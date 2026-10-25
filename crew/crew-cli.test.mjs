@@ -4831,7 +4831,7 @@ test('D1-codes workflow refusal set is frozen and every validator code is reacha
 
   const cases = [
     ['workflow-schema', () => ({ ...cloneWorkflow(), extra: true })],
-    ['workflow-shape-unsupported', () => ({ shape: 'scout', seats: {} })],
+    ['workflow-shape-unsupported', () => ({ shape: 'unknown', seats: {} })],
     ['workflow-stage-extra', () => {
       const map = cloneWorkflow(); map.seats.extra = { ...map.seats.plan }; return map
     }],
@@ -4979,7 +4979,7 @@ test('E1-unnamed boot member record stays deep-equal', async () => {
   }))
   const crewContract = (crew) => {
     const copy = JSON.parse(JSON.stringify(crew))
-    for (const key of ['created_at', 'checkout', 'workspace_id', 'window_id', 'task', 'task_return', 'roster', 'workflow', 'base_branch']) delete copy[key]
+    for (const key of ['created_at', 'checkout', 'workspace_id', 'window_id', 'task', 'task_return', 'roster', 'workflow', 'workflow_shape', 'base_branch']) delete copy[key]
     copy.members = withoutWorkflowSeat(copy.members)
     return copy
   }
@@ -5556,3 +5556,48 @@ test('SG6 teardownCore settles before the rename', () => {
   assert.equal(seen.length, 1);
   assert.equal(seen[0].taskDir, join(dir, 'task'));
 });
+
+// Named workflow assignments are execution inputs, not just comparison metadata.
+test('E1-saved workflow assignment reaches the booted seat and journal', async () => {
+  const map = cloneWorkflow(); map.seats.plan.effort = 'max'
+  const rows = await bootSeatRows({ task:'workflow-edited', rosterValue:shippedRoster(), args:{workflow:'full'}, readWorkflowFile:()=>JSON.stringify(map) })
+  assert.equal(rows.crew.members.planner.effort, 'max')
+  assert.equal(rows.crew.members.planner.workflow_seat.effort, 'max')
+  assert.equal(rows.find(row=>row.role==='planner').effort, 'max')
+  assert.equal(shippedRoster().tiers.build.planner.effort, 'high')
+})
+
+test('E1-every workflow boots its edited assignments and preserves other tier seats', async () => {
+ const {createWorkflowEditor}=await import('../visualizer/server/workflow-editor.mjs')
+ const {workflowStageEntries}=await import('./workflows.mjs')
+ const service=createWorkflowEditor({root:ROOT})
+ for(const shape of Object.keys(SEAT_BEARING_STAGES)){
+  const assurance=shape==='review_panel'?'rigorous':'standard',tier=shape==='review_panel'?'judge':'build'
+  const view=service.read({shape,assurance});assert.equal(view.validation,null)
+  for(const [,cell] of workflowStageEntries(view.map))cell.effort='max'
+  const task=`workflow-${shape.replaceAll('_','-')}`
+  const rows=await bootSeatRows({task,tier,rosterValue:shippedRoster(),args:{workflow:view.name},readWorkflowFile:()=>JSON.stringify(view.map),afterBoot:async({home,checkout,dir})=>{
+    if(shape!=='scout')return
+    const before=readFileSync(join(dir,'crew.json'),'utf8')
+    await withHome(home,()=>assert.throws(()=>runCmd({task,checkout,execution:'full'}),/requires --execution scout/))
+    assert.equal(readFileSync(join(dir,'crew.json'),'utf8'),before)
+  }})
+  assert.equal(rows.crew.workflow_shape,shape)
+  const mapped=new Set(workflowStageEntries(view.map).map(([,cell])=>cell.role))
+  for(const role of mapped){assert.equal(rows.crew.members[role].effort,'max');assert.equal(rows.crew.members[role].workflow_seat.effort,'max');assert.equal(rows.find(row=>row.role===role).effort,'max')}
+  for(const role of rows.crew.roles.filter(role=>!mapped.has(role)))assert.equal(rows.crew.members[role].effort,shippedRoster().tiers[tier][role].effort)
+ }
+})
+
+test('E1-workflow-revision is enforced before boot side effects and accepts the reviewed bytes', async () => {
+ const raw=JSON.stringify(cloneWorkflow()),revision=createHash('sha256').update(raw).digest('hex')
+ const rows=await bootSeatRows({task:'workflow-pinned',rosterValue:shippedRoster(),args:{workflow:'full','workflow-revision':revision},readWorkflowFile:()=>raw})
+ assert.equal(rows.crew.workflow,'full');assert.equal(rows.crew.members.planner.id,JSON.parse(raw).seats.plan.id)
+ const home=scratchDir('crew-workflow-pin-home-'),{root,checkout}=testCheckout('crew-workflow-pin-checkout-'),rosterPath=join(home,'roster.json')
+ writeFileSync(rosterPath,JSON.stringify(shippedRoster()));execSync('git init -q && git -c user.email=workflow@example.test -c user.name=workflow commit --allow-empty -q -m seed',{cwd:checkout})
+ const cmux=callCounter(),tree=callCounter()
+ try {
+  await withHome(home,()=>assert.rejects(()=>bootCmd({task:'stale-pin',checkout,tier:'build',roster:rosterPath,workflow:'full','workflow-revision':revision,'headless-all':true,'claude-bin':process.execPath},{cmux,tree,readWorkflowFile:()=>raw+'\n'}),/changed after task preparation/))
+  assert.equal(cmux.calls.length,0);assert.equal(tree.calls.length,0);assert.equal(existsSync(testCrewDir(home,checkout,'stale-pin')),false)
+ }finally{rmSync(home,{recursive:true,force:true});rmSync(root,{recursive:true,force:true})}
+})

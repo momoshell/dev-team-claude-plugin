@@ -4,19 +4,19 @@ The contract below is the checkable boundary recorded in `visualizer/web/src/lib
 
 ## T1 - component names only Tier-2 aliases
 
-A component may name only Tier-2 aliases: `--bg`, `--panel`, `--line`, `--muted`, `--accent`, `--neutral`, the `--status-*` aliases, `--status-escalated`, the six `--role-*` aliases, and `--lane-0` through `--lane-7`. It must not name a raw `--ink-*`, `--paper-*`, `--spot-*`, role `-dark`/`-light` half, `--serious`, or `-raw` status token. The raw block opens at `visualizer/web/src/lib/theme.css:2`, and `--serious` stays raw at `visualizer/web/src/lib/theme.css:28`. The old recorded App.svelte `--serious` exception is gone: the feed error paints only aliases at `visualizer/web/src/App.svelte:249`, so the obedience count must be remeasured before anyone claims a number. Exhibit: the raw block and the measured suite pins below.
+A component may name only Tier-2 aliases: `--bg`, `--panel`, `--line`, `--muted`, `--accent`, `--neutral`, the `--status-*` aliases, `--status-escalated`, the six `--role-*` aliases, and `--lane-0` through `--lane-7`. It must not name a raw `--ink-*`, `--paper-*`, `--spot-*`, role `-dark`/`-light` half, `--serious`, or `-raw` status token. The raw block opens at `visualizer/web/src/lib/theme.css:2`, and `--serious` stays raw at `visualizer/web/src/lib/theme.css:28`. The old recorded App.svelte `--serious` exception is gone: the feed error paints only aliases at `visualizer/web/src/App.svelte:251`, so the obedience count must be remeasured before anyone claims a number. Exhibit: the raw block and the measured suite pins below.
 
 ## T2 - painted colour comes from a token
 
-Make every painted foreground, background, border, marker, and fill resolve to a token rather than a literal colour. The measured code violates this in **4 of 34 components, 22 times**, all in state-colour rules; the inventory is in `references/state-colour.md` L1. Exhibit: `visualizer/web/src/lib/GateChips.svelte:13`, `visualizer/web/src/lib/AcceptPanel.svelte:23`, `visualizer/web/src/lib/PhasePanel.svelte:99`, and the gantt row at `visualizer/web/src/lib/PhaseGantt.svelte:257`. The suite currently has no general hex ban and no general requirement that a colour declaration use `var()`.
+Make every painted foreground, background, border, marker, and fill resolve to a token rather than a literal colour. The measured code violates this in **4 of 38 components, 22 times**, all in state-colour rules; the inventory is in `references/state-colour.md` L1. Exhibit: `visualizer/web/src/lib/GateChips.svelte:13`, `visualizer/web/src/lib/AcceptPanel.svelte:23`, `visualizer/web/src/lib/PhasePanel.svelte:99`, and the gantt row at `visualizer/web/src/lib/PhaseGantt.svelte:257`. The suite currently has no general hex ban and no general requirement that a colour declaration use `var()`.
 
 ## T3 - escalation goes through the alias
 
-Use `--status-escalated` in a component; treat `--serious` as raw. Both error exhibits are alias-correct: `visualizer/web/src/App.svelte:249` paints feed errors from `--status-fail`, and `visualizer/web/src/lib/RosterPanel.svelte:703` paints the notice from `--status-fail`. No `--serious` read remains in App.svelte. This is a naming boundary even though both names currently resolve identically.
+Use `--status-escalated` in a component; treat `--serious` as raw. Both error exhibits are alias-correct: `visualizer/web/src/App.svelte:251` paints feed errors from `--status-fail`, and `visualizer/web/src/lib/RosterPanel.svelte:729` paints the notice from `--status-fail`. No `--serious` read remains in App.svelte. This is a naming boundary even though both names currently resolve identically.
 
 ## T4 - one owner writes the theme switch
 
-Only `visualizer/web/src/App.svelte:69` may write `document.documentElement.dataset.theme`, with `visualizer/web/src/App.svelte:70` deleting it for the system choice; `theme.css` may declare the selectors but no other component may set the attribute. Exhibit: `visualizer/web/src/App.svelte:26` and `visualizer/web/src/App.svelte:27` read the persisted `os`/`paper`/`ink` value, `visualizer/web/src/App.svelte:71` persists the choice, and `visualizer/web/src/App.svelte:180` offers the selector. The repo-wide grep found only the theme selectors in `visualizer/web/src/lib/theme.css:44`, `visualizer/web/src/lib/theme.css:71`, and `visualizer/web/src/lib/theme.css:99` plus those App writes.
+Only `visualizer/web/src/App.svelte:70` may write `document.documentElement.dataset.theme`, with `visualizer/web/src/App.svelte:71` deleting it for the system choice; `theme.css` may declare the selectors but no other component may set the attribute. Exhibit: `visualizer/web/src/App.svelte:27` and `visualizer/web/src/App.svelte:28` read the persisted `os`/`paper`/`ink` value, `visualizer/web/src/App.svelte:72` persists the choice, and `visualizer/web/src/App.svelte:181` offers the selector. The repo-wide grep found only the theme selectors in `visualizer/web/src/lib/theme.css:44`, `visualizer/web/src/lib/theme.css:71`, and `visualizer/web/src/lib/theme.css:99` plus those App writes.
 
 ## What the switch means
 
@@ -46,6 +46,6 @@ A component belongs in this census when its markup applies `mono` to runtime con
 | `EventStory.svelte` | compliant | global `.mono` at `visualizer/web/src/lib/theme.css:165` |
 | `FleetTable.svelte` | compliant | global `.mono` at `visualizer/web/src/lib/theme.css:165` |
 | `RunCard.svelte` | compliant | local `.mono` at `visualizer/web/src/lib/RunCard.svelte:73` |
-| `WorkflowsPage.svelte` | compliant | global `.mono` at `visualizer/web/src/lib/theme.css:165` |
+| `SkillsPage.svelte` | compliant | global `.mono` at `visualizer/web/src/lib/theme.css:165` |
 
-`5/5 compliant, 0/5 non-compliant`.
+`6/6 compliant, 0/6 non-compliant`.

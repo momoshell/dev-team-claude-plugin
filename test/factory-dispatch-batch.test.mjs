@@ -3225,7 +3225,7 @@ test('F1 the prompt-surface set has one definition and the four consumers import
   // the dispatcher's assurance trigger stays WIDE (touching anchors.json is a tiering input); publish, the
   // builder-brief wrapper and closeout are MEASUREMENT consumers and read documents only.
   const closeout = readFileSync(join(repoRoot, 'scripts/factory/closeout.mjs'), 'utf8')
-  assert.match(dispatcher, /protectedHitsIn\([^)]*promptSurfacePaths\(/)
+  assert.match(dispatcher, /assuranceScopeHits\([^)]*promptSurfacePaths\(/)
   assert.doesNotMatch(dispatcher, /\bpromptDocumentHits\b/)
   assert.match(driver, /promptDocumentHits\(files, promptSurfacePaths\(register\)\)/)
   assert.match(driver, /promptScopeHits\(scopeFiles, promptSurfacePaths\(loadCapabilities\(\)\)\)/)

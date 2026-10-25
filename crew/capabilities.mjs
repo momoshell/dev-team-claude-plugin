@@ -229,7 +229,7 @@ export function loadCapabilities({ path = CAPABILITIES_PATH, schemaPath = CAPABI
   for (const [agent, entry] of Object.entries(value?.coding_agents || {})) {
     const base = `coding_agents.${agent}`
     duplicateAgentValues(entry.providers, `${base}.providers`, 'provider')
-    duplicateAgentValues(entry.transports, `${base}.transports`, 'transport')
+    duplicateAgentValues(entry.transports, `${base}.transports`, 'transport'); if (entry.default_transport !== undefined && !entry.transports.includes(entry.default_transport)) throw refuse('register-invalid', `${base}.default_transport must be one of the integration's declared transports`)
     duplicateAgentValues(entry.refuses, `${base}.refuses`, 'refusal')
     const expectedAdapter = `crew/adapters/adapter-${agent}.mjs`
     if (entry.adapter !== expectedAdapter) {

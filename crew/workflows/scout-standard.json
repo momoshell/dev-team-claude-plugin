@@ -1,0 +1,14 @@
+{
+  "shape": "scout",
+  "seats": {
+    "scout": {
+      "role": "planner",
+      "agent": "pi",
+      "provider": "openai",
+      "id": "gpt-6.1-sol",
+      "effort": "high",
+      "skills": [],
+      "extensions": []
+    }
+  }
+}

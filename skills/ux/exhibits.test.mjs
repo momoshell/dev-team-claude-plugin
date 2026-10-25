@@ -87,27 +87,27 @@ test('ux manifest pins carry current exact content', () => {
 test('ux absence vocabulary re-derives from the component tree', () => {
   const body = readFileSync(join(REF_DIR, 'absence.md'), 'utf8')
   const dash = census('—', 'g')
-  assert.equal(dash.occurrences, 116)
-  assert.equal(dash.files, 24)
+  assert.equal(dash.occurrences, 93)
+  assert.equal(dash.files, 20)
   const unavailable = census('unavailable', 'gi')
-  assert.equal(unavailable.occurrences, 94)
-  assert.equal(unavailable.files, 24)
+  assert.equal(unavailable.occurrences, 90)
+  assert.equal(unavailable.files, 26)
   const unmeasured = census('unmeasured', 'gi')
-  assert.equal(unmeasured.occurrences, 34)
-  assert.equal(unmeasured.files, 11)
+  assert.equal(unmeasured.occurrences, 14)
+  assert.equal(unmeasured.files, 7)
   const notMeasured = census('not measured', 'gi')
-  assert.equal(notMeasured.occurrences, 20)
+  assert.equal(notMeasured.occurrences, 22)
   assert.equal(notMeasured.files, 7)
   const union = new Set([...dash.hit, ...unavailable.hit, ...unmeasured.hit, ...notMeasured.hit])
-  assert.equal(union.size, 28)
-  assert.equal(libFiles().length, 34)
-  for (const row of ['| `—` | 116 | 24 |', '| `unavailable` | 94 | 24 |', '| `unmeasured` | 34 | 11 |', '| `not measured` | 20 | 7 |']) {
+  assert.equal(union.size, 30)
+  assert.equal(libFiles().length, 38)
+  for (const row of ['| `—` | 93 | 20 |', '| `unavailable` | 90 | 26 |', '| `unmeasured` | 14 | 7 |', '| `not measured` | 22 | 7 |']) {
     assert.ok(body.includes(row), `absence.md must carry ${row}`)
   }
   assert.ok(body.includes('`Unmeasured — <reason>`'), 'absence.md must name the canonical vocabulary')
 })
 
-test('ux state branches re-derive to sixteen of thirty three', () => {
+test('ux state branches re-derive to nineteen of thirty eight', () => {
   const body = readFileSync(join(REF_DIR, 'states.md'), 'utf8')
   assert.ok(body.includes('## Adopted rules'), 'states.md must carry the adopted rules heading')
   const hit = []
@@ -117,10 +117,10 @@ test('ux state branches re-derive to sixteen of thirty three', () => {
     const conditions = [...markup.matchAll(/\{#if\s+([^}]+)\}|\{:else if\s+([^}]+)\}/g)].map((match) => match[1] || match[2] || '')
     if (hasEmptyClass || conditions.some((condition) => condition.includes('loading'))) hit.push(file)
   }
-  assert.equal(hit.length, 17)
-  assert.equal(libFiles().length - hit.length, 17)
-  assert.ok(body.includes('17/34') || body.includes('17 of 34'), 'states.md must record the branched count')
-  assert.ok(body.includes('17/34'), 'states.md must record the unbranched remainder')
+  assert.equal(hit.length, 19)
+  assert.equal(libFiles().length - hit.length, 19)
+  assert.ok(body.includes('19/38') || body.includes('19 of 38'), 'states.md must record the branched count')
+  assert.ok(body.includes('19/38'), 'states.md must record the unbranched remainder')
 })
 
 test('ux keyboard and focus register re-derives', () => {
@@ -129,31 +129,31 @@ test('ux keyboard and focus register re-derives', () => {
   assert.equal(legacy.occurrences, 0)
   assert.equal(legacy.files, 0)
   const modern = census('onkeydown=', 'g')
-  assert.equal(modern.occurrences, 3)
-  assert.equal(modern.files, 2)
+  assert.equal(modern.occurrences, 1)
+  assert.equal(modern.files, 1)
   const visible = census(':focus-visible', 'g')
-  assert.equal(visible.occurrences, 4)
-  assert.equal(visible.files, 3)
+  assert.equal(visible.occurrences, 27)
+  assert.equal(visible.files, 8)
   const plain = census(':focus(?!-)', 'g')
-  assert.equal(plain.occurrences, 3)
-  assert.equal(plain.files, 1)
+  assert.equal(plain.occurrences, 5)
+  assert.equal(plain.files, 2)
   const tab = census('tabindex', 'g')
-  assert.equal(tab.occurrences, 1)
-  assert.equal(tab.files, 1)
+  assert.equal(tab.occurrences, 17)
+  assert.equal(tab.files, 9)
   const aria = census('aria-', 'g')
-  assert.equal(aria.occurrences, 129)
-  assert.equal(aria.files, 29)
+  assert.equal(aria.occurrences, 214)
+  assert.equal(aria.files, 33)
   const role = census('role=', 'g')
-  assert.equal(role.occurrences, 27)
-  assert.equal(role.files, 12)
+  assert.equal(role.occurrences, 79)
+  assert.equal(role.files, 18)
   for (const row of [
     '| legacy `on:keydown` attributes | 0 | 0 |',
-    '| modern `onkeydown=` attributes | 3 | 2 |',
-    '| `:focus-visible` selectors | 4 | 3 |',
-    '| plain `:focus` selectors | 3 | 1 |',
-    '| `tabindex` attributes | 1 | 1 |',
-    '| `aria-` attributes | 129 | 29 |',
-    '| `role=` attributes | 27 | 12 |',
+    '| modern `onkeydown=` attributes | 1 | 1 |',
+    '| `:focus-visible` selectors | 27 | 8 |',
+    '| plain `:focus` selectors | 5 | 2 |',
+    '| `tabindex` attributes | 17 | 9 |',
+    '| `aria-` attributes | 214 | 33 |',
+    '| `role=` attributes | 79 | 18 |',
   ]) {
     assert.ok(body.includes(row), `keyboard-focus.md must carry ${row}`)
   }
@@ -167,7 +167,7 @@ test('ux motion register re-derives with no reduced motion query', () => {
   const reduced = census('prefers-reduced-motion', 'g')
   assert.equal(reduced.occurrences, 0)
   assert.equal(reduced.files, 0)
-  assert.ok(body.includes('0/34') || body.includes('0 of 34'), 'motion.md must record the zero query count')
+  assert.ok(body.includes('0/38') || body.includes('0 of 38'), 'motion.md must record the zero query count')
 })
 
 // Mutation killed: dropping a source identity from one adopted rule breaks the provenance floor.
@@ -198,10 +198,10 @@ test('ux stated gaps are counted and few', () => {
     gaps += (body.match(/\*\*Stated gap:\*\*/g) || []).length
   }
   assert.equal(gaps, 4)
-  assert.ok(readFileSync(join(REF_DIR, 'absence.md'), 'utf8').includes('4/34'), 'absence.md must record the canonical-phrase adoption count')
+  assert.ok(readFileSync(join(REF_DIR, 'absence.md'), 'utf8').includes('0/38'), 'absence.md must record the canonical-phrase adoption count')
   for (const body of readDocs()) {
     for (const line of body.split('\n')) {
-      if (line.includes('**Stated gap:**')) assert.match(line, /\d+\/34/, 'every stated gap carries a denominator')
+      if (line.includes('**Stated gap:**')) assert.match(line, /\d+\/38/, 'every stated gap carries a denominator')
     }
   }
 })

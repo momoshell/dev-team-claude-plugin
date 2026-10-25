@@ -1,8 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import { VARIANTS } from '../../crew/variants.mjs'
-import { shapeValidationDefect } from '../../crew/shape-validator.mjs'
-import { unifiedDiff } from './roster-edit.mjs'
+import { createWorkflowEditor } from './workflow-editor.mjs'
 
 export const DEFAULT_RECENT_RUNS = 5
 export const WORKFLOW_FEED_REASONS = Object.freeze(['feed-unmeasured', 'feed-unavailable'])
@@ -53,6 +52,7 @@ function readRoster(path) {
 }
 
 function normalizeSeat(role, value) {
+  if (Array.isArray(value)) return value.map(cell=>record(cell)?{role:cell.role,...normalizeSeat(cell.role,cell)}:null)
   if (value === null) return null
   if (!record(value)) return null
   const output = {}
@@ -197,93 +197,8 @@ function declarationRows(declarations) {
   return Object.entries(declarations).map(([shape, declaration]) => ({ shape, declaration: clone(declaration) }))
 }
 
-function proposalRefusal(code, message) {
-  return { code, message }
-}
-
-function safeWorkflowPath(root, shape) {
-  const relativePath = `crew/workflows/${shape}.json`
-  const path = resolve(root, relativePath)
-  if (path !== resolve(root) && !path.startsWith(`${resolve(root)}/`)) return null
-  return { path, relativePath }
-}
-
-function readBefore(path) {
-  try {
-    const before = readFileSync(path, 'utf8')
-    return before.trim() === '' ? { before, error: `workflow map file is empty, at ${path}` } : { before, error: null }
-  } catch (err) {
-    if (err?.code === 'ENOENT') return { before: '', error: null }
-    return { before: null, error: errorText(path, err, 'unable to read workflow map') }
-  }
-}
-
-function roleForStage(stage) {
-  const table = {
-    plan: 'planner', check: 'planner', scout: 'planner', repair: 'planner',
-    build: 'builder', review: 'reviewer', review_only: 'reviewer', verify_only: 'reviewer',
-  }
-  return table[stage] || null
-}
-
-function canonicalWorkflowBefore(before, shape, fallbackSeats) {
-  if (before.trim() !== '') {
-    try {
-      const parsed = JSON.parse(before)
-      const mapped = mapShape(parsed, shape, 'workflow map')
-      if (!mapped.error) return mapped.value
-      return { error: mapped.error }
-    } catch (err) {
-      return { error: `malformed workflow map: ${err?.message || 'invalid JSON'}` }
-    }
-  }
-  return { shape, seats: normalizeSeats(fallbackSeats) || {} }
-}
-
-export async function proposeWorkflowEdit({ root = process.cwd(), variants = VARIANTS, rosterPath, workflow, edit, tier: requestedTier } = {}) {
-  const declarations = record(variants) ? variants : VARIANTS
-  const shape = typeof workflow === 'string' ? workflow : workflow?.shape
-  const refusals = []
-  if (typeof shape !== 'string' || !Object.prototype.hasOwnProperty.call(declarations, shape) || !SAFE_WORKFLOW_NAME.test(shape)) {
-    refusals.push(proposalRefusal('shape', 'workflow shape must be a declared safe name'))
-  }
-  const inputEdit = record(edit) ? edit : null
-  if (!inputEdit) refusals.push(proposalRefusal('edit', 'workflow edit must be an object'))
-  const declaration = shape && declarations[shape]
-  const stage = inputEdit?.stage ?? null
-  const stageHead = typeof stage === 'string' ? stage.split(':')[0] : stage
-  if (stage !== null && (!Array.isArray(declaration?.stages) || !declaration.stages.includes(stageHead))) refusals.push(proposalRefusal('stage', `stage ${JSON.stringify(stage)} is not declared by ${shape}`))
-  if (inputEdit && Object.prototype.hasOwnProperty.call(inputEdit, 'cell') && inputEdit.cell !== null && !record(inputEdit.cell)) refusals.push(proposalRefusal('cell', 'workflow cell must be an object or null'))
-  const name = shape && SAFE_WORKFLOW_NAME.test(shape) ? safeWorkflowPath(root, shape) : null
-  if (!name) refusals.push(proposalRefusal('path', 'workflow path is not safe'))
-  if (refusals.length) return { ok: false, refusals, diff: null, workflow_path: name?.relativePath ?? null, before: null, after: null }
-  const topologyDeclaration = record(workflow) ? (workflow.declaration === undefined ? declaration : workflow.declaration) : declaration
-  const topologyDefect = record(workflow) ? shapeValidationDefect(topologyDeclaration, shape) : { defect: null, detail: null }
-  if (topologyDefect.defect) return { ok: false, refusals: [proposalRefusal(topologyDefect.defect, topologyDefect.detail)], diff: null, workflow_path: name?.relativePath ?? null, before: null, after: null }
-
-  const rosterFile = resolve(rosterPath ? (isAbsolute(rosterPath) ? rosterPath : join(root, rosterPath)) : join(root, 'crew', 'roster.json'))
-  const roster = readRoster(rosterFile)
-  const suppliedWorkflow = record(workflow) ? workflow : null
-  const suppliedSeats = suppliedWorkflow && Object.prototype.hasOwnProperty.call(suppliedWorkflow, 'seats') ? suppliedWorkflow.seats : undefined
-  if (roster.error && suppliedSeats === undefined) return { ok: false, refusals: [proposalRefusal('read-error', roster.error)], diff: null, workflow_path: name.relativePath, before: null, after: null }
-  const tier = requestedTier === undefined ? roster.tiers[0] : roster.tiers.find((row) => row?.tier === requestedTier)
-  if (!tier) return { ok: false, refusals: [proposalRefusal('tier', 'workflow tier must name an available roster tier')], diff: null, workflow_path: name.relativePath, before: null, after: null }
-  if (!tier?.measured) return { ok: false, refusals: [proposalRefusal('tier-unmeasured', 'selected tier is unmeasured')], diff: null, workflow_path: name.relativePath, before: null, after: null }
-  const beforeRead = readBefore(name.path)
-  if (beforeRead.error) return { ok: false, refusals: [proposalRefusal('read-error', beforeRead.error)], diff: null, workflow_path: name.relativePath, before: null, after: null }
-  const fallbackSeats = requestedTier === undefined && suppliedSeats !== undefined ? suppliedSeats : tier.cells
-  const baseline = canonicalWorkflowBefore(beforeRead.before, shape, fallbackSeats)
-  if (baseline.error) return { ok: false, refusals: [proposalRefusal('workflow-map', baseline.error)], diff: null, workflow_path: name.relativePath, before: beforeRead.before, after: null }
-  const seats = normalizeSeats(baseline.seats) || {}
-  const role = inputEdit.role || (stageHead ? roleForStage(stageHead) : null)
-  if (typeof role !== 'string' || !role) return { ok: false, refusals: [proposalRefusal('role', 'workflow seat edits require a role or seat-bearing stage')], diff: null, workflow_path: name.relativePath, before: beforeRead.before, after: null }
-  if (!Object.prototype.hasOwnProperty.call(inputEdit, 'cell')) return { ok: false, refusals: [proposalRefusal('cell', 'workflow seat edits require a cell')], diff: null, workflow_path: name.relativePath, before: beforeRead.before, after: null }
-  seats[role] = normalizeSeat(role, inputEdit.cell)
-  const after = `${JSON.stringify({ shape, seats }, null, 2)}\n`
-  const before = beforeRead.before
-  const relativePath = name.relativePath
-  const diff = unifiedDiff(before, after, { path: relativePath })
-  return { ok: true, refusals: [], diff, workflow_path: relativePath, before, after }
+export async function proposeWorkflowEdit({ root = process.cwd(), rosterPath, workflow, edit, tier, capabilitiesPath, ladderPath } = {}) {
+  return createWorkflowEditor({root,rosterPath,capabilitiesPath,ladderPath}).propose({workflow,edit,tier})
 }
 
 export function createWorkflowsSource({ root = process.cwd(), pluginRoot = root, feed = null, variants = VARIANTS, rosterPath, docsPath, defaultRecentRuns = DEFAULT_RECENT_RUNS } = {}) {

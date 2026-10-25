@@ -83,7 +83,7 @@ export { CAPABILITY_DELIVERY, CAPABILITY_REFUSALS, EMPTY_GRANTS, assertGrantsBac
 } from './capabilities.mjs'
 import { completionLogPath } from './factoryctl.mjs'
 import { hostLoad, loadPolicy, assertHostQuiet } from './host-load.mjs'
-import { loadWorkflow, validateWorkflow, workflowRefusal } from './workflows.mjs'
+import { loadWorkflow, validateWorkflow, workflowRefusal, workflowAssignments, assertWorkflowExecution } from './workflows.mjs'
 import { loadMap, resolveSeatSkills, reachableSeatSkills } from '../hooks/skill-gate.mjs'
 import { parseFenceScope } from './fence-scope.mjs'
 export { loadWorkflow, validateWorkflow, workflowRefusal } from './workflows.mjs'
@@ -966,14 +966,14 @@ export function transportFor(role, args = {}) {
   return DEFAULT_TRANSPORT
 }
 
-export function seatTransport({ role, args = {}, adapter, agentName } = {}) {
+export function seatTransport({ role, args = {}, adapter, agentName, preferredTransport } = {}) {
   const explicit = transportFor(role, args)
   if (explicit !== DEFAULT_TRANSPORT) return explicit
   const raw = args['headless-all']
-  if (raw === undefined) return DEFAULT_TRANSPORT
+  if (raw === undefined) { if (preferredTransport) adapter.capabilitiesFor({ transport: preferredTransport }); return preferredTransport || DEFAULT_TRANSPORT }
   if (raw !== true && raw !== 'true') throw new Error(`--headless-all takes no value (got ${JSON.stringify(raw)})`)
   const refusals = []
-  for (const transport of HEADLESS_TRANSPORTS) {
+  for (const transport of [...new Set([...(HEADLESS_TRANSPORTS.includes(preferredTransport) ? [preferredTransport] : []), ...HEADLESS_TRANSPORTS])]) {
     try {
       adapter.capabilitiesFor({ transport })
       return transport
@@ -2571,7 +2571,7 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
         }
       }
       if (rawProvider) assertAgentProvider(registry, name, rawProvider, { role })
-      const transport = seatTransport({ role, args: sourceArgs, adapter, agentName: name })
+      const transport = seatTransport({ role, args: sourceArgs, adapter, agentName: name, preferredTransport: registry.coding_agents[name]?.default_transport })
       const relativeAdapterPath = `crew/adapters/adapter-${name}.mjs`
       // Do not re-add an adapter assertion here: loadCapabilities owns adapter-path
       // agreement at crew/capabilities.mjs:201-203. This path remains only for the
@@ -3237,6 +3237,7 @@ export async function bootCmd(args, deps = {}) {
   let rosterRecord = null
   let workflow = null
   const seatingTier = args.tier !== undefined || args.assurance !== undefined ? assuranceTier(configuration.assurance.effective) : null
+  if (args['workflow-revision'] && !args.workflow) throw workflowRefusal('workflow-name-invalid', '--workflow-revision requires --workflow.')
   if (args.workflow && !seatingTier) {
     throw workflowRefusal('workflow-needs-tier', `--workflow ${JSON.stringify(args.workflow)} requires --tier or --assurance so the effective seating tier and model floor are known`, { workflow: args.workflow })
   }
@@ -3277,6 +3278,17 @@ export async function bootCmd(args, deps = {}) {
     throw new Error(`transport role ${role} given but crew seats no ${role}`)
   }
   for (const role of roles) transportFor(role, args) // detects ambiguous lists before cmux boot
+  if (args.workflow) {
+    const workflowPath = resolvePath(join(workflowDirDep || join(HERE, 'workflows'), `${args.workflow}.json`))
+    const map = loadWorkflowDep(args.workflow, { expectedRevision:args['workflow-revision'], ...(workflowDirDep ? { dir: workflowDirDep } : {}), ...(readWorkflowFileDep ? { readFile: readWorkflowFileDep } : {}) })
+    const validated = validateWorkflowDep(map, { register: registerDep || loadCapabilities(), ladder: loadLadder(), tier: tierName, roles, path: workflowPath })
+    workflow = { name: args.workflow, ...validated }
+    const prior = tierSeats
+    tierSeats = workflowAssignments(tierSeats, workflow, args)
+    for (const role of roles) if (!isDeepStrictEqual(workflowSeatFields(prior[role]), workflowSeatFields(tierSeats[role]))) {
+      sources[role] = { agent: prior[role].agent !== tierSeats[role].agent ? 'override' : sources[role].agent, model: prior[role].provider !== tierSeats[role].provider || prior[role].id !== tierSeats[role].id ? 'override' : sources[role].model, effort: prior[role].effort !== tierSeats[role].effort ? 'override' : sources[role].effort }
+    }
+  }
   // #309: refuse a saturated HOST the way ADR-032's breaker refuses an open
   // cell. Opt-in (CREW_LOAD_THRESHOLD); with no policy nothing is measured and
   // boot is unchanged. Refuse HERE: before resolveAdapters, before the
@@ -3333,16 +3345,7 @@ export async function bootCmd(args, deps = {}) {
     assertDefBandFloors(grantedDefModels(adapters, { localProviders: registry.local_providers }), tierName, ladder, { adapters, localProviders: registry.local_providers })
   }
   if (args.workflow) {
-    const workflowLoadOptions = {}
-    if (workflowDirDep) workflowLoadOptions.dir = workflowDirDep
-    if (readWorkflowFileDep) workflowLoadOptions.readFile = readWorkflowFileDep
-    const workflowMap = loadWorkflowDep(args.workflow, workflowLoadOptions)
-    const workflowPath = resolvePath(join(workflowDirDep || join(HERE, 'workflows'), `${args.workflow}.json`))
-    const validated = validateWorkflowDep(workflowMap, {
-      register: registry, ladder, tier: tierName, roles, path: workflowPath,
-    })
-    workflow = { name: args.workflow, ...validated }
-    for (const role of roles) {
+    for (const role of Object.keys(workflow.seats)) {
       const expected = workflowSeatFields(workflow.seats[role])
       const actual = workflowSeatFields(seats?.[role])
       if (!isDeepStrictEqual(actual, expected)) {
@@ -3643,7 +3646,7 @@ plugin: pluginProvenance(),
     ...(workerBin ? { claude_bin: workerBin } : {}),
     ...(turnCeilingRecord ? { turn_ceilings: turnCeilingRecord } : {}),
     ...(tierName ? { tier: tierName, seats: { ...seats, advisor } } : {}),
-    ...(workflow ? { workflow: workflow.name } : {}),
+    ...(workflow ? { workflow: workflow.name, workflow_shape: workflow.shape } : {}),
     ...(rosterRecord ? { roster: { path: rosterRecord.path, origin: rosterRecord.origin, sha256: rosterRecord.sha256, snapshot: rosterSnapshot } } : {}),
     ...(laneFence ? { lane_name: laneFence.lane, lane_fence: laneFence.fence } : {}),
     advisor: advisorRecord,
@@ -4023,6 +4026,7 @@ export function runCmd(args, deps = {}) {
   const paths = pathsFor(taskSlug, checkout)
   const crew = loadCrew(paths)
   assertSameCheckout(crew, checkout)
+  assertWorkflowExecution(crew, executionConfiguration.execution.effective)
   if (!Object.hasOwn(crew, 'base_branch')) {
     crew.base_branch = resolveBaseBranch(checkout, deps)
     saveCrew(paths, crew)
@@ -5165,7 +5169,7 @@ export function parseArgs(argv) {
 }
 
 export const KNOWN_FLAGS = Object.freeze({
-  boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'acp', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin', 'profile', 'assurance', 'roster', 'workflow', 'charter-arm', 'panel-distinct-agents', ...TURN_CEILING_FLAGS]),
+  boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'acp', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin', 'profile', 'assurance', 'roster', 'workflow', 'workflow-revision', 'charter-arm', 'panel-distinct-agents', ...TURN_CEILING_FLAGS]),
   run: Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'execution', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', 'review-base-sha', 'review-head-sha', ...WAIT_FLAGS, 'suite', 'keep', 'claude-bin', 'chunked', 'chunk']),
   resume: Object.freeze(['task', 'checkout', 'suite', 'keep']),
   handoff: Object.freeze(['task', 'checkout', 'brief-file']),
@@ -5186,7 +5190,7 @@ export const FLAG_VALUE_REFUSAL = 'invalid-flag-value'
 export const FLAG_VALUE_CONTRACT = Object.freeze({
   task: 'value', checkout: 'value', roles: 'value', tier: 'value',
   fences: 'value', lane: 'value', 'brief-file': 'value', variant: 'value',
-  profile: 'value', execution: 'value', assurance: 'value', roster: 'value', workflow: 'value', 'charter-arm': 'value',
+  profile: 'value', execution: 'value', assurance: 'value', roster: 'value', workflow: 'value', 'workflow-revision': 'value', 'charter-arm': 'value',
   'files-in-scope': 'value', 'validation-lane': 'value',
   'plan-rounds': 'value', 'build-rounds': 'value', 'review-rounds': 'value',
   'review-base-sha': 'value', 'review-head-sha': 'value',

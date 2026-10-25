@@ -1,391 +1,102 @@
-<script>
-  import { getWorkflows, proposeWorkflowEdit } from './api.js'
-  import DiffBlock from './DiffBlock.svelte'
-  import { workflowPresentation } from './workflows.js'
-
-  const STAGE_ROLES = Object.freeze({
-    plan: 'planner', check: 'planner', scout: 'planner', repair: 'planner',
-    build: 'builder', review: 'reviewer', review_only: 'reviewer', verify_only: 'reviewer',
-  })
-
-  function record(value) {
-    return value !== null && typeof value === 'object' && !Array.isArray(value)
-  }
-
-  function seatBearingStages(workflow) {
-    const stages = workflow?.declaration?.stages
-    if (!Array.isArray(stages)) return []
-    return stages.map((stage) => {
-      const head = typeof stage === 'string' ? stage.split(':')[0] : ''
-      return { name: stage, role: STAGE_ROLES[head] || null }
-    }).filter((stage) => typeof stage.name === 'string' && stage.name && stage.role)
-  }
-
-  function tierRows(value) {
-    return Array.isArray(value?.roster?.tiers)
-      ? value.roster.tiers.filter((row) => typeof row?.tier === 'string')
-      : []
-  }
-
-  function seedCellDraft(workflow, tier, role) {
-    const seats = workflow?.tier_maps?.[tier]?.seats
-    if (!record(seats) || typeof role !== 'string' || !Object.prototype.hasOwnProperty.call(seats, role) || seats[role] === undefined) return ''
-    try { return JSON.stringify(seats[role], null, 2) ?? '' } catch { return '' }
-  }
-
-  let payload = $state(null)
-  let loading = $state(true)
-  let requestError = $state('')
-  let selectedWorkflowShape = $state('')
-  let selectedTier = $state('')
-  let selectedStage = $state('')
-  let selectedRole = $state('')
-  let cellDraft = $state('')
-  let proposal = $state(null)
-  let proposalBusy = $state(false)
-  let parseError = $state('')
-  let copyNotice = $state('')
-
-  $effect(() => {
-    let active = true
-    getWorkflows(5).then((result) => {
-      if (!active) return
-      payload = result && typeof result === 'object' ? result : { workflows: [] }
-      seedEditor(payload)
-      requestError = ''
-      loading = false
-    }).catch((error) => {
-      if (!active) return
-      requestError = error?.message || 'workflow request failed without a reason'
-      loading = false
-    })
-    return () => { active = false }
-  })
-
-  let workflows = $derived(Array.isArray(payload?.workflows) ? payload.workflows : [])
-  let presentations = $derived(workflows.map((workflow) => workflowPresentation(workflow?.shape, {
-    observedLabels: Array.isArray(workflow?.observed_labels) ? workflow.observed_labels : [],
-  })))
-  let tierOptions = $derived(tierRows(payload))
-  let selectedWorkflow = $derived(workflows.find((workflow) => workflow?.shape === selectedWorkflowShape) || workflows[0] || null)
-  let selectedStages = $derived(seatBearingStages(selectedWorkflow))
-  let selectedRoles = $derived([...new Set(selectedStages.map((stage) => stage.role))])
-  let selectedTierRow = $derived(tierOptions.find((row) => row.tier === selectedTier) || null)
-  let selectedTierSeats = $derived(record(selectedWorkflow?.tier_maps?.[selectedTier]?.seats) ? selectedWorkflow.tier_maps[selectedTier].seats : null)
-  let selectedCellPresent = $derived(Boolean(selectedTierRow?.measured === true && record(selectedTierSeats) && typeof selectedRole === 'string' && Object.prototype.hasOwnProperty.call(selectedTierSeats, selectedRole) && selectedTierSeats[selectedRole] !== undefined))
-  let editorReady = $derived(Boolean(selectedWorkflow && selectedTier && selectedStage && selectedRole && selectedCellPresent && cellDraft.trim()))
-
-  function resetProposalState() {
-    proposal = null
-    parseError = ''
-    copyNotice = ''
-  }
-
-  function setEditorSelection(workflow, tier, stage = null, role = null) {
-    const stages = seatBearingStages(workflow)
-    const chosenStage = stages.find((entry) => entry.name === stage) || stages[0] || null
-    const roles = [...new Set(stages.map((entry) => entry.role))]
-    const chosenRole = roles.includes(role) ? role : chosenStage?.role || roles[0] || ''
-    selectedWorkflowShape = workflow?.shape || ''
-    selectedTier = typeof tier === 'string' ? tier : ''
-    selectedStage = chosenStage?.name || ''
-    selectedRole = chosenRole
-    cellDraft = seedCellDraft(workflow, selectedTier, selectedRole)
-    resetProposalState()
-  }
-
-  function seedEditor(value) {
-    const rows = Array.isArray(value?.workflows) ? value.workflows : []
-    const tiers = tierRows(value)
-    setEditorSelection(rows[0] || null, tiers[0]?.tier || '')
-  }
-
-  function selectWorkflow(event) {
-    const workflow = workflows.find((row) => row?.shape === event.currentTarget.value) || null
-    setEditorSelection(workflow, tierOptions[0]?.tier || '')
-  }
-
-  function selectTier(event) {
-    setEditorSelection(selectedWorkflow, event.currentTarget.value, selectedStage, selectedRole)
-  }
-
-  function selectStage(event) {
-    setEditorSelection(selectedWorkflow, selectedTier, event.currentTarget.value, null)
-  }
-
-  function selectRole(event) {
-    setEditorSelection(selectedWorkflow, selectedTier, selectedStage, event.currentTarget.value)
-  }
-
-  function updateCellDraft(event) {
-    cellDraft = event.currentTarget.value
-    proposal = null
-    parseError = ''
-    copyNotice = ''
-  }
-
-  async function submitProposal(event) {
-    event.preventDefault()
-    proposal = null
-    parseError = ''
-    copyNotice = ''
-    let cell
-    try { cell = JSON.parse(cellDraft) }
-    catch { parseError = 'Cell draft is not valid JSON; enter a JSON object or null.'; return }
-    proposalBusy = true
-    try {
-      proposal = await proposeWorkflowEdit({ workflow: selectedWorkflow, edit: { stage: selectedStage, role: selectedRole, cell }, tier: selectedTier })
-      if (!proposal || typeof proposal !== 'object') proposal = { ok: false, refusals: [{ code: 'request', message: 'workflow proposal returned no result' }], diff: null }
-    } catch (error) {
-      proposal = { ok: false, refusals: [{ code: 'request', message: `workflow proposal request failed: ${error?.message || 'no reason was returned'}` }], diff: null }
-    } finally { proposalBusy = false }
-  }
-
-  async function copyDiff() {
-    if (typeof proposal?.diff !== 'string') { copyNotice = 'No proposal diff is available to copy.'; return }
-    try {
-      if (typeof navigator === 'undefined' || !navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') throw new Error('clipboard access is unavailable')
-      await navigator.clipboard.writeText(proposal.diff)
-      copyNotice = 'Proposal diff copied to the clipboard.'
-    } catch (error) {
-      copyNotice = `Clipboard access was unavailable; the rendered proposal diff is still available${error?.message ? ` (${error.message})` : ''}.`
-    }
-  }
-
-  function metadataValue(value) {
-    if (Array.isArray(value)) return value.length ? value.join(', ') : 'empty'
-    if (value && typeof value === 'object') return JSON.stringify(value)
-    if (value == null) return 'not recorded'
-    return String(value)
-  }
+<script module>
+  let pending=null
 </script>
-
-<main class="page workflows-page">
-  <div class="page-heading">
-    <div><p class="eyebrow">Workflow catalog</p><h1>Workflows</h1><p>Compare every declared execution shape, its canonical stage order, seats, writes, envelope contract, and recommending task profiles.</p></div>
-    <span class="updated">Declarations are authoritative · topology comes from executionTopology</span>
-  </div>
-  <p class="boundary-note">This page composes a workflow proposal diff for copying; it never dispatches or boots a run, posts a review, applies policy, or writes the proposal.</p>
-
-  {#if loading}
-    <section class="state-card"><strong>Loading workflows</strong><p>Reading the declared workflow catalog.</p></section>
-  {:else if requestError}
-    <section class="state-card degraded"><strong>Workflow catalog unavailable</strong><p>{requestError}</p></section>
-  {:else}
-    {#if payload?.degraded}
-      <p class="degraded-note" role="status">Workflow declarations are shown; supporting evidence is degraded{#if payload?.error}: {payload.error}{/if}.</p>
-    {/if}
-    {#if !workflows.length}
-      <section class="state-card"><strong>No workflows declared</strong><p>The workflow declaration feed returned no shapes, so no catalog facts can be displayed.</p></section>
-    {:else}
-      <section class="workflow-catalog" aria-label="All declared workflows">
-        {#each presentations as presentation (presentation.shape)}
-          <article class="workflow-card" aria-labelledby={`workflow-${presentation.shape}`}>
-            <header class="workflow-heading">
-              <div><p class="eyebrow">Execution shape</p><h2 id={`workflow-${presentation.shape}`}>{presentation.shape || 'undeclared'}</h2></div>
-              <span class="shape-note">Canonical declaration</span>
-            </header>
-
-            <section class="catalog-section stages-section" aria-labelledby={`workflow-${presentation.shape}-stages`}>
-              <h3 id={`workflow-${presentation.shape}-stages`}>Stage order</h3>
-              {#if presentation.stages.length}
-                <ol class="stage-order">
-                  {#each presentation.stages as stage (stage.position)}
-                    <li><span class="stage-position">{stage.position}</span><strong>{stage.name}</strong></li>
-                  {/each}
-                </ol>
-              {:else}
-                <p class="absence">No canonical stages are available for this workflow shape.</p>
-              {/if}
-            </section>
-
-            <div class="workflow-facts">
-              <section class="catalog-section" aria-labelledby={`workflow-${presentation.shape}-seats`}>
-                <h3 id={`workflow-${presentation.shape}-seats`}>Seats</h3>
-                {#if presentation.seats.items.length}
-                  <ul class="fact-list">
-                    {#each presentation.seats.items as role (role)}<li><strong>{role}</strong></li>{/each}
-                  </ul>
-                {:else}
-                  <p class="absence">{presentation.seats.absence_reason}</p>
-                {/if}
-              </section>
-
-              <section class="catalog-section" aria-labelledby={`workflow-${presentation.shape}-writes`}>
-                <h3 id={`workflow-${presentation.shape}-writes`}>Writes</h3>
-                {#if presentation.writes.value == null}
-                  <p class="absence">{presentation.writes.absence_reason}</p>
-                {:else}
-                  <p class="fact-value mono">{metadataValue(presentation.writes.value)}</p>
-                {/if}
-              </section>
-            </div>
-
-            <section class="catalog-section envelope-section" aria-labelledby={`workflow-${presentation.shape}-envelope`}>
-              <h3 id={`workflow-${presentation.shape}-envelope`}>Envelope fields</h3>
-              {#if presentation.envelope_fields.items.length}
-                <div class="envelope-list">
-                  {#each presentation.envelope_fields.items as field (field.name)}
-                    <article class="envelope-field">
-                      <header><strong>{field.name}</strong><span>{field.kind || 'kind unavailable'}</span></header>
-                      <dl class="metadata-list">
-                        <div><dt>Kind</dt><dd>{metadataValue(field.kind)}</dd></div>
-                        {#if field.values !== undefined}<div><dt>Values</dt><dd>{metadataValue(field.values)}</dd></div>{/if}
-                        {#if field.item_fields !== undefined}<div><dt>Item fields</dt><dd>{metadataValue(field.item_fields)}</dd></div>{/if}
-                        {#if field.optional_item_fields !== undefined}<div><dt>Optional item fields</dt><dd>{metadataValue(field.optional_item_fields)}</dd></div>{/if}
-                        {#if field.item_values !== undefined}<div><dt>Item values</dt><dd>{metadataValue(field.item_values)}</dd></div>{/if}
-                        {#if field.item_patterns !== undefined}<div><dt>Item patterns</dt><dd>{metadataValue(field.item_patterns)}</dd></div>{/if}
-                        {#if field.cardinality !== undefined}<div><dt>Cardinality</dt><dd>{metadataValue(field.cardinality)}</dd></div>{/if}
-                        {#if field.covers !== undefined}<div><dt>Covers</dt><dd>{metadataValue(field.covers)}</dd></div>{/if}
-                        {#if field.allow_empty !== undefined}<div><dt>Allow empty</dt><dd>{metadataValue(field.allow_empty)}</dd></div>{/if}
-                      </dl>
-                    </article>
-                  {/each}
-                </div>
-              {:else}
-                <p class="absence">{presentation.envelope_fields.absence_reason}</p>
-              {/if}
-            </section>
-
-            <section class="catalog-section" aria-labelledby={`workflow-${presentation.shape}-profiles`}>
-              <h3 id={`workflow-${presentation.shape}-profiles`}>Recommending profiles</h3>
-              {#if presentation.recommended_profiles.items.length}
-                <ul class="profile-list">
-                  {#each presentation.recommended_profiles.items as profile (profile.key)}
-                    <li><strong>{profile.name}</strong><span class="mono">{profile.key}</span></li>
-                  {/each}
-                </ul>
-              {:else}
-                <p class="absence">{presentation.recommended_profiles.absence_reason}</p>
-              {/if}
-            </section>
-          </article>
-        {/each}
+<script>
+  import { onMount, onDestroy, tick } from 'svelte'
+  import { ChevronDown, GitBranch, Bot, LockKeyhole, ArrowDown, Save, FileDown, ArrowUpRight } from 'lucide-svelte'
+  import './configuration-controls.css'
+  import { workflowPresentation } from './workflows.js'
+  import WorkflowTransfer from './WorkflowTransfer.svelte'
+  import { getWorkflows, getWorkflowEditor, saveWorkflow, getWorkflowLibrary } from './api.js'
+  const titles={full:'Build and deliver',scout:'Investigate',repair:'Repair a change',directed:'Build from a plan',review_only:'Review a change',review_panel:'Review with a panel',verify_only:'Verify behavior',stepped:'Build in steps',finish:'Finish and deliver'}
+  const purposes={full:'Plan, implement, validate and deliver a change.',scout:'Investigate a question and return findings without changing the repository.',repair:'Repair an existing change within its inherited scope.',directed:'Implement an existing plan, then review the result.',review_only:'Review a revision and return findings without changing it.',review_panel:'Collect multiple review perspectives on a change.',verify_only:'Check behavior and return evidence without changing the repository.',stepped:'Implement an ordered plan one step at a time.',finish:'Complete the delivery steps for an existing change.'}
+  const names={plan:'Plan the change',check:'Check the plan',build:'Implement',review:'Review the change','scope-gate':'Check scope','envelope-accept':'Accept the result',lane:'Run lane checks',gate:'Run acceptance checks','gate-baseline':'Check the baseline','gate-repair':'Repair acceptance checks','gate-reverify':'Verify repaired checks','gate-proof':'Verify proof',commit:'Commit',document:'Update documentation',rebase:'Rebase',suite:'Run the test suite',publish:'Publish',converge:'Confirm completion',scout:'Investigate',repair:'Repair',review_only:'Review',review_panel:'Review and adjudicate',verify_only:'Verify','finish-triage':'Read the unfinished task',directed:'Read the supplied plan',decision:'Decide the outcome'}
+  const roles={planner:'Planner',builder:'Builder',reviewer:'Reviewer',lead:'Lead','tech-lead':'Tech lead'}
+  const assurances={quick:'Quick',standard:'Standard',rigorous:'Rigorous'}
+  let presets=$state([]),preset=$state(''),transferMode=$state(null)
+  let payload=$state(null),loading=$state(true),error=$state(''),notice=$state(''),shape=$state('full'),assurance=$state('standard'),stage=$state('plan')
+  let editor=$state(null),draft=$state(null),baseline=$state(''),editorError=$state(''),busy=$state(false),saving=$state(false),changeRequest=$state(null),errorBox=$state(),saveHeading=$state(),confirmButton=$state(),generation=0
+  let workflows=$derived(payload?.workflows || [])
+  let selected=$derived(workflows.find(row=>row.shape===shape))
+  let stages=$derived(workflowPresentation(shape).stages.map(row=>row.name))
+  let selectedRole=$state('')
+  let stageRoles=$derived([editor?.stage_roles?.[stage] || []].flat())
+  let role=$derived(stageRoles.includes(selectedRole)?selectedRole:stageRoles[0])
+  let cell=$derived(Array.isArray(draft?.seats?.[stage])?draft.seats[stage].find(item=>item.role===role):draft?.seats?.[stage])
+  let changedStages=$derived(stages.filter(item=>JSON.stringify(draft?.seats?.[item])!==JSON.stringify(baseline?JSON.parse(baseline).seats?.[item]:undefined)))
+  let dirty=$derived(draft!==null && JSON.stringify(draft)!==baseline)
+  let availableModels=$derived((editor?.models || []).filter(model=>editor?.harnesses?.find(h=>h.key===cell?.agent)?.providers.includes(model.provider)))
+  let providers=$derived([...new Set(availableModels.map(model=>model.provider))])
+  let description=$derived(({plan:'The planner explores the task and proposes a bounded implementation plan.',check:'The tech lead checks the plan when this role is seated. The runtime controls whether this step is required.',build:'The builder implements the accepted plan and returns evidence of the changes.',review:'The reviewer inspects the change and reports findings before delivery.','gate-repair':'The lead repairs acceptance checks when the runtime requires it.',scout:'The planner investigates the brief and returns findings without changing repository files.',review_panel:'Two reviewers inspect the change independently. The lead resolves disagreements and returns a combined result.',review_only:'The reviewer examines the change and returns structured findings without editing files.',verify_only:'The reviewer checks the requested behavior and returns verification evidence.',repair:'The planner reads the failure and prepares a bounded repair for the builder.'})[stage] || payload?.docs?.[stage]?.description || 'This step is controlled by the workflow’s implemented execution path.')
+  let grant=$derived(editor?.grants?.[role])
+  let skills=$derived([...new Set([...(grant?.skills || []),...(grant?.by_agent?.[cell?.agent]?.skills || [])])])
+  async function loadCatalog(){loading=true;error='';try{payload=await getWorkflows(5)}catch(cause){error=cause.message}finally{loading=false}}
+  async function loadEditor(){
+    const token=++generation;busy=true;editorError='';editor=null;draft=null;baseline=''
+    try{const value=await getWorkflowEditor(shape,assurance,preset);if(token!==generation)return;editor=value;draft=structuredClone(value.map);baseline=JSON.stringify(draft);if(!value.stage_roles[stage])stage=Object.keys(value.map.seats)[0] || stage}catch(cause){if(token===generation)editorError=cause.message}finally{if(token===generation)busy=false}
+  }
+  onMount(async()=>{await loadCatalog();await loadLibrary();if(pending){({shape,assurance,stage,preset,editor,draft,baseline}=pending);pending=null;notice='Your unsaved workflow draft was restored.'}else await loadEditor()})
+  onDestroy(()=>{generation++;if(dirty)pending={shape,assurance,stage,preset,editor:structuredClone($state.snapshot(editor)),draft:structuredClone($state.snapshot(draft)),baseline}})
+  function beforeUnload(event){if(dirty){event.preventDefault();event.returnValue=''}}
+  async function choose(next){if(dirty){changeRequest=next;await tick();confirmButton?.focus();return}await switchTo(next)}
+  async function switchTo(next){changeRequest=null;notice='';if(next.reset){draft=JSON.parse(baseline);editorError='';notice='Unsaved changes reverted.';return}if(next.transfer){draft=JSON.parse(baseline);transferMode=next.transfer;return}transferMode=null;preset=next.preset ?? '';shape=next.shape ?? shape;assurance=next.assurance ?? assurance;stage=workflows.find(row=>row.shape===shape)?.declaration?.stages?.[0] || '';await loadEditor()}
+  function setCell(field,value){
+    const next={...$state.snapshot(cell),[field]:value}
+    if(field==='agent'){
+      const models=editor.models.filter(model=>editor.harnesses.find(h=>h.key===value)?.providers.includes(model.provider))
+      if(!models.some(model=>model.provider===next.provider && model.id===next.id)){next.provider=models[0]?.provider || '';next.id=models[0]?.id || ''}
+      // These declare required grants; actual delivery stays under the role policy.
+      next.skills=[];next.extensions=[]
+    }
+    if(field==='provider')next.id=availableModels.find(model=>model.provider===value)?.id || ''
+    draft={...$state.snapshot(draft),seats:{...$state.snapshot(draft.seats),[stage]:Array.isArray(draft.seats[stage])?draft.seats[stage].map(item=>item.role===role?next:$state.snapshot(item)):next}}
+    editorError='';notice=''
+  }
+  async function save(){
+    if(saving || !editor || (!dirty && editor.revision))return;saving=true;editorError=''
+    try{
+      const result=await saveWorkflow({shape,assurance,name:editor.name,map:$state.snapshot(draft),expected_revision:editor.revision,policy_revision:editor.policy_revision})
+      draft=result.map;baseline=JSON.stringify(draft);editor={...$state.snapshot(editor),revision:result.revision,source:'Saved locally',validation:null};pending=null
+      await loadLibrary();notice=`Saved ${result.name}. Select this named workflow for future boots. Running tasks keep their existing assignments.`
+      await tick();saveHeading?.focus()
+    }catch(cause){editorError=`${cause.message} Your draft is kept. Export it before reloading if you need to keep a copy.`;await tick();errorBox?.focus()}finally{saving=false}
+  }
+  async function loadLibrary(){try{presets=(await getWorkflowLibrary()).presets}catch(cause){editorError=cause.message}}
+  async function openPreset(name){const saved=presets.find(item=>item.name===name);await choose(saved?{preset:name,shape:saved.shape,assurance:saved.suggested_assurance || assurance}:{shape,assurance})}
+  async function transferred(result){transferMode=null;await loadLibrary();await switchTo({preset:result.name,shape:result.shape,assurance:result.assurance});notice=`Saved ${result.name}. This preset is ready to select for a new task.`}
+  function download(){if(!draft)return;const url=URL.createObjectURL(new Blob([JSON.stringify($state.snapshot(draft),null,2)+'\n'],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=`${editor.name}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
+</script>
+<svelte:window onbeforeunload={beforeUnload} />
+<section class="workflows-workspace" aria-label="Workflow library and stage editor">
+  <header class="page-heading"><div><h1>Workflows</h1><p>Choose a workflow, then configure who handles each stage.</p></div><GitBranch size={28} aria-hidden="true" /></header>
+  {#if notice}<div class="notice success" role="status" tabindex="-1" bind:this={saveHeading}>{notice}</div>{/if}
+  {#if loading}<p role="status">Reading workflows…</p>{:else if error}<div class="notice error" role="alert">Could not read workflows: {error}<button onclick={loadCatalog}>Try again</button></div>{:else if !workflows.length}<p>No workflows were returned. Refresh to try again.</p>{:else}
+    <div class="chooser"><label>Workflow<div class="select-shell"><select value={shape} disabled={busy || saving || !!transferMode} onchange={event=>{const value=event.currentTarget.value;event.currentTarget.value=shape;choose({shape:value})}}>{#each workflows as workflow}<option value={workflow.shape}>{titles[workflow.shape] || workflow.shape}</option>{/each}</select><ChevronDown size={16} aria-hidden="true" /></div></label><label>Assurance<div class="select-shell"><select value={assurance} disabled={busy || saving || !!transferMode} onchange={event=>{const value=event.currentTarget.value;event.currentTarget.value=assurance;choose({assurance:value,preset})}}>{#each Object.entries(assurances) as [key,title]}<option value={key}>{title}</option>{/each}</select><ChevronDown size={16} aria-hidden="true" /></div></label><a href="#/assurances">Understand assurances <ArrowUpRight size={14} aria-hidden="true" /></a></div>
+    <div class="library-bar"><label>Saved preset<div class="select-shell"><select value={preset} disabled={busy || saving || !!transferMode} onchange={event=>{const value=event.currentTarget.value;event.currentTarget.value=preset;openPreset(value)}}><option value="">Default for this workflow and assurance</option>{#each presets as item}<option value={item.name} disabled={!workflows.some(workflow=>workflow.shape===item.shape)}>{item.name}{item.error?' · needs attention':''}</option>{/each}</select><ChevronDown size={16} aria-hidden="true" /></div></label><div class="actions"><button disabled={!draft || busy || saving || !!transferMode || !editor?.writable} onclick={()=>{transferMode='duplicate'}}>Duplicate preset</button><button disabled={busy || saving || !!transferMode || !editor?.writable} onclick={()=>choose({transfer:'import'})}>Import JSON</button></div></div>
+    {#if transferMode && draft}{#key transferMode}<WorkflowTransfer mode={transferMode} source={$state.snapshot(draft)} sourceName={editor.name} {assurance} onclose={()=>transferMode=null} onsaved={transferred} />{/key}{/if}
+    {#if changeRequest}<div class="notice" role="alert"><strong>{changeRequest.reset ? 'Revert unsaved changes?' : 'Keep your unsaved changes?'}</strong><p>{changeRequest.reset ? 'This restores the assignments from when you opened or last saved this workflow.' : 'Continuing will discard this draft. Save or export it first if you want to keep it.'}</p><div class="actions"><button bind:this={confirmButton} onclick={()=>changeRequest=null}>Keep editing</button><button onclick={()=>switchTo(changeRequest)}>{changeRequest.reset ? 'Discard changes' : 'Discard and switch'}</button></div></div>{/if}
+    <header class="workflow-summary"><div><p class="eyebrow">{editor?.source || 'Built-in workflow'}</p><h2>{titles[shape] || shape}</h2><p>{purposes[shape] || 'Inspect the declared stages and their evidence.'}</p></div><span class="badge">{selected?.declaration?.writes==='none' ? 'No repository changes' : 'Can change files'}</span></header>
+    {#if editor?.missing_roles?.length}<div class="notice warning" role="status"><strong>{assurances[assurance]} does not seat every required role</strong><p>This workflow needs {editor.missing_roles.map(value=>roles[value] || value).join(', ')}. Choose a compatible assurance before saving.</p><div class="actions">{#each editor.compatible_assurances as name}<button onclick={()=>choose({assurance:name})}>Use {assurances[name]}</button>{/each}<a href="#/roster">Review roster</a></div></div>{/if}
+    <div class="workspace">
+      <section class="sequence" aria-labelledby="sequence-heading"><header><h3 id="sequence-heading">Execution sequence</h3><p>{stages.length} stages · fixed order</p></header><p class="hint">Select a stage to inspect it. Conditional stages may be skipped or repeated. Scroll for the complete sequence.</p><ol>{#each stages as item,index}<li><button class:selected={stage===item} aria-pressed={stage===item} onclick={()=>stage=item}><span class="step-number">{index+1}</span><span><strong>{names[item] || item.replaceAll('-',' ')}</strong><small>{editor?.stage_roles?.[item] ? [editor.stage_roles[item]].flat().map(value=>roles[value] || value).join(' · ') : 'Runtime-managed'}</small>{#if changedStages.includes(item)}<small class="edited">Edited</small>{/if}</span>{#if draft?.seats?.[item]}<Bot size={16} aria-label="Configurable assignment" />{:else}<LockKeyhole size={14} aria-label="Fixed step" />{/if}</button>{#if index<stages.length-1}<ArrowDown class="connector" size={14} aria-hidden="true" />{/if}</li>{/each}</ol></section>
+      <section class="inspector" aria-labelledby="stage-heading"><header><p class="eyebrow">Stage {stages.indexOf(stage)+1} of {stages.length}</p><h2 id="stage-heading">{names[stage] || stage.replaceAll('-',' ')}</h2><p>{description}</p></header>
+        {#if stageRoles.length>1}<label>Stage role<div class="select-shell"><select value={role} disabled={saving} onchange={event=>selectedRole=event.currentTarget.value}>{#each stageRoles as value}<option value={value}>{roles[value]}{editor.roles.includes(value)?'':' · not seated'}</option>{/each}</select><ChevronDown size={16} aria-hidden="true" /></div></label><p class="hint">Each role has its own assignment. Reviewer and Tech lead review independently; Lead adjudicates their findings.</p>{/if}
+        {#if busy}<p role="status">Reading stage configuration…</p>{:else if cell}
+          <div class="assignment-heading"><Bot size={20} aria-hidden="true" /><div><h3>{roles[cell.role] || cell.role} assignment</h3><p>Configuration for {assurances[assurance]} in this named workflow.</p></div></div>
+          <fieldset disabled={saving || !!transferMode || !editor.writable}><div class="fields"><label>Execution harness<div class="select-shell"><select value={cell.agent} onchange={event=>setCell('agent',event.currentTarget.value)}>{#if !editor.harnesses.some(h=>h.key===cell.agent)}<option value={cell.agent}>{cell.agent} · unavailable</option>{/if}{#each editor.harnesses as harness}<option value={harness.key}>{harness.name}</option>{/each}</select><ChevronDown size={16} aria-hidden="true" /></div></label><label>Provider<div class="select-shell"><select value={cell.provider} onchange={event=>setCell('provider',event.currentTarget.value)}>{#if !providers.includes(cell.provider)}<option value={cell.provider}>{cell.provider} · unavailable</option>{/if}{#each providers as provider}<option value={provider}>{provider}</option>{/each}</select><ChevronDown size={16} aria-hidden="true" /></div></label><label class="wide">Model<div class="select-shell"><select value={cell.id} onchange={event=>setCell('id',event.currentTarget.value)}>{#if !availableModels.some(model=>model.provider===cell.provider && model.id===cell.id)}<option value={cell.id}>{cell.id || 'Choose a model'} · unavailable</option>{/if}{#each availableModels.filter(model=>model.provider===cell.provider) as model}<option value={model.id}>{model.id}</option>{/each}</select><ChevronDown size={16} aria-hidden="true" /></div></label><label>Reasoning effort<div class="select-shell"><select value={cell.effort} onchange={event=>setCell('effort',event.currentTarget.value)}>{#each editor.efforts as effort}<option value={effort}>{effort.replace('xhigh','Extra high')}</option>{/each}</select><ChevronDown size={16} aria-hidden="true" /></div></label></div></fieldset>
+          <p class="hint">Choices come from configured harnesses and models that meet this assurance’s model policy. Boot still checks adapter readiness and role requirements.</p>
+          <div class="inherited"><h3>Instructions and skills</h3><p>This stage uses the {roles[cell.role] || cell.role} role instructions and its harness-specific grants.</p>{#if skills.length}<ul>{#each skills as skill}<li><code>{skill}</code></li>{/each}</ul>{:else}<p class="hint">No skills are granted to this role and harness.</p>{/if}<div class="links"><a href="#/prompts">Edit role instructions <ArrowUpRight size={14} aria-hidden="true" /></a><a href="#/skills">Manage skills <ArrowUpRight size={14} aria-hidden="true" /></a><a href="#/agents">Manage agents <ArrowUpRight size={14} aria-hidden="true" /></a></div></div>
+        {:else}<div class="fixed-note"><LockKeyhole size={20} aria-hidden="true" /><div><h3>{role ? 'Not seated for this assurance' : 'Controlled by the runtime'}</h3><p>{role ? `The ${roles[role]} role is not assigned under ${assurances[assurance]}. Choose another assurance or review the roster.` : 'This check or delivery step has no model assignment. Its order and rules are fixed by the executor.'}</p><a href="#/roster">Review role assignments <ArrowUpRight size={14} aria-hidden="true" /></a></div></div>{/if}
+        {#if editorError}<div class="notice error" role="alert" tabindex="-1" bind:this={errorBox}>{editorError}<button onclick={()=>choose({})}>Reload configuration</button></div>{/if}
+        {#if editor?.validation && !editor?.missing_roles?.length}<p class="notice warning">This configuration needs attention: {editor.validation}</p>{/if}
+        {#if editor}<footer><div><strong>{dirty ? `${changedStages.length} ${changedStages.length===1?'stage':'stages'} edited` : editor.revision ? 'Saved locally' : 'Ready to customize'}</strong><p>{editor.writable ? 'Changes apply only when this named workflow is selected.' : 'This installed plugin is read-only. Open its source checkout to edit.'}</p></div><div class="actions">{#if dirty}<button disabled={saving} onclick={()=>choose({reset:true})}>Revert changes</button>{/if}<button onclick={download} disabled={saving}><FileDown size={16} aria-hidden="true" />Export JSON</button><button class="primary" disabled={(!dirty && !!editor.revision) || saving || !!transferMode || !editor.writable || editor.missing_roles?.length>0} onclick={save}><Save size={16} aria-hidden="true" />{saving ? 'Saving…' : 'Save workflow'}</button></div></footer><details><summary>Use this configuration</summary><p>After saving, add these options to a future Crew boot:</p><code class="command">{editor.usage}</code><p>When running the task, select the matching execution:</p><code class="command">{editor.run_usage}</code><p class="hint">File: {editor.path}</p><p class="hint">Stage order and role grants remain runtime-managed. Changing a primary model or harness drops that role’s roster fallback chain for this workflow. Existing runs keep their recorded configuration.</p></details>{/if}
       </section>
-
-      <section class="proposal-editor" aria-labelledby="workflow-proposal-heading">
-        <header class="proposal-heading">
-          <div><p class="eyebrow">Proposal editor</p><h2 id="workflow-proposal-heading">Compose a workflow step change</h2><p>Choose a declared workflow, roster tier, seat-bearing stage, and role. The cell stays a JSON draft until you request a proposal diff.</p></div>
-          <span class="shape-note">Copyable diff only</span>
-        </header>
-        {#if !workflows.length}
-          <p class="absence">No workflow rows are available for this proposal.</p>
-        {:else if !selectedStages.length}
-          <p class="absence">No seat-bearing stages are available for this workflow declaration.</p>
-        {:else if !tierOptions.length}
-          <p class="absence">No roster tiers are available for this workflow proposal.</p>
-        {:else if !selectedTierRow}
-          <p class="absence">The selected roster tier is unavailable, so no cell can be seeded.</p>
-        {:else if selectedTierRow.measured !== true || !selectedTierSeats}
-          <p class="absence">The selected roster tier has no measured seat data, so no cell draft can be seeded.</p>
-        {:else if !selectedCellPresent}
-          <p class="absence">The selected tier has no measured cell for the selected seat role, so no cell draft can be seeded.</p>
-        {/if}
-        <form class="proposal-form" onsubmit={submitProposal}>
-          <div class="proposal-fields">
-            <label>Workflow<select value={selectedWorkflowShape} onchange={selectWorkflow} disabled={!workflows.length} required><option value="" disabled>Choose a workflow</option>{#each workflows as workflow (workflow.shape)}<option value={workflow.shape}>{workflow.shape}</option>{/each}</select></label>
-            <label>Roster tier<select value={selectedTier} onchange={selectTier} disabled={!tierOptions.length} required><option value="" disabled>Choose a tier</option>{#each tierOptions as tier (tier.tier)}<option value={tier.tier}>{tier.tier}{tier.measured === true ? '' : ' (unmeasured)'}</option>{/each}</select></label>
-            <label>Seat-bearing stage<select value={selectedStage} onchange={selectStage} disabled={!selectedStages.length} required><option value="" disabled>Choose a stage</option>{#each selectedStages as stage (stage.name)}<option value={stage.name}>{stage.name}</option>{/each}</select></label>
-            <label>Seat role<select value={selectedRole} onchange={selectRole} disabled={!selectedRoles.length} required><option value="" disabled>Choose a role</option>{#each selectedRoles as role (role)}<option value={role}>{role}</option>{/each}</select></label>
-          </div>
-          <label>Cell JSON<textarea value={cellDraft} oninput={updateCellDraft} rows="10" placeholder="A measured seat cell will be seeded here." disabled={!selectedCellPresent} required></textarea></label>
-          <button type="submit" disabled={!editorReady || proposalBusy}>{proposalBusy ? 'Composing…' : 'Compose proposal diff'}</button>
-        </form>
-        {#if parseError}<p class="editor-error" role="alert">{parseError}</p>{/if}
-        {#if proposal}
-          <section class="proposal-result" aria-live="polite">
-            <h3>Proposal result</h3>
-            {#if proposal.diff !== null && proposal.diff !== undefined}
-              <h4>Unified diff</h4>
-              <DiffBlock text={proposal.diff} empty="(no workflow change)" label="Workflow proposal diff" />
-              <button type="button" class="copy-button" onclick={copyDiff}>Copy proposal diff</button>
-              {#if copyNotice}<p class:editor-error={copyNotice.startsWith('Clipboard')} class="copy-status" role="status">{copyNotice}</p>{/if}
-            {/if}
-            {#if proposal.refusals?.length}
-              <h4>Refusals</h4>
-              <ul>{#each proposal.refusals as refusal (refusal.code || refusal.message)}<li>{refusal.code || 'unknown'}: {refusal.message || 'refusal reason unavailable'}</li>{/each}</ul>
-            {:else if proposal.ok}
-              <p class="success">Proposal is ready to copy; no checkout file was changed.</p>
-            {:else}
-              <p class="editor-error">Proposal was refused without a reason.</p>
-            {/if}
-          </section>
-        {/if}
-      </section>
-    {/if}
+    </div>
+    <section class="history"><header><h2>Recent runs</h2><p>Recorded executions of this workflow. Open a task to inspect its actual path and waterfall.</p></header>{#if selected?.evidence?.measured && selected.recent_runs?.length}<ul>{#each selected.recent_runs as run}<li>{#if run.run_id}<a href={`#/${encodeURIComponent(run.run_id)}`}>Run {run.run_id} <ArrowUpRight size={14} aria-hidden="true" /></a>{:else}<span>Run identifier unavailable</span>{/if}<span>Recorded: {run.outcome || 'Outcome not recorded'}</span><time>{run.started_at ? new Date(run.started_at).toLocaleString() : 'Start time unavailable'}</time></li>{/each}</ul>{:else}<p class="empty">{selected?.evidence?.reason==='feed-unavailable' ? 'Run history is unavailable. Refresh after the ledger reconnects.' : 'No recorded runs for this workflow.'}</p>{/if}</section>
+    <details class="technical"><summary>Result contract and technical details</summary><p>Workflow identifier: <code>{shape}</code>. These are declared output requirements, not evidence that a task passed them.</p><pre>{JSON.stringify({writes:selected?.declaration?.writes,accepted_by:selected?.declaration?.accepted_by,envelope_fields:selected?.declaration?.envelope_fields},null,2)}</pre></details>
   {/if}
-</main>
-
+</section>
 <style>
-.workflows-page { padding-top:2rem; }
-.page-heading { display:flex; justify-content:space-between; align-items:end; gap:1rem; margin-bottom:1rem; }
-.page-heading h1 { margin:.1rem 0 .35rem; font-size:clamp(1.7rem,3vw,2.35rem); letter-spacing:-.04em; }
-.page-heading p { margin:0; color:var(--muted); max-width:46rem; font-size:.9rem; }
-.eyebrow { color:var(--accent); font-size:.66rem; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }
-.updated,.shape-note { color:var(--muted); font-size:.7rem; }
-.boundary-note { margin:0 0 1rem; border:1px dashed var(--accent); border-radius:var(--radius); padding:.7rem .8rem; color:var(--muted); font-size:.7rem; }
-.degraded-note { margin:0 0 1rem; border:1px solid var(--status-escalated); border-radius:var(--radius); padding:.7rem .8rem; color:var(--status-escalated); font-size:.7rem; }
-.workflow-catalog { display:grid; grid-template-columns:repeat(auto-fit,minmax(20rem,1fr)); gap:1rem; align-items:start; }
-.workflow-card,.state-card { min-width:0; border:1px solid var(--line); border-radius:var(--radius); background:var(--panel); }
-.workflow-card { overflow:hidden; }
-.workflow-heading { display:flex; justify-content:space-between; align-items:start; gap:1rem; padding:1rem; border-bottom:1px solid var(--line); }
-.workflow-heading h2 { margin:.12rem 0 0; color:var(--accent); font-size:1.15rem; }
-.workflow-heading .eyebrow { margin:0; }
-.catalog-section { min-width:0; padding:1rem; border-bottom:1px solid var(--line); }
-.catalog-section:last-child { border-bottom:0; }
-.catalog-section h3 { margin:0 0 .65rem; color:var(--accent); font-size:.72rem; letter-spacing:.08em; text-transform:uppercase; }
-.workflow-facts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); border-bottom:1px solid var(--line); }
-.workflow-facts .catalog-section { border-bottom:0; }
-.stage-order,.fact-list,.profile-list { display:grid; gap:.35rem; margin:0; padding:0; list-style:none; }
-.stage-order li { display:grid; grid-template-columns:2rem minmax(0,1fr); align-items:center; gap:.45rem; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--panel-raised); padding:.4rem .5rem; }
-.stage-order strong { overflow-wrap:anywhere; font-size:.7rem; }
-.stage-position { display:grid; width:1.45rem; height:1.45rem; place-items:center; border-radius:50%; background:var(--accent); color:var(--bg); font:700 .62rem var(--mono); }
-.fact-list li,.profile-list li { display:flex; justify-content:space-between; gap:.7rem; border-top:1px solid var(--line); padding:.45rem 0; font-size:.7rem; }
-.fact-list li:first-child,.profile-list li:first-child { border-top:0; padding-top:0; }
-.fact-list strong { color:var(--accent); }
-.profile-list strong { overflow-wrap:anywhere; }
-.profile-list span { color:var(--muted); font-size:.62rem; }
-.fact-value { margin:0; color:var(--accent); font-size:.75rem; }
-.envelope-list { display:grid; gap:.65rem; }
-.envelope-field { min-width:0; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--panel-raised); padding:.65rem; }
-.envelope-field header { display:flex; justify-content:space-between; align-items:start; gap:.7rem; margin-bottom:.5rem; }
-.envelope-field header strong { overflow-wrap:anywhere; color:var(--accent); font-size:.72rem; }
-.envelope-field header span { color:var(--neutral); font:600 .58rem var(--mono); text-transform:uppercase; }
-.metadata-list { display:grid; gap:.35rem; margin:0; }
-.metadata-list div { display:grid; grid-template-columns:minmax(6rem,max-content) minmax(0,1fr); gap:.55rem; border-top:1px solid var(--line); padding-top:.35rem; }
-.metadata-list dt { color:var(--muted); font-size:.58rem; text-transform:uppercase; letter-spacing:.05em; }
-.metadata-list dd { min-width:0; margin:0; overflow-wrap:anywhere; color:var(--accent); font: .61rem/1.4 var(--mono); }
-.absence { margin:0; color:var(--muted); font-size:.68rem; line-height:1.45; }
-.mono { font-family:var(--mono); }
-.state-card { max-width:42rem; margin:3rem auto; padding:1.4rem; text-align:center; }
-.state-card strong { color:var(--accent); }
-.state-card p { color:var(--muted); font-size:.75rem; }
-.state-card.degraded { border-color:var(--status-escalated); }
-.proposal-editor { display:grid; gap:.75rem; margin-top:1rem; border:1px solid var(--line); border-radius:var(--radius); background:var(--panel); padding:1rem; }
-.proposal-heading { display:flex; justify-content:space-between; align-items:start; gap:1rem; }
-.proposal-heading h2 { margin:.12rem 0 .35rem; font-size:1.1rem; }
-.proposal-heading p:not(.eyebrow) { margin:0; color:var(--muted); max-width:44rem; font-size:.72rem; }
-.proposal-form { display:grid; gap:.7rem; }
-.proposal-fields { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.7rem; }
-.proposal-form label { display:grid; gap:.25rem; color:var(--muted); font-size:.64rem; }
-.proposal-form select,.proposal-form textarea { min-width:0; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--bg); color:var(--accent); padding:.5rem .6rem; font:inherit; }
-.proposal-form textarea { resize:vertical; font-family:var(--mono); font-size:.68rem; line-height:1.5; }
-.proposal-form button[type='submit'],.copy-button { width:max-content; border:1px solid var(--accent); border-radius:var(--radius-sm); background:var(--accent); color:var(--bg); padding:.5rem .75rem; cursor:pointer; }
-.proposal-form button[type='submit']:disabled,.copy-button:disabled { cursor:not-allowed; opacity:.55; }
-.proposal-result { border-top:1px solid var(--line); padding-top:.7rem; }
-.proposal-result h3,.proposal-result h4 { margin:.25rem 0 .35rem; font-size:.76rem; }
-.proposal-result h4 { color:var(--muted); font-size:.62rem; letter-spacing:.08em; text-transform:uppercase; }
-.proposal-result ul { margin:.25rem 0 0; padding-left:1.1rem; color:var(--status-fail); font-size:.68rem; }
-.copy-button { margin-top:.55rem; background:var(--panel-raised); color:var(--accent); }
-.copy-status { margin:.45rem 0 0; font-size:.68rem; }
-.editor-error { color:var(--status-fail); font-size:.7rem; }
-.success { color:var(--status-ok); font-size:.7rem; }
-@media (max-width:900px) { .proposal-fields { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-@media (max-width:700px) {
-  .page-heading { align-items:start; }
-  .updated { display:none; }
-  .workflow-facts { grid-template-columns:1fr; }
-  .workflow-facts .catalog-section { border-bottom:1px solid var(--line); }
-  .workflow-facts .catalog-section:last-child { border-bottom:0; }
-}
+.workflows-workspace{display:grid;gap:1.5rem;min-width:0}h1,h2,h3,p{margin:0}h1{font-size:clamp(1.7rem,3vw,2.35rem);letter-spacing:-.04em}h2{font-size:1.3rem}h3{font-size:1rem}p{line-height:1.55}button,select{font:inherit}button{display:inline-flex;align-items:center;justify-content:center;gap:.45rem;min-height:2.65rem;padding:.6rem .8rem;border:1px solid var(--line);border-radius:.5rem;background:var(--panel);color:var(--text);cursor:pointer;font-weight:600}button:disabled{opacity:.55;cursor:default}.primary{background:var(--accent-solid);color:var(--on-accent);border-color:var(--accent-solid)}button:focus-visible,select:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}.page-heading,.workflow-summary{display:flex;justify-content:space-between;align-items:start;gap:1rem}.page-heading p,.workflow-summary p:not(.eyebrow),.inspector header p:not(.eyebrow){color:var(--muted);margin-top:.4rem}.page-heading :global(svg){color:var(--accent);flex-shrink:0}.chooser{display:flex;gap:1.25rem;align-items:end;flex-wrap:wrap;padding:1rem;background:var(--panel);border:1px solid var(--line);border-radius:.75rem}.chooser label:first-child{flex:1;min-width:12rem}label{display:grid;gap:.45rem;font-size:.9rem;font-weight:600}select{appearance:none;width:100%;min-width:0;padding:.65rem;padding-inline-end:2.75rem;border:1px solid var(--muted);border-radius:.45rem;background-color:var(--panel);color:var(--text)}.library-bar{display:flex;gap:1.25rem;align-items:end;flex-wrap:wrap}.library-bar>label{flex:1;min-width:0}.library-bar .actions{padding-bottom:.1rem}.chooser>a{margin-bottom:.7rem}.eyebrow{font-size:.8rem;color:var(--accent);font-weight:700;margin-bottom:.35rem}.badge{font-size:.8rem;background:var(--accent-surface);color:var(--accent);border-radius:1rem;padding:.4rem .7rem;white-space:nowrap}.workspace{display:grid;grid-template-columns:15rem minmax(0,1fr);gap:1.2rem;align-items:start}.sequence{min-width:0}.sequence header p,.hint{font-size:.85rem;color:var(--muted)}.sequence>.hint{margin:.5rem 0 .8rem}.sequence ol{list-style:none;margin:0;padding:2px 5px 2px 2px;max-height:42rem;overflow:auto;overscroll-behavior:contain}.sequence li{display:flex;flex-direction:column;align-items:center}.sequence button{width:100%;justify-content:start;text-align:start;padding:.65rem;gap:.65rem}.sequence button>span:nth-child(2){flex:1;min-width:0}.sequence strong{font-size:.86rem;display:block}.sequence .edited{color:var(--accent);font-weight:700}.sequence small{display:block;color:var(--muted);font-size:.76rem;margin-top:.2rem}.sequence button.selected{border-color:var(--accent);background:var(--accent-surface);box-shadow:inset 3px 0 var(--accent)}.step-number{font-size:.8rem;font-variant-numeric:tabular-nums;color:var(--muted);width:1.2rem}.sequence :global(.connector){color:var(--muted);margin:.15rem 0}.sequence button :global(svg){flex-shrink:0;color:var(--accent)}.inspector{border:1px solid var(--line);border-radius:.75rem;background:var(--panel);padding:1.25rem;display:grid;gap:1.2rem;min-width:0}.assignment-heading{display:flex;align-items:center;gap:.65rem;border-top:1px solid var(--line);padding-top:1rem}.assignment-heading :global(svg){color:var(--accent)}.assignment-heading p{font-size:.85rem;color:var(--muted);margin-top:.2rem}fieldset{border:0;margin:0;padding:0;min-width:0}.fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem}.fields .wide{grid-column:1/-1}.inherited{border-top:1px solid var(--line);padding-top:1rem}.inherited p{font-size:.88rem;margin:.4rem 0;color:var(--muted)}.inherited ul{padding-inline-start:1.2rem;font-size:.85rem}.inherited code{overflow-wrap:anywhere}.links,.actions{display:flex;gap:.6rem 1rem;flex-wrap:wrap}a{display:inline-flex;gap:.3rem;align-items:center;color:var(--accent);font-size:.88rem;text-underline-offset:.2em}.fixed-note{display:flex;gap:.8rem;border-inline-start:3px solid var(--accent);padding-inline-start:.8rem}.fixed-note :global(svg){flex-shrink:0;color:var(--accent)}.fixed-note p{font-size:.9rem;color:var(--muted);margin:.4rem 0 .7rem}footer{border-top:1px solid var(--line);padding-top:1rem;display:grid;gap:.8rem}footer strong{font-size:.9rem}footer p{font-size:.85rem;color:var(--muted);margin-top:.3rem}summary{cursor:pointer;padding:.6rem 0;font-size:.9rem}details p{font-size:.88rem;color:var(--muted);margin:.4rem 0}.command{display:block;overflow-wrap:anywhere;padding:.8rem;background:var(--panel-raised);border-radius:.4rem;font-size:.85rem}.notice{display:grid;gap:.6rem;padding:1rem;border:1px solid var(--line);border-radius:.6rem;overflow-wrap:anywhere;line-height:1.5}.notice button{justify-self:start}.error{color:var(--status-fail)}.warning{color:var(--status-escalated)}.success{border-inline-start:3px solid var(--status-ok)}.history{border-top:1px solid var(--line);padding-top:1.5rem}.history header p{color:var(--muted);font-size:.9rem;margin-top:.4rem}.history ul{padding:0;list-style:none}.history li{display:flex;flex-wrap:wrap;gap:.6rem 1rem;align-items:center;justify-content:space-between;padding:.9rem 0;border-bottom:1px solid var(--line);font-size:.85rem}.history time{color:var(--muted)}.empty{color:var(--muted);padding:1rem 0}.technical pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:.8rem;padding:1rem;background:var(--panel-raised);border:1px solid var(--line);border-radius:.5rem}.technical{min-width:0}
+@media(max-width:900px){.workspace{grid-template-columns:1fr}.sequence ol{display:flex;gap:.6rem;max-height:none;overflow-x:auto;padding:.3rem .2rem .6rem}.sequence li{flex:0 0 11rem}.sequence button{height:100%}.sequence :global(.connector){display:none}.sequence>.hint{font-size:.85rem}.inspector{padding:1rem}}@media(max-width:500px){.library-bar{display:grid;grid-template-columns:1fr}.fields{grid-template-columns:1fr}.chooser{padding:.8rem}.chooser label{width:100%}.workflow-summary{flex-direction:column}.page-heading> :global(svg){display:none}select{font-size:1rem}.actions button{flex:1}.history li{align-items:start;flex-direction:column}}
 </style>

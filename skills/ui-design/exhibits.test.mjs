@@ -18,14 +18,14 @@ const MIN_ANCHORS = 46;
 // JSON-compatible triple naming the line the prose claims.
 const UNPINNABLE_PINS = [
   ["visualizer/web/index.html", 2, "<meta charset=\"UTF-8\">"],
-  ["visualizer/web/src/App.svelte", 26, "let themeValue = 'os'"],
-  ["visualizer/web/src/App.svelte", 27, "try { themeValue = localStorage.getItem('dt-theme') || 'os' } catch {}"],
-  ["visualizer/web/src/App.svelte", 69, "document.documentElement.dataset.theme = theme"],
-  ["visualizer/web/src/App.svelte", 70, "delete document.documentElement.dataset.theme"],
-  ["visualizer/web/src/App.svelte", 71, "localStorage.setItem('dt-theme', theme)"],
-  ["visualizer/web/src/App.svelte", 180, "<Dropdown bind:value={theme}"],
-  ["visualizer/web/src/App.svelte", 246, ".workspace { margin-inline-start:13.5rem;"],
-  ["visualizer/web/src/App.svelte", 249, ".error-banner { margin:1rem; border:1px solid var(--status-fail);"],
+  ["visualizer/web/src/App.svelte", 27, "let themeValue = 'os'"],
+  ["visualizer/web/src/App.svelte", 28, "try { themeValue = localStorage.getItem('dt-theme') || 'os' } catch {}"],
+  ["visualizer/web/src/App.svelte", 70, "document.documentElement.dataset.theme = theme"],
+  ["visualizer/web/src/App.svelte", 71, "delete document.documentElement.dataset.theme"],
+  ["visualizer/web/src/App.svelte", 72, "localStorage.setItem('dt-theme', theme)"],
+  ["visualizer/web/src/App.svelte", 181, "<Dropdown bind:value={theme}"],
+  ["visualizer/web/src/App.svelte", 248, ".workspace { margin-inline-start:13.5rem;"],
+  ["visualizer/web/src/App.svelte", 251, ".error-banner { margin:1rem; border:1px solid var(--status-fail);"],
   ["visualizer/web/src/lib/AcceptPanel.svelte", 23, ".chip.held { color:#166534; background:#dcfce7; }"],
   ["visualizer/web/src/lib/EnvelopeInspector.svelte", 85, ".error { border:1px solid color-mix(in srgb,var(--status-fail) 40%,var(--line));"],
   ["visualizer/web/src/lib/FleetTable.svelte", 14, "status ${row.status.tone}"],
@@ -48,9 +48,9 @@ const UNPINNABLE_PINS = [
   ["visualizer/web/src/lib/PhasePanel.svelte", 99, ".chip.unproven { color:#92400e; background:#fef3c7; }"],
   ["visualizer/web/src/lib/RoleTag.svelte", 4, "--role-color: var(--role-${role})"],
   ["visualizer/web/src/lib/RoleTag.svelte", 9, ".swatch { width:.65rem; height:.65rem; background:var(--role-color);"],
-  ["visualizer/web/src/lib/RosterPanel.svelte", 703, ".notice strong { color:var(--status-fail); }"],
-  ["visualizer/web/src/lib/RosterPanel.svelte", 718, ".source-setup input { min-width:0; border:1px solid var(--line);"],
-  ["visualizer/web/src/lib/RosterPanel.svelte", 731, ".pick-evidence pre { max-height:12rem;"],
+  ["visualizer/web/src/lib/RosterPanel.svelte", 729, ".notice strong { color:var(--status-fail); }"],
+  ["visualizer/web/src/lib/RosterPanel.svelte", 744, ".source-setup input { min-width:0; border:1px solid var(--line);"],
+  ["visualizer/web/src/lib/RosterPanel.svelte", 759, ".pick-evidence pre { max-height:12rem;"],
   ["visualizer/web/src/lib/RunCard.svelte", 53, "status ${status.tone}"],
   ["visualizer/web/src/lib/RunCard.svelte", 65, ".status-dot { width:.55rem; height:.55rem; background:currentColor;"],
   ["visualizer/web/src/lib/RunCard.svelte", 66, ".status.ok { color:var(--status-ok); }"],
@@ -358,7 +358,7 @@ function assertHoverDenominators() {
 // Mutation killed: hard-coding the denominator instead of counting the component tree.
 test('D1', () => {
   const componentCount = libFiles().length
-  assert.equal(componentCount, 34)
+  assert.equal(componentCount, 38)
   const docs = [SKILL_DOC, join(REF_DIR, 'contract.md'), join(REF_DIR, 'state-colour.md')]
   let seen = 0
   for (const doc of docs) {
@@ -408,7 +408,7 @@ test('F1', () => {
       source: localTabular ? localKey : 'visualizer/web/src/lib/theme.css:165',
     })
   }
-  assert.deepEqual([...derived.keys()].sort(), ['AgentsPage.svelte', 'EventStory.svelte', 'FleetTable.svelte', 'RunCard.svelte', 'WorkflowsPage.svelte'])
+  assert.deepEqual([...derived.keys()].sort(), ['AgentsPage.svelte', 'EventStory.svelte', 'FleetTable.svelte', 'RunCard.svelte', 'SkillsPage.svelte'])
   const body = readFileSync(join(REF_DIR, 'contract.md'), 'utf8')
   const section = body.split('## Tabular numerals')[1].split('## ')[0]
   const rows = [...section.matchAll(/\| `([A-Za-z0-9_-]+\.svelte)` \| (compliant|non-compliant) \| ([^|]*) \|/g)]
@@ -419,7 +419,7 @@ test('F1', () => {
     assert.equal(row[2], expected.verdict, `${row[1]} verdict must re-derive`)
     assert.ok(row[3].includes(expected.source), `${row[1]} must cite ${expected.source}`)
   }
-  assert.ok(section.includes('5/5 compliant, 0/5 non-compliant'), 'the register concludes 5/5 compliant')
+  assert.ok(section.includes('6/6 compliant, 0/6 non-compliant'), 'the register concludes 6/6 compliant')
 })
 
 // Mutation killed: borrowing the hover ground for the rest state.
@@ -434,8 +434,8 @@ test('G1', () => {
   assert.equal(hoverRes.paper, '4.76')
   assert.equal(hoverRes.ink, '7.20')
   const rows = registerRows()
-  assert.equal(rows.length, 23)
-  assert.equal(new Set(rows.map((row) => row.file)).size, 10)
+  assert.equal(rows.length, 24)
+  assert.equal(new Set(rows.map((row) => row.file)).size, 11)
   for (const file of libFiles()) {
     const expected = extractHoverRules(styleTextOf(file))
     for (const rule of expected) {
@@ -462,7 +462,7 @@ test('H1', () => {
   assert.equal(contrastFor(records[0], records[0].verdict), 'paper 5.17 → 4.76; ink 6.20 → 7.20')
   assert.ok(contrastFor(records[1], records[1].verdict).startsWith('Unmeasured —'))
   const roster = registerRows().filter((row) => row.file === 'RosterPanel.svelte')
-  assert.equal(roster.length, 7, 'a mixed component keeps one row per hover rule')
+  assert.equal(roster.length, 6, 'a mixed component keeps one row per hover rule')
 })
 
 // Mutation killed: recognizing only #hex as a colour literal.
@@ -588,8 +588,8 @@ test('pin-sweep D1', () => {
 // Guard for RV1-1: editing the register's denominator sentence reddens this test.
 test('K1', () => {
   const { rows, measured } = assertHoverDenominators()
-  assert.equal(rows.length, 23)
-  assert.equal(new Set(rows.map((row) => row.file)).size, 10)
+  assert.equal(rows.length, 24)
+  assert.equal(new Set(rows.map((row) => row.file)).size, 11)
   assert.equal(measured, 3)
 })
 

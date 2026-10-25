@@ -6,6 +6,7 @@
   import { createRefreshLoop, journalPulse } from './lib/live.js'
   import { formatHash, parseHash, subscribeHash } from './lib/route.js'
   import TaskList from './lib/TaskList.svelte'
+  import TaskPreparation from './lib/TaskPreparation.svelte'
   import OperationsOverview from './lib/OperationsOverview.svelte'
   import CellHealthPanel from './lib/CellHealthPanel.svelte'
   import TeardownPanel from './lib/TeardownPanel.svelte'
@@ -206,21 +207,21 @@
   </main>
 {:else if route.view === 'agents'}
   <main class="page">
-    <div class="page-heading"><div><p class="eyebrow">Seat composition</p><h1>Agents</h1><p>Inspect agent capabilities and what reached their last recorded sessions.</p></div></div>
+    <div class="page-heading"><div><p class="eyebrow">Seat composition</p><h1>Agents</h1><p>Create reusable agents, edit their instructions, or start from one already on your system.</p></div></div>
     <AgentsPage />
   </main>
 {:else if route.view === 'skills'}
   <main class="page">
-    <div class="page-heading"><div><p class="eyebrow">Shipped capability inventory</p><h1>Skills</h1><p>Read every shipped skill and prepare a role-grant proposal without changing a file.</p></div></div>
+    <div class="page-heading"><div><p class="eyebrow">Skill library</p><h1>Skills</h1><p>Create reusable skills, edit instructions and choose when Crew uses them.</p></div></div>
     <SkillsPage />
   </main>
 {:else if route.view === 'prompts'}
   <main class="page">
-    <div class="page-heading"><div><p class="eyebrow">Shipped prompt charters</p><h1>Prompts</h1><p>Read shipped role and shared charters and prepare a proposal without changing a file.</p></div></div>
+    <div class="page-heading"><div><p class="eyebrow">Shipped prompt charters</p><h1>Prompts</h1><p>Edit shared and role instructions, preview their combined prompt, and save locally.</p></div></div>
     <PromptsPage />
   </main>
 {:else if route.view === 'workflows'}
-  <WorkflowsPage />
+  <main class="page"><WorkflowsPage /></main>
 {:else if route.view === 'assurances'}
   <main class="page">
     <AssurancePage />
@@ -228,6 +229,7 @@
 {:else}
   <main class="page">
     <div class="page-heading task-heading"><div><p class="eyebrow">Work history</p><h1>Tasks</h1><p>Find a run, understand its outcome, and inspect the evidence.</p></div><span class="updated">{autoRefresh ? 'Automatic updates enabled' : 'Automatic updates paused'}</span></div>
+    <TaskPreparation />
     {#if attentionRows.length}
       <div class="attention-notice"><div><strong>{attentionSummary.total} runs to review</strong><p>{attentionSummary.text} · unarchived history</p></div><button onclick={focusActivity}>Review tasks →</button></div>
     {/if}

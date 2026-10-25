@@ -12,8 +12,14 @@ import { createJournalSource } from './journal-source.mjs'
 import { createShipStateResolver } from './ship-state.mjs'
 import { createRosterSource } from './roster-source.mjs'
 import { createWorkflowsSource } from './workflows-source.mjs'
+import { createPreparedTasks } from './prepared-tasks.mjs'
+import { createWorkflowEditor } from './workflow-editor.mjs'
 import { unifiedDiff, proposeEdit } from './roster-edit.mjs'
 import { createAgentsSource } from './agents-source.mjs'
+import { createAgentLibrary } from './agent-library.mjs'
+import { createSkillLibrary } from './skill-library.mjs'
+import { createPromptLibrary } from './prompt-library.mjs'
+import { createAssurancePreview } from './assurance-preview.mjs'
 import { VARIANTS } from '../../crew/variants.mjs'
 import { ASSURANCE_NAMES, ASSURANCES, canonicalAssurance } from '../../crew/assurances.mjs'
 import { PROTECTED_PATHS } from '../../crew/protected-paths.mjs'
@@ -91,13 +97,28 @@ export const ROUTE_PARAMS = Object.freeze({
   '/api/roster': [],
   '/api/plugin-write-mode': [],
   '/api/roster/pick': ['tier', 'role'],
+  '/api/agent-library': [],
+  '/api/agent-library/save': [],
+  '/api/harness-settings': [],
+  '/api/skill-library': [],
+  '/api/skill-library/save': [],
+  '/api/skill-rules': [],
   '/api/agents': [],
   '/api/agents/propose': [],
   '/api/skills/propose': [],
   '/api/prompts/propose': [],
+  '/api/prompt-library': [],
+  '/api/prompt-library/preview': [],
+  '/api/prompt-library/save': [],
   '/api/workflows': ['recent'],
   '/api/workflows/propose': [],
+  '/api/workflows/editor': ['shape','assurance','name'],
+  '/api/workflows/save': [],
+  '/api/workflows/library': [],
+  '/api/prepared-tasks': [],
+  '/api/workflows/preview': [],
   '/api/assurances': [],
+  '/api/assurances/preview': [],
   '/api/assurances/propose': [],
   '/api/cell-health': ['since', 'until'],
   '/api/run-set': ['since', 'until'],
@@ -569,9 +590,18 @@ export function startServer(options = {}) {
   const journal = config.journal || createJournalSource({ crewRoot: config.crewRoot })
   const ship = config.shipState || createShipStateResolver({ journalSource: journal, fetchImpl: config.fetchImpl, token: env.GITHUB_TOKEN, apiUrl: env.DEVTEAM_GITHUB_API_URL, repository: env.GITHUB_REPOSITORY })
   const roster = config.roster || createRosterSource({ rosterPath: config.rosterPath })
+  const assurancePreview = createAssurancePreview({roster,capabilitiesPath:config.capabilitiesPath})
   const workflows = config.workflows || createWorkflowsSource({ root: config.checkout, pluginRoot: PROJECT_ROOT, feed, variants: VARIANTS, rosterPath: config.rosterPath, docsPath: config.workflowsDocsPath })
+  const workflowRoot = config.workflowRoot ?? PROJECT_ROOT
+  const workflowEditor = createWorkflowEditor({root:workflowRoot,rosterPath:config.rosterPath,capabilitiesPath:config.capabilitiesPath,ladderPath:config.ladderPath,writable:writeMode.writable && pluginWriteTargetMode({target:join(workflowRoot,'crew/workflows'),home:config.home ?? homedir()}).writable})
   const modelCatalog = config.modelCatalog || createArtificialAnalysisCatalog({ apiKey: env.ARTIFICIAL_ANALYSIS_API_KEY, fetchImpl: config.fetchImpl })
+  const preparedTasks=createPreparedTasks({directory:join(config.crewRoot,'prepared-tasks'),checkout:config.checkout,runtimeRoot:workflowRoot,workflows:workflowEditor,writable:writeMode.writable})
   const agents = config.agents || config.agentsSource || createAgentsSource({ checkout: config.checkout, pluginRoot: PROJECT_ROOT, crewRoot: config.crewRoot })
+  const agentLibrary = createAgentLibrary({ capabilitiesPath:config.capabilitiesPath ?? join(PROJECT_ROOT,'crew/capabilities.json'), checkout:config.checkout, home:config.home ?? homedir(), env, writable:writeMode.writable && pluginWriteTargetMode({target:join(config.checkout,'agents'),home:config.home ?? homedir()}).writable })
+  const skillRoot = config.skillRoot ?? config.pluginRoot ?? PROJECT_ROOT
+  const skillLibrary = createSkillLibrary({root:skillRoot,writable:writeMode.writable && pluginWriteTargetMode({target:join(skillRoot,'skills'),home:config.home ?? homedir()}).writable})
+  const promptRoot = config.promptRoot ?? config.pluginRoot ?? PROJECT_ROOT
+  const promptLibrary = createPromptLibrary({root:promptRoot,writable:writeMode.writable && pluginWriteTargetMode({target:join(promptRoot,'crew/roles'),home:config.home ?? homedir()}).writable})
   const openRouterCatalog = config.openRouterCatalog || createOpenRouterCatalog({ fetchImpl: config.fetchImpl })
   const readModelCatalog = async () => {
     const [openRouter, artificialAnalysis] = await Promise.all([openRouterCatalog.get(), modelCatalog.get()])
@@ -650,7 +680,20 @@ export function startServer(options = {}) {
           assurance: { axis: 'review_strength', presets },
           band_floors: { axis: 'model_seating', values, absent },
           protected_paths: [...PROTECTED_PATHS],
+          preview_policy: assurancePreview.read(),
         })
+      }
+      if (url.pathname === '/api/assurances/preview') {
+        if(method!=='POST') return json(res,405,{schema,error:'method not allowed'},{allow:'POST'})
+        const refusal=writeGuard(req)
+        if(refusal) return json(res,refusal.status,{schema,error:refusal.error})
+        let input
+        try {input=await body(req,131072)} catch(error) {return json(res,400,{schema,error:error.message})}
+        if(!input || typeof input!=='object' || Array.isArray(input))return json(res,400,{schema,error:'request body must be an object'})
+        const unknown=Object.keys(input).find(key=>!['assurance','context','files','extra_paths','revision'].includes(key))
+        if(unknown)return json(res,400,{schema,error:`unknown field ${unknown}`})
+        const {status,...result}=assurancePreview.preview(input)
+        return json(res,status || 200,{schema,...result})
       }
       if (url.pathname === '/api/assurances/propose') {
         if (method !== 'POST') return assuranceRefusal(res, 405, 'method_not_allowed', 'method not allowed', { allow: 'POST' })
@@ -797,6 +840,76 @@ export function startServer(options = {}) {
           view = rosterPickUnavailable(tier, role, `routing pick could not be materialised: ${err?.message || String(err)}`)
         }
         return json(res, 200, { schema, ...view })
+      }
+      if (url.pathname === '/api/prompt-library') {
+        if(method!=='GET') return json(res,405,{schema,error:'method not allowed'},{allow:'GET'})
+        return json(res,200,{schema,...promptLibrary.read()})
+      }
+      if (url.pathname === '/api/prompt-library/preview' || url.pathname === '/api/prompt-library/save') {
+        if(method!=='POST') return json(res,405,{schema,error:'method not allowed'},{allow:'POST'})
+        const refusal=writeGuard(req)
+        if(refusal) return json(res,refusal.status,{schema,error:refusal.error})
+        const save=url.pathname.endsWith('/save')
+        if(save && (!writeMode.writable || !pluginWriteTargetMode({target:join(promptRoot,'crew/roles'),home:config.home ?? homedir()}).writable)) return json(res,409,pluginWriteRefusal)
+        let input
+        try { input=await body(req,1572864) } catch(error) { return json(res,400,{schema,error:error.message}) }
+        if(!input || typeof input!=='object' || Array.isArray(input)) return json(res,400,{schema,error:'request body must be an object'})
+        const unknown=Object.keys(input).find(key=>!['role','text','expected_revision'].includes(key))
+        if(unknown) return json(res,400,{schema,error:`unknown field ${unknown}`})
+        const {status,...result}=save ? promptLibrary.save(input) : promptLibrary.preview(input)
+        return json(res,status || 200,{schema,...result})
+      }
+      if (url.pathname === '/api/skill-library') {
+        if(method!=='GET') return json(res,405,{schema,error:'method not allowed'},{allow:'GET'})
+        return json(res,200,{schema,...skillLibrary.read()})
+      }
+      if (url.pathname === '/api/skill-library/save' || url.pathname === '/api/skill-rules') {
+        if(method!=='POST') return json(res,405,{schema,error:'method not allowed'},{allow:'POST'})
+        const refusal=writeGuard(req)
+        if(refusal) return json(res,refusal.status,{schema,error:refusal.error})
+        if(!writeMode.writable || !pluginWriteTargetMode({target:join(skillRoot,'skills'),home:config.home ?? homedir()}).writable) return json(res,409,pluginWriteRefusal)
+        let input
+        try { input=await body(req,1572864) } catch(error) { return json(res,400,{schema,error:error.message}) }
+        if(!input || typeof input!=='object' || Array.isArray(input)) return json(res,400,{schema,error:'request body must be an object'})
+        const isRules=url.pathname==='/api/skill-rules'
+        const fields=isRules ? ['map','expected_revision'] : ['name','text','expected_revision']
+        const unknown=Object.keys(input).find(key=>!fields.includes(key))
+        if(unknown) return json(res,400,{schema,error:`unknown field ${unknown}`})
+        const {status,...result}=isRules ? skillLibrary.saveRules(input) : skillLibrary.save(input)
+        return json(res,status || 200,{schema,...result})
+      }
+      if (url.pathname === '/api/agent-library') {
+        if (method !== 'GET') return json(res,405,{schema,error:'method not allowed'},{allow:'GET'})
+        return json(res,200,{schema,...agentLibrary.read()})
+      }
+      if (url.pathname === '/api/harness-settings') {
+        if(method!=='POST') return json(res,405,{schema,error:'method not allowed'},{allow:'POST'})
+        const refusal=writeGuard(req)
+        if(refusal) return json(res,refusal.status,{schema,error:refusal.error})
+        if(!writeMode.writable) return json(res,409,pluginWriteRefusal)
+        if(!pluginWriteTargetMode({target:config.capabilitiesPath ?? join(PROJECT_ROOT,'crew/capabilities.json'),home:config.home ?? homedir()}).writable) return json(res,409,pluginWriteRefusal)
+        let input
+        try { input=await body(req) } catch(err) { return json(res,400,{schema,error:err.message}) }
+        if(!input || typeof input!=='object' || Array.isArray(input)) return json(res,400,{schema,error:'request body must be an object'})
+        const unknown=Object.keys(input).find(key=>!['name','default_transport','expected_revision'].includes(key))
+        if(unknown) return json(res,400,{schema,error:`unknown field ${unknown}`})
+        const {status,...result}=agentLibrary.saveHarness(input)
+        return json(res,status || 200,{schema,...result})
+      }
+      if (url.pathname === '/api/agent-library/save') {
+        if (method !== 'POST') return json(res,405,{schema,error:'method not allowed'},{allow:'POST'})
+        const refusal=writeGuard(req)
+        if(refusal) return json(res,refusal.status,{schema,error:refusal.error})
+        if(!writeMode.writable) return json(res,409,pluginWriteRefusal)
+        const targetMode=pluginWriteTargetMode({target:join(config.checkout,'agents'),home:config.home ?? homedir()})
+        if(!targetMode.writable) return json(res,409,{schema,error:PLUGIN_WRITE_NOTICE})
+        let input
+        try { input=await body(req, 1572864) } catch(err) { return json(res,400,{schema,error:err.message || 'invalid json'}) }
+        if(!input || typeof input!=='object' || Array.isArray(input)) return json(res,400,{schema,error:'request body must be an object'})
+        const unknown=Object.keys(input).find(key=>!['filename','text','expected_revision'].includes(key))
+        if(unknown) return json(res,400,{schema,error:`unknown field ${unknown}`})
+        const {status,...result}=agentLibrary.save(input)
+        return json(res,status || 200,{schema,...result})
       }
       if (url.pathname === '/api/agents') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
@@ -954,6 +1067,34 @@ export function startServer(options = {}) {
           ...(transitionError ? { error: transitionError } : {}),
         })
       }
+      if (url.pathname === '/api/prepared-tasks') {
+        if(method==='GET'){const result=preparedTasks.list();return json(res,result.ok?200:result.status,{schema,...result})}
+        if(method!=='POST')return json(res,405,{error:'method not allowed'},{allow:'GET, POST'})
+        const refusal=writeGuard(req);if(refusal)return json(res,refusal.status,{error:refusal.error})
+        let input;try{input=await body(req,96*1024)}catch(error){return json(res,400,{error:error.message})}
+        if(!input || typeof input!=='object' || Array.isArray(input))return json(res,400,{error:'A task object is required.'})
+        const result=preparedTasks.create(input);return json(res,result.ok?200:result.status,{schema,...result})
+      }
+      if (url.pathname === '/api/workflows/library') {
+        if(method!=='GET')return json(res,405,{error:'method not allowed'},{allow:'GET'})
+        const result=workflowEditor.library();return json(res,result.ok?200:result.status,{schema,...result})
+      }
+      if (url.pathname === '/api/workflows/editor') {
+        if (method !== 'GET') return json(res,405,{error:'method not allowed'},{allow:'GET'})
+        const result=workflowEditor.read({shape:url.searchParams.get('shape') || 'full',assurance:url.searchParams.get('assurance') || 'standard',name:url.searchParams.get('name') || undefined})
+        return json(res,result.ok?200:result.status,{schema,...result})
+      }
+      if (url.pathname === '/api/workflows/save' || url.pathname === '/api/workflows/preview') {
+        if (method !== 'POST') return json(res,405,{error:'method not allowed'},{allow:'POST'})
+        const refusal=writeGuard(req)
+        if(refusal)return json(res,refusal.status,{error:refusal.error})
+        if(!writeMode.writable || !pluginWriteTargetMode({target:join(workflowRoot,'crew/workflows'),home:config.home ?? homedir()}).writable)return json(res,409,pluginWriteRefusal)
+        let input
+        try{input=await body(req,128*1024)}catch(error){return json(res,400,{error:error.message})}
+        if(!input || typeof input!=='object' || Array.isArray(input))return json(res,400,{error:'A workflow object is required.'})
+        const result=url.pathname.endsWith('/preview')?workflowEditor.preview(input):workflowEditor.save(input)
+        return json(res,result.ok?200:result.status,{schema,...result})
+      }
       if (url.pathname === '/api/workflows/propose') {
         if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
         const refusal = writeGuard(req)
@@ -963,7 +1104,7 @@ export function startServer(options = {}) {
         if (!input || typeof input !== 'object' || Array.isArray(input) || (typeof input.workflow !== 'string' && !(input.workflow && typeof input.workflow === 'object')) || !input.edit || typeof input.edit !== 'object' || Array.isArray(input.edit)) {
           return json(res, 400, { schema, error: 'workflow and edit are required' })
         }
-        const result = await workflows.propose({ workflow: input.workflow, edit: input.edit, tier: input.tier })
+        const result = workflowEditor.propose({ workflow: input.workflow, edit: input.edit, tier: input.tier })
         return json(res, 200, { schema, ...result })
       }
       if (url.pathname === '/api/roster/propose') {
@@ -1109,7 +1250,7 @@ export function startServer(options = {}) {
   process.once('SIGTERM', close); process.once('SIGINT', close)
   server.listen(config.port, config.host, () => {
     const address = server.address()
-    process.stdout.write(`${JSON.stringify({ listening: true, port: address.port, ledger_db: config.ledgerDb, triage_db: config.triageDb || join(dirname(config.ledgerDb), 'visualizer.db'), crew_root: config.crewRoot, returns_readonly: true, readonly: false, ledger_feed_readonly: true, triage_sidecar_writable: true, writes: ['triage sidecar (may create visualizer.db and its WAL/SHM)', 'stop-switch', 'intake brake ledger rows (may create the ledger directory, ledger.jsonl, ledger.db, WAL and SHM)', 'configured roster file when Apply for next task is explicitly requested', 'Artificial Analysis key in the project .env.local when explicitly requested'] })}\n`)
+    process.stdout.write(`${JSON.stringify({ listening: true, port: address.port, ledger_db: config.ledgerDb, triage_db: config.triageDb || join(dirname(config.ledgerDb), 'visualizer.db'), crew_root: config.crewRoot, returns_readonly: true, readonly: false, ledger_feed_readonly: true, triage_sidecar_writable: true, writes: ['triage sidecar (may create visualizer.db and its WAL/SHM)', 'stop-switch', 'intake brake ledger rows (may create the ledger directory, ledger.jsonl, ledger.db, WAL and SHM)', 'configured roster file when Apply for next task is explicitly requested', 'project agent definition files when Save agent is explicitly requested', 'harness execution preferences when Save harness settings is explicitly requested', 'skill definitions and selection rules when explicitly saved', 'prompt charter files when Save prompt is explicitly requested', 'native workflow assignment files when Save workflow is explicitly requested', 'local task briefs and configurations when Create local task is explicitly requested', 'Artificial Analysis key in the project .env.local when explicitly requested'] })}\n`)
   })
   return { server, feed, agents }
 }

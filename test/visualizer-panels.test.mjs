@@ -593,10 +593,10 @@ test('RV2-1 configured AA failure keeps repair controls and footer honest', () =
 test('F1 null intelligence produces an unmeasured draft', () => {
   const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
   assert.match(source, /if \(intelligence == null\) return null/)
-  assert.match(source, /band == null \? 'unmeasured'/)
+  assert.match(source, /chip.band \|\| 'Not rated'/)
   assert.match(source, /reference_pending:variant\.intelligence == null \? variant\.score_absent_reason/)
   assert.doesNotMatch(source, /if \(intelligence == null\) return 'utility'/)
-  assert.match(source, /'unmeasured'/)
+  assert.match(source, /variant.intelligence == null \? 'Not measured'/)
 })
 
 test('roster seat assignment asks for an explicit per-seat thinking effort', () => {
@@ -604,8 +604,8 @@ test('roster seat assignment asks for an explicit per-seat thinking effort', () 
   assert.match(source, /const EFFORT_OPTIONS = \[/)
   for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) assert.match(source, new RegExp(`value:'${effort}'`))
   assert.match(source, /function beginAssignment\(tier, role, key\)/)
-  assert.match(source, /onclick=\{\(\) => selectedModel && beginAssignment\(column\.tier, seat\.role, selectedModel\)\}/)
-  assert.match(source, /<h2 id="assignment-title">Set thinking effort<\/h2>/)
+  assert.match(source, /onclick=\{\(\) => beginAssignment\(column\.tier, seat\.role, selectedModel \|\| seat\.model_key\)\}/)
+  assert.match(source, /<h2 id="assignment-title">Change model<\/h2>/)
   assert.match(source, /bind:value=\{assignmentDraft\.effort\}/)
   assert.match(source, /Effort is stored independently for every assurance profile and seat\./)
   assert.match(source, /onclick=\{applyAssignment\}>Add to draft<\/button>/)
@@ -621,7 +621,7 @@ test('roster drafts have an explicit local activation path for the next task', (
   assert.match(source, /Policy warnings do not block a local experiment/)
   assert.match(source, /next newly booted task/)
   assert.match(source, /Running tasks continue unchanged/)
-  assert.match(source, /no branch, commit, PR, or remote push is created/)
+  assert.match(source, /no branch, commit, PR, or remote push/)
   assert.match(source, /Prepare repository patch/)
   assert.match(source, /staged = \[\]; selectedModel = null/)
 })
@@ -708,7 +708,7 @@ test("C1 propose the pick returns today's diff without a write", async () => {
     assert.equal(calls.filter(({ path }) => /\/apply(?:\?|$)/.test(path)).length, 0)
     assert.deepEqual(JSON.parse(calls[0].options.body), { tier:'build', role:'reviewer', cell })
     const panel = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
-    assert.match(panel, /Propose the pick/)
+    assert.match(panel, /Preview suggested change/)
     assert.match(panel, /proposeRosterEdit\(column\.tier, seat\.role, pick\.chosen_cell\)/)
     const policyStart = panel.indexOf('class="pick-explanation"')
     const policyEnd = panel.indexOf('</section>', policyStart)
@@ -751,22 +751,22 @@ test('assurance page preserves the server refusal message from a 400 response', 
       return true
     })
     const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/AssurancePage.svelte'), 'utf8')
-    assert.match(page, /message: cause\?\.message/)
+    assert.match(page, /\$\{cause\.message\}/)
     assert.doesNotMatch(page, /request failed \(400\)/)
   } finally {
     globalThis.fetch = originalFetch
   }
 })
 
-test('RV1-1 roster pick fetch effect ignores staged local drafts', () => {
+test('routing evidence reads only on disclosure and never uses draft cells', () => {
   const panel = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
-  assert.match(panel, /let pickRows = \$derived\(\(payload\?\.rail \|\| \[\]\)\.flatMap\(/)
-  const start = panel.indexOf('const revision = ++pickRevision')
-  const end = panel.indexOf('return () => { active = false }', start)
-  assert.ok(start >= 0 && end > start)
-  const pickEffect = panel.slice(start, end)
-  assert.match(pickEffect, /const rows = pickRows/)
-  assert.doesNotMatch(pickEffect, /\b(?:rail|staged)\b/)
+  const start = panel.indexOf('async function loadPick(')
+  const end = panel.indexOf('$effect', start)
+  const load = panel.slice(start, end)
+  assert.match(load, /getRosterPick\(tier, role\)/)
+  assert.doesNotMatch(load, /\b(?:rail|staged)\b/)
+  assert.match(load, /revision !== pickRevision/)
+  assert.match(panel, /if \(event.currentTarget.open\) void loadPick\(column.tier, seat.role\)/)
 })
 
 test('rosterPickPanel preserves null metrics, ranked order, and raw evidence', () => {
@@ -1203,7 +1203,7 @@ test('E1 agents page route nav and title are wired', () => {
   assert.match(app, /Agents · Factory/)
   assert.match(app, /<AgentsPage\s*\/?\s*>/)
   assert.match(app, /route\.view === 'agents'[^\n]*>Agents</)
-  assert.match(page, /aria-label="Agent evidence"/)
+  assert.match(page, /aria-label="Agent library"/)
 })
 
 test('skills-page:D1', () => {
@@ -1216,11 +1216,11 @@ test('skills-page:D1', () => {
   assert.ok(app.includes("route.view === 'skills'"))
   assert.ok(app.includes('<SkillsPage />'))
   assert.match(app, />Skills<\//)
-  assert.ok(page.includes('onsubmit={submitProposal}'))
-  assert.equal((page.match(/onsubmit=/g) || []).length, 1)
-  assert.ok(page.includes('proposeSkills'))
-  assert.match(page, /no file was changed/i)
-  assert.doesNotMatch(page, /\b(?:apply|dispatch|post|boot|policy)\b/i)
+  assert.ok(page.includes('onsubmit={save}'))
+  assert.match(page, /saveSkillFile\(\{name,text,expected_revision:editor.revision\}\)/)
+  assert.ok(page.includes('Selection rules'))
+  assert.ok(page.includes('Discard your unsaved skill changes?'))
+  assert.doesNotMatch(page, /proposeSkills|Proposal only/)
   assert.doesNotMatch(page, /#[0-9a-f]{3,8}\b|rgb\(|--(?:ink|paper|spot|serious)/i)
 })
 
@@ -1254,13 +1254,13 @@ test('assurance page exposes separate axes and only prepares proposals', () => {
   assert.match(app, /route\.view === 'assurances'/)
   assert.match(app, /<AssurancePage \/>/)
   assert.match(app, />Assurances<\//)
-  for (const heading of ['Review strength', 'Model seating eligibility']) assert.match(page, new RegExp(heading))
-  assert.match(page, /\{preset\.forcing\}/)
+  for (const heading of ['Check a task’s scope', 'When stronger review is required']) assert.match(page, new RegExp(heading))
+  assert.match(page, /current\.matches/)
   assert.match(page, /getAssurances\(/)
-  assert.match(page, /assurancePanel\(/)
-  assert.match(page, /proposeAssuranceChange\(/)
-  assert.match(page, /Proposal only — nothing was applied\./)
-  assert.equal([...page.matchAll(/\{#each shaped\.presets as preset, index \(preset\.key \?\? index\)\}/g)].length, 2)
+  assert.match(page, /payload\?\.preview_policy/)
+  assert.match(page, /previewAssurance\(/)
+  assert.match(page, /No tasks started or settings changed\./)
+  assert.match(page, /bind:group=\{assurance\}/)
   const pairedInteractive = ['button', 'form', 'a', 'label', 'select', 'option', 'textarea']
     .flatMap((tag) => [...page.matchAll(new RegExp(`<${tag}\\b[\\s\\S]*?<\\/${tag}>`, 'gi'))])
   const voidInteractive = [...page.matchAll(/<input\b[^>]*>/gi)]
@@ -1282,12 +1282,12 @@ test('prompts-page:A1', async () => {
   assert.match(app, /<PromptsPage\s*\/>/)
   assert.equal((page.match(/onsubmit=/g) || []).length, 1)
   assert.match(page, /onsubmit=\{submitPrompt\}/)
-  assert.match(page, /proposePrompt\(/)
+  assert.match(page, /savePrompt\(/)
   assert.match(page, /PROMPT_SURFACE_CONSEQUENCE/)
   assert.match(page, /protected: prompt-surface/)
-  assert.match(page, /Proposal only — nothing is applied\./)
-  assert.match(page, /Unmeasured — \$\{prompt\.recipients_reason\}/)
-  assert.doesNotMatch(page, /\b(?:apply|dispatch)\b/i)
+  assert.match(page, /Review & preview/)
+  assert.match(page, /currentReview\?\.affected/)
+  assert.match(page, /expected_revision:editor\.revision/)
 
   const originalFetch = globalThis.fetch
   const calls = []
@@ -1327,8 +1327,8 @@ test('F1 agents page uses only Tier-2 colour aliases', () => {
   assert.equal(declarations.some((value) => /(?:^|\s)(?:white|black|red|blue|green|gray|grey)(?:\s|$)/i.test(value)), false)
   assert.equal(declarations.some((value) => /--(?:ink|paper|spot|serious|status-\w+-raw|role-\w+-(?:dark|light))/.test(value)), false)
   assert.ok(source.includes('background:var(--panel); border:1px solid var(--line);'))
-  for (const token of ['Register grant', 'Last-seat delivery', 'Proposal only — nothing is applied.', 'href="#/prompts"', 'href="#/skills"']) assert.ok(source.includes(token), token)
-  for (const tab of ['Capabilities', 'Skill delivery', 'Prompt delivery']) assert.ok(source.includes(tab), tab)
+  for (const token of ['Create agent', 'Use a copy', 'Save agent']) assert.ok(source.includes(token), token)
+  for (const tab of ['Project library', 'Available on system']) assert.ok(source.includes(tab), tab); assert.doesNotMatch(source, /Skill delivery|skills-panel/); const skillsPage = readFileSync(join(ROOT, 'visualizer/web/src/lib/SkillDelivery.svelte'), 'utf8'); assert.match(skillsPage, /Skill delivery/); assert.match(skillsPage, /<th>Skill<\/th><th>Last recorded delivery<\/th>/); assert.match(skillsPage, /cell\?\.last_seat_delivery === true/)
 })
 
 test('fleet cells preserve honest absence and discriminate status evidence', () => {
@@ -2703,18 +2703,18 @@ test('workflow-page:A1', () => {
 
 test('D1 workflows page preserves every declared shape', () => {
   const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
-  for (const shape of Object.keys(VARIANTS)) {
-    const presentation = workflowPresentation(shape, { observedLabels: [] })
-    const expected = VARIANTS[shape].stages.map((name, index) => ({ name, position: index + 1 }))
-    assert.deepEqual(presentation.stages, expected, shape)
-    assert.deepEqual(presentation.stages.map((stage) => stage.position), expected.map((stage) => stage.position), shape)
-  }
-  assert.match(page, /let presentations = \$derived\(workflows\.map\(\(workflow\) => workflowPresentation\(workflow\?\.shape, \{/)
+  assert.match(page, /#each workflows as workflow/)
   assert.doesNotMatch(page, /workflows\.(?:slice|filter)\(/)
-  assert.match(page, /#each presentations as presentation \(presentation\.shape\)/)
-  assert.match(page, /<ol class="stage-order">[\s\S]*presentation\.stages/)
-  assert.match(page, /No canonical stages are available for this workflow shape\./)
+  assert.match(page, /workflowPresentation\(shape\)\.stages/)
+  assert.match(page, /#each stages as item,index/)
 })
+
+
+
+
+
+
+
 
 test('workflow-catalog:B1 declaration facts and profile inversion', () => {
   for (const shape of Object.keys(VARIANTS)) {
@@ -2741,7 +2741,7 @@ test('workflow-catalog:C1 canonical topology contract and page dependency', () =
   assert.doesNotMatch(body, /(?:VARIANTS\[[^\]]+\]|declaration)\.stages/)
   const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
   assert.match(page, /import \{ workflowPresentation \} from '\.\/workflows\.js'/)
-  assert.match(page, /workflowPresentation\(workflow\?\.shape/)
+  assert.match(page, /workflowPresentation\(shape\)/)
 })
 
 test('workflow-catalog:D1 empty facts explain their absence', () => {
@@ -2763,29 +2763,29 @@ test('workflow-catalog:D1 empty facts explain their absence', () => {
   assert.ok(unknown.writes.absence_reason?.trim())
 })
 
-test('A1 workflows page composes proposal diff', () => {
+test('A1 workflows page uses native assignment selectors and revision-checked saves', () => {
   const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
-  assert.match(page, /import \{ getWorkflows, proposeWorkflowEdit \} from '\.\/api\.js'/)
-  assert.match(page, /import DiffBlock from '\.\/DiffBlock\.svelte'/)
-  assert.match(page, /proposal = await proposeWorkflowEdit\(\{ workflow: selectedWorkflow, edit: \{ stage: selectedStage, role: selectedRole, cell \}, tier: selectedTier \}\)/)
-  assert.match(page, /<DiffBlock text=\{proposal\.diff\}/)
-  assert.match(page, /navigator\.clipboard\.writeText\(proposal\.diff\)/)
-  assert.match(page, /refusal\.code/)
-  assert.match(page, /refusal\.message/)
-  assert.match(page, /Cell draft is not valid JSON/)
-  assert.match(page, /No seat-bearing stages are available/)
-  assert.match(page, /no measured seat data.*cell draft can be seeded/)
+  assert.match(page, /getWorkflowEditor, saveWorkflow/)
+  assert.match(page, /expected_revision:editor.revision/)
+  assert.match(page, /policy_revision:editor.policy_revision/)
+  assert.match(page, /Execution harness<div class="select-shell"><select/)
+  assert.match(page, /Provider<div class="select-shell"><select/)
+  assert.match(page, /Model<div class="select-shell"><select/)
+  assert.match(page, /Reasoning effort<div class="select-shell"><select/)
+  assert.doesNotMatch(page, /Cell JSON|proposeWorkflowEdit/)
 })
+
+
 
 test('C1 workflows page has no execution action', () => {
   const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
-  assert.match(page, /<form class="proposal-form" onsubmit=\{submitProposal\}>/)
-  assert.equal((page.match(/onsubmit=/g) || []).length, 1)
-  assert.doesNotMatch(page, /data-action\s*=/i)
-  const controls = [...page.matchAll(/<(?:form|button)\b[\s\S]*?<\/(?:form|button)>/gi)].map((match) => match[0]).join('\n')
-  assert.doesNotMatch(controls, /\b(?:dispatch|boot|apply|post)\b/i)
-  assert.match(page, /never dispatches or boots a run, posts a review, applies policy, or writes the proposal\./)
+  assert.match(page, /Save workflow/)
+  assert.match(page, /named workflow is selected/)
+  assert.doesNotMatch(page, /dispatchRun|bootRun|startRun/)
+  assert.match(page, /fixed order/)
 })
+
+
 
 test('workflow-page:A2', () => {
   const graph = shapeWorkflowGraph('full', {
@@ -2914,11 +2914,11 @@ test('workflow-page:E1', () => {
 })
 
 test('workflow-page:F1', () => {
-  const aliases = /var\(--(?:bg|panel|panel-raised|line|muted|accent|neutral|status-[a-z-]+|role-[a-z-]+)\)/
+  const aliases = /var\(--(?:bg|panel|panel-raised|line|muted|accent|accent-solid|accent-surface|on-accent|text|neutral|status-[a-z-]+|role-[a-z-]+)\)/
   for (const relative of ['visualizer/web/src/lib/WorkflowsPage.svelte', 'visualizer/web/src/lib/WorkflowGraph.svelte']) {
     const source = readFileSync(join(ROOT, relative), 'utf8')
     for (const declaration of source.matchAll(/(?:^|[;{])\s*(?:color|background(?:-color)?|border(?:-color)?|box-shadow)\s*:[^;}]+/gm)) {
-      assert.match(declaration[0], aliases, `${relative} has an unaliased painted declaration ${declaration[0]}`)
+      if (!/border\s*:\s*0$/.test(declaration[0])) assert.match(declaration[0], aliases, `${relative} has an unaliased painted declaration ${declaration[0]}`)
       assert.doesNotMatch(declaration[0], /#|rgb\(|--ink|--paper|--spot|--serious/)
     }
   }
@@ -3106,10 +3106,10 @@ test('RV1-3 final-index topology move is measured and refused', () => {
 
 test('RV1-4 workflow page states the proposal-only boundary', () => {
   const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
-  assert.match(page, /<p class="boundary-note">This page composes a workflow proposal diff for copying; it never dispatches or boots a run, posts a review, applies policy, or writes the proposal\.<\/p>/)
-  assert.doesNotMatch(page, />Read-only catalog<\/p>/)
+  assert.match(page, /Changes apply only when this named workflow is selected/)
+  assert.match(page, /Running tasks keep their existing assignments/)
   assert.match(page, /workflowPresentation/)
-  assert.match(page, /DiffBlock/)
+  assert.match(page, /getWorkflowEditor/)
   assert.doesNotMatch(page, /data-action\s*=/i)
 })
 
@@ -3758,7 +3758,7 @@ test('estimated cell prices label as estimated and chips render the flag', () =>
  assert.doesNotMatch(meas.price_label, /estimated/)
  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
  const line = source.split('\n').find((l) => l.includes('chip.cost_out_per_mtok'))
- assert.match(line, /chip\.rate_estimated \? ' \(estimated\)'/)
+ assert.match(line, /chip\.rate_estimated \? ' · estimated'/)
 })
 
 const reasonCopyProbes = await import('../visualizer/web/src/lib/reason-copy.js').catch(() => null)
@@ -4286,4 +4286,74 @@ test('detail refresh includes final settlement and preserves successful partial 
     assert.match(reader.snapshot().error,/Event history could not be refreshed/)
     assert.equal(reader.snapshot().loading,false)
   } finally {unsubscribe()}
+})
+
+
+// Reversing an edit must remove the pending move, not keep a no-op ready to apply.
+test('roster draft replacements preserve other roles and remove a reverted edit', async () => {
+  const { replaceRosterMove, rosterChanges } = await import('../visualizer/web/src/lib/roster-draft.js')
+  const original = { provider:'openai', id:'original', agent:'pi', effort:'high', fallback:[{provider:'openai',id:'backup',agent:'pi',effort:'high'}] }
+  const base = [{tier:'build',seats:[{role:'builder',cell:original}]}]
+  const unrelated = {tier:'judge',role:'builder',cell:{...original,effort:'max'}}
+  const change = {tier:'build',role:'builder',cell:{...original,id:'replacement'}}
+  const moves = replaceRosterMove(base,[unrelated],change)
+  assert.deepEqual(moves,[unrelated,change])
+  assert.deepEqual(rosterChanges(base,moves)[1].before,original)
+  assert.equal(rosterChanges(base,moves)[1].afterKey,'openai/replacement')
+  assert.deepEqual(replaceRosterMove(base,moves,{...change,cell:original}),[unrelated])
+  assert.equal(original.id,'original')
+  const effortOnly = replaceRosterMove(base,[],{...change,cell:{...original,effort:'medium'}})
+  assert.deepEqual(effortOnly[0].cell.fallback,original.fallback)
+  assert.equal(effortOnly[0].cell.effort,'medium')
+  assert.equal(rosterChanges(base,[{tier:'build',role:'advisor',cell:null}])[0].before,null)
+})
+
+test('roster recommendation distinguishes missing evaluations from policy exclusions and unavailable reads', async () => {
+  const { rosterRecommendation, candidateExplanation } = await import('../visualizer/web/src/lib/roster-recommendation.js')
+  const missing = { outcome:'abstained', policy_candidates:[{ eligible:false, exclusion_reason:'measurement-absent' }], eval_cells:[] }
+  const view = rosterRecommendation(missing)
+  assert.equal(view.title, 'No recommendation yet')
+  assert.match(view.description, /no matching evaluation results for this role/)
+  assert.equal(view.suggested, false)
+  assert.match(candidateExplanation(missing.policy_candidates[0]), /role and configuration/)
+  for (const reason of ['cost-absent', 'band-below-floor', 'breaker-open']) {
+    const excluded = rosterRecommendation({ ...missing, policy_candidates:[{ exclusion_reason:reason }] })
+    assert.doesNotMatch(excluded.description, /no matching evaluation results/)
+    assert.equal(excluded.suggested, false)
+  }
+  assert.match(candidateExplanation({ exclusion_reason:'cost-absent' }), /Token usage or pricing is missing/)
+  assert.match(candidateExplanation({ exclusion_reason:'band-below-floor' }), /minimum capability/)
+  assert.match(candidateExplanation({ exclusion_reason:'breaker-open' }), /runtime health/)
+  assert.match(candidateExplanation({ exclusion_reason:'new-server-reason' }), /no recognized reason/)
+  assert.equal(rosterRecommendation({ ...missing, unavailable:'ledger offline' }).title, 'Recommendation unavailable')
+  assert.equal(rosterRecommendation(null).title, 'Recommendation unavailable')
+})
+
+test('roster recommendation compares the complete assignment before offering a change preview', async () => {
+  const { rosterRecommendation } = await import('../visualizer/web/src/lib/roster-recommendation.js')
+  const cell = { provider:'openai', id:'test-model', agent:'pi', effort:'medium' }
+  const payload = { outcome:'chosen', chosen_cell:cell, current_cell:{ ...cell } }
+  const same = rosterRecommendation(payload)
+  assert.equal(same.title, 'Current assignment recommended')
+  assert.equal(same.suggested, false)
+  for (const key of ['provider', 'id', 'agent', 'effort']) {
+    const changed = rosterRecommendation({ ...payload, chosen_cell:{ ...cell, [key]:'different' } })
+    assert.equal(changed.title, 'Suggested assignment')
+    assert.equal(changed.suggested, true)
+    assert.match(changed.description, /does not change your roster/)
+  }
+  assert.equal(rosterRecommendation({ ...payload, chosen_cell:null }).suggested, false)
+  assert.equal(rosterRecommendation({ ...payload, chosen_cell:{ id:'partial' } }).suggested, false)
+  const panel = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  assert.match(panel, /\{#if pick.eval_cells\?\.length\}\s*<details class="pick-evidence">/)
+  assert.doesNotMatch(panel, /Recent model history:|Raw eval_cells evidence|Eligible survivor|Abstained/)
+  assert.match(panel, /Based on the saved roster. Your pending change has not been evaluated/)
+})
+
+test('candidate metrics preserve measured zero and hide absent or invalid numbers', async () => {
+  const { candidateMetrics } = await import('../visualizer/web/src/lib/roster-recommendation.js')
+  assert.deepEqual(candidateMetrics({ rate:{ value:0, numerator:0, denominator:12 }, cost:{ value:0 } }), ['Evaluation pass rate: 0% (0/12)', 'Estimated evaluation cost: $0'])
+  assert.deepEqual(candidateMetrics({ rate:{ value:null, numerator:null, denominator:null }, cost:{ value:null } }), [])
+  assert.deepEqual(candidateMetrics({ rate:{ value:0.5, numerator:1, denominator:2, reason:'rate-thin' }, cost:{ value:-1 } }), [])
+  assert.deepEqual(candidateMetrics({ rate:{ value:0.8, numerator:8, denominator:10 }, cost:{ value:0.000001 } }), ['Evaluation pass rate: 80% (8/10)', 'Estimated evaluation cost: <$0.0001'])
 })

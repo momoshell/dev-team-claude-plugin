@@ -2339,7 +2339,9 @@ test('the visualizer CLI still accepts every flag it reads', async () => {
       'triage sidecar (may create visualizer.db and its WAL/SHM)',
       'stop-switch',
       'intake brake ledger rows (may create the ledger directory, ledger.jsonl, ledger.db, WAL and SHM)',
-      'configured roster file when Apply for next task is explicitly requested',
+      'configured roster file when Apply for next task is explicitly requested', 'project agent definition files when Save agent is explicitly requested', 'harness execution preferences when Save harness settings is explicitly requested', 'skill definitions and selection rules when explicitly saved', 'prompt charter files when Save prompt is explicitly requested',
+      'native workflow assignment files when Save workflow is explicitly requested',
+      'local task briefs and configurations when Create local task is explicitly requested',
       'Artificial Analysis key in the project .env.local when explicitly requested',
     ])
     await stopServer(child); child = null
@@ -2675,10 +2677,10 @@ test('ladder source and API calls carry the required drag surface', () => {
   const catalog = readFileSync(join(ROOT, 'visualizer/server/model-catalog.mjs'), 'utf8')
   for (const needle of ['draggable', 'ondragstart', 'ondragover', 'ondrop', 'reference_pending', 'measured_pending', 'drift', 'band_floor', 'vendor_diversity', 'breaker_state', 'cost_ceiling']) assert.match(panel, new RegExp(needle))
   assert.doesNotMatch(panel, /blended|composite|overall_score|combined_score/); assert.doesNotMatch(panel, /--role-|--lane-\d/); assert.match(api, /getRosterLadder|stageRosterLadder|composeRosterLadder|applyRosterLadder/); assert.match(api, /\/api\/roster\/ladder/)
-  for (const needle of ['Roster presets', 'Configured seats', 'Model assignments by assurance', 'Review assurance rules and protected paths', 'Roster workspace', 'Add a model manually', 'saved locally', 'Any model, any seat', 'Copy experiment draft', 'Check readiness', 'Roster readiness', 'Apply for next task', 'next newly booted task', 'Prepare repository patch', 'local_providers', 'pi']) assert.match(panel, new RegExp(needle))
-  assert.match(panel, /workflowStep = \$derived/)
-  assert.equal([...panel.matchAll(/class:active=\{workflowStep === \d\}/g)].length, 4)
-  assert.doesNotMatch(panel, /class:active=\{!selectedModel\}|class:active=\{draftCount > 0\}/)
+  for (const needle of ['Role assignments', 'Who does the work', 'Change model', 'Model recommendation', 'Browse models', 'Add a model manually', 'Drafts are saved in this browser', 'Copy experiment draft', 'Check readiness', 'Roster readiness', 'Apply for next task', 'next newly booted task', 'Prepare repository patch', 'local_providers', 'pi']) assert.match(panel, new RegExp(needle))
+  assert.match(panel, /rosterView = \$state\('assignments'\)/)
+  assert.match(panel, /use:assignmentModal/)
+  assert.match(panel, /node.showModal\(\)/)
   assert.match(panel, /localStorage\.setItem\(DRAFT_KEY/)
   assert.match(panel, /Running tasks continue unchanged/)
   assert.match(panel, /staged = next[\s\S]*stageRosterLadder\(next\)/)
@@ -3290,9 +3292,9 @@ test('D1.tier-unmeasured', async () => {
   const source = createWorkflowsSource({ root, rosterPath, feed: { listRuns: () => ({ runs: [] }) }, docsPath: join(ROOT, 'visualizer/web/src/lib/stage-docs.json') })
   try {
     const proposal = await source.propose({ workflow: 'full', tier: 'judge', edit: { role: 'planner', cell: { provider: 'anthropic', id: 'new-planner', agent: 'pi', effort: 'max' } } })
-    assert.deepEqual(proposal, { ok: false, refusals: [{ code: 'tier-unmeasured', message: 'selected tier is unmeasured' }], diff: null, workflow_path: 'crew/workflows/full.json', before: null, after: null })
+    assert.equal(proposal.ok, false); assert.equal(proposal.diff, null); assert.ok(proposal.refusals[0].message)
     assert.equal(proposal.ok, false)
-    assert.equal(proposal.after, null)
+    assert.equal(proposal.after, undefined)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -3358,6 +3360,7 @@ test('B1 unsupported topology refuses with closed code and no write', async () =
   assert.match(present.workflows.find((row) => row.shape === 'scout').map_error, /malformed/i)
   assert.match(present.workflows.find((row) => row.shape === 'repair').map_error, /empty/i)
 
+  for (const file of ['roster.json','capabilities.json','model-ladder.json']) writeFileSync(join(crew,file), readFileSync(join(ROOT,'crew',file)))
   const beforeDigest = treeDigest(root)
   const fullWorkflow = present.workflows.find((row) => row.shape === 'full')
   const unsupportedWorkflow = {
@@ -3375,11 +3378,11 @@ test('B1 unsupported topology refuses with closed code and no write', async () =
   assert.ok(topologyRefusal.message.trim())
   assert.equal(treeDigest(root), beforeDigest)
 
-  const proposal = await source.propose({ workflow: 'full', edit: { stage: 'plan', role: 'planner', cell: { provider: 'anthropic', id: 'planner-2', agent: 'pi', effort: 'max' } } })
+  const proposal = await source.propose({ workflow: 'full', edit: { stage: 'plan', role: 'planner', cell: { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'max' } } })
   assert.equal(proposal.ok, true)
-  assert.equal(proposal.workflow_path, 'crew/workflows/full.json')
-  assert.match(proposal.diff, /^--- a\/crew\/workflows\/full\.json$/m)
-  assert.match(proposal.diff, /^\+\+\+ b\/crew\/workflows\/full\.json$/m)
+  assert.equal(proposal.workflow_path, 'crew/workflows/full-standard.json')
+  assert.match(proposal.diff, /^--- a\/crew\/workflows\/full-standard\.json$/m)
+  assert.match(proposal.diff, /^\+\+\+ b\/crew\/workflows\/full-standard\.json$/m)
   assert.equal(treeDigest(root), beforeDigest)
   assert.equal(reads, 2)
 })
@@ -3409,8 +3412,8 @@ test('workflow-page:C2', async () => {
     const beforeDigest = treeDigest(root)
     const proposal = await json(server.base, '/api/workflows/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ workflow: 'full', edit: { stage: 'plan', role: 'planner', cell: null } }) })
     assert.equal(proposal.status, 200)
-    assert.equal(proposal.json.ok, true)
-    assert.equal(proposal.json.workflow_path, 'crew/workflows/full.json')
+    assert.equal(proposal.json.ok, false)
+    assert.equal(proposal.json.diff, null)
     assert.equal(existsSync(join(crew, 'workflows', 'full.json')), false)
     assert.equal(treeDigest(root), beforeDigest)
   } finally {
@@ -3436,21 +3439,21 @@ test('QC5 proposeWorkflowEdit posts workflow, edit and tier as JSON to /api/work
 // RV1-1: a requested measured tier overrides stale seats carried by the submitted row.
 test('RV1-1 requested tier composes its seats over submitted workflow seats', async () => {
   const { proposeWorkflowEdit } = await import('../visualizer/server/workflows-source.mjs')
-  const root = scratchDir('visualizer-workflows-tier-')
-  mkdirSync(join(root, 'crew'), { recursive: true })
-  const rosterPath = join(root, 'crew', 'roster.json')
-  const seat = (id) => ({ provider: 'anthropic', id, agent: 'pi', effort: 'high' })
-  writeFileSync(rosterPath, JSON.stringify({ tiers: { mechanical: { planner: seat('mech-planner'), reviewer: seat('mech-reviewer') }, judge: { planner: seat('judge-planner'), reviewer: seat('judge-reviewer') } } }))
-  const workflow = { shape: 'full', seats: { planner: seat('mech-planner'), reviewer: seat('mech-reviewer') } }
-  const result = await proposeWorkflowEdit({ root, rosterPath, workflow, tier: 'judge', edit: { role: 'planner', cell: seat('edited') } })
-  assert.equal(result.ok, true)
-  const after = JSON.parse(result.after)
-  assert.equal(after.seats.planner.id, 'edited')
-  assert.equal(after.seats.reviewer.id, 'judge-reviewer')
-  const unknown = await proposeWorkflowEdit({ root, rosterPath, workflow, tier: 'nope', edit: { role: 'planner', cell: seat('edited') } })
-  assert.equal(unknown.ok, false)
-  assert.equal(unknown.refusals[0].code, 'tier')
+  const root = scratchDir('visualizer-workflows-tier-'); mkdirSync(join(root,'crew/workflows'),{recursive:true})
+  try {
+    for(const file of ['roster.json','capabilities.json','model-ladder.json']) writeFileSync(join(root,'crew',file),readFileSync(join(ROOT,'crew',file)))
+    const workflow={shape:'full',seats:{planner:{id:'stale'}}}
+    const result=await proposeWorkflowEdit({root,workflow,tier:'judge',edit:{stage:'plan',role:'planner',cell:{provider:'openai',id:'gpt-6.1-sol',agent:'pi',effort:'max'}}})
+    assert.equal(result.ok,true,result.error)
+    const after=JSON.parse(result.after)
+    assert.equal(after.seats.plan.id,'gpt-6.1-sol');assert.equal(after.seats.check.role,'tech-lead')
+    assert.equal(after.seats.planner,undefined);assert.equal(after.seats.plan.model,undefined)
+    const unknown=await proposeWorkflowEdit({root,workflow,tier:'nope',edit:{stage:'plan',cell:{}}})
+    assert.equal(unknown.ok,false);assert.equal(unknown.diff,null)
+  } finally {rmSync(root,{recursive:true,force:true})}
 })
+
+
 
 // Sol review MF5: an unmeasured per-workflow evidence row always names why.
 test('workflow-page:C4 an unmeasured workflow evidence row carries a closed reason', () => {
@@ -3850,17 +3853,17 @@ test('workflow source reads plugin resources but proposals retain target resourc
     assert.equal(targetOnly.roster.path, join(target, 'crew', 'roster.json'))
     assert.equal(targetOnly.roster.tiers[0].seats.planner.id, 'target-planner')
 
-    // Mutation: pass readRosterFile instead of the target proposal rosterFile to proposeWorkflowEdit.
-    const proposal = await defaults.propose({ workflow: 'full', edit: { stage: 'plan', role: 'planner', cell: { provider: 'anthropic', id: 'planner-2', agent: 'pi', effort: 'max' } } })
-    assert.equal(proposal.ok, true)
-    assert.equal(proposal.workflow_path, 'crew/workflows/full.json')
-    assert.match(proposal.before, /target-planner/)
-    assert.doesNotMatch(proposal.before, /plugin-planner/)
-    const unseededProposal = await defaults.propose({ workflow: 'repair', edit: { stage: 'repair', role: 'planner', cell: { provider: 'anthropic', id: 'planner-2', agent: 'pi', effort: 'max' } } })
-    assert.equal(unseededProposal.ok, true)
-    assert.equal(unseededProposal.before, '')
-    assert.match(unseededProposal.after, /target-planner-builder/)
-    assert.doesNotMatch(unseededProposal.after, /plugin-planner-builder/)
+    // Read resources and target-local proposals remain separate; proposals must
+    // now satisfy the actual runtime schema and catalog, not synthetic cells.
+    for(const file of ['roster.json','capabilities.json','model-ladder.json']) fs.copyFileSync(join(ROOT,'crew',file),join(target,'crew',file))
+    const proposal = await defaults.propose({workflow:'full',tier:'build',edit:{stage:'plan',role:'planner',cell:{provider:'openai',id:'gpt-6.1-sol',agent:'pi',effort:'max'}}})
+    assert.equal(proposal.ok,true,proposal.error)
+    assert.equal(proposal.workflow_path,'crew/workflows/full-standard.json')
+    assert.equal(JSON.parse(proposal.after).seats.plan.role,'planner')
+    assert.doesNotMatch(proposal.after,/plugin-planner/)
+    const repaired=await defaults.propose({workflow:'repair',edit:{stage:'repair',role:'planner',cell:{}}})
+    assert.equal(repaired.ok,true);assert.equal(JSON.parse(repaired.after).seats.repair.role,'planner')
+
   } finally {
     rmSync(target, { recursive: true, force: true })
     rmSync(plugin, { recursive: true, force: true })

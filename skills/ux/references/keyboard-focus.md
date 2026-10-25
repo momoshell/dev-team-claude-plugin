@@ -5,20 +5,20 @@
 
 ## Measured operability register
 
-Literal census over the 34 `.svelte` files directly under the visualizer lib directory:
+Literal census over the 38 `.svelte` files directly under the visualizer lib directory:
 
 | signal | occurrences | files |
 |---|---|---|
 | legacy `on:keydown` attributes | 0 | 0 |
-| modern `onkeydown=` attributes | 3 | 2 |
-| `:focus-visible` selectors | 4 | 3 |
-| plain `:focus` selectors | 3 | 1 |
-| `tabindex` attributes | 1 | 1 |
-| `aria-` attributes | 129 | 29 |
-| `role=` attributes | 27 | 12 |
+| modern `onkeydown=` attributes | 1 | 1 |
+| `:focus-visible` selectors | 27 | 8 |
+| plain `:focus` selectors | 5 | 2 |
+| `tabindex` attributes | 17 | 9 |
+| `aria-` attributes | 214 | 33 |
+| `role=` attributes | 79 | 18 |
 
-The remaining modern handlers live at `visualizer/web/src/lib/RosterPanel.svelte:426` and `visualizer/web/src/lib/RosterPanel.svelte:684`; the plain-`:focus` treatment and the single `tabindex` live at `visualizer/web/src/lib/RosterPanel.svelte:718` (the other two plain-`:focus` selectors sit on line 711) and `visualizer/web/src/lib/RosterPanel.svelte:684`. Focus-dependent chart labels and the other component focus treatment are at `visualizer/web/src/lib/OperationsOverview.svelte:158` and `visualizer/web/src/lib/PhaseGantt.svelte:258`.
+Roster editing uses a native modal dialog, opened by `visualizer/web/src/lib/RosterPanel.svelte:243` and labelled at `visualizer/web/src/lib/RosterPanel.svelte:714`. The browser supplies Escape, focus containment and an inert background; the action restores trigger focus. The remaining explicit key handler belongs to Dropdown. Focus-dependent chart labels and component focus treatment remain at `visualizer/web/src/lib/OperationsOverview.svelte:158` and `visualizer/web/src/lib/PhaseGantt.svelte:258`.
 
-**Stated gap:** modern handlers cover 2/34 components and visible focus covers 3/34 components; that narrow coverage is recorded as-is, not as proof that all 34 components need handlers.
+**Stated gap:** modern handlers cover 1/38 components and visible focus covers 8/38 components; that narrow coverage is recorded as-is, not as proof that all 38 components need handlers.
 
 The shared theme sheet supplies focus outlines for native controls across the application. This component-only census does not measure that global coverage.

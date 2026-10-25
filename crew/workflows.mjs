@@ -2,6 +2,7 @@
 // This module is a leaf: it knows policy data and shape membership, but never
 // imports the executor or boot implementation.
 
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { dirname, join, resolve as resolvePath } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -52,7 +53,28 @@ export const SEAT_BEARING_STAGES = Object.freeze({
     'gate-repair': 'lead', // verified crew/drive.mjs:9280-9290 through GATE_CUSTODIAN
     review: 'reviewer', // verified crew/drive.mjs:9766-9813
   }),
+  scout: Object.freeze({ scout: 'planner' }),
+  review_only: Object.freeze({ review_only: 'reviewer' }),
+  verify_only: Object.freeze({ verify_only: 'reviewer' }),
+  // driveReviewPanelShape dispatches two independent reviews, then adjudication.
+  review_panel: Object.freeze({ review_panel: Object.freeze(['reviewer', 'tech-lead', 'lead']) }),
+  repair: Object.freeze({ repair: 'planner', build: 'builder', review: 'reviewer' }),
+  directed: Object.freeze({ build: 'builder', review: 'reviewer' }),
+  finish: Object.freeze({ build: 'builder', review: 'reviewer' }),
+  stepped: Object.freeze({ plan: 'planner', check: 'tech-lead', build: 'builder', 'gate-repair': 'lead', review: 'reviewer' }),
 })
+
+export function workflowStageEntries(map) {
+  return Object.entries(map.seats).flatMap(([stage, value]) =>
+    (Array.isArray(value) ? value : [value]).map(seat => [stage, seat]))
+}
+
+export function assertWorkflowExecution(crew, execution) {
+  if (crew.workflow_shape && crew.workflow_shape !== execution) {
+    throw workflowRefusal('workflow-seat-mismatch', `Saved workflow ${crew.workflow} requires --execution ${crew.workflow_shape}; received ${execution}. Boot another workflow to change the execution shape.`)
+  }
+}
+
 
 function deepFreeze(value) {
   if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value
@@ -60,7 +82,7 @@ function deepFreeze(value) {
   return Object.freeze(value)
 }
 
-export function loadWorkflow(name, { dir = WORKFLOWS_DIR, readFile = readFileSync } = {}) {
+export function loadWorkflow(name, { dir = WORKFLOWS_DIR, readFile = readFileSync, expectedRevision } = {}) {
   if (typeof name !== 'string' || !WORKFLOW_NAME.test(name)) {
     throw workflowRefusal(
       'workflow-name-invalid',
@@ -79,6 +101,7 @@ export function loadWorkflow(name, { dir = WORKFLOWS_DIR, readFile = readFileSyn
       { name, path: file },
     )
   }
+  if (expectedRevision !== undefined && (!/^[a-f0-9]{64}$/.test(expectedRevision) || createHash('sha256').update(String(raw)).digest('hex') !== expectedRevision)) throw workflowRefusal('workflow-seat-mismatch', 'The selected workflow changed after task preparation. Review the preset and prepare the task again.', {name,path:file})
   try {
     return JSON.parse(String(raw))
   } catch (err) {
@@ -97,7 +120,7 @@ function isObject(value) {
 function schemaErrors(map) {
   const errors = validateCapabilities(WORKFLOW_SCHEMA, map)
   if (errors.length || !isObject(map) || !isObject(map.seats)) return errors
-  for (const [stage, seat] of Object.entries(map.seats)) {
+  for (const [stage, seat] of workflowStageEntries(map)) {
     for (const kind of ['skills', 'extensions']) {
       const entries = Array.isArray(seat?.[kind]) ? seat[kind] : []
       const seen = new Set()
@@ -219,7 +242,12 @@ export function validateWorkflow(map, {
   if (!isObject(register.coding_agents)) register.coding_agents = {}
   const byRole = {}
 
-  for (const [stage, seat] of Object.entries(map.seats)) {
+  const required = Array.isArray(variant.required_seats) ? variant.required_seats : ['planner', 'builder', 'reviewer']
+  for (const role of required) if (!roleSet.has(role)) {
+    throw workflowRefusal('workflow-role-unseated', `Workflow ${map.shape} requires ${role}. Choose an assurance that seats this role.`, { role, shape: map.shape })
+  }
+  const seen = new Set()
+  for (const [stage, seat] of workflowStageEntries(map)) {
     if (!shapeStages.has(stage)) {
       throw workflowRefusal(
         'workflow-stage-extra',
@@ -234,11 +262,12 @@ export function validateWorkflow(map, {
         { path, shape: map.shape, stage },
       )
     }
-    const expectedRole = inventory[stage]
-    if (seat.role !== expectedRole) {
+    const expectedRoles = [inventory[stage]].flat()
+    const expectedRole = seat.role
+    if (!expectedRoles.includes(seat.role) || (Array.isArray(map.seats[stage]) && !Array.isArray(inventory[stage]))) {
       throw workflowRefusal(
         'workflow-stage-role',
-        `workflow ${path} stage ${stage} must be seated by role ${expectedRole}, found ${seat.role}`,
+        `workflow ${path} stage ${stage} must be seated by ${expectedRoles.join(', ')}, found ${seat.role}`,
         { path, shape: map.shape, stage, role: seat.role, expectedRole },
       )
     }
@@ -250,6 +279,9 @@ export function validateWorkflow(map, {
       )
     }
     const role = expectedRole
+    const identity = `${stage}/${role}`
+    if (seen.has(identity)) throw workflowRefusal('workflow-role-divergent', `Stage ${stage} repeats role ${role}.`, { stage, role })
+    seen.add(identity)
     if (!Object.hasOwn(register.coding_agents, seat.agent)) {
       throw workflowRefusal(
         'workflow-agent-unknown',
@@ -282,8 +314,8 @@ export function validateWorkflow(map, {
     if (!prior) byRole[role] = resolved
   }
 
-  for (const [stage, role] of Object.entries(inventory)) {
-    if (roleSet.has(role) && !Object.hasOwn(map.seats, stage)) {
+  for (const [stage, stageRoles] of Object.entries(inventory)) for (const role of [stageRoles].flat()) {
+    if (roleSet.has(role) && !seen.has(`${stage}/${role}`)) {
       throw workflowRefusal(
         'workflow-stage-missing',
         `workflow ${path} is missing required seated stage ${stage} for role ${role}`,
@@ -293,4 +325,23 @@ export function validateWorkflow(map, {
   }
 
   return deepFreeze({ shape: map.shape, seats: byRole })
+}
+
+// Explicit named workflows supply assignments before adapter resolution. CLI
+// overrides remain visible so boot's final seat comparison can reject conflicts.
+export function workflowAssignments(seats, workflow, args = {}) {
+  return Object.fromEntries(Object.entries(seats).map(([role, original]) => {
+    const declared = workflow.seats[role]
+    if (!declared) return [role, original]
+    const cell = { ...original,
+      agent: args[`agent-${role}`] ? original.agent : declared.agent,
+      provider: args[`model-${role}`] ? original.provider : declared.provider,
+      id: args[`model-${role}`] ? original.id : declared.id,
+      model: args[`model-${role}`] ? original.model : null,
+      effort: args[`effort-${role}`] ? original.effort : declared.effort,
+    }
+    // Fallbacks belong to the roster's primary assignment, not a new one.
+    if (cell.agent !== original.agent || cell.provider !== original.provider || cell.id !== original.id) delete cell.fallback
+    return [role, cell]
+  }))
 }

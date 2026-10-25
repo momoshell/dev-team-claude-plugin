@@ -1,5 +1,4 @@
 {
-  "visualizer/web/src/lib/AgentsPage.svelte:68": "Unmeasured — providers are not recorded",
   "visualizer/web/src/lib/Dropdown.svelte:101": ".dropdown-trigger:focus-visible",
   "visualizer/web/src/lib/Dropdown.svelte:50": "function keydown(event) {",
   "visualizer/web/src/lib/Dropdown.svelte:83": "onkeydown={keydown}",
@@ -7,15 +6,16 @@
   "visualizer/web/src/lib/PhaseDots.svelte:6": "small class=\"unavailable\"",
   "visualizer/web/src/lib/PhaseDots.svelte:8": "animation:pulse 1.2s infinite",
   "visualizer/web/src/lib/PhaseGantt.svelte:258": ".bounce-hotspot:focus-visible",
-  "visualizer/web/src/lib/PromptsPage.svelte:52": "prompt.recipients_reason",
-  "visualizer/web/src/lib/RunCard.svelte:54": "run.engineer || 'engineer —'",
+  "visualizer/web/src/lib/RunCard.svelte:54": "run.engineer || 'engineer \u2014'",
   "visualizer/web/src/lib/TaskList.svelte:118": "No tasks match this view.",
-  "visualizer/web/src/lib/WorkflowsPage.svelte:171": "Loading workflows",
-  "visualizer/web/src/lib/WorkflowsPage.svelte:294": "class=\"editor-error\" role=\"alert\"",
-  "visualizer/web/src/lib/RosterPanel.svelte:594": "Null means not measured—not zero",
-  "visualizer/web/src/lib/RosterPanel.svelte:426": "<svelte:window onkeydown",
-  "visualizer/web/src/lib/RosterPanel.svelte:684": "assignment-title\" tabindex=\"-1\"",
-  "visualizer/web/src/lib/RosterPanel.svelte:718": ".directory-loading span",
-  "visualizer/web/src/lib/RosterPanel.svelte:702": ".loading span { width:1.6rem",
-  "visualizer/web/src/lib/RunDetail.svelte:322": "Missing values were not measured."
+  "visualizer/web/src/lib/RosterPanel.svelte:243": "function assignmentModal(node)",
+  "visualizer/web/src/lib/RosterPanel.svelte:714": "<dialog class=\"assignment-dialog\" use:assignmentModal",
+  "visualizer/web/src/lib/RunDetail.svelte:322": "Missing values were not measured.",
+  "visualizer/web/src/lib/RosterPanel.svelte:656": "Null means not measured\u2014not zero",
+  "visualizer/web/src/lib/RosterPanel.svelte:744": ".directory-loading span",
+  "visualizer/web/src/lib/RosterPanel.svelte:728": ".loading span { width:1.6rem",
+  "visualizer/web/src/lib/agents.js:209": "return mark.measured === false ? `Unmeasured \u2014 ${mark.reason}`",
+  "visualizer/web/src/lib/OperationsOverview.svelte:64": "unmeasured runs. Totals include recorded fields only.",
+  "visualizer/web/src/lib/WorkflowsPage.svelte:73": "Reading workflows\u2026",
+  "visualizer/web/src/lib/WorkflowsPage.svelte:90": "bind:this={errorBox}"
 }

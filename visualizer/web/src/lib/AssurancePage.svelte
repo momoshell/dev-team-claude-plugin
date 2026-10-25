@@ -1,158 +1,92 @@
-<script>
-  import { getAssurances, proposeAssuranceChange } from './api.js'
-  import { assurancePanel } from './panels.js'
-
-  let payload = $state({})
-  let loading = $state(true)
-  let requestError = $state('')
-  let documentDraft = $state('')
-  let displayPath = $state('')
-  let selectedAssurance = $state('')
-  let result = $state(null)
-  let shaped = $derived(assurancePanel(payload))
-
-  $effect(() => {
-    let active = true
-    getAssurances().then((value) => {
-      if (!active) return
-      payload = value && typeof value === 'object' ? value : {}
-      requestError = ''
-      loading = false
-    }).catch((cause) => {
-      if (!active) return
-      requestError = cause?.message || 'Assurance policy unavailable — request failed without a reason'
-      loading = false
-    })
-    return () => { active = false }
-  })
-
-  async function submitProposal(event) {
-    event.preventDefault()
-    result = null
-    try {
-      result = await proposeAssuranceChange(documentDraft, selectedAssurance, displayPath)
-    } catch (cause) {
-      result = { ok: false, diff: null, wrote: false, refusals: [{ code: 'request', message: cause?.message || 'Assurance proposal request failed without a reason' }] }
-    }
-  }
+<script module>
+  let remembered = {assurance:'standard',files:'',context:'lane',extra:''}
 </script>
-
-<section class="assurance-page" aria-label="Assurance policy">
-  <div class="page-heading">
-    <div><p class="eyebrow">Policy readout</p><h1>Assurance presets</h1><p>Review strength is separate from model seating. This page reads the ratified declarations and prepares a caller-supplied lane-request diff.</p></div>
-    <span class="updated">Read-only policy · no checkout changes</span>
-  </div>
-
-  {#if loading}
-    <section class="state-card"><strong>Loading assurance policy</strong><p>Reading preset declarations, model seating floors, and protected paths.</p></section>
-  {:else if requestError}
-    <section class="state-card degraded"><strong>Assurance policy unavailable</strong><p>{requestError}</p></section>
-  {:else}
-    <section class="policy-section" aria-labelledby="review-strength-heading">
-      <header class="section-heading"><div><p class="eyebrow">Assurance axis</p><h2 id="review-strength-heading">Review strength</h2></div><span class="axis-label">{shaped.assurance_axis}</span></header>
-      {#if shaped.assurance_absent && !shaped.presets.length}<p class="unmeasured">{shaped.assurance_absent}</p>{/if}
-      <div class="preset-grid">
-        {#each shaped.presets as preset, index (preset.key ?? index)}
-          <article class="preset-card">
-            <header><div><p class="eyebrow">Preset</p><h3>{preset.name || 'Preset name unavailable'}</h3></div><span class="preset-key">{preset.key || 'key unavailable'}</span></header>
-            <dl class="facts">
-              <div><dt>Alias</dt><dd>{preset.alias || 'Alias unavailable'}</dd></div>
-              <div><dt>Description</dt><dd>{preset.description || 'Description unavailable'}</dd></div>
-              <div><dt>Ordinal review strength</dt><dd>{preset.rank == null ? 'Ordinal strength unmeasured' : `${preset.rank} of ${shaped.presets.length}`}</dd></div>
-            </dl>
-            <p class="forcing"><strong>Protected-path rule</strong> {preset.forcing}</p>
-          </article>
-        {/each}
+<script>
+  import { onMount, onDestroy, tick } from 'svelte'
+  import { Shield, Users, ArrowRight, CircleAlert, Check, FileSearch } from 'lucide-svelte'
+  import { getAssurances, previewAssurance } from './api.js'
+  let payload=$state(null),loading=$state(true),error=$state(''),notice=$state(''),busy=$state(false)
+  let assurance=$state(remembered.assurance),files=$state(remembered.files),context=$state(remembered.context),extra=$state(remembered.extra)
+  let result=$state(null),resultKey=$state(''),formError=$state(''),resultHeading=$state(),errorBox=$state()
+  const labels={quick:'Quick',standard:'Standard',rigorous:'Rigorous',planner:'Planner',builder:'Builder',reviewer:'Reviewer',lead:'Lead','tech-lead':'Tech lead',advisor:'Advisor'}
+  const descriptions={quick:'Routine, low-risk work.',standard:'Everyday changes that need judgment.',rigorous:'Sensitive changes and additional scrutiny.'}
+  let policy=$derived(payload?.preview_policy)
+  let presets=$derived(payload?.assurance?.presets ?? [])
+  let key=$derived(JSON.stringify({assurance,files,context,extra,revision:policy?.revision}))
+  let current=$derived(resultKey===key ? result : null)
+  const lines=value=>value.split('\n').map(line=>line.trim()).filter(Boolean)
+  async function load(){loading=true;error='';result=null;try{payload=await getAssurances();notice='Policy refreshed.'}catch(cause){error=`Could not read assurance policy: ${cause.message}. Try refreshing.`}finally{loading=false}}
+  onMount(load)
+  onDestroy(()=>{remembered={assurance,files,context,extra}})
+  async function checkScope(event){
+    event?.preventDefault();if(busy)return;formError='';result=null;notice=''
+    if(!files.trim()){formError='Add the files or directories this task will change, one per line.';await tick();errorBox?.focus();return}
+    busy=true
+    const snapshot=key
+    try{const value=await previewAssurance({assurance,files:lines(files),context,extra_paths:lines(extra),revision:policy.revision});result=value;resultKey=snapshot;notice='Scope check complete.';await tick();resultHeading?.focus()}
+    catch(cause){formError=`${cause.message} Your inputs are kept.`;await tick();errorBox?.focus()}finally{busy=false}
+  }
+  async function useRequired(){assurance='rigorous';await tick();await checkScope()}
+</script>
+<section class="assurance-workspace" aria-label="Assurance settings and preview">
+  <header class="page-heading"><div><h1>Assurances</h1><p>Understand the oversight behind a task, and check when stronger review is required.</p></div><button class="refresh-policy" type="button" onclick={load} disabled={loading || busy}>Refresh policy</button></header>
+  <p class="sr-only" role="status">{notice}</p>
+  {#if loading}<div class="notice" role="status">Reading presets, role assignments and protections…</div>{:else if error}<div class="notice error" role="alert">{error}<button type="button" onclick={load}>Try again</button></div>{:else}
+    <fieldset class="preset-picker" disabled={busy}>
+      <legend>Choose a preset to explore</legend><p class="section-hint">This selection is for the preview below. It does not change a task or a default.</p>
+      <div class="preset-grid">{#each presets as preset (preset.key)}
+        <label class="preset-card" class:selected={assurance===preset.key}><span class="card-top"><span class="preset-name">{preset.name}</span><input type="radio" name="assurance" value={preset.key} bind:group={assurance} aria-label={preset.name} /></span><span class="preset-description">{descriptions[preset.key] || preset.description}</span><span class="team-heading"><Users size={15} aria-hidden="true" /> {policy?.teams[preset.key] ? `${policy.teams[preset.key].length} assigned roles` : 'Assignments unavailable'}</span><span class="team-roles">{#each policy?.teams[preset.key] ?? [] as role}<span>{labels[role] || role}</span>{/each}</span><span class="selection-label">{assurance===preset.key ? 'Selected for preview' : 'Select for preview'}</span></label>
+      {/each}</div>
+    </fieldset>
+    <div class="context-note"><Shield size={21} aria-hidden="true" /><div><strong>Assurance sets oversight. The workflow defines the checks.</strong><p>Roles shown come from your configured roster. Tests, gates and completion evidence depend on the workflow and task.</p><div class="context-links"><a href="#/roster">Edit role assignments <ArrowRight size={14} aria-hidden="true" /></a><a href="#/workflows">Explore workflows <ArrowRight size={14} aria-hidden="true" /></a></div></div></div>
+    {#if policy?.notes.length}<div class="notice warning"><strong>Some policy details are unavailable</strong><ul>{#each policy.notes as note}<li>{note}</li>{/each}</ul></div>{/if}
+    <section class="scope-check" aria-labelledby="scope-check-heading">
+      <header class="section-heading"><div><p class="eyebrow">Try it before running</p><h2 id="scope-check-heading">Check a task’s scope</h2><p>See which protections match the files you plan to change.</p></div><span class="badge">Preview only</span></header>
+      <div class="check-layout">
+        <form onsubmit={checkScope}>
+          <fieldset disabled={busy || !policy}>
+            <label for="assurance-files">Files or directories to change</label><textarea id="assurance-files" bind:value={files} rows="6" placeholder="src/components/Button.svelte&#10;crew/roles/builder.md" aria-describedby="scope-format"></textarea><p id="scope-format" class="hint">One repository-relative path per line. Use a trailing / for a directory. File line ranges such as src/app.js:10-20 are supported.</p>
+            <div class="examples"><span>Try an example:</span><button type="button" onclick={()=>files='src/components/Button.svelte'}>Ordinary code</button><button type="button" onclick={()=>files='crew/roles/builder.md'}>Prompt change</button></div>
+            <details class="advanced"><summary>Request context and extra protections</summary><label for="assurance-context">Where the preset is requested</label><select id="assurance-context" bind:value={context}><option value="lane">Individual task request</option><option value="batch">Batch setting</option></select><p class="hint">An individual request below a required minimum is refused. A batch setting is raised to that minimum.</p><label for="assurance-extra">Additional protected paths for this preview</label><textarea id="assurance-extra" bind:value={extra} rows="3" placeholder="src/payments/&#10;config/production.json"></textarea><p class="hint">These examples supplement the built-in rules for this check only. Nothing is saved.</p></details>
+          </fieldset>
+          {#if formError}<div class="notice error" role="alert" tabindex="-1" bind:this={errorBox}>{formError}</div>{/if}
+          <div class="form-footer"><button type="submit" class="primary" disabled={busy || !policy}>{busy ? 'Checking scope…' : 'Check scope'}</button><span class="hint">No tasks started or settings changed.</span></div>
+        </form>
+        <section class="preview-result" class:blocked={current?.outcome==='blocked'} class:raised={current?.outcome==='raised'} aria-label="Scope preview result">
+          {#if current}
+            <div class="result-icon">{#if current.outcome==='blocked' || current.outcome==='incomplete'}<CircleAlert size={22} aria-hidden="true" />{:else if current.outcome==='raised'}<Shield size={22} aria-hidden="true" />{:else}<Check size={22} aria-hidden="true" />{/if}</div>
+            <p class="eyebrow">{current.outcome==='blocked' ? 'Request would be refused' : current.outcome==='raised' ? 'Stronger oversight required' : current.outcome==='incomplete' ? 'Incomplete policy check' : 'No higher preset required by these paths'}</p>
+            <h3 tabindex="-1" bind:this={resultHeading}>{current.outcome==='blocked' ? `${labels[current.requested]} is below the minimum` : current.outcome==='incomplete' ? 'Some protections could not be checked' : `${labels[current.effective]} would be used`}</h3>
+            <dl class="result-facts"><div><dt>Requested</dt><dd>{labels[current.requested]}</dd></div><div><dt>Required minimum</dt><dd>{current.minimum ? labels[current.minimum] : 'None found in checked rules'}</dd></div><div><dt>Request context</dt><dd>{current.context==='lane' ? 'Individual task' : 'Batch setting'}</dd></div></dl>
+            {#if current.matches.length}<div class="matches"><h4>Why this result</h4>{#each current.matches as match}<div class="match"><strong>{match.label}</strong><ul>{#each match.paths as path}<li><code>{path}</code></li>{/each}</ul></div>{/each}</div>{/if}
+            {#if current.outcome==='blocked'}<p>Choose Rigorous to meet the minimum for these paths.</p><button type="button" class="repair" onclick={useRequired}>Preview with Rigorous <ArrowRight size={15} aria-hidden="true" /></button>{:else if current.roles}<p class="result-team"><strong>Configured team</strong>{current.roles.map(role=>labels[role] || role).join(' · ')}</p>{/if}
+            <p class="result-limit">This checks path-based requirements, not launch readiness. Compiler recommendations, per-run additions and later discoveries may require more oversight.</p>
+          {:else}<div class="preview-empty"><FileSearch size={30} aria-hidden="true" /><h3>{result ? 'Inputs changed' : 'Preview the required oversight'}</h3><p>{result ? 'Check scope again to update the result for your current selection.' : 'Choose a preset and enter the task’s files. The result will show matched protections and any required minimum.'}</p></div>{/if}
+        </section>
       </div>
     </section>
-
-    <section class="policy-section" aria-labelledby="model-seating-heading">
-      <header class="section-heading"><div><p class="eyebrow">Capability axis</p><h2 id="model-seating-heading">Model seating eligibility</h2></div><span class="axis-label">{shaped.band_floor_axis}</span></header>
-      {#if shaped.band_floors}
-        <dl class="floor-list">
-          {#each Object.entries(shaped.band_floors) as [tier, band] (tier)}<div><dt>{tier}</dt><dd>{band}</dd></div>{/each}
-        </dl>
-      {:else}
-        <p class="unmeasured">{shaped.band_floors_absent}</p>
-      {/if}
-    </section>
-
-    <section class="policy-section protected-section" aria-labelledby="protected-path-heading">
-      <header class="section-heading"><div><p class="eyebrow">Forcing authority</p><h2 id="protected-path-heading">Protected paths</h2></div></header>
-      {#if shaped.protected_paths.length}
-        <ul class="path-list">{#each shaped.protected_paths as path (path)}<li><code>{path}</code></li>{/each}</ul>
-      {:else}
-        <p class="unmeasured">Protected path list unavailable — endpoint supplied no paths.</p>
-      {/if}
-    </section>
-
-    <section class="policy-section proposal-section" aria-labelledby="proposal-heading">
-      <header class="section-heading"><div><p class="eyebrow">Caller-supplied preview</p><h2 id="proposal-heading">Prepare a lane-request change</h2><p>Paste canonical JSON to see the one-line assurance change. Formatting is checked, not silently rewritten.</p></div></header>
-      <p class="proposal-note">Proposal only — nothing was applied.</p>
-      <form class="proposal-form" onsubmit={submitProposal}>
-        <label>Lane-request JSON<textarea bind:value={documentDraft} rows="12" placeholder="Paste canonical JSON here" required></textarea></label>
-        <div class="proposal-fields">
-          <label>Display label (optional)<input bind:value={displayPath} placeholder="request.json" /></label>
-          <label>Assurance preset<select bind:value={selectedAssurance} required><option value="" disabled>Choose a preset</option>{#each shaped.presets as preset, index (preset.key ?? index)}<option value={preset.key}>{preset.name || preset.key}</option>{/each}</select></label>
-        </div>
-        <button type="submit" disabled={!selectedAssurance || !documentDraft}>Prepare proposal</button>
-      </form>
-
-      {#if result}
-        <section class="proposal-result" aria-live="polite">
-          <h3>Proposal result</h3>
-          {#if result.diff}<h4>Unified diff</h4><pre>{result.diff}</pre>{/if}
-          {#if result.refusals?.length}<h4>Refusals</h4><ul>{#each result.refusals as refusal (refusal.code || refusal.message)}<li>{refusal.code ? `${refusal.code}: ` : ''}{refusal.message}</li>{/each}</ul>{:else if result.ok}<p class="success">Proposal is ready for review; no checkout file was changed.</p>{/if}
-        </section>
-      {/if}
+    <section class="protection-section" aria-labelledby="protection-heading"><header class="section-heading"><div><h2 id="protection-heading">When stronger review is required</h2><p>These protections remain in effect whichever preset you choose.</p></div></header>
+      <div class="protection-list">
+        {#each [['built_in','Protected code and configuration','Core runtime, policy, CI and architectural decisions.'],['prompt_paths','Prompt instructions','Role charters and guidelines change how agents behave.'],['skill_paths','Registered skills','Skill files granted through the runtime capability register.']] as [key,title,description]}<details><summary><span>{title}<small>{policy?.protections[key]===null ? 'Unavailable' : `${policy?.protections[key]?.length ?? 0} ${policy?.protections[key]?.length===1 ? 'path' : 'paths'}`}</small></span></summary><p>{description} Matching scope requires at least Rigorous.</p>{#if policy?.protections[key]===null}<p class="warning">Repair the capability register and refresh to see registered skill protections.</p>{:else}<ul class="path-list">{#each policy?.protections[key] ?? [] as path}<li><code>{path}</code></li>{:else}<li>No registered paths in this category.</li>{/each}</ul>{/if}</details>{/each}
+      </div>
+      <div class="discovery-note"><strong>Protection can also be discovered during a run.</strong><p>Crew then requires the Rigorous reviewer assignment or stops for attention if it cannot seat that reviewer. The task’s history records the attempt.</p></div>
+      <details class="technical"><summary>Policy scope and limitations</summary><p>Built-in paths are mandatory; run-specific additions can extend them. This page reads the built-in rules and runtime skill grants. It does not load a task’s extra protections or compiler recommendation.</p><p>Embedded prompt templates require human recognition; file matching alone cannot identify every prompt change. Prompt changes also require the repository’s measurement claim.</p><p>Presets are defined in code. Choosing one here does not edit their rules or set a project default.</p></details>
     </section>
   {/if}
 </section>
-
 <style>
-.assurance-page { display:grid; gap:1rem; }
-.page-heading { display:flex; justify-content:space-between; align-items:end; gap:1rem; }
-.page-heading h1 { margin:.1rem 0 .35rem; font-size:clamp(1.7rem,3vw,2.35rem); letter-spacing:-.04em; }
-.page-heading p { margin:0; color:var(--muted); max-width:44rem; font-size:.9rem; }
-.eyebrow { margin:0 0 .22rem; color:var(--accent); font-size:.66rem; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }
-.updated,.axis-label { color:var(--muted); font-size:.7rem; }
-.state-card,.policy-section { border:1px solid var(--line); border-radius:var(--radius); background:var(--panel); padding:1rem; }
-.state-card p,.unmeasured,.proposal-note { margin:.35rem 0 0; color:var(--muted); font-size:.72rem; }
-.state-card.degraded { border-color:color-mix(in srgb,var(--status-escalated) 45%,var(--line)); }
-.state-card.degraded p { color:var(--status-escalated); }
-.section-heading { display:flex; justify-content:space-between; align-items:start; gap:1rem; margin-bottom:.8rem; }
-.section-heading h2 { margin:.1rem 0 0; font-size:1.1rem; }
-.section-heading p:not(.eyebrow) { margin:.35rem 0 0; color:var(--muted); font-size:.72rem; max-width:44rem; }
-.preset-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:.8rem; }
-.preset-card { min-width:0; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--panel-raised); padding:.8rem; }
-.preset-card header { display:flex; justify-content:space-between; align-items:start; gap:.7rem; }
-.preset-card h3 { margin:0; font-size:.95rem; }
-.preset-key { color:var(--muted); font:600 .62rem var(--mono); }
-.facts,.floor-list { display:grid; gap:.55rem; margin:1rem 0 0; }
-.facts div,.floor-list div { display:grid; gap:.15rem; border-top:1px solid var(--line); padding-top:.5rem; }
-.facts dt,.floor-list dt { color:var(--muted); font-size:.59rem; letter-spacing:.08em; text-transform:uppercase; }
-.facts dd,.floor-list dd { margin:0; font-size:.7rem; overflow-wrap:anywhere; }
-.forcing { margin:1rem 0 0; border-top:1px solid var(--line); padding-top:.6rem; color:var(--accent); font-size:.68rem; line-height:1.45; }
-.forcing strong { display:block; margin-bottom:.15rem; color:var(--muted); font-size:.59rem; letter-spacing:.08em; text-transform:uppercase; }
-.floor-list { grid-template-columns:repeat(3,minmax(0,1fr)); }
-.path-list { display:flex; flex-wrap:wrap; gap:.45rem; margin:0; padding:0; list-style:none; }
-.path-list li { border:1px solid var(--line); border-radius:.4rem; background:var(--panel-raised); padding:.4rem .5rem; }
-.path-list code { font:600 .62rem var(--mono); overflow-wrap:anywhere; }
-.proposal-section { display:grid; gap:.75rem; }
-.proposal-section .section-heading { margin-bottom:0; }
-.proposal-form { display:grid; gap:.7rem; }
-.proposal-form label { display:grid; gap:.25rem; color:var(--muted); font-size:.64rem; }
-.proposal-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.7rem; }
-input,select,textarea { min-width:0; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--bg); color:inherit; padding:.5rem .6rem; font:inherit; }
-textarea { resize:vertical; font-family:var(--mono); font-size:.68rem; line-height:1.5; }
-button[type='submit'] { width:max-content; border:1px solid var(--accent); border-radius:var(--radius-sm); background:var(--accent); color:var(--bg); padding:.5rem .75rem; cursor:pointer; }
-button[type='submit']:disabled { cursor:not-allowed; opacity:.55; }
-.proposal-result { border-top:1px solid var(--line); padding-top:.7rem; }
-.proposal-result h3,.proposal-result h4 { margin:.25rem 0 .35rem; font-size:.76rem; }
-.proposal-result h4 { color:var(--muted); font-size:.62rem; letter-spacing:.08em; text-transform:uppercase; }
-.proposal-result pre { overflow:auto; margin:0; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--bg); padding:.7rem; white-space:pre-wrap; font: .65rem/1.5 var(--mono); }
-.proposal-result ul { margin:.25rem 0 0; padding-left:1.1rem; color:var(--status-fail); font-size:.68rem; }
-.success { color:var(--status-ok); font-size:.7rem; }
-@media (max-width:900px) { .preset-grid { grid-template-columns:1fr; } .floor-list { grid-template-columns:1fr; } }
-@media (max-width:620px) { .page-heading,.section-heading { align-items:start; flex-direction:column; } .proposal-fields { grid-template-columns:1fr; } .updated { display:none; } }
+.assurance-workspace { display:grid; gap:1.75rem; min-width:0; }h1,h2,h3,h4,p { margin:0; }h1 { font-size:clamp(1.7rem,3vw,2.35rem); letter-spacing:-.04em; }h2 { font-size:1.25rem; }h3 { font-size:1.12rem; }h4 { font-size:.9rem; }p { line-height:1.55; }
+.page-heading,.section-heading { display:flex; align-items:start; justify-content:space-between; gap:1rem; }.page-heading p,.section-heading p:not(.eyebrow) { color:var(--muted); margin-top:.4rem; }.page-heading p { max-width:45rem; }.refresh-policy { flex-shrink:0; }
+button { display:inline-flex; align-items:center; justify-content:center; gap:.4rem; min-height:2.65rem; border:1px solid var(--line); border-radius:.5rem; background:var(--panel); color:var(--text); padding:.6rem .85rem; font-weight:600; cursor:pointer; }button:disabled { opacity:.55; cursor:default; }button.primary { background:var(--accent-solid); color:var(--on-accent); border-color:var(--accent-solid); }.repair { color:var(--accent); border-color:var(--accent); }
+button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+fieldset { border:0; min-width:0; margin:0; padding:0; }.preset-picker legend { font-size:1.25rem; font-weight:700; padding:0; margin-bottom:.4rem; }.section-hint,.hint { color:var(--muted); font-size:.88rem; }.preset-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:.8rem; margin-top:1rem; }
+.preset-card { display:flex; flex-direction:column; min-width:0; border:1px solid var(--line); border-radius:.75rem; padding:1rem; background:var(--panel); cursor:pointer; }.preset-card.selected { border:2px solid var(--accent); padding:calc(1rem - 1px); background:var(--accent-surface); }.card-top { display:flex; justify-content:space-between; align-items:center; gap:.5rem; }.preset-name { font-size:1.2rem; font-weight:700; }.card-top input { accent-color:var(--accent-solid); width:1.15rem; height:1.15rem; margin:0; }.preset-description { color:var(--muted); font-size:.9rem; line-height:1.5; margin:.4rem 0 1.15rem; }.team-heading { display:flex; gap:.4rem; align-items:center; font-size:.8rem; font-weight:600; margin-top:auto; }.team-roles { display:flex; flex-wrap:wrap; gap:.35rem; margin:.55rem 0 1rem; }.team-roles span { font-size:.8rem; border:1px solid var(--line); border-radius:.3rem; padding:.2rem .4rem; background:var(--panel); }.selection-label { font-size:.8rem; color:var(--muted); }.selected .selection-label { color:var(--accent); font-weight:700; }
+.context-note { display:flex; gap:.8rem; align-items:start; padding-inline-start:.9rem; border-inline-start:3px solid var(--accent); }.context-note :global(svg) { flex-shrink:0; color:var(--accent); }.context-note p { color:var(--muted); margin-top:.3rem; font-size:.9rem; }.context-links { display:flex; flex-wrap:wrap; gap:1.25rem; margin-top:.6rem; }a { display:inline-flex; align-items:center; gap:.35rem; color:var(--accent); text-decoration:underline; text-underline-offset:.18em; font-size:.88rem; }
+.scope-check { border-top:1px solid var(--line); padding-top:1.5rem; }.eyebrow { color:var(--accent); font-size:.75rem; font-weight:700; margin-bottom:.35rem; }.badge { color:var(--accent); background:var(--accent-surface); border:1px solid var(--line); border-radius:1rem; padding:.3rem .65rem; font-size:.8rem; white-space:nowrap; }
+.check-layout { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:1.2rem; margin-top:1.2rem; }form { display:grid; align-content:start; gap:1rem; min-width:0; }form label { display:block; font-size:.9rem; font-weight:600; margin-bottom:.5rem; }textarea,select { box-sizing:border-box; width:100%; min-width:0; border:1px solid var(--muted); border-radius:.5rem; background:var(--panel); color:var(--text); padding:.65rem; font:inherit; }textarea { resize:vertical; line-height:1.6; }form .hint { margin-top:.4rem; }.examples { display:flex; flex-wrap:wrap; align-items:center; gap:.4rem; margin-top:.7rem; font-size:.8rem; }.examples>span { color:var(--muted); }.examples button { font-size:.8rem; min-height:2.2rem; padding:.3rem .6rem; }.advanced { margin-top:1rem; }.advanced label { margin-top:.9rem; }.form-footer { display:flex; flex-wrap:wrap; align-items:center; gap:.75rem; }
+.preview-result { align-self:start; background:var(--panel); border:1px solid var(--line); border-radius:.75rem; padding:1.15rem; min-width:0; display:grid; gap:.8rem; }.preview-result.blocked { border-inline-start:4px solid var(--status-escalated); }.preview-result.raised { border-inline-start:4px solid var(--accent); }.result-icon { color:var(--accent); }.blocked .result-icon,.blocked .eyebrow { color:var(--status-escalated); }.preview-result>.eyebrow { margin:0; }.preview-result p { font-size:.88rem; }.result-facts { display:grid; gap:.55rem; margin:.3rem 0; }.result-facts div { display:flex; justify-content:space-between; gap:1rem; font-size:.85rem; }.result-facts dt { color:var(--muted); }.result-facts dd { margin:0; text-align:end; font-weight:600; }.matches { border-top:1px solid var(--line); padding-top:.8rem; }.match { margin-top:.6rem; font-size:.85rem; }.match strong { font-weight:600; }.match ul { margin:.3rem 0; padding-inline-start:1.2rem; }.match code { overflow-wrap:anywhere; font-size:.85rem; }.result-team strong { display:block; margin-bottom:.3rem; }.result-limit { color:var(--muted); border-top:1px solid var(--line); padding-top:.7rem; }.preview-empty { padding:1rem 0; display:grid; gap:.8rem; color:var(--muted); }.preview-empty :global(svg) { color:var(--accent); }.preview-empty h3 { color:var(--text); }
+.protection-section { border-top:1px solid var(--line); padding-top:1.5rem; }.protection-list { margin-top:1rem; border:1px solid var(--line); border-radius:.75rem; background:var(--panel); }.protection-list details { padding:.3rem 1rem; }.protection-list details+details { border-top:1px solid var(--line); }summary { cursor:pointer; padding:.65rem 0; font-size:.9rem; }summary>span { display:inline-flex; justify-content:space-between; width:calc(100% - 1.4rem); gap:.6rem; font-weight:600; }summary small { color:var(--muted); font-weight:400; flex-shrink:0; }.protection-list p { color:var(--muted); font-size:.88rem; }.path-list { display:grid; gap:.4rem; padding-inline-start:1.2rem; font-size:.85rem; }.path-list code { overflow-wrap:anywhere; }.discovery-note { margin:1rem 0; font-size:.9rem; }.discovery-note p,.technical p { color:var(--muted); margin-top:.4rem; }.technical { font-size:.85rem; }
+.notice { overflow-wrap:anywhere; display:grid; gap:.6rem; border:1px solid var(--line); border-radius:.6rem; background:var(--panel); padding:1rem; line-height:1.55; }.notice button { justify-self:start; }.notice ul { margin:0; padding-inline-start:1.1rem; }.error { color:var(--status-fail); }.warning { color:var(--status-escalated); }.sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+@media(max-width:1000px) { .check-layout { grid-template-columns:1fr; } }
+@media(max-width:760px) { .preset-grid { grid-template-columns:1fr; }.page-heading,.section-heading { flex-direction:column; }textarea,select { font-size:1rem; }.result-facts div { flex-direction:column; gap:.2rem; }.result-facts dd { text-align:start; }.context-note { padding-inline-start:.6rem; }.preset-description { margin-bottom:.7rem; }.team-roles { margin-bottom:.7rem; } }
 </style>

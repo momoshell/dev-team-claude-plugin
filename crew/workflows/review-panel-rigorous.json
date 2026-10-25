@@ -1,0 +1,34 @@
+{
+  "shape": "review_panel",
+  "seats": {
+    "review_panel": [
+      {
+        "role": "reviewer",
+        "agent": "claude",
+        "provider": "anthropic",
+        "id": "claude-opus-5-5",
+        "effort": "xhigh",
+        "skills": [],
+        "extensions": []
+      },
+      {
+        "role": "tech-lead",
+        "agent": "claude",
+        "provider": "anthropic",
+        "id": "claude-opus-5-5",
+        "effort": "xhigh",
+        "skills": [],
+        "extensions": []
+      },
+      {
+        "role": "lead",
+        "agent": "pi",
+        "provider": "openai",
+        "id": "gpt-6-astra",
+        "effort": "high",
+        "skills": [],
+        "extensions": []
+      }
+    ]
+  }
+}

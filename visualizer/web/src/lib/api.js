@@ -38,3 +38,27 @@ export const stageRosterLadder = (moves) => request('/api/roster/ladder/stage', 
 export const composeRosterLadder = (moves) => request('/api/roster/ladder/compose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ moves }) })
 export const applyRosterLadder = (moves, options = {}) => request('/api/roster/ladder/apply', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ moves, allow_warnings:options.allowWarnings === true }) })
 export const getPluginWriteMode = () => request('/api/plugin-write-mode')
+
+export const getAgentLibrary = () => request('/api/agent-library')
+export const saveAgentFile = (input) => request('/api/agent-library/save', { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(input) })
+
+export const saveHarnessSettings = input => request('/api/harness-settings', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(input)})
+
+export const getSkillLibrary = () => request('/api/skill-library')
+export const saveSkillFile = input => request('/api/skill-library/save', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(input)})
+export const saveSkillRules = input => request('/api/skill-rules', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(input)})
+
+export const getPromptLibrary = () => request('/api/prompt-library')
+export const previewPrompt = input => request('/api/prompt-library/preview',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(input)})
+export const savePrompt = input => request('/api/prompt-library/save',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(input)})
+
+export const previewAssurance = input => request('/api/assurances/preview',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(input)})
+
+export const getWorkflowEditor = (shape,assurance,name) => request(`/api/workflows/editor?shape=${encodeURIComponent(shape)}&assurance=${encodeURIComponent(assurance)}${name?`&name=${encodeURIComponent(name)}`:''}`)
+export const saveWorkflow = (input) => request('/api/workflows/save',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(input)})
+
+export const getWorkflowLibrary = () => request('/api/workflows/library')
+export const previewWorkflow = input => request('/api/workflows/preview',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(input)})
+
+export const getPreparedTasks = () => request('/api/prepared-tasks')
+export const createPreparedTask = input => request('/api/prepared-tasks',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(input)})

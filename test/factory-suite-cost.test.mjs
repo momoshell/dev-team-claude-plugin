@@ -159,6 +159,13 @@ test('D1 a tracked suite added after the recorded measurement is unmeasured, not
     'test/factory-seat-priors.test.mjs',
     'test/factory-shape-scan.test.mjs',
     'test/factory-skill-reads.test.mjs',
+    'test/visualizer-agent-library.test.mjs',
+    'test/visualizer-assurance-preview.test.mjs',
+    'test/visualizer-harness-settings.test.mjs',
+    'test/visualizer-prepared-tasks.test.mjs',
+    'test/visualizer-prompt-library.test.mjs',
+    'test/visualizer-skill-library.test.mjs',
+    'test/visualizer-workflow-editor.test.mjs',
     'test/zz-added-after-measurement.test.mjs',
   ])
   assert.equal(result.reason, UNRECORDED_SUITE_REASON)

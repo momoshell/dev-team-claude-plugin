@@ -3,7 +3,10 @@
   "$id": "https://example.internal/crew/workflows/workflow.schema.json",
   "title": "closed workflow seat map",
   "type": "object",
-  "required": ["shape", "seats"],
+  "required": [
+    "shape",
+    "seats"
+  ],
   "additionalProperties": false,
   "properties": {
     "shape": {
@@ -14,7 +17,18 @@
       "type": "object",
       "patternProperties": {
         "^[a-z0-9][a-z0-9_-]*$": {
-          "$ref": "#/$defs/seat"
+          "oneOf": [
+            {
+              "$ref": "#/$defs/seat"
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/seat"
+              }
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -23,11 +37,25 @@
   "$defs": {
     "seat": {
       "type": "object",
-      "required": ["role", "agent", "provider", "id", "effort", "skills", "extensions"],
+      "required": [
+        "role",
+        "agent",
+        "provider",
+        "id",
+        "effort",
+        "skills",
+        "extensions"
+      ],
       "additionalProperties": false,
       "properties": {
         "role": {
-          "enum": ["lead", "planner", "builder", "reviewer", "tech-lead"]
+          "enum": [
+            "lead",
+            "planner",
+            "builder",
+            "reviewer",
+            "tech-lead"
+          ]
         },
         "agent": {
           "type": "string",
@@ -42,17 +70,27 @@
           "pattern": "^[A-Za-z0-9._-]+$"
         },
         "effort": {
-          "enum": ["low", "medium", "high", "xhigh", "max"]
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
         },
         "skills": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/relpath" }
+          "items": {
+            "$ref": "#/$defs/relpath"
+          }
         },
         "extensions": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/relpath" }
+          "items": {
+            "$ref": "#/$defs/relpath"
+          }
         }
       }
     },

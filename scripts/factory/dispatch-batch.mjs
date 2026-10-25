@@ -14,6 +14,7 @@ import { resolveTaskReturn } from '../../crew/crew.mjs'
 import { hostLoad, withSuiteSlot } from '../../crew/host-load.mjs'
 import { slotStore } from '../../crew/reclaim.mjs'
 import { loadCapabilities } from '../../crew/capabilities.mjs'
+import { assuranceScopeHits, reconcileTierChoice } from '../../crew/assurance-scope.mjs'
 import { protectedHitsIn, resolveProtectedPaths, PROMPT_SURFACE_BLIND_SPOT as SHARED_PROMPT_SURFACE_BLIND_SPOT, promptSurfacePaths } from '../../crew/protected-paths.mjs'
 import { fenceScopesIntersect, parseFenceScope } from '../../crew/fence-scope.mjs'
 import { slug } from '../../crew/slug.mjs'
@@ -3687,21 +3688,13 @@ export async function compileLane({ lane, batchDir, requestPath, laneDir, regist
 
 export function tierFloor({ files, extra } = {}) {
   const paths = resolveProtectedPaths(extra)
-  const protectedFiles = (Array.isArray(files) ? files : []).map((entry) => {
-    const parsed = parseFenceScope(entry)
-    return parsed.kind === 'span' ? parsed.path : entry
-  })
-  const hits = protectedHitsIn(protectedFiles, paths)
+  const hits = assuranceScopeHits(files, paths)
   const forced = hits.length > 0 ? 'judge' : null
   return { hits, forced, floor: forced }
 }
 
 export function promptSurfaceVerdict({ files, subjects, register = loadCapabilities() } = {}) {
-  const protectedFiles = (Array.isArray(files) ? files : []).map((entry) => {
-    const parsed = parseFenceScope(entry)
-    return parsed.kind === 'span' ? parsed.path : entry
-  })
-  const surfaceHits = protectedHitsIn(protectedFiles, promptSurfacePaths(register))
+  const surfaceHits = assuranceScopeHits(files, promptSurfacePaths(register))
   if (subjects === undefined) return { hits: surfaceHits, promptChange: surfaceHits.length > 0, forced: surfaceHits.length > 0 ? 'judge' : null }
   const subjectPaths = (Array.isArray(subjects) ? subjects : []).map((entry) => {
     const parsed = parseFenceScope(entry)
@@ -3759,7 +3752,8 @@ export function resolveRequestedTier({ tier, assurance } = {}) {
 }
 
 export function reconcileTier({ lane, forced, recommended, requested, requestedFrom = 'lane', forceReason = TIER_FLOOR_CONFLICT } = {}) {
-  if (forced && requestedFrom !== 'batch' && requested && TIER_NAMES.indexOf(requested) < TIER_NAMES.indexOf(forced)) {
+  const choice = reconcileTierChoice({forced,recommended,requested,requestedFrom})
+  if (choice.conflict) {
     if (forceReason === PROMPT_SURFACE_CONFLICT) {
       refuse(`lane ${lane} requested tier ${requested} below prompt surface floor ${forced}; ${SHARED_PROMPT_SURFACE_BLIND_SPOT}`, PROMPT_SURFACE_CONFLICT)
     }
@@ -3768,17 +3762,7 @@ export function reconcileTier({ lane, forced, recommended, requested, requestedF
     }
     refuse(`lane ${lane} requested tier ${requested} below protected floor ${forced}`, TIER_FLOOR_CONFLICT)
   }
-  const candidates = [forced, requested, requested == null ? recommended : null]
-  const known = candidates.filter((tier) => TIER_NAMES.includes(tier))
-  const tier = known.length === 0
-    ? null
-    : known.reduce((best, candidate) => TIER_NAMES.indexOf(candidate) > TIER_NAMES.indexOf(best) ? candidate : best)
-  const warning = requested != null
-    && TIER_NAMES.includes(recommended)
-    && TIER_NAMES.includes(requested)
-    && TIER_NAMES.indexOf(recommended) > TIER_NAMES.indexOf(requested)
-    ? `requested ${TIER_TO_ASSURANCE[requested] || requested} below recommendation ${TIER_TO_ASSURANCE[recommended] || recommended}; request retained`
-    : null
+  const { tier, warning } = choice
   return { lane, tier, forced, recommended, requested, warning }
 }
 

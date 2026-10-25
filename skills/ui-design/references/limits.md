@@ -69,17 +69,17 @@ Each of the 24 `:hover` rule blocks below is classified independently from sourc
 |---|---|---|---|---|---|---|
 | `PhasePanel.svelte` | `.envelope-documents summary:hover` | `background: color-mix(in srgb,var(--document-role) 6%,transparent)` | token | `none declared` | `color-mix(in srgb,var(--document-role) 6%,transparent)` | Unmeasured — no source-declared rest background |
 
-### `RosterPanel.svelte` — 7 rules
+### `RosterPanel.svelte` — 6 rules
 
 | File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
 |---|---|---|---|---|---|---|
 | `RosterPanel.svelte` | `.seat.changeable:hover` | `border-color: var(--accent); background: var(--accent-soft)` | token | `none declared` | `var(--accent-soft)` | Unmeasured — no source-declared rest background |
 | `RosterPanel.svelte` | `.source-setup a:hover` | `color: var(--accent)` | token | `none declared` | `none declared` | Unmeasured — no source-declared rest background |
-| `RosterPanel.svelte` | `.directory-list article:hover` | `background: color-mix(in srgb,var(--accent) 3%,var(--panel))` | token | `none declared` | `color-mix(in srgb,var(--accent) 3%,var(--panel))` | Unmeasured — no source-declared rest background |
 | `RosterPanel.svelte` | `.directory-pager button:hover:not(:disabled)` | `background: var(--accent-soft); color: var(--accent)` | token | `transparent` | `var(--accent-soft)` | Unmeasured — rest ground is transparent |
 | `RosterPanel.svelte` | `.scope button:hover` | `background: var(--panel-raised); color: var(--text)` | token | `transparent` | `var(--panel-raised)` | Unmeasured — rest ground is transparent |
-| `RosterPanel.svelte` | `.model-palette article:hover` | `border-color: color-mix(in srgb,var(--accent) 55%,var(--line))` | token | `var(--panel-raised)` | `var(--panel-raised)` | Unmeasured — rest foreground is inherited, not source-declared |
-| `RosterPanel.svelte` | `.remove-model:hover` | `color: var(--status-fail)` | token | `transparent` | `transparent` | Unmeasured — rest ground is transparent |
+| `RosterPanel.svelte` | `.model-palette article:hover` | `border-color: var(--accent-border)` | token | `var(--panel)` | `var(--panel)` | Unmeasured — rest foreground is inherited, not source-declared |
+
+| `RosterPanel.svelte` | `.model-choice:hover .choose-model-cta` | `(none)` | none | `none declared` | `none declared` | Unmeasured — rule declares no color-affecting declaration |
 
 ### `TaskList.svelte` — 2 rules
 
@@ -94,7 +94,14 @@ Each of the 24 `:hover` rule blocks below is classified independently from sourc
 |---|---|---|---|---|---|---|
 | `WorkflowGraph.svelte` | `.stage-node:hover` | `border-color: var(--accent)` | token | `var(--panel-raised)` | `var(--panel-raised)` | paper 5.17 → 5.17; ink 6.20 → 6.20 |
 
-23 rules in 10/34 components. Three rules carry measured rest → hover ratios; the rest stop at a closed reason instead of borrowing a ground.
+### `PromptsPage.svelte` — 2 rules
+
+| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
+|---|---|---|---|---|---|---|
+| `PromptsPage.svelte` | `button:hover:not(:disabled)` | `border-color: var(--accent); background: var(--accent-surface)` | token | `var(--panel)` | `var(--accent-surface)` | Unmeasured — hover ground token --accent-surface has no source-declared value |
+| `PromptsPage.svelte` | `button.primary:hover:not(:disabled)` | `background: var(--accent-solid)` | token | `var(--accent-solid)` | `var(--accent-solid)` | Unmeasured — rest ground token --accent-solid has no source-declared value |
+
+24 rules in 11/38 components. Three rules carry measured rest → hover ratios; the rest stop at a closed reason instead of borrowing a ground.
 
 ## Vacuous theme-sheet coverage
 

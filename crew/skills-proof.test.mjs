@@ -169,3 +169,13 @@ test('a seat whose agent is neither claude nor pi proves nothing', async () => {
     assert.equal(await prove([piLoad(), write()], { agent, requires: ['alpha'], writes: 'task-dir' }), 'required-skills-unproven', String(agent))
   }
 })
+
+// MUTATION: match loads only against <skills root>/<name>/SKILL.md and a path-granted skill is refused.
+test('a skill granted by path loads from that path, resolved against the seat cwd', async () => {
+  const definition = { agent: 'pi', requires: ['review-procedure'], skills: ['.agents/skills/review-procedure/SKILL.md'], writes: 'task-dir' }
+  const at = (cwd, path) => proveRequiredSkills({ definition, sessionFile: 'x', cwd, skillsRoot: '/c/skills',
+    readFile: async () => [call('p', 'read', 'read', { path }), update('p', 'completed'), write()].join('\n') })
+  assert.equal(await at('/w', '/w/.agents/skills/review-procedure/SKILL.md'), null)
+  assert.equal(await at('/w', '.agents/skills/review-procedure/SKILL.md'), null)
+  assert.equal(await at('/w', '/other/.agents/skills/review-procedure/SKILL.md'), 'required-skills-unproven')
+})

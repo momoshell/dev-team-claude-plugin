@@ -2,7 +2,7 @@
 // skills is accepted only if its session recording shows each one fully loaded before the seat's
 // first write. Read only: it judges recorded rows and never grants.
 import { readFile as fsReadFile } from 'node:fs/promises'
-import { isAbsolute, join, normalize, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, normalize, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // The skills root a lean seat is granted from (crew/acp/seat.mjs SKILLS_ROOT).
@@ -60,8 +60,8 @@ function toolNameOf(call) {
 // does not, and neither does a file read. A pi seat is granted SKILL.md paths (`--skill`), so for it
 // only a whole read counts: a read tool with no offset or limit, or exactly `cat <path>` (a search such
 // as Grep returns matching lines only), whose path, resolved against the seat's cwd when relative,
-// equals <skills root>/<required>/SKILL.md.
-function loadOf(name, input, { agent, role, required, skillsRoot, cwd }) {
+// is a path the skill was granted at (see grantedPaths).
+function loadOf(name, input, { agent, role, required, granted, cwd }) {
   if (agent === 'claude') {
     const own = `crew-skills-${role}:`
     const skill = name === 'Skill' && typeof input.skill === 'string' && input.skill.startsWith(own) ? input.skill.slice(own.length) : null
@@ -76,7 +76,22 @@ function loadOf(name, input, { agent, role, required, skillsRoot, cwd }) {
   else if (name.toLowerCase() === 'read' && input.offset == null && input.limit == null) path = input.path ?? input.file_path
   if (typeof path !== 'string' || path === '' || (!isAbsolute(path) && typeof cwd !== 'string')) return null
   const full = isAbsolute(path) ? normalize(path) : resolve(cwd, path)
-  return required.find((skill) => full === join(skillsRoot, skill, 'SKILL.md')) ?? null
+  return required.find((skill) => granted.get(skill).has(full)) ?? null
+}
+
+// Where each required skill is granted, by crew/acp/seat.mjs resolveSkill: a bare name is
+// <skills root>/<name>/SKILL.md, and a definition `skills` entry with a slash or a .md suffix is a path
+// resolved against the seat's cwd, named by its directory when it is a SKILL.md, else by its file stem.
+function grantedPaths(required, skills, skillsRoot, cwd) {
+  const granted = new Map(required.map((skill) => [skill, new Set([join(skillsRoot, skill, 'SKILL.md')])]))
+  for (const entry of Array.isArray(skills) ? skills : []) {
+    if (typeof entry !== 'string' || !(entry.includes('/') || entry.endsWith('.md'))) continue
+    if (!isAbsolute(entry) && typeof cwd !== 'string') continue
+    const path = isAbsolute(entry) ? normalize(entry) : resolve(cwd, entry)
+    const name = basename(path) === 'SKILL.md' ? basename(dirname(path)) : basename(path, '.md')
+    granted.get(name)?.add(path)
+  }
+  return granted
 }
 
 export async function proveRequiredSkills({ definition, sessionFile, cwd, readFile = fsReadFile, skillsRoot = SKILLS_ROOT }) {
@@ -88,7 +103,7 @@ export async function proveRequiredSkills({ definition, sessionFile, cwd, readFi
     if (typeof raw !== 'string' || raw.trim() === '') return UNPROVEN
     calls = foldCalls(raw)
   } catch { return UNPROVEN }
-  const scope = { agent: definition.agent, role: definition.role, required, skillsRoot, cwd }
+  const scope = { agent: definition.agent, role: definition.role, required, granted: grantedPaths(required, definition.skills, skillsRoot, cwd), cwd }
   const loadedAt = new Map()
   let firstWrite = null
   for (const call of calls) {

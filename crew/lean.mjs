@@ -45,6 +45,7 @@ function definitionFor({ role, seat }, tier, d) {
   return {
     definition: { role, agent: seat.agent, model: `${seat.provider}/${seat.id}`, effort: seat.effort, writes: effective.writes ?? 'none', skills: effective.skills ?? [],
       tools: effective.tools,
+      wait_s: effective.wait_s,
       body },
     source, charters,
   }

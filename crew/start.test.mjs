@@ -484,7 +484,7 @@ test('every turn gets its role definition, the complete brief and P2, and its ow
     const source = join(AGENTS, `${role}.md`)
     const { body, fields } = parseAgent(readFileSync(source, 'utf8'))
     const cell = seats[role]
-    assert.deepEqual(request.definition, { role, agent: cell.agent, model: `${cell.provider}/${cell.id}`, effort: cell.effort, writes: { ...fields, ...fields.tiers?.build }.writes, skills: [], tools: { ...fields, ...fields.tiers?.build }.tools, body })
+    assert.deepEqual(request.definition, { role, agent: cell.agent, model: `${cell.provider}/${cell.id}`, effort: cell.effort, writes: { ...fields, ...fields.tiers?.build }.writes, skills: [], tools: { ...fields, ...fields.tiers?.build }.tools, wait_s: { ...fields, ...fields.tiers?.build }.wait_s, body })
     assert.equal(request.taskDir, f.spec.taskDir)
     assert.equal(request.cwd, f.spec.cwd)
     assert.notEqual(f.spec.taskDir, request.cwd)
@@ -541,6 +541,65 @@ test('the tools a seat receives are the effective definition tools, tier overrid
   assert.deepEqual((await planned({ readFileSync: edit('writes: task-dir', 'writes: task-dir\ntools: ["Read","Grep"]') })).tools, ['Read', 'Grep'])
   assert.deepEqual((await planned({ readFileSync: edit(/tiers: .*/, 'tools: ["Read"]\ntiers: {"build":{"tools":["Glob"]}}') })).tools, ['Glob'])
   assert.deepEqual((await planned({ readFileSync: edit('writes: task-dir', 'writes: task-dir\ntools: []') })).tools, [])
+})
+
+// MUTATION: drop effective.wait_s from the dispatched definition and an authored deadline never reaches the seat.
+test('the wait_s a seat receives is the effective definition value, tier override included, absent when unset', async () => {
+  const planner = join(AGENTS, 'planner.md')
+  const edit = (from, to) => (path, ...args) => {
+    const text = readFileSync(path, ...args)
+    return path === planner ? text.replace(from, to) : text
+  }
+  const planned = async (deps) => {
+    const f = leanFixture({ acp: () => { throw new Error('capture ends the fake turn') }, deps })
+    await f.go()
+    return f.requests[0].definition
+  }
+  assert.equal(Object.hasOwn(await planned({}), 'wait_s'), true)
+  assert.equal((await planned({})).wait_s, undefined)
+  assert.equal((await planned({ readFileSync: edit('writes: task-dir', 'writes: task-dir\nwait_s: 7') })).wait_s, 7)
+  assert.equal((await planned({ readFileSync: edit(/tiers: .*/, 'wait_s: 7\ntiers: {"build":{"wait_s":3}}') })).wait_s, 3)
+})
+
+// MUTATION: read the return file after a failed seat and an envelope written during an expired turn's teardown is accepted.
+test('an expired real seat turn stops the lane as seat-unmeasured and its late envelope is never read', async () => {
+  const planner = join(AGENTS, 'planner.md')
+  let clock = 0, returnPath, envelopeId, reads = 0, laterSeats = 0
+  const f = leanFixture({
+    deps: {
+      readFileSync: (path, ...args) => {
+        const text = readFileSync(path, ...args)
+        return path === planner ? text.replace('writes: task-dir', 'writes: task-dir\nwait_s: 2') : text
+      },
+      runAcpSeat: (input) => {
+        if (returnPath) { laterSeats++; throw new Error('no later seat may run') }
+        returnPath = /^Return path: (.+)$/m.exec(input.prompt)[1]
+        envelopeId = /^Envelope id: (.+)$/m.exec(input.prompt)[1]
+        const late = () => {
+          mkdirSync(f.spec.taskDir, { recursive: true })
+          writeFileSync(returnPath, JSON.stringify({ role: 'planner', id: envelopeId, status: 'done', summary: 'late',
+            details: { plan_path: join(f.spec.taskDir, 'plan.md'), gate_path: join(f.spec.taskDir, 'gate.mjs'), acceptance: ['RV1'], mutations: [LEAN_MUTATION] } }))
+        }
+        const client = {
+          start() {}, initialize() {}, newSession() {}, setMode() {},
+          beginPrompt: () => 5, pollPrompt: () => null,
+          cancelPrompt: () => { late(); return true },
+          close: () => ({ outcome: 'proven' }),
+        }
+        return runAcpSeat({ ...input, binaries: { pi: process.execPath, claudeAcp: process.execPath, claude: process.execPath },
+          deps: { ...input.deps, clientFactory: () => client, now: () => clock, sleep: (ms) => { clock += ms } } })
+      },
+    },
+    loopDeps: { readFile: async (...args) => { reads++; return readFileSync(...args) } },
+  })
+  const result = await f.go()
+  assert.equal(result.status, 'stopped')
+  assert.equal(result.reason, 'seat-unmeasured')
+  assert.equal(existsSync(returnPath), true)
+  assert.equal(reads, 0)
+  assert.equal(laterSeats, 0)
+  assert.equal(clock, 2000)
+  assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
 })
 
 // MUTATION: skip the empty-list refusal in the seat and a toolless Claude seat starts and runs.

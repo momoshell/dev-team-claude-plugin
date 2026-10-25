@@ -4,7 +4,8 @@
 // crew/agents/*.md, so the old path boots what the new path boots. The committed
 // roster.json supplies what the definitions do not carry: the schema version,
 // updated_at, models, policy and which roles each tier lists. --check writes nothing and
-// exits 1 when the committed file differs from what the definitions generate.
+// exits 1 when the committed file differs from what the definitions generate. Both refuse,
+// writing nothing, when boot would refuse the generated roster (crew/roster-validate.mjs).
 //
 // Until plan 4.4 the visualizer's roster editor writes roster.json directly; the next
 // generate overwrites that edit.
@@ -14,6 +15,7 @@ import { fileURLToPath } from 'node:url'
 import { TIERS } from './protocols.mjs'
 import { resolveAgents } from './agents.mjs'
 import { normalizeRoster, serializeRosterV1, serializeRosterV2 } from './roster.mjs'
+import { bootRefusals } from './roster-validate.mjs'
 
 export const ROSTER_PATH = join(dirname(fileURLToPath(import.meta.url)), 'roster.json')
 
@@ -34,7 +36,7 @@ export function generateRoster(templateText, resolve = resolveAgents) {
   return serialize({ updated_at: template.updated_at, models: template.models, policy: template.policy, tiers })
 }
 
-export function main(argv = process.argv.slice(2), { path = ROSTER_PATH, resolve = resolveAgents, log = (line) => process.stdout.write(line + '\n') } = {}) {
+export async function main(argv = process.argv.slice(2), { path = ROSTER_PATH, resolve = resolveAgents, refusals = bootRefusals, log = (line) => process.stdout.write(line + '\n') } = {}) {
   const check = argv.includes('--check')
   if (argv[0] !== 'generate' || argv.some((arg, index) => index > 0 && arg !== '--check')) {
     process.stderr.write('usage: crew roster generate [--check]\n')
@@ -42,6 +44,12 @@ export function main(argv = process.argv.slice(2), { path = ROSTER_PATH, resolve
   }
   const current = readFileSync(path, 'utf8')
   const generated = generateRoster(current, resolve)
+  const refused = await refusals(normalizeRoster(JSON.parse(generated)))
+  if (refused.length) {
+    log(`crew roster: boot refuses the roster the agent definitions generate; ${path} is left as it is`)
+    for (const refusal of refused) log(JSON.stringify(refusal))
+    return 1
+  }
   if (generated === current) { log(`crew roster: ${path} matches the agent definitions`); return 0 }
   if (check) { log(`crew roster: ${path} differs from the agent definitions; run crew roster generate`); return 1 }
   writeFileSync(path, generated)
@@ -50,5 +58,5 @@ export function main(argv = process.argv.slice(2), { path = ROSTER_PATH, resolve
 }
 
 if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
-  process.exitCode = main()
+  process.exitCode = await main()
 }

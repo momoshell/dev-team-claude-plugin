@@ -651,3 +651,141 @@ test('Pi brings its own tools: an explicit empty list still launches', () => {
     assert.equal(run.launches.length, 1)
   })
 })
+
+// A fake client under an injected clock: the deadline loop, cancellation and teardown are observable without a transport.
+function deadlineSeat({ agent = 'pi', wait_s, answerAt = null, answer = { stopReason: 'end_turn', usage: null, refusal: null }, pollAdvance = 0, cancelError = null, closeError = null, closeOutcome = 'proven', pollError = null } = {}) {
+  const root = scratchDir('acp-seat-deadline-')
+  let clock = 0
+  const events = []
+  const sleeps = []
+  let pending = false
+  const client = {
+    start() {}, initialize() {}, newSession() {}, setMode() {},
+    prompt() { throw new Error('the seat never calls the blocking prompt') },
+    cancel() { events.push(['cancel-session', clock]) },
+    beginPrompt() { events.push(['begin', clock]); pending = true; return 41 },
+    pollPrompt(id) {
+      events.push(['poll', id, clock])
+      if (pollError) throw pollError
+      clock += pollAdvance
+      if (answerAt === null || clock < answerAt) return null
+      pending = false
+      return answer
+    },
+    cancelPrompt(id) { events.push(['cancel', id, clock]); if (cancelError) throw cancelError; return pending },
+    close() { events.push(['close', clock]); if (closeError) throw closeError; return { outcome: closeOutcome } },
+  }
+  const before = runtimes()
+  let result
+  let error
+  try {
+    result = runAcpSeat({
+      definition: { role: 'planner', agent, model: agent === 'pi' ? 'openai/gpt-6.1-sol' : 'anthropic/claude-opus-4-6', effort: 'high', skills: [], ...(wait_s === undefined ? {} : { wait_s }) },
+      cwd: root, prompt: 'deadline prompt', sessionFile: join(root, 'session.jsonl'),
+      binaries: { claudeAcp: BIN, claude: BIN, pi: BIN },
+      deps: { clientFactory: () => client, now: () => clock, sleep: (ms) => { sleeps.push(ms); clock += ms } },
+    })
+  } catch (caught) { error = caught }
+  const leftover = [...runtimes()].filter((dir) => !before.has(dir)).map((dir) => join(tmpdir(), dir))
+  const at = (kind) => events.filter((event) => event[0] === kind)
+  return { result, error, events, sleeps, at, leftover, clock: () => clock,
+    cleanup() { for (const dir of leftover) rmSync(dir, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true }) } }
+}
+
+function deadline(options, inspect) {
+  const run = deadlineSeat(options)
+  try { return inspect(run) } finally { run.cleanup() }
+}
+
+test('an explicit wait_s answers a turn just before its deadline and cancels a pending one at it, for pi and claude', () => {
+  for (const agent of ['pi', 'claude']) {
+    deadline({ agent, wait_s: 3, answerAt: 2975 }, (run) => {
+      assert.equal(run.error, undefined, agent)
+      assert.deepEqual(run.result, { stopReason: 'end_turn', usage: null, refusal: null }, agent)
+      assert.deepEqual(run.at('cancel'), [], agent)
+    })
+    deadline({ agent, wait_s: 3 }, (run) => {
+      assert.equal(run.error.reason, 'acp-seat-deadline', agent)
+      assert.match(run.error.message, /planner.*3s/, agent)
+      assert.equal(run.result, undefined, agent)
+      assert.deepEqual(run.at('cancel'), [['cancel', 41, 3000]], agent)
+      assert.equal(run.at('begin').length, 1, agent)
+    })
+  }
+})
+
+test('an omitted wait_s expires at 2,400,000ms and malformed supplied values refuse before any runtime exists', () => {
+  deadline({}, (run) => {
+    assert.equal(run.error.reason, 'acp-seat-deadline')
+    assert.deepEqual(run.at('cancel'), [['cancel', 41, 2400000]])
+  })
+  for (const wait_s of [null, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '3', NaN, Infinity]) {
+    deadline({ wait_s }, (run) => {
+      assert.match(run.error.message, /wait_s must be a positive safe integer/, String(wait_s))
+      assert.deepEqual(run.events, [], String(wait_s))
+      assert.deepEqual(run.leftover, [], String(wait_s))
+    })
+  }
+  deadline({ wait_s: Number.MAX_SAFE_INTEGER, answerAt: 25 }, (run) => assert.equal(run.error, undefined))
+})
+
+test('an answer at or after the deadline, even one that arrives inside the poll, is never returned', () => {
+  for (const [answerAt, pollAdvance] of [[2000, 2000], [2000, 0], [5000, 0]]) {
+    deadline({ wait_s: 2, answerAt, pollAdvance }, (run) => {
+      assert.equal(run.error?.reason, 'acp-seat-deadline', `${answerAt}/${pollAdvance}`)
+      assert.equal(run.result, undefined)
+      assert.equal(run.at('cancel').length, 1)
+      assert.equal(run.at('cancel')[0][1], 41)
+      assert.equal(run.at('cancel-session').length, pollAdvance > 0 ? 1 : 0, 'a settled late turn falls back to the session cancel')
+    })
+  }
+})
+
+test('cancellation is attempted once before close and a cancel failure or throwing close cannot mask the deadline', () => {
+  const unknown = new Error('who knows')
+  for (const cancelError of [null, ...['EIO', 'EPERM', 'EINTR'].map((code) => Object.assign(new Error(code), { code })), unknown]) {
+    for (const closeError of [null, new Error('close broke')]) {
+      deadline({ wait_s: 1, cancelError, closeError }, (run) => {
+        assert.equal(run.error.reason, 'acp-seat-deadline')
+        assert.deepEqual(run.events.map((event) => event[0]).filter((kind) => kind === 'cancel' || kind === 'close'), ['cancel', 'close'])
+      })
+    }
+  }
+})
+
+test('a proven close removes the runtime and an unproven or unknown close retains it', () => {
+  deadline({ wait_s: 1, closeOutcome: 'proven' }, (run) => assert.deepEqual(run.leftover.filter((dir) => existsSync(dir)), []))
+  for (const closeOutcome of ['unproven', 'unknown']) {
+    deadline({ wait_s: 1, closeOutcome }, (run) => {
+      assert.equal(run.leftover.length, 1, closeOutcome)
+      assert.equal(existsSync(run.leftover[0]), true, closeOutcome)
+    })
+  }
+  deadline({ wait_s: 1, closeError: new Error('close broke') }, (run) => {
+    assert.equal(run.leftover.length, 1)
+    assert.equal(existsSync(run.leftover[0]), true)
+  })
+})
+
+test('a turn answered at 700,000ms returns the exact normalized object under an explicit 900s and the default deadline, uncancelled', () => {
+  const refused = { stopReason: null, usage: null, refusal: { code: 1, message: 'no', errorKind: null } }
+  for (const wait_s of [900, undefined]) {
+    for (const answer of [{ stopReason: 'end_turn', usage: { input: 3 }, refusal: null }, refused, { stopReason: 'cancelled', usage: null, refusal: null }]) {
+      deadline({ wait_s, answerAt: 700000, answer }, (run) => {
+        assert.equal(run.error, undefined)
+        assert.equal(run.result, answer)
+        assert.deepEqual(run.at('cancel'), [])
+        assert.equal(run.at('close').length, 1)
+      })
+    }
+  }
+})
+
+test('a prompt poll failure propagates unchanged through teardown without a cancel', () => {
+  const eio = Object.assign(new Error('pipe'), { code: 'EIO' })
+  deadline({ wait_s: 5, pollError: eio }, (run) => {
+    assert.equal(run.error, eio)
+    assert.deepEqual(run.at('cancel'), [])
+    assert.equal(run.at('close').length, 1)
+  })
+})

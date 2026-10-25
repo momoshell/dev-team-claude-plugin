@@ -4,7 +4,7 @@ import {
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, parse, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ACP_UPDATE_KINDS, acpClient } from '../acp-client.mjs'
+import { ACP_POLL_MS, ACP_UPDATE_KINDS, acpClient } from '../acp-client.mjs'
 import { permissionHandler, readOnlyCommand } from '../acp-permission.mjs'
 import { AGENT_ROLES } from '../protocols.mjs'
 import * as claudeAdapter from '../adapters/adapter-claude.mjs'
@@ -94,6 +94,8 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
   if (!EFFORTS.includes(definition.effort)) throw new Error(`effort must be one of ${EFFORTS.join(', ')}, got ${JSON.stringify(definition.effort)}`)
   if (definition.role !== undefined && !AGENT_ROLES.includes(definition.role)) throw new Error(`unknown role ${JSON.stringify(definition.role)}`)
   const role = definition.role ?? ROLE
+  const waitS = definition.wait_s === undefined ? 2400 : definition.wait_s
+  if (!Number.isSafeInteger(waitS) || waitS <= 0) throw new Error(`wait_s must be a positive safe integer, got ${JSON.stringify(definition.wait_s)}`)
   const writes = WRITES.includes(definition.writes) ? definition.writes : 'none'
   const skills = definition.skills ?? []
   if (!Array.isArray(skills)) throw new Error('skills must be a list of skill names or paths')
@@ -102,6 +104,8 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
   const model = definition.model.slice(definition.model.indexOf('/') + 1)
   const piModel = definition.model
   const env = deps.env ?? process.env
+  const now = deps.now ?? (() => Number(process.hrtime.bigint()) / 1e6)
+  const sleep = deps.sleep ?? ((ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) })
   const isClaude = definition.agent === 'claude'
   let tools
   let deny = ''
@@ -184,7 +188,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
       launch = piAdapter.acpLaunch({ ...spec, bin: pi, model: piModel })
     }
     const sinkKinds = [...ACP_UPDATE_KINDS, 'unknown']
-    client = acpClient({
+    client = (deps.clientFactory ?? acpClient)({
       launch, dir: join(runtime, 'acp'), cwd: workdir, role, onPermission,
       sinks: Object.fromEntries(sinkKinds.map((kind) => [kind, recordUpdate])),
       deps: deps.clientDeps ?? {},
@@ -194,7 +198,18 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
     client.initialize()
     client.newSession(launch.sessionParams)
     if (launch.mode) client.setMode(launch.mode)
-    return client.prompt([{ type: 'text', text: prompt }])
+    const deadline = now() + waitS * 1000
+    const promptId = client.beginPrompt([{ type: 'text', text: prompt }])
+    while (now() < deadline) {
+      const turn = client.pollPrompt(promptId)
+      if (now() >= deadline) break
+      if (turn) return turn
+      sleep(Math.max(0, Math.min(ACP_POLL_MS, deadline - now())))
+    }
+    // The cancel is a courtesy: its answer is never awaited, and a failed write cannot replace the deadline.
+    // A turn that settled too late is no longer pending, so the session-wide cancel stands in for the prompt's.
+    try { client.cancelPrompt(promptId) || client.cancel() } catch { /* the deadline stands */ }
+    throw Object.assign(new Error(`${role} produced no answer within ${waitS}s (acp-seat-deadline)`), { reason: 'acp-seat-deadline' })
   } finally {
     try { closed = client?.close() ?? null } catch { /* teardown never overwrites the turn */ }
     // An unproven teardown keeps the runtime: it holds the evidence the next owner reclaims by.

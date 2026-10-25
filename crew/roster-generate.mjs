@@ -50,12 +50,12 @@ export async function main(argv = process.argv.slice(2), { path = ROSTER_PATH, r
     for (const refusal of refused) log(JSON.stringify(refusal))
     return 1
   }
+  // The boot checks are awaited, so the file is read again before any verdict: an edit made
+  // meanwhile (the visualizer's roster editor) is neither called a match nor overwritten.
+  if (readFileSync(path, 'utf8') !== current) { log(`crew roster: ${path} changed while it was being generated; nothing written, run it again`); return 1 }
   if (generated === current) { log(`crew roster: ${path} matches the agent definitions`); return 0 }
   if (check) { log(`crew roster: ${path} differs from the agent definitions; run crew roster generate`); return 1 }
-  // The boot checks are awaited, so the file is read again before it is replaced: an edit
-  // made meanwhile (the visualizer's roster editor) refuses rather than being lost. The new
-  // bytes land in a sibling file first, so a failed write never truncates the roster.
-  if (readFileSync(path, 'utf8') !== current) { log(`crew roster: ${path} changed while it was being generated; nothing written, run it again`); return 1 }
+  // The new bytes land in a sibling file first, so a failed write never truncates the roster.
   const temporary = `${path}.${process.pid}.tmp`
   try { write(temporary, generated); renameSync(temporary, path) } catch (error) {
     rmSync(temporary, { force: true })

@@ -94,3 +94,11 @@ test('an edit made while the boot checks run is kept, and nothing is written', (
   assert.equal(await main(['generate'], { path, resolve, refusals, log: quiet }), 1)
   assert.equal(readFileSync(path, 'utf8'), edited)
 }))
+
+// MUTATION: compare only the first read and --check calls a file edited meanwhile a match.
+test('--check never reports a match for a file that changed while the boot checks ran', () => withScratch(async ({ resolve, path }) => {
+  const edited = committed.replace('"updated_at": "', '"updated_at": "x')
+  const refusals = async () => { writeFileSync(path, edited); return [] }
+  assert.equal(await main(['generate', '--check'], { path, resolve, refusals, log: quiet }), 1)
+  assert.equal(readFileSync(path, 'utf8'), edited)
+}))

@@ -43,7 +43,7 @@ function definitionFor({ role, seat }, tier, d) {
   const effective = { ...fields, ...override }
   const charters = [...body.matchAll(CHARTER_LINK)].map((link) => resolve(dirname(source), link[1]))
   return {
-    definition: { role, agent: seat.agent, model: `${seat.provider}/${seat.id}`, effort: seat.effort, skills: effective.skills ?? [], body },
+    definition: { role, agent: seat.agent, model: `${seat.provider}/${seat.id}`, effort: seat.effort, writes: effective.writes ?? 'none', skills: effective.skills ?? [], body },
     source, charters,
   }
 }
@@ -100,7 +100,7 @@ export async function runLean(spec, deps = {}) {
       try { return d.appendFileSync(...args) } catch (error) { recordError ??= error; throw error }
     }
     await d.runAcpSeat({
-      definition, cwd: spec.cwd, prompt, sessionFile,
+      definition, cwd: spec.cwd, taskDir: spec.taskDir, prompt, sessionFile,
       deps: { appendFileSync: guardedAppend },
     })
     if (recordError) throw recordError

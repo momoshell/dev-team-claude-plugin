@@ -479,9 +479,10 @@ test('every turn gets its role definition, the complete brief and P2, and its ow
     const id = `lane.${role}.${index + 1}`
     const returnPath = join(f.spec.taskDir, `${role}-${index + 1}.json`)
     const source = join(AGENTS, `${role}.md`)
-    const { body } = parseAgent(readFileSync(source, 'utf8'))
+    const { body, fields } = parseAgent(readFileSync(source, 'utf8'))
     const cell = seats[role]
-    assert.deepEqual(request.definition, { role, agent: cell.agent, model: `${cell.provider}/${cell.id}`, effort: cell.effort, skills: [], body })
+    assert.deepEqual(request.definition, { role, agent: cell.agent, model: `${cell.provider}/${cell.id}`, effort: cell.effort, writes: { ...fields, ...fields.tiers?.build }.writes, skills: [], body })
+    assert.equal(request.taskDir, f.spec.taskDir)
     assert.equal(request.cwd, f.spec.cwd)
     assert.notEqual(f.spec.taskDir, request.cwd)
     assert.equal(request.sessionFile, f.sessionOf(role, index + 1))
@@ -500,6 +501,22 @@ test('every turn gets its role definition, the complete brief and P2, and its ow
   assert.match(f.requests[3].prompt, /redo-this/)
   assert.equal(new Set(f.requests.map((r) => r.sessionFile)).size, 5)
   assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
+})
+
+// MUTATION: derive writes from the role instead of the effective definition and a tier override or edited file is ignored.
+test('the writes a seat receives are the effective definition writes, tier override included', async () => {
+  const planner = join(AGENTS, 'planner.md')
+  const edit = (from, to) => (path, ...args) => {
+    const text = readFileSync(path, ...args)
+    return path === planner ? text.replace(from, to) : text
+  }
+  const task = leanFixture({ deps: { readFileSync: edit('writes: task-dir', 'writes: repo') } })
+  await task.go()
+  assert.deepEqual(task.requests.map((r) => r.definition.writes), ['repo', 'repo', 'task-dir'])
+  const tiered = leanFixture({ deps: { readFileSync: edit(/tiers: .*/, 'tiers: {"build":{"writes":"none"}}') } })
+  await tiered.go()
+  assert.equal(tiered.requests[0].definition.writes, 'none')
+  assert.equal(tiered.requests[0].definition.role, 'planner')
 })
 
 // MUTATION: skip the lead turn's definition and a consulted lead runs with no charter or P2 example.
@@ -561,6 +578,19 @@ test('a recording append that fails, even once, stops the turn although the seat
   assert.deepEqual(result, { status: 'stopped', reason: 'seat-unmeasured', pr: null })
   assert.equal(f.requests.length, 1)
   assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
+})
+
+// MUTATION: let a failed permission-row append pass and a decision the lane cannot replay goes unseen.
+test('a permission row whose append fails stops the turn like any other recording failure', async () => {
+  const acp = async (input) => {
+    const id = /^Envelope id: (.+)$/m.exec(input.prompt)[1]
+    const row = { kind: 'permission', role: input.definition.role, writes: input.definition.writes, sessionId: 's', tool_call_id: 't', tool: 'edit', title: 'write', option: 'deny', option_kind: 'reject_once' }
+    try { input.deps.appendFileSync(input.sessionFile, `${JSON.stringify(row)}\n`, 'utf8') } catch {}
+    assert.ok(id)
+  }
+  const f = leanFixture({ acp, deps: { appendFileSync: (path, text, ...rest) => { if (text.includes('"kind":"permission"')) throw EPERM; return appendFileSyncReal(path, text, ...rest) } } })
+  assert.deepEqual(await f.go(), { status: 'stopped', reason: 'seat-unmeasured', pr: null })
+  assert.equal(f.requests.length, 1)
 })
 
 // MUTATION: treat a thrown or rejected turn as returned and the loop reads a missing envelope as success.

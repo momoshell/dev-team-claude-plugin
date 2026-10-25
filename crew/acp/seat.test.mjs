@@ -1,10 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync,
+  appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import { ROOT, scratchDir } from '../../test/helpers.mjs'
 import { runAcpSeat } from './seat.mjs'
 
@@ -12,6 +12,11 @@ const FIXTURES = join(ROOT, 'test', 'fixtures', 'acp')
 const BIN = process.execPath
 const fixture = (name) => readFileSync(join(FIXTURES, `${name}.ndjson`), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
 const normal = fixture('claude-turn')
+const PERMISSION_OPTIONS = [
+  { optionId: 'deny', kind: 'reject_once', name: 'Deny' },
+  { optionId: 'yes', kind: 'allow_once', name: 'Allow' },
+  { optionId: 'forever', kind: 'allow_always', name: 'Always allow' },
+]
 const runtimes = () => new Set(readdirSync(tmpdir()).filter((name) => /^acp-seat-[A-Za-z0-9]{6}$/.test(name)))
 
 function makeSkills(root, names = ['alpha', 'beta']) {
@@ -61,6 +66,12 @@ function replaySeat(name, options = {}) {
       }
     }
     if (!Object.hasOwn(frame, 'id') || !frame.method) return
+    if (frame.method === 'session/prompt') {
+      options.permissions?.forEach((toolCall, i) => appendFileSync(stream, `${JSON.stringify({
+        jsonrpc: '2.0', id: `permit-${i}`, method: 'session/request_permission',
+        params: { sessionId: 'fixture', toolCall, options: toolCall?._options ?? PERMISSION_OPTIONS },
+      })}\n`))
+    }
     if (options.writeError && frame.method === 'session/prompt') throw Object.assign(new Error('pipe broke'), { code: options.writeError })
     let source = records
     let index = source.findIndex((row) => row.dir === 'client->agent' && row.frame?.method === frame.method)
@@ -113,7 +124,7 @@ function replaySeat(name, options = {}) {
       },
       mkdirSync: (path, opts) => {
         mkdirSync(path, opts)
-        if (String(path).endsWith('/seat')) {
+        if (basename(dirname(path)) === 'acp') {
           stream = join(path, 'stream.jsonl')
           writeFileSync(stream, '')
         }
@@ -135,12 +146,13 @@ function replaySeat(name, options = {}) {
   let error
   try {
     result = runAcpSeat({
-      definition, cwd: options.cwd ?? root, prompt: options.prompt ?? 'fixture prompt', sessionFile,
+      definition, cwd: options.cwd ?? root, taskDir: options.taskDir, prompt: options.prompt ?? 'fixture prompt', sessionFile,
       binaries: options.binaries ?? { claudeAcp: BIN, claude: BIN, pi: BIN }, deps })
   } catch (caught) { error = caught }
   const leftover = [...runtimes()].filter((dir) => !before.has(dir)).map((dir) => join(tmpdir(), dir))
   const rows = options.unwritable ? [] : readFileSync(sessionFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
-  return { root, result, error, rows, expected, sent, launches, plugins, kills, skills, leftover, sessionFile,
+  const replies = (options.permissions ?? []).map((_, i) => sent.find((frame) => frame.id === `permit-${i}` && !frame.method)?.result?.outcome ?? null)
+  return { root, result, error, rows, expected, sent, replies, launches, plugins, kills, skills, leftover, sessionFile,
     cleanup() { for (const dir of leftover) rmSync(dir, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true }) } }
 }
 
@@ -394,4 +406,179 @@ test('the session file and granted skill sources survive the run', () => {
     assert.ok(existsSync(run.sessionFile))
     for (const path of run.skills) assert.ok(existsSync(path))
   })
+})
+
+// ---- permission decisions: the effective definition's writes and the lane task directory ----
+
+let calls = 0
+const edit = (path, key = 'path') => ({ toolCallId: `edit-${++calls}`, kind: 'edit', title: 'write', rawInput: { [key]: path, content: 'after' } })
+const shell = (command) => ({ toolCallId: `shell-${++calls}`, kind: 'execute', title: 'bash', rawInput: { command } })
+const verdict = (reply) => (reply?.outcome === 'cancelled' ? 'cancelled' : reply?.optionId === 'yes' ? 'allow' : reply?.outcome === 'selected' ? 'reject' : reply)
+
+// A worktree, a lane task directory and everything outside both, with the links an escape would use.
+function withPermissionTree(inspect) {
+  const root = realpathSync(scratchDir('acp-seat-permission-'))
+  const work = join(root, 'work'), task = join(root, 'task'), outside = join(root, 'outside')
+  for (const dir of [work, task, outside, `${work}-sibling`]) mkdirSync(dir)
+  writeFileSync(join(work, 'existing'), 'before')
+  writeFileSync(join(task, 'existing'), 'before')
+  symlinkSync(outside, join(work, 'escape'))
+  symlinkSync(outside, join(task, 'escape'))
+  symlinkSync(join(outside, 'absent'), join(task, 'dangling'))
+  try { return inspect({ root, work, task, outside }) } finally { rmSync(root, { recursive: true, force: true }) }
+}
+
+// Replays the permission requests through the real seat and returns one verdict per request.
+function decide(tree, writes, requests, { name = 'pi-turn', ...options } = {}) {
+  const run = replaySeat(name, { cwd: tree.work, taskDir: tree.task, permissions: requests, ...options, definition: { role: 'planner', writes, ...options.definition } })
+  try {
+    assert.equal(run.error, undefined)
+    return { verdicts: run.replies.map(verdict), rows: run.rows.filter((row) => row.kind === 'permission'), run: { sent: run.sent, rows: run.rows, expected: run.expected, plugins: run.plugins, launches: run.launches } }
+  } finally { run.cleanup() }
+}
+
+test('task-dir seats write the lane task directory, new and nested files included, never the worktree (Pi path and Claude file_path)', () => {
+  withPermissionTree((tree) => {
+    for (const [name, key] of [['pi-turn', 'path'], ['claude-turn', 'file_path']]) {
+      const allowed = [edit(join(tree.task, 'existing'), key), edit(join(tree.task, 'new', 'deep', 'gate.mjs'), key), edit(relative(tree.work, join(tree.task, 'plan.md')), key)]
+      assert.deepEqual(decide(tree, 'task-dir', allowed, { name }).verdicts, ['allow', 'allow', 'allow'], name)
+      const denied = [edit(join(tree.work, 'existing'), key), edit('fresh.mjs', key)]
+      assert.deepEqual(decide(tree, 'task-dir', denied, { name }).verdicts, ['reject', 'reject'], name)
+    }
+  })
+})
+
+test('repo seats write the worktree and the lane task directory, nothing else', () => {
+  withPermissionTree((tree) => {
+    const { verdicts } = decide(tree, 'repo', [
+      edit('existing'), edit(join(tree.work, 'new', 'code.mjs')), edit(join(tree.task, 'return.json')),
+      edit(join(tree.outside, 'new')), edit(join(`${tree.work}-sibling`, 'new')), edit('../outside/new'),
+      edit(join(tree.work, 'escape', 'new')), edit(join(tree.task, 'escape', 'new')), edit(join(tree.task, 'dangling')),
+      edit(`${tree.task}/escape/../new`), edit(join(tree.work, 'existing', 'child')),
+    ])
+    assert.deepEqual(verdicts, ['allow', 'allow', 'allow', ...Array(8).fill('reject')])
+  })
+})
+
+test('writes none rejects every file mutation in every root', () => {
+  withPermissionTree((tree) => {
+    const { verdicts } = decide(tree, 'none', [edit(join(tree.task, 'existing')), edit('existing'), edit(join(tree.outside, 'new'))])
+    assert.deepEqual(verdicts, ['reject', 'reject', 'reject'])
+  })
+})
+
+test('missing, unknown or role-implied writes grant nothing', () => {
+  withPermissionTree((tree) => {
+    for (const writes of [undefined, null, 'admin', '']) {
+      const { verdicts, rows } = decide(tree, writes, [edit('existing'), edit(join(tree.task, 'existing'))], { definition: { role: 'builder', writes } })
+      assert.deepEqual(verdicts, ['reject', 'reject'], String(writes))
+      assert.deepEqual(rows.map((row) => row.writes), ['none', 'none'])
+    }
+  })
+})
+
+test('shell: repo seats run commands, others only the read-only allowlist', () => {
+  withPermissionTree((tree) => {
+    const commands = ['touch nope', 'cat existing > nope', 'git status', 'cat existing']
+    for (const writes of ['task-dir', 'none']) {
+      assert.deepEqual(decide(tree, writes, commands.map(shell)).verdicts, ['reject', 'reject', 'allow', 'allow'], writes)
+    }
+    assert.deepEqual(decide(tree, 'repo', commands.map(shell)).verdicts, ['allow', 'allow', 'allow', 'allow'])
+    const malformed = [{ kind: 'execute', title: 'bash', rawInput: {} }, { kind: 'execute', title: 'bash', rawInput: { command: '' } },
+      { kind: 'execute', title: 'bash', rawInput: { command: 7 } }, { kind: 'execute', title: 'bash', rawInput: null }, { kind: 'execute', title: 'bash' }]
+    assert.deepEqual(decide(tree, 'repo', malformed).verdicts, Array(5).fill('reject'))
+  })
+})
+
+test('anything the rules do not name is rejected even for a repo seat', () => {
+  withPermissionTree((tree) => {
+    const target = join(tree.work, 'existing')
+    const { verdicts } = decide(tree, 'repo', [
+      { kind: 'other', title: 'write', rawInput: { path: target } }, { kind: 'fetch', title: 'fetch', rawInput: { path: target } },
+      { kind: 'read', title: 'read', rawInput: { path: target } }, { kind: 'move', title: 'move', rawInput: { path: target } },
+      { kind: 'edit', title: 'write', rawInput: { from: target, to: target } },
+      { kind: 'edit', title: 'write', rawInput: {} }, { kind: 'edit', title: 'write' }, { kind: 'edit', title: target },
+      { kind: 'edit', title: 'write', rawInput: { path: target, file_path: join(tree.outside, 'x') } },
+      { kind: 'edit', title: 'write', rawInput: { path: '' } }, { kind: 'edit', title: 'write', rawInput: { path: 7 } },
+      { kind: 'edit', title: 'write', rawInput: { path: `${target}\0x` } }, { title: 'write', rawInput: { path: target } }, null,
+    ])
+    assert.deepEqual(verdicts, Array(14).fill('reject'))
+    assert.deepEqual(decide(tree, 'repo', [{ kind: 'edit', title: 'write', rawInput: { path: target, file_path: target } }]).verdicts, ['allow'])
+  })
+})
+
+test('an unreadable path component rejects that request only (EPERM, EIO, EINTR), the next request is still decided', () => {
+  withPermissionTree((tree) => {
+    for (const code of ['EPERM', 'EIO', 'EINTR']) {
+      const broken = join(tree.work, 'existing')
+      const realpathSync = (path, ...rest) => {
+        if (path === broken) throw Object.assign(new Error(code), { code })
+        return realpathSync_(path, ...rest)
+      }
+      const { verdicts } = decide(tree, 'repo', [edit(broken), edit(join(tree.work, 'fresh')), edit(broken)], { deps: { realpathSync } })
+      assert.deepEqual(verdicts, ['reject', 'allow', 'reject'], code)
+    }
+  })
+})
+const realpathSync_ = realpathSync
+
+test('each decision is one session row, in request order, correlated to the reply and before the updates', () => {
+  withPermissionTree((tree) => {
+    const requests = [edit(join(tree.task, 'existing')), edit('existing'), shell('git status'),
+      { toolCallId: 'unsupported', kind: 'other', title: 'unknown', rawInput: {} },
+      { ...edit('existing'), toolCallId: 'always', _options: [{ optionId: 'forever', kind: 'allow_always', name: 'Always' }] },
+      { ...edit('existing'), toolCallId: 'reject-always', _options: [{ optionId: 'never', kind: 'reject_always', name: 'Never' }, { optionId: 'forever', kind: 'allow_always', name: 'Always' }] },
+      { ...edit(join(tree.task, 'existing')), toolCallId: 'only-always-allowed', _options: [{ optionId: 'no', kind: 'reject_once', name: 'No' }, { optionId: 'forever', kind: 'allow_always', name: 'Always' }] }]
+    const { rows, verdicts, run } = decide(tree, 'task-dir', requests)
+    assert.deepEqual(verdicts, ['allow', 'reject', 'allow', 'reject', 'cancelled', 'reject', 'reject'])
+    const base = { kind: 'permission', role: 'planner', writes: 'task-dir', sessionId: 'fixture' }
+    assert.deepEqual(rows, [
+      { ...base, tool_call_id: requests[0].toolCallId, tool: 'edit', title: 'write', option: 'yes', option_kind: 'allow_once' },
+      { ...base, tool_call_id: requests[1].toolCallId, tool: 'edit', title: 'write', option: 'deny', option_kind: 'reject_once' },
+      { ...base, tool_call_id: requests[2].toolCallId, tool: 'execute', title: 'bash', option: 'yes', option_kind: 'allow_once' },
+      { ...base, tool_call_id: 'unsupported', tool: 'other', title: 'unknown', option: 'deny', option_kind: 'reject_once' },
+      { ...base, tool_call_id: 'always', tool: 'edit', title: 'write', option: null, option_kind: null },
+      { ...base, tool_call_id: 'reject-always', tool: 'edit', title: 'write', option: 'never', option_kind: 'reject_always' },
+      { ...base, tool_call_id: 'only-always-allowed', tool: 'edit', title: 'write', option: 'no', option_kind: 'reject_once' },
+    ])
+    assert.deepEqual(run.rows, [{ prior: true }, ...rows, ...run.expected])
+  })
+})
+
+test('a failed permission-row append never changes a decision', () => {
+  withPermissionTree((tree) => {
+    const appendFileSync = (path, text, ...rest) => { if (text.includes('"kind":"permission"')) throw Object.assign(new Error('denied'), { code: 'EIO' }); return appendFileSync_(path, text, ...rest) }
+    const { verdicts } = decide(tree, 'task-dir', [edit(join(tree.task, 'existing')), edit('existing')], { deps: { appendFileSync } })
+    assert.deepEqual(verdicts, ['allow', 'reject'])
+  })
+})
+const appendFileSync_ = appendFileSync
+
+test('the actual role reaches the launch and the lane task directory is writable only when writes allow it', () => {
+  withPermissionTree((tree) => {
+    const dirsOf = (writes, taskDir) => {
+      const run = replaySeat('claude-turn', { cwd: tree.work, taskDir, definition: { role: 'planner', writes } })
+      try { return sessionNew(run).params._meta.claudeCode.options.additionalDirectories } finally { run.cleanup() }
+    }
+    assert.deepEqual(dirsOf('task-dir', tree.task), [tree.task])
+    assert.deepEqual(dirsOf('repo', tree.task), [tree.task])
+    assert.deepEqual(dirsOf('none', tree.task), [])
+    assert.deepEqual(dirsOf('task-dir', undefined), [])
+    const run = replaySeat('claude-turn', { grant: true, cwd: tree.work, definition: { role: 'planner', writes: 'none' } })
+    try { assert.match(sessionNew(run).params._meta.claudeCode.options.plugins[0].path, /claude-skills[\\/]planner$/) } finally { run.cleanup() }
+    const unnamed = replaySeat('claude-turn', { grant: true, cwd: tree.work })
+    try { assert.match(sessionNew(unnamed).params._meta.claudeCode.options.plugins[0].path, /claude-skills[\\/]seat$/) } finally { unnamed.cleanup() }
+    const pi = replaySeat('pi-turn', { cwd: tree.work, definition: { role: 'builder', writes: 'repo' } })
+    try { assert.equal(pi.error, undefined); assert.equal(pi.launches.length, 1) } finally { pi.cleanup() }
+  })
+})
+
+test('an unknown role is refused before any process or runtime exists', () => {
+  for (const role of ['seat', '', null, 'admin']) {
+    use('pi-turn', { definition: { role } }, (run) => {
+      assert.match(run.error?.message ?? '', /unknown role/, String(role))
+      assert.equal(run.launches.length, 0)
+      assert.deepEqual(run.leftover, [])
+    })
+  }
 })

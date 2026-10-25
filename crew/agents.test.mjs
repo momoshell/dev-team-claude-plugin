@@ -61,7 +61,10 @@ test('lean charter declarations match the P2 schemas and loop ownership', () => 
     }
     assert.ok(body.includes(`writes: ${fields.writes}`), `${role}: write boundary`)
     assert.ok(body.includes('The loop runs the gate at baseline, after the build and under mutation.'), role)
-    assert.ok(body.includes('Do not run those stages yourself.'), role)
+    if (role === 'builder') {
+      assert.ok(!body.includes('Do not run those stages yourself.'), role)
+      assert.ok(body.includes('You may run the gate and targeted tests to check your work. Do not run the full suite, commit, rebase or open the PR.'), role)
+    } else assert.ok(body.includes('Do not run those stages yourself.'), role)
   }
   const planner = parseAgent(readFileSync(join(AGENTS_DIR, 'planner.md'), 'utf8')).body
   assert.match(planner, /one `FAIL <id>` line per failing acceptance id/)
@@ -70,6 +73,9 @@ test('lean charter declarations match the P2 schemas and loop ownership', () => 
   assert.match(planner, /conventional-commit subject[^\n]*at most 72 characters/)
   assert.match(planner, /names both the commit and the PR/)
   assert.match(planner, /Do not write a PR body/)
+  assert.ok(planner.includes('Each mutation is applied to the tree after the build; each find must match text that exists in the built tree, not text removed by the build.'))
+  const reviewer = parseAgent(readFileSync(join(AGENTS_DIR, 'reviewer.md'), 'utf8')).body
+  assert.ok(reviewer.includes('Read the supplied brief, plan, changed paths and any feedback. Inspect the tracked diff and read every listed untracked file directly; git diff alone omits untracked files.'))
 })
 
 // MUTATION: change any model, effort, fallback or null tier in a definition and this tier drifts from the roster.

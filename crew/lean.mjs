@@ -104,11 +104,16 @@ export async function runLean(spec, deps = {}) {
     const guardedAppend = (...args) => {
       try { return d.appendFileSync(...args) } catch (error) { recordError ??= error; throw error }
     }
-    await d.runAcpSeat({
+    const turn = await d.runAcpSeat({
       definition, cwd: spec.cwd, taskDir: spec.taskDir, prompt, sessionFile,
       deps: { appendFileSync: guardedAppend },
     })
     if (recordError) throw recordError
+    // A refused or unmeasured turn fails here, before the loop reads an envelope the seat never earned.
+    if (turn?.refusal || !turn?.stopReason) {
+      guardedAppend(sessionFile, `${JSON.stringify({ type: 'turn', stopReason: turn?.stopReason ?? null, usage: turn?.usage ?? null, refusal: turn?.refusal ?? null })}\n`, 'utf8')
+      throw Object.assign(new Error(turn?.refusal?.message ?? 'ACP seat turn returned no stop reason'), { code: turn?.refusal?.code ?? null, errorKind: turn?.refusal?.errorKind ?? null })
+    }
   }
 
   let result

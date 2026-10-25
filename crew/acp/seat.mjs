@@ -102,7 +102,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
   const workdir = resolve(cwd)
   const recordTo = resolve(sessionFile)
   const model = definition.model.slice(definition.model.indexOf('/') + 1)
-  const piModel = definition.model
+  const piModel = definition.agent === 'pi' ? piAdapter.modelString({ provider: definition.model.split('/')[0], id: model }) : definition.model
   const env = deps.env ?? process.env
   const now = deps.now ?? (() => Number(process.hrtime.bigint()) / 1e6)
   const sleep = deps.sleep ?? ((ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) })

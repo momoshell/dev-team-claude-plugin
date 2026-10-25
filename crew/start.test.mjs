@@ -446,6 +446,7 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
     try { input.deps.appendFileSync(input.sessionFile, `${JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `chunk-${id}` } } })}\n`, 'utf8') } catch {}
     mkdirSync(spec.taskDir, { recursive: true })
     writeFileSync(path, JSON.stringify(envelope(input.definition.role, id)))
+    return { stopReason: 'end_turn', usage: null, refusal: null }
   })
   const options = {
     log: (line) => logs.push(line),
@@ -648,6 +649,93 @@ test('a Claude seat authored with an empty tools list stops the lane as seat-unm
   assert.deepEqual(refusals, ['ACP_EMPTY_TOOLS'])
   assert.equal(spawned.length, 0)
   assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
+})
+
+// One planner turn whose ACP result is `turn`; a present return file is written first so a read of it would be visible.
+async function oneTurn(turn, { withFile = true, deps = {} } = {}) {
+  let reads = 0
+  const verdicts = []
+  const f = leanFixture({
+    acp: async (input) => {
+      const path = /^Return path: (.+)$/m.exec(input.prompt)[1]
+      const id = /^Envelope id: (.+)$/m.exec(input.prompt)[1]
+      try { input.deps.appendFileSync(input.sessionFile, `${JSON.stringify({ update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'chunk' } } })}\n`, 'utf8') } catch {}
+      if (withFile) {
+        mkdirSync(f.spec.taskDir, { recursive: true })
+        writeFileSync(path, JSON.stringify({ role: 'planner', id, status: 'done', summary: 'x', details: { subject: 'fix(crew): publish measured lane results', plan_path: 'p', gate_path: 'g', acceptance: ['RV1'], mutations: [LEAN_MUTATION] } }))
+      }
+      return turn
+    },
+    deps,
+    loopDeps: {
+      readFile: async (...args) => { reads++; return readFileSync(...args) },
+      journal: async (row) => { if (row.event === 'verdict') verdicts.push(row) },
+    },
+  })
+  const result = await f.go()
+  const rows = readFileSync(f.sessionOf('planner', 1), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+  return { f, result, reads: () => reads, verdicts, rows }
+}
+
+// MUTATION: drop the refusal clause of the turn check and a refused turn falls through to the envelope read.
+test('a refused ACP turn stops the lane as seat-unmeasured with the provider cause, never reading the envelope, even one that exists', async () => {
+  const refusals = [
+    { code: -32000, message: 'account out of credits', errorKind: 'billing_error' },
+    { code: null, message: 'quota exhausted', errorKind: null },
+  ]
+  for (const refusal of refusals) {
+    for (const [stopReason, usage] of [[null, null], ['end_turn', { input_tokens: 3 }]]) {
+      for (const withFile of [true, false]) {
+        const label = `${refusal.message} ${stopReason} ${withFile}`
+        const run = await oneTurn({ stopReason, usage, refusal }, { withFile })
+        assert.deepEqual(run.result, { status: 'stopped', reason: 'seat-unmeasured', pr: null }, label)
+        assert.equal(run.reads(), 0, label)
+        assert.equal(run.f.requests.length, 1, label)
+        assert.equal(run.verdicts.length, 1, label)
+        assert.deepEqual(run.verdicts[0].observation.error, { code: refusal.code, message: refusal.message }, label)
+        assert.deepEqual(run.rows.at(-1), { type: 'turn', stopReason, usage, refusal }, label)
+        assert.equal(run.rows.length, 3, label)
+      }
+    }
+  }
+})
+
+// MUTATION: drop the missing-stop-reason clause and a turn that never measured a stop is accepted on its envelope.
+test('an ACP turn with no stop reason (null, empty, absent, no turn at all) is unmeasured before any envelope read', async () => {
+  for (const turn of [{ stopReason: null, usage: null, refusal: null }, { stopReason: '', usage: null, refusal: null }, { usage: null, refusal: null }, undefined, null]) {
+    const run = await oneTurn(turn)
+    const label = JSON.stringify(turn) ?? 'undefined'
+    assert.deepEqual(run.result, { status: 'stopped', reason: 'seat-unmeasured', pr: null }, label)
+    assert.equal(run.reads(), 0, label)
+    assert.deepEqual(run.verdicts[0].observation.error, { code: null, message: 'ACP seat turn returned no stop reason' }, label)
+    assert.deepEqual(run.rows.at(-1), { type: 'turn', stopReason: turn?.stopReason ?? null, usage: null, refusal: null }, label)
+  }
+})
+
+// MUTATION: swallow the failed turn-row append and the cause is lost while the seat still reports a recorded failure.
+test('a denied turn-row append still fails the seat and names the recording error; an earlier recording error wins', async () => {
+  const refused = { stopReason: null, usage: null, refusal: { code: 1, message: 'refused', errorKind: 'x' } }
+  for (const code of ['EPERM', 'EIO', 'EINTR']) {
+    const deny = (match, errorCode) => (...args) => {
+      if (String(args[1]).includes(match)) throw Object.assign(new Error(`${errorCode} injected`), { code: errorCode })
+      return appendFileSyncReal(...args)
+    }
+    const turnRow = await oneTurn(refused, { deps: { appendFileSync: deny('"type":"turn"', code) } })
+    assert.deepEqual(turnRow.result, { status: 'stopped', reason: 'seat-unmeasured', pr: null }, code)
+    assert.equal(turnRow.reads(), 0, code)
+    assert.equal(turnRow.verdicts[0].observation.error.code, code)
+    const earlier = await oneTurn(refused, { deps: { appendFileSync: (...args) => { if (String(args[1]).includes('chunk')) throw Object.assign(new Error('first'), { code }); return deny('"type":"turn"', 'EIO')(...args) } } })
+    assert.equal(earlier.verdicts[0].observation.error.code, code)
+    assert.equal(earlier.reads(), 0, code)
+  }
+})
+
+// MUTATION: append a turn row on success too and every accepted recording gains an extra line.
+test('an accepted turn adds no turn row and its envelope is read', async () => {
+  const run = await oneTurn({ stopReason: 'end_turn', usage: null, refusal: null })
+  assert.equal(run.reads() > 0, true)
+  assert.equal(run.rows.some((row) => row.type === 'turn'), false)
+  assert.equal(run.rows.length, 2)
 })
 
 // MUTATION: skip the lead turn's definition and a consulted lead runs with no charter or P2 example.

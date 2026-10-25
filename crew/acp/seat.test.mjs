@@ -249,10 +249,35 @@ test('the Pi launch runs this checkout bridge with the full provider/id model an
     const [, args, spawnOptions] = run.launches[0]
     const shell = args[1]
     assert.ok(shell.includes(resolve(ROOT, 'crew/pi/acp-bridge.mjs')))
-    assert.ok(shell.includes('--model') && shell.includes('openai/gpt-6.1-sol'))
+    assert.ok(shell.includes('--model') && shell.includes('openai-codex/gpt-6.1-sol'))
+    assert.ok(!shell.includes(' openai/gpt-6.1-sol'))
     assert.ok(shell.includes('--thinking') && shell.includes('high'))
     assert.equal(spawnOptions.env.CREW_PI_BIN, BIN)
   })
+})
+
+// MUTATION: pass definition.model to pi unchanged and an openai seat launches on the metered provider.
+test('a pi seat launches with the legacy provider mapping: openai becomes openai-codex, anthropic and meta stay', () => {
+  for (const [model, launched] of [['openai/gpt-6.1-sol', 'openai-codex/gpt-6.1-sol'], ['anthropic/claude-opus-4-6', 'anthropic/claude-opus-4-6'], ['meta/llama-5', 'meta/llama-5']]) {
+    use('pi-turn', { model }, (run) => {
+      assert.equal(run.error, undefined, model)
+      assert.equal(run.result.stopReason, 'end_turn', model)
+      const shell = run.launches[0][1][1]
+      assert.ok(shell.includes(launched), model)
+      assert.ok(launched === model || !shell.includes(model), model)
+    })
+  }
+})
+
+// MUTATION: drop the own-property guard and a prototype name or an unmapped provider launches.
+test('a pi seat with an unmapped or prototype provider is refused by name before any process or runtime exists', () => {
+  for (const provider of ['mistral', 'constructor']) {
+    use('pi-turn', { model: `${provider}/some-model` }, (run) => {
+      assert.match(run.error?.message ?? '', new RegExp(`no pi provider for roster provider.*${provider}`, 'i'), provider)
+      assert.equal(run.launches.length, 0, provider)
+      assert.deepEqual(run.leftover, [], provider)
+    })
+  }
 })
 
 test('Pi receives the same explicit skill paths as --skill arguments', () => {

@@ -44,7 +44,7 @@ function definitionFor({ role, seat }, tier, d) {
   const effective = { ...fields, ...override }
   const charters = [...body.matchAll(CHARTER_LINK)].map((link) => resolve(dirname(source), link[1]))
   return {
-    definition: { role, agent: seat.agent, model: `${seat.provider}/${seat.id}`, effort: seat.effort, writes: effective.writes ?? 'none', skills: effective.skills ?? [],
+    definition: { role, agent: seat.agent, model: `${seat.provider}/${seat.id}`, effort: seat.effort, writes: effective.writes ?? 'none', skills: effective.skills ?? [], requires: effective.requires ?? [],
       tools: effective.tools,
       wait_s: effective.wait_s,
       body },
@@ -114,6 +114,8 @@ export async function runLean(spec, deps = {}) {
       guardedAppend(sessionFile, `${JSON.stringify({ type: 'turn', stopReason: turn?.stopReason ?? null, usage: turn?.usage ?? null, refusal: turn?.refusal ?? null })}\n`, 'utf8')
       throw Object.assign(new Error(turn?.refusal?.message ?? 'ACP seat turn returned no stop reason'), { code: turn?.refusal?.code ?? null, errorKind: turn?.refusal?.errorKind ?? null })
     }
+    // Trusted runtime context for the loop's required-skill proof; never read from the seat's envelope.
+    return { definition, sessionFile }
   }
 
   let result

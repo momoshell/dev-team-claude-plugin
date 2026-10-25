@@ -40,6 +40,7 @@ function fakes(options = {}) {
     resolveAgents: () => ({ seats: Object.fromEntries(roles.map((role) => [role, { agent: 'pi', provider: 'test', id: role, effort: 'high', ...(options.bounds?.[role] ? { rounds: options.bounds[role] } : {}) }])), advisor: null }),
     mkdir: async (path, opts) => { calls.push('mkdir'); seen.mkdir = [path, opts] },
     readFile: async (path) => {
+      if (options.sessionError && path.endsWith('.session')) throw Object.assign(new Error('gone'), { code: options.sessionError })
       if (options.readError) throw Object.assign(new Error('denied'), { code: options.readError })
       return returns.get(path) ?? ''
     },
@@ -52,6 +53,10 @@ function fakes(options = {}) {
       let value = envelope(request)
       if (options.edit) value = options.edit(value, request) ?? value
       returns.set(request.returnPath, typeof value === 'string' ? value : JSON.stringify(value))
+      const recorded = options.recording?.(request)
+      if (!recorded) return undefined
+      if (recorded.rows) returns.set(`${request.returnPath}.session`, recorded.rows.map((r) => JSON.stringify(r)).join('\n'))
+      return { definition: recorded.definition, sessionFile: `${request.returnPath}.session` }
     },
     checkBaseline: measured('baseline', 'baseline' in options ? options.baseline : { accepted: true, reason: 'gate-failed', result: { ...green(), status: 'red', code: 1, reason: 'gate-failed', failingIds: ['A1'] } }),
     runGate: measured('gate', options.gate ?? { ...green(), failingIds: [] }),
@@ -598,11 +603,11 @@ test('a changed-path read that is denied, interrupted, non-green or malformed st
 })
 
 // MUTATION: import an old runtime module, or wire the loop into one, and the isolated lane is no longer isolated.
-test('the loop imports only builtins and the three contract modules, and only the lean bridge imports it', () => {
+test('the loop imports only builtins, the three contract modules and the skill proof, and only the lean bridge imports it', () => {
   const dir = fileURLToPath(new URL('.', import.meta.url))
   const source = readFileSync(join(dir, 'loop.mjs'), 'utf8')
   const specifiers = [...source.matchAll(/^(?:import|} from|export [^\n]* from)[^'\n]*'([^']+)'/gm)].map((m) => m[1]).sort()
-  assert.deepEqual(specifiers, ['./agents.mjs', './checks.mjs', './protocols.mjs', 'node:fs/promises', 'node:path'])
+  assert.deepEqual(specifiers, ['./agents.mjs', './checks.mjs', './protocols.mjs', './skills-proof.mjs', 'node:fs/promises', 'node:path'])
   const importers = readdirSync(dir, { recursive: true, withFileTypes: true })
     .filter((e) => e.isFile() && e.name.endsWith('.mjs') && !e.name.endsWith('.test.mjs') && e.name !== 'loop.mjs')
     .map((e) => join(e.parentPath, e.name))
@@ -647,4 +652,41 @@ test('an unmeasured suite or incomplete proof stops before any commit or publica
   const f = fakes({ proof: { status: 'green', reason: null, rows: [] } })
   assert.equal((await f.go()).status, 'stopped')
   assert.deepEqual([f.calls.includes('suite'), f.seen.commit, f.seen.publish], [false, undefined, undefined])
+})
+
+const callRow = (id, title, kind, rawInput) => ({ sessionId: 's', update: { sessionUpdate: 'tool_call', toolCallId: id, title, kind, status: 'in_progress', rawInput } })
+const LOAD = callRow('r1', 'read', 'read', { path: '/c/skills/alpha/SKILL.md' })
+const DONE = { sessionId: 's', update: { sessionUpdate: 'tool_call_update', toolCallId: 'r1', status: 'completed' } }
+const WRITE = callRow('w1', 'write', 'edit', { path: '/c/a.mjs' })
+const required = (rows) => ({ recording: () => ({ definition: { requires: ['alpha'], writes: 'repo' }, rows }) })
+
+// MUTATION: skip the proof in seatTurn and a seat that never loaded its required skill advances.
+test('a seat whose recording shows every required skill before its first write is accepted', async () => {
+  const f = fakes(required([LOAD, DONE, WRITE]))
+  assert.equal((await f.go()).status, 'done')
+})
+
+// MUTATION: accept a late load and a write before the skill passes.
+test('a required skill loaded after the first write, or never, refuses the envelope and nothing advances', async () => {
+  for (const rows of [[WRITE, LOAD, DONE], [LOAD, WRITE], [WRITE], [], [{ sessionId: 's', update: { sessionUpdate: 'agent_message_chunk' } }]]) {
+    const f = fakes(required(rows))
+    assert.deepEqual(await f.go(), stopped('envelope-refused'))
+    assert.deepEqual(f.rows.find((r) => r.event === 'envelope').defects, ['required-skills-unproven'])
+    assert.deepEqual(f.calls.filter((c) => c !== 'mkdir'), ['seat:planner'])
+  }
+})
+
+// MUTATION: treat an unreadable recording as proof.
+test('an unreadable recording refuses when a skill is required and is ignored when none is', async () => {
+  const f = fakes({ sessionError: 'ENOENT', recording: () => ({ definition: { requires: ['alpha'], writes: 'repo' } }) })
+  assert.deepEqual(await f.go(), stopped('envelope-refused'))
+  assert.deepEqual(f.rows.find((r) => r.event === 'envelope').defects, ['required-skills-unproven'])
+  const none = fakes({ sessionError: 'ENOENT', recording: () => ({ definition: { requires: [], writes: 'repo' } }) })
+  assert.equal((await none.go()).status, 'done')
+})
+
+// MUTATION: let a refused lead envelope through the proof.
+test('a lead whose recording does not show its required skill is refused', async () => {
+  const f = fakes({ spec: {}, lead: 'bounce', edit: (value) => (value.role === 'planner' ? { ...value, status: 'insufficient' } : value), recording: (r) => (r.role === 'lead' ? { definition: { requires: ['alpha'], writes: 'task-dir' }, rows: [] } : null) })
+  assert.deepEqual(await f.go(), stopped('lead-refused'))
 })

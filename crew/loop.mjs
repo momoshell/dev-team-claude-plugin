@@ -10,6 +10,7 @@ import {
   CHECK_REASONS, checkBaseline, commitChanges, openPullRequest, proveMutations, rebaseBranch, runGate, runSuite,
 } from './checks.mjs'
 import { TIERS, validateEnvelope } from './protocols.mjs'
+import { proveRequiredSkills } from './skills-proof.mjs'
 
 export const DEFAULT_ROUNDS = 2
 export const LOOP_REASONS = Object.freeze([
@@ -125,7 +126,8 @@ export async function runLoop(spec, deps = {}) {
         const returnPath = join(spec.taskDir, `${role}-${turn}.json`)
         let failure = null
         let parsed = null
-        try { await d.runSeat({ role, seat: seats[role], id, returnPath, brief: spec.brief, planPath, gatePath, feedback, ...(role === 'reviewer' ? { changedPaths } : {}) }) } catch (error) { failure = { reason: 'seat-unmeasured', error: describe(error) } }
+        let recording = null
+        try { recording = await d.runSeat({ role, seat: seats[role], id, returnPath, brief: spec.brief, planPath, gatePath, feedback, ...(role === 'reviewer' ? { changedPaths } : {}) }) } catch (error) { failure = { reason: 'seat-unmeasured', error: describe(error) } }
         let raw = null
         if (!failure) {
           try { raw = await d.readFile(returnPath, 'utf8') } catch (error) { failure = { reason: 'seat-unmeasured', error: describe(error) } }
@@ -135,6 +137,11 @@ export async function runLoop(spec, deps = {}) {
           try { parsed = JSON.parse(raw) } catch (error) { failure = { reason: 'envelope-refused', error: describe(error) } }
         }
         const checked = failure ? { envelope: null, defects: [] } : validateEnvelope(role, parsed)
+        // The proof reads the seat's own recording, after the schema and id are sound.
+        if (!failure && checked.defects.length === 0 && checked.envelope?.id === id && recording?.definition && recording.sessionFile) {
+          const unproven = await proveRequiredSkills({ definition: recording.definition, sessionFile: recording.sessionFile, readFile: d.readFile })
+          if (unproven) checked.defects.push(unproven)
+        }
         const valid = checked.defects.length === 0 && checked.envelope?.id === id
         await emit('envelope', { role, id, returnPath, parsed, defects: checked.defects, error: failure?.error ?? null })
         if (!failure && !valid) failure = { reason: 'envelope-refused', defects: checked.defects }

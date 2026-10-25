@@ -485,7 +485,7 @@ test('every turn gets its role definition, the complete brief and P2, and its ow
     const source = join(AGENTS, `${role}.md`)
     const { body, fields } = parseAgent(readFileSync(source, 'utf8'))
     const cell = seats[role]
-    assert.deepEqual(request.definition, { role, agent: cell.agent, model: `${cell.provider}/${cell.id}`, effort: cell.effort, writes: { ...fields, ...fields.tiers?.build }.writes, skills: [], tools: { ...fields, ...fields.tiers?.build }.tools, wait_s: { ...fields, ...fields.tiers?.build }.wait_s, body })
+    assert.deepEqual(request.definition, { role, agent: cell.agent, model: `${cell.provider}/${cell.id}`, effort: cell.effort, writes: { ...fields, ...fields.tiers?.build }.writes, skills: [], requires: [], tools: { ...fields, ...fields.tiers?.build }.tools, wait_s: { ...fields, ...fields.tiers?.build }.wait_s, body })
     assert.equal(request.taskDir, f.spec.taskDir)
     assert.equal(request.cwd, f.spec.cwd)
     assert.notEqual(f.spec.taskDir, request.cwd)
@@ -907,4 +907,27 @@ test('a started lean spec reaches the PR with its exact P1 source and measured b
   assert.equal(seen.publish.title, seen.commit.subject)
   assert.equal(seen.publish.body, ['Source: "issue 1961"', '', '## Acceptance', '- RV1', '', '## Measurements', '- Baseline gate: red; failing ids: RV1.', '- Gate: green.', '- Mutations: 1/1 killed (RV1: killed).', '- Suite: green; exit 0.'].join('\n'))
   assert.equal(spec.source, 'issue 1961')
+})
+
+// MUTATION: drop effective.requires from the dispatched definition and the proof has nothing to check.
+test('the requires a seat receives are the effective definition list, tier override included, and its recording decides the envelope', async () => {
+  const planner = join(AGENTS, 'planner.md')
+  const edit = (from, to) => (path, ...args) => {
+    const text = readFileSync(path, ...args)
+    return path === planner ? text.replace(from, to) : text
+  }
+  const load = JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'tool_call', toolCallId: 'r1', title: 'read', kind: 'read', status: 'in_progress', rawInput: { path: '/c/skills/alpha/SKILL.md' } } })
+  const loaded = JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'tool_call_update', toolCallId: 'r1', status: 'completed' } })
+  const based = leanFixture({ deps: { readFileSync: edit('advisor: null', 'advisor: null\nrequires: ["alpha"]') } })
+  assert.equal((await based.go()).status, 'stopped')
+  assert.deepEqual(based.requests[0].definition.requires, ['alpha'])
+  const tiered = leanFixture({ deps: { readFileSync: edit(/tiers: .*/, 'requires: ["base"]\ntiers: {"build":{"requires":["alpha"]}}') } })
+  const answered = tiered.options.runAcpSeat
+  tiered.options.runAcpSeat = async (input) => {
+    const turn = await answered(input)
+    if (input.definition.role === 'planner') input.deps.appendFileSync(input.sessionFile, `${load}\n${loaded}\n`, 'utf8')
+    return turn
+  }
+  assert.equal((await tiered.go()).status, 'done')
+  assert.deepEqual(tiered.requests[0].definition.requires, ['alpha'])
 })

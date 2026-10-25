@@ -152,3 +152,20 @@ test('a read recorded with locations but no input is not a load', async () => {
   const located = row({ sessionUpdate: 'tool_call', toolCallId: 'loc', title: 'read', kind: 'read', status: 'in_progress', locations: [{ path: '/c/skills/alpha/SKILL.md' }] })
   assert.equal(await prove([located, update('loc', 'completed'), write()]), 'required-skills-unproven')
 })
+
+// MUTATION: refuse a quoted cat path, or let the old tracker's name pattern judge a dotted skill, and these refuse.
+test('a quoted cat path with spaces and a dotted skill name both load', async () => {
+  const spaced = proveRequiredSkills({ definition: { agent: 'pi', requires: ['alpha'], writes: 'task-dir' }, sessionFile: 'x', skillsRoot: '/c space/skills',
+    readFile: async () => [call('q', 'bash', 'execute', { command: 'cat "/c space/skills/alpha/SKILL.md"' }), update('q', 'completed'), write()].join('\n') })
+  assert.equal(await spaced, null)
+  const dotted = { agent: 'claude', role: 'planner', requires: ['alpha.v1'], writes: 'task-dir' }
+  assert.equal(await prove([skill('crew-skills-planner:alpha.v1'), call('cw', 'Write', 'edit', {}, true)], dotted), null)
+  assert.equal(await prove([piLoad('alpha.v1'), write()], { agent: 'pi', requires: ['alpha.v1'], writes: 'task-dir' }), null)
+})
+
+// MUTATION: let any agent but pi prove a skill by a file read and an unnamed agent passes.
+test('a seat whose agent is neither claude nor pi proves nothing', async () => {
+  for (const agent of [undefined, 'other']) {
+    assert.equal(await prove([piLoad(), write()], { agent, requires: ['alpha'], writes: 'task-dir' }), 'required-skills-unproven', String(agent))
+  }
+})

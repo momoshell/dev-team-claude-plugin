@@ -1,14 +1,14 @@
 // Required-skill proof for lean seats (ADR-052): the envelope of a seat whose definition `requires`
 // skills is accepted only if its session recording shows each one fully loaded before the seat's
-// first write. Read only: it reuses the old path's load tracker and judges recorded rows, never grants.
+// first write. Read only: it judges recorded rows and never grants.
 import { readFile as fsReadFile } from 'node:fs/promises'
 import { isAbsolute, join, normalize, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createSkillLoadTracker } from './headless.mjs'
 
 // The skills root a lean seat is granted from (crew/acp/seat.mjs SKILLS_ROOT).
 const SKILLS_ROOT = fileURLToPath(new URL('../skills', import.meta.url))
-const CAT = /^cat\s+(['"]?)([^'"\s]+)\1$/
+// Exactly `cat <path>`, the path bare or wholly single- or double-quoted (a quoted path may hold spaces).
+const CAT = /^cat\s+(?:"([^"]+)"|'([^']+)'|([^\s'"]+))$/
 
 const UNPROVEN = 'required-skills-unproven'
 const WRITE_TOOLS = new Set(['edit', 'write', 'multiedit', 'notebookedit'])
@@ -54,7 +54,7 @@ function toolNameOf(call) {
   return call.kind ?? 'other'
 }
 
-// The load a completed call shows, as [toolName, input] for the tracker, or null when it shows none.
+// The required skill a completed call loads, or null when it loads none.
 // A claude seat loads its granted skills only through its own plugin, `crew-skills-<role>`
 // (adapter-claude writeSeatSkills): a Skill call under that namespace counts, a bare or foreign name
 // does not, and neither does a file read. A pi seat is granted SKILL.md paths (`--skill`), so for it
@@ -64,17 +64,19 @@ function toolNameOf(call) {
 function loadOf(name, input, { agent, role, required, skillsRoot, cwd }) {
   if (agent === 'claude') {
     const own = `crew-skills-${role}:`
-    return name === 'Skill' && typeof input.skill === 'string' && input.skill.startsWith(own)
-      ? [name, { ...input, skill: input.skill.slice(own.length) }]
-      : null
+    const skill = name === 'Skill' && typeof input.skill === 'string' && input.skill.startsWith(own) ? input.skill.slice(own.length) : null
+    return required.includes(skill) ? skill : null
   }
   if (agent !== 'pi') return null
   let path
-  if (name === 'bash') path = typeof input.command === 'string' ? CAT.exec(input.command.trim())?.[2] : undefined
+  if (name === 'bash') {
+    const cat = typeof input.command === 'string' ? CAT.exec(input.command.trim()) : null
+    path = cat ? cat[1] ?? cat[2] ?? cat[3] : undefined
+  }
   else if (name.toLowerCase() === 'read' && input.offset == null && input.limit == null) path = input.path ?? input.file_path
   if (typeof path !== 'string' || path === '' || (!isAbsolute(path) && typeof cwd !== 'string')) return null
   const full = isAbsolute(path) ? normalize(path) : resolve(cwd, path)
-  return required.some((skill) => full === join(skillsRoot, skill, 'SKILL.md')) ? ['read', { path: full }] : null
+  return required.find((skill) => full === join(skillsRoot, skill, 'SKILL.md')) ?? null
 }
 
 export async function proveRequiredSkills({ definition, sessionFile, cwd, readFile = fsReadFile, skillsRoot = SKILLS_ROOT }) {
@@ -87,7 +89,7 @@ export async function proveRequiredSkills({ definition, sessionFile, cwd, readFi
     calls = foldCalls(raw)
   } catch { return UNPROVEN }
   const scope = { agent: definition.agent, role: definition.role, required, skillsRoot, cwd }
-  const tracker = createSkillLoadTracker()
+  const loadedAt = new Map()
   let firstWrite = null
   for (const call of calls) {
     const name = toolNameOf(call)
@@ -97,13 +99,9 @@ export async function proveRequiredSkills({ definition, sessionFile, cwd, readFi
     if (writes && firstWrite === null) firstWrite = call.seq
     // A load needs the recorded input: locations alone cannot show whether a read was whole.
     if (call.loadAt === null || call.status !== 'completed' || !call.input) continue
-    const load = loadOf(name, call.input, scope)
-    if (load) tracker.observe(load[0], load[1], null, call.loadAt, call.id)
+    const skill = loadOf(name, call.input, scope)
+    if (skill !== null) loadedAt.set(skill, Math.min(loadedAt.get(skill) ?? Infinity, call.loadAt))
   }
-  const { loads } = tracker.snapshot()
-  for (const skill of required) {
-    const seqs = loads.filter((entry) => entry.skill === skill && entry.slice === null).map((entry) => entry.seq)
-    if (seqs.length === 0 || (firstWrite !== null && Math.min(...seqs) >= firstWrite)) return UNPROVEN
-  }
-  return null
+  const proven = (skill) => loadedAt.has(skill) && (firstWrite === null || loadedAt.get(skill) < firstWrite)
+  return required.every(proven) ? null : UNPROVEN
 }

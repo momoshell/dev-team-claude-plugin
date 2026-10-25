@@ -12,7 +12,12 @@ import * as piAdapter from '../adapters/adapter-pi.mjs'
 
 const ROLE = 'seat'
 const WRITES = Object.freeze(['none', 'task-dir', 'repo'])
-const EFFORTS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max'])
+const DEFAULT_TOOLS = Object.freeze({
+  repo: 'Read,Edit,Write,Glob,Grep,Bash',
+  'task-dir': 'Read,Glob,Grep,Bash,Write',
+  none: 'Read,Glob,Grep',
+})
+const EFFORTS =Object.freeze(['low', 'medium', 'high', 'xhigh', 'max'])
 const MODEL = /^[a-z0-9-]+\/[A-Za-z0-9._-]+$/
 const SKILLS_ROOT = fileURLToPath(new URL('../../skills', import.meta.url))
 
@@ -98,6 +103,15 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
   const piModel = definition.model
   const env = deps.env ?? process.env
   const isClaude = definition.agent === 'claude'
+  let tools
+  let deny = ''
+  if (isClaude) {
+    const requestedTools = definition.tools === undefined ? DEFAULT_TOOLS[writes].split(',') : definition.tools
+    if (!Array.isArray(requestedTools) || !requestedTools.every((tool) => typeof tool === 'string' && tool.trim() !== '')) throw new Error('tools must be a list of nonempty strings')
+    tools = [...new Set(requestedTools.map((tool) => tool.trim()))].join(',')
+    if (!tools) throw Object.assign(new Error('Claude seat requires at least one tool'), { code: 'ACP_EMPTY_TOOLS' })
+    deny = writes === 'task-dir' ? 'Edit,NotebookEdit' : ''
+  }
   const claudeAcp = isClaude ? resolveBinary('claude ACP', binaries.claudeAcp, 'claude-agent-acp', env) : null
   const claude = isClaude ? resolveBinary('claude', binaries.claude, 'claude', env) : null
   const pi = isClaude ? null : resolveBinary('pi', binaries.pi, 'pi', env)
@@ -158,7 +172,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
     const promptFile = join(runtime, 'system.md')
     writeFileSync(promptFile, '')
     const writableDirs = writes === 'none' || !laneTaskDir ? [] : [laneTaskDir]
-    const spec = { role, cwd: workdir, effort: definition.effort, promptFile, taskDir: runtime, grants, deny: '', writableDirs }
+    const spec = { role, cwd: workdir, effort: definition.effort, promptFile, taskDir: runtime, grants, tools, deny, writableDirs }
     let launch
     if (isClaude) {
       claudeAdapter.writeSeatSkills({ taskDir: runtime, role, grants }, deps.skillDeps ?? {})

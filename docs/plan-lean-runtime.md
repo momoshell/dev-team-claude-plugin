@@ -177,14 +177,14 @@ Sol review, because the current factory is what is being replaced. From phase 4,
 
 ### Phase 3: ACP seats and the minimal loop
 
-- [ ] 3.1 `crew/acp/`: client, claude and pi launch, a session file per seat (P4). First check: whether
+- [x] 3.1 `crew/acp/`: client, claude and pi launch, a session file per seat (P4). First check: whether
       `claude-agent-acp` loads plugin skills and agent definitions as the headless claude seat does.
 - [ ] 2.2 `requires` skill proof from the session file, refused in the envelope check. Moved here from
       phase 2 (D12).
-- [ ] 3.2 `crew show <lane> [seat]` prints a seat's full session from its file. `crew show` over today's
+- [x] 3.2 `crew show <lane> [seat]` prints a seat's full session from its file. `crew show` over today's
       headless streams shipped in #1974; it moves to the session files once 3.1 exists.
-- [ ] 3.3 P2 envelope schemas per role in `crew/protocols.mjs`.
-- [ ] 3.4 `crew/checks.mjs`: gate red and green, mutation kill, suite with timeout and process-group kill,
+- [x] 3.3 P2 envelope schemas per role in `crew/protocols.mjs`.
+- [x] 3.4 `crew/checks.mjs`: gate red and green, mutation kill, suite with timeout and process-group kill,
       commit, rebase, PR.
 - [ ] 3.5 `crew/loop.mjs` behind `crew start --loop lean`, with the `stepped` and `finish` shapes and the
       arm fields (advisor, edit assist, codemode, lab, readgate, memory, extensions) wired from frontmatter.

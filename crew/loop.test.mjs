@@ -9,15 +9,15 @@ import { DEFAULT_ROUNDS, LOOP_REASONS, runLoop } from './loop.mjs'
 const PR = { number: 73, url: 'https://example.test/pr/73', state: 'OPEN', headRefName: 'lane', baseRefName: 'main' }
 const finding = { id: 'R1', severity: 'must-fix', location: 'lib.mjs:1', summary: 'Fix the defect' }
 const green = () => ({ status: 'green', reason: null, code: 0, signal: null, stdout: '', stderr: '', timedOut: false })
-const STAGES = ['plan', 'baseline', 'build', 'gate', 'mutations', 'review', 'suite', 'paths', 'commit', 'fetch', 'rebase', 'publish']
-const SUCCESS = ['seat:planner', 'baseline', 'seat:builder', 'gate', 'mutations', 'seat:reviewer', 'suite', 'paths', 'commit', 'fetch', 'rebase', 'publish']
+const STAGES = ['plan', 'baseline', 'build', 'gate', 'mutations', 'review-paths', 'review', 'suite', 'paths', 'commit', 'fetch', 'rebase', 'publish']
+const SUCCESS = ['seat:planner', 'baseline', 'seat:builder', 'gate', 'mutations', 'review-paths', 'seat:reviewer', 'suite', 'paths', 'commit', 'fetch', 'rebase', 'publish']
 const MUTATION = { check: 'A1', file: 'lib.mjs', find: 'old', replace: 'new' }
 
 // Every effect is a recorded call; nothing touches a model, git, gh, the network or the disk.
 // A seat "returns" by writing its envelope into a virtual file the loop then reads back.
 function fakes(options = {}) {
   const calls = [], rows = [], requests = [], seen = {}, returns = new Map()
-  let reviewTurns = 0
+  let reviewTurns = 0, reviewReads = 0
   const spec = {
     id: 'lane', cwd: '/virtual/checkout', taskDir: '/virtual/task', tier: 'build', shape: 'standard', brief: 'operator task',
     acceptance: ['A1'], source: 'issue 12', branch: 'lane', base: 'main', closes: [12], refs: [13],
@@ -58,8 +58,11 @@ function fakes(options = {}) {
     proveMutations: measured('mutations', 'proof' in options ? options.proof : { status: 'green', reason: null, rows: [{ check: 'A1', outcome: 'killed', reason: null }] }),
     runSuite: measured('suite', options.suite ?? green()),
     commitChanges: measured('commit', options.commit ?? { status: 'green', reason: null, head: 'a'.repeat(40), files: ['lib.mjs'] }),
+    // the status probe before the suite measures the reviewer's paths, the one after it measures the commit's
     run: (input) => input.args.includes('status')
-      ? measured('paths', options.pathsResult ?? (() => ({ ...green(), stdout: options.paths ?? ' M lib.mjs\0' })))(input)
+      ? (calls.includes('suite')
+        ? measured('paths', options.pathsResult ?? (() => ({ ...green(), stdout: options.paths ?? ' M lib.mjs\0' })))
+        : measured('review-paths', options.reviewResult ?? (() => ({ ...green(), stdout: [options.reviewPaths].flat()[Math.min(reviewReads++, [options.reviewPaths].flat().length - 1)] ?? ' M lib.mjs\0' }))))(input)
       : measured('fetch', options.fetch ?? green())(input),
     rebaseBranch: measured('rebase', options.rebase ?? { status: 'green', reason: null, head: 'b'.repeat(40) }),
     openPullRequest: measured('publish', options.publish ?? { status: 'green', reason: null, pr: PR }),
@@ -81,6 +84,7 @@ test('a green run walks every stage in order and returns the measured PR with ea
   assert.deepEqual(f.seen.gate, f.seen.baseline)
   assert.deepEqual(f.seen.mutations, { cwd: '/virtual/checkout', gatePath: '/virtual/task/gate.mjs', checks: ['A1'], mutations: [MUTATION], timeoutMs: 5000 })
   assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 5000 })
+  assert.deepEqual(f.seen['review-paths'], f.seen.paths)
   assert.deepEqual(f.seen.paths, { cwd: '/virtual/checkout', command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs: 5000 })
   assert.deepEqual(f.seen.commit, { cwd: '/virtual/checkout', files: ['lib.mjs'], subject: 'fix(crew): planned lane', body: BODY, closes: [12], refs: [13], timeoutMs: 5000 })
   assert.deepEqual(f.seen.fetch, { cwd: '/virtual/checkout', command: 'git', args: ['fetch', 'origin'], timeoutMs: 5000 })
@@ -88,6 +92,8 @@ test('a green run walks every stage in order and returns the measured PR with ea
   assert.deepEqual(f.seen.publish, { cwd: '/virtual/checkout', branch: 'lane', base: 'main', title: 'fix(crew): planned lane', body: BODY, closes: [12], refs: [13], timeoutMs: 5000 })
   const planner = f.requests[0]
   assert.deepEqual(Object.keys(planner).sort(), ['brief', 'feedback', 'gatePath', 'id', 'planPath', 'returnPath', 'role', 'seat'])
+  assert.deepEqual(Object.keys(f.requests[1]).sort(), Object.keys(planner).sort())
+  assert.deepEqual(Object.keys(f.requests[2]).sort(), [...Object.keys(planner), 'changedPaths'].sort())
   assert.deepEqual(f.requests[1], { ...f.requests[1], role: 'builder', planPath: '/virtual/task/plan.md', gatePath: '/virtual/task/gate.mjs', feedback: [] })
   assert.equal(new Set(f.requests.map((r) => r.id)).size, f.requests.length)
   assert.equal(new Set(f.requests.map((r) => r.returnPath)).size, f.requests.length)
@@ -99,7 +105,7 @@ test('a suite timeout override reaches only the suite and absent overrides inher
     const f = fakes({ spec: { suite: { command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs } } })
     assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
     assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs })
-    for (const stage of ['baseline', 'gate', 'mutations', 'paths', 'commit', 'fetch', 'rebase', 'publish']) assert.equal(f.seen[stage].timeoutMs, 5000, stage)
+    for (const stage of ['baseline', 'gate', 'mutations', 'review-paths', 'paths', 'commit', 'fetch', 'rebase', 'publish']) assert.equal(f.seen[stage].timeoutMs, 5000, stage)
   }
   const inherit = fakes({ spec: { suite: { command: 'node', timeoutMs: undefined } } })
   await inherit.go()
@@ -196,7 +202,7 @@ test('changes-needed carries the exact findings to the next build and repeats ga
   assert.equal(builders.length, 2)
   assert.deepEqual(builders[0].feedback, [])
   assert.deepEqual(builders[1].feedback, [finding])
-  assert.deepEqual(f.calls.slice(1, 12), ['seat:planner', 'baseline', 'seat:builder', 'gate', 'mutations', 'seat:reviewer', 'seat:builder', 'gate', 'mutations', 'seat:reviewer', 'suite'])
+  assert.deepEqual(f.calls.slice(1, 14), ['seat:planner', 'baseline', 'seat:builder', 'gate', 'mutations', 'review-paths', 'seat:reviewer', 'seat:builder', 'gate', 'mutations', 'review-paths', 'seat:reviewer', 'suite'])
   assert.equal(f.calls.filter((c) => c === 'baseline').length, 1)
   assert.equal(count(f, 'planner'), 1)
 })
@@ -367,7 +373,7 @@ test('every started stage ends on success and refusal, in order', async () => {
   assert.ok(ok.rows.every((r) => r.lane === 'lane' && typeof r.event === 'string' && 'stage' in r))
   const refused = fakes({ suite: { ...green(), status: 'red', code: 1, reason: 'exit-nonzero' } })
   await refused.go()
-  assert.deepEqual(pairs(refused.rows), STAGES.slice(0, 7).flatMap((s) => [['stage-start', s], ['stage-end', s]]))
+  assert.deepEqual(pairs(refused.rows), STAGES.slice(0, 8).flatMap((s) => [['stage-start', s], ['stage-end', s]]))
   const thrown = fakes({ deps: { mkdir: async () => {}, resolveAgents: undefined } })
   assert.deepEqual(await thrown.go(), stopped('invalid-input'))
   const lead = fakes({ edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate' } : v })
@@ -397,7 +403,7 @@ test('the journal carries each envelope, verdict, check, commit and PR observati
   assert.deepEqual(events('envelope').map((r) => [r.role, r.id, r.parsed.status, r.defects, r.error]), [
     ['planner', 'lane.planner.1', 'done', [], null], ['builder', 'lane.builder.2', 'done', [], null], ['reviewer', 'lane.reviewer.3', 'done', [], null],
   ])
-  assert.deepEqual(events('check').map((r) => r.check), ['baseline', 'gate', 'mutations', 'suite', 'paths', 'commit', 'fetch', 'rebase', 'publish'])
+  assert.deepEqual(events('check').map((r) => r.check), ['baseline', 'gate', 'mutations', 'review-paths', 'suite', 'paths', 'commit', 'fetch', 'rebase', 'publish'])
   assert.deepEqual(events('check')[0].result.result.failingIds, ['A1'])
   assert.deepEqual(events('verdict').map((r) => [r.status, r.verdict]), [['reviewed', 'pass']])
   assert.deepEqual(events('commit').map((r) => r.head), ['a'.repeat(40)])
@@ -505,6 +511,58 @@ test('the commit receives the paths git reports after the suite, both rename end
     const order = f.calls.filter((c) => ['suite', 'paths', 'commit'].includes(c))
     assert.deepEqual(order, ['suite', 'paths', 'commit'])
   }
+})
+
+// MUTATION: reuse the first measurement, the caller's list or an unparsed line and a reviewer sees a stale, partial or lost path set.
+test('every reviewer turn receives the paths git reports at that round, both rename ends and odd names included', async () => {
+  const cases = [
+    [' M src/a.mjs\0?? new file.txt\0R  renamed.mjs\0old.mjs\0 D deleted.mjs\0', ['src/a.mjs', 'new file.txt', 'renamed.mjs', 'old.mjs', 'deleted.mjs']],
+    ['C  copy.mjs\0src.mjs\0', ['copy.mjs', 'src.mjs']],
+    ['MM both.mjs\0A  both.mjs\0', ['both.mjs']],
+    ['?? line\nbreak.txt\0?? "quoted".txt\0', ['line\nbreak.txt', '"quoted".txt']],
+    ['', []],
+  ]
+  for (const [reviewPaths, expected] of cases) {
+    const f = fakes({ reviewPaths })
+    assert.equal((await f.go()).status, 'done', reviewPaths)
+    assert.deepEqual(f.requests.filter((r) => r.role === 'reviewer').map((r) => r.changedPaths), [expected], reviewPaths)
+  }
+  const rounds = fakes({ review: 1, spec: { files: ['caller-lie.mjs'] }, reviewPaths: [' M first.mjs\0', ' M second.mjs\0?? third.txt\0'], paths: ' M commit-only.mjs\0' })
+  assert.equal((await rounds.go()).status, 'done')
+  assert.deepEqual(rounds.requests.filter((r) => r.role === 'reviewer').map((r) => r.changedPaths), [['first.mjs'], ['second.mjs', 'third.txt']])
+  assert.deepEqual(rounds.seen.commit.files, ['commit-only.mjs'])
+  assert.deepEqual(rounds.calls.filter((c) => c.endsWith('paths')), ['review-paths', 'review-paths', 'paths'])
+  assert.equal(rounds.requests.filter((r) => r.role !== 'reviewer').some((r) => 'changedPaths' in r), false)
+})
+
+// MUTATION: dispatch the reviewer anyway when the status read is unusable and the review runs on an unmeasured path set.
+test('a reviewer path read that is denied, interrupted, non-green or malformed stops before the reviewer, suite and commit', async () => {
+  const bad = (fields) => ({ reviewResult: { ...green(), stdout: ' M a.mjs\0', ...fields } })
+  const cases = {
+    'EPERM': { deps: { run: async () => { throw Object.assign(new Error('denied'), { code: 'EPERM' }) } } },
+    'ENOENT': bad({ status: 'unmeasured', reason: 'spawn-failed', code: null, stdout: '' }),
+    'EINTR': bad({ status: 'unmeasured', reason: 'interrupted', code: null, signal: 'SIGINT' }),
+    'red': bad({ status: 'red', reason: 'exit-nonzero', code: 128 }),
+    'signal': bad({ signal: 'SIGKILL' }),
+    'timeout': bad({ timedOut: true }),
+    'nonzero green': bad({ code: 1 }),
+    'no stdout': bad({ stdout: undefined }),
+    'truncated': bad({ stdout: ' M a.mjs' }),
+    'dangling rename': bad({ stdout: 'R  new.mjs\0' }),
+    'unsafe': bad({ stdout: '?? ../escape\0' }),
+    'git dir': bad({ stdout: ' M .git/config\0' }),
+  }
+  for (const [name, options] of Object.entries(cases)) {
+    const f = fakes(options)
+    assert.deepEqual(await f.go(), stopped('paths-unmeasured'), name)
+    assert.equal(count(f, 'reviewer'), 0, name)
+    for (const effect of ['suite', 'paths', 'commit', 'fetch', 'rebase', 'publish']) assert.equal(f.calls.includes(effect), false, `${name} ${effect}`)
+    assert.equal(f.rows.find((r) => r.event === 'verdict' && r.status === 'stopped').reason, 'paths-unmeasured', name)
+  }
+  const second = fakes({ review: 1, deps: { run: (() => { let reads = 0; return async (input) => ++reads === 1 ? { ...green(), stdout: ' M a.mjs\0' } : { ...green(), stdout: ' M a.mjs' } })() } })
+  assert.deepEqual(await second.go(), stopped('paths-unmeasured'))
+  assert.equal(count(second, 'reviewer'), 1)
+  assert.equal(second.calls.includes('suite'), false)
 })
 
 // MUTATION: commit anyway when the status read is unusable and unmeasured paths are committed as an empty list.

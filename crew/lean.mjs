@@ -64,6 +64,7 @@ function promptFor({ request, spec, source, charters, body }) {
     brief,
     ...(planPath ? ['', `Plan path: ${planPath}`] : []),
     ...(gatePath ? [`Gate path: ${gatePath}`] : []),
+    ...(role === 'reviewer' ? ['', '## Changed paths', ...request.changedPaths.map((path) => `- ${JSON.stringify(path)}`)] : []),
     '',
     '## Feedback',
     JSON.stringify(feedback ?? []),

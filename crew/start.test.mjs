@@ -428,7 +428,7 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
   }
   mkdirSync(spec.cwd, { recursive: true })
   const requests = [], logs = [], reviews = answers.reviews ?? ['pass']
-  let review = 0
+  let review = 0, reads = 0
   const envelope = (role, id) => {
     const n = Number(id.split('.').at(-1))
     const own = answers[`${role}.${n}`]
@@ -459,7 +459,7 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
       commitChanges: async () => ({ status: 'green', reason: null, head: 'a'.repeat(40) }),
       rebaseBranch: async () => ({ status: 'green', reason: null, head: 'b'.repeat(40) }),
       openPullRequest: async () => ({ status: 'green', reason: null, pr: { number: 7, url: 'https://example.test/7' } }),
-      run: async (input) => input.args.includes('status') ? { ...GREEN, stdout: status } : GREEN,
+      run: async (input) => input.args.includes('status') ? { ...GREEN, stdout: [status].flat()[Math.min(reads++, [status].flat().length - 1)] } : GREEN,
       ...loopDeps,
     },
     ...deps,
@@ -506,6 +506,25 @@ test('every turn gets its role definition, the complete brief and P2, and its ow
   assert.match(f.requests[3].prompt, /redo-this/)
   assert.equal(new Set(f.requests.map((r) => r.sessionFile)).size, 5)
   assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
+})
+
+// MUTATION: drop the changed-path section from the reviewer prompt and the reviewer is told nothing about untracked or renamed files.
+test('each reviewer prompt lists that round\'s measured paths as JSON-quoted bullets and no other seat gets the section', async () => {
+  const f = leanFixture({
+    answers: { reviews: ['changes-needed', 'pass'] },
+    status: [' M src/a.mjs\0?? untracked file.txt\0?? line\nbreak.txt\0?? "quoted".txt\0R  moved.mjs\0old.mjs\0', '', ' M commit-only.mjs\0'],
+  })
+  assert.equal((await f.go()).status, 'done')
+  const section = (prompt) => (prompt.split('\n## Changed paths\n')[1] ?? '').split('\n## ')[0].split('\n').filter((line) => line.startsWith('- '))
+  const reviewers = f.requests.filter((r) => r.definition.role === 'reviewer')
+  assert.deepEqual(reviewers.map((r) => section(r.prompt)), [
+    ['- "src/a.mjs"', '- "untracked file.txt"', '- "line\\nbreak.txt"', '- "\\"quoted\\".txt"', '- "moved.mjs"', '- "old.mjs"'],
+    [],
+  ])
+  assert.match(reviewers[1].prompt, /^## Changed paths\n\n## Feedback$/m)
+  for (const request of f.requests.filter((r) => r.definition.role !== 'reviewer')) assert.doesNotMatch(request.prompt, /## Changed paths/)
+  const recorded = JSON.parse(readFileSync(reviewers[0].sessionFile, 'utf8').split('\n')[0])
+  assert.equal(recorded.text, reviewers[0].prompt)
 })
 
 // MUTATION: derive writes from the role instead of the effective definition and a tier override or edited file is ignored.

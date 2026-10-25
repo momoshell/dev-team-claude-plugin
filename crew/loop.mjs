@@ -76,6 +76,7 @@ export async function runLoop(spec, deps = {}) {
   let turn = 0
   let planPath = null
   let gatePath = null
+  let changedPaths = []
 
   const emit = async (event, fields) => {
     const row = { event, lane: spec.id, stage: where, ...fields }
@@ -124,7 +125,7 @@ export async function runLoop(spec, deps = {}) {
         const returnPath = join(spec.taskDir, `${role}-${turn}.json`)
         let failure = null
         let parsed = null
-        try { await d.runSeat({ role, seat: seats[role], id, returnPath, brief: spec.brief, planPath, gatePath, feedback }) } catch (error) { failure = { reason: 'seat-unmeasured', error: describe(error) } }
+        try { await d.runSeat({ role, seat: seats[role], id, returnPath, brief: spec.brief, planPath, gatePath, feedback, ...(role === 'reviewer' ? { changedPaths } : {}) }) } catch (error) { failure = { reason: 'seat-unmeasured', error: describe(error) } }
         let raw = null
         if (!failure) {
           try { raw = await d.readFile(returnPath, 'utf8') } catch (error) { failure = { reason: 'seat-unmeasured', error: describe(error) } }
@@ -193,6 +194,11 @@ export async function runLoop(spec, deps = {}) {
         && acceptance.every((id) => rows.filter((row) => row?.check === id && row.outcome === 'killed' && row.reason === null).length === 1)
       if (!proofOK) return stop(proof.reason ?? 'mutation-unmeasured', proof)
       measurements.push(`- Mutations: ${rows.filter((row) => row.outcome === 'killed').length}/${acceptance.length} killed (${rows.map((row) => `${row.check}: ${row.outcome}`).join(', ')}).`)
+
+      // The reviewer is told what git reports changed now, remeasured every round; an unreadable status stops the lane.
+      const status = await stage('review-paths', () => callCheck('review-paths', d.run, { cwd, command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs }, { command: true }))
+      changedPaths = status.status === 'green' && typeof status.stdout === 'string' ? parseChangedPaths(status.stdout) : null
+      if (changedPaths === null) return stop('paths-unmeasured', status)
 
       const reviewed = await stage('review', () => seatTurn('reviewer'))
       if (reviewed.halt) return reviewed.halt

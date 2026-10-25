@@ -128,3 +128,11 @@ test('a relative read resolves against the seat cwd before it is compared with t
   assert.equal(await at('/c', [cat, update('cat', 'completed'), write()]), null)
   assert.equal(await at('/worktree', [rel, update('rel', 'completed'), write()]), 'required-skills-unproven')
 })
+
+// MUTATION: convert any path-bearing call into a load and a grep of SKILL.md proves the skill.
+test('a search over a SKILL.md is not a load', async () => {
+  for (const [title, kind] of [['Grep', 'search'], ['grep', 'search'], ['find', 'search']]) {
+    const id = `g-${title}`
+    assert.equal(await prove([call(id, title, kind, { path: '/c/skills/alpha/SKILL.md', pattern: 'x' }, title === 'Grep'), update(id, 'completed'), write()]), 'required-skills-unproven', title)
+  }
+})

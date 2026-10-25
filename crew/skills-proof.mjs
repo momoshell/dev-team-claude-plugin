@@ -69,9 +69,11 @@ function inputsOf(call) {
 // A claude Skill call names its skill directly and is matched by namespace instead.
 function wholeGrantedRead(name, input, required, skillsRoot, cwd) {
   if (name === 'Skill') return true
-  let path = input.path ?? input.file_path
+  // Only a read tool or a `cat` reads a file whole; a search such as Grep returns matching lines only.
+  let path
   if (name === 'bash') path = typeof input.command === 'string' ? CAT.exec(input.command.trim())?.[2] : undefined
-  else if (input.offset != null || input.limit != null) return null
+  else if (name.toLowerCase() !== 'read' || input.offset != null || input.limit != null) return null
+  else path = input.path ?? input.file_path
   if (typeof path !== 'string' || path === '') return null
   if (!isAbsolute(path) && typeof cwd !== 'string') return null
   const full = isAbsolute(path) ? normalize(path) : resolve(cwd, path)

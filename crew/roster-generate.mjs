@@ -9,7 +9,7 @@
 //
 // Until plan 4.4 the visualizer's roster editor writes roster.json directly; the next
 // generate overwrites that edit.
-import { readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TIERS } from './protocols.mjs'
@@ -36,9 +36,9 @@ export function generateRoster(templateText, resolve = resolveAgents) {
   return serialize({ updated_at: template.updated_at, models: template.models, policy: template.policy, tiers })
 }
 
-export async function main(argv = process.argv.slice(2), { path = ROSTER_PATH, resolve = resolveAgents, refusals = bootRefusals, log = (line) => process.stdout.write(line + '\n') } = {}) {
-  const check = argv.includes('--check')
-  if (argv[0] !== 'generate' || argv.some((arg, index) => index > 0 && arg !== '--check')) {
+export async function main(argv = process.argv.slice(2), { path = ROSTER_PATH, resolve = resolveAgents, refusals = bootRefusals, write = writeFileSync, log = (line) => process.stdout.write(line + '\n') } = {}) {
+  const check = argv[1] === '--check'
+  if (argv[0] !== 'generate' || argv.length > (check ? 2 : 1)) {
     process.stderr.write('usage: crew roster generate [--check]\n')
     return 2
   }
@@ -52,7 +52,16 @@ export async function main(argv = process.argv.slice(2), { path = ROSTER_PATH, r
   }
   if (generated === current) { log(`crew roster: ${path} matches the agent definitions`); return 0 }
   if (check) { log(`crew roster: ${path} differs from the agent definitions; run crew roster generate`); return 1 }
-  writeFileSync(path, generated)
+  // The boot checks are awaited, so the file is read again before it is replaced: an edit
+  // made meanwhile (the visualizer's roster editor) refuses rather than being lost. The new
+  // bytes land in a sibling file first, so a failed write never truncates the roster.
+  if (readFileSync(path, 'utf8') !== current) { log(`crew roster: ${path} changed while it was being generated; nothing written, run it again`); return 1 }
+  const temporary = `${path}.${process.pid}.tmp`
+  try { write(temporary, generated); renameSync(temporary, path) } catch (error) {
+    rmSync(temporary, { force: true })
+    log(`crew roster: cannot write ${path}: ${error.code ?? error.message}; it is left as it was`)
+    return 1
+  }
   log(`crew roster: wrote ${path} from the agent definitions`)
   return 0
 }

@@ -60,7 +60,7 @@ test('--check reports drift with exit 1 and leaves the file alone; generate writ
 
 // MUTATION: accept any argv and a typo regenerates the roster.
 test('anything but generate [--check] is a usage error that writes nothing', () => withScratch(async ({ resolve, path }) => {
-  for (const argv of [[], ['gen'], ['generate', '--force']]) {
+  for (const argv of [[], ['gen'], ['generate', '--force'], ['generate', '--check', '--check'], ['--check', 'generate']]) {
     assert.equal(await main(argv, { path, resolve, log: quiet }), 2, JSON.stringify(argv))
   }
   assert.equal(readFileSync(path, 'utf8'), committed)
@@ -76,4 +76,21 @@ test('a roster boot would refuse is never written, and --check fails on it', () 
     assert.ok(lines.length > 1)
   }
   assert.equal(readFileSync(path, 'utf8'), committed)
+}))
+
+// MUTATION: write the roster in place and a failed write leaves it truncated.
+test('a write that fails partway leaves the roster as it was', () => withScratch(async ({ edit, resolve, path }) => {
+  edit('planner', (text) => text.replace(/^effort: \w+$/m, 'effort: low'))
+  const write = (target, text) => { writeFileSync(target, text.slice(0, 1024)); throw Object.assign(new Error('file too large'), { code: 'EFBIG' }) }
+  assert.equal(await main(['generate'], { path, resolve, write, log: quiet }), 1)
+  assert.equal(readFileSync(path, 'utf8'), committed)
+}))
+
+// MUTATION: drop the re-read and an edit made during the boot checks is overwritten.
+test('an edit made while the boot checks run is kept, and nothing is written', () => withScratch(async ({ edit, resolve, path }) => {
+  edit('planner', (text) => text.replace(/^effort: \w+$/m, 'effort: low'))
+  const edited = committed.replace('"updated_at": "', '"updated_at": "x')
+  const refusals = async () => { writeFileSync(path, edited); return [] }
+  assert.equal(await main(['generate'], { path, resolve, refusals, log: quiet }), 1)
+  assert.equal(readFileSync(path, 'utf8'), edited)
 }))

@@ -33,9 +33,6 @@ function foldCalls(raw) {
     const id = typeof update.toolCallId === 'string' ? update.toolCallId : `anonymous-${++anonymous}`
     if (!calls.has(id)) calls.set(id, { id, seq: at, inputAt: null, doneAt: null, title: null, kind: null, status: null, tool: null, input: null, locations: null })
     const call = calls.get(id)
-    const named = (update.rawInput && typeof update.rawInput === 'object' && !Array.isArray(update.rawInput) && Object.keys(update.rawInput).length)
-      || (Array.isArray(update.locations) && update.locations.length)
-    if (named) call.inputAt = at
     if (typeof update.title === 'string') call.title = update.title
     if (typeof update.kind === 'string') call.kind = update.kind
     if (typeof update.status === 'string') call.status = update.status
@@ -43,8 +40,11 @@ function foldCalls(raw) {
     const tool = update._meta?.claudeCode?.toolName
     if (typeof tool === 'string' && tool !== '') call.tool = tool
     const input = update.rawInput
-    if (input && typeof input === 'object' && !Array.isArray(input) && Object.keys(input).length) call.input = input
+    const hasInput = input && typeof input === 'object' && !Array.isArray(input) && Object.keys(input).length > 0
+    const hasLocations = Array.isArray(update.locations) && update.locations.length > 0
+    if (hasInput) call.input = input
     if (Array.isArray(update.locations)) call.locations = update.locations
+    if (hasInput || hasLocations) call.inputAt = at
   }
   return [...calls.values()].map((call) => ({ ...call, loadAt: call.doneAt === null ? null : Math.max(call.inputAt ?? call.seq, call.doneAt) }))
 }
@@ -63,61 +63,55 @@ function inputsOf(call) {
   return located.length ? located : [{}]
 }
 
-// A read-type call is a load only when it reads a granted SKILL.md whole: its path, resolved against
-// the seat's cwd when relative, equals <skills root>/<required>/SKILL.md, with no offset or limit, or
-// it is a shell call that is exactly `cat <path>`. Returns the resolved path, or null when it is no load.
-// A claude Skill call names its skill directly and is matched by namespace instead.
-function wholeGrantedRead(name, input, required, skillsRoot, cwd) {
-  if (name === 'Skill') return true
-  // Only a read tool or a `cat` reads a file whole; a search such as Grep returns matching lines only.
+// The load a completed call shows, as [toolName, input] for the tracker, or null when it shows none.
+// A claude Skill call counts under the seat's own plugin, `crew-skills-<role>` (adapter-claude
+// writeSeatSkills), and under no other. Any other call counts only as a whole read of a granted
+// SKILL.md: a read tool with no offset or limit, or exactly `cat <path>` (a search such as Grep returns
+// matching lines only), whose path, resolved against the seat's cwd when relative, equals
+// <skills root>/<required>/SKILL.md. Every load is handed to the tracker as a read of that path.
+function loadOf(name, input, { role, required, skillsRoot, cwd }) {
+  if (name === 'Skill') {
+    if (typeof input.skill !== 'string' || !input.skill.includes(':')) return [name, input]
+    const own = `crew-skills-${role}:`
+    return input.skill.startsWith(own) ? [name, { ...input, skill: input.skill.slice(own.length) }] : null
+  }
   let path
   if (name === 'bash') path = typeof input.command === 'string' ? CAT.exec(input.command.trim())?.[2] : undefined
-  else if (name.toLowerCase() !== 'read' || input.offset != null || input.limit != null) return null
-  else path = input.path ?? input.file_path
-  if (typeof path !== 'string' || path === '') return null
-  if (!isAbsolute(path) && typeof cwd !== 'string') return null
+  else if (name.toLowerCase() === 'read' && input.offset == null && input.limit == null) path = input.path ?? input.file_path
+  if (typeof path !== 'string' || path === '' || (!isAbsolute(path) && typeof cwd !== 'string')) return null
   const full = isAbsolute(path) ? normalize(path) : resolve(cwd, path)
-  return required.some((skill) => full === join(skillsRoot, skill, 'SKILL.md')) ? full : null
+  return required.some((skill) => full === join(skillsRoot, skill, 'SKILL.md')) ? ['read', { path: full }] : null
 }
 
 export async function proveRequiredSkills({ definition, sessionFile, cwd, readFile = fsReadFile, skillsRoot = SKILLS_ROOT }) {
   const required = definition?.requires ?? []
   if (required.length === 0) return null
   let raw
-  try { raw = await readFile(sessionFile, 'utf8') } catch { return 'required-skills-unproven' }
+  try { raw = await readFile(sessionFile, 'utf8') } catch { return UNPROVEN }
   let calls
   try {
     if (typeof raw !== 'string' || raw.trim() === '') return UNPROVEN
     calls = foldCalls(raw)
   } catch { return UNPROVEN }
+  const scope = { role: definition.role, required, skillsRoot, cwd }
   const tracker = createSkillLoadTracker()
   let firstWrite = null
   for (const call of calls) {
     const name = toolNameOf(call)
     const lower = name.toLowerCase()
     for (const input of inputsOf(call)) {
-      // A claude seat's granted skills load from its own plugin, `crew-skills-<role>` (adapter-claude
-      // writeSeatSkills); a load namespaced under any other plugin is not the granted skill.
-      const own = `crew-skills-${definition.role}:`
-      const normalized = name === 'Skill' && typeof input.skill === 'string' && input.skill.includes(':')
-        ? { ...input, skill: input.skill.startsWith(own) ? input.skill.slice(own.length) : null }
-        : input
-      const granted = call.loadAt !== null && call.status === 'completed' ? wholeGrantedRead(name, normalized, required, skillsRoot, cwd) : null
-      // A whole read is observed as a read of its resolved path, so relative and `cat` loads classify alike.
-      if (granted === true) tracker.observe(name, normalized, null, call.loadAt, call.id)
-      else if (granted) tracker.observe('read', { path: granted }, null, call.loadAt, call.id)
+      const load = call.loadAt !== null && call.status === 'completed' ? loadOf(name, input, scope) : null
+      if (load) tracker.observe(load[0], load[1], null, call.loadAt, call.id)
       // For a repo writer every shell call is a write boundary, including one that reads a SKILL.md.
       const shell = call.kind === 'execute' || lower === 'bash'
       const writes = WRITE_TOOLS.has(lower) || WRITE_KINDS.has(call.kind) || (shell && definition.writes === 'repo')
       if (writes && firstWrite === null) firstWrite = call.seq
     }
-    if (call.status === 'failed') tracker.fail(call.id)
   }
   const { loads } = tracker.snapshot()
   for (const skill of required) {
     const seqs = loads.filter((entry) => entry.skill === skill && entry.slice === null).map((entry) => entry.seq)
-    if (seqs.length === 0) return 'required-skills-unproven'
-    if (firstWrite !== null && Math.min(...seqs) >= firstWrite) return 'required-skills-unproven'
+    if (seqs.length === 0 || (firstWrite !== null && Math.min(...seqs) >= firstWrite)) return UNPROVEN
   }
   return null
 }

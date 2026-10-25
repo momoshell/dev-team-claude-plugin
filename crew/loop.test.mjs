@@ -92,6 +92,42 @@ test('a green run walks every stage in order and returns the measured PR with ea
   assert.equal(new Set(f.requests.map((r) => r.returnPath)).size, f.requests.length)
 })
 
+// MUTATION: forward the general timeout to the suite and the suite override never reaches the runner.
+test('a suite timeout override reaches only the suite and absent overrides inherit the general timeout', async () => {
+  for (const timeoutMs of [1, 1800000, Number.MAX_SAFE_INTEGER]) {
+    const f = fakes({ spec: { suite: { command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs } } })
+    assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
+    assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs })
+    for (const stage of ['baseline', 'gate', 'mutations', 'paths', 'commit', 'fetch', 'rebase', 'publish']) assert.equal(f.seen[stage].timeoutMs, 5000, stage)
+  }
+  const inherit = fakes({ spec: { suite: { command: 'node', timeoutMs: undefined } } })
+  await inherit.go()
+  assert.equal(inherit.seen.suite.timeoutMs, 5000)
+  const neither = fakes({ spec: { timeoutMs: undefined, suite: { command: 'node' } } })
+  await neither.go()
+  assert.equal(neither.seen.suite.timeoutMs, undefined)
+})
+
+// MUTATION: drop the suite timeout validation and an unsound override starts the lane.
+test('an invalid suite timeout override is refused before any dependency or journal effect', async () => {
+  const invalid = [0, -1, 1.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1, '1800000', null, true, {}, []]
+  for (const timeoutMs of invalid) {
+    const f = fakes({ spec: { suite: { command: 'node', timeoutMs } } })
+    assert.deepEqual(await f.go(), stopped('invalid-input'), String(timeoutMs))
+    assert.deepEqual(f.calls, [])
+    assert.deepEqual(f.rows, [])
+    assert.equal(f.requests.length, 0)
+  }
+})
+
+// MUTATION: let a suite override swallow the timeout stop and a timed-out suite publishes.
+test('a measured suite timeout under an override stops the lane with no commit, fetch, rebase or publish', async () => {
+  const f = fakes({ spec: { suite: { command: 'node', timeoutMs: 1800000 } }, suite: { ...green(), status: 'unmeasured', reason: 'timeout', timedOut: true } })
+  assert.deepEqual(await f.go(), stopped('timeout'))
+  assert.equal(f.seen.suite.timeoutMs, 1800000)
+  for (const effect of ['paths', 'commit', 'fetch', 'rebase', 'publish']) assert.equal(f.calls.includes(effect), false, effect)
+})
+
 // MUTATION: skip the baseline acceptance branch and a green baseline lets the builder start.
 test('a green, unmeasured, malformed or contradictory baseline stops before the builder', async () => {
   const redRun = { ...green(), status: 'red', code: 1, reason: 'gate-failed', failingIds: ['A1'] }

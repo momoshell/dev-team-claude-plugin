@@ -49,6 +49,7 @@ export async function runLoop(spec, deps = {}) {
   const sound = [spec.id, spec.cwd, spec.taskDir, spec.brief, spec.subject, spec.branch, spec.base].every(text) && TIERS.includes(spec.tier)
     && strings(spec.acceptance) && spec.acceptance.length > 0 && new Set(spec.acceptance).size === spec.acceptance.length
     && text(spec.suite?.command) && (spec.suite.args === undefined || Array.isArray(spec.suite.args))
+    && (spec.suite.timeoutMs === undefined || (Number.isSafeInteger(spec.suite.timeoutMs) && spec.suite.timeoutMs > 0))
     && [spec.body, spec.title].every((v) => v === undefined || typeof v === 'string')
     && [spec.closes, spec.refs].every((v) => v === undefined || Array.isArray(v))
     && (spec.timeoutMs === undefined || (Number.isSafeInteger(spec.timeoutMs) && spec.timeoutMs > 0))
@@ -201,7 +202,7 @@ export async function runLoop(spec, deps = {}) {
       break
     }
 
-    const suite = await stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs }, { command: true }))
+    const suite = await stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs ?? timeoutMs }, { command: true }))
     if (suite.status !== 'green') return stop(suite.reason, suite)
 
     // The commit names what git reports changed now, never a list the caller wrote before the build.

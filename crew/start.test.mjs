@@ -362,10 +362,12 @@ test('--loop lean detaches the bridge on a measured spec and boots nothing', asy
   assert.equal(spawned(calls, 'boot'), undefined)
   assert.equal(spawned(calls, 'run'), undefined)
   assert.equal(result.pid, 4242)
-  assert.deepEqual(JSON.parse(written(calls, '/task/lean.json')[2]), {
+  const spec = JSON.parse(written(calls, '/task/lean.json')[2])
+  assert.deepEqual(spec, {
     id: 'b1', cwd: '/repo/dt-b1', taskDir: '/home/.crew/dt-b1/b1/task', tier: 'build', shape: 'standard', brief: runBrief(BRIEF, 1961),
-    acceptance: ['RV1'], subject: 'feat: b1', branch: 'b1', base: 'main', closes: [1961], suite: { command: 'npm', args: ['test'] },
+    acceptance: ['RV1'], subject: 'feat: b1', branch: 'b1', base: 'main', closes: [1961], suite: { command: 'npm', args: ['test'], timeoutMs: 1800000 },
   })
+  assert.equal(spec.timeoutMs, undefined)
   const { members } = JSON.parse(written(calls, '/dt-b1/b1/crew.json')[2])
   const { seats } = resolveAgents('build')
   assert.deepEqual(Object.keys(members), Object.keys(seats))

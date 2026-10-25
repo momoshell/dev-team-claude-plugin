@@ -655,7 +655,9 @@ test('an unmeasured suite or incomplete proof stops before any commit or publica
 })
 
 const callRow = (id, title, kind, rawInput) => ({ sessionId: 's', update: { sessionUpdate: 'tool_call', toolCallId: id, title, kind, status: 'in_progress', rawInput } })
-const LOAD = callRow('r1', 'read', 'read', { path: '/c/skills/alpha/SKILL.md' })
+// The proof binds a load to the granted path, <checkout>/skills/<name>/SKILL.md (crew/acp/seat.mjs SKILLS_ROOT).
+const GRANTED_ALPHA = fileURLToPath(new URL('../skills/alpha/SKILL.md', import.meta.url))
+const LOAD = callRow('r1', 'read', 'read', { path: GRANTED_ALPHA })
 const DONE = { sessionId: 's', update: { sessionUpdate: 'tool_call_update', toolCallId: 'r1', status: 'completed' } }
 const WRITE = callRow('w1', 'write', 'edit', { path: '/c/a.mjs' })
 const required = (rows) => ({ recording: () => ({ definition: { requires: ['alpha'], writes: 'repo' }, rows }) })

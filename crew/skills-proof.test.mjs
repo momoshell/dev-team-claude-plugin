@@ -12,7 +12,7 @@ const skill = (name, id = `s-${name}`) => `${call(id, 'Skill', 'other', { skill:
 const write = (id = 'w') => call(id, 'write', 'edit', { path: '/c/a.mjs' })
 const shell = () => call('sh', 'bash', 'execute', { command: 'pwd' })
 const prove = (rows, definition = { requires: ['alpha'], writes: 'task-dir' }) =>
-  proveRequiredSkills({ definition, sessionFile: 'x.jsonl', readFile: async () => ['{"type":"prompt"}', ...rows].join('\n') })
+  proveRequiredSkills({ definition, sessionFile: 'x.jsonl', skillsRoot: '/c/skills', readFile: async () => ['{"type":"prompt"}', ...rows].join('\n') })
 
 // MUTATION: count a load that follows the first write and SK2 passes.
 test('a load before the first write proves; a load after it, or none, does not', async () => {
@@ -99,4 +99,21 @@ test('an unreadable, empty or malformed recording does not prove, and a definiti
   for (const none of [{ requires: [] }, {}]) {
     assert.equal(await proveRequiredSkills({ definition: none, sessionFile: 'x', readFile: async () => { throw new Error('must not read') } }), null)
   }
+})
+
+// MUTATION: drop the offset/limit check and a one-line read of SKILL.md proves the skill.
+test('a partial read of a SKILL.md is not a load', async () => {
+  const head = call('h', 'read', 'read', { path: '/c/skills/alpha/SKILL.md', offset: 1, limit: 1 })
+  assert.equal(await prove([head, update('h', 'completed'), write()]), 'required-skills-unproven')
+  const shellHead = call('sh1', 'bash', 'execute', { command: 'head -1 /c/skills/alpha/SKILL.md' })
+  assert.equal(await prove([shellHead, update('sh1', 'completed'), write()]), 'required-skills-unproven')
+})
+
+// MUTATION: match any path ending in skills/<name>/SKILL.md and a foreign copy proves the skill.
+test('only the granted SKILL.md path is a load', async () => {
+  for (const path of ['/tmp/skills/alpha/SKILL.md', 'skills/alpha/SKILL.md', '/c/skills/alpha/../alpha-x/SKILL.md']) {
+    const id = `p-${path}`
+    assert.equal(await prove([call(id, 'read', 'read', { path }), update(id, 'completed'), write()]), 'required-skills-unproven', path)
+  }
+  assert.equal(await prove([call('ok', 'read', 'read', { path: '/c/skills/alpha/SKILL.md' }), update('ok', 'completed'), write()]), null)
 })

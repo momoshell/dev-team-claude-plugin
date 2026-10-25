@@ -43,7 +43,9 @@ function definitionFor({ role, seat }, tier, d) {
   const effective = { ...fields, ...override }
   const charters = [...body.matchAll(CHARTER_LINK)].map((link) => resolve(dirname(source), link[1]))
   return {
-    definition: { role, agent: seat.agent, model: `${seat.provider}/${seat.id}`, effort: seat.effort, writes: effective.writes ?? 'none', skills: effective.skills ?? [], body },
+    definition: { role, agent: seat.agent, model: `${seat.provider}/${seat.id}`, effort: seat.effort, writes: effective.writes ?? 'none', skills: effective.skills ?? [],
+      tools: effective.tools,
+      body },
     source, charters,
   }
 }

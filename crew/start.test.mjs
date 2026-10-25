@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { laneName, main, runBrief, startLane, StartRefusal } from './start.mjs'
 import { main as leanMain, runLean } from './lean.mjs'
+import { runAcpSeat } from './acp/seat.mjs'
 import { parseAgent } from './protocols.mjs'
 import { acceptanceIds, composeCommitMessage, issueStatementDefect } from './drive.mjs'
 import { resolveAgents } from './agents.mjs'
@@ -481,7 +482,7 @@ test('every turn gets its role definition, the complete brief and P2, and its ow
     const source = join(AGENTS, `${role}.md`)
     const { body, fields } = parseAgent(readFileSync(source, 'utf8'))
     const cell = seats[role]
-    assert.deepEqual(request.definition, { role, agent: cell.agent, model: `${cell.provider}/${cell.id}`, effort: cell.effort, writes: { ...fields, ...fields.tiers?.build }.writes, skills: [], body })
+    assert.deepEqual(request.definition, { role, agent: cell.agent, model: `${cell.provider}/${cell.id}`, effort: cell.effort, writes: { ...fields, ...fields.tiers?.build }.writes, skills: [], tools: { ...fields, ...fields.tiers?.build }.tools, body })
     assert.equal(request.taskDir, f.spec.taskDir)
     assert.equal(request.cwd, f.spec.cwd)
     assert.notEqual(f.spec.taskDir, request.cwd)
@@ -519,6 +520,54 @@ test('the writes a seat receives are the effective definition writes, tier overr
   await tiered.go()
   assert.equal(tiered.requests[0].definition.writes, 'none')
   assert.equal(tiered.requests[0].definition.role, 'planner')
+})
+
+// MUTATION: drop effective.tools from the dispatched definition and an authored tool list never reaches the seat.
+test('the tools a seat receives are the effective definition tools, tier override and empty list included, absent when unset', async () => {
+  const planner = join(AGENTS, 'planner.md')
+  const edit = (from, to) => (path, ...args) => {
+    const text = readFileSync(path, ...args)
+    return path === planner ? text.replace(from, to) : text
+  }
+  const planned = async (deps) => {
+    const f = leanFixture({ acp: () => { throw new Error('capture ends the fake turn') }, deps })
+    await f.go()
+    return f.requests[0].definition
+  }
+  assert.equal(Object.hasOwn(await planned({}), 'tools'), true)
+  assert.equal((await planned({})).tools, undefined)
+  assert.deepEqual((await planned({ readFileSync: edit('writes: task-dir', 'writes: task-dir\ntools: ["Read","Grep"]') })).tools, ['Read', 'Grep'])
+  assert.deepEqual((await planned({ readFileSync: edit(/tiers: .*/, 'tools: ["Read"]\ntiers: {"build":{"tools":["Glob"]}}') })).tools, ['Glob'])
+  assert.deepEqual((await planned({ readFileSync: edit('writes: task-dir', 'writes: task-dir\ntools: []') })).tools, [])
+})
+
+// MUTATION: skip the empty-list refusal in the seat and a toolless Claude seat starts and runs.
+test('a Claude seat authored with an empty tools list stops the lane as seat-unmeasured before any process starts', async () => {
+  const planner = join(AGENTS, 'planner.md')
+  const spawned = [], refusals = []
+  const f = leanFixture({
+    deps: {
+      readFileSync: (path, ...args) => {
+        const text = readFileSync(path, ...args)
+        return path === planner ? text.replace('writes: task-dir', 'writes: task-dir\ntools: []') : text
+      },
+      runAcpSeat: (input) => {
+        try {
+          return runAcpSeat({
+            ...input,
+            definition: { ...input.definition, agent: 'claude', model: 'anthropic/claude-opus-4-6' },
+            binaries: { claudeAcp: process.execPath, claude: process.execPath },
+            deps: { ...input.deps, clientDeps: { spawn: (...args) => { spawned.push(args); throw new Error('no process may start') } } },
+          })
+        } catch (error) { refusals.push(error.code); throw error }
+      },
+    },
+  })
+  const result = await f.go()
+  assert.deepEqual(result, { status: 'stopped', reason: 'seat-unmeasured', pr: null })
+  assert.deepEqual(refusals, ['ACP_EMPTY_TOOLS'])
+  assert.equal(spawned.length, 0)
+  assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
 })
 
 // MUTATION: skip the lead turn's definition and a consulted lead runs with no charter or P2 example.

@@ -582,3 +582,72 @@ test('an unknown role is refused before any process or runtime exists', () => {
     })
   }
 })
+
+const launchTools = (run) => {
+  const { allowedTools, tools, disallowedTools } = sessionNew(run).params._meta.claudeCode.options
+  return { allowedTools, tools, disallowedTools }
+}
+const TOOL_DEFAULTS = {
+  repo: ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash'],
+  'task-dir': ['Read', 'Glob', 'Grep', 'Bash', 'Write'],
+  none: ['Read', 'Glob', 'Grep'],
+}
+
+test('a Claude seat without tools launches the writes-based defaults, none being read and search only', () => {
+  for (const [writes, expected] of Object.entries(TOOL_DEFAULTS)) {
+    use('claude-turn', { definition: { writes } }, (run) => {
+      assert.equal(run.error, undefined, writes)
+      const launched = launchTools(run)
+      assert.deepEqual(launched.allowedTools, expected, writes)
+      assert.deepEqual(launched.tools, expected, writes)
+    })
+  }
+  use('claude-turn', {}, (run) => assert.deepEqual(launchTools(run).allowedTools, TOOL_DEFAULTS.none))
+})
+
+test('task-dir seats deny Edit and NotebookEdit even when the explicit tools list Edit', () => {
+  for (const definition of [{ writes: 'task-dir' }, { writes: 'task-dir', tools: ['Read', 'Edit'] }]) {
+    use('claude-turn', { definition }, (run) => {
+      const { disallowedTools } = launchTools(run)
+      assert.ok(disallowedTools.includes('Edit'), JSON.stringify(definition))
+      assert.ok(disallowedTools.includes('NotebookEdit'), JSON.stringify(definition))
+    })
+  }
+})
+
+test('explicit tools replace the defaults for every writes class', () => {
+  for (const writes of Object.keys(TOOL_DEFAULTS)) {
+    use('claude-turn', { definition: { writes, tools: ['Read', 'Grep'] } }, (run) => {
+      const launched = launchTools(run)
+      assert.deepEqual(launched.allowedTools, ['Read', 'Grep'], writes)
+      assert.deepEqual(launched.tools, ['Read', 'Grep'], writes)
+    })
+  }
+})
+
+test('an empty Claude tool list is refused as ACP_EMPTY_TOOLS before any process or runtime exists', () => {
+  for (const writes of Object.keys(TOOL_DEFAULTS)) {
+    use('claude-turn', { definition: { writes, tools: [] } }, (run) => {
+      assert.equal(run.error?.code, 'ACP_EMPTY_TOOLS', writes)
+      assert.equal(run.launches.length, 0, writes)
+      assert.deepEqual(run.leftover, [], writes)
+    })
+  }
+})
+
+test('malformed Claude tools are refused before any process or runtime exists', () => {
+  for (const tools of [null, '', 'Read', 7, {}, [null], [7], [''], [' ']]) {
+    use('claude-turn', { definition: { writes: 'repo', tools } }, (run) => {
+      assert.match(run.error?.message ?? '', /tools must be a list/, JSON.stringify(tools))
+      assert.equal(run.launches.length, 0, JSON.stringify(tools))
+      assert.deepEqual(run.leftover, [], JSON.stringify(tools))
+    })
+  }
+})
+
+test('Pi brings its own tools: an explicit empty list still launches', () => {
+  use('pi-turn', { definition: { writes: 'repo', tools: [] } }, (run) => {
+    assert.equal(run.error, undefined)
+    assert.equal(run.launches.length, 1)
+  })
+})

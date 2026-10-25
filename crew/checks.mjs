@@ -532,6 +532,13 @@ export async function rebaseBranch(spec = {}, deps = {}) {
       if ((await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])).status === 'green') { target = ref; break }
     }
     if (target === null) return red('rebase-failed', { detail: `${base} is neither a local nor a remote-tracking branch` })
+    // An ignored file the base tracks can be overwritten by a rebase, and an abort does not bring it back.
+    const ignored = await git(['ls-files', '-z', '--others', '--ignored', '--exclude-standard'])
+    const tracked = await git(['ls-tree', '-r', '-z', '--name-only', target])
+    if (ignored.status !== 'green' || tracked.status !== 'green') return unmeasured('rebase-failed', { detail: 'ignored or base paths could not be listed' })
+    const baseFiles = new Set(tracked.stdout.split('\0').filter(Boolean))
+    const colliding = ignored.stdout.split('\0').filter((path) => path !== '' && baseFiles.has(path))
+    if (colliding.length > 0) return red('dirty-worktree', { detail: 'ignored files the base tracks would be overwritten', paths: colliding })
     const outcome = await git([...NO_HOOKS, '-c', 'rebase.autoStash=false', 'rebase', target])
     if (outcome.status === 'green') {
       const after = await readCheckout(git, cwd)
@@ -577,6 +584,7 @@ export async function openPullRequest(spec = {}, deps = {}) {
     const valid = typeof cwd === 'string' && cwd !== '' && validTimeout(timeoutMs) && singleLine(title) && typeof body === 'string'
       && closing && referenced && typeof remote === 'string' && /^[A-Za-z0-9_][A-Za-z0-9._-]*$/.test(remote)
     if (!valid) return unmeasured('invalid-input')
+    if (branch === base) return unmeasured('invalid-input', { detail: 'the lane branch is its own base; nothing is pushed' })
     const git = (args) => runCommand({ cwd, command: 'git', args, timeoutMs }, deps)
     const gh = (args) => runCommand({ cwd, command: 'gh', args, timeoutMs }, deps)
     const bad = await refProblem(git, branch) ?? await refProblem(git, base)

@@ -1354,3 +1354,29 @@ test('rebaseBranch puts the branch back when its runner reports failure after gi
   assert.notEqual(result.status, 'green')
   assert.deepEqual(snapshot(cwd), before)
 })
+
+// MUTATION: drop the branch-equals-base refusal and the step pushes straight to the base.
+test('openPullRequest refuses a lane branch that is its own base before any push', async () => {
+  const f = fakeRemote({ branch: 'main' })
+  const result = await openPullRequest({ ...publishSpec, branch: 'main' }, { run: f.run })
+  assert.equal(result.status, 'unmeasured')
+  assert.equal(reasonOf(result), 'invalid-input')
+  assert.equal(f.calls.length, 0)
+})
+
+// MUTATION: drop the ignored-path collision check and a conflicting rebase overwrites the ignored file.
+test('rebaseBranch refuses to rebase over an ignored file the base tracks', async () => {
+  const cwd = laneRepo({ 'a.txt': 'base\n', '.gitignore': 'build.log\n' })
+  git(cwd, 'checkout', '-q', 'main')
+  writeFileSync(join(cwd, '.gitignore'), '')
+  writeFileSync(join(cwd, 'build.log'), 'tracked on main\n')
+  git(cwd, 'add', '.gitignore', 'build.log')
+  git(cwd, 'commit', '-qm', 'main tracks build.log')
+  git(cwd, 'checkout', '-q', 'lane')
+  writeFileSync(join(cwd, 'build.log'), 'precious local log\n')
+  const result = await rebaseBranch({ cwd, base: 'main' })
+  assert.equal(result.status, 'red')
+  assert.equal(reasonOf(result), 'dirty-worktree')
+  assert.deepEqual(result.paths, ['build.log'])
+  assert.equal(readFileSync(join(cwd, 'build.log'), 'utf8'), 'precious local log\n')
+})

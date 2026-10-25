@@ -67,6 +67,9 @@ test('lean charter declarations match the P2 schemas and loop ownership', () => 
   assert.match(planner, /one `FAIL <id>` line per failing acceptance id/)
   assert.match(planner, /must be red on the unchanged tree/)
   assert.match(planner, /exactly \{check, file, find, replace\}/)
+  assert.match(planner, /conventional-commit subject[^\n]*at most 72 characters/)
+  assert.match(planner, /names both the commit and the PR/)
+  assert.match(planner, /Do not write a PR body/)
 })
 
 // MUTATION: change any model, effort, fallback or null tier in a definition and this tier drifts from the roster.

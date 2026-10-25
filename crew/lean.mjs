@@ -18,6 +18,7 @@ function exampleEnvelope(role, id, acceptance) {
   const review = { verdict: 'pass', findings: [{ id: 'R1', severity: 'should-fix', location: 'path/to/file.mjs:10', summary: 'what is wrong and why' }] }
   const details = {
     planner: {
+      subject: 'fix(crew): publish measured lane results',
       plan_path: '<absolute path of the plan you wrote>',
       gate_path: '<absolute path of the gate you wrote>',
       acceptance,

@@ -132,7 +132,7 @@ export async function startLane({ briefPath, checkout, check = false, loop, deps
       .map(([role, cell]) => [role, { agent: cell.agent, model: `${cell.provider}/${cell.id}`, transport: 'lean-acp' }]))
     const spec = {
       id: lane, cwd: worktree, taskDir, tier: fields.tier, shape: fields.shape, brief: run, acceptance: fields.acceptance,
-      subject: `feat: ${lane}`, branch: lane, base, closes: fields.closes === null ? [] : [fields.closes],
+      source: fields.source, branch: lane, base, closes: fields.closes === null ? [] : [fields.closes],
       suite: { command: 'npm', args: ['test'], timeoutMs: 1800000 },
     }
     try {

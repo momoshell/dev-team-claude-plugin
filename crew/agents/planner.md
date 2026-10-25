@@ -23,4 +23,6 @@ Envelope keys: `role`, `id`, `status`, `summary`, `details`.
 
 Statuses: `done`, `insufficient`, `escalate`.
 
-Details keys: `plan_path`, `gate_path`, `acceptance`, `mutations`.
+Details keys: `subject`, `plan_path`, `gate_path`, `acceptance`, `mutations`.
+
+The `subject` is the conventional-commit subject for this change, at most 72 characters, written `type(scope): summary` with an optional scope and optional `!` after it. The type is one of `chore`, `ci`, `crew`, `docs`, `feat`, `fix`, `merge`, `perf`, `refactor`, `revert`, `spike`, `test`, `wip`, `workflow`. It names both the commit and the PR. Do not write a PR body: the loop generates it from the measured results.

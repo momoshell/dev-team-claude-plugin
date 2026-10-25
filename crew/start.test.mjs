@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { laneName, main, runBrief, startLane, StartRefusal } from './start.mjs'
 import { main as leanMain, runLean } from './lean.mjs'
 import { runAcpSeat } from './acp/seat.mjs'
-import { parseAgent } from './protocols.mjs'
+import { parseAgent, validateEnvelope } from './protocols.mjs'
 import { acceptanceIds, composeCommitMessage, issueStatementDefect } from './drive.mjs'
 import { resolveAgents } from './agents.mjs'
 import { bootRefusals } from './roster-validate.mjs'
@@ -365,7 +365,7 @@ test('--loop lean detaches the bridge on a measured spec and boots nothing', asy
   const spec = JSON.parse(written(calls, '/task/lean.json')[2])
   assert.deepEqual(spec, {
     id: 'b1', cwd: '/repo/dt-b1', taskDir: '/home/.crew/dt-b1/b1/task', tier: 'build', shape: 'standard', brief: runBrief(BRIEF, 1961),
-    acceptance: ['RV1'], subject: 'feat: b1', branch: 'b1', base: 'main', closes: [1961], suite: { command: 'npm', args: ['test'], timeoutMs: 1800000 },
+    acceptance: ['RV1'], source: 'issue 1961', branch: 'b1', base: 'main', closes: [1961], suite: { command: 'npm', args: ['test'], timeoutMs: 1800000 },
   })
   assert.equal(spec.timeoutMs, undefined)
   const { members } = JSON.parse(written(calls, '/dt-b1/b1/crew.json')[2])
@@ -424,7 +424,7 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
   const dir = scratchDir('lean-')
   const spec = {
     id: 'lane', cwd: join(dir, 'worktree'), taskDir: join(dir, 'task'), tier, shape: 'standard', brief: BRIEF, acceptance: ['RV1'],
-    subject: 'feat: lane', branch: 'lane', base: 'main', suite: { command: 'npm', args: ['test'] },
+    source: 'issue 1961', branch: 'lane', base: 'main', suite: { command: 'npm', args: ['test'] },
   }
   mkdirSync(spec.cwd, { recursive: true })
   const requests = [], logs = [], reviews = answers.reviews ?? ['pass']
@@ -432,7 +432,7 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
   const envelope = (role, id) => {
     const n = Number(id.split('.').at(-1))
     const own = answers[`${role}.${n}`]
-    const details = role === 'planner' ? { plan_path: join(spec.taskDir, 'plan.md'), gate_path: join(spec.taskDir, 'gate.mjs'), acceptance: ['RV1'], mutations: [LEAN_MUTATION] }
+    const details = role === 'planner' ? { subject: 'fix(crew): publish measured lane results', plan_path: join(spec.taskDir, 'plan.md'), gate_path: join(spec.taskDir, 'gate.mjs'), acceptance: ['RV1'], mutations: [LEAN_MUTATION] }
       : role === 'builder' ? { summary: 'built' }
       : role === 'lead' ? { decision: 'bounce' }
       : { verdict: reviews[review] ?? 'pass', findings: reviews[review++] === 'changes-needed' ? [{ id: 'F1', severity: 'must-fix', location: 'a:1', summary: 'redo-this' }] : [] }
@@ -710,4 +710,35 @@ test('importing the bridge launches nothing', () => {
   const run = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(pathToFileURL(LEAN).href)})`], { encoding: 'utf8', timeout: 20000 })
   assert.equal(run.status, 0, run.stderr)
   assert.equal(run.stdout, '')
+})
+
+// MUTATION: drop subject from the planner example and the prompt shows a P2 the loop refuses.
+test('the planner prompt example is a valid P2 envelope carrying a subject', async () => {
+  const f = leanFixture()
+  await f.go()
+  const prompt = f.requests[0].prompt
+  const start = prompt.indexOf('{', prompt.indexOf('"role": "planner"') - 20)
+  const example = JSON.parse(prompt.slice(start, prompt.indexOf('\n}', start) + 2))
+  assert.equal(example.role, 'planner')
+  assert.deepEqual(validateEnvelope('planner', example).defects, [])
+  assert.match(example.details.subject, /^fix\(crew\): /)
+})
+
+// MUTATION: invent the subject in startLane and the published source is not the brief's.
+test('a started lean spec reaches the PR with its exact P1 source and measured body', async () => {
+  const { deps, calls } = fakes()
+  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps })
+  const spec = JSON.parse(written(calls, '/task/lean.json')[2])
+  const seen = {}
+  const loopDeps = {
+    commitChanges: async (input) => { seen.commit = input; return { status: 'green', reason: null, head: 'a'.repeat(40) } },
+    openPullRequest: async (input) => { seen.publish = input; return { status: 'green', reason: null, pr: { number: 7 } } },
+  }
+  const g = leanFixture({ loopDeps })
+  g.spec.source = spec.source
+  assert.equal((await g.go()).status, 'done')
+  assert.equal(seen.commit.subject, 'fix(crew): publish measured lane results')
+  assert.equal(seen.publish.title, seen.commit.subject)
+  assert.equal(seen.publish.body, ['Source: "issue 1961"', '', '## Acceptance', '- RV1', '', '## Measurements', '- Baseline gate: red; failing ids: RV1.', '- Gate: green.', '- Mutations: 1/1 killed (RV1: killed).', '- Suite: green; exit 0.'].join('\n'))
+  assert.equal(spec.source, 'issue 1961')
 })

@@ -87,6 +87,15 @@ test('a fallback inherits the seat effort, and an empty chain is no fallback key
   assert.equal('fallback' in resolveAgents('build', dir).seats.lead, false)
 }))
 
+// MUTATION: drop the rounds copy in resolveAgents and a declared bound never reaches the seat.
+test('a declared rounds bound reaches the seat, a tier override replaces it, and an omitted one adds no key', () => withScratch((dir) => {
+  assert.equal(Object.values(resolveAgents('build', dir).seats).some((seat) => 'rounds' in seat), false)
+  edit(dir, 'builder', (text) => text.replace('role: builder\n', 'role: builder\nrounds: 1\n').replace('{"effort":"xhigh"}', '{"effort":"xhigh","rounds":3}'))
+  assert.equal(resolveAgents('build', dir).seats.builder.rounds, 1)
+  assert.equal(resolveAgents('judge', dir).seats.builder.rounds, 3)
+  assert.equal('rounds' in resolveAgents('build', dir).seats.planner, false)
+}))
+
 // MUTATION: ignore a role's advisor and a declared advisor never reaches the tier.
 test('a declared advisor is normalized; null elsewhere does not erase it and a clash refuses', () => withScratch((dir) => {
   const advisor = (model, effort) => `advisor: {"agent":"pi","model":"${model}","effort":"${effort}"}`

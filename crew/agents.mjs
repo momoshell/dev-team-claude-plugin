@@ -43,6 +43,7 @@ export function resolveAgents(tier, directory = DEFAULT_DIRECTORY) {
     if (override === null) return
     const effective = { ...base, ...override }
     const seat = cellOf(effective.model, effective.agent, effective.effort)
+    if (effective.rounds !== undefined) seat.rounds = effective.rounds
     if (effective.fallback?.length) seat.fallback = effective.fallback.map((entry) => cellOf(entry.model, entry.agent, entry.effort ?? effective.effort))
     seats[role] = seat
     if (effective.advisor) declared.set(role, cellOf(effective.advisor.model, effective.advisor.agent, effective.advisor.effort))

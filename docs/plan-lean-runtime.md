@@ -173,13 +173,14 @@ Sol review, because the current factory is what is being replaced. From phase 4,
       edit. `crew start` boots from `crew/agents/*.md`; the old path keeps reading `crew/roster.json`.
       Built in #1975 and #1976: `crew start` generates the roster in memory. `crew roster generate` (D11) is
       not built yet.
-- [ ] 2.2 `requires` skill proof from the session file, refused in the envelope check. Moved to phase 3 (D12).
 - Done means: a roster swap on the new path is one frontmatter edit; one lane per role boots from it.
 
 ### Phase 3: ACP seats and the minimal loop
 
 - [ ] 3.1 `crew/acp/`: client, claude and pi launch, a session file per seat (P4). First check: whether
       `claude-agent-acp` loads plugin skills and agent definitions as the headless claude seat does.
+- [ ] 2.2 `requires` skill proof from the session file, refused in the envelope check. Moved here from
+      phase 2 (D12).
 - [ ] 3.2 `crew show <lane> [seat]` prints a seat's full session from its file. `crew show` over today's
       headless streams shipped in #1974; it moves to the session files once 3.1 exists.
 - [ ] 3.3 P2 envelope schemas per role in `crew/protocols.mjs`.

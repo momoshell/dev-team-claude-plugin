@@ -16,10 +16,11 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync,
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { parseBrief, TIERS } from './protocols.mjs'
+import { parseBrief } from './protocols.mjs'
 import { resolveAgents } from './agents.mjs'
 import { bootRefusals } from './roster-validate.mjs'
-import { normalizeRoster, serializeRosterV1, serializeRosterV2 } from './roster.mjs'
+import { normalizeRoster } from './roster.mjs'
+import { generateRoster } from './roster-generate.mjs'
 import { SLOT_ENV } from './reclaim.mjs'
 import { acceptanceIds, boundIssueOf } from './drive.mjs'
 
@@ -74,20 +75,12 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
   }
   if (fields.shape === 'finish') throw new StartRefusal('shape finish starts from an escalated lane, not a new brief; crew start runs standard and stepped')
 
-  // The deployed roster.json, read the way boot reads it, supplies the schema version,
-  // updated_at, models, policy and which roles each tier lists; every seat and the advisor
-  // come from the agent definitions. The file keeps the template's schema version, and
-  // the check runs on those bytes normalized exactly as boot will normalize them.
+  // The deployed roster.json supplies what the agent definitions do not carry; every seat
+  // and the advisor come from the definitions (crew/roster-generate.mjs). The check runs on
+  // those bytes normalized exactly as boot will normalize them.
   let rosterText, roster
   try {
-    const template = normalizeRoster(JSON.parse(d.readFileSync(join(HOME, 'crew', 'roster.json'), 'utf8')))
-    const tiers = Object.fromEntries(TIERS.map((tier) => {
-      const { seats, advisor } = d.resolveAgents(tier)
-      const cells = Object.fromEntries(Object.keys(template.tiers[tier]).filter((role) => role !== 'advisor').map((role) => [role, seats[role] ?? null]))
-      return [tier, { ...cells, ...seats, advisor }]
-    }))
-    const serialize = template.schema_version === 2 ? serializeRosterV2 : serializeRosterV1
-    rosterText = serialize({ updated_at: template.updated_at, models: template.models, policy: template.policy, tiers }) + '\n'
+    rosterText = generateRoster(d.readFileSync(join(HOME, 'crew', 'roster.json'), 'utf8'), d.resolveAgents) + '\n'
     roster = normalizeRoster(JSON.parse(rosterText))
   } catch (cause) {
     throw new StartRefusal(`cannot generate the roster from the agent definitions: ${cause.message}`, { cause })

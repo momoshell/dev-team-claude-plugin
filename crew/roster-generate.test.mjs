@@ -1,0 +1,104 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { readFileSync, writeFileSync, rmSync, cpSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { resolveAgents } from './agents.mjs'
+import { ROSTER_PATH, generateRoster, main } from './roster-generate.mjs'
+import { scratchDir } from '../test/helpers.mjs'
+
+const AGENTS_DIR = fileURLToPath(new URL('./agents/', import.meta.url))
+const committed = readFileSync(ROSTER_PATH, 'utf8')
+
+// A private copy of the definitions and the roster, so a test can edit either.
+async function withScratch(fn) {
+  const dir = scratchDir('roster-generate-test-')
+  try {
+    cpSync(AGENTS_DIR, join(dir, 'agents'), { recursive: true })
+    writeFileSync(join(dir, 'roster.json'), committed)
+    const edit = (role, change) => { const path = join(dir, 'agents', `${role}.md`); writeFileSync(path, change(readFileSync(path, 'utf8'))) }
+    return await fn({ dir, edit, resolve: (tier) => resolveAgents(tier, join(dir, 'agents')), path: join(dir, 'roster.json') })
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+}
+const quiet = () => {}
+
+// MUTATION: edit any committed definition without regenerating and the bytes differ.
+test('the committed roster.json is exactly what the committed definitions generate', () => {
+  assert.equal(generateRoster(committed), committed)
+})
+
+// MUTATION: write the template's cells back instead of the resolved ones and the edit never reaches the file.
+test('an edited definition changes its cell in the generated roster, and only that cell', () => withScratch(({ edit, resolve }) => {
+  edit('builder', (text) => text.replace('effort: high', 'effort: low'))
+  const before = JSON.parse(committed)
+  const after = JSON.parse(generateRoster(committed, resolve))
+  assert.equal(after.tiers.build.builder.effort, 'low')
+  assert.equal(after.tiers.mechanical.builder.effort, 'low')
+  assert.equal(after.tiers.judge.builder.effort, before.tiers.judge.builder.effort)
+  after.tiers.build.builder.effort = after.tiers.mechanical.builder.effort = 'high'
+  assert.deepEqual(after, before)
+}))
+
+// MUTATION: drop the null fill and a role the definitions unseat disappears from its tier.
+test('a role a definition unseats at a tier stays listed as null', () => withScratch(({ edit, resolve }) => {
+  edit('reviewer', (text) => text.replace(/^tiers: .*$/m, (line) => line.replace('{', '{"mechanical":null,')))
+  const tiers = JSON.parse(generateRoster(committed, resolve)).tiers
+  assert.deepEqual(Object.keys(tiers.mechanical), ['advisor', 'lead', 'planner', 'builder', 'reviewer'])
+  assert.equal(tiers.mechanical.reviewer, null)
+  assert.notEqual(tiers.build.reviewer, null)
+}))
+
+// MUTATION: write on --check and the drifted file is changed by a check.
+test('--check reports drift with exit 1 and leaves the file alone; generate writes it', () => withScratch(async ({ edit, resolve, path }) => {
+  edit('planner', (text) => text.replace(/^effort: \w+$/m, 'effort: low'))
+  assert.equal(await main(['generate', '--check'], { path, resolve, log: quiet }), 1)
+  assert.equal(readFileSync(path, 'utf8'), committed)
+  assert.equal(await main(['generate'], { path, resolve, log: quiet }), 0)
+  assert.notEqual(readFileSync(path, 'utf8'), committed)
+  assert.equal(await main(['generate', '--check'], { path, resolve, log: quiet }), 0)
+}))
+
+// MUTATION: accept any argv and a typo regenerates the roster.
+test('anything but generate [--check] is a usage error that writes nothing', () => withScratch(async ({ resolve, path }) => {
+  for (const argv of [[], ['gen'], ['generate', '--force'], ['generate', '--check', '--check'], ['--check', 'generate']]) {
+    assert.equal(await main(argv, { path, resolve, log: quiet }), 2, JSON.stringify(argv))
+  }
+  assert.equal(readFileSync(path, 'utf8'), committed)
+}))
+
+// MUTATION: skip the boot checks and generate writes a roster boot refuses, then --check calls it a match.
+test('a roster boot would refuse is never written, and --check fails on it', () => withScratch(async ({ edit, resolve, path }) => {
+  edit('builder', (text) => text.replace('advisor: null', 'advisor: {"agent":"pi","model":"openai/gpt-6.1-sol","effort":"high"}'))
+  for (const argv of [['generate'], ['generate', '--check']]) {
+    const lines = []
+    assert.equal(await main(argv, { path, resolve, log: (line) => lines.push(line) }), 1, JSON.stringify(argv))
+    assert.match(lines[0], /boot refuses/)
+    assert.ok(lines.length > 1)
+  }
+  assert.equal(readFileSync(path, 'utf8'), committed)
+}))
+
+// MUTATION: write the roster in place and a failed write leaves it truncated.
+test('a write that fails partway leaves the roster as it was', () => withScratch(async ({ edit, resolve, path }) => {
+  edit('planner', (text) => text.replace(/^effort: \w+$/m, 'effort: low'))
+  const write = (target, text) => { writeFileSync(target, text.slice(0, 1024)); throw Object.assign(new Error('file too large'), { code: 'EFBIG' }) }
+  assert.equal(await main(['generate'], { path, resolve, write, log: quiet }), 1)
+  assert.equal(readFileSync(path, 'utf8'), committed)
+}))
+
+// MUTATION: drop the re-read and an edit made during the boot checks is overwritten.
+test('an edit made while the boot checks run is kept, and nothing is written', () => withScratch(async ({ edit, resolve, path }) => {
+  edit('planner', (text) => text.replace(/^effort: \w+$/m, 'effort: low'))
+  const edited = committed.replace('"updated_at": "', '"updated_at": "x')
+  const refusals = async () => { writeFileSync(path, edited); return [] }
+  assert.equal(await main(['generate'], { path, resolve, refusals, log: quiet }), 1)
+  assert.equal(readFileSync(path, 'utf8'), edited)
+}))
+
+// MUTATION: compare only the first read and --check calls a file edited meanwhile a match.
+test('--check never reports a match for a file that changed while the boot checks ran', () => withScratch(async ({ resolve, path }) => {
+  const edited = committed.replace('"updated_at": "', '"updated_at": "x')
+  const refusals = async () => { writeFileSync(path, edited); return [] }
+  assert.equal(await main(['generate', '--check'], { path, resolve, refusals, log: quiet }), 1)
+  assert.equal(readFileSync(path, 'utf8'), edited)
+}))

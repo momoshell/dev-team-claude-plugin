@@ -171,8 +171,8 @@ Sol review, because the current factory is what is being replaced. From phase 4,
 
 - [x] 2.1 P5 schema and `crew/agents.mjs`, with `bootRefusals` from `roster-validate.mjs` run on every
       edit. `crew start` boots from `crew/agents/*.md`; the old path keeps reading `crew/roster.json`.
-      Built in #1975 and #1976: `crew start` generates the roster in memory. `crew roster generate` (D11) is
-      not built yet.
+      Built in #1975 and #1976: `crew start` generates the roster in memory. `crew roster generate` (D11)
+      writes `crew/roster.json` from the definitions, and a test holds the committed file to it.
 - Done means: a roster swap on the new path is one frontmatter edit; one lane per role boots from it.
 
 ### Phase 3: ACP seats and the minimal loop

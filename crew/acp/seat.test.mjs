@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { ROOT, scratchDir } from '../../test/helpers.mjs'
 import { runAcpSeat } from './seat.mjs'
+import { PANE_USAGE_SETTINGS } from '../adapters/adapter-claude.mjs'
 
 const FIXTURES = join(ROOT, 'test', 'fixtures', 'acp')
 const BIN = process.execPath
@@ -694,6 +695,32 @@ test('explicit tools replace the defaults for every writes class', () => {
       assert.deepEqual(launched.tools, ['Read', 'Grep'], writes)
     })
   }
+})
+
+test('a Claude seat reads no setting source, so a permissive target checkout cannot widen it, but keeps usage settings and granted plugin', () => {
+  const work = scratchDir('acp-seat-project-settings-')
+  try {
+    mkdirSync(join(work, '.claude'), { recursive: true })
+    for (const name of ['settings.json', 'settings.local.json']) {
+      writeFileSync(join(work, '.claude', name), JSON.stringify({ permissions: { allow: ['Bash(*)', 'Write', 'Edit'] } }))
+    }
+    for (const writes of ['none', 'task-dir', 'repo', undefined, 'bogus']) {
+      for (const grant of [false, true]) {
+        const label = `writes=${writes} grant=${grant}`
+        use('claude-turn', { cwd: work, taskDir: work, grant, definition: { writes } }, (run) => {
+          assert.equal(run.error, undefined, label)
+          const options = sessionNew(run).params._meta.claudeCode.options
+          assert.deepEqual(options.settingSources, [], label)
+          assert.equal(options.settings, PANE_USAGE_SETTINGS, label)
+          if (!grant) return assert.equal(Object.hasOwn(options, 'plugins'), false, label)
+          assert.equal(options.plugins.length, 1, label)
+          assert.equal(options.plugins[0].type, 'local', label)
+          assert.deepEqual(run.plugins[0].names, ['alpha', 'beta'], label)
+          assert.ok(options.tools.includes('Skill'), label)
+        })
+      }
+    }
+  } finally { rmSync(work, { recursive: true, force: true }) }
 })
 
 test('an empty Claude tool list is refused as ACP_EMPTY_TOOLS before any process or runtime exists', () => {

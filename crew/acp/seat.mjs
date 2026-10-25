@@ -183,11 +183,14 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
     if (isClaude) {
       claudeAdapter.writeSeatSkills({ taskDir: runtime, role, grants }, deps.skillDeps ?? {})
       launch = claudeAdapter.acpLaunch({ ...spec, bin: claudeAcp, claudeBin: claude, model })
+      const options = launch.sessionParams._meta.claudeCode.options
+      // The target checkout's permissions.allow would approve calls before they reach onPermission.
+      // An explicit empty list overrides the SDK defaults; the usage settings and plugins stay.
+      options.settingSources = []
       if (writes !== 'repo') {
         // `default` (Manual) asks before every change; acceptEdits would take an edit in cwd silently.
         // Listed tools stay available but lose auto-approval, so each write or shell call reaches onPermission.
         launch.mode = 'default'
-        const options = launch.sessionParams._meta.claudeCode.options
         options.allowedTools = options.allowedTools.filter((tool) => !UNASKED_TOOLS.includes(tool.split('(')[0].trim()))
       }
     } else {

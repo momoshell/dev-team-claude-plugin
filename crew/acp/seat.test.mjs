@@ -5,12 +5,10 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { scratchDir } from '../../test/helpers.mjs'
+import { ROOT, scratchDir } from '../../test/helpers.mjs'
 import { runAcpSeat } from './seat.mjs'
 
-const REPO = fileURLToPath(new URL('../../', import.meta.url))
-const FIXTURES = join(REPO, 'test', 'fixtures', 'acp')
+const FIXTURES = join(ROOT, 'test', 'fixtures', 'acp')
 const BIN = process.execPath
 const fixture = (name) => readFileSync(join(FIXTURES, `${name}.ndjson`), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
 const normal = fixture('claude-turn')
@@ -218,7 +216,7 @@ test('a skill identifier resolves to this checkout skills/<name>/SKILL.md, not t
   use('claude-turn', { skills: ['qa-test-writing'] }, (run) => {
     assert.equal(run.error, undefined)
     assert.deepEqual(run.plugins[0].names, ['qa-test-writing'])
-    assert.equal(run.plugins[0].files[0].skill, readFileSync(join(REPO, 'skills', 'qa-test-writing', 'SKILL.md'), 'utf8'))
+    assert.equal(run.plugins[0].files[0].skill, readFileSync(join(ROOT, 'skills', 'qa-test-writing', 'SKILL.md'), 'utf8'))
   })
 })
 
@@ -238,7 +236,7 @@ test('the Pi launch runs this checkout bridge with the full provider/id model an
     assert.equal(run.error, undefined)
     const [, args, spawnOptions] = run.launches[0]
     const shell = args[1]
-    assert.ok(shell.includes(resolve(REPO, 'crew/pi/acp-bridge.mjs')))
+    assert.ok(shell.includes(resolve(ROOT, 'crew/pi/acp-bridge.mjs')))
     assert.ok(shell.includes('--model') && shell.includes('openai/gpt-6.1-sol'))
     assert.ok(shell.includes('--thinking') && shell.includes('high'))
     assert.equal(spawnOptions.env.CREW_PI_BIN, BIN)

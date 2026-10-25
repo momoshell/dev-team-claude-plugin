@@ -40,7 +40,6 @@ function fakes(options = {}) {
     resolveAgents: () => ({ seats: Object.fromEntries(roles.map((role) => [role, { agent: 'pi', provider: 'test', id: role, effort: 'high', ...(options.bounds?.[role] ? { rounds: options.bounds[role] } : {}) }])), advisor: null }),
     mkdir: async (path, opts) => { calls.push('mkdir'); seen.mkdir = [path, opts] },
     readFile: async (path) => {
-      if (options.sessionError && path.endsWith('.session')) throw Object.assign(new Error('gone'), { code: options.sessionError })
       if (options.readError) throw Object.assign(new Error('denied'), { code: options.readError })
       return returns.get(path) ?? ''
     },
@@ -55,8 +54,7 @@ function fakes(options = {}) {
       returns.set(request.returnPath, typeof value === 'string' ? value : JSON.stringify(value))
       const recorded = options.recording?.(request)
       if (!recorded) return undefined
-      if (recorded.rows) returns.set(`${request.returnPath}.session`, recorded.rows.map((r) => JSON.stringify(r)).join('\n'))
-      return { definition: recorded.definition, sessionFile: `${request.returnPath}.session` }
+      return { definition: recorded.definition, recorded: recorded.rows ? recorded.rows.map((r) => JSON.stringify(r)).join('\n') : null }
     },
     checkBaseline: measured('baseline', 'baseline' in options ? options.baseline : { accepted: true, reason: 'gate-failed', result: { ...green(), status: 'red', code: 1, reason: 'gate-failed', failingIds: ['A1'] } }),
     runGate: measured('gate', options.gate ?? { ...green(), failingIds: [] }),
@@ -678,12 +676,12 @@ test('a required skill loaded after the first write, or never, refuses the envel
   }
 })
 
-// MUTATION: treat an unreadable recording as proof.
-test('an unreadable recording refuses when a skill is required and is ignored when none is', async () => {
-  const f = fakes({ sessionError: 'ENOENT', recording: () => ({ definition: { agent: 'pi', requires: ['alpha'], writes: 'repo' } }) })
+// MUTATION: treat a missing recording as proof.
+test('a missing recording refuses when a skill is required and is ignored when none is', async () => {
+  const f = fakes({ recording: () => ({ definition: { agent: 'pi', requires: ['alpha'], writes: 'repo' } }) })
   assert.deepEqual(await f.go(), stopped('envelope-refused'))
   assert.deepEqual(f.rows.find((r) => r.event === 'envelope').defects, ['required-skills-unproven'])
-  const none = fakes({ sessionError: 'ENOENT', recording: () => ({ definition: { requires: [], writes: 'repo' } }) })
+  const none = fakes({ recording: () => ({ definition: { requires: [], writes: 'repo' } }) })
   assert.equal((await none.go()).status, 'done')
 })
 

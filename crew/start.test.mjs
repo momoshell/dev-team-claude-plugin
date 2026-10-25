@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { appendFileSync as appendFileSyncReal, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync as appendFileSyncReal, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { laneName, main, runBrief, startLane, StartRefusal } from './start.mjs'
@@ -930,4 +930,41 @@ test('the requires a seat receives are the effective definition list, tier overr
   }
   assert.equal((await tiered.go()).status, 'done')
   assert.deepEqual(tiered.requests[0].definition.requires, ['alpha'])
+})
+
+// MUTATION: prove from the session file on disk instead of the relayed rows and a forged recording passes.
+test('a seat that rewrites its own session file with forged loads is still refused', async () => {
+  const planner = join(AGENTS, 'planner.md')
+  const forgedLoad = JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'tool_call', toolCallId: 'f1', title: 'read', kind: 'read', status: 'completed', rawInput: { path: fileURLToPath(new URL('../skills/alpha/SKILL.md', import.meta.url)) } } })
+  const forged = leanFixture({ deps: { readFileSync: (path, ...args) => {
+    const text = readFileSync(path, ...args)
+    return path === planner ? text.replace('advisor: null', 'advisor: null\nrequires: ["alpha"]') : text
+  } } })
+  const answered = forged.options.runAcpSeat
+  forged.options.runAcpSeat = async (input) => {
+    const turn = await answered(input)
+    if (input.definition.role === 'planner') writeFileSync(input.sessionFile, `${forgedLoad}\n`)
+    return turn
+  }
+  assert.equal((await forged.go()).status, 'stopped')
+})
+
+// MUTATION: skip the on-disk check and a seat that deletes or rewrites its recording after a real load passes.
+test('a seat that deletes or rewrites its session file after a relayed load is refused', async () => {
+  const planner = join(AGENTS, 'planner.md')
+  const load = JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'tool_call', toolCallId: 'r1', title: 'read', kind: 'read', status: 'in_progress', rawInput: { path: fileURLToPath(new URL('../skills/alpha/SKILL.md', import.meta.url)) } } })
+  const loaded = JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'tool_call_update', toolCallId: 'r1', status: 'completed' } })
+  for (const tamper of [(file) => rmSync(file), (file) => writeFileSync(file, 'replaced\n')]) {
+    const lane = leanFixture({ deps: { readFileSync: (path, ...args) => {
+      const text = readFileSync(path, ...args)
+      return path === planner ? text.replace('advisor: null', 'advisor: null\nrequires: ["alpha"]') : text
+    } } })
+    const answered = lane.options.runAcpSeat
+    lane.options.runAcpSeat = async (input) => {
+      const turn = await answered(input)
+      if (input.definition.role === 'planner') { input.deps.appendFileSync(input.sessionFile, `${load}\n${loaded}\n`, 'utf8'); tamper(input.sessionFile) }
+      return turn
+    }
+    assert.equal((await lane.go()).status, 'stopped')
+  }
 })

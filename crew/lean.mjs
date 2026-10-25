@@ -98,11 +98,14 @@ export async function runLean(spec, deps = {}) {
     const sessionFile = join(spec.taskDir, 'lean', role, `${id}.jsonl`)
     d.mkdirSync(dirname(sessionFile), { recursive: true })
     // 'wx': a turn id is issued once, so an existing recording is never appended to or reused.
-    d.writeFileSync(sessionFile, `${JSON.stringify({ type: 'prompt', text: prompt })}\n`, { flag: 'wx' })
-    // runAcpSeat swallows a failed append; the first one is kept and fails the turn afterwards.
+    const header = `${JSON.stringify({ type: 'prompt', text: prompt })}\n`
+    d.writeFileSync(sessionFile, header, { flag: 'wx' })
+    // runAcpSeat swallows a failed append; the first one is kept and fails the turn afterwards. Every
+    // relayed line is also kept in memory: the skill proof reads that copy, which the seat cannot rewrite.
     let recordError = null
+    const relayed = []
     const guardedAppend = (...args) => {
-      try { return d.appendFileSync(...args) } catch (error) { recordError ??= error; throw error }
+      try { const out = d.appendFileSync(...args); if (args[0] === sessionFile) relayed.push(String(args[1])); return out } catch (error) { recordError ??= error; throw error }
     }
     const turn = await d.runAcpSeat({
       definition, cwd: spec.cwd, taskDir: spec.taskDir, prompt, sessionFile,
@@ -115,7 +118,12 @@ export async function runLean(spec, deps = {}) {
       throw Object.assign(new Error(turn?.refusal?.message ?? 'ACP seat turn returned no stop reason'), { code: turn?.refusal?.code ?? null, errorKind: turn?.refusal?.errorKind ?? null })
     }
     // Trusted runtime context for the loop's required-skill proof; never read from the seat's envelope.
-    return { definition, sessionFile, cwd: spec.cwd }
+    // The proof reads the relayed copy, and only while the file on disk is still exactly what was
+    // relayed: a seat that removed, blocked or rewrote its own recording proves nothing.
+    const recorded = relayed.join('')
+    let intact = false
+    try { intact = d.readFileSync(sessionFile, 'utf8') === header + recorded } catch { /* unreadable is not intact */ }
+    return { definition, recorded: intact ? recorded : null, cwd: spec.cwd }
   }
 
   let result

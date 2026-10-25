@@ -12,7 +12,7 @@ const skill = (name, id = `s-${name}`) => `${call(id, 'Skill', 'other', { skill:
 const write = (id = 'w') => call(id, 'write', 'edit', { path: '/c/a.mjs' })
 const shell = () => call('sh', 'bash', 'execute', { command: 'pwd' })
 const prove = (rows, definition = { agent: 'pi', requires: ['alpha'], writes: 'task-dir' }) =>
-  proveRequiredSkills({ definition, sessionFile: 'x.jsonl', skillsRoot: '/c/skills', readFile: async () => ['{"type":"prompt"}', ...rows].join('\n') })
+  proveRequiredSkills({ definition, skillsRoot: '/c/skills', recorded: ['{"type":"prompt"}', ...rows].join('\n') })
 
 // MUTATION: count a load that follows the first write and SK2 passes.
 test('a load before the first write proves; a load after it, or none, does not', async () => {
@@ -90,14 +90,14 @@ test('a claude Skill load matches the bare required name only under the seat\'s 
   assert.equal(await prove([call('cw', 'Write', 'edit', {}, true), skill('crew-skills-planner:alpha')], planner), 'required-skills-unproven')
 })
 
-// MUTATION: a failing read counts as proof.
-test('an unreadable, empty or malformed recording does not prove, and a definition requiring nothing never reads it', async () => {
+// MUTATION: a missing recording counts as proof.
+test('a missing, empty or malformed recording does not prove, and a definition requiring nothing needs none', async () => {
   const definition = { agent: 'pi', requires: ['alpha'], writes: 'task-dir' }
-  assert.equal(await proveRequiredSkills({ definition, sessionFile: 'x', readFile: async () => { throw Object.assign(new Error('no'), { code: 'EACCES' }) } }), 'required-skills-unproven')
-  assert.equal(await proveRequiredSkills({ definition, sessionFile: 'x', readFile: async () => '' }), 'required-skills-unproven')
+  assert.equal(await proveRequiredSkills({ definition, recorded: null }), 'required-skills-unproven')
+  assert.equal(await proveRequiredSkills({ definition, recorded: '' }), 'required-skills-unproven')
   assert.equal(await prove(['{broken', piLoad()]), 'required-skills-unproven')
   for (const none of [{ requires: [] }, {}]) {
-    assert.equal(await proveRequiredSkills({ definition: none, sessionFile: 'x', readFile: async () => { throw new Error('must not read') } }), null)
+    assert.equal(await proveRequiredSkills({ definition: none, recorded: null }), null)
   }
 })
 
@@ -121,7 +121,7 @@ test('only the granted SKILL.md path is a load', async () => {
 // MUTATION: compare a relative path verbatim, or resolve it against anything but the seat cwd, and these flip.
 test('a relative read resolves against the seat cwd before it is compared with the granted path', async () => {
   const definition = { agent: 'pi', requires: ['alpha'], writes: 'task-dir' }
-  const at = (cwd, rows) => proveRequiredSkills({ definition, sessionFile: 'x', cwd, skillsRoot: '/c/skills', readFile: async () => rows.join('\n') })
+  const at = (cwd, rows) => proveRequiredSkills({ definition, cwd, skillsRoot: '/c/skills', recorded: rows.join('\n') })
   const rel = call('rel', 'read', 'read', { path: 'skills/alpha/SKILL.md' })
   const cat = call('cat', 'bash', 'execute', { command: 'cat skills/alpha/SKILL.md' })
   assert.equal(await at('/c', [rel, update('rel', 'completed'), write()]), null)
@@ -155,8 +155,8 @@ test('a read recorded with locations but no input is not a load', async () => {
 
 // MUTATION: refuse a quoted cat path, or let the old tracker's name pattern judge a dotted skill, and these refuse.
 test('a quoted cat path with spaces and a dotted skill name both load', async () => {
-  const spaced = proveRequiredSkills({ definition: { agent: 'pi', requires: ['alpha'], writes: 'task-dir' }, sessionFile: 'x', skillsRoot: '/c space/skills',
-    readFile: async () => [call('q', 'bash', 'execute', { command: 'cat "/c space/skills/alpha/SKILL.md"' }), update('q', 'completed'), write()].join('\n') })
+  const spaced = proveRequiredSkills({ definition: { agent: 'pi', requires: ['alpha'], writes: 'task-dir' }, skillsRoot: '/c space/skills',
+    recorded: [call('q', 'bash', 'execute', { command: 'cat "/c space/skills/alpha/SKILL.md"' }), update('q', 'completed'), write()].join('\n') })
   assert.equal(await spaced, null)
   const dotted = { agent: 'claude', role: 'planner', requires: ['alpha.v1'], writes: 'task-dir' }
   assert.equal(await prove([skill('crew-skills-planner:alpha.v1'), call('cw', 'Write', 'edit', {}, true)], dotted), null)
@@ -173,8 +173,8 @@ test('a seat whose agent is neither claude nor pi proves nothing', async () => {
 // MUTATION: match loads only against <skills root>/<name>/SKILL.md and a path-granted skill is refused.
 test('a skill granted by path loads from that path, resolved against the seat cwd', async () => {
   const definition = { agent: 'pi', requires: ['review-procedure'], skills: ['.agents/skills/review-procedure/SKILL.md'], writes: 'task-dir' }
-  const at = (cwd, path) => proveRequiredSkills({ definition, sessionFile: 'x', cwd, skillsRoot: '/c/skills',
-    readFile: async () => [call('p', 'read', 'read', { path }), update('p', 'completed'), write()].join('\n') })
+  const at = (cwd, path) => proveRequiredSkills({ definition, cwd, skillsRoot: '/c/skills',
+    recorded: [call('p', 'read', 'read', { path }), update('p', 'completed'), write()].join('\n') })
   assert.equal(await at('/w', '/w/.agents/skills/review-procedure/SKILL.md'), null)
   assert.equal(await at('/w', '.agents/skills/review-procedure/SKILL.md'), null)
   assert.equal(await at('/w', '/other/.agents/skills/review-procedure/SKILL.md'), 'required-skills-unproven')

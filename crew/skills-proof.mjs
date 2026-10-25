@@ -1,7 +1,7 @@
 // Required-skill proof for lean seats (ADR-052): the envelope of a seat whose definition `requires`
 // skills is accepted only if its session recording shows each one fully loaded before the seat's
-// first write. Read only: it judges recorded rows and never grants.
-import { readFile as fsReadFile } from 'node:fs/promises'
+// first write. It judges the rows this process relayed for the turn, never the session file a
+// task-dir seat could rewrite, and never grants.
 import { basename, dirname, isAbsolute, join, normalize, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -94,15 +94,12 @@ function grantedPaths(required, skills, skillsRoot, cwd) {
   return granted
 }
 
-export async function proveRequiredSkills({ definition, sessionFile, cwd, readFile = fsReadFile, skillsRoot = SKILLS_ROOT }) {
+export function proveRequiredSkills({ definition, recorded, cwd, skillsRoot = SKILLS_ROOT }) {
   const required = definition?.requires ?? []
   if (required.length === 0) return null
+  if (typeof recorded !== 'string' || recorded.trim() === '') return UNPROVEN
   let calls
-  try {
-    const raw = await readFile(sessionFile, 'utf8')
-    if (typeof raw !== 'string' || raw.trim() === '') return UNPROVEN
-    calls = foldCalls(raw)
-  } catch { return UNPROVEN }
+  try { calls = foldCalls(recorded) } catch { return UNPROVEN }
   const scope = { agent: definition.agent, role: definition.role, required, granted: grantedPaths(required, definition.skills, skillsRoot, cwd), cwd }
   const loadedAt = new Map()
   let firstWrite = null

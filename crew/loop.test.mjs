@@ -660,7 +660,7 @@ const GRANTED_ALPHA = fileURLToPath(new URL('../skills/alpha/SKILL.md', import.m
 const LOAD = callRow('r1', 'read', 'read', { path: GRANTED_ALPHA })
 const DONE = { sessionId: 's', update: { sessionUpdate: 'tool_call_update', toolCallId: 'r1', status: 'completed' } }
 const WRITE = callRow('w1', 'write', 'edit', { path: '/c/a.mjs' })
-const required = (rows) => ({ recording: () => ({ definition: { requires: ['alpha'], writes: 'repo' }, rows }) })
+const required = (rows) => ({ recording: () => ({ definition: { agent: 'pi', requires: ['alpha'], writes: 'repo' }, rows }) })
 
 // MUTATION: skip the proof in seatTurn and a seat that never loaded its required skill advances.
 test('a seat whose recording shows every required skill before its first write is accepted', async () => {
@@ -680,7 +680,7 @@ test('a required skill loaded after the first write, or never, refuses the envel
 
 // MUTATION: treat an unreadable recording as proof.
 test('an unreadable recording refuses when a skill is required and is ignored when none is', async () => {
-  const f = fakes({ sessionError: 'ENOENT', recording: () => ({ definition: { requires: ['alpha'], writes: 'repo' } }) })
+  const f = fakes({ sessionError: 'ENOENT', recording: () => ({ definition: { agent: 'pi', requires: ['alpha'], writes: 'repo' } }) })
   assert.deepEqual(await f.go(), stopped('envelope-refused'))
   assert.deepEqual(f.rows.find((r) => r.event === 'envelope').defects, ['required-skills-unproven'])
   const none = fakes({ sessionError: 'ENOENT', recording: () => ({ definition: { requires: [], writes: 'repo' } }) })

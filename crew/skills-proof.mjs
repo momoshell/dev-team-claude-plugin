@@ -64,17 +64,20 @@ function inputsOf(call) {
 }
 
 // The load a completed call shows, as [toolName, input] for the tracker, or null when it shows none.
-// A claude Skill call counts under the seat's own plugin, `crew-skills-<role>` (adapter-claude
-// writeSeatSkills), and under no other. Any other call counts only as a whole read of a granted
-// SKILL.md: a read tool with no offset or limit, or exactly `cat <path>` (a search such as Grep returns
-// matching lines only), whose path, resolved against the seat's cwd when relative, equals
-// <skills root>/<required>/SKILL.md. Every load is handed to the tracker as a read of that path.
-function loadOf(name, input, { role, required, skillsRoot, cwd }) {
-  if (name === 'Skill') {
-    if (typeof input.skill !== 'string' || !input.skill.includes(':')) return [name, input]
+// A claude seat loads its granted skills only through its own plugin, `crew-skills-<role>`
+// (adapter-claude writeSeatSkills): a Skill call under that namespace counts, a bare or foreign name
+// does not, and neither does a file read. A pi seat is granted SKILL.md paths (`--skill`), so for it
+// only a whole read counts: a read tool with no offset or limit, or exactly `cat <path>` (a search such
+// as Grep returns matching lines only), whose path, resolved against the seat's cwd when relative,
+// equals <skills root>/<required>/SKILL.md.
+function loadOf(name, input, { agent, role, required, skillsRoot, cwd }) {
+  if (agent === 'claude') {
     const own = `crew-skills-${role}:`
-    return input.skill.startsWith(own) ? [name, { ...input, skill: input.skill.slice(own.length) }] : null
+    return name === 'Skill' && typeof input.skill === 'string' && input.skill.startsWith(own)
+      ? [name, { ...input, skill: input.skill.slice(own.length) }]
+      : null
   }
+  if (agent !== 'pi') return null
   let path
   if (name === 'bash') path = typeof input.command === 'string' ? CAT.exec(input.command.trim())?.[2] : undefined
   else if (name.toLowerCase() === 'read' && input.offset == null && input.limit == null) path = input.path ?? input.file_path
@@ -93,7 +96,7 @@ export async function proveRequiredSkills({ definition, sessionFile, cwd, readFi
     if (typeof raw !== 'string' || raw.trim() === '') return UNPROVEN
     calls = foldCalls(raw)
   } catch { return UNPROVEN }
-  const scope = { role: definition.role, required, skillsRoot, cwd }
+  const scope = { agent: definition.agent, role: definition.role, required, skillsRoot, cwd }
   const tracker = createSkillLoadTracker()
   let firstWrite = null
   for (const call of calls) {

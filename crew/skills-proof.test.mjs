@@ -11,7 +11,7 @@ const piLoad = (skill = 'alpha', id = `r-${skill}`) => `${call(id, 'read', 'read
 const skill = (name, id = `s-${name}`) => `${call(id, 'Skill', 'other', { skill: name }, true)}\n${done(id)}`
 const write = (id = 'w') => call(id, 'write', 'edit', { path: '/c/a.mjs' })
 const shell = () => call('sh', 'bash', 'execute', { command: 'pwd' })
-const prove = (rows, definition = { requires: ['alpha'], writes: 'task-dir' }) =>
+const prove = (rows, definition = { agent: 'pi', requires: ['alpha'], writes: 'task-dir' }) =>
   proveRequiredSkills({ definition, sessionFile: 'x.jsonl', skillsRoot: '/c/skills', readFile: async () => ['{"type":"prompt"}', ...rows].join('\n') })
 
 // MUTATION: count a load that follows the first write and SK2 passes.
@@ -24,7 +24,7 @@ test('a load before the first write proves; a load after it, or none, does not',
 })
 
 test('every required skill must be loaded; references, failed loads and look-alikes do not count', async () => {
-  const two = { requires: ['alpha', 'beta'], writes: 'task-dir' }
+  const two = { agent: 'pi', requires: ['alpha', 'beta'], writes: 'task-dir' }
   assert.equal(await prove([piLoad(), piLoad('beta'), write()], two), null)
   assert.equal(await prove([piLoad(), write()], two), 'required-skills-unproven')
   assert.equal(await prove([call('ref', 'read', 'read', { path: '/c/skills/alpha/references/g.md' }), write()]), 'required-skills-unproven')
@@ -36,20 +36,20 @@ test('every required skill must be loaded; references, failed loads and look-ali
 // MUTATION: treat every shell call as a write, or none.
 test('a shell call is a write only for a repo writer', async () => {
   assert.equal(await prove([shell(), piLoad(), write()]), null)
-  assert.equal(await prove([shell(), piLoad(), write()], { requires: ['alpha'], writes: 'repo' }), 'required-skills-unproven')
-  assert.equal(await prove([piLoad(), shell()], { requires: ['alpha'], writes: 'repo' }), null)
+  assert.equal(await prove([shell(), piLoad(), write()], { agent: 'pi', requires: ['alpha'], writes: 'repo' }), 'required-skills-unproven')
+  assert.equal(await prove([piLoad(), shell()], { agent: 'pi', requires: ['alpha'], writes: 'repo' }), null)
 })
 
 // MUTATION: exempt a shell call that reads a SKILL.md from the write boundary and the beta-then-alpha order passes.
 test('for a repo writer a shell call that reads a skill is still the first write', async () => {
-  const repo = { requires: ['alpha'], writes: 'repo' }
+  const repo = { agent: 'pi', requires: ['alpha'], writes: 'repo' }
   const catBeta = call('cat', 'bash', 'execute', { command: 'cat skills/beta/SKILL.md' })
   assert.equal(await prove([catBeta, piLoad(), write()], repo), 'required-skills-unproven')
 })
 
 // MUTATION: order a load by the row its call first appeared on and the late-named load passes.
 test('a skill named only in a later update is ordered by that update, not by the empty first row', async () => {
-  const planner = { role: 'planner', requires: ['alpha'], writes: 'task-dir' }
+  const planner = { agent: 'claude', role: 'planner', requires: ['alpha'], writes: 'task-dir' }
   const pending = call('s', 'Skill', 'other', {}, true)
   const named = row({ sessionUpdate: 'tool_call_update', toolCallId: 's', rawInput: { skill: 'crew-skills-planner:alpha' } })
   assert.equal(await prove([pending, call('cw', 'Write', 'edit', {}, true), named, done('s')], planner), 'required-skills-unproven')
@@ -58,7 +58,7 @@ test('a skill named only in a later update is ordered by that update, not by the
 
 // MUTATION: count a load on its named row rather than its completion and the started-then-written order passes.
 test('a load counts only once completed, and only if it completed before the first write', async () => {
-  const planner = { role: 'planner', requires: ['alpha'], writes: 'task-dir' }
+  const planner = { agent: 'claude', role: 'planner', requires: ['alpha'], writes: 'task-dir' }
   const started = call('s', 'Skill', 'other', { skill: 'crew-skills-planner:alpha' }, true)
   assert.equal(await prove([started, call('cw', 'Write', 'edit', {}, true), done('s')], planner), 'required-skills-unproven')
   assert.equal(await prove([started, call('cw', 'Write', 'edit', {}, true)], planner), 'required-skills-unproven')
@@ -81,7 +81,7 @@ test('an execute call titled Run command that reads a SKILL.md is a load for a n
 
 // MUTATION: compare the namespaced name verbatim and SK4 fails; strip any namespace and the foreign-plugin case passes.
 test('a claude Skill load matches the bare required name only under the seat\'s own plugin', async () => {
-  const planner = { role: 'planner', requires: ['alpha'], writes: 'task-dir' }
+  const planner = { agent: 'claude', role: 'planner', requires: ['alpha'], writes: 'task-dir' }
   assert.equal(await prove([skill('crew-skills-planner:alpha'), call('cw', 'Write', 'edit', {}, true)], planner), null)
   for (const plugin of ['crew-skills-builder', 'dev-team', 'other']) {
     assert.equal(await prove([skill(`${plugin}:alpha`), call('cw', 'Write', 'edit', {}, true)], planner), 'required-skills-unproven', plugin)
@@ -92,7 +92,7 @@ test('a claude Skill load matches the bare required name only under the seat\'s 
 
 // MUTATION: a failing read counts as proof.
 test('an unreadable, empty or malformed recording does not prove, and a definition requiring nothing never reads it', async () => {
-  const definition = { requires: ['alpha'], writes: 'task-dir' }
+  const definition = { agent: 'pi', requires: ['alpha'], writes: 'task-dir' }
   assert.equal(await proveRequiredSkills({ definition, sessionFile: 'x', readFile: async () => { throw Object.assign(new Error('no'), { code: 'EACCES' }) } }), 'required-skills-unproven')
   assert.equal(await proveRequiredSkills({ definition, sessionFile: 'x', readFile: async () => '' }), 'required-skills-unproven')
   assert.equal(await prove(['{broken', piLoad()]), 'required-skills-unproven')
@@ -120,7 +120,7 @@ test('only the granted SKILL.md path is a load', async () => {
 
 // MUTATION: compare a relative path verbatim, or resolve it against anything but the seat cwd, and these flip.
 test('a relative read resolves against the seat cwd before it is compared with the granted path', async () => {
-  const definition = { requires: ['alpha'], writes: 'task-dir' }
+  const definition = { agent: 'pi', requires: ['alpha'], writes: 'task-dir' }
   const at = (cwd, rows) => proveRequiredSkills({ definition, sessionFile: 'x', cwd, skillsRoot: '/c/skills', readFile: async () => rows.join('\n') })
   const rel = call('rel', 'read', 'read', { path: 'skills/alpha/SKILL.md' })
   const cat = call('cat', 'bash', 'execute', { command: 'cat skills/alpha/SKILL.md' })
@@ -135,4 +135,14 @@ test('a search over a SKILL.md is not a load', async () => {
     const id = `g-${title}`
     assert.equal(await prove([call(id, title, kind, { path: '/c/skills/alpha/SKILL.md', pattern: 'x' }, title === 'Grep'), update(id, 'completed'), write()]), 'required-skills-unproven', title)
   }
+})
+
+// MUTATION: let a claude seat prove a skill by a file read, or by a bare or foreign Skill name, and these pass.
+test('a claude seat proves a skill only by a Skill call under its own plugin', async () => {
+  const planner = { agent: 'claude', role: 'planner', requires: ['alpha'], writes: 'task-dir' }
+  const claudeWrite = () => call('cw', 'Write', 'edit', {}, true)
+  assert.equal(await prove([piLoad(), claudeWrite()], planner), 'required-skills-unproven')
+  assert.equal(await prove([skill('alpha'), claudeWrite()], planner), 'required-skills-unproven')
+  assert.equal(await prove([skill('crew-skills-planner:alpha'), claudeWrite()], planner), null)
+  assert.equal(await prove([skill('crew-skills-planner:alpha'), write()], { ...planner, agent: 'pi' }), 'required-skills-unproven')
 })

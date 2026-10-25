@@ -111,9 +111,20 @@ test('a partial read of a SKILL.md is not a load', async () => {
 
 // MUTATION: match any path ending in skills/<name>/SKILL.md and a foreign copy proves the skill.
 test('only the granted SKILL.md path is a load', async () => {
-  for (const path of ['/tmp/skills/alpha/SKILL.md', 'skills/alpha/SKILL.md', '/c/skills/alpha/../alpha-x/SKILL.md']) {
+  for (const path of ['/tmp/skills/alpha/SKILL.md', 'skills/alpha/SKILL.md', '/c/skills/alpha/../alpha-x/SKILL.md']) { // no cwd: a relative path proves nothing
     const id = `p-${path}`
     assert.equal(await prove([call(id, 'read', 'read', { path }), update(id, 'completed'), write()]), 'required-skills-unproven', path)
   }
   assert.equal(await prove([call('ok', 'read', 'read', { path: '/c/skills/alpha/SKILL.md' }), update('ok', 'completed'), write()]), null)
+})
+
+// MUTATION: compare a relative path verbatim, or resolve it against anything but the seat cwd, and these flip.
+test('a relative read resolves against the seat cwd before it is compared with the granted path', async () => {
+  const definition = { requires: ['alpha'], writes: 'task-dir' }
+  const at = (cwd, rows) => proveRequiredSkills({ definition, sessionFile: 'x', cwd, skillsRoot: '/c/skills', readFile: async () => rows.join('\n') })
+  const rel = call('rel', 'read', 'read', { path: 'skills/alpha/SKILL.md' })
+  const cat = call('cat', 'bash', 'execute', { command: 'cat skills/alpha/SKILL.md' })
+  assert.equal(await at('/c', [rel, update('rel', 'completed'), write()]), null)
+  assert.equal(await at('/c', [cat, update('cat', 'completed'), write()]), null)
+  assert.equal(await at('/worktree', [rel, update('rel', 'completed'), write()]), 'required-skills-unproven')
 })

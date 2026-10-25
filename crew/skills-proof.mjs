@@ -2,7 +2,7 @@
 // skills is accepted only if its session recording shows each one fully loaded before the seat's
 // first write. Read only: it reuses the old path's load tracker and judges recorded rows, never grants.
 import { readFile as fsReadFile } from 'node:fs/promises'
-import { isAbsolute, join, normalize } from 'node:path'
+import { isAbsolute, join, normalize, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createSkillLoadTracker } from './headless.mjs'
 
@@ -63,19 +63,22 @@ function inputsOf(call) {
   return located.length ? located : [{}]
 }
 
-// A read-type call is a load only when it reads a granted SKILL.md whole: an absolute path equal to
-// <skills root>/<required>/SKILL.md, with no offset or limit, or a shell call that is exactly `cat <path>`.
+// A read-type call is a load only when it reads a granted SKILL.md whole: its path, resolved against
+// the seat's cwd when relative, equals <skills root>/<required>/SKILL.md, with no offset or limit, or
+// it is a shell call that is exactly `cat <path>`. Returns the resolved path, or null when it is no load.
 // A claude Skill call names its skill directly and is matched by namespace instead.
-function wholeGrantedRead(name, input, required, skillsRoot) {
+function wholeGrantedRead(name, input, required, skillsRoot, cwd) {
   if (name === 'Skill') return true
   let path = input.path ?? input.file_path
   if (name === 'bash') path = typeof input.command === 'string' ? CAT.exec(input.command.trim())?.[2] : undefined
-  else if (input.offset != null || input.limit != null) return false
-  if (typeof path !== 'string' || !isAbsolute(path)) return false
-  return required.some((skill) => normalize(path) === join(skillsRoot, skill, 'SKILL.md'))
+  else if (input.offset != null || input.limit != null) return null
+  if (typeof path !== 'string' || path === '') return null
+  if (!isAbsolute(path) && typeof cwd !== 'string') return null
+  const full = isAbsolute(path) ? normalize(path) : resolve(cwd, path)
+  return required.some((skill) => full === join(skillsRoot, skill, 'SKILL.md')) ? full : null
 }
 
-export async function proveRequiredSkills({ definition, sessionFile, readFile = fsReadFile, skillsRoot = SKILLS_ROOT }) {
+export async function proveRequiredSkills({ definition, sessionFile, cwd, readFile = fsReadFile, skillsRoot = SKILLS_ROOT }) {
   const required = definition?.requires ?? []
   if (required.length === 0) return null
   let raw
@@ -97,7 +100,10 @@ export async function proveRequiredSkills({ definition, sessionFile, readFile = 
       const normalized = name === 'Skill' && typeof input.skill === 'string' && input.skill.includes(':')
         ? { ...input, skill: input.skill.startsWith(own) ? input.skill.slice(own.length) : null }
         : input
-      if (call.loadAt !== null && call.status === 'completed' && wholeGrantedRead(name, normalized, required, skillsRoot)) tracker.observe(name, normalized, null, call.loadAt, call.id)
+      const granted = call.loadAt !== null && call.status === 'completed' ? wholeGrantedRead(name, normalized, required, skillsRoot, cwd) : null
+      // A whole read is observed as a read of its resolved path, so relative and `cat` loads classify alike.
+      if (granted === true) tracker.observe(name, normalized, null, call.loadAt, call.id)
+      else if (granted) tracker.observe('read', { path: granted }, null, call.loadAt, call.id)
       // For a repo writer every shell call is a write boundary, including one that reads a SKILL.md.
       const shell = call.kind === 'execute' || lower === 'bash'
       const writes = WRITE_TOOLS.has(lower) || WRITE_KINDS.has(call.kind) || (shell && definition.writes === 'repo')

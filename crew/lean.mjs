@@ -115,7 +115,7 @@ export async function runLean(spec, deps = {}) {
       throw Object.assign(new Error(turn?.refusal?.message ?? 'ACP seat turn returned no stop reason'), { code: turn?.refusal?.code ?? null, errorKind: turn?.refusal?.errorKind ?? null })
     }
     // Trusted runtime context for the loop's required-skill proof; never read from the seat's envelope.
-    return { definition, sessionFile }
+    return { definition, sessionFile, cwd: spec.cwd }
   }
 
   let result

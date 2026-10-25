@@ -139,7 +139,7 @@ export async function runLoop(spec, deps = {}) {
         const checked = failure ? { envelope: null, defects: [] } : validateEnvelope(role, parsed)
         // The proof reads the seat's own recording, after the schema and id are sound.
         if (!failure && checked.defects.length === 0 && checked.envelope?.id === id && recording?.definition && recording.sessionFile) {
-          const unproven = await proveRequiredSkills({ definition: recording.definition, sessionFile: recording.sessionFile, readFile: d.readFile })
+          const unproven = await proveRequiredSkills({ definition: recording.definition, sessionFile: recording.sessionFile, cwd: recording.cwd, readFile: d.readFile })
           if (unproven) checked.defects.push(unproven)
         }
         const valid = checked.defects.length === 0 && checked.envelope?.id === id

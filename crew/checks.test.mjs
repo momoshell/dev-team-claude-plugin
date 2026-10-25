@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { scratchDir } from '../test/helpers.mjs'
+import { git, gitResult, scratchDir } from '../test/helpers.mjs'
 import { CHECK_REASONS, checkBaseline, commitChanges, openPullRequest, proveMutations, rebaseBranch, runGate, runSuite } from './checks.mjs'
 
 const GATE_TIMEOUT_MS = 10_000
@@ -724,7 +724,6 @@ test('a copy that cannot be removed is unmeasured cleanup-unproven, not a thrown
 
 
 // Lane publication: real git in scratch repositories for commit and rebase, scripted transcripts for gh and the remote.
-const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' })
 const FAKE_OK = (stdout = '') => ({ status: 'green', reason: null, code: 0, signal: null, stdout, stderr: '', timedOut: false })
 const FAKE_BAD = { status: 'red', reason: 'exit-nonzero', code: 1, signal: null, stdout: '', stderr: 'injected failure', timedOut: false }
 const FAKE_UNMEASURED = (reason) => ({ status: 'unmeasured', reason, code: null, signal: null, stdout: '', stderr: '', timedOut: false })
@@ -1263,4 +1262,33 @@ test('openPullRequest neutralizes issue numbers in the title', async () => {
   const create = f.calls.find((spec) => spec.args[1] === 'create')
   const title = create.args[create.args.indexOf('--title') + 1]
   assert.equal(title.includes('#'), false, title)
+})
+
+// MUTATION: rebase onto the bare name and a tag of the same name wins over the branch.
+test('rebaseBranch rebases onto the branch, not a tag that shares its name', async () => {
+  const cwd = laneRepo({ 'a.txt': 'base\n' })
+  const lane = git(cwd, 'rev-parse', '--abbrev-ref', 'HEAD').trim()
+  git(cwd, 'tag', 'main', 'HEAD')
+  git(cwd, 'checkout', '-q', 'refs/heads/main')
+  git(cwd, 'checkout', '-q', '-B', 'main')
+  writeFileSync(join(cwd, 'b.txt'), 'newer on main\n')
+  git(cwd, 'add', 'b.txt')
+  git(cwd, 'commit', '-q', '-m', 'main moves')
+  git(cwd, 'checkout', '-q', lane)
+  writeFileSync(join(cwd, 'c.txt'), 'lane work\n')
+  git(cwd, 'add', 'c.txt')
+  git(cwd, 'commit', '-q', '-m', 'lane work')
+  const result = await rebaseBranch({ cwd, base: 'main' })
+  assert.equal(result.status, 'green', JSON.stringify(result))
+  assert.equal(gitResult(cwd, 'merge-base', '--is-ancestor', 'refs/heads/main', 'HEAD').status, 0)
+})
+
+// MUTATION: query with --base and a PR the lane already has on another base is invisible, so a second is created.
+test('openPullRequest finds the lane PR on any base and refuses to open a second', async () => {
+  const f = fakeRemote({ prs: [prRecord(30, { baseRefName: 'dev' })], remote: SHA })
+  const result = await openPullRequest(publishSpec, { run: f.run })
+  assert.equal(result.status, 'unmeasured')
+  assert.equal(reasonOf(result), 'pr-unmeasured')
+  assert.equal(f.count('gh', 'create'), 0)
+  assert.ok(f.calls.filter((spec) => spec.args[1] === 'list').every((spec) => !spec.args.includes('--base')))
 })

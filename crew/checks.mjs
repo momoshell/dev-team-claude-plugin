@@ -515,11 +515,18 @@ export async function rebaseBranch(spec = {}, deps = {}) {
     const before = await readCheckout(git, cwd)
     if (before.problem) return notGreen(before.problem, 'rebase-failed')
     if (before.busy.length > 0 || before.status !== '') return red('dirty-worktree', { busy: before.busy })
-    const outcome = await git([...NO_HOOKS, '-c', 'rebase.autoStash=false', 'rebase', base])
+    // A bare name can resolve to a tag of the same name; rebase onto the branch it names, local first.
+    let target = null
+    for (const ref of [`refs/heads/${base}`, `refs/remotes/${base}`]) {
+      if ((await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])).status === 'green') { target = ref; break }
+    }
+    if (target === null) return red('rebase-failed', { detail: `${base} is neither a local nor a remote-tracking branch` })
+    const outcome = await git([...NO_HOOKS, '-c', 'rebase.autoStash=false', 'rebase', target])
     if (outcome.status === 'green') {
       const after = await readCheckout(git, cwd)
-      if (!after.problem && after.busy.length === 0 && after.status === '') return { status: 'green', reason: null, head: after.head }
-      return unmeasured('rebase-failed', { detail: 'the rebase exited 0 but the checkout could not be proven clean' })
+      const onBase = await git(['merge-base', '--is-ancestor', target, 'HEAD'])
+      if (!after.problem && after.busy.length === 0 && after.status === '' && onBase.status === 'green') return { status: 'green', reason: null, head: after.head }
+      return unmeasured('rebase-failed', { detail: 'the rebase exited 0 but the checkout could not be proven clean and on its base' })
     }
     const listed = outcome.status === 'red' ? await git(['diff', '--name-only', '--diff-filter=U', '-z']) : null
     const mid = await readCheckout(git, cwd)
@@ -541,7 +548,7 @@ export async function rebaseBranch(spec = {}, deps = {}) {
 function validPr(record, branch, base) {
   if (!record || typeof record !== 'object' || !Number.isSafeInteger(record.number) || record.number <= 0) return false
   try { if (new URL(record.url).protocol !== 'https:') return false } catch { return false }
-  return record.state === 'OPEN' && record.headRefName === branch && record.baseRefName === base && record.isCrossRepository === false
+  return record.state === 'OPEN' && record.headRefName === branch && typeof record.baseRefName === 'string' && record.isCrossRepository === false
 }
 
 // Pushes the lane branch (never forced) and opens its PR, or returns the PR already open. Every claim is read back.
@@ -568,7 +575,8 @@ export async function openPullRequest(spec = {}, deps = {}) {
 
     // null is unknown (failed, malformed or ambiguous query), never an absent PR.
     const openPrs = async () => {
-      const listed = await gh(['pr', 'list', '--state', 'open', '--head', branch, '--base', base, '--json', 'number,url,state,headRefName,baseRefName,isCrossRepository'])
+      // Queried by head only: a PR the lane already has on another base must block a second, not hide behind --base.
+      const listed = await gh(['pr', 'list', '--state', 'open', '--head', branch, '--json', 'number,url,state,headRefName,baseRefName,isCrossRepository'])
       if (listed.status !== 'green') return null
       let records
       try { records = JSON.parse(listed.stdout) } catch { return null }
@@ -587,6 +595,7 @@ export async function openPullRequest(spec = {}, deps = {}) {
 
     const existing = await openPrs()
     if (existing === null || existing.length > 1) return unmeasured('pr-unmeasured')
+    if (existing.length === 1 && existing[0].baseRefName !== base) return unmeasured('pr-unmeasured', { detail: `the open PR for ${branch} targets ${existing[0].baseRefName}, not ${base}`, pr: existing[0] })
     let remoteOid = await remoteHead()
     if (remoteOid !== head) {
       await git(['push', remote, `HEAD:refs/heads/${branch}`])
@@ -596,7 +605,7 @@ export async function openPullRequest(spec = {}, deps = {}) {
     if (existing.length === 1) return { status: 'green', reason: null, pr: existing[0], reused: true }
     await gh(['pr', 'create', '--base', base, '--head', branch, '--title', withoutIssueTokens(title), '--body', composeLanePrBody({ body, closes: closing, refs: referenced })])
     const confirmed = await openPrs() ?? []
-    if (confirmed.length !== 1) return unmeasured('pr-unmeasured')
+    if (confirmed.length !== 1 || confirmed[0].baseRefName !== base) return unmeasured('pr-unmeasured')
     return { status: 'green', reason: null, pr: confirmed[0], reused: false }
   })
 }

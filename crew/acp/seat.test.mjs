@@ -1143,43 +1143,28 @@ test('a claude seat never drops an arm it cannot express: every pi-only extensio
   assert.equal(armed('claude', 'builder', { edit_assist: false, codemode: false, advisor: null, extensions: [] }).created.length, 1)
 })
 
-test('a pi seat that declares an advisor loads the advisor extension with CREW_ADVISOR=1; null does not', () => {
-  const { launch } = armed('pi', 'planner', { advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' } })
-  assert.equal(launch.env.CREW_ADVISOR, '1')
-  assert.ok(piExtensions(launch).some((path) => path.endsWith('/crew/pi/extensions/advisor.ts')))
-  const none = armed('pi', 'planner', { advisor: null }).launch
+test('a lean pi seat refuses the arms that read the old task layout: advisor, edit assist, builderloop and skeletonread', () => {
+  const requests = [
+    { advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' } }, { edit_assist: true },
+    { extensions: ['builderloop'] }, { extensions: ['skeletonread'] },
+  ]
+  for (const arms of requests) {
+    const probe = armLaunch('pi', 'builder', arms)
+    assert.throws(() => probe.run(), { reason: 'grant-unsupported' }, JSON.stringify(arms))
+    assert.equal(probe.created.length, 0, JSON.stringify(arms))
+  }
+  const none = armed('pi', 'builder', { advisor: null, edit_assist: false }).launch
   assert.equal(none.env.CREW_ADVISOR, undefined)
   assert.deepEqual(piExtensions(none), [])
 })
 
-test('a pi advisor writes its model cell to the lane task dir manifest the extension reads', () => {
-  const probe = armed('pi', 'planner', { advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' } })
-  const manifest = JSON.parse(readFileSync(join(probe.taskDir, 'advisor-manifest.json'), 'utf8'))
-  assert.equal(manifest.schema_version, 1)
-  assert.deepEqual(manifest.tripwires, [])
-  assert.deepEqual({ ...manifest.cell, model: undefined }, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'high', model: undefined })
-  assert.equal(typeof manifest.cell.model, 'string')
-  assert.equal(probe.launch.env.CREW_TASK_DIR, probe.taskDir)
-})
-
-test('an advisor naming a non-pi cell refuses before a client', () => {
-  const probe = armLaunch('pi', 'planner', { advisor: { agent: 'claude', model: 'anthropic/claude-opus-4-6', effort: 'high' } })
-  assert.throws(() => probe.run(), { reason: 'grant-unsupported' })
-  assert.equal(probe.created.length, 0)
-})
-
-test('a pi builder carries its edit assist setting to the launch; an unset field carries none; a planner that asks refuses', () => {
-  assert.equal(armed('pi', 'builder', { edit_assist: true }).launch.env.CREW_EDIT_ASSIST, 'on')
+test('a pi builder with edit assist off carries off; an unset field carries none', () => {
   assert.equal(armed('pi', 'builder', { edit_assist: false }).launch.env.CREW_EDIT_ASSIST, 'off')
   assert.equal(armed('pi', 'builder', {}).launch.env.CREW_EDIT_ASSIST, undefined)
-  const planner = armLaunch('pi', 'planner', { edit_assist: true })
-  assert.throws(() => planner.run(), { reason: 'grant-unsupported' })
-  assert.equal(planner.created.length, 0)
-  assert.equal(armed('pi', 'planner', { edit_assist: false }).launch.env.CREW_EDIT_ASSIST, undefined)
 })
 
 test('every native extension reaches a pi launch as its checkout extension with its tool; none declared loads none', () => {
-  const tools = { readgate: null, builderloop: null, reminders: null, skeletonread: 'retrieve' }
+  const tools = { readgate: null, reminders: null }
   for (const [name, tool] of Object.entries(tools)) {
     const { launch } = armed('pi', 'builder', { extensions: [name] })
     assert.deepEqual(piExtensions(launch), [join(ROOT, 'crew', 'pi', 'extensions', `${name}.ts`)])

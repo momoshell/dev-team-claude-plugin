@@ -340,6 +340,63 @@ test('a red, unmeasured or malformed-green suite never commits', async () => {
   }
 })
 
+const redRun = (code = 1, reason = 'exit-nonzero') => ({ ...green(), status: 'red', code, reason })
+const timeoutRun = () => ({ ...green(), status: 'unmeasured', code: null, reason: 'timeout', timedOut: true })
+// A suite seam that answers from a sequence and counts every invocation; an exhausted sequence throws.
+function sequenced(sequence, options = {}) {
+  const inputs = []
+  const f = fakes(options)
+  f.deps.runSuite = async (input) => {
+    f.calls.push('suite'); inputs.push(structuredClone(input))
+    const next = sequence[inputs.length - 1]
+    if (next instanceof Error) throw next
+    if (next === undefined) throw new Error('unexpected extra suite run')
+    return structuredClone(next)
+  }
+  return Object.assign(f, { inputs })
+}
+const EFFECTS = ['paths', 'commit', 'fetch', 'rebase', 'publish']
+
+// MUTATION: never re-run a red suite and a flaky first red stops the lane.
+test('a red suite is run once more and a green re-run reaches commit with both runs in the PR measurements', async () => {
+  const f = sequenced([redRun(7), green(), redRun(9)], { spec: { suite: { command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 1800000 } } })
+  const { inputs } = f
+  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
+  assert.equal(inputs.length, 2)
+  assert.deepEqual(inputs[1], inputs[0])
+  assert.deepEqual(inputs[0], { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 1800000 })
+  assert.deepEqual(f.calls.filter((c) => ['suite', ...EFFECTS].includes(c)), ['suite', 'suite', ...EFFECTS])
+  const body = BODY.replace('- Suite: green; exit 0.', '- Suite: red; exit 7.\n- Suite re-run: green; exit 0.')
+  assert.equal(f.seen.commit.body, body)
+  assert.equal(f.seen.publish.body, body)
+  assert.deepEqual(f.rows.filter((r) => r.event === 'check' && r.check === 'suite').map((r) => r.result.status), ['red', 'green'])
+})
+
+// MUTATION: return the re-run's reason, or run a third time, and a double red misreports or over-runs.
+test('a suite red on both runs stops with the first run reason after exactly two runs', async () => {
+  for (const second of [redRun(2), redRun(2, 'gate-failed')]) {
+    const f = sequenced([redRun(1), second, green()])
+    assert.deepEqual(await f.go(), stopped('exit-nonzero'))
+    assert.equal(f.inputs.length, 2)
+    for (const effect of EFFECTS) assert.equal(f.calls.includes(effect), false, effect)
+    assert.equal(f.rows.findLast((r) => r.event === 'verdict').reason, 'exit-nonzero')
+  }
+})
+
+// MUTATION: let a re-run turn an unmeasured result into green, or re-run an unmeasured first result.
+test('an unmeasured suite is never re-run and never turned green by a re-run', async () => {
+  const unknowns = [[timeoutRun(), 'timeout'], [new Error('crashed'), 'runner-threw'], [{ ...green(), code: 4 }, 'runner-threw'], [{ status: 'green' }, 'runner-threw']]
+  for (const [unknown, reason] of unknowns) {
+    const initial = sequenced([unknown, green()])
+    assert.deepEqual(await initial.go(), stopped(reason))
+    assert.equal(initial.inputs.length, 1)
+    const rerun = sequenced([redRun(), unknown, green()])
+    assert.deepEqual(await rerun.go(), stopped(reason))
+    assert.equal(rerun.inputs.length, 2)
+    for (const f of [initial, rerun]) for (const effect of EFFECTS) assert.equal(f.calls.includes(effect), false, effect)
+  }
+})
+
 // MUTATION: continue past a failed publication effect and a later effect runs on an unproven state.
 test('a failed commit, fetch, rebase or publish stops every later effect and returns one enum reason', async () => {
   const bad = (reason) => ({ status: 'red', reason })
@@ -376,7 +433,8 @@ test('every started stage ends on success and refusal, in order', async () => {
   assert.ok(ok.rows.every((r) => r.lane === 'lane' && typeof r.event === 'string' && 'stage' in r))
   const refused = fakes({ suite: { ...green(), status: 'red', code: 1, reason: 'exit-nonzero' } })
   await refused.go()
-  assert.deepEqual(pairs(refused.rows), STAGES.slice(0, 8).flatMap((s) => [['stage-start', s], ['stage-end', s]]))
+  // a red suite is run once more, so its stage opens and closes twice
+  assert.deepEqual(pairs(refused.rows), [...STAGES.slice(0, 8), 'suite'].flatMap((s) => [['stage-start', s], ['stage-end', s]]))
   const thrown = fakes({ deps: { mkdir: async () => {}, resolveAgents: undefined } })
   assert.deepEqual(await thrown.go(), stopped('invalid-input'))
   const lead = fakes({ edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate' } : v })

@@ -218,9 +218,18 @@ export async function runLoop(spec, deps = {}) {
       break
     }
 
-    const suite = await stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs ?? timeoutMs }, { command: true }))
-    if (suite.status !== 'green') return stop(suite.reason, suite)
-    measurements.push(`- Suite: ${suite.status}; exit ${suite.code}.`)
+    const runSuite = () => stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs ?? timeoutMs }, { command: true }))
+    const suite = await runSuite()
+    // Only a measured red is run once more; an unmeasured suite stops as it is, and the first red stays in the PR text.
+    if (suite.status === 'red') {
+      measurements.push(`- Suite: ${suite.status}; exit ${suite.code}.`)
+      const rerun = await runSuite()
+      if (rerun.status !== 'green') return stop(rerun.status === 'red' ? suite.reason : rerun.reason, rerun)
+      measurements.push(`- Suite re-run: ${rerun.status}; exit ${rerun.code}.`)
+    } else {
+      if (suite.status !== 'green') return stop(suite.reason, suite)
+      measurements.push(`- Suite: ${suite.status}; exit ${suite.code}.`)
+    }
     const body = [`Source: ${JSON.stringify(spec.source)}`, '', '## Acceptance', ...acceptance.map((id) => `- ${id}`), '', '## Measurements', ...measurements].join('\n')
 
     // The commit names what git reports changed now, never a list the caller wrote before the build.

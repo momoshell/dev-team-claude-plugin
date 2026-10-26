@@ -129,6 +129,9 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
   const laneTaskDir = nonempty(taskDir) ? resolve(taskDir) : null
   const workRoot = canonicalRoot(workdir, real)
   const taskRoot = laneTaskDir ? canonicalRoot(laneTaskDir, real) : null
+  // lean.mjs records every turn under <taskDir>/lean; a seat never edits the record of a turn.
+  // Case is folded because the default macOS volume resolves LEAN and Lean to the same directory.
+  const leanRoot = taskRoot ? canonicalWritePath(join(taskRoot, 'lean'), taskRoot, real) : null
 
   function record(row) {
     try {
@@ -157,6 +160,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
     if (named.length === 0 || !named.every((value) => value === named[0]) || !nonempty(named[0])) return false
     const target = canonicalWritePath(named[0], workRoot, real)
     if (target == null) return false
+    if (inside(target.toLowerCase(), leanRoot?.toLowerCase())) return false
     if (writes === 'task-dir') return inside(target, taskRoot)
     if (writes === 'repo') return inside(target, workRoot) || inside(target, taskRoot)
     return false
@@ -218,6 +222,10 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
       if (turn) return turn
       // A seat that died with no answer would otherwise hold the turn until its deadline.
       if (client.hasExitMarker?.()) {
+        // The answer may have settled between the empty poll and the marker.
+        const exitedTurn = client.pollPrompt(promptId)
+        if (now() >= deadline) break
+        if (exitedTurn) return exitedTurn
         throw Object.assign(new Error(`${role} exited before answering (acp-seat-closed)`), { reason: 'acp-seat-closed' })
       }
       sleep(Math.max(0, Math.min(ACP_POLL_MS, deadline - now())))

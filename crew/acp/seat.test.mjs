@@ -4,6 +4,7 @@ import {
   appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { ROOT, scratchDir } from '../../test/helpers.mjs'
 import { runAcpSeat } from './seat.mjs'
@@ -497,6 +498,49 @@ test('repo seats write the worktree and the lane task directory, nothing else', 
   })
 })
 
+test('a task-dir or repo seat never edits, writes or deletes a lean session record, and the rest of the task directory stays writable', () => {
+  const root = realpathSync(scratchDir('acp-seat-lean-'))
+  try {
+    for (const placement of ['external', 'nested', 'symlinked']) {
+      for (const existing of [false, true]) {
+        const home = join(root, `${placement}-${existing}`)
+        const work = join(home, 'work')
+        const task = placement === 'nested' ? join(work, 'task') : join(home, 'task')
+        mkdirSync(task, { recursive: true })
+        mkdirSync(work, { recursive: true })
+        const lean = join(task, 'lean')
+        if (existing) {
+          mkdirSync(join(lean, 'planner'), { recursive: true })
+          writeFileSync(join(lean, 'planner', 'turn.jsonl'), 'trusted\n')
+        }
+        symlinkSync(lean, join(work, 'session-alias'))
+        const taskDir = placement === 'symlinked' ? join(home, 'task-alias') : task
+        if (placement === 'symlinked') symlinkSync(task, taskDir)
+        const denied = [
+          lean, join(lean, 'planner', 'turn.jsonl'), join(lean, 'new', 'deep.jsonl'), `${task}/./lean/planner/turn.jsonl`,
+          relative(work, join(lean, 'planner', 'turn.jsonl')), join(work, 'session-alias', 'planner', 'turn.jsonl'),
+          join(taskDir, 'lean', 'planner', 'turn.jsonl'), join(task, 'LEAN', 'planner', 'turn.jsonl'), join(task, 'Lean', 'new.jsonl'),
+        ]
+        const allowed = [
+          join(task, 'plan.md'), join(task, 'gate.mjs'), join(task, 'return.json'), join(task, 'new', 'artifact.json'),
+          join(task, 'leaner', 'keep.jsonl'), join(task, 'lean-other', 'keep.jsonl'),
+        ]
+        for (const [name, key] of [['pi-turn', 'path'], ['claude-turn', 'file_path']]) {
+          for (const writes of ['task-dir', 'repo']) {
+            for (const kind of ['edit', 'write', 'delete']) {
+              const request = (path) => ({ ...edit(path, key), kind })
+              const { verdicts } = decide({ work, task: taskDir }, writes, [...denied, ...allowed].map(request), { name })
+              const label = `${placement}/${existing}/${name}/${writes}/${kind}`
+              assert.deepEqual(verdicts, [...denied.map(() => 'reject'), ...allowed.map(() => 'allow')], label)
+            }
+          }
+        }
+        if (existing) assert.equal(readFileSync(join(lean, 'planner', 'turn.jsonl'), 'utf8'), 'trusted\n')
+      }
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('writes none rejects every file mutation in every root', () => {
   withPermissionTree((tree) => {
     const { verdicts } = decide(tree, 'none', [edit(join(tree.task, 'existing')), edit('existing'), edit(join(tree.outside, 'new'))])
@@ -762,7 +806,7 @@ test('Pi brings its own tools: an explicit empty list still launches', () => {
 })
 
 // A fake client under an injected clock: the deadline loop, cancellation and teardown are observable without a transport.
-function deadlineSeat({ agent = 'pi', wait_s, answerAt = null, answer = { stopReason: 'end_turn', usage: null, refusal: null }, pollAdvance = 0, cancelError = null, closeError = null, closeOutcome = 'proven', pollError = null, exitAt = null, onStart = () => {} } = {}) {
+function deadlineSeat({ agent = 'pi', wait_s, answerAt = null, answer = { stopReason: 'end_turn', usage: null, refusal: null }, pollAdvance = 0, cancelError = null, closeError = null, closeOutcome = 'proven', pollError = null, exitAt = null, settleOnExit = false, exitPollAdvance = 0, exitPollError = null, onStart = () => {} } = {}) {
   const root = scratchDir('acp-seat-deadline-')
   const runtimeRoot = join(root, 'runtimes')
   mkdirSync(runtimeRoot)
@@ -770,16 +814,19 @@ function deadlineSeat({ agent = 'pi', wait_s, answerAt = null, answer = { stopRe
   const events = []
   const sleeps = []
   let pending = false
+  let exitSeen = false
   const client = {
     start() { onStart() }, initialize() {}, newSession() {}, setMode() {},
     prompt() { throw new Error('the seat never calls the blocking prompt') },
     cancel() { events.push(['cancel-session', clock]) },
-    hasExitMarker() { return exitAt !== null && clock >= exitAt },
+    // settleOnExit: the answer lands after the empty poll, at the moment the exit marker is observed.
+    hasExitMarker() { if (settleOnExit) { exitSeen = true; return true } return exitAt !== null && clock >= exitAt },
     beginPrompt() { events.push(['begin', clock]); pending = true; return 41 },
     pollPrompt(id) {
       events.push(['poll', id, clock])
-      if (pollError) throw pollError
-      clock += pollAdvance
+      if (pollError || (exitSeen && exitPollError)) throw pollError ?? exitPollError
+      clock += exitSeen ? exitPollAdvance : pollAdvance
+      if (exitSeen) { pending = false; return answer }
       if (answerAt === null || clock < answerAt) return null
       pending = false
       return answer
@@ -860,6 +907,35 @@ test('an answer that settled with the exit is returned, and a late exit does not
     assert.deepEqual(run.result, { stopReason: 'end_turn', usage: null, refusal: null })
   })
   deadline({ wait_s: 1, exitAt: 5000 }, (run) => assert.equal(run.error?.reason, 'acp-seat-deadline'))
+})
+
+test('an answer that settles between an empty poll and the exit marker is returned, not dropped as a closed seat', () => {
+  for (const agent of ['pi', 'claude']) {
+    for (const answer of [
+      { stopReason: 'end_turn', usage: null, refusal: null },
+      { stopReason: 'cancelled', usage: null, refusal: null },
+      { stopReason: null, usage: null, refusal: { code: 1, message: 'refused', errorKind: null } },
+    ]) {
+      deadline({ agent, wait_s: 60, settleOnExit: true, answer }, (run) => {
+        assert.equal(run.error, undefined, agent)
+        assert.equal(run.result, answer, agent)
+        assert.deepEqual(run.at('poll').map((event) => event[1]), [41, 41], agent)
+        assert.deepEqual(run.at('cancel'), [], agent)
+        assert.deepEqual(run.at('cancel-session'), [], agent)
+        assert.equal(run.at('close').length, 1, agent)
+      })
+    }
+    deadline({ agent, wait_s: 1, settleOnExit: true, exitPollAdvance: 5000 }, (run) => {
+      assert.equal(run.error?.reason, 'acp-seat-deadline', agent)
+      assert.equal(run.result, undefined, agent)
+    })
+    const eio = Object.assign(new Error('EIO'), { code: 'EIO' })
+    deadline({ agent, wait_s: 60, exitAt: 0, pollError: eio }, (run) => assert.equal(run.error, eio, agent))
+    deadline({ agent, wait_s: 60, settleOnExit: true, exitPollError: eio }, (run) => {
+      assert.equal(run.error, eio, agent)
+      assert.equal(run.at('poll').length, 2, agent)
+    })
+  }
 })
 
 test('an answer at or after the deadline, even one that arrives inside the poll, is never returned', () => {
@@ -975,7 +1051,8 @@ test('a seat runtime another process creates in the system temp directory surviv
       fs.writeFileSync(state, JSON.stringify({ dir }))
     } else {
       const { dir } = JSON.parse(fs.readFileSync(state, 'utf8'))
-      const intact = fs.readFileSync(path.join(dir, 'sentinel.txt'), 'utf8') === 'foreign'
+      let intact = false
+      try { intact = fs.readFileSync(path.join(dir, 'sentinel.txt'), 'utf8') === 'foreign' } catch { /* missing or unreadable is not intact */ }
       fs.rmSync(dir, { recursive: true, force: true })
       process.exit(intact ? 0 : 3)
     }`

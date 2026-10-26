@@ -1090,7 +1090,8 @@ function armLaunch(agent, role, arms, { env = {}, ...options } = {}) {
     definition, cwd, taskDir, prompt: 'p', sessionFile: join(taskDir, 'session.jsonl'),
     binaries: { pi: BIN, claude: BIN, claudeAcp: BIN },
     deps: {
-      runtimeRoot, env: { PATH: process.env.PATH, PI_CODING_AGENT_DIR: baseAgentDir, ...env }, ...options.deps,
+      // The fff server binary is a host install; the launch shape must not depend on this host having it.
+      runtimeRoot, env: { PATH: process.env.PATH, PI_CODING_AGENT_DIR: baseAgentDir, ...env }, exists: (path) => path === '/opt/homebrew/bin/fff-mcp' || existsSync(path), ...options.deps,
       clientFactory(input) {
         created.push(input.launch)
         return {

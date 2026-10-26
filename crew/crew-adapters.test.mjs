@@ -412,6 +412,7 @@ test('Claude ACP launch carries SDK tools directories and frozen binaries', () =
   assert.deepEqual(launch.sessionParams._meta.claudeCode.options, { model: 'opus', settingSources: ['project'], settings: PANE_USAGE_SETTINGS, strictMcpConfig: true, allowedTools: ['Read', 'Write', 'Bash'], tools: ['Read', 'Write', 'Bash'], disallowedTools: ['Edit', 'Task', 'mcp__*'], additionalDirectories: ['/task', '/returns'], extraArgs: { effort: 'high', 'append-system-prompt-file': '/task/role.md' } })
   assert.deepEqual(launch.policy, { autoDeny: [], autoApprove: [], escalate: ['edit', 'execute', 'delete', 'move', 'fetch'] })
   assert.equal(Object.hasOwn(launch.sessionParams, 'additionalDirectories'), false)
+  assert.equal(Object.hasOwn(launch.sessionParams._meta, 'systemPrompt'), false)
   const empty = claudeAcpLaunch({ bin: '/bin/acp', claudeBin: '/frozen/claude', env: {} }).sessionParams._meta.claudeCode.options
   assert.equal(empty.extraArgs.effort, undefined)
   assert.deepEqual(empty.allowedTools, [])

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {
   appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { spawnSync } from 'node:child_process'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { ROOT, scratchDir } from '../../test/helpers.mjs'
 import { runAcpSeat } from './seat.mjs'
@@ -18,7 +18,7 @@ const PERMISSION_OPTIONS = [
   { optionId: 'yes', kind: 'allow_once', name: 'Allow' },
   { optionId: 'forever', kind: 'allow_always', name: 'Always allow' },
 ]
-const runtimes = () => new Set(readdirSync(tmpdir()).filter((name) => /^acp-seat-[A-Za-z0-9]{6}$/.test(name)))
+const runtimes = (runtimeRoot) => new Set(readdirSync(runtimeRoot).filter((name) => /^acp-seat-[A-Za-z0-9]{6}$/.test(name)))
 
 function makeSkills(root, names = ['alpha', 'beta']) {
   return names.map((name) => {
@@ -33,6 +33,8 @@ function makeSkills(root, names = ['alpha', 'beta']) {
 // Drives the real runner and acpClient from a recorded directional stream; no agent process exists.
 function replaySeat(name, options = {}) {
   const root = scratchDir('acp-seat-test-')
+  const runtimeRoot = join(root, 'runtimes')
+  mkdirSync(runtimeRoot)
   const records = fixture(name)
   const sent = []
   const launches = []
@@ -148,9 +150,10 @@ function replaySeat(name, options = {}) {
       seatCommandRoot: join(root, 'seat-runtime'),
     },
     ...options.deps,
+    runtimeRoot,
   }
   if (options.appendError) deps.appendFileSync = () => { throw Object.assign(new Error('denied'), { code: options.appendError }) }
-  const before = runtimes()
+  const before = runtimes(runtimeRoot)
   let result
   let error
   try {
@@ -158,7 +161,7 @@ function replaySeat(name, options = {}) {
       definition, cwd: options.cwd ?? root, taskDir: options.taskDir, prompt: options.prompt ?? 'fixture prompt', sessionFile,
       binaries: options.binaries ?? { claudeAcp: BIN, claude: BIN, pi: BIN }, deps })
   } catch (caught) { error = caught }
-  const leftover = [...runtimes()].filter((dir) => !before.has(dir)).map((dir) => join(tmpdir(), dir))
+  const leftover = [...runtimes(runtimeRoot)].filter((dir) => !before.has(dir)).map((dir) => join(runtimeRoot, dir))
   const rows = options.unwritable ? [] : readFileSync(sessionFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
   const replies = (options.permissions ?? []).map((_, i) => sent.find((frame) => frame.id === `permit-${i}` && !frame.method)?.result?.outcome ?? null)
   return { root, result, error, rows, expected, sent, replies, launches, plugins, kills, skills, leftover, sessionFile,
@@ -672,7 +675,7 @@ test('a refused set_mode starts no prompt and still tears the client down', () =
       definition: { agent: 'claude', model: 'anthropic/claude-opus-4-6', effort: 'high', role: 'reviewer', skills: [], writes: 'task-dir' },
       cwd: root, taskDir: root, prompt: 'x', sessionFile: join(root, 'session.jsonl'),
       binaries: { claudeAcp: BIN, claude: BIN },
-      deps: { clientFactory: () => ({
+      deps: { runtimeRoot: root, clientFactory: () => ({
         start() { events.push('start') },
         initialize() { events.push('initialize') },
         newSession() { events.push('new') },
@@ -759,14 +762,16 @@ test('Pi brings its own tools: an explicit empty list still launches', () => {
 })
 
 // A fake client under an injected clock: the deadline loop, cancellation and teardown are observable without a transport.
-function deadlineSeat({ agent = 'pi', wait_s, answerAt = null, answer = { stopReason: 'end_turn', usage: null, refusal: null }, pollAdvance = 0, cancelError = null, closeError = null, closeOutcome = 'proven', pollError = null, exitAt = null } = {}) {
+function deadlineSeat({ agent = 'pi', wait_s, answerAt = null, answer = { stopReason: 'end_turn', usage: null, refusal: null }, pollAdvance = 0, cancelError = null, closeError = null, closeOutcome = 'proven', pollError = null, exitAt = null, onStart = () => {} } = {}) {
   const root = scratchDir('acp-seat-deadline-')
+  const runtimeRoot = join(root, 'runtimes')
+  mkdirSync(runtimeRoot)
   let clock = 0
   const events = []
   const sleeps = []
   let pending = false
   const client = {
-    start() {}, initialize() {}, newSession() {}, setMode() {},
+    start() { onStart() }, initialize() {}, newSession() {}, setMode() {},
     prompt() { throw new Error('the seat never calls the blocking prompt') },
     cancel() { events.push(['cancel-session', clock]) },
     hasExitMarker() { return exitAt !== null && clock >= exitAt },
@@ -782,7 +787,7 @@ function deadlineSeat({ agent = 'pi', wait_s, answerAt = null, answer = { stopRe
     cancelPrompt(id) { events.push(['cancel', id, clock]); if (cancelError) throw cancelError; return pending },
     close() { events.push(['close', clock]); if (closeError) throw closeError; return { outcome: closeOutcome } },
   }
-  const before = runtimes()
+  const before = runtimes(runtimeRoot)
   let result
   let error
   try {
@@ -790,10 +795,10 @@ function deadlineSeat({ agent = 'pi', wait_s, answerAt = null, answer = { stopRe
       definition: { role: 'planner', agent, model: agent === 'pi' ? 'openai/gpt-6.1-sol' : 'anthropic/claude-opus-4-6', effort: 'high', skills: [], ...(wait_s === undefined ? {} : { wait_s }) },
       cwd: root, prompt: 'deadline prompt', sessionFile: join(root, 'session.jsonl'),
       binaries: { claudeAcp: BIN, claude: BIN, pi: BIN },
-      deps: { clientFactory: () => client, now: () => clock, sleep: (ms) => { sleeps.push(ms); clock += ms } },
+      deps: { runtimeRoot, clientFactory: () => client, now: () => clock, sleep: (ms) => { sleeps.push(ms); clock += ms } },
     })
   } catch (caught) { error = caught }
-  const leftover = [...runtimes()].filter((dir) => !before.has(dir)).map((dir) => join(tmpdir(), dir))
+  const leftover = [...runtimes(runtimeRoot)].filter((dir) => !before.has(dir)).map((dir) => join(runtimeRoot, dir))
   const at = (kind) => events.filter((event) => event[0] === kind)
   return { result, error, events, sleeps, at, leftover, clock: () => clock,
     cleanup() { for (const dir of leftover) rmSync(dir, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true }) } }
@@ -916,4 +921,75 @@ test('a prompt poll failure propagates unchanged through teardown without a canc
     assert.deepEqual(run.at('cancel'), [])
     assert.equal(run.at('close').length, 1)
   })
+})
+
+// A fake client that records where the runner placed its runtime; no transport exists.
+function placementSeat(root, deps, closeOutcome = 'proven') {
+  const seen = {}
+  const answer = { stopReason: 'end_turn', usage: null, refusal: null }
+  runAcpSeat({
+    definition: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high', skills: [], wait_s: 1 },
+    cwd: root, prompt: 'x', sessionFile: join(root, 'session.jsonl'),
+    binaries: { pi: BIN },
+    deps: {
+      now: () => 0,
+      clientFactory: ({ dir }) => {
+        seen.runtime = dirname(dir)
+        deps.during?.(seen)
+        return {
+          start() {}, initialize() {}, newSession() {}, setMode() {}, beginPrompt: () => 1, pollPrompt: () => answer,
+          close: () => ({ outcome: closeOutcome }),
+        }
+      },
+      ...deps.seat,
+    },
+  })
+  return seen
+}
+
+test('the runtime is created under the injected root and torn down only when proven', () => {
+  const root = scratchDir('acp-seat-root-')
+  try {
+    const runtimeRoot = join(root, 'runtimes')
+    mkdirSync(runtimeRoot)
+    const proven = placementSeat(root, { seat: { runtimeRoot } })
+    assert.equal(realpathSync(dirname(proven.runtime)), realpathSync(runtimeRoot))
+    assert.match(basename(proven.runtime), /^acp-seat-[A-Za-z0-9]{6}$/)
+    assert.equal(existsSync(proven.runtime), false)
+    const unproven = placementSeat(root, { seat: { runtimeRoot } }, 'unproven')
+    assert.equal(realpathSync(dirname(unproven.runtime)), realpathSync(runtimeRoot))
+    assert.equal(existsSync(unproven.runtime), true)
+    assert.equal(existsSync(runtimeRoot), true)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('a seat runtime another process creates in the system temp directory survives a turn and its cleanup', () => {
+  // The helper owns its sentinel: it creates, verifies and removes it; the seat harness never lists or reads shared temp.
+  const helper = `
+    const fs = require('node:fs'), os = require('node:os'), path = require('node:path')
+    const mode = process.argv[1]
+    const state = path.join(process.argv[2], 'sentinel.json')
+    if (mode === 'create') {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-seat-'))
+      fs.writeFileSync(path.join(dir, 'sentinel.txt'), 'foreign')
+      fs.writeFileSync(state, JSON.stringify({ dir }))
+    } else {
+      const { dir } = JSON.parse(fs.readFileSync(state, 'utf8'))
+      const intact = fs.readFileSync(path.join(dir, 'sentinel.txt'), 'utf8') === 'foreign'
+      fs.rmSync(dir, { recursive: true, force: true })
+      process.exit(intact ? 0 : 3)
+    }`
+  const root = scratchDir('acp-seat-foreign-')
+  const run = (mode) => spawnSync(BIN, ['-e', helper, mode, root], { encoding: 'utf8', timeout: 10000 })
+  let created = false
+  try {
+    // Created between the turn's start and its cleanup, where a shared-temp diff would adopt it.
+    const turn = deadlineSeat({ wait_s: 1, onStart: () => { assert.equal(run('create').status, 0); created = true } })
+    assert.ok(created)
+    turn.cleanup()
+    assert.equal(run('verify').status, 0, 'the foreign runtime was removed or changed')
+  } finally {
+    if (created && existsSync(join(root, 'sentinel.json'))) run('verify')
+    rmSync(root, { recursive: true, force: true })
+  }
 })

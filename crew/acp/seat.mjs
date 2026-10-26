@@ -170,7 +170,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
   }
   try { mkdirSync(dirname(recordTo), { recursive: true }) } catch { /* the first append reports nothing either */ }
 
-  const runtime = mkdtempSync(join(tmpdir(), 'acp-seat-'))
+  const runtime = mkdtempSync(join(deps.runtimeRoot ?? tmpdir(), 'acp-seat-'))
   let client = null
   let started = false
   let closed = null

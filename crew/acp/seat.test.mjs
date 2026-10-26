@@ -1245,6 +1245,7 @@ const laneDetails = { subject: 'fix(crew): resolve lean arm context', plan_path:
 function leanLane(taskDir, { anchor = Date.now() - 60_000, details = laneDetails, number = 3, mtime = anchor + 5_000 } = {}) {
   if (anchor !== null) writeFileSync(join(taskDir, 'journal.jsonl'), `${JSON.stringify({ event: 'run-start', at: anchor, lane: 'lane', run_id: 'lane' })}\n`)
   if (details !== null) {
+    if (details.plan_path === laneDetails.plan_path) writeFileSync(join(taskDir, details.plan_path), '# plan\n')
     const path = join(taskDir, `planner-${number}.json`)
     writeFileSync(path, JSON.stringify({ role: 'planner', id: `lane.planner.${number}`, status: 'done', summary: 's', details }))
     utimesSync(path, mtime / 1000, mtime / 1000)
@@ -1411,4 +1412,17 @@ test('a claude seat with no MCP grants is still strict about MCP config', () => 
   const options = claudeOptions(armed('claude', 'planner', {}).launch)
   assert.equal(options.strictMcpConfig, true)
   assert.equal(options.mcpServers, undefined)
+})
+
+test('a lean skeletonread seat refuses a planner return its reader rejects for sharing the run-start mtime', () => {
+  const anchor = Date.now() - 60_000
+  refusedBeforeClient({ extensions: ['skeletonread'] }, (taskDir) => leanLane(taskDir, { anchor, mtime: anchor }))
+})
+
+test('a lean builderloop seat refuses a planner return whose gate command is only whitespace', () => {
+  refusedBeforeClient({ extensions: ['builderloop'] }, (taskDir) => leanLane(taskDir, { details: { ...laneDetails, gate_cmd: '   ' } }))
+})
+
+test('a lean builder declaring edit assist without builderloop refuses before a client', () => {
+  refusedBeforeClient({ edit_assist: true }, (taskDir) => leanLane(taskDir))
 })

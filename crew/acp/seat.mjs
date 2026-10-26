@@ -11,6 +11,9 @@ import { AGENT_ROLES, validateEnvelope } from '../protocols.mjs'
 import * as claudeAdapter from '../adapters/adapter-claude.mjs'
 import * as piAdapter from '../adapters/adapter-pi.mjs'
 import { CONTEXT_LAYOUT_ENV, LEAN_LAYOUT, journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../pi/context-layout.mjs'
+import { loadContext as advisorContext } from '../pi/extensions/advisor.ts'
+import { loadPlannerContext } from '../pi/extensions/builderloop.ts'
+import { loadAcceptedContext } from '../pi/extensions/skeletonread.ts'
 
 const ROLE = 'seat'
 const WRITES = Object.freeze(['none', 'task-dir', 'repo'])
@@ -192,7 +195,7 @@ function advisorCellOf(advisor) {
 // What a lean seat's context arms need, read from the lane's own task dir and nowhere else: the lane's run-start
 // anchor (written once by the loop, never per seat) and, past the planner, the planner's current return. A seat that
 // cannot be given them is refused here, before it starts, rather than booted with arms that read nothing.
-function laneContext({ arms, role, laneTaskDir, definition, briefText, deps }) {
+function laneContext({ arms, role, laneTaskDir, workdir, definition, briefText, deps }) {
   const refusal = (why) => { throw refuse('grant-unsupported', `seat ${role} declares ${arms.join(', ')}, which read the lane context, and ${why} — refusing to boot a silently weaker seat`) }
   if (!laneTaskDir) return refusal('it has no task dir')
   const layout = { [CONTEXT_LAYOUT_ENV]: LEAN_LAYOUT }
@@ -222,6 +225,12 @@ function laneContext({ arms, role, laneTaskDir, definition, briefText, deps }) {
     const details = planner?.status === 'done' && validateEnvelope('planner', planner).defects.length === 0 ? planner.details : null
     const missing = details === null ? needs : needs.filter((key) => (Array.isArray(details[key]) ? details[key].length === 0 : !nonempty(details[key])))
     if (missing.length) return refusal(`the lane's planner return written since its start does not carry ${missing.join(', ')}`)
+    // The arms' own readers have the last word, so a return this check accepts is one each arm can read.
+    const env = { [CONTEXT_LAYOUT_ENV]: LEAN_LAYOUT, CREW_TASK_DIR: laneTaskDir }
+    const unread = arms.filter((arm) => (arm === 'skeletonread'
+      ? loadAcceptedContext({ taskDir: laneTaskDir, cwd: workdir, env }) === null
+      : ['builderloop', 'edit_assist'].includes(arm) && loadPlannerContext({ taskDir: laneTaskDir, env }) === null))
+    if (unread.length) return refusal(`${unread.join(', ')} cannot read the lane's planner return`)
   }
   if (!arms.includes('advisor')) return
   const cell = advisorCellOf(definition.advisor)
@@ -234,6 +243,7 @@ function laneContext({ arms, role, laneTaskDir, definition, briefText, deps }) {
     const written = JSON.parse(read(target, 'utf8'))
     if (written?.run_started_at !== anchor || written.cell?.model !== cell.model) throw new Error('the manifest read back differs from the one written')
   } catch (error) { refusal(`the advisor manifest could not be written: ${error.message}`) }
+  if (role !== 'planner' && advisorContext({ taskDir: laneTaskDir, env: { [CONTEXT_LAYOUT_ENV]: LEAN_LAYOUT, CREW_TASK_DIR: laneTaskDir } }).scope_source === 'absent') refusal(`the advisor cannot read the lane's planner return`)
 }
 
 export function runAcpSeat({ definition, cwd, taskDir, prompt, briefText, sessionFile, binaries = {}, deps = {} }) {
@@ -284,7 +294,9 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, briefText, sessio
   const append = deps.appendFileSync ?? appendFileSync
   const real = deps.realpathSync ?? realpathSync
   const laneTaskDir = nonempty(taskDir) ? resolve(taskDir) : null
-  if (contextArms.length) laneContext({ arms: contextArms, role, laneTaskDir, definition, briefText, deps })
+  // edit_assist runs inside builderloop; without it the seat would carry the flag and no arm to act on it.
+  if (contextArms.includes('edit_assist') && !contextArms.includes('builderloop')) throw refuse('grant-unsupported', `seat ${role} declares edit_assist without builderloop, which runs it — refusing to boot a silently weaker seat`)
+  if (contextArms.length) laneContext({ arms: contextArms, role, laneTaskDir, workdir, definition, briefText, deps })
   const workRoot = canonicalRoot(workdir, real)
   const taskRoot = laneTaskDir ? canonicalRoot(laneTaskDir, real) : null
   // lean.mjs records every turn under <taskDir>/lean; a seat never edits the record of a turn.

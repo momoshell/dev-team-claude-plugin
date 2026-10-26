@@ -25,7 +25,8 @@ import { execFileSync, spawn as nodeSpawn } from 'node:child_process'
 import { appendFileSync, readFileSync, readdirSync, statSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { StringDecoder } from 'node:string_decoder'
-import { dirname, join, relative, resolve } from 'node:path'
+import { join, relative, resolve } from 'node:path'
+import { journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../context-layout.mjs'
 import { resolvePiBinary, createStreamReducer, carriesOwnSpend, STREAM_CAP_BYTES } from './subagent.ts'
 
 export const ADVISOR_CONFIG_VERSION = 1
@@ -135,12 +136,12 @@ export function boundTarget(value) {
   return boundText(value, TARGET_CAP_BYTES)
 }
 
-export function journalPathFrom(taskDir) {
-  return join(dirname(String(taskDir || '')), 'journal.jsonl')
+export function journalPathFrom(taskDir, env) {
+  return journalPathOf(taskDir, env)
 }
 
-export function returnsDirFrom(taskDir) {
-  return join(dirname(String(taskDir || '')), 'returns')
+export function returnsDirFrom(taskDir, env) {
+  return plannerReturnsDirOf(taskDir, env)
 }
 
 function roleOf(env) {
@@ -227,7 +228,7 @@ export function isTestFile(path) {
   return /\.test\.(mjs|js|ts)$/.test(String(path || ''))
 }
 
-function plannerReturn({ taskDir, manifest, deps }) {
+function plannerReturn({ taskDir, manifest, deps, env }) {
   const epoch = epochMilliseconds(manifest?.run_started_at)
   if (epoch === null) return { files_in_scope: [], validation_lane: null, source: 'absent' }
   const readDir = deps.readDir || readdirSync
@@ -235,16 +236,16 @@ function plannerReturn({ taskDir, manifest, deps }) {
     try { return statSync(path).mtimeMs } catch { return null }
   })
   let names
-  try { names = readDir(returnsDirFrom(taskDir)) } catch { return { files_in_scope: [], validation_lane: null, source: 'absent' } }
+  try { names = readDir(returnsDirFrom(taskDir, env)) } catch { return { files_in_scope: [], validation_lane: null, source: 'absent' } }
   const candidates = []
   for (const name of names || []) {
-    const match = /^d(\d+)\.planner\.json$/.exec(String(name))
-    if (!match) continue
-    const path = join(returnsDirFrom(taskDir), String(name))
+    const number = plannerReturnNumber(name, env)
+    if (number === null) continue
+    const path = join(returnsDirFrom(taskDir, env), String(name))
     let mtime
     try { mtime = fileMtime(path) } catch { mtime = null }
     if (typeof mtime !== 'number' || !Number.isFinite(mtime) || mtime < epoch) continue
-    candidates.push({ number: Number(match[1]), path })
+    candidates.push({ number, path })
   }
   candidates.sort((a, b) => b.number - a.number)
   const readFile = deps.readFile || DEFAULT_READ
@@ -270,7 +271,7 @@ function plannerReturn({ taskDir, manifest, deps }) {
   }
 }
 
-export function loadContext({ taskDir, deps = {} } = {}) {
+export function loadContext({ taskDir, deps = {}, env = process.env } = {}) {
   const readFile = deps.readFile || DEFAULT_READ
   const manifest = manifestText({ taskDir, readFile })
   if (!manifest) {
@@ -279,7 +280,7 @@ export function loadContext({ taskDir, deps = {} } = {}) {
       tripwires: [], tripwires_source: 'absent', run_started_at: null, cell: null,
     }
   }
-  const planner = plannerReturn({ taskDir, manifest, deps })
+  const planner = plannerReturn({ taskDir, manifest, deps, env })
   return {
     files_in_scope: planner.files_in_scope,
     validation_lane: planner.validation_lane,
@@ -732,7 +733,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   const cancelTimeout = deps.clearTimeout || clearTimeout
   const send = deps.send || null
   const diffSize = deps.diffSize || ((path) => gitDiffSize({ cwd: path, deps }))
-  const journalPath = journalPathFrom(taskDir)
+  const journalPath = journalPathFrom(taskDir, env)
 
   function replyRecord(replyText, codes) {
     const reason = codes.find((code) => REPLY_REASONS.includes(code)) || 'reply-unrecorded'
@@ -803,7 +804,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       context = null
       contextRowEpoch = null
     }
-    const fresh = loadContext({ taskDir, deps: { ...deps, readFile, readDir, fileMtime } })
+    const fresh = loadContext({ taskDir, env, deps: { ...deps, readFile, readDir, fileMtime } })
     if (freshKey === null) return fresh
     context = fresh
     if (contextRowEpoch !== freshKey && fresh.scope_source !== 'absent') {
@@ -1310,7 +1311,7 @@ export async function attachAdvisor(pi, { env = process.env, deps = {} } = {}) {
   const role = String(env?.CREW_ROLE || '')
   const appendFile = deps.appendFile || DEFAULT_APPEND
   const taskDir = deps.taskDir || env?.CREW_TASK_DIR || ''
-  const journalPath = journalPathFrom(taskDir)
+  const journalPath = journalPathFrom(taskDir, env)
 
   const now = deps.now || DEFAULT_NOW
   if (env?.[ADVISOR_GRANT_ENV] !== '1') return

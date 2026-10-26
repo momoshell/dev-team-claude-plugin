@@ -1,8 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { appendFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { scratchDir } from '../../../test/helpers.mjs'
+import { leanLaneFixture, scratchDir } from '../../../test/helpers.mjs'
 import * as mod from './skeletonread.ts'
 
 const RUN_AT = 1_000_000_000_000
@@ -217,4 +217,29 @@ test('skeletonread helpers reject malformed ranges and invalid fences', () => {
   assert.equal(mod.validFence([]), false)
   assert.equal(mod.retrieveRange('0-1', ['one']), 'refused: range is malformed or outside the file')
   assert.equal(mod.inFence(['src/'], 'src/target.mjs'), true)
+})
+
+test('a lean lane accepts its own planner return: citations come from the lane plan, newest return, never the parent', () => {
+  const lane = leanLaneFixture({ planners: [[2, 10_000, { files_in_scope: ['older.mjs'] }], [12, 30_000], [99, -10_000, { files_in_scope: ['stale.mjs'] }]] })
+  const cwd = join(lane.parent, 'checkout')
+  mkdirSync(cwd)
+  writeFileSync(join(cwd, 'a.mjs'), 'one\ntwo\nthree\n')
+  const context = mod.loadAcceptedContext({ taskDir: lane.taskDir, cwd, env: lane.env })
+  assert.equal(context.planner_number, 12)
+  assert.equal(context.plan_path, join(lane.taskDir, 'plan.md'))
+  assert.deepEqual(context.ranges, [{ file: 'a.mjs', start: 1, end: 2 }])
+  lane.write(13, 40_000, { plan_path: '../elsewhere.md' })
+  assert.equal(mod.loadAcceptedContext({ taskDir: lane.taskDir, cwd, env: lane.env }), null, 'the newest return is unusable and fails closed')
+  rmSync(join(lane.taskDir, 'journal.jsonl'))
+  assert.equal(mod.loadAcceptedContext({ taskDir: lane.taskDir, cwd, env: lane.env }), null, 'no fallback to the parent journal')
+})
+
+test('the old layout keeps its flat returns beside the task dir when no lane layout is named', () => {
+  const lane = leanLaneFixture()
+  const cwd = join(lane.parent, 'checkout')
+  mkdirSync(cwd)
+  writeFileSync(join(cwd, 'a.mjs'), 'one\ntwo\n')
+  const context = mod.loadAcceptedContext({ taskDir: lane.taskDir, cwd, env: { CREW_TASK_DIR: lane.taskDir } })
+  assert.equal(context.planner_number, 88)
+  assert.deepEqual(context.files_in_scope, ['FOREIGN'])
 })

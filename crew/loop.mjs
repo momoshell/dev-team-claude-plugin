@@ -193,6 +193,8 @@ export async function runLoop(spec, deps = {}) {
 
   try {
     try { await d.mkdir(spec.taskDir, { recursive: true }) } catch (error) { return await stop('runner-threw', { mkdir: describe(error) }) }
+    // The lane's own start, written once: the arms of every seat (and every retry) date the planner's return against it.
+    await emit('run-start', { at: Date.now(), run_id: spec.id })
 
     const planned = await stage('plan', () => seatTurn('planner'))
     if (planned.halt) return planned.halt

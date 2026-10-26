@@ -264,6 +264,20 @@ test('P2 planner details name the plan, the gate and the acceptance ids', () => 
 })
 
 // MUTATION: bypass DETAIL_RULES for subject and a malformed, overlong or control-bearing subject is accepted.
+test('P2 planner details may carry the context its builder arms read, and refuse it malformed', () => {
+  const full = envelope('planner'); Object.assign(full.details, { files_in_scope: ['crew/a.mjs'], validation_lane: 'node --test crew/a.test.mjs', gate_cmd: 'node gate.mjs' })
+  assert.deepEqual(validateEnvelope('planner', full).defects, [])
+  assert.deepEqual(validateEnvelope('planner', envelope('planner')).defects, [], 'the fields are optional')
+  for (const [key, bad] of [['files_in_scope', []], ['files_in_scope', 'a.mjs'], ['files_in_scope', ['a.mjs', '']], ['files_in_scope', [3]], ['validation_lane', ''], ['validation_lane', 5], ['gate_cmd', ''], ['gate_cmd', null]]) {
+    const value = envelope('planner'); value.details[key] = bad
+    assert.equal(refusedFor('planner', value, `details.${key}`).length, 1, `${key} ${JSON.stringify(bad)}`)
+  }
+  for (const role of AGENT_ROLES.filter((role) => role !== 'planner')) {
+    const value = envelope(role); value.details.files_in_scope = ['a.mjs']
+    assert.ok(refusedFor(role, value, 'details.files_in_scope is not a field').length, role)
+  }
+})
+
 test('P2 planner subject is a conventional-commit subject of at most 72 characters', () => {
   const types = ['chore', 'ci', 'crew', 'docs', 'feat', 'fix', 'merge', 'perf', 'refactor', 'revert', 'spike', 'test', 'wip', 'workflow']
   const accepted = ['fix: x', 'feat!: breaking change', 'fix(crew)!: scoped breaking', 'fix(a.b_c/d-e): scoped', `fix: ${'x'.repeat(67)}`, 'fix: two  spaces inside', ...types.map((t) => `${t}(crew): measured change`)]

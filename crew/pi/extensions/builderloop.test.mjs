@@ -1,10 +1,10 @@
 import { test } from 'node:test'
 import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { spawn as realSpawn, spawnSync as realSpawnSync } from 'node:child_process'
-import { scratchDir } from '../../../test/helpers.mjs'
+import { leanLaneFixture, scratchDir } from '../../../test/helpers.mjs'
 import * as mod from './builderloop.ts'
 
 function fixture({ lane = 'node --test in.test.mjs', scope = ['in.test.mjs'], gate = 'node task/gate.mjs' } = {}) {
@@ -493,7 +493,7 @@ test('builderloop is zero-dependency, erasable, and exposes only its test seam',
   const source = readFileSync(new URL('./builderloop.ts', import.meta.url), 'utf8')
   const imports = [...source.matchAll(/^import[\s\S]*?from\s+["']([^"']+)["']/gm)].map((match) => match[1])
   assert.ok(imports.length > 0)
-  assert.ok(imports.every((specifier) => specifier.startsWith('node:')), imports.join(', '))
+  assert.ok(imports.every((specifier) => specifier.startsWith('node:') || specifier === '../context-layout.mjs'), imports.join(', '))
   assert.doesNotMatch(source, /^\s*(enum|namespace)\s/m)
   assert.deepEqual(Object.keys(mod).sort(), ['attachBuilderLoop', 'createBuilderLoop', 'default', 'EDIT_ASSIST_ENV', 'EDIT_FAILURE_CAUSES', 'EDIT_FAILURE_ABSENT_REASONS', 'EDIT_FILE_CAP_BYTES', 'EDIT_CORPUS_CAP_BYTES', 'EDIT_HINT_CAP_BYTES', 'fencedNodeTestCommand', 'loadPlannerContext', 'runNodeTests'].sort())
 })
@@ -1088,4 +1088,37 @@ test('a trigger arriving during the follow-up chains a third run with a single-e
   assert.match(appendedText(r[1]), /covered 1 edits/)
   assert.match(appendedText(r[2]), /covered 1 edits/)
   assert.equal(d.maxActive(), 1)
+})
+
+test('a lean lane resolves the planner context from its own task dir, newest return first, never from its parent', () => {
+  const lane = leanLaneFixture({ planners: [[2, 10_000, { validation_lane: 'node --test older.test.mjs' }], [12, 30_000], [99, -10_000, { validation_lane: 'node --test stale.test.mjs' }]] })
+  const context = mod.loadPlannerContext({ taskDir: lane.taskDir, env: lane.env })
+  assert.deepEqual(context, { files_in_scope: ['a.mjs', 'a.test.mjs'], validation_lane: 'node --test a.test.mjs', gate_cmd: 'node gate.mjs' })
+  // The newest return decides even when it is unusable: an older one never stands in for it.
+  lane.write(13, 40_000, { gate_cmd: '' })
+  assert.equal(mod.loadPlannerContext({ taskDir: lane.taskDir, env: lane.env }), null)
+  // Without the lane's own anchor the parent's journal and returns are not a fallback.
+  rmSync(join(lane.taskDir, 'journal.jsonl'))
+  assert.equal(mod.loadPlannerContext({ taskDir: lane.taskDir, env: lane.env }), null)
+  writeFileSync(join(lane.taskDir, 'journal.jsonl'), 'not json\n')
+  assert.equal(mod.loadPlannerContext({ taskDir: lane.taskDir, env: lane.env }), null)
+})
+
+test('the old layout keeps its run-scoped returns beside the task dir when no lane layout is named', () => {
+  const lane = leanLaneFixture()
+  const env = { CREW_TASK_DIR: lane.taskDir }
+  const context = mod.loadPlannerContext({ taskDir: lane.taskDir, env })
+  assert.deepEqual(context.files_in_scope, ['FOREIGN'], 'the parent journal anchors returns/foreign exactly as before')
+  assert.equal(mod.loadPlannerContext({ taskDir: lane.taskDir, env: { ...env, CREW_CONTEXT_LAYOUT: 'old' } })?.validation_lane, 'node --test foreign.test.mjs')
+})
+
+test('a lean builder journals its edit failures in the lane journal', () => {
+  const lane = leanLaneFixture()
+  const rows = []
+  const loop = mod.createBuilderLoop({
+    taskDir: lane.taskDir, env: { ...lane.env, CREW_EDIT_ASSIST: 'on' }, cwd: lane.parent,
+    deps: { appendFile: (path, line) => rows.push([path, line]) },
+  })
+  loop.onToolResult?.({ toolName: 'edit', input: { path: 'a.mjs', edits: [{ oldText: 'x', newText: 'y' }] }, isError: true, content: [{ type: 'text', text: 'Could not find the exact text' }] }, { cwd: lane.parent })
+  assert.ok(rows.length > 0 && rows.every(([path]) => path === join(lane.taskDir, 'journal.jsonl')), JSON.stringify(rows.map(([path]) => path)))
 })

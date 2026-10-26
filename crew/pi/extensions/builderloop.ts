@@ -8,8 +8,9 @@
 import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { appendFileSync, closeSync, lstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
+import { isLeanLayout, journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../context-layout.mjs'
 
 export const EDIT_ASSIST_ENV = 'CREW_EDIT_ASSIST'
 export const EDIT_FAILURE_CAUSES = Object.freeze(['not-unique', 'indentation', 'never-seen', 'partly-seen', 'seen-stale', 'other'])
@@ -278,27 +279,29 @@ function plannerEnvelope(raw) {
 export function loadPlannerContext(value = {}, extraDeps = {}) {
   const input = optionsFor(value, extraDeps)
   const deps = input.deps || {}
+  const env = input.env || process.env
   const taskDir = String(input.taskDir || input.env?.CREW_TASK_DIR || '')
   if (!taskDir) return null
   const read = deps.readFile || deps.readFileSync || defaultRead
-  const journalPath = join(dirname(taskDir), 'journal.jsonl')
+  const journalPath = journalPathOf(taskDir, env)
   const anchor = journalRunStart(journalPath, deps, read)
-  if (anchor === null || anchor.runId === null) return null
+  // A lean lane's returns sit in its task dir, so only the old layout needs the anchor's run id.
+  if (anchor === null || (anchor.runId === null && !isLeanLayout(env))) return null
   // Returns have been run-scoped since 2fac235d (2026-09-13). Scanning returns/ itself found only
   // run-id directories, matched nothing, and this hook was silently inert for five days.
-  const returnsDir = join(dirname(taskDir), 'returns', anchor.runId)
+  const returnsDir = plannerReturnsDirOf(taskDir, env, isLeanLayout(env) ? null : anchor.runId)
   const runStart = anchor.at
   let names
   try { names = (deps.readDir || deps.readdirSync || readdirSync)(returnsDir) } catch { return null }
   if (!Array.isArray(names) || names.length > MAX_RETURN_ENTRIES) return null
   const candidates = []
   for (const name of names) {
-    const match = /^d(\d+)\.planner\.json$/.exec(String(name))
-    if (!match) continue
+    const number = plannerReturnNumber(name, env)
+    if (number === null) continue
     const path = join(returnsDir, String(name))
     const mtime = candidateMtime(path, deps)
     if (mtime === null || mtime < runStart) continue
-    candidates.push({ number: Number(match[1]), path })
+    candidates.push({ number, path })
   }
   candidates.sort((left, right) => right.number - left.number)
   const candidate = candidates[0]
@@ -792,7 +795,7 @@ export function createBuilderLoop(value = {}) {
   const statFile = deps.stat || deps.statSync || statSync
   const now = deps.now || defaultNow
   const measureTree = deps.measureTree || ((cwd) => defaultMeasureTree(cwd, deps))
-  const journalPath = join(dirname(taskDir), 'journal.jsonl')
+  const journalPath = journalPathOf(taskDir, env)
   const contextDeps = deps.contextDeps || deps
   const runnerDeps = deps.runnerDeps || deps
 

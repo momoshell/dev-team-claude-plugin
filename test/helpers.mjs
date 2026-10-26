@@ -335,3 +335,33 @@ export function forAll(generate, property, { runs = 200, seed = 0x9e3779b9 } = {
   }
   return runs
 }
+
+// A lean lane as the loop leaves it: journal.jsonl with one run-start, planner-<turn>.json returns, all in the task dir.
+// A decoy old-layout journal and returns/ sit beside it, as another lane's context would.
+export function leanLaneFixture({ prefix = 'crew-lean-lane-', details = {}, planners = [[12, 30_000]] } = {}) {
+  const parent = scratchDir(prefix)
+  const taskDir = join(parent, 'task')
+  mkdirSync(taskDir, { recursive: true })
+  const at = Date.now() - 120_000
+  const put = (path, row) => writeFileSync(path, `${JSON.stringify(row)}\n`)
+  put(join(taskDir, 'journal.jsonl'), { event: 'run-start', at, lane: 'lane', run_id: 'lane' })
+  const base = {
+    subject: 'fix(crew): resolve lean arm context', plan_path: join(taskDir, 'plan.md'), gate_path: join(taskDir, 'gate.mjs'),
+    acceptance: ['AC1'], mutations: [{ check: 'AC1', file: 'a.mjs', find: 'a', replace: 'b' }],
+    files_in_scope: ['a.mjs', 'a.test.mjs'], validation_lane: 'node --test a.test.mjs', gate_cmd: 'node gate.mjs', ...details,
+  }
+  writeFileSync(base.plan_path, 'Plan\na.mjs:1-2\n')
+  const write = (number, offset, changes = {}) => {
+    const path = join(taskDir, `planner-${number}.json`)
+    put(path, { role: 'planner', id: `lane.planner.${number}`, status: 'done', summary: 's', details: { ...base, ...changes } })
+    utimesSync(path, (at + offset) / 1000, (at + offset) / 1000)
+    return path
+  }
+  for (const [number, offset, changes] of planners) write(number, offset, changes)
+  put(join(parent, 'journal.jsonl'), { event: 'run-start', at: at - 60_000, run_id: 'foreign' })
+  mkdirSync(join(parent, 'returns', 'foreign'), { recursive: true })
+  for (const dir of [join(parent, 'returns'), join(parent, 'returns', 'foreign')]) {
+    put(join(dir, 'd88.planner.json'), { role: 'planner', status: 'done', details: { ...base, files_in_scope: ['FOREIGN'], validation_lane: 'node --test foreign.test.mjs' } })
+  }
+  return { parent, taskDir, at, details: base, write, env: { CREW_CONTEXT_LAYOUT: 'lean', CREW_ROLE: 'builder', CREW_TASK_DIR: taskDir } }
+}

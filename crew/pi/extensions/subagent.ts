@@ -58,6 +58,7 @@ import { fileURLToPath } from 'node:url'
 // so the file stays free of third-party dependencies; the granting seat of this
 // extension is a pi seat by construction, so adapter-pi IS the granting seat's adapter.
 import { modelString } from '../../adapters/adapter-pi.mjs'
+import { journalPathOf, spawnCountPathOf } from '../context-layout.mjs'
 
 export const AGENT_TOOL_NAME = 'agent'
 export const AGENTS_ENV = 'CREW_PI_AGENTS'
@@ -528,12 +529,12 @@ export function boundAgentName(name: string): string {
   return new StringDecoder('utf8').write(Buffer.from(out, 'utf8').subarray(0, AGENT_NAME_CAP_BYTES))
 }
 
-export function journalPathFrom(taskDir: string): string {
-  return join(dirname(String(taskDir)), 'journal.jsonl')
+export function journalPathFrom(taskDir: string, env?: any): string {
+  return journalPathOf(taskDir, env)
 }
 
-export function spawnCountPathFrom(taskDir: string): string {
-  return join(dirname(String(taskDir)), SPAWN_COUNT_FILE)
+export function spawnCountPathFrom(taskDir: string, env?: any): string {
+  return spawnCountPathOf(taskDir, env, SPAWN_COUNT_FILE)
 }
 
 // A sentinel, so the unparseable branch is one decidable line rather than a
@@ -565,10 +566,10 @@ export function readSpawnCount(path: string, readFile: any): any {
 // bounds — counting only successes would leave the fast loop unbounded. A
 // counter that cannot be written refuses too: an uncountable spawn is an
 // unbounded spawn.
-export function reserveSpawn({ taskDir, readFile, writeFile, budget = SUBAGENT_SPAWN_BUDGET }: any): any {
+export function reserveSpawn({ taskDir, env, readFile, writeFile, budget = SUBAGENT_SPAWN_BUDGET }: any): any {
   const dir = String(taskDir || '')
   if (!dir) return { error: `refused: the subagent spawn budget cannot be scoped to a run because CREW_TASK_DIR is unset; the budget of ${budget} spawns per run is enforced against the task dir` }
-  const path = spawnCountPathFrom(dir)
+  const path = spawnCountPathFrom(dir, env)
   const read = readSpawnCount(path, readFile)
   if (read.error) return { error: `refused: ${read.error}, at ${path}` }
   const count = read.count
@@ -712,7 +713,7 @@ export function createAgentTool(deps: any = {}) {
       // fan out again; this says a run may not fan out for ever. Placed last
       // among the pre-spawn refusals so a malformed call cannot spend an
       // allowance, and before the spawn so a fast-failing child still costs one.
-      const reserved = reserveSpawn({ taskDir, readFile, writeFile })
+      const reserved = reserveSpawn({ taskDir, env, readFile, writeFile })
       if (reserved.error) {
         // Unlike every other pre-spawn refusal this one JOURNALS. A bound that
         // hides its own operation is a bound nobody can tune (#696): the row
@@ -720,7 +721,7 @@ export function createAgentTool(deps: any = {}) {
         // null model, because no child was ever chosen.
         try {
           if (taskDir) {
-            appendFile(journalPathFrom(taskDir), `${JSON.stringify(usageRow({
+            appendFile(journalPathFrom(taskDir, env), `${JSON.stringify(usageRow({
               at: now(), role, agent: agentName, spawnId, model: null, usage: null, outcome: SPAWN_BUDGET_OUTCOME,
             }))}\n`)
           }
@@ -952,7 +953,7 @@ export function createAgentTool(deps: any = {}) {
         try { if (dir) removeDir(dir) } catch { /* nothing to do */ }
         try {
           if (taskDir) {
-            appendFile(journalPathFrom(taskDir), `${JSON.stringify(usageRow({
+            appendFile(journalPathFrom(taskDir, env), `${JSON.stringify(usageRow({
               at: now(), role, agent: agentName, spawnId, model, usage, outcome: findings ? 'ok' : 'refused',
             }))}\n`)
           }

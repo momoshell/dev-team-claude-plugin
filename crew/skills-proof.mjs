@@ -16,9 +16,9 @@ const WRITE_KINDS = new Set(['edit', 'delete', 'move'])
 
 // Fold tool_call and tool_call_update rows by call id: first-seen order, with metadata and input
 // kept across partial updates. `seq` is the row a call first appears on (its write
-// boundary). A read counts as a load only once it has completed, and no earlier than the last row
-// that changed what it names: a pending call can arrive with empty or different input and name
-// its skill, or finish, only in a later update. `loadAt` is the later of those two rows.
+// boundary). A read counts as a load only once it has completed, and only if the input naming it was
+// recorded by then: a pending call can arrive with empty or different input and name its skill only
+// in a later update. `loadAt` is the completion row.
 function foldCalls(raw) {
   const calls = new Map()
   let anonymous = 0
@@ -43,7 +43,8 @@ function foldCalls(raw) {
     const hasInput = input && typeof input === 'object' && !Array.isArray(input) && Object.keys(input).length > 0
     if (hasInput) { call.input = input; call.inputAt = at }
   }
-  return [...calls.values()].map((call) => ({ ...call, loadAt: call.doneAt === null ? null : Math.max(call.inputAt ?? call.seq, call.doneAt) }))
+  // A call that names what it read only after it completed never showed that read: no load.
+  return [...calls.values()].map((call) => ({ ...call, loadAt: call.doneAt === null || call.inputAt === null || call.inputAt > call.doneAt ? null : call.doneAt }))
 }
 
 function toolNameOf(call) {

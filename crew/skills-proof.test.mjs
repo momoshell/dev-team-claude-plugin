@@ -179,3 +179,11 @@ test('a skill granted by path loads from that path, resolved against the seat cw
   assert.equal(await at('/w', '.agents/skills/review-procedure/SKILL.md'), null)
   assert.equal(await at('/w', '/other/.agents/skills/review-procedure/SKILL.md'), 'required-skills-unproven')
 })
+
+// MUTATION: time a load by its naming row even when that row follows completion and this passes.
+test('a call that names its skill only after it completed is not a load', async () => {
+  const planner = { agent: 'claude', role: 'planner', requires: ['alpha'], writes: 'task-dir' }
+  const pending = call('s', 'Skill', 'other', {}, true)
+  const named = row({ sessionUpdate: 'tool_call_update', toolCallId: 's', rawInput: { skill: 'crew-skills-planner:alpha' } })
+  assert.equal(await prove([pending, done('s'), named, call('cw', 'Write', 'edit', {}, true)], planner), 'required-skills-unproven')
+})

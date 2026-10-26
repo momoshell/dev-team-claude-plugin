@@ -183,8 +183,8 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
   const pi = isClaude ? null : resolveBinary('pi', binaries.pi, 'pi', env)
   const grantedSkills = skills.map((skill) => resolveSkill(skill, workdir))
   const grants = seatGrants(definition, { role, isClaude, skills: grantedSkills, deps })
-  // fff replaces native search on a claude seat, as the old path's effectiveDeny did.
-  if (isClaude && claudeAdapter.hasFffGrant(grants)) deny = [deny, 'Glob,Grep'].filter(Boolean).join(',')
+  // fff replaces native search, as the old path's effectiveDeny did; pi reads Glob and Grep as find and grep.
+  if (grants.mcp_servers.some((server) => server.name === 'fff')) deny = [deny, 'Glob,Grep'].filter(Boolean).join(',')
   const editAssist = typeof definition.edit_assist === 'boolean' ? (definition.edit_assist ? 'on' : 'off') : null
 
   const append = deps.appendFileSync ?? appendFileSync

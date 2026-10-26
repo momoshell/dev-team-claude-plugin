@@ -1183,6 +1183,13 @@ test('a pi seat that declares subagent carries the registered agents the extensi
   assert.deepEqual(JSON.parse(builder.env.CREW_PI_AGENTS).map((agent) => agent.name), ['scout'])
 })
 
+test('a pi seat that declares fff excludes native find and grep; one that does not keeps them', () => {
+  const excluded = (launch) => { const i = launch.args.indexOf('--exclude-tools'); return i < 0 ? [] : launch.args[i + 1].split(',') }
+  const { launch } = armed('pi', 'builder', { extensions: ['fff'] })
+  for (const tool of ['find', 'grep']) assert.ok(excluded(launch).includes(tool), `fff excludes native ${tool}`)
+  assert.deepEqual(excluded(armed('pi', 'builder', {}).launch).filter((tool) => ['find', 'grep'].includes(tool)), [])
+})
+
 test('a pi seat that declares fff and lab gets builtin MCP, its tools and a runtime agent dir carrying the servers', () => {
   const probe = armed('pi', 'planner', { extensions: ['fff', 'lab'] })
   const { launch } = probe

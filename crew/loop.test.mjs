@@ -851,3 +851,23 @@ test('a lead whose recording does not show its required skill is refused', async
   const f = fakes({ spec: {}, lead: 'bounce', edit: (value) => (value.role === 'planner' ? { ...value, status: 'insufficient' } : value), recording: (r) => (r.role === 'lead' ? { definition: { requires: ['alpha'], writes: 'task-dir' }, rows: [] } : null) })
   assert.deepEqual(await f.go(), stopped('lead-refused'))
 })
+
+test('the lane writes one run-start with its identity before the first seat, and repairs, bounces and retries never write another', async () => {
+  const f = fakes({ review: 1, edit: (value, request) => (request.role === 'builder' && !request.repair && !f.repaired ? ((f.repaired = true), { ...value, status: 'bogus' }) : value) })
+  const before = Date.now()
+  const result = await f.go()
+  assert.equal(result.status, 'done')
+  const starts = f.rows.filter((row) => row.event === 'run-start')
+  assert.equal(starts.length, 1)
+  assert.equal(f.rows.indexOf(starts[0]), 0, 'the anchor precedes every other row, so before the first seat')
+  assert.equal(starts[0].lane, 'lane')
+  assert.equal(starts[0].run_id, 'lane')
+  assert.ok(starts[0].at >= before && starts[0].at <= Date.now(), 'a wall-clock lane start')
+  assert.ok(count(f, 'builder') >= 2, 'the build was repeated or repaired')
+})
+
+test('a task dir that cannot be made writes no run-start', async () => {
+  const f = fakes({ deps: { mkdir: async () => { throw new Error('denied') } } })
+  assert.equal((await f.go()).reason, 'runner-threw')
+  assert.equal(f.rows.some((row) => row.event === 'run-start'), false)
+})

@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync,
+  appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync,
 } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -1183,7 +1183,7 @@ function armLaunch(agent, role, arms, { env = {}, ...options } = {}) {
     model: agent === 'pi' ? 'openai/gpt-6.1-sol' : 'anthropic/claude-opus-4-6', ...arms,
   }
   const run = () => runAcpSeat({
-    definition, cwd, taskDir, prompt: 'p', sessionFile: join(taskDir, 'session.jsonl'),
+    definition, cwd, taskDir, prompt: 'p', briefText: options.briefText, sessionFile: join(taskDir, 'session.jsonl'),
     binaries: { pi: BIN, claude: BIN, claudeAcp: BIN },
     deps: {
       // The fff server binary is a host install; the launch shape must not depend on this host having it.
@@ -1240,19 +1240,83 @@ test('a claude seat never drops an arm it cannot express: every pi-only extensio
   assert.equal(armed('claude', 'builder', { edit_assist: false, codemode: false, advisor: null, extensions: [] }).created.length, 1)
 })
 
-test('a lean pi seat refuses the arms that read the old task layout: advisor, edit assist, builderloop and skeletonread', () => {
-  const requests = [
-    { advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' } }, { edit_assist: true },
-    { extensions: ['builderloop'] }, { extensions: ['skeletonread'] },
-  ]
-  for (const arms of requests) {
-    const probe = armLaunch('pi', 'builder', arms)
-    assert.throws(() => probe.run(), { reason: 'grant-unsupported' }, JSON.stringify(arms))
-    assert.equal(probe.created.length, 0, JSON.stringify(arms))
+// The lane context a lean pi seat's context arms read: the loop's run-start and the planner's return, in the lane's own task dir.
+const laneDetails = { subject: 'fix(crew): resolve lean arm context', plan_path: 'plan.md', gate_path: 'gate.mjs', acceptance: ['AC1'], mutations: [{ check: 'AC1', file: 'a.mjs', find: 'a', replace: 'b' }], files_in_scope: ['a.mjs'], validation_lane: 'node --test a.test.mjs', gate_cmd: 'node gate.mjs' }
+function leanLane(taskDir, { anchor = Date.now() - 60_000, details = laneDetails, number = 3, mtime = anchor + 5_000 } = {}) {
+  if (anchor !== null) writeFileSync(join(taskDir, 'journal.jsonl'), `${JSON.stringify({ event: 'run-start', at: anchor, lane: 'lane', run_id: 'lane' })}\n`)
+  if (details !== null) {
+    const path = join(taskDir, `planner-${number}.json`)
+    writeFileSync(path, JSON.stringify({ role: 'planner', id: `lane.planner.${number}`, status: 'done', summary: 's', details }))
+    utimesSync(path, mtime / 1000, mtime / 1000)
   }
-  const none = armed('pi', 'builder', { advisor: null, edit_assist: false }).launch
-  assert.equal(none.env.CREW_ADVISOR, undefined)
-  assert.deepEqual(piExtensions(none), [])
+}
+const advisorArm = { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' }
+const contextArms = { advisor: advisorArm, edit_assist: true, extensions: ['builderloop', 'skeletonread'] }
+const refusedBeforeClient = (arms, lane, options = {}) => {
+  const probe = armLaunch('pi', 'builder', arms, options)
+  lane(probe.taskDir)
+  assert.throws(() => probe.run(), { reason: 'grant-unsupported' }, JSON.stringify(arms))
+  assert.equal(probe.created.length, 0, 'a refused seat constructs no client')
+  assert.deepEqual(readdirSync(probe.runtimeRoot), [], 'a refused seat leaves no runtime')
+  return probe
+}
+
+test('a lean pi builder declaring advisor, edit assist, builderloop and skeletonread launches with all four on the lane layout', () => {
+  const probe = armLaunch('pi', 'builder', contextArms, { briefText: 'Tripwire tests:\n- a.test.mjs · tripwire\nBroad keys\n' })
+  const anchor = Date.now() - 60_000
+  leanLane(probe.taskDir, { anchor })
+  probe.run()
+  const [launch] = probe.created
+  assert.equal(launch.env.CREW_CONTEXT_LAYOUT, 'lean')
+  assert.equal(launch.env.CREW_TASK_DIR, probe.taskDir)
+  assert.equal(launch.env.CREW_ADVISOR, '1')
+  assert.equal(launch.env.CREW_EDIT_ASSIST, 'on')
+  for (const name of ['advisor', 'builderloop', 'skeletonread']) assert.ok(piExtensions(launch).includes(join(ROOT, 'crew', 'pi', 'extensions', `${name}.ts`)), name)
+  assert.ok(piTools(launch).includes('retrieve'))
+  const manifest = JSON.parse(readFileSync(join(probe.taskDir, 'advisor-manifest.json'), 'utf8'))
+  assert.equal(manifest.schema_version, 1)
+  assert.equal(manifest.run_started_at, anchor, 'the manifest is dated by the lane start, never the seat start')
+  assert.deepEqual(manifest.tripwires, ['a.test.mjs'])
+  assert.deepEqual(manifest.cell, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'high', model: 'openai/gpt-6.1-sol' })
+  assert.equal(existsSync(join(probe.taskDir, 'advisor-manifest.json.tmp')), false)
+})
+
+test('a lean pi seat with context arms refuses before a client when the lane has no run-start of its own, whatever its parent holds', () => {
+  for (const arms of [{ advisor: advisorArm }, { edit_assist: true }, { extensions: ['builderloop'] }, { extensions: ['skeletonread'] }]) {
+    refusedBeforeClient(arms, (taskDir) => {
+      // The old layout's journal and returns beside the task dir are another lane's context.
+      writeFileSync(join(dirname(taskDir), 'journal.jsonl'), `${JSON.stringify({ event: 'run-start', at: 1, run_id: 'foreign' })}\n`)
+      mkdirSync(join(dirname(taskDir), 'returns', 'foreign'), { recursive: true })
+      leanLane(taskDir, { anchor: null })
+    })
+  }
+  refusedBeforeClient({ extensions: ['builderloop'] }, (taskDir) => { leanLane(taskDir); writeFileSync(join(taskDir, 'journal.jsonl'), 'not json\n{"event":"stage-start"}\n') })
+})
+
+test('a lean pi seat with context arms refuses when the lane planner return is missing, stale, newest-invalid or lacks what an arm reads', () => {
+  const arms = { extensions: ['builderloop'] }
+  refusedBeforeClient(arms, (taskDir) => leanLane(taskDir, { details: null }))
+  refusedBeforeClient(arms, (taskDir) => leanLane(taskDir, { anchor: Date.now() - 60_000, mtime: Date.now() - 120_000 }))
+  refusedBeforeClient(arms, (taskDir) => { const { gate_cmd: _, ...rest } = laneDetails; leanLane(taskDir, { details: rest }) })
+  refusedBeforeClient({ extensions: ['skeletonread'] }, (taskDir) => leanLane(taskDir, { details: { ...laneDetails, files_in_scope: [] } }))
+  // The newest return decides: an older valid one does not stand in for it.
+  refusedBeforeClient(arms, (taskDir) => {
+    leanLane(taskDir, { number: 2 })
+    writeFileSync(join(taskDir, 'planner-9.json'), '{"role":"planner"')
+  })
+  // A planner seat has no planner return yet, but still needs the lane's anchor.
+  const planner = armLaunch('pi', 'planner', { extensions: ['skeletonread'] })
+  leanLane(planner.taskDir, { details: null })
+  planner.run()
+  assert.equal(planner.created.length, 1)
+})
+
+test('a lean pi seat granted the advisor refuses without a pi cell or a written manifest, and never boots silently', () => {
+  for (const advisor of [{ agent: 'claude', model: 'anthropic/claude-opus-4-6', effort: 'high' }, { agent: 'pi', model: 'not a model', effort: 'high' }, { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'huge' }]) {
+    refusedBeforeClient({ advisor }, (taskDir) => leanLane(taskDir))
+  }
+  const failing = refusedBeforeClient({ advisor: advisorArm }, (taskDir) => leanLane(taskDir), { deps: { writeFileSync: (path, ...rest) => { if (path.includes('advisor-manifest')) throw new Error('disk full'); return writeFileSync(path, ...rest) } } })
+  assert.equal(existsSync(join(failing.taskDir, 'advisor-manifest.json')), false)
 })
 
 test('a pi builder with edit assist off carries off; an unset field carries none', () => {

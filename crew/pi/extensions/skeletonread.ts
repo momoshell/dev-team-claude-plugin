@@ -5,7 +5,8 @@
 
 import { appendFileSync, closeSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs'
 import { StringDecoder } from 'node:string_decoder'
-import { dirname, join, relative, resolve } from 'node:path'
+import { join, relative, resolve } from 'node:path'
+import { journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../context-layout.mjs'
 import { exportEntries } from '../../../scripts/factory/make-brief.mjs'
 import { DEFAULT_MAX_LINES, MAX_LINES_ENV } from './readgate.ts'
 
@@ -472,21 +473,22 @@ export function loadAcceptedContext(value = {}, extraDeps = {}) {
   const cwd = String(input.cwd || deps.cwd || process.cwd())
   if (!taskDir) return null
   const read = deps.readFile || deps.readFileSync || defaultRead
-  const journalPath = join(dirname(taskDir), 'journal.jsonl')
+  const env = input.env || process.env
+  const journalPath = journalPathOf(taskDir, env)
   const runStart = journalRunStart(journalPath, deps, read)
   if (runStart === null) return null
-  const returnsDir = join(dirname(taskDir), 'returns')
+  const returnsDir = plannerReturnsDirOf(taskDir, env)
   let names
   try { names = (deps.readDir || deps.readdirSync || defaultReadDir)(returnsDir) } catch { return null }
   if (!Array.isArray(names) || names.length > MAX_RETURN_ENTRIES) return null
   const candidates = []
   for (const name of names) {
-    const match = /^d(\d+)\.planner\.json$/.exec(String(name))
-    if (!match) continue
+    const number = plannerReturnNumber(name, env)
+    if (number === null) continue
     const path = join(returnsDir, String(name))
     const mtime = candidateMtime(path, deps)
     if (mtime === null) continue
-    candidates.push({ number: Number(match[1]), path, mtime })
+    candidates.push({ number, path, mtime })
   }
   const currentCandidates = SELECT_LATEST_PLANNER_RETURN
     ? candidates.filter((candidate) => candidate.mtime > runStart).sort((left, right) => right.number - left.number)
@@ -698,7 +700,7 @@ export function createSkeletonRead(options = {}) {
   const loadContext = input.loadContext || deps.loadContext || ((value) => loadAcceptedContext(value))
   const index = input.exportEntries || deps.exportEntries || exportEntries
   const recordFailure = input.recordFailure || deps.recordFailure || ((row) => {
-    const journalPath = taskDir ? join(dirname(taskDir), 'journal.jsonl') : null
+    const journalPath = taskDir ? journalPathOf(taskDir, env) : null
     if (!journalPath) return
     ;(deps.appendFile || deps.appendFileSync || defaultAppend)(journalPath, `${JSON.stringify(row)}\n`)
   })

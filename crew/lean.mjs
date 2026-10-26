@@ -24,6 +24,9 @@ function exampleEnvelope(role, id, acceptance) {
       gate_path: '<absolute path of the gate you wrote>',
       acceptance,
       mutations: acceptance.map((check) => ({ check, file: '<repo-relative file the gate reads>', find: '<literal text in that file>', replace: '<different literal text that makes this check fail>' })),
+      files_in_scope: ['<repo-relative file the builder may edit>'],
+      validation_lane: '<the node --test command that checks the change>',
+      gate_cmd: '<the command that runs your gate>',
     },
     builder: { summary: '<what you built>' },
     reviewer: review,
@@ -138,7 +141,7 @@ export async function runLean(spec, deps = {}) {
         try { const out = d.appendFileSync(...args); if (args[0] === sessionFile) relayed.push(String(args[1])); return out } catch (error) { recordError ??= error; throw error }
       }
       const turn = await d.runAcpSeat({
-        definition, cwd: spec.cwd, taskDir: spec.taskDir, prompt, sessionFile,
+        definition, cwd: spec.cwd, taskDir: spec.taskDir, prompt, sessionFile, briefText: spec.brief,
         deps: { appendFileSync: guardedAppend },
       })
       if (recordError) throw recordError

@@ -878,10 +878,27 @@ test('lean prompts contain only the lean contract', async () => {
   for (const { prompt, definition } of f.requests) {
     assert.doesNotMatch(prompt, /^Charter file/m, definition.role)
     assert.doesNotMatch(prompt, /\]\([^)]*roles\//, definition.role)
-    for (const field of ['gate_cmd', 'validation_lane', 'files_in_scope', 'commit_subject', 'closes', 'exemplars', 'exemplars_none', 'consult_questions']) {
+    // Only the planner states the context the builder's arms read; no other turn names it.
+    for (const field of ['gate_cmd', 'validation_lane', 'files_in_scope']) {
+      const matcher = new RegExp(`\\b${field}\\b`)
+      if (definition.role === 'planner') assert.match(prompt, matcher, `planner: ${field}`)
+      else assert.doesNotMatch(prompt, matcher, `${definition.role}: ${field}`)
+    }
+    for (const field of ['commit_subject', 'closes', 'exemplars', 'exemplars_none', 'consult_questions']) {
       assert.doesNotMatch(prompt, new RegExp(`\\b${field}\\b`), `${definition.role}: ${field}`)
     }
   }
+})
+
+test('every lean seat turn carries the brief to the seat, and the planner example it is shown is a valid P2 planner envelope', async () => {
+  const f = leanFixture({})
+  f.spec.brief = 'Tripwire tests:\n- a.test.mjs · tripwire\nBroad keys\n'
+  assert.equal((await f.go()).status, 'done')
+  assert.ok(f.requests.length > 0)
+  for (const request of f.requests) assert.equal(request.briefText, f.spec.brief, request.definition.role)
+  const planner = f.requests.find((request) => request.definition.role === 'planner')
+  const example = JSON.parse(planner.prompt.slice(planner.prompt.lastIndexOf('{\n  "role"'), planner.prompt.lastIndexOf('}') + 1))
+  assert.deepEqual(validateEnvelope('planner', example).defects, [])
 })
 
 // MUTATION: take the effort from the file's base fields and a tier override never reaches the seat.

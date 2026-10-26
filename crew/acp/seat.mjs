@@ -1,15 +1,16 @@
 import {
-  accessSync, appendFileSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync,
+  accessSync, appendFileSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { delimiter, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
+import { basename, delimiter, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ACP_POLL_MS, ACP_UPDATE_KINDS, acpClient } from '../acp-client.mjs'
 import { permissionHandler, readOnlyCommand } from '../acp-permission.mjs'
 import { armGrants, PI_AGENT_DIR_ENV, refuse } from '../capabilities.mjs'
-import { AGENT_ROLES } from '../protocols.mjs'
+import { AGENT_ROLES, validateEnvelope } from '../protocols.mjs'
 import * as claudeAdapter from '../adapters/adapter-claude.mjs'
 import * as piAdapter from '../adapters/adapter-pi.mjs'
+import { CONTEXT_LAYOUT_ENV, LEAN_LAYOUT, journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../pi/context-layout.mjs'
 
 const ROLE = 'seat'
 const WRITES = Object.freeze(['none', 'task-dir', 'repo'])
@@ -50,7 +51,19 @@ function resolveSkill(skill, cwd) {
   return file
 }
 
-const LEGACY_CONTEXT_ARMS = Object.freeze(['builderloop', 'skeletonread'])
+// The pi arms that read the lane's own context: its run anchor and the planner's return. Each names the
+// planner details it cannot do without.
+const CONTEXT_ARMS = Object.freeze({
+  advisor: ['files_in_scope'],
+  builderloop: ['files_in_scope', 'validation_lane', 'gate_cmd'],
+  edit_assist: ['files_in_scope', 'validation_lane', 'gate_cmd'],
+  skeletonread: ['files_in_scope', 'plan_path'],
+})
+const CONTEXT_EXTENSIONS = Object.freeze(['builderloop', 'skeletonread'])
+const ADVISOR_MANIFEST = 'advisor-manifest.json'
+const ADVISOR_MANIFEST_VERSION = 1
+// advisor.ts SAFE_MODEL: the spellings its manifest reader accepts for a cell.
+const SAFE_CELL_VALUE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/
 
 const nonempty = (value) => typeof value === 'string' && value !== ''
 
@@ -63,10 +76,9 @@ function seatGrants(definition, { role, isClaude, skills, deps }) {
   for (const [arm, set] of [['advisor', advisor], ['edit_assist', definition.edit_assist === true], ['codemode', definition.codemode === true]]) {
     if (isClaude && set) throw refuse('grant-unsupported', `adapter-claude cannot express the ${arm} arm of seat ${role} — refusing to boot a silently weaker seat`)
   }
-  // These arms read the planner's return and the run anchor from the old layout (dirname(taskDir)/journal.jsonl and
-  // returns/<run>/); a lean lane keeps both inside its task dir, so on a lean seat they would load and see nothing.
-  const unported = [...extensions.filter((name) => LEGACY_CONTEXT_ARMS.includes(name)), ...(advisor ? ['advisor'] : []), ...(definition.edit_assist === true ? ['edit_assist'] : [])]
-  if (unported.length) throw refuse('grant-unsupported', `seat ${role} declares ${unported.join(', ')}, which read the old task layout and see no context on a lean seat — refusing to boot a silently weaker seat`)
+  // Only a pi seat has the lean lane's context to read; a claude seat would load these arms and see none.
+  const unported = isClaude ? extensions.filter((name) => CONTEXT_EXTENSIONS.includes(name)) : []
+  if (unported.length) throw refuse('grant-unsupported', `seat ${role} declares ${unported.join(', ')}, which read the lane context a claude seat does not get — refusing to boot a silently weaker seat`)
   const armed = armGrants({ role, agent: definition.agent, extensions }, { register: deps.register, root: deps.root, exists: deps.exists })
   const mcp = armed.mcp_servers.length > 0
   const piBuiltins = isClaude ? [] : [...(definition.codemode === true ? ['builtin:codemode'] : []), ...(mcp ? ['builtin:mcp'] : [])]
@@ -148,7 +160,83 @@ function canonicalWritePath(target, base, real) {
 
 const inside = (path, root) => root != null && (path === root || path.startsWith(root.endsWith(sep) ? root : `${root}${sep}`))
 
-export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, binaries = {}, deps = {} }) {
+const epochMs = (value) => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value !== 'string' || !value.trim()) return null
+  const parsed = Number.isFinite(Number(value)) ? Number(value) : Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+// The Tripwire tests section of the brief, as the old path's advisorManifest reads it (crew/crew.mjs).
+function briefTripwires(briefText) {
+  const lines = String(briefText ?? '').split(/\r?\n/)
+  const marker = lines.findIndex((line) => line.trim().toLowerCase() === 'tripwire tests:')
+  const tripwires = []
+  if (marker >= 0) for (let i = marker + 1; i < lines.length; i += 1) {
+    const line = lines[i].trim()
+    if (/^broad keys\b/i.test(line)) break
+    const match = /^-\s+(.+?)\s+·/.exec(line)
+    if (match && match[1].trim()) tripwires.push(match[1].trim())
+  }
+  return tripwires
+}
+
+// A cell the manifest reader would accept, from the definition's advisor entry; anything else is no cell.
+function advisorCellOf(advisor) {
+  const model = advisor?.model
+  if (advisor?.agent !== 'pi' || typeof model !== 'string' || !MODEL.test(model) || !EFFORTS.includes(advisor.effort)) return null
+  const cell = { provider: model.slice(0, model.indexOf('/')), id: model.slice(model.indexOf('/') + 1), agent: advisor.agent, effort: advisor.effort, model }
+  return Object.values(cell).every((value) => SAFE_CELL_VALUE.test(value)) ? cell : null
+}
+
+// What a lean seat's context arms need, read from the lane's own task dir and nowhere else: the lane's run-start
+// anchor (written once by the loop, never per seat) and, past the planner, the planner's current return. A seat that
+// cannot be given them is refused here, before it starts, rather than booted with arms that read nothing.
+function laneContext({ arms, role, laneTaskDir, definition, briefText, deps }) {
+  const refusal = (why) => { throw refuse('grant-unsupported', `seat ${role} declares ${arms.join(', ')}, which read the lane context, and ${why} — refusing to boot a silently weaker seat`) }
+  if (!laneTaskDir) return refusal('it has no task dir')
+  const layout = { [CONTEXT_LAYOUT_ENV]: LEAN_LAYOUT }
+  const read = deps.readFileSync ?? readFileSync
+  let journal
+  try { journal = read(journalPathOf(laneTaskDir, layout), 'utf8') } catch { return refusal(`the lane journal ${journalPathOf(laneTaskDir, layout)} is unreadable`) }
+  let anchor = null
+  for (const line of String(journal).split('\n')) {
+    let row
+    try { row = JSON.parse(line) } catch { continue }
+    if (row?.event !== 'run-start') continue
+    const at = epochMs(row.at ?? row.started_at ?? row.run_started_at ?? row.timestamp)
+    if (at !== null) anchor = at
+  }
+  if (anchor === null) return refusal('the lane journal has no run-start')
+  if (role !== 'planner') {
+    const needs = [...new Set(arms.flatMap((arm) => CONTEXT_ARMS[arm]))]
+    let planner = null
+    try {
+      const dir = plannerReturnsDirOf(laneTaskDir, layout)
+      const candidates = readdirSync(dir)
+        .map((name) => ({ name, number: plannerReturnNumber(name, layout) }))
+        .filter((entry) => entry.number !== null && statSync(join(dir, entry.name)).mtimeMs >= anchor)
+        .sort((a, b) => b.number - a.number)
+      if (candidates[0]) planner = JSON.parse(read(join(dir, candidates[0].name), 'utf8'))
+    } catch { planner = null }
+    const details = planner?.status === 'done' && validateEnvelope('planner', planner).defects.length === 0 ? planner.details : null
+    const missing = details === null ? needs : needs.filter((key) => (Array.isArray(details[key]) ? details[key].length === 0 : !nonempty(details[key])))
+    if (missing.length) return refusal(`the lane's planner return written since its start does not carry ${missing.join(', ')}`)
+  }
+  if (!arms.includes('advisor')) return
+  const cell = advisorCellOf(definition.advisor)
+  if (!cell) return refusal('the advisor cell is not a pi provider/id with an effort')
+  const manifest = { schema_version: ADVISOR_MANIFEST_VERSION, generated_at: new Date().toISOString(), task: basename(dirname(laneTaskDir)), run_started_at: anchor, tripwires: briefTripwires(briefText), cell }
+  const target = join(laneTaskDir, ADVISOR_MANIFEST)
+  try {
+    ;(deps.writeFileSync ?? writeFileSync)(`${target}.tmp`, JSON.stringify(manifest))
+    ;(deps.renameSync ?? renameSync)(`${target}.tmp`, target)
+    const written = JSON.parse(read(target, 'utf8'))
+    if (written?.run_started_at !== anchor || written.cell?.model !== cell.model) throw new Error('the manifest read back differs from the one written')
+  } catch (error) { refusal(`the advisor manifest could not be written: ${error.message}`) }
+}
+
+export function runAcpSeat({ definition, cwd, taskDir, prompt, briefText, sessionFile, binaries = {}, deps = {} }) {
   if (!definition || typeof definition !== 'object') throw new Error('definition must be an object')
   if (!['claude', 'pi'].includes(definition.agent)) throw new Error(`unsupported agent: ${definition.agent}`)
   if (!nonempty(cwd)) throw new Error('cwd must be a nonempty string')
@@ -188,10 +276,15 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
   // fff replaces native search, as the old path's effectiveDeny did; pi reads Glob and Grep as find and grep.
   if (grants.mcp_servers.some((server) => server.name === 'fff')) deny = [deny, 'Glob,Grep'].filter(Boolean).join(',')
   const editAssist = typeof definition.edit_assist === 'boolean' ? (definition.edit_assist ? 'on' : 'off') : null
+  const contextArms = isClaude ? [] : [
+    ...(definition.extensions ?? []).filter((name) => CONTEXT_EXTENSIONS.includes(name)),
+    ...(grants.advisor ? ['advisor'] : []), ...(definition.edit_assist === true ? ['edit_assist'] : []),
+  ]
 
   const append = deps.appendFileSync ?? appendFileSync
   const real = deps.realpathSync ?? realpathSync
   const laneTaskDir = nonempty(taskDir) ? resolve(taskDir) : null
+  if (contextArms.length) laneContext({ arms: contextArms, role, laneTaskDir, definition, briefText, deps })
   const workRoot = canonicalRoot(workdir, real)
   const taskRoot = laneTaskDir ? canonicalRoot(laneTaskDir, real) : null
   // lean.mjs records every turn under <taskDir>/lean; a seat never edits the record of a turn.
@@ -253,7 +346,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
     // taskDir stays the per-seat runtime, where materialised resources live; the lane's task dir reaches the seat through its environment.
     const spec = {
       role, cwd: workdir, effort: definition.effort, promptFile, taskDir: runtime, grants, tools, deny, writableDirs, editAssist,
-      env: laneTaskDir ? { CREW_ROLE: role, CREW_TASK_DIR: laneTaskDir } : { CREW_ROLE: role },
+      env: laneTaskDir ? { CREW_ROLE: role, CREW_TASK_DIR: laneTaskDir, [CONTEXT_LAYOUT_ENV]: LEAN_LAYOUT } : { CREW_ROLE: role },
     }
     let launch
     if (isClaude) {

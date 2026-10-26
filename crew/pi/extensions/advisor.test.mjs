@@ -10,7 +10,7 @@ import {
   ADVISOR_BOOT_REFUSALS as bootAdvisorRefusals, classifyAdvisorCell as bootClassifyAdvisorCell,
   DEFAULT_TRANSPORT, advisorBootRecord, assertAdvisorCellLive,
 } from '../../crew.mjs'
-import { scratchDir } from '../../../test/helpers.mjs'
+import { leanLaneFixture, scratchDir } from '../../../test/helpers.mjs'
 function fixture() {
   const root = scratchDir('advisor-test-')
   const taskDir = join(root, 'task')
@@ -339,7 +339,7 @@ test('E1 advisor module is node-only, erasable, and exposes no callable registra
   const source = readFileSync(new URL('./advisor.ts', import.meta.url), 'utf8')
   const imports = [...source.matchAll(/^import[\s\S]*?from\s+["']([^"']+)["']/gm)].map((match) => match[1])
   assert.ok(imports.length > 0)
-  assert.ok(imports.every((specifier) => specifier.startsWith('node:') || specifier === './subagent.ts'))
+  assert.ok(imports.every((specifier) => specifier.startsWith('node:') || ['./subagent.ts', '../context-layout.mjs'].includes(specifier)))
   assert.doesNotMatch(source, /registerTool/)
   assert.doesNotMatch(source, /^\s*(enum|namespace)\s/m)
 })
@@ -1636,4 +1636,34 @@ test('TS4 both advisor prompts instruct the no-finding reply', () => {
   const sentence = 'If neither class applies, return [] alone.'
   assert.equal(advisor.BUILDER_SYSTEM_PROMPT.includes(sentence), true)
   assert.equal(advisor.PLANNER_SYSTEM_PROMPT.includes(sentence), true)
+})
+
+test('a lean lane gives the advisor its scope from the lane planner return written before the seat, dated by the lane start', () => {
+  const lane = leanLaneFixture({ planners: [[2, 10_000, { files_in_scope: ['older.mjs'] }], [12, 30_000], [99, -10_000, { files_in_scope: ['stale.mjs'] }]] })
+  const cell = { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'high', model: 'openai/gpt-6.1-sol' }
+  writeFileSync(join(lane.taskDir, 'advisor-manifest.json'), JSON.stringify({ schema_version: 1, run_started_at: lane.at, tripwires: ['a.test.mjs'], cell }))
+  const context = advisor.loadContext({ taskDir: lane.taskDir, env: lane.env })
+  assert.deepEqual(context.files_in_scope, ['a.mjs', 'a.test.mjs'])
+  assert.equal(context.validation_lane, 'node --test a.test.mjs')
+  assert.equal(context.scope_source, 'planner-return-12')
+  assert.deepEqual(context.cell, cell)
+  assert.equal(context.run_started_at, lane.at)
+  // A seat-time anchor hides a planner return written before the seat; the lane's does not.
+  writeFileSync(join(lane.taskDir, 'advisor-manifest.json'), JSON.stringify({ schema_version: 1, run_started_at: Date.now(), tripwires: [], cell }))
+  assert.equal(advisor.loadContext({ taskDir: lane.taskDir, env: lane.env }).scope_source, 'absent')
+  // The newest return decides, and the parent's returns are never read.
+  writeFileSync(join(lane.taskDir, 'advisor-manifest.json'), JSON.stringify({ schema_version: 1, run_started_at: lane.at, tripwires: [], cell }))
+  lane.write(13, 40_000, { files_in_scope: 'nope', validation_lane: '' })
+  assert.equal(advisor.loadContext({ taskDir: lane.taskDir, env: lane.env }).scope_source, 'absent')
+})
+
+test('the advisor keeps the old layout without a lane layout and journals a lean lane in the lane journal', () => {
+  const lane = leanLaneFixture()
+  assert.equal(advisor.journalPathFrom(lane.taskDir), join(lane.parent, 'journal.jsonl'))
+  assert.equal(advisor.returnsDirFrom(lane.taskDir), join(lane.parent, 'returns'))
+  assert.equal(advisor.journalPathFrom(lane.taskDir, lane.env), join(lane.taskDir, 'journal.jsonl'))
+  assert.equal(advisor.returnsDirFrom(lane.taskDir, lane.env), lane.taskDir)
+  writeFileSync(join(lane.parent, 'advisor-manifest.json'), '{}')
+  writeFileSync(join(lane.taskDir, 'advisor-manifest.json'), JSON.stringify({ schema_version: 1, run_started_at: lane.at, tripwires: [], cell: null }))
+  assert.equal(advisor.loadContext({ taskDir: lane.taskDir, env: { CREW_TASK_DIR: lane.taskDir } }).files_in_scope[0], 'FOREIGN')
 })

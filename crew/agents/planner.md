@@ -25,4 +25,6 @@ Statuses: `done`, `insufficient`, `escalate`.
 
 Details keys: `subject`, `plan_path`, `gate_path`, `acceptance`, `mutations`.
 
+Also give `files_in_scope` (the repo-relative files the builder may edit, tests included), `validation_lane` (the `node --test` command that checks the change) and `gate_cmd` (the command that runs your gate). The builder's context arms read them, and a builder that declares those arms is refused without them. Cite plan lines as `file:start-end` inside `plan_path`.
+
 The `subject` is the conventional-commit subject for this change, at most 72 characters, written `type(scope): summary` with an optional scope and optional `!` after it. The type is one of `chore`, `ci`, `crew`, `docs`, `feat`, `fix`, `merge`, `perf`, `refactor`, `revert`, `spike`, `test`, `wip`, `workflow`. It names both the commit and the PR. Do not write a PR body: the loop generates it from the measured results.

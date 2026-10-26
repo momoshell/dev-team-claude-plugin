@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'; import { ROOT, scratchDir } from '../../../test/helpers.mjs'
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'; import { ROOT, leanLaneFixture, scratchDir } from '../../../test/helpers.mjs'
 
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -175,7 +175,7 @@ test('the module is zero-dep, erasable, and carries the vendored MIT notice', ()
   const source = readFileSync(EXTENSION, 'utf8')
   const imports = [...source.matchAll(/^import[\s\S]*?from\s+["']([^"']+)["']/gm)].map((match) => match[1]); const allNodeImports = imports.every((specifier) => specifier.startsWith('node:'))
   assert.ok(imports.length > 0)
-  assert.ok(allNodeImports || imports.every((specifier) => specifier.startsWith('node:') || specifier === '../../adapters/adapter-pi.mjs'), imports.join(', '))
+  assert.ok(allNodeImports || imports.every((specifier) => specifier.startsWith('node:') || ['../../adapters/adapter-pi.mjs', '../context-layout.mjs'].includes(specifier)), imports.join(', '))
   const adapterSource = readFileSync(join(dirname(EXTENSION), '../../adapters/adapter-pi.mjs'), 'utf8')
   const adapterImports = [...adapterSource.matchAll(/^import[\s\S]*?from\s+["']([^"']+)["']/gm)].map((match) => match[1])
   assert.deepEqual(adapterImports.filter((specifier) => !specifier.startsWith('node:')), [])
@@ -826,4 +826,28 @@ test('the two reducers agree in what they fold, not only in what they claim', ()
     assert.deepEqual(rpc.foldRpcUsage([row.frame]), want, `headless-rpc.mjs folded: ${row.name}`)
     assert.deepEqual(mod.foldUsage([row.frame]), want, `subagent.ts folded: ${row.name}`)
   }
+})
+
+test('a lean lane counts its spawns inside its task dir and leaves the parent budget alone', () => {
+  const lane = leanLaneFixture()
+  const parentCounter = join(lane.parent, 'subagent-spawns.json')
+  writeFileSync(parentCounter, '{"spawns":8}\n')
+  assert.equal(mod.spawnCountPathFrom(lane.taskDir, lane.env), join(lane.taskDir, 'subagent-spawns.json'))
+  assert.equal(mod.journalPathFrom(lane.taskDir, lane.env), join(lane.taskDir, 'journal.jsonl'))
+  for (const count of [1, 2]) {
+    const out = mod.reserveSpawn({ taskDir: lane.taskDir, env: lane.env, readFile: readFileSync, writeFile: writeFileSync })
+    assert.equal(out.count, count)
+    assert.deepEqual(JSON.parse(readFileSync(join(lane.taskDir, 'subagent-spawns.json'), 'utf8')), { spawns: count })
+  }
+  assert.equal(readFileSync(parentCounter, 'utf8'), '{"spawns":8}\n')
+  writeFileSync(join(lane.taskDir, 'subagent-spawns.json'), `${JSON.stringify({ spawns: mod.SUBAGENT_SPAWN_BUDGET })}\n`)
+  assert.match(mod.reserveSpawn({ taskDir: lane.taskDir, env: lane.env, readFile: readFileSync, writeFile: writeFileSync }).error, /spent its subagent spawn budget/)
+})
+
+test('the old layout keeps its counter and journal beside the task dir without a lane layout', () => {
+  const lane = leanLaneFixture()
+  assert.equal(mod.spawnCountPathFrom(lane.taskDir), join(lane.parent, 'subagent-spawns.json'))
+  assert.equal(mod.journalPathFrom(lane.taskDir, { CREW_TASK_DIR: lane.taskDir }), join(lane.parent, 'journal.jsonl'))
+  assert.equal(mod.reserveSpawn({ taskDir: lane.taskDir, env: {}, readFile: readFileSync, writeFile: writeFileSync }).count, 1)
+  assert.equal(existsSync(join(lane.taskDir, 'subagent-spawns.json')), false)
 })

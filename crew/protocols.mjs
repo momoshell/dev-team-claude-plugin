@@ -222,12 +222,19 @@ const DETAIL_KEYS = Object.freeze({
   'tech-lead': REVIEW_KEYS,
   lead: ['decision'],
 })
+// Fields a role may carry beyond its required ones. A planner states the context the builder's arms read.
+const OPTIONAL_DETAIL_KEYS = Object.freeze({
+  planner: ['files_in_scope', 'validation_lane', 'gate_cmd'],
+})
 const DETAIL_RULES = {
   subject: [(v) => typeof v === 'string' && v.length <= 72 && !/[\x00-\x1f\x7f]/.test(v)
     && /^(?:chore|ci|crew|docs|feat|fix|merge|perf|refactor|revert|spike|test|wip|workflow)(?:\([A-Za-z0-9][A-Za-z0-9._/-]*\))?!?: \S(?:.*\S)?$/.test(v),
   'is a conventional-commit subject of at most 72 characters: type(scope): summary'],
   plan_path: [nonempty, 'is a nonempty string'],
   gate_path: [nonempty, 'is a nonempty string'],
+  files_in_scope: [(v) => Array.isArray(v) && v.length > 0 && v.every(nonempty), 'is a nonempty list of nonempty strings'],
+  validation_lane: [nonempty, 'is a nonempty string'],
+  gate_cmd: [nonempty, 'is a nonempty string'],
   summary: [nonempty, 'is a nonempty string'],
   verdict: [(v) => REVIEW_VERDICTS.includes(v), `is one of ${REVIEW_VERDICTS.join(', ')}`],
   decision: [(v) => LEAD_DECISIONS.includes(v), `is one of ${LEAD_DECISIONS.join(', ')}`],
@@ -288,7 +295,11 @@ export function validateEnvelope(role, envelope) {
   if (required && Object.hasOwn(envelope, 'details')) {
     if (!plain(details)) defects.push(`details is an object with ${required.join(', ')}`)
     else {
-      for (const key of Object.keys(details)) if (!required.includes(key)) defects.push(`details.${key} is not a field of ${role} details`)
+      const optional = OPTIONAL_DETAIL_KEYS[role] ?? []
+      for (const key of Object.keys(details)) {
+        if (optional.includes(key)) { if (!DETAIL_RULES[key][0](details[key])) defects.push(`details.${key} ${DETAIL_RULES[key][1]}`) }
+        else if (!required.includes(key)) defects.push(`details.${key} is not a field of ${role} details`)
+      }
       for (const key of required) {
         if (!Object.hasOwn(details, key)) { defects.push(`details.${key} is required`); continue }
         const v = details[key]

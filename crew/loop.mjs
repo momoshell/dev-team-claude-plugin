@@ -13,6 +13,7 @@ import { TIERS, validateEnvelope } from './protocols.mjs'
 import { proveRequiredSkills } from './skills-proof.mjs'
 
 export const DEFAULT_ROUNDS = 2
+const MAX_ENVELOPE_REPAIRS = 1
 export const LOOP_REASONS = Object.freeze([
   ...CHECK_REASONS, 'unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'lead-escalated', 'lead-unavailable',
   'lead-refused', 'accept-unmeasured', 'round-bound', 'paths-unmeasured',
@@ -112,7 +113,8 @@ export async function runLoop(spec, deps = {}) {
     return sound ? result : { status: 'unmeasured', reason: 'runner-threw' }
   }
 
-  // One role's turn: issue, await, read back, validate. Returns { envelope } for a done envelope or { halt }.
+  // One role's turn: issue, await, read back, validate (a schema-refused file gets one repair turn that
+  // costs no round). Returns { envelope } for a done envelope or { halt }.
   // A valid non-done envelope, or an exhausted bound, is put to the lead.
   const seatTurn = async (role, feedback = []) => {
     for (;;) {
@@ -124,23 +126,42 @@ export async function runLoop(spec, deps = {}) {
         rounds[role] += 1
         const id = `${spec.id}.${role}.${turn}`
         const returnPath = join(spec.taskDir, `${role}-${turn}.json`)
-        let failure = null
-        let parsed = null
-        let recording = null
-        try { recording = await d.runSeat({ role, seat: seats[role], id, returnPath, brief: spec.brief, planPath, gatePath, feedback, ...(role === 'reviewer' ? { changedPaths } : {}) }) } catch (error) { failure = { reason: 'seat-unmeasured', error: describe(error) } }
-        let raw = null
-        if (!failure) {
-          try { raw = await d.readFile(returnPath, 'utf8') } catch (error) { failure = { reason: 'seat-unmeasured', error: describe(error) } }
+        const request = { role, seat: seats[role], id, returnPath, brief: spec.brief, planPath, gatePath, feedback, ...(role === 'reviewer' ? { changedPaths } : {}) }
+        // One attempt: run the seat, then read the issued path back, parse it and validate it in full.
+        const attempt = async (asked) => {
+          let failure = null
+          let parsed = null
+          let recording = null
+          try { recording = await d.runSeat(asked) } catch (error) { failure = { reason: 'seat-unmeasured', error: describe(error) } }
+          let raw = null
+          if (!failure) {
+            try { raw = await d.readFile(returnPath, 'utf8') } catch (error) { failure = { reason: 'seat-unmeasured', error: describe(error) } }
+          }
+          if (!failure && (typeof raw !== 'string' || raw.trim() === '')) failure = { reason: 'seat-unmeasured', error: { code: null, message: 'the seat returned an empty file' } }
+          if (!failure) {
+            try { parsed = JSON.parse(raw) } catch (error) { failure = { reason: 'envelope-refused', error: describe(error) } }
+          }
+          const checked = failure ? { envelope: null, defects: [] } : validateEnvelope(role, parsed)
+          return { failure, parsed, recording, checked }
         }
-        if (!failure && (typeof raw !== 'string' || raw.trim() === '')) failure = { reason: 'seat-unmeasured', error: { code: null, message: 'the seat returned an empty file' } }
-        if (!failure) {
-          try { parsed = JSON.parse(raw) } catch (error) { failure = { reason: 'envelope-refused', error: describe(error) } }
+        const observe = (a) => emit('envelope', { role, id, returnPath, parsed: a.parsed, defects: a.checked.defects, error: a.failure?.error ?? null })
+        // A file that parsed but failed the schema gets a bounded repair turn; any other failure is final.
+        const attempts = [await attempt(request)]
+        let latest = attempts[0]
+        while (!latest.failure && latest.checked.defects.length > 0 && attempts.length <= MAX_ENVELOPE_REPAIRS) {
+          await observe(latest)
+          latest = await attempt({ ...request, repair: { defects: [...latest.checked.defects] } })
+          attempts.push(latest)
         }
-        const checked = failure ? { envelope: null, defects: [] } : validateEnvelope(role, parsed)
-        // The proof reads the rows the runner relayed for this turn, after the schema and id are sound.
-        if (!failure && checked.defects.length === 0 && checked.envelope?.id === id && recording?.definition) {
-          const unproven = proveRequiredSkills({ definition: recording.definition, recorded: recording.recorded, cwd: recording.cwd })
-          if (unproven) checked.defects.push(unproven)
+        let { failure, parsed, checked } = latest
+        // The proof reads the rows the runner relayed for each turn, after the schema and id are sound;
+        // a repair turn never launders the work that came before it.
+        if (!failure && checked.defects.length === 0 && checked.envelope?.id === id) {
+          for (const { recording } of attempts) {
+            if (!recording?.definition) continue
+            const unproven = proveRequiredSkills({ definition: recording.definition, recorded: recording.recorded, cwd: recording.cwd })
+            if (unproven) checked.defects.push(unproven)
+          }
         }
         const valid = checked.defects.length === 0 && checked.envelope?.id === id
         await emit('envelope', { role, id, returnPath, parsed, defects: checked.defects, error: failure?.error ?? null })

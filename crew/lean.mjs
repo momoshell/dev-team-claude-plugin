@@ -54,6 +54,27 @@ function definitionFor({ role, seat }, tier, d) {
   }
 }
 
+// A repair turn: the work is done and its return file failed validation. Names the defects and the
+// path, and asks for nothing but a corrected envelope there.
+function repairPromptFor({ request, spec }) {
+  const { role, id, returnPath, repair } = request
+  return [
+    'Your envelope was refused. Do not redo the assignment and do not edit any other file.',
+    '',
+    '## Defects',
+    ...repair.defects.map((defect) => `- ${defect}`),
+    '',
+    '## Return',
+    'Read the existing file at the return path below and keep its completed results. Write only a corrected',
+    'P2 envelope, as JSON, to that same path; nothing else you write counts as your return.',
+    `Envelope id: ${id}`,
+    `Return path: ${returnPath}`,
+    JSON.stringify(exampleEnvelope(role, id, spec.acceptance), null, 2),
+    'status is done, insufficient or escalate; use insufficient or escalate instead of faking a done.',
+    '',
+  ].join('\n')
+}
+
 function promptFor({ request, spec, source, charters, body }) {
   const { role, id, returnPath, brief, planPath, gatePath, feedback } = request
   const lines = [
@@ -98,13 +119,14 @@ export async function runLean(spec, deps = {}) {
   const runSeat = async (request) => {
     const { definition, source, charters } = definitionFor(request, spec.tier, d)
     const { role, id } = request
-    const prompt = promptFor({ request, spec, source, charters, body: definition.body })
+    const prompt = request.repair ? repairPromptFor({ request, spec }) : promptFor({ request, spec, source, charters, body: definition.body })
     d.mkdirSync(join(spec.taskDir, 'lean', role), { recursive: true })
+    const stem = request.repair ? `${id}.repair` : id
     // A provider failure is retried in a fresh ACP session inside the shared bounds. The issued id,
     // prompt and definition stay the same; each attempt records to its own session file.
     let attempts = 0, waitedMs = 0
     for (;;) {
-      const sessionFile = join(spec.taskDir, 'lean', role, attempts === 0 ? `${id}.jsonl` : `${id}.retry-${attempts}.jsonl`)
+      const sessionFile = join(spec.taskDir, 'lean', role, attempts === 0 ? `${stem}.jsonl` : `${stem}.retry-${attempts}.jsonl`)
       // 'wx': a turn id is issued once, so an existing recording is never appended to or reused.
       const header = `${JSON.stringify({ type: 'prompt', text: prompt })}\n`
       d.writeFileSync(sessionFile, header, { flag: 'wx' })

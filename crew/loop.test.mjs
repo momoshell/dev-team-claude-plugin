@@ -160,6 +160,109 @@ test('a green, unmeasured, malformed or contradictory baseline stops before the 
   }
 })
 
+const gaps = (v) => ({ ...v, details: { ...v.details, gaps: [] } })
+const nth = (role, turn, edit) => (v, r) => (r.role === role && Number(r.id.split('.').at(-1)) === turn ? edit(v) : v)
+
+// MUTATION: allow no repair turn and the b1385 builder envelope with one extra field ends the lane.
+test('a schema-refused envelope gets one repair turn on the same id and path, and the lane continues without a lost round', async () => {
+  for (const role of ['planner', 'builder', 'reviewer']) {
+    const f = fakes({ bounds: { [role]: 1 }, edit: (v, r) => (r.role === role && !r.repair ? gaps(v) : v) })
+    assert.equal((await f.go()).status, 'done', role)
+    const [first, repair] = f.requests.filter((r) => r.role === role)
+    assert.equal(f.requests.filter((r) => r.role === role).length, 2, role)
+    assert.deepEqual(repair.repair, { defects: [`details.gaps is not a field of ${role} details`] }, role)
+    assert.equal(first.repair, undefined)
+    assert.equal(repair.id, first.id)
+    assert.equal(repair.returnPath, first.returnPath)
+    const seen = f.rows.filter((r) => r.event === 'envelope' && r.role === role)
+    assert.equal(seen.length, 2)
+    assert.equal(seen[0].defects.length, 1)
+    assert.deepEqual(seen[1].defects, [])
+    assert.equal(count(f, 'lead'), 0)
+  }
+  // the repair costs no round: a builder bound of two still serves the build that review sends back
+  const f = fakes({ review: 1, bounds: { builder: 2 }, edit: (v, r) => (r.role === 'builder' && !r.repair && r.feedback.length === 0 ? gaps(v) : v) })
+  assert.equal((await f.go()).status, 'done')
+  assert.equal(count(f, 'builder'), 3)
+  assert.deepEqual(f.requests.filter((r) => r.role === 'builder').at(-1).feedback, [finding])
+  for (const raw of ['null', '[]', '42']) {
+    const parsedRoot = fakes({ edit: (v, r) => (r.role === 'builder' && !r.repair ? raw : v) })
+    assert.equal((await parsedRoot.go()).status, 'done', raw)
+    assert.equal(count(parsedRoot, 'builder'), 2, raw)
+  }
+})
+
+// MUTATION: skip the second validation and a repaired envelope that is still bad advances.
+test('a repaired envelope that is refused again stops the lane with no third turn', async () => {
+  const cases = {
+    'same defect': (v) => gaps(v),
+    'different defect': (v) => ({ ...v, summary: '' }),
+    'stale id': (v) => ({ ...v, id: 'stale-return' }),
+    'not JSON': () => '{',
+  }
+  for (const [name, edit] of Object.entries(cases)) {
+    const f = fakes({ edit: (v, r) => (r.role === 'builder' ? (r.repair ? edit(v) : gaps(v)) : v) })
+    assert.deepEqual(await f.go(), stopped('envelope-refused'), name)
+    assert.equal(count(f, 'builder'), 2, name)
+    assert.equal(f.calls.includes('gate'), false, name)
+    assert.equal(count(f, 'lead'), 0, name)
+  }
+  for (const [name, options, reason] of [
+    ['empty', { edit: (v, r) => (r.role === 'builder' ? (r.repair ? '' : gaps(v)) : v) }, 'seat-unmeasured'],
+    ['seat failure', { edit: (v, r) => (r.role === 'builder' ? gaps(v) : v) }, 'seat-unmeasured'],
+  ]) {
+    const f = fakes(options)
+    let dispatched = 0
+    if (name === 'seat failure') {
+      const run = f.deps.runSeat
+      f.deps.runSeat = async (request) => { if (request.role === 'builder') dispatched += 1; if (request.repair) throw new Error('repair crashed'); return run(request) }
+    }
+    assert.deepEqual(await f.go(), stopped(reason), name)
+    assert.equal(name === 'seat failure' ? dispatched : count(f, 'builder'), 2, name)
+    assert.equal(f.calls.includes('gate'), false, name)
+  }
+  // a refused repair of the lead is a lead refusal
+  const lead = fakes({ edit: (v) => (v.role === 'planner' ? { ...v, status: 'escalate' } : v.role === 'lead' ? gaps(v) : v) })
+  assert.deepEqual(await lead.go(), stopped('lead-refused'))
+  assert.equal(count(lead, 'lead'), 2)
+})
+
+// MUTATION: repair a file that was never JSON, or one refused only for its id or skill proof.
+test('a non-JSON, empty, unreadable, id-only or proof-only refusal gets no repair turn', async () => {
+  for (const [options, reason] of [
+    [{ edit: () => '{' }, 'envelope-refused'],
+    [{ edit: () => 'not JSON' }, 'envelope-refused'],
+    [{ edit: () => '' }, 'seat-unmeasured'],
+    [{ readError: 'EPERM' }, 'seat-unmeasured'],
+    [{ seatThrows: 'planner' }, 'seat-unmeasured'],
+    [{ edit: (v) => ({ ...v, id: 'stale-return' }) }, 'envelope-refused'],
+    [required([]), 'envelope-refused'],
+  ]) {
+    const f = fakes(options)
+    assert.deepEqual(await f.go(), stopped(reason))
+    assert.equal(count(f, 'planner'), 1)
+    assert.equal(f.requests.some((r) => r.repair), false)
+  }
+})
+
+// MUTATION: prove only the repair turn's recording and unproven work is laundered by a fresh repair.
+test('a repair does not launder an unproven original and must itself prove its required skills', async () => {
+  for (const unproven of [1, 2]) {
+    const f = fakes({
+      edit: (v, r) => (r.role === 'builder' && !r.repair ? gaps(v) : v),
+      recording: (r) => (r.role === 'builder' ? { definition: { agent: 'pi', requires: ['alpha'], skills: ['alpha'], writes: 'repo' }, rows: (r.repair ? 2 : 1) === unproven ? [] : [LOAD, DONE] } : null),
+    })
+    assert.deepEqual(await f.go(), stopped('envelope-refused'), `turn ${unproven}`)
+    assert.equal(count(f, 'builder'), 2)
+    assert.equal(f.calls.includes('gate'), false)
+  }
+  const both = fakes({
+    edit: (v, r) => (r.role === 'builder' && !r.repair ? gaps(v) : v),
+    recording: (r) => (r.role === 'builder' ? { definition: { agent: 'pi', requires: ['alpha'], skills: ['alpha'], writes: 'repo' }, rows: [LOAD, DONE] } : null),
+  })
+  assert.equal((await both.go()).status, 'done')
+})
+
 // MUTATION: treat every envelope as valid and a refused return advances the loop.
 test('a refused, unreadable, empty or stale envelope stops the lane and a lead accept never launders it', async () => {
   const cases = {
@@ -270,7 +373,7 @@ test('an unseated, refusing or insufficient lead stops without recursion', async
   assert.equal(count(none, 'lead'), 0)
   const bad = fakes({ edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate' } : v.role === 'lead' ? { ...v, extra: 1 } : v })
   assert.deepEqual(await bad.go(), stopped('lead-refused'))
-  assert.equal(count(bad, 'lead'), 1)
+  assert.equal(count(bad, 'lead'), 2)
   const insufficient = fakes({ edit: (v) => v.role === 'planner' || v.role === 'lead' ? { ...v, status: 'insufficient' } : v })
   assert.deepEqual(await insufficient.go(), stopped('lead-refused'))
   assert.equal(count(insufficient, 'lead'), 1)

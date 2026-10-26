@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync,
+  appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -1067,6 +1067,71 @@ test('the runtime is created under the injected root and torn down only when pro
     assert.equal(realpathSync(dirname(unproven.runtime)), realpathSync(runtimeRoot))
     assert.equal(existsSync(unproven.runtime), true)
     assert.equal(existsSync(runtimeRoot), true)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('RI1 a lean seat runtime is created beside its lane task dir and its command FIFO root is that runtime', () => {
+  const root = scratchDir('acp-seat-lane-')
+  try {
+    const lane = join(root, 'lane')
+    const taskDir = join(lane, 'task')
+    mkdirSync(taskDir, { recursive: true })
+    let input = null
+    runAcpSeat({
+      definition: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high', skills: [], wait_s: 1 },
+      cwd: root, taskDir, prompt: 'x', sessionFile: join(lane, 'session.jsonl'), binaries: { pi: BIN },
+      deps: {
+        now: () => 0,
+        clientFactory: (given) => {
+          input = given
+          return {
+            start() {}, initialize() {}, newSession() {}, setMode() {}, beginPrompt: () => 1,
+            pollPrompt: () => ({ stopReason: 'end_turn', usage: null, refusal: null }), close: () => ({ outcome: 'unproven' }),
+          }
+        },
+      },
+    })
+    const runtime = dirname(input.dir)
+    assert.equal(realpathSync(dirname(runtime)), join(realpathSync(lane), 'seat-runtime'))
+    assert.match(basename(runtime), /^acp-seat-[A-Za-z0-9]{6}$/)
+    assert.equal(statSync(dirname(runtime)).mode & 0o077, 0, 'the runtime collection is private')
+    assert.equal(input.deps.seatCommandRoot, runtime)
+    assert.equal(relative(taskDir, runtime).startsWith('..'), true, 'the runtime stays outside the task tree')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('RI2 a seat whose runtime vanishes mid-turn ends with acp-seat-runtime-missing within two polls', () => {
+  const root = scratchDir('acp-seat-vanish-')
+  try {
+    const runtimeRoot = join(root, 'runtimes')
+    mkdirSync(runtimeRoot)
+    let clock = 0
+    let runtime = null
+    let closes = 0
+    let polls = 0
+    let error = null
+    try {
+      runAcpSeat({
+        definition: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high', skills: [], wait_s: 3600 },
+        cwd: root, prompt: 'x', sessionFile: join(root, 'session.jsonl'), binaries: { pi: BIN },
+        deps: {
+          runtimeRoot, now: () => clock, sleep: (ms) => { clock += ms; rmSync(runtime, { recursive: true, force: true }) },
+          clientFactory: ({ dir }) => {
+            runtime = dirname(dir)
+            return {
+              start() {}, initialize() {}, newSession() {}, setMode() {}, beginPrompt: () => 1,
+              pollPrompt: () => { polls += 1; return null }, cancelPrompt: () => true, cancel() {},
+              close: () => { closes += 1; return { outcome: 'proven' } },
+            }
+          },
+        },
+      })
+    } catch (caught) { error = caught }
+    assert.equal(error?.reason, 'acp-seat-runtime-missing')
+    assert.equal(polls, 1, 'the lost runtime is noticed before another poll')
+    assert.ok(clock <= 50, `runtime loss cost ${clock}ms`)
+    assert.equal(closes, 1)
+    assert.equal(existsSync(runtime), false)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

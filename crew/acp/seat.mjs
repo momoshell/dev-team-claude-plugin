@@ -239,7 +239,10 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
   }
   try { mkdirSync(dirname(recordTo), { recursive: true }) } catch { /* the first append reports nothing either */ }
 
-  const runtime = mkdtempSync(join(deps.runtimeRoot ?? tmpdir(), 'acp-seat-'))
+  // A lean seat's runtime sits beside its lane's task dir, so a glob over another lane's runtimes cannot reach it.
+  const runtimeRoot = deps.runtimeRoot ?? (laneTaskDir ? join(dirname(laneTaskDir), 'seat-runtime') : tmpdir())
+  mkdirSync(runtimeRoot, { recursive: true, mode: 0o700 })
+  const runtime = mkdtempSync(join(runtimeRoot, 'acp-seat-'))
   let client = null
   let started = false
   let closed = null
@@ -278,7 +281,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
     client = (deps.clientFactory ?? acpClient)({
       launch, dir: join(runtime, 'acp'), cwd: workdir, role, onPermission,
       sinks: Object.fromEntries(sinkKinds.map((kind) => [kind, recordUpdate])),
-      deps: deps.clientDeps ?? {},
+      deps: { seatCommandRoot: runtime, ...deps.clientDeps },
     })
     client.start()
     started = true
@@ -288,6 +291,10 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
     const deadline = now() + waitS * 1000
     const promptId = client.beginPrompt([{ type: 'text', text: prompt }])
     while (now() < deadline) {
+      // Nothing can repair a lost runtime, and the stream it held would stay silent until the deadline.
+      if (!existsSync(runtime)) {
+        throw Object.assign(new Error(`${role} runtime ${runtime} disappeared mid-turn (acp-seat-runtime-missing)`), { reason: 'acp-seat-runtime-missing' })
+      }
       const turn = client.pollPrompt(promptId)
       if (now() >= deadline) break
       if (turn) return turn

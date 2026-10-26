@@ -1178,6 +1178,53 @@ test('RR1 unproven owner close leaves runtime dirs', () => {
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+test('RI2 a deleted PGID marker does not stop teardown proving an already-dead owned group', () => {
+  const root = scratchDir('acp-ri2-marker-')
+  const acpRoot = join(root, 'acp')
+  let clock = 0
+  let gone = false
+  const probes = []
+  const deps = {
+    pid: 900, spawn: () => ({ pid: 901, unref() {} }), openSync: () => 7,
+    writeSync: () => {}, closeSync: () => {},
+    kill: (target, signal) => {
+      probes.push([target, signal])
+      if (target === -901 && signal === 0 && gone) throw Object.assign(new Error('gone'), { code: 'ESRCH' })
+      return true
+    },
+    spawnSync: () => ({ status: 0, stdout: '901 S\n' }),
+    now: () => clock, sleep: (ms) => { clock += ms }, log: () => {}, seatCommandRoot: join(root, 'seat-runtime'),
+  }
+  const client = acpClient({ launch: { bin: '/bin/false', args: [], env: {} }, dir: acpRoot, cwd: root, role: 'builder', deps })
+  try {
+    client.start()
+    // The pgid file was never written (or was removed with the runtime); only the owned child pid can answer.
+    gone = true
+    const result = client.close()
+    assert.equal(result.outcome, 'proven')
+    assert.equal(clock, 0, 'marker loss adds no proof wait')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('RI2 a missing PGID marker never proves a live or unprobeable owned group dead', () => {
+  for (const code of [null, 'EPERM', 'EIO']) {
+    const root = scratchDir('acp-ri2-live-')
+    let clock = 0
+    const deps = {
+      pid: 900, spawn: () => ({ pid: 901, unref() {} }), openSync: () => 7,
+      writeSync: () => {}, closeSync: () => {},
+      kill: (_target, signal) => { if (signal === 0 && code) throw Object.assign(new Error(code), { code }); return true },
+      spawnSync: () => ({ status: 0, stdout: '901 S\n' }),
+      now: () => clock++, sleep: () => {}, log: () => {}, seatCommandRoot: join(root, 'seat-runtime'),
+    }
+    const client = acpClient({ launch: { bin: '/bin/false', args: [], env: {} }, dir: join(root, 'acp'), cwd: root, role: 'builder', deps })
+    try {
+      client.start()
+      assert.notEqual(client.close().outcome, 'proven', `code ${code}`)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }
+})
+
 test('LG2 default seat command root resolves the acp FIFO under TMPDIR crew-rpc', () => {
   const root = scratchDir('lg-acp-default-')
   const acpRoot = join(root, 'acp')

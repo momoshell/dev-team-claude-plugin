@@ -345,9 +345,18 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     return stats.length > 0 && stats.every((stat) => stat.startsWith('Z'))
   }
 
+  // Only ESRCH settles anything here: without its marker a live or unreadable group stays unproven.
+  function ownedGroupGone() {
+    const pgid = Number(child?.pid)
+    if (!Number.isSafeInteger(pgid) || pgid <= 1) return false
+    try { kill(-pgid, 0); return false } catch (err) { return err?.code === 'ESRCH' }
+  }
+
   // One look at the seat's process group. The exit marker only says the leader left, so it never decides this.
   function probeGroup() {
-    const liveness = store.probeEvidence({ kind: EVIDENCE_KINDS.PGID, file: paths.pgid })
+    let liveness = store.probeEvidence({ kind: EVIDENCE_KINDS.PGID, file: paths.pgid })
+    // A marker that is gone proves nothing; the detached child's pid is the group this client owns.
+    if (liveness === LIVENESS.UNKNOWN && !exists(paths.pgid) && ownedGroupGone()) liveness = LIVENESS.DEAD
     return { liveness, reason: liveness === LIVENESS.DEAD && exists(paths.exit) ? 'exit-marker' : 'probe' }
   }
   function probeOnce(pgid) {

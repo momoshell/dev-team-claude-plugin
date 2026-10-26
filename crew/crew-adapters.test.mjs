@@ -409,7 +409,7 @@ test('Claude ACP launch carries SDK tools directories and frozen binaries', () =
   assert.deepEqual(launch.args, [])
   assert.equal(launch.mode, 'acceptEdits')
   assert.deepEqual(launch.env, { KEEP: 'yes', CLAUDE_CODE_EXECUTABLE: '/frozen/claude', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CREW_FFF: '0', CREW_FFF_NODE: '', CREW_FFF_HOOK: '' })
-  assert.deepEqual(launch.sessionParams._meta.claudeCode.options, { model: 'opus', settingSources: ['project'], settings: PANE_USAGE_SETTINGS, allowedTools: ['Read', 'Write', 'Bash'], tools: ['Read', 'Write', 'Bash'], disallowedTools: ['Edit', 'Task', 'mcp__*'], additionalDirectories: ['/task', '/returns'], extraArgs: { effort: 'high', 'append-system-prompt-file': '/task/role.md' } })
+  assert.deepEqual(launch.sessionParams._meta.claudeCode.options, { model: 'opus', settingSources: ['project'], settings: PANE_USAGE_SETTINGS, strictMcpConfig: true, allowedTools: ['Read', 'Write', 'Bash'], tools: ['Read', 'Write', 'Bash'], disallowedTools: ['Edit', 'Task', 'mcp__*'], additionalDirectories: ['/task', '/returns'], extraArgs: { effort: 'high', 'append-system-prompt-file': '/task/role.md' } })
   assert.deepEqual(launch.policy, { autoDeny: [], autoApprove: [], escalate: ['edit', 'execute', 'delete', 'move', 'fetch'] })
   assert.equal(Object.hasOwn(launch.sessionParams, 'additionalDirectories'), false)
   const empty = claudeAcpLaunch({ bin: '/bin/acp', claudeBin: '/frozen/claude', env: {} }).sessionParams._meta.claudeCode.options
@@ -458,8 +458,9 @@ test('AM3 Claude ACP allowlists each fff tool exactly once', () => {
     assert.equal(options.disallowedTools.includes('mcp__*'), false)
   }
 })
-test('AM4 Claude ACP omits MCP config without grants', () => {
+test('AM4 Claude ACP omits MCP servers but stays strict without grants', () => {
   // MUTATION: force hasMcpServers true, injecting forbidden config into no-grant output.
+  // MUTATION: strictMcpConfig false, and the operator's own connectors reach the seat.
   const granted = acpMcpOptions()._meta.claudeCode.options
   assert.equal(Object.hasOwn(granted, 'mcpServers'), true)
   for (const servers of [[], undefined]) {
@@ -468,9 +469,9 @@ test('AM4 Claude ACP omits MCP config without grants', () => {
     else grants.mcp_servers = servers
     const bare = acpMcpOptions(grants)._meta.claudeCode.options
     assert.equal(Object.hasOwn(bare, 'mcpServers'), false)
-    assert.equal(Object.hasOwn(bare, 'strictMcpConfig'), false)
+    assert.equal(bare.strictMcpConfig, true, 'strict MCP config holds without MCP grants')
     assert.equal(bare.disallowedTools.includes('mcp__*'), true)
-    const { mcpServers, strictMcpConfig, ...normalizedGranted } = granted
+    const { mcpServers, ...normalizedGranted } = granted
     normalizedGranted.allowedTools = normalizedGranted.allowedTools.filter(tool => !ACP_MCP_NAMES.includes(tool))
     normalizedGranted.tools = normalizedGranted.tools.filter(tool => !ACP_MCP_NAMES.includes(tool))
     const normalizedBare = { ...bare, disallowedTools: bare.disallowedTools.filter(tool => tool !== 'mcp__*') }
@@ -2449,4 +2450,10 @@ test('Claude ACP launch carries the grant-decided CREW_FFF triple', () => {
   assert.equal(granted.env.CREW_FFF, '1')
   assert.equal(granted.env.CREW_FFF_NODE, process.execPath)
   assert.equal(granted.env.CREW_FFF_HOOK, FFF_HOOK_PATH)
+})
+
+test('Claude ACP launch carries the seat env the lean runner supplies: role and lane task dir', () => {
+  const { env } = claudeAcpLaunch({ bin: '/bin/acp', claudeBin: '/frozen/claude', env: { CREW_ROLE: 'builder', CREW_TASK_DIR: '/lane' } })
+  assert.equal(env.CREW_ROLE, 'builder')
+  assert.equal(env.CREW_TASK_DIR, '/lane')
 })

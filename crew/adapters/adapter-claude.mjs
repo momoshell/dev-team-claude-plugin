@@ -465,7 +465,7 @@ export function acpLaunch(spec = {}) {
         model,
         settingSources: ['project'], settings: PANE_USAGE_SETTINGS,
         ...(hasMcpServers ? { mcpServers } : {}),
-        ...(hasMcpServers ? { strictMcpConfig: true } : {}),
+        strictMcpConfig: true,
         allowedTools: acpTools,
         tools: acpTools,
         ...(hasSkills ? { plugins: [{ type: 'local', path: skillsPluginDir({ taskDir, role }) }] } : {}),

@@ -1070,3 +1070,171 @@ test('a seat runtime another process creates in the system temp directory surviv
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+// Launches the real runner against a recording client factory: the launch an agent definition's arms produce, no process.
+function armLaunch(agent, role, arms, { env = {}, ...options } = {}) {
+  const root = scratchDir('acp-seat-arms-')
+  const cwd = join(root, 'checkout')
+  const taskDir = join(root, 'lane')
+  const runtimeRoot = join(root, 'runtime')
+  const baseAgentDir = join(root, 'base-agent')
+  for (const dir of [cwd, taskDir, runtimeRoot, baseAgentDir]) mkdirSync(dir, { recursive: true })
+  writeFileSync(join(baseAgentDir, 'auth.json'), '{}')
+  writeFileSync(join(baseAgentDir, 'settings.json'), JSON.stringify({ theme: 'dark', codemode: { mode: 'off', keep: 1 } }))
+  const created = []
+  const definition = {
+    role, agent, writes: role === 'builder' ? 'repo' : 'task-dir', effort: 'high', skills: [],
+    model: agent === 'pi' ? 'openai/gpt-6.1-sol' : 'anthropic/claude-opus-4-6', ...arms,
+  }
+  const run = () => runAcpSeat({
+    definition, cwd, taskDir, prompt: 'p', sessionFile: join(taskDir, 'session.jsonl'),
+    binaries: { pi: BIN, claude: BIN, claudeAcp: BIN },
+    deps: {
+      runtimeRoot, env: { PATH: process.env.PATH, PI_CODING_AGENT_DIR: baseAgentDir, ...env }, ...options.deps,
+      clientFactory(input) {
+        created.push(input.launch)
+        return {
+          start() {}, initialize() {}, newSession() {}, setMode() {}, beginPrompt() { return 1 },
+          pollPrompt() { return { stopReason: 'end_turn', refusal: null } }, close() { return { outcome: 'unproven' } },
+        }
+      },
+    },
+  })
+  return { run, created, cwd, taskDir, runtimeRoot, baseAgentDir }
+}
+const armed = (...args) => { const probe = armLaunch(...args); probe.run(); return { ...probe, launch: probe.created[0] } }
+const claudeOptions = (launch) => launch.sessionParams._meta.claudeCode.options
+const piExtensions = (launch) => launch.args.flatMap((arg, index, args) => arg === '-e' ? [args[index + 1]] : [])
+const piTools = (launch) => launch.args[launch.args.indexOf('--tools') + 1].split(',')
+const FFF_TOOLS = ['mcp__fff__find_files', 'mcp__fff__grep', 'mcp__fff__multi_grep']
+
+test('a claude seat that declares fff launches with the fff server, its tools and CREW_FFF; one that does not has none', () => {
+  const { launch } = armed('claude', 'planner', { extensions: ['fff'] })
+  const options = claudeOptions(launch)
+  assert.deepEqual(options.mcpServers, { fff: { command: '/opt/homebrew/bin/fff-mcp', args: [] } })
+  for (const tool of FFF_TOOLS) { assert.ok(options.allowedTools.includes(tool)); assert.ok(options.tools.includes(tool)) }
+  assert.equal(launch.env.CREW_FFF, '1')
+  const bare = armed('claude', 'planner', {})
+  assert.equal(claudeOptions(bare.launch).mcpServers, undefined)
+  assert.equal(bare.launch.env.CREW_FFF, '0')
+})
+
+test('a claude seat that declares lab launches with the lab server and its tool allowed', () => {
+  const options = claudeOptions(armed('claude', 'planner', { extensions: ['lab'] }).launch)
+  assert.equal(options.mcpServers.lab.command, BIN)
+  assert.deepEqual(options.mcpServers.lab.args, [join(ROOT, 'crew', 'mcp', 'lab-server.mjs')])
+  assert.ok(options.allowedTools.includes('mcp__lab__lab'))
+})
+
+test('a claude seat never drops an arm it cannot express: every pi-only extension, advisor, edit assist and codemode refuse before a client', () => {
+  const requests = [
+    ...['readgate', 'builderloop', 'reminders', 'skeletonread', 'subagent'].map((name) => ({ extensions: [name] })),
+    { advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' } }, { edit_assist: true }, { codemode: true },
+  ]
+  for (const arms of requests) {
+    const probe = armLaunch('claude', 'builder', arms)
+    assert.throws(() => probe.run(), { reason: 'grant-unsupported' }, JSON.stringify(arms))
+    assert.equal(probe.created.length, 0, JSON.stringify(arms))
+    assert.deepEqual(readdirSync(probe.runtimeRoot), [], 'a refused seat leaves no runtime')
+  }
+  // Only a requested arm refuses: false is the absence of the arm.
+  assert.equal(armed('claude', 'builder', { edit_assist: false, codemode: false, advisor: null, extensions: [] }).created.length, 1)
+})
+
+test('a pi seat that declares an advisor loads the advisor extension with CREW_ADVISOR=1; null does not', () => {
+  const { launch } = armed('pi', 'planner', { advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' } })
+  assert.equal(launch.env.CREW_ADVISOR, '1')
+  assert.ok(piExtensions(launch).some((path) => path.endsWith('/crew/pi/extensions/advisor.ts')))
+  const none = armed('pi', 'planner', { advisor: null }).launch
+  assert.equal(none.env.CREW_ADVISOR, undefined)
+  assert.deepEqual(piExtensions(none), [])
+})
+
+test('a pi builder carries its edit assist setting to the launch; a planner and an unset field carry none', () => {
+  assert.equal(armed('pi', 'builder', { edit_assist: true }).launch.env.CREW_EDIT_ASSIST, 'on')
+  assert.equal(armed('pi', 'builder', { edit_assist: false }).launch.env.CREW_EDIT_ASSIST, 'off')
+  assert.equal(armed('pi', 'builder', {}).launch.env.CREW_EDIT_ASSIST, undefined)
+  assert.equal(armed('pi', 'planner', { edit_assist: true }).launch.env.CREW_EDIT_ASSIST, undefined)
+})
+
+test('every native extension reaches a pi launch as its checkout extension with its tool; none declared loads none', () => {
+  const tools = { readgate: null, builderloop: null, reminders: null, skeletonread: 'retrieve' }
+  for (const [name, tool] of Object.entries(tools)) {
+    const { launch } = armed('pi', 'builder', { extensions: [name] })
+    assert.deepEqual(piExtensions(launch), [join(ROOT, 'crew', 'pi', 'extensions', `${name}.ts`)])
+    if (tool) assert.ok(piTools(launch).includes(tool))
+  }
+  assert.deepEqual(piExtensions(armed('pi', 'builder', {}).launch), [])
+  assert.equal(armed('pi', 'builder', {}).launch.env.PI_CODING_AGENT_DIR, undefined)
+})
+
+test('a pi seat that declares subagent carries the registered agents the extension needs', () => {
+  const { launch } = armed('pi', 'planner', { extensions: ['subagent'] })
+  assert.deepEqual(piExtensions(launch), [join(ROOT, 'crew', 'pi', 'extensions', 'subagent.ts')])
+  assert.ok(piTools(launch).includes('agent'))
+  assert.deepEqual(JSON.parse(launch.env.CREW_PI_AGENTS).map((agent) => agent.name), ['scout'])
+  const builder = armed('pi', 'builder', { extensions: ['subagent'] }).launch
+  assert.deepEqual(JSON.parse(builder.env.CREW_PI_AGENTS).map((agent) => agent.name), ['scout'])
+})
+
+test('a pi seat that declares fff and lab gets builtin MCP, its tools and a runtime agent dir carrying the servers', () => {
+  const probe = armed('pi', 'planner', { extensions: ['fff', 'lab'] })
+  const { launch } = probe
+  assert.equal(launch.env.CREW_FFF, '1')
+  for (const tool of [...FFF_TOOLS, 'mcp__lab__lab']) assert.ok(piTools(launch).includes(tool), tool)
+  const agentDir = launch.env.PI_CODING_AGENT_DIR
+  assert.ok(agentDir.startsWith(probe.runtimeRoot), 'the agent dir is runtime, never the lane task dir')
+  assert.equal(agentDir, join(readdirSync(probe.runtimeRoot).map((name) => join(probe.runtimeRoot, name))[0], 'pi-agent', 'planner'))
+  const mcp = JSON.parse(readFileSync(join(agentDir, 'mcp.json'), 'utf8')).mcpServers
+  assert.deepEqual(mcp.fff, { command: '/opt/homebrew/bin/fff-mcp', args: [], exposure: 'direct' })
+  assert.equal(mcp.lab.timeout, 960)
+  assert.equal(JSON.parse(readFileSync(join(agentDir, 'settings.json'), 'utf8')).codemode.mode, 'off')
+  assert.equal(readFileSync(join(agentDir, 'auth.json'), 'utf8'), '{}')
+})
+
+test('a pi seat that declares codemode runs it in only mode through its own settings; false leaves the operator settings', () => {
+  const on = armed('pi', 'planner', { codemode: true }).launch
+  assert.ok(piTools(on).includes('codemode'))
+  const settings = JSON.parse(readFileSync(join(on.env.PI_CODING_AGENT_DIR, 'settings.json'), 'utf8'))
+  assert.deepEqual(settings, { theme: 'dark', codemode: { mode: 'only', keep: 1 } })
+  const off = armed('pi', 'planner', { codemode: false }).launch
+  assert.ok(!piTools(off).includes('codemode'))
+  assert.equal(off.env.PI_CODING_AGENT_DIR, undefined)
+})
+
+test('a pi seat refuses an MCP grant that a project MCP config would override', () => {
+  const probe = armLaunch('pi', 'planner', { extensions: ['fff'] })
+  mkdirSync(join(probe.cwd, '.pi'), { recursive: true })
+  writeFileSync(join(probe.cwd, '.pi', 'mcp.json'), '{}')
+  assert.throws(() => probe.run(), { reason: 'grant-unsupported' })
+  assert.equal(probe.created.length, 0)
+})
+
+test('a declared asset that is missing refuses the seat, and an unknown extension is not guessed', () => {
+  const missing = armLaunch('claude', 'planner', { extensions: ['fff'] }, { deps: { exists: () => false } })
+  assert.throws(() => missing.run(), { reason: 'extension-missing' })
+  const lab = armLaunch('pi', 'planner', { extensions: ['lab'] }, { deps: { exists: (path) => !path.endsWith('lab-server.mjs') } })
+  assert.throws(() => lab.run(), { reason: 'extension-missing' })
+  const ext = armLaunch('pi', 'planner', { extensions: ['reminders'] }, { deps: { exists: (path) => !path.endsWith('reminders.ts') } })
+  assert.throws(() => ext.run(), { reason: 'extension-missing' })
+  const unknown = armLaunch('pi', 'planner', { extensions: ['../escape'] })
+  assert.throws(() => unknown.run(), { reason: 'unknown-grant' })
+  for (const probe of [missing, lab, ext, unknown]) assert.equal(probe.created.length, 0)
+})
+
+test('both ACP launches carry the seat role and the lane task dir, not the runtime or cwd, over ambient values', () => {
+  for (const agent of ['pi', 'claude']) {
+    for (const role of ['planner', 'builder']) {
+      const probe = armed(agent, role, {}, { env: { CREW_ROLE: 'poison', CREW_TASK_DIR: '/poison' } })
+      assert.equal(probe.launch.env.CREW_ROLE, role)
+      assert.equal(probe.launch.env.CREW_TASK_DIR, resolve(probe.taskDir))
+      assert.notEqual(probe.launch.env.CREW_TASK_DIR, probe.cwd)
+    }
+  }
+})
+
+test('a claude seat with no MCP grants is still strict about MCP config', () => {
+  const options = claudeOptions(armed('claude', 'planner', {}).launch)
+  assert.equal(options.strictMcpConfig, true)
+  assert.equal(options.mcpServers, undefined)
+})

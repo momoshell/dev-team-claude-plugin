@@ -1,11 +1,12 @@
 import {
-  accessSync, appendFileSync, constants as fsConstants, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync,
+  accessSync, appendFileSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { delimiter, dirname, isAbsolute, join, parse, resolve, sep } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
+import { delimiter, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ACP_POLL_MS, ACP_UPDATE_KINDS, acpClient } from '../acp-client.mjs'
 import { permissionHandler, readOnlyCommand } from '../acp-permission.mjs'
+import { armGrants, PI_AGENT_DIR_ENV, refuse } from '../capabilities.mjs'
 import { AGENT_ROLES } from '../protocols.mjs'
 import * as claudeAdapter from '../adapters/adapter-claude.mjs'
 import * as piAdapter from '../adapters/adapter-pi.mjs'
@@ -48,6 +49,59 @@ function resolveSkill(skill, cwd) {
 }
 
 const nonempty = (value) => typeof value === 'string' && value !== ''
+
+// The arms the effective definition declares, as the seat's grants. An arm the adapter cannot express
+// is refused here or by the adapter itself; none is dropped. Claude expresses only the fff and lab MCP servers.
+function seatGrants(definition, { role, isClaude, skills, deps }) {
+  const extensions = definition.extensions ?? []
+  if (!Array.isArray(extensions) || !extensions.every(nonempty)) throw new Error('extensions must be a list of extension names')
+  const advisor = definition.advisor !== undefined && definition.advisor !== null
+  for (const [arm, set] of [['advisor', advisor], ['edit_assist', definition.edit_assist === true], ['codemode', definition.codemode === true]]) {
+    if (isClaude && set) throw refuse('grant-unsupported', `adapter-claude cannot express the ${arm} arm of seat ${role} — refusing to boot a silently weaker seat`)
+  }
+  const armed = armGrants({ role, agent: definition.agent, extensions }, { register: deps.register, root: deps.root, exists: deps.exists })
+  const mcp = armed.mcp_servers.length > 0
+  const piBuiltins = isClaude ? [] : [...(definition.codemode === true ? ['builtin:codemode'] : []), ...(mcp ? ['builtin:mcp'] : [])]
+  return {
+    tools: isClaude && armed.mcp_servers.some((server) => server.name === 'lab') ? [...piAdapter.PI_MCP_SERVER_TOOLS.lab] : [],
+    extensions: [...armed.extensions, ...piBuiltins],
+    agents: [...armed.agents],
+    skills,
+    advisor,
+    mcp_servers: armed.mcp_servers.map((server) => ({ ...server })),
+  }
+}
+
+// pi reads settings and MCP servers from its agent dir. A seat that needs either gets its own dir in the
+// per-seat runtime: the operator's dir symlinked in, settings.json and mcp.json written for the seat.
+function writePiAgentDir({ agentDir, grants, cwd, env, role }) {
+  const mcp = grants.extensions.includes('builtin:mcp')
+  const codemode = grants.extensions.includes('builtin:codemode')
+  if (!mcp && !codemode) return
+  try {
+    if (mcp && existsSync(join(cwd, '.pi', 'mcp.json'))) throw new Error(`project MCP config ${join(cwd, '.pi', 'mcp.json')} would add to or override the granted servers`)
+    const baseDir = resolve(env[PI_AGENT_DIR_ENV] ?? join(homedir(), '.pi', 'agent'))
+    const inside = relative(agentDir, baseDir)
+    if (inside === '' || (!inside.startsWith('..') && !isAbsolute(inside))) throw new Error(`base directory ${baseDir} is within seat destination ${agentDir}`)
+    let base = {}
+    try { base = JSON.parse(readFileSync(join(baseDir, 'settings.json'), 'utf8')) } catch (error) { if (error.code !== 'ENOENT') throw error }
+    if (!base || typeof base !== 'object' || Array.isArray(base)) throw new Error('settings.json must contain an object')
+    let names = []
+    try { names = readdirSync(baseDir) } catch (error) { if (error.code !== 'ENOENT') throw error }
+    mkdirSync(agentDir, { recursive: true })
+    writeFileSync(join(agentDir, 'settings.json'), JSON.stringify(codemode ? { ...base, codemode: { ...base.codemode, mode: 'only' } } : base, null, 2))
+    if (mcp) {
+      const mcpServers = {}
+      for (const server of grants.mcp_servers) {
+        mcpServers[server.name] = { command: server.command.bin, args: [...server.command.args], exposure: 'direct', ...(server.name === 'lab' ? { timeout: 960 } : {}) }
+      }
+      writeFileSync(join(agentDir, 'mcp.json'), JSON.stringify({ mcpServers }, null, 2))
+    }
+    for (const name of names) if (name !== 'settings.json' && name !== 'mcp.json') symlinkSync(join(baseDir, name), join(agentDir, name))
+  } catch (error) {
+    throw refuse('grant-unsupported', `seat ${role} pi agent directory materialisation failed: ${error.message}`)
+  }
+}
 
 // An existing directory's real path; anything else grants nothing.
 function canonicalRoot(dir, real) {
@@ -122,7 +176,8 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
   const claude = isClaude ? resolveBinary('claude', binaries.claude, 'claude', env) : null
   const pi = isClaude ? null : resolveBinary('pi', binaries.pi, 'pi', env)
   const grantedSkills = skills.map((skill) => resolveSkill(skill, workdir))
-  const grants = { tools: [], extensions: [], agents: [], skills: grantedSkills, advisor: false, mcp_servers: [] }
+  const grants = seatGrants(definition, { role, isClaude, skills: grantedSkills, deps })
+  const editAssist = typeof definition.edit_assist === 'boolean' ? (definition.edit_assist ? 'on' : 'off') : null
 
   const append = deps.appendFileSync ?? appendFileSync
   const real = deps.realpathSync ?? realpathSync
@@ -182,7 +237,11 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
     const promptFile = join(runtime, 'system.md')
     writeFileSync(promptFile, '')
     const writableDirs = writes === 'none' || !laneTaskDir ? [] : [laneTaskDir]
-    const spec = { role, cwd: workdir, effort: definition.effort, promptFile, taskDir: runtime, grants, tools, deny, writableDirs }
+    // taskDir stays the per-seat runtime, where materialised resources live; the lane's task dir reaches the seat through its environment.
+    const spec = {
+      role, cwd: workdir, effort: definition.effort, promptFile, taskDir: runtime, grants, tools, deny, writableDirs, editAssist,
+      env: laneTaskDir ? { CREW_ROLE: role, CREW_TASK_DIR: laneTaskDir } : { CREW_ROLE: role },
+    }
     let launch
     if (isClaude) {
       claudeAdapter.writeSeatSkills({ taskDir: runtime, role, grants }, deps.skillDeps ?? {})
@@ -201,6 +260,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
       for (const file of grantedSkills) {
         if (!statSync(file).isFile()) throw new Error(`granted skill ${JSON.stringify(file)} is not a file`)
       }
+      writePiAgentDir({ agentDir: piAdapter.piSeatAgentDir({ taskDir: runtime, role }), grants, cwd: workdir, env, role })
       launch = piAdapter.acpLaunch({ ...spec, bin: pi, model: piModel })
     }
     const sinkKinds = [...ACP_UPDATE_KINDS, 'unknown']

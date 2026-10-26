@@ -921,7 +921,7 @@ test('the requires a seat receives are the effective definition list, tier overr
   const based = leanFixture({ deps: { readFileSync: edit('advisor: null', 'advisor: null\nrequires: ["alpha"]') } })
   assert.equal((await based.go()).status, 'stopped')
   assert.deepEqual(based.requests[0].definition.requires, ['alpha'])
-  const tiered = leanFixture({ deps: { readFileSync: edit(/tiers: .*/, 'requires: ["base"]\ntiers: {"build":{"requires":["alpha"]}}') } })
+  const tiered = leanFixture({ deps: { readFileSync: edit(/tiers: .*/, 'skills: ["alpha"]\nrequires: ["base"]\ntiers: {"build":{"requires":["alpha"]}}') } })
   const answered = tiered.options.runAcpSeat
   tiered.options.runAcpSeat = async (input) => {
     const turn = await answered(input)
@@ -938,7 +938,7 @@ test('a seat that rewrites its own session file with forged loads is still refus
   const forgedLoad = JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'tool_call', toolCallId: 'f1', title: 'read', kind: 'read', status: 'completed', rawInput: { path: fileURLToPath(new URL('../skills/alpha/SKILL.md', import.meta.url)) } } })
   const forged = leanFixture({ deps: { readFileSync: (path, ...args) => {
     const text = readFileSync(path, ...args)
-    return path === planner ? text.replace('advisor: null', 'advisor: null\nrequires: ["alpha"]') : text
+    return path === planner ? text.replace('advisor: null', 'advisor: null\nskills: ["alpha"]\nrequires: ["alpha"]') : text
   } } })
   const answered = forged.options.runAcpSeat
   forged.options.runAcpSeat = async (input) => {
@@ -957,7 +957,7 @@ test('a seat that deletes or rewrites its session file after a relayed load is r
   for (const tamper of [(file) => rmSync(file), (file) => writeFileSync(file, 'replaced\n')]) {
     const lane = leanFixture({ deps: { readFileSync: (path, ...args) => {
       const text = readFileSync(path, ...args)
-      return path === planner ? text.replace('advisor: null', 'advisor: null\nrequires: ["alpha"]') : text
+      return path === planner ? text.replace('advisor: null', 'advisor: null\nskills: ["alpha"]\nrequires: ["alpha"]') : text
     } } })
     const answered = lane.options.runAcpSeat
     lane.options.runAcpSeat = async (input) => {

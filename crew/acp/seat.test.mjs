@@ -198,6 +198,37 @@ test('the supplied prompt is sent exactly once as one text block, including an e
   }
 })
 
+const LEAN_CLAUDE_PROMPT = 'You are a coding agent. Work in the current directory with the tools you have. Prefer short command output: use quiet or dot reporters and tail long logs. Be concise.'
+
+test('every lean Claude seat launches with the plain-string system prompt asking for short command output, whatever its role or writes', () => {
+  for (const role of [undefined, 'lead', 'planner', 'builder', 'reviewer', 'tech-lead']) {
+    for (const writes of ['none', 'task-dir', 'repo']) {
+      use('claude-turn', { definition: { ...(role === undefined ? {} : { role }), writes } }, (run) => {
+        assert.equal(run.error, undefined, `${role}/${writes}`)
+        const meta = sessionNew(run).params._meta
+        assert.equal(typeof meta.systemPrompt, 'string')
+        assert.equal(meta.systemPrompt, LEAN_CLAUDE_PROMPT)
+        assert.match(meta.systemPrompt, /short command output/)
+        assert.equal(meta.claudeCode.options.model, 'claude-opus-4-6')
+        assert.equal(meta.claudeCode.options.extraArgs.effort, 'high')
+        assert.deepEqual(meta.claudeCode.options.settingSources, [])
+        assert.equal(meta.claudeCode.options.settings, PANE_USAGE_SETTINGS)
+      })
+    }
+  }
+})
+
+test('a lean Pi seat launches with no system prompt meta, and its supplied prompt is still sent once', () => {
+  for (const writes of ['none', 'task-dir', 'repo']) {
+    use('pi-turn', { definition: { writes } }, (run) => {
+      assert.equal(run.error, undefined)
+      assert.equal(Object.hasOwn(sessionNew(run).params._meta ?? {}, 'systemPrompt'), false)
+      const prompts = run.sent.filter((frame) => frame.method === 'session/prompt')
+      assert.deepEqual(prompts.map((frame) => frame.params.prompt), [[{ type: 'text', text: 'fixture prompt' }]])
+    })
+  }
+})
+
 test('a typed provider refusal is returned unchanged and the stream still records its updates', () => {
   use('claude-refusal-auth', {}, (run) => {
     assert.equal(run.error, undefined)

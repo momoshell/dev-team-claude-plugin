@@ -23,6 +23,8 @@ const UNASKED_TOOLS = Object.freeze(['Write', 'Edit', 'NotebookEdit', 'Bash'])
 const EFFORTS =Object.freeze(['low', 'medium', 'high', 'xhigh', 'max'])
 const MODEL = /^[a-z0-9-]+\/[A-Za-z0-9._-]+$/
 const SKILLS_ROOT = fileURLToPath(new URL('../../skills', import.meta.url))
+// A plain string replaces claude-agent-acp's claude_code preset; the role prompt arrives in the turn itself.
+const LEAN_CLAUDE_SYSTEM_PROMPT = 'You are a coding agent. Work in the current directory with the tools you have. Prefer short command output: use quiet or dot reporters and tail long logs. Be concise.'
 
 function resolveBinary(label, explicit, name, env) {
   const executable = (path) => { try { accessSync(path, fsConstants.X_OK); return statSync(path).isFile() } catch { return false } }
@@ -254,6 +256,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
     if (isClaude) {
       claudeAdapter.writeSeatSkills({ taskDir: runtime, role, grants }, deps.skillDeps ?? {})
       launch = claudeAdapter.acpLaunch({ ...spec, bin: claudeAcp, claudeBin: claude, model })
+      launch.sessionParams._meta.systemPrompt = LEAN_CLAUDE_SYSTEM_PROMPT
       const options = launch.sessionParams._meta.claudeCode.options
       // The target checkout's permissions.allow would approve calls before they reach onPermission.
       // An explicit empty list overrides the SDK defaults; the usage settings and plugins stay.

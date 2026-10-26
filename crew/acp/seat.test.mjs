@@ -1114,8 +1114,10 @@ test('a claude seat that declares fff launches with the fff server, its tools an
   assert.deepEqual(options.mcpServers, { fff: { command: '/opt/homebrew/bin/fff-mcp', args: [] } })
   for (const tool of FFF_TOOLS) { assert.ok(options.allowedTools.includes(tool)); assert.ok(options.tools.includes(tool)) }
   assert.equal(launch.env.CREW_FFF, '1')
+  for (const tool of ['Glob', 'Grep']) assert.ok(options.disallowedTools.includes(tool), `fff denies native ${tool}`)
   const bare = armed('claude', 'planner', {})
   assert.equal(claudeOptions(bare.launch).mcpServers, undefined)
+  for (const tool of ['Glob', 'Grep']) assert.ok(!claudeOptions(bare.launch).disallowedTools.includes(tool))
   assert.equal(bare.launch.env.CREW_FFF, '0')
 })
 
@@ -1150,11 +1152,30 @@ test('a pi seat that declares an advisor loads the advisor extension with CREW_A
   assert.deepEqual(piExtensions(none), [])
 })
 
-test('a pi builder carries its edit assist setting to the launch; a planner and an unset field carry none', () => {
+test('a pi advisor writes its model cell to the lane task dir manifest the extension reads', () => {
+  const probe = armed('pi', 'planner', { advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' } })
+  const manifest = JSON.parse(readFileSync(join(probe.taskDir, 'advisor-manifest.json'), 'utf8'))
+  assert.equal(manifest.schema_version, 1)
+  assert.deepEqual(manifest.tripwires, [])
+  assert.deepEqual({ ...manifest.cell, model: undefined }, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'high', model: undefined })
+  assert.equal(typeof manifest.cell.model, 'string')
+  assert.equal(probe.launch.env.CREW_TASK_DIR, probe.taskDir)
+})
+
+test('an advisor naming a non-pi cell refuses before a client', () => {
+  const probe = armLaunch('pi', 'planner', { advisor: { agent: 'claude', model: 'anthropic/claude-opus-4-6', effort: 'high' } })
+  assert.throws(() => probe.run(), { reason: 'grant-unsupported' })
+  assert.equal(probe.created.length, 0)
+})
+
+test('a pi builder carries its edit assist setting to the launch; an unset field carries none; a planner that asks refuses', () => {
   assert.equal(armed('pi', 'builder', { edit_assist: true }).launch.env.CREW_EDIT_ASSIST, 'on')
   assert.equal(armed('pi', 'builder', { edit_assist: false }).launch.env.CREW_EDIT_ASSIST, 'off')
   assert.equal(armed('pi', 'builder', {}).launch.env.CREW_EDIT_ASSIST, undefined)
-  assert.equal(armed('pi', 'planner', { edit_assist: true }).launch.env.CREW_EDIT_ASSIST, undefined)
+  const planner = armLaunch('pi', 'planner', { edit_assist: true })
+  assert.throws(() => planner.run(), { reason: 'grant-unsupported' })
+  assert.equal(planner.created.length, 0)
+  assert.equal(armed('pi', 'planner', { edit_assist: false }).launch.env.CREW_EDIT_ASSIST, undefined)
 })
 
 test('every native extension reaches a pi launch as its checkout extension with its tool; none declared loads none', () => {

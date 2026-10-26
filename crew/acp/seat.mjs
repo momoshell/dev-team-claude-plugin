@@ -1,5 +1,5 @@
 import {
-  accessSync, appendFileSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync,
+  accessSync, appendFileSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
@@ -59,6 +59,8 @@ function seatGrants(definition, { role, isClaude, skills, deps }) {
   for (const [arm, set] of [['advisor', advisor], ['edit_assist', definition.edit_assist === true], ['codemode', definition.codemode === true]]) {
     if (isClaude && set) throw refuse('grant-unsupported', `adapter-claude cannot express the ${arm} arm of seat ${role} — refusing to boot a silently weaker seat`)
   }
+  if (definition.edit_assist === true && role !== 'builder') throw refuse('grant-unsupported', `edit assist runs only on the builder seat, not ${role} — refusing to boot a silently weaker seat`)
+  if (advisor && definition.advisor.agent !== 'pi') throw refuse('grant-unsupported', `the advisor cell of seat ${role} must be a pi cell, got ${JSON.stringify(definition.advisor.agent)}`)
   const armed = armGrants({ role, agent: definition.agent, extensions }, { register: deps.register, root: deps.root, exists: deps.exists })
   const mcp = armed.mcp_servers.length > 0
   const piBuiltins = isClaude ? [] : [...(definition.codemode === true ? ['builtin:codemode'] : []), ...(mcp ? ['builtin:mcp'] : [])]
@@ -69,6 +71,22 @@ function seatGrants(definition, { role, isClaude, skills, deps }) {
     skills,
     advisor,
     mcp_servers: armed.mcp_servers.map((server) => ({ ...server })),
+  }
+}
+
+// The advisor extension reads its model cell from the lane task dir's manifest; without one it would run
+// its tier-0 checks only, so a declared advisor with no task dir to hold the manifest is refused.
+function writeAdvisorManifest({ advisor, taskDir, role }) {
+  if (!taskDir) throw refuse('grant-unsupported', `seat ${role} declares an advisor but has no task dir for its manifest`)
+  const [provider, id] = advisor.model.split('/')
+  const cell = { provider, id, agent: advisor.agent, effort: advisor.effort, model: piAdapter.modelString({ provider, id }) }
+  const manifest = { schema_version: 1, generated_at: new Date().toISOString(), task: role, run_started_at: Date.now(), tripwires: [], cell }
+  const path = join(taskDir, 'advisor-manifest.json')
+  try {
+    writeFileSync(`${path}.tmp`, JSON.stringify(manifest))
+    renameSync(`${path}.tmp`, path)
+  } catch (error) {
+    throw refuse('grant-unsupported', `seat ${role} advisor manifest could not be written: ${error.message}`)
   }
 }
 
@@ -177,6 +195,8 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
   const pi = isClaude ? null : resolveBinary('pi', binaries.pi, 'pi', env)
   const grantedSkills = skills.map((skill) => resolveSkill(skill, workdir))
   const grants = seatGrants(definition, { role, isClaude, skills: grantedSkills, deps })
+  // fff replaces native search on a claude seat, as the old path's effectiveDeny did.
+  if (isClaude && claudeAdapter.hasFffGrant(grants)) deny = [deny, 'Glob,Grep'].filter(Boolean).join(',')
   const editAssist = typeof definition.edit_assist === 'boolean' ? (definition.edit_assist ? 'on' : 'off') : null
 
   const append = deps.appendFileSync ?? appendFileSync
@@ -260,6 +280,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
       for (const file of grantedSkills) {
         if (!statSync(file).isFile()) throw new Error(`granted skill ${JSON.stringify(file)} is not a file`)
       }
+      if (grants.advisor) writeAdvisorManifest({ advisor: definition.advisor, taskDir: laneTaskDir, role })
       writePiAgentDir({ agentDir: piAdapter.piSeatAgentDir({ taskDir: runtime, role }), grants, cwd: workdir, env, role })
       launch = piAdapter.acpLaunch({ ...spec, bin: pi, model: piModel })
     }

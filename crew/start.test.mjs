@@ -486,7 +486,7 @@ test('every turn gets its role definition, the complete brief and P2, and its ow
     const source = join(AGENTS, `${role}.md`)
     const { body, fields } = parseAgent(readFileSync(source, 'utf8'))
     const cell = seats[role]
-    assert.deepEqual(request.definition, { role, agent: cell.agent, model: `${cell.provider}/${cell.id}`, effort: cell.effort, writes: { ...fields, ...fields.tiers?.build }.writes, skills: [], requires: [], tools: { ...fields, ...fields.tiers?.build }.tools, wait_s: { ...fields, ...fields.tiers?.build }.wait_s, body })
+    assert.deepEqual(request.definition, { role, agent: cell.agent, model: `${cell.provider}/${cell.id}`, effort: cell.effort, writes: { ...fields, ...fields.tiers?.build }.writes, skills: [], requires: [], tools: { ...fields, ...fields.tiers?.build }.tools, extensions: { ...fields, ...fields.tiers?.build }.extensions, advisor: { ...fields, ...fields.tiers?.build }.advisor, edit_assist: { ...fields, ...fields.tiers?.build }.edit_assist, codemode: { ...fields, ...fields.tiers?.build }.codemode, wait_s: { ...fields, ...fields.tiers?.build }.wait_s, body })
     assert.equal(request.taskDir, f.spec.taskDir)
     assert.equal(request.cwd, f.spec.cwd)
     assert.notEqual(f.spec.taskDir, request.cwd)

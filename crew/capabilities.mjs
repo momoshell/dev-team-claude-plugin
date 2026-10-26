@@ -578,6 +578,67 @@ export function grantsFor(register, role, { root = REGISTER_ROOT, exists = exist
   })
 }
 
+const LEAN_FFF_BIN = '/opt/homebrew/bin/fff-mcp'
+const LEAN_LAB_SERVER = 'crew/mcp/lab-server.mjs'
+const LEAN_MCP_ARMS = Object.freeze(['fff', 'lab'])
+
+// The register entry an MCP arm resolves to: the first role or adapter overlay that declares the server.
+function registeredMcpServer(register, name) {
+  for (const spec of Object.values(register?.roles ?? {})) {
+    for (const group of [spec, ...Object.values(spec?.by_agent ?? {})]) {
+      const found = (group?.mcp_servers ?? []).find((server) => server?.name === name)
+      if (found) return found
+    }
+  }
+  return null
+}
+
+function registeredAgents(register, role, agent) {
+  const own = agentSpec(register, role, agent)?.agents ?? []
+  if (own.length > 0) return own
+  const named = new Map()
+  for (const spec of Object.values(register?.roles ?? {})) {
+    for (const group of [spec, ...Object.values(spec?.by_agent ?? {})]) {
+      for (const grant of group?.agents ?? []) if (!named.has(grant.name)) named.set(grant.name, grant)
+    }
+  }
+  return [...named.values()]
+}
+
+// The grants one lean seat's effective definition asks for, and no others: a native extension name
+// becomes its checkout extension, fff and lab become the register's MCP servers, and subagent brings
+// the registered agent definitions it needs. Resolution and refusals are grantsFor's own; a declared
+// asset that is missing refuses instead of leaving a weaker seat.
+export function armGrants({ role, agent, extensions = [] }, { register = loadCapabilities(), root = REGISTER_ROOT, exists = existsSync, readFile = readFileSync } = {}) {
+  const paths = []
+  const mcp_servers = []
+  for (const name of extensions) {
+    if (LEAN_MCP_ARMS.includes(name)) {
+      const server = registeredMcpServer(register, name)
+      if (!server) throw refuse('unknown-grant', `seat ${role} extension ${JSON.stringify(name)} has no MCP server in the register`)
+      if (name === 'fff') {
+        if (!pathExists(exists, LEAN_FFF_BIN)) throw pathMessage('extension-missing', role, 'fff MCP server', 'an installed fff-mcp binary', 'missing', LEAN_FFF_BIN)
+        mcp_servers.push(server)
+      } else {
+        const path = resolvedGrantPath(root, LEAN_LAB_SERVER)
+        if (!pathExists(exists, path)) throw pathMessage('extension-missing', role, 'lab MCP server', 'an existing checkout-relative path', 'missing', path)
+        mcp_servers.push({ ...server, command: { bin: process.execPath, args: [path] } })
+      }
+    } else if (/^[a-z]+$/.test(name)) {
+      paths.push(`crew/pi/extensions/${name}.ts`)
+    } else {
+      throw refuse('unknown-grant', `seat ${role} has unregistered extension ${JSON.stringify(name)}`)
+    }
+  }
+  const fanout = agent === 'pi' && paths.includes(SUBAGENT_EXTENSION)
+  const agents = fanout ? registeredAgents(register, role, agent) : []
+  if (fanout && agents.length === 0) {
+    throw refuse('unknown-grant', `seat ${role} asks for subagent but the register declares no agent definition for it`)
+  }
+  const narrow = { roles: { [role]: { tools: [], extensions: paths, agents, skills: [], advisor: false, requires: [], mcp_servers, vendor_extensions: [] } } }
+  return grantsFor(narrow, role, { root, exists, readFile, agent: null, vendorRoots: [] })
+}
+
 function relativeGrantMatches(declared, resolved) {
   const declaration = String(declared).replaceAll('\\', '/')
   const candidate = String(resolved).replaceAll('\\', '/')

@@ -1022,3 +1022,9 @@ test('an ungranted pane seat withholds every advisor/edit-assist value when exec
   assert.equal(granted.CREW_ADVISOR, '1')
   assert.equal(granted.CREW_PI_AGENTS, JSON.stringify([{ name: 'scout', def: '/scout.json' }]))
 })
+
+test('pi ACP launch carries the seat env the lean runner supplies: role and lane task dir', () => {
+  const launch = acpLaunch({ bin: '/bin/pi', cwd: '/tmp', model: 'm', promptFile: 'p', role: 'planner', env: { CREW_ROLE: 'planner', CREW_TASK_DIR: '/lane' } })
+  assert.equal(launch.env.CREW_ROLE, 'planner')
+  assert.equal(launch.env.CREW_TASK_DIR, '/lane')
+})

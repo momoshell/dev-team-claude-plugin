@@ -10,6 +10,7 @@ import { runAcpSeat } from './acp/seat.mjs'
 import { parseAgent, validateEnvelope } from './protocols.mjs'
 import { acceptanceIds, composeCommitMessage, issueStatementDefect } from './drive.mjs'
 import { resolveAgents } from './agents.mjs'
+import { PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS } from './headless.mjs'
 import { bootRefusals } from './roster-validate.mjs'
 import { normalizeRoster, serializeRosterV2 } from './roster.mjs'
 import { scratchDir } from '../test/helpers.mjs'
@@ -498,7 +499,8 @@ test('every turn gets its role definition, the complete brief and P2, and its ow
     const lines = readFileSync(request.sessionFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
     assert.deepEqual(lines[0], { type: 'prompt', text: request.prompt })
     assert.equal(lines[1].update.content.text, `chunk-${id}`)
-    assert.equal(lines.length, 2)
+    assert.deepEqual(lines[2], { type: 'turn', stopReason: 'end_turn', usage: null, refusal: null })
+    assert.equal(lines.length, 3)
   })
   assert.match(f.requests[0].prompt, /"mutations"/)
   assert.match(f.requests[1].prompt, /"summary"/)
@@ -730,12 +732,92 @@ test('a denied turn-row append still fails the seat and names the recording erro
   }
 })
 
-// MUTATION: append a turn row on success too and every accepted recording gains an extra line.
-test('an accepted turn adds no turn row and its envelope is read', async () => {
-  const run = await oneTurn({ stopReason: 'end_turn', usage: null, refusal: null })
-  assert.equal(run.reads() > 0, true)
-  assert.equal(run.rows.some((row) => row.type === 'turn'), false)
-  assert.equal(run.rows.length, 2)
+// MUTATION: null the usage in the turn row and an accepted turn loses its measurement.
+test('an accepted turn ends with exactly one turn row carrying its usage, and its envelope is read', async () => {
+  for (const usage of [{ input_tokens: 5, output_tokens: 2 }, null]) {
+    const run = await oneTurn({ stopReason: 'end_turn', usage, refusal: null })
+    assert.equal(run.reads() > 0, true)
+    assert.equal(run.rows.filter((row) => row.type === 'turn').length, 1)
+    assert.deepEqual(run.rows.at(-1), { type: 'turn', stopReason: 'end_turn', usage, refusal: null })
+    assert.equal(run.rows.length, 3)
+  }
+})
+
+// A planner whose first `refusals.length` turns are refused, then accepted; the clock and the wait are virtual.
+async function retryRun(refusals, { oversleep = 0 } = {}) {
+  const sleeps = [], sessions = []
+  let clock = Date.parse('2026-10-26T00:00:00Z'), turns = 0
+  const f = leanFixture({
+    acp: async (input) => {
+      sessions.push(input.sessionFile)
+      const path = /^Return path: (.+)$/m.exec(input.prompt)[1]
+      const id = /^Envelope id: (.+)$/m.exec(input.prompt)[1]
+      const wanted = input.definition.role === 'planner' ? refusals[turns++] : undefined
+      const refusal = typeof wanted === 'function' ? wanted(clock) : wanted
+      if (refusal) return { stopReason: null, usage: null, refusal }
+      mkdirSync(f.spec.taskDir, { recursive: true })
+      const details = input.definition.role === 'planner' ? { subject: 'fix(crew): publish measured lane results', plan_path: 'p', gate_path: 'g', acceptance: ['RV1'], mutations: [LEAN_MUTATION] }
+        : input.definition.role === 'builder' ? { summary: 'built' } : { verdict: 'pass', findings: [] }
+      writeFileSync(path, JSON.stringify({ role: input.definition.role, id, status: 'done', summary: 'x', details }))
+      return { stopReason: 'end_turn', usage: { input_tokens: 1 }, refusal: null }
+    },
+    deps: { now: () => clock, sleep: async (ms) => { sleeps.push(ms); clock += ms + oversleep } },
+  })
+  const result = await f.go()
+  return { f, result, sleeps, sessions }
+}
+const rateLimit = (at, hours) => {
+  const d = new Date(at + hours * 3600000)
+  const h = d.getUTCHours()
+  return { code: -32000, errorKind: 'rate_limit', message: `resets ${h % 12 || 12}:${String(d.getUTCMinutes()).padStart(2, '0')}${h < 12 ? 'am' : 'pm'} (UTC)` }
+}
+
+// MUTATION: null the classifier result and a rate-limited turn stops the lane instead of retrying.
+test('a rate-limited turn is retried in a fresh session after the stated reset and the lane continues', async () => {
+  const run = await retryRun([rateLimit(Date.parse('2026-10-26T00:00:00Z'), 2)])
+  assert.equal(run.result.status, 'done')
+  assert.deepEqual(run.sleeps, [2 * 3600000 + PROVIDER_RESET_SETTLE_MS])
+  assert.equal(run.sessions.length, 4)
+  assert.equal(new Set(run.sessions).size, 4)
+  assert.equal(run.sessions[1], run.f.sessionOf('planner', 1).replace('.jsonl', '.retry-1.jsonl'))
+  const rows = (file) => readFileSync(file, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+  assert.equal(rows(run.sessions[0]).at(-1).refusal.errorKind, 'rate_limit')
+  assert.equal(rows(run.sessions[1]).at(-1).stopReason, 'end_turn')
+  for (const file of run.sessions) assert.equal(rows(file).filter((row) => row.type === 'turn').length, 1)
+})
+
+test('a server error is retried up to the shared attempt bound, then the lane stops as seat-unmeasured', async () => {
+  const refusal = { code: -32000, errorKind: 'overloaded', message: 'overloaded' }
+  const recovers = await retryRun([refusal])
+  assert.equal(recovers.result.status, 'done')
+  const spent = await retryRun(Array(PROVIDER_RETRY_MAX + 2).fill(refusal))
+  assert.deepEqual(spent.result, { status: 'stopped', reason: 'seat-unmeasured', pr: null })
+  assert.equal(spent.sessions.length, PROVIDER_RETRY_MAX + 1)
+  assert.equal(spent.sleeps.length, PROVIDER_RETRY_MAX)
+})
+
+test('a retry never runs past the total wait: a reset beyond it, repeated resets, and an oversleep stop the lane', async () => {
+  const at = Date.parse('2026-10-26T00:00:00Z')
+  const far = await retryRun([rateLimit(at, 6)])
+  assert.equal(far.result.reason, 'seat-unmeasured')
+  assert.deepEqual([far.sleeps.length, far.sessions.length], [0, 1])
+  const repeated = await retryRun(Array(4).fill((now) => rateLimit(now, 2)))
+  assert.equal(repeated.result.reason, 'seat-unmeasured')
+  assert.equal(repeated.sleeps.length, 2)
+  assert.ok(repeated.sleeps.reduce((a, b) => a + b, 0) <= PROVIDER_RETRY_TOTAL_WAIT_MS)
+  const overslept = await retryRun([{ code: -32000, errorKind: 'server_error', message: 'boom' }], { oversleep: PROVIDER_RETRY_TOTAL_WAIT_MS })
+  assert.equal(overslept.result.reason, 'seat-unmeasured')
+  assert.deepEqual([overslept.sleeps.length, overslept.sessions.length], [1, 1])
+})
+
+// MUTATION: route an authentication failure as a server error and it is retried.
+test('an authentication failure, even with a parseable reset, stops the lane without a retry', async () => {
+  const at = Date.parse('2026-10-26T00:00:00Z')
+  for (const errorKind of ['authentication_failed', 'oauth_org_not_allowed', 'verification_required']) {
+    const run = await retryRun([{ ...rateLimit(at, 2), errorKind }])
+    assert.deepEqual(run.result, { status: 'stopped', reason: 'seat-unmeasured', pr: null }, errorKind)
+    assert.deepEqual([run.sleeps.length, run.sessions.length], [0, 1], errorKind)
+  }
 })
 
 // MUTATION: skip the lead turn's definition and a consulted lead runs with no charter or P2 example.

@@ -6,6 +6,7 @@ import { appendFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } 
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runAcpSeat } from './acp/seat.mjs'
+import { acpProviderFailureKind, acpTextReset, providerRetryDecision, PROVIDER_RETRY_TOTAL_WAIT_MS } from './headless.mjs'
 import { runLoop } from './loop.mjs'
 import { AGENT_ROLES, parseAgent } from './protocols.mjs'
 
@@ -86,6 +87,8 @@ function promptFor({ request, spec, source, charters, body }) {
 export async function runLean(spec, deps = {}) {
   const d = {
     runAcpSeat, readFileSync, mkdirSync, writeFileSync, appendFileSync,
+    now: Date.now,
+    sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
     log: (line) => process.stdout.write(`${line}\n`),
     loopDeps: {},
     ...deps,
@@ -95,35 +98,53 @@ export async function runLean(spec, deps = {}) {
     const { definition, source, charters } = definitionFor(request, spec.tier, d)
     const { role, id } = request
     const prompt = promptFor({ request, spec, source, charters, body: definition.body })
-    const sessionFile = join(spec.taskDir, 'lean', role, `${id}.jsonl`)
-    d.mkdirSync(dirname(sessionFile), { recursive: true })
-    // 'wx': a turn id is issued once, so an existing recording is never appended to or reused.
-    const header = `${JSON.stringify({ type: 'prompt', text: prompt })}\n`
-    d.writeFileSync(sessionFile, header, { flag: 'wx' })
-    // runAcpSeat swallows a failed append; the first one is kept and fails the turn afterwards. Every
-    // relayed line is also kept in memory: the skill proof reads that copy, which the seat cannot rewrite.
-    let recordError = null
-    const relayed = []
-    const guardedAppend = (...args) => {
-      try { const out = d.appendFileSync(...args); if (args[0] === sessionFile) relayed.push(String(args[1])); return out } catch (error) { recordError ??= error; throw error }
-    }
-    const turn = await d.runAcpSeat({
-      definition, cwd: spec.cwd, taskDir: spec.taskDir, prompt, sessionFile,
-      deps: { appendFileSync: guardedAppend },
-    })
-    if (recordError) throw recordError
-    // A refused or unmeasured turn fails here, before the loop reads an envelope the seat never earned.
-    if (turn?.refusal || !turn?.stopReason) {
+    d.mkdirSync(join(spec.taskDir, 'lean', role), { recursive: true })
+    // A provider failure is retried in a fresh ACP session inside the shared bounds. The issued id,
+    // prompt and definition stay the same; each attempt records to its own session file.
+    let attempts = 0, waitedMs = 0
+    for (;;) {
+      const sessionFile = join(spec.taskDir, 'lean', role, attempts === 0 ? `${id}.jsonl` : `${id}.retry-${attempts}.jsonl`)
+      // 'wx': a turn id is issued once, so an existing recording is never appended to or reused.
+      const header = `${JSON.stringify({ type: 'prompt', text: prompt })}\n`
+      d.writeFileSync(sessionFile, header, { flag: 'wx' })
+      // runAcpSeat swallows a failed append; the first one is kept and fails the turn afterwards. Every
+      // relayed line is also kept in memory: the skill proof reads that copy, which the seat cannot rewrite.
+      let recordError = null
+      const relayed = []
+      const guardedAppend = (...args) => {
+        try { const out = d.appendFileSync(...args); if (args[0] === sessionFile) relayed.push(String(args[1])); return out } catch (error) { recordError ??= error; throw error }
+      }
+      const turn = await d.runAcpSeat({
+        definition, cwd: spec.cwd, taskDir: spec.taskDir, prompt, sessionFile,
+        deps: { appendFileSync: guardedAppend },
+      })
+      if (recordError) throw recordError
+      // The runtime writes the one turn row of every turn, accepted or not.
       guardedAppend(sessionFile, `${JSON.stringify({ type: 'turn', stopReason: turn?.stopReason ?? null, usage: turn?.usage ?? null, refusal: turn?.refusal ?? null })}\n`, 'utf8')
-      throw Object.assign(new Error(turn?.refusal?.message ?? 'ACP seat turn returned no stop reason'), { code: turn?.refusal?.code ?? null, errorKind: turn?.refusal?.errorKind ?? null })
+      // A refused or unmeasured turn fails here, before the loop reads an envelope the seat never earned.
+      if (turn?.refusal || !turn?.stopReason) {
+        const failure = Object.assign(new Error(turn?.refusal?.message ?? 'ACP seat turn returned no stop reason'), { code: turn?.refusal?.code ?? null, errorKind: turn?.refusal?.errorKind ?? null })
+        if (!turn?.refusal) throw failure
+        const kind = acpProviderFailureKind(turn?.refusal?.errorKind)
+        const at = d.now()
+        const reset = kind === 'rate_limit' ? acpTextReset(turn.refusal.message, at) : null
+        const decision = providerRetryDecision({ kind, reset, attempts, waitedMs, at })
+        if (!decision.retry) throw failure
+        await d.sleep(decision.wait_ms)
+        // The wait actually taken counts, never less than the one intended; an oversleep that crosses the bound buys no replacement.
+        waitedMs += Math.max(decision.wait_ms, d.now() - at)
+        if (waitedMs > PROVIDER_RETRY_TOTAL_WAIT_MS) throw failure
+        attempts += 1
+        continue
+      }
+      // Trusted runtime context for the loop's required-skill proof; never read from the seat's envelope.
+      // The proof reads the relayed copy, and only while the file on disk is still exactly what was
+      // relayed: a seat that removed, blocked or rewrote its own recording proves nothing.
+      const recorded = relayed.join('')
+      let intact = false
+      try { intact = d.readFileSync(sessionFile, 'utf8') === header + recorded } catch { /* unreadable is not intact */ }
+      return { definition, recorded: intact ? recorded : null, cwd: spec.cwd }
     }
-    // Trusted runtime context for the loop's required-skill proof; never read from the seat's envelope.
-    // The proof reads the relayed copy, and only while the file on disk is still exactly what was
-    // relayed: a seat that removed, blocked or rewrote its own recording proves nothing.
-    const recorded = relayed.join('')
-    let intact = false
-    try { intact = d.readFileSync(sessionFile, 'utf8') === header + recorded } catch { /* unreadable is not intact */ }
-    return { definition, recorded: intact ? recorded : null, cwd: spec.cwd }
   }
 
   let result

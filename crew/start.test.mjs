@@ -835,6 +835,40 @@ test('a consulted lead gets its own definition and decision shape', async () => 
   assert.equal(lead.sessionFile, f.sessionOf('lead', 2))
 })
 
+// MUTATION: resume the refused session or repeat the assignment and a repair is not a fresh, repair-only turn.
+test('a schema-refused builder envelope gets one fresh repair-only turn at the same path, then the lane continues', async () => {
+  const f = leanFixture()
+  const turns = {}
+  f.options.runAcpSeat = async (input) => {
+    f.requests.push(input)
+    const role = input.definition.role
+    const id = /^Envelope id: (.+)$/m.exec(input.prompt)[1]
+    const path = /^Return path: (.+)$/m.exec(input.prompt)[1]
+    const n = turns[role] = (turns[role] ?? 0) + 1
+    const value = { role, id, status: 'done', summary: 'fixture', details: role === 'planner' ? { subject: 'fix(crew): publish measured lane results', plan_path: join(f.spec.taskDir, 'plan.md'), gate_path: join(f.spec.taskDir, 'gate.mjs'), acceptance: ['RV1'], mutations: [LEAN_MUTATION] } : role === 'builder' ? { summary: 'built', ...(n === 1 ? { gaps: [] } : {}) } : { verdict: 'pass', findings: [] } }
+    mkdirSync(f.spec.taskDir, { recursive: true })
+    writeFileSync(path, JSON.stringify(value))
+    return { stopReason: 'end_turn', usage: null, refusal: null }
+  }
+  const result = await f.go()
+  assert.equal(result.status, 'done')
+  const builders = f.requests.filter((r) => r.definition.role === 'builder')
+  assert.equal(builders.length, 2)
+  const [first, repair] = builders
+  assert.notEqual(repair.sessionFile, first.sessionFile)
+  assert.equal(first.sessionFile, f.sessionOf('builder', 2))
+  assert.equal(repair.sessionFile, join(f.spec.taskDir, 'lean', 'builder', 'lane.builder.2.repair.jsonl'))
+  for (const field of ['Envelope id', 'Return path']) {
+    const pattern = new RegExp(`^${field}: (.+)$`, 'm')
+    assert.equal(pattern.exec(repair.prompt)[1], pattern.exec(first.prompt)[1])
+  }
+  assert.ok(repair.prompt.includes('details.gaps is not a field of builder details'))
+  assert.ok(!repair.prompt.includes(first.definition.body))
+  assert.ok(!repair.prompt.includes(BRIEF))
+  assert.deepEqual(JSON.parse(readFileSync(repair.sessionFile, 'utf8').split('\n')[0]), { type: 'prompt', text: repair.prompt })
+  assert.ok(first.prompt.includes(BRIEF), 'the ordinary assignment keeps its full prompt')
+})
+
 // MUTATION: restore an old role-charter link or first-generation field in a body and a dispatched prompt carries it.
 test('lean prompts contain only the lean contract', async () => {
   const f = leanFixture({ answers: { 'planner.1': 'insufficient' } })

@@ -285,7 +285,7 @@ export async function runLoop(spec, deps = {}) {
           if (repaired) return stop(suite.reason, rerun)
           // Two measured reds earn one builder turn and one review (beyond their rounds if spent), then the gate, proof, review and suite again.
           const failures = suiteFailures([suite, rerun])
-          const suiteFeedback = [{
+          feedback = [{
             id: 'suite-repair',
             severity: 'must-fix',
             summary: 'The full suite is red on two runs after your change, usually because a skill doc pins code you moved (anchors.json line spans, census figures in exhibits tests). Fix the failing tests; for anchor spans run skills/qa-test-writing/anchor-pin.mjs --repair-all <dir> --root <checkout> with node. This is your only repair turn.',
@@ -295,14 +295,12 @@ export async function runLoop(spec, deps = {}) {
             ...(failures.tail.length ? { outputTail: failures.tail } : {}),
           }]
           for (const role of ['builder', 'reviewer']) seats[role] = { ...seats[role], rounds: Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }
-          feedback = suiteFeedback
           repairing = true
           repaired = true
           continue
-        } else {
-          if (rerun.status !== 'green') return stop(rerun.reason, rerun)
-          measurements.push(`- Suite re-run: ${rerun.status}; exit ${rerun.code}.`)
         }
+        if (rerun.status !== 'green') return stop(rerun.reason, rerun)
+        measurements.push(`- Suite re-run: ${rerun.status}; exit ${rerun.code}.`)
       } else {
         if (suite.status !== 'green') return stop(suite.reason, suite)
         measurements.push(`- Suite: ${suite.status}; exit ${suite.code}.`)

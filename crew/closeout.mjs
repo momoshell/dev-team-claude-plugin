@@ -2,16 +2,19 @@
 //
 // Three steps, in this order, each checked:
 //   1. git worktree remove <worktree>          (never --force: git itself refuses a worktree with uncommitted changes)
-//   2. git branch -d <branch>                  (local only, never -D)
+//   2. git branch -D <lane>                    (local only, and only when its tip is the PR head GitHub merged)
 //   3. move ~/.crew/dt-<lane> to ~/.crew-journal-archive/dt-<lane>  (moved, never deleted)
-// Only for a live lane whose journal records a PR that GitHub reports MERGED. Every check runs before the first
-// effect, and the first effect refuses a dirty worktree, so a refusal before it changes nothing on disk or in git.
+// Only for a live lane whose journal records a PR that GitHub reports MERGED, whose worktree is dt-<lane> on
+// branch <lane>, and whose branch tip is that PR's head. The PR is looked up by its recorded URL, so the cwd's
+// repository never answers for it. Every check runs before the first effect, and the first effect refuses a dirty
+// worktree, so a refusal before it changes nothing on disk or in git.
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { homedir } from 'node:os'
-import { dirname, join, sep } from 'node:path'
+import { basename, dirname, join, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLeanSource } from '../visualizer/server/lean-source.mjs'
+import { parsePrUrl } from './record-pr.mjs'
 
 export class CloseoutRefusal extends Error {}
 
@@ -37,8 +40,8 @@ function lastPr(text) {
     if (!isObject(row)) refuse('task journal has a non-object row')
     if (row.event === 'pr') pr = row.pr
   }
-  if (!isObject(pr) || !Number.isSafeInteger(pr.number) || pr.number <= 0) refuse('task journal records no pull request')
-  return pr
+  if (!isObject(pr) || typeof pr.url !== 'string') refuse('task journal records no pull request')
+  try { return parsePrUrl(pr.url) } catch { refuse(`task journal records a malformed pull request url: ${pr.url}`) }
 }
 
 // Run a command and refuse unless it exits 0.
@@ -62,23 +65,28 @@ export function closeoutLane({ lane, root = join(homedir(), '.crew'), archiveRoo
 
   const worktree = found.spec.cwd
   if (typeof worktree !== 'string' || !worktree || !isDir(worktree)) refuse('lean.json names no existing worktree')
-  const branch = typeof found.spec.branch === 'string' && found.spec.branch && !found.spec.branch.startsWith('-') ? found.spec.branch : lane
+  if (basename(worktree) !== `dt-${lane}`) refuse(`worktree ${worktree} is not dt-${lane}`)
+  const branch = lane
   const laneDir = join(root, `dt-${lane}`)
   const archivedDir = join(archive, `dt-${lane}`)
   if (existsSync(archivedDir)) refuse(`${archivedDir} already exists`)
 
-  let state
-  try { state = JSON.parse(must(run, 'gh pr view', 'gh', ['pr', 'view', String(pr.number), '--json', 'state'])).state } catch (error) {
+  let view
+  try { view = JSON.parse(must(run, 'gh pr view', 'gh', ['pr', 'view', pr.url, '--json', 'state,headRefOid'])) } catch (error) {
     if (error instanceof CloseoutRefusal) throw error
     refuse('gh pr view returned unparseable output')
   }
-  if (state !== 'MERGED') refuse(`pull request #${pr.number} is not merged (${String(state)})`)
+  if (view?.state !== 'MERGED') refuse(`pull request #${pr.number} is not merged (${String(view?.state)})`)
 
   const common = must(run, 'git rev-parse', 'git', ['-C', worktree, 'rev-parse', '--path-format=absolute', '--git-common-dir']).trim()
   if (!common) refuse('could not find the main checkout')
   const mainCheckout = dirname(common)
+  const head = must(run, 'git symbolic-ref', 'git', ['-C', worktree, 'symbolic-ref', '-q', 'HEAD']).trim()
+  if (head !== `refs/heads/${branch}`) refuse(`worktree ${worktree} is on ${head || 'a detached HEAD'}, not ${branch}`)
+  const tip = must(run, 'git rev-parse', 'git', ['-C', mainCheckout, 'rev-parse', '--verify', `refs/heads/${branch}^{commit}`]).trim()
+  if (typeof view.headRefOid !== 'string' || tip !== view.headRefOid) refuse(`branch ${branch} is at ${tip}, not the merged head ${String(view.headRefOid)}`)
   must(run, 'git worktree remove', 'git', ['-C', mainCheckout, 'worktree', 'remove', worktree])
-  must(run, 'git branch -d', 'git', ['-C', mainCheckout, 'branch', '-d', branch])
+  must(run, 'git branch -D', 'git', ['-C', mainCheckout, 'branch', '-D', branch])
   try {
     mkdir(archive, { recursive: true })
     rename(laneDir, archivedDir)

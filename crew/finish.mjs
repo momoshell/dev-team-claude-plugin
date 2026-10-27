@@ -170,13 +170,11 @@ function readText(d, file, what) {
 }
 
 // The PR text is the measured text, character for character, plus the lane's issues on trailer lines. openPullRequest
-// rewrites issue tokens in prose ("#42" -> "issue 42") when it creates a PR, so the text is applied again with gh pr edit
-// whenever that rewriting changed it, or the PR was already open.
-const issueTokens = (text) => text.replace(/#(\d+)/g, 'issue $1')
-function prBody(body, closes, refs, rewrite = false) {
+// rewrites issue tokens in prose ("#42" -> "issue 42") when it creates a PR, so the text is applied again with gh pr edit.
+function prBody(body, closes, refs) {
   const open = refs.filter((issue) => !closes.includes(issue))
   const trailers = [...closes.map((issue) => `Closes: #${issue}`), ...(open.length ? [`Refs: ${open.map((issue) => `#${issue}`).join(', ')}`] : [])]
-  return [rewrite ? issueTokens(body) : body, trailers.join('\n')].filter((block) => block !== '').join('\n\n')
+  return [body, trailers.join('\n')].filter((block) => block !== '').join('\n\n')
 }
 
 // One decision per ready row: the claim is exclusive and taken before any effect, so overlapping decisions cannot both act.
@@ -227,8 +225,10 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
       if (head?.status !== 'green' || String(head.stdout ?? '').trim() !== ready.head) throw new FinishRefusal('finish-head-moved', `lane ${lane}'s checkout is not measured at the finish run's head ${ready.head}; nothing was published`)
       const published = await d.openPullRequest({ cwd: spec.cwd, branch: spec.branch, base: spec.base, title: ready.subject, body, closes, refs })
       if (published?.status !== 'green' || !isObject(published.pr)) throw new FinishRefusal('finish-publish', `the pull request did not open: ${published?.reason ?? 'unmeasured'}`)
-      const text = prBody(body, closes, refs)
-      if (published.reused === true || issueTokens(ready.subject) !== ready.subject || prBody(body, closes, refs, true) !== text) {
+      // Every returned PR gets the measured text: openPullRequest rewrites issue tokens, and a PR it found rather than
+      // created (reused, or opened by someone else between its lookup and its create) carries whatever text it had.
+      {
+        const text = prBody(body, closes, refs)
         const edited = await d.run({ cwd: spec.cwd, command: 'gh', args: ['pr', 'edit', String(published.pr.number), '--title', ready.subject, '--body', text], timeoutMs: 60_000 })
         if (edited?.status !== 'green') throw new FinishRefusal('finish-publish', `the pull request ${published.pr.number} could not be updated with the measured text: ${edited?.reason ?? 'unmeasured'}`)
       }
@@ -259,6 +259,8 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
     }
     // The decision is recorded once the run is launched: a launch that fails leaves the lane ready, so the pass can be retried.
     const started = launch(d, { crewRoot, taskDir, spec, finish, claim: claimStop(d, lane, taskDir, readyAt) })
+    // The ready pass's report no longer describes the lane: only the new pass, if it ends ready, writes one.
+    d.rmSync(join(taskDir, 'finish-report.json'), { force: true })
     decision()
     return { ...started, choice }
   } catch (error) {

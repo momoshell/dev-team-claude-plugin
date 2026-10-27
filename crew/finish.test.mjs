@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { scratchDir } from '../test/helpers.mjs'
 import { createHash } from 'node:crypto'
@@ -258,8 +258,11 @@ test('--return spawns a finish run whose spec carries the guidance and the spent
   try {
     const file = join(r.f.base, 'return.md')
     writeFileSync(file, 'Fix the widget first')
+    writeFileSync(join(r.f.taskDir, 'finish-report.json'), '{}')
     await r.decide('return', file)
     assert.equal(r.spawned.length, 1)
+    // MUTATION: keep the report and the deciding session reads the ready pass as the lane's state.
+    assert.equal(existsSync(join(r.f.taskDir, 'finish-report.json')), false, 'the ready pass report outlived the return')
     const spec = JSON.parse(readFileSync(join(r.f.taskDir, 'finish.json'), 'utf8'))
     assert.deepEqual([spec.shape, spec.finish.guidance, spec.finish.priorReviewRounds, spec.finish.stop.reason, spec.finish.turnOffset], ['finish', 'Fix the widget first', 2, STOP.reason, 2])
     assert.equal(r.rowsOf().at(-1).choice, 'return')
@@ -393,12 +396,12 @@ test('--accept leaves the PR with the measured subject and notes literally, also
     assert.equal(rows(reused.r).at(-1).notesSha256, createHash('sha256').update('new notes #42').digest('hex'))
   } finally { cleanup(reused.r.f) }
 
-  // Text with no issue token needs no edit on a fresh PR.
+  // A PR it did not create (opened by someone else between its lookup and its create) reads as fresh: it is edited too.
   const plain = lane(false)
   try {
     writeFileSync(join(plain.r.f.taskDir, 'journal.jsonl'), `${rows(plain.r).map((row) => JSON.stringify(row.event === 'finish-ready' ? { ...row, subject: 'fix: plain', body: 'plain body' } : row)).join('\n')}\n`)
     await decideFinish({ lane: 'lane9', root: plain.r.f.root, choice: 'accept', deps: plain.deps })
-    assert.equal(plain.g.gh('edit'), undefined)
+    assert.equal(argOf(plain.g.gh('edit'), '--body'), 'plain body\n\nCloses: #91\nRefs: #92')
   } finally { cleanup(plain.r.f) }
 
   // A reused PR that cannot be updated records nothing and leaves the lane retryable.

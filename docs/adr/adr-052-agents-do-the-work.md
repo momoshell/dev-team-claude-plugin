@@ -184,3 +184,48 @@ folder keeps operator-side agents such as `agents/brief-writer.md`.
 Each frontmatter field is one line, with JSON for objects and object lists, and carries no trailing comment.
 Section 4's example is written in that form, so the P5 parser reads it as it stands.
 Nothing else in section 4 changes.
+
+## Amendment 2 (2026-10-26): claude seats run the arms as plugin hooks
+
+A claude seat used to refuse every pi arm, because the arms are `crew/pi/extensions/*.ts` and attach to pi's
+events. Two live probes on 2026-10-26, over `claude-agent-acp` 0.86.0, showed that Claude Code plugin hooks
+carry the arms the operator wants on a claude seat. On a claude ACP seat, readgate, skeletonread, reminders,
+builderloop (with edit assist) and the advisor now run as the hooks of one crew-owned plugin, listed in the
+launch's `_meta.claudeCode.options.plugins` beside any skills plugin. The hooks run the same factories pi loads
+and write no arm's rules a second time; the plugin only translates Claude's hook payloads into the events the
+factories read and their results back into hook output.
+
+| Arm | Hook | Effect |
+|---|---|---|
+| readgate | PreToolUse | `permissionDecision: deny` with readgate's own reason |
+| skeletonread | PostToolUse | `updatedToolOutput`: the tool's own `tool_response`, cloned, with `file.content`, `file.numLines` and `file.totalLines` (Read) or `stdout` (Bash) replaced; a plain string is dropped by Claude |
+| advisor | PostToolUse, PostToolUseFailure | `additionalContext`: the tier-0 note |
+| reminders | SessionStart, PostToolUse | `additionalContext`: the role's table at session start; a rule's reminder after its tool |
+| edit assist (builderloop) | PreToolUse | `additionalContext`: the file-derived hint, **one tool call late** |
+
+Three things follow from Claude's hooks, and are the price of the decision.
+
+- **Edit assist arrives one call late.** Claude validates an Edit's input before any hook fires, so a failed
+  Edit (old_string not found) has no hook. The next PreToolUse hook reads the session's `transcript_path`, finds
+  the errored `tool_result` it has not yet hinted, pairs it with its `tool_use` input, and hands builderloop's
+  existing failed-edit path the result in the shape that path reads. The hint is added once per failed tool call.
+- **A hook is a fresh process.** What an arm keeps between tool calls (readgate's delivered ranges, the advisor's
+  repeat counts and cadence, builderloop's corpus and rerun guard, the reminders already fired) is exported by the
+  factory and stored in a file under the lane's task dir, one per seat session and run, written atomically under a
+  lock. Pi never calls the export or import; its closure is unchanged.
+- **The tier-1 judgment is not run.** The advisor's model consult outlives a hook, so a claude seat gets the tier-0
+  predicates (scope breach, tripwire touch, repeated failure, growth divergence) and not the judgment channel.
+  builderloop's fenced lane run after a successful edit is not carried either: it would hold a hook for up to
+  thirty seconds, and the seat has Bash. Its rerun refusal, its test-output filter and edit assist are.
+
+Grants stay explicit. The arms a seat carries are written into the plugin's `config.json` at launch; an arm not
+in it is never imported, and an ambient `CREW_ADVISOR` or `CREW_EDIT_ASSIST` grants nothing. A hook that fails,
+or whose stored state is not its own, prints nothing and exits 0: a granted arm that breaks never changes the
+turn. A claude seat with a context arm gets the same lane-context check before boot as a pi seat (PR 2007).
+
+Unchanged: pi seats load the `.ts` extensions as they do; **subagent and codemode still refuse on a claude seat**
+(`grant-unsupported`, before any client exists); the old headless and pane transports still refuse every
+extension grant; the old ACP transport (`crew/acp-io.mjs`) neither materialises the plugin nor reads the advisor
+or `edit_assist`, because `adapter-claude`'s `acpLaunch` takes the arms path only when the lean seat opts in
+(`armHooks`); `crew/agents/*.md` frontmatter values do not change. Token budget and output caps are a later
+lane.

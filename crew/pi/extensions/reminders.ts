@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { logLine, parseAssignment } from '../../driver.mjs'
+import { journalPathOf } from '../context-layout.mjs'
 
 const TABLE_PATH = join(dirname(fileURLToPath(import.meta.url)), 'reminders.json')
 const TOP_KEYS = ['schema_version', 'rules']
@@ -53,12 +54,12 @@ export function createReminders({ env = process.env, deps = {} } = {}) {
   const unusable = (value) => { reason = value; usable = false; record({ event: 'rule_reminder_table_unusable', rule_reminder_table_unusable: { reason } }) }
   let usable = true
   const taskDir = env.CREW_TASK_DIR
-  const journalPath = taskDir ? join(dirname(taskDir), 'journal.jsonl') : null
+  const journalPath = taskDir ? journalPathOf(taskDir, env) : null
   const record = (row) => { if (journalPath) append(journalPath, row) }
   let raw
   try { raw = read(deps.tablePath || TABLE_PATH, 'utf8') } catch { unusable('unreadable') }
   if (usable) {
-    try { table = JSON.parse(raw) } catch { unusable('unparseable'); return { beforeAgentStart, toolResult, get usable() { return usable }, get reason() { return reason } } }
+    try { table = JSON.parse(raw) } catch { unusable('unparseable'); return { beforeAgentStart, sessionStart, toolResult, exportState, importState, get usable() { return usable }, get reason() { return reason } } }
     const invalid = validate(table, read)
     if (invalid) unusable(invalid)
   }
@@ -66,6 +67,20 @@ export function createReminders({ env = process.env, deps = {} } = {}) {
     const assignment = parseAssignment(event?.prompt)
     if (assignment && assignment.id !== currentId) fired.clear()
     if (assignment) currentId = assignment.id
+  }
+  // A host with a session-start channel (the claude seat plugin) shows the role's table at the start.
+  function sessionStart() {
+    if (!usable) return undefined
+    const rules = table.rules.filter((rule) => rule.roles.includes(env.CREW_ROLE))
+    for (const rule of rules) record({ event: 'rule_reminder', rule_reminder: { rule: rule.id, role: env.CREW_ROLE, tool: 'session-start', assignment_id: currentId } })
+    return rules.length ? rules.map((rule) => `reminder (${rule.id}): ${rule.reminder}`).join('\n') : undefined
+  }
+  // A host that runs each hook in a fresh process keeps the fired set between calls; pi never calls these.
+  function exportState() { return { current_id: currentId, fired: [...fired] } }
+  function importState(state) {
+    if (!state || typeof state !== 'object' || !Array.isArray(state.fired) || !state.fired.every((id) => typeof id === 'string') || (state.current_id !== null && typeof state.current_id !== 'string')) throw new Error('reminders state is malformed')
+    currentId = state.current_id
+    fired.clear(); for (const id of state.fired) fired.add(id)
   }
   function toolResult(event) {
     if (!usable || !event || !event.input) return undefined
@@ -93,7 +108,7 @@ export function createReminders({ env = process.env, deps = {} } = {}) {
     }
     return { content: [reminderPart, ...event.content] }
   }
-  return { beforeAgentStart, toolResult, get usable() { return usable }, get reason() { return reason } }
+  return { beforeAgentStart, sessionStart, toolResult, exportState, importState, get usable() { return usable }, get reason() { return reason } }
 }
 // Idea credit: the rule reminders follow oh-my-pi's TTSR and the non-interrupting tool_result rule reminder; no oh-my-pi source is copied, ideas only, and no licence notice is invented.
 export function attachReminders(pi, options = {}) {

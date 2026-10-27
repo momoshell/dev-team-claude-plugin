@@ -464,7 +464,7 @@ test('ACP named unsupported adapter refuses without Pi fallback', () => {
   try { assert.throws(() => assign(f), (error) => error.stage === 'acp-launch-unsupported' && /unsupported-agent/.test(error.message)) } finally { cleanup(f) }
 })
 
-function wireFixture({ rejectMode = false } = {}) {
+function wireFixture({ rejectMode = false, grants, editAssist } = {}) {
   const root = scratchDir('acp-wire-')
   const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
   mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir)
@@ -491,11 +491,27 @@ function wireFixture({ rejectMode = false } = {}) {
       appendFileSync(stream, `${JSON.stringify(answer)}\n`)
     },
   }
-  const io = acpIo({ crew: { claude_bin: '/frozen/claude', members: { reviewer: { agent: 'claude', model: 'claude-test', tools: 'Read,Write', deny: 'Edit,NotebookEdit', effort: 'high' } } }, paths, taskDir: paths.taskDir, checkout: root,
-    adapters: { reviewer: { name: 'claude', adapter: { ACP_BINARY, capabilitiesFor: claudeCapabilitiesFor, acpLaunch: claudeAcpLaunch } } },
+  const io = acpIo({ crew: { claude_bin: '/frozen/claude', ...(editAssist ? { edit_assist: editAssist } : {}), members: { reviewer: { agent: 'claude', model: 'claude-test', tools: 'Read,Write', deny: 'Edit,NotebookEdit', effort: 'high' } } }, paths, taskDir: paths.taskDir, checkout: root,
+    adapters: { reviewer: { name: 'claude', ...(grants ? { grants } : {}), adapter: { ACP_BINARY, capabilitiesFor: claudeCapabilitiesFor, acpLaunch: claudeAcpLaunch } } },
     deps: { env: { PATH: '/fake-bin' }, existsSync: (path) => path === '/fake-bin/claude-agent-acp' || fsExistsSync(path), clientDeps, sleep() {}, log: (row) => logs.push(row), emit: (row) => heartbeats.push(row) } })
   return { root, paths, briefFile, io, sent, logs, heartbeats, close() { io.close(); rmSync(root, { recursive: true, force: true }) } }
 }
+
+test('the old ACP transport still launches a claude seat the register grants the advisor or rotation sets edit_assist on', () => {
+  // crew/acp-io.mjs does not materialise the arms plugin, so acpLaunch must keep ignoring advisor and edit_assist for it.
+  const grants = { tools: ['Read', 'Write'], extensions: [], agents: [], skills: [], advisor: true, mcp_servers: [] }
+  const f = wireFixture({ grants, editAssist: 'on' })
+  try {
+    const out = f.io.assign({ role: 'reviewer', briefFile: f.briefFile })
+    const options = f.sent.find((frame) => frame.method === 'session/new').params._meta.claudeCode.options
+    assert.equal(Object.hasOwn(options, 'plugins'), false)
+    assert.ok(out.returnPath)
+  } finally { f.close() }
+  const refused = wireFixture({ grants: { ...grants, extensions: [join(ROOT, 'crew/pi/extensions/readgate.ts')] } })
+  try {
+    assert.throws(() => refused.io.assign({ role: 'reviewer', briefFile: refused.briefFile }), (error) => error.reason === 'grant-unsupported')
+  } finally { refused.close() }
+})
 
 test('Claude ACP session options and mode reach the wire', () => {
   const f = wireFixture()

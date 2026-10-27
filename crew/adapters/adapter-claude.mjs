@@ -3,6 +3,7 @@ import { isAbsolute, join, basename, dirname } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapter-pi.mjs'
+import { ARMS_CONFIG_FILE, CLAUDE_ADVISED_ROLES, CLAUDE_ARMS, armsPluginDir, claudeArmsOf, writeArmsPlugin } from './claude-arms.mjs'
 
 const require = createRequire(import.meta.url)
 let sharedFffSearchProgram
@@ -279,6 +280,17 @@ function assertSupportedGrants(grants = NO_GRANTS) {
   }
 }
 
+// ACP seats carry the arms in CLAUDE_ARMS as plugin hooks (ADR-052 Amendment 2); every other extension is still refused.
+// The old headless and pane transports keep assertSupportedGrants above.
+function acpArms(grants = NO_GRANTS, role, editAssist) {
+  const { arms, unsupported } = claudeArmsOf(grants)
+  const refuse = (why) => Object.assign(new Error(`adapter-claude cannot express ${why} — refusing to boot a silently weaker seat [grant-unsupported]`), { reason: 'grant-unsupported' })
+  if (unsupported.length) throw refuse(`extension grants ${JSON.stringify({ extensions: unsupported })} over ACP (it carries ${CLAUDE_ARMS.join(', ')})`)
+  if (arms.includes('advisor') && !CLAUDE_ADVISED_ROLES.includes(role)) throw refuse(`the advisor arm of seat ${role}`)
+  if (editAssist === 'on' && !arms.includes('builderloop')) throw refuse('edit_assist without builderloop, which runs it')
+  return arms
+}
+
 export function skillsPluginDir({ taskDir, role } = {}) {
   if (typeof taskDir !== 'string' || !isAbsolute(taskDir)) {
     throw new Error(`adapter-claude.skillsPluginDir: taskDir must be an ABSOLUTE path, got ${JSON.stringify(taskDir)}`)
@@ -389,6 +401,25 @@ export function writeSeatSkills({ taskDir, role, grants } = {}, deps = {}) {
   }, null, 2))
 }
 
+// The plugin that runs a claude ACP seat's arms. taskDir is the per-seat runtime; the hooks keep their state in the lane.
+export function writeSeatArms({ taskDir, role, grants, cwd, editAssist = null, env = {} } = {}, deps = {}) {
+  const arms = acpArms(grants, role, editAssist)
+  if (arms.length === 0) return
+  assertInsideTaskDir(armsPluginDir({ taskDir, role }), taskDir, deps)
+  writeArmsPlugin({ taskDir, role, arms, cwd, editAssist, laneTaskDir: env.CREW_TASK_DIR, layout: env.CREW_CONTEXT_LAYOUT }, deps)
+}
+
+function assertArmsMaterialised({ taskDir, role, arms }) {
+  if (arms.length === 0) return
+  const root = armsPluginDir({ taskDir, role })
+  if (!existsSync(join(root, ARMS_CONFIG_FILE)) || !existsSync(join(root, 'hooks', 'hooks.json'))) {
+    throw Object.assign(
+      new Error(`adapter-claude arms not materialised at ${JSON.stringify(root)} — refusing to boot a silently weaker seat [grant-unsupported]`),
+      { reason: 'grant-unsupported' },
+    )
+  }
+}
+
 export function assertSkillsMaterialised({ taskDir, role, grants } = {}) {
   const skills = grants?.skills || []
   if (skills.length === 0) return
@@ -427,10 +458,15 @@ const ACP_PROFILE = Object.freeze({ interjection: 'turn', abort: 'cancel', sessi
 
 export const ACP_BINARY = 'claude-agent-acp'
 
+// armHooks is the lean seat's opt-in (crew/acp/seat.mjs, which also writes the plugin with writeSeatArms). Without it the launch
+// keeps the old ACP transport's rule (crew/acp-io.mjs): extension grants refuse, advisor and editAssist are not read, no arms plugin.
 export function acpLaunch(spec = {}) {
-  const { bin, claudeBin, cwd, model, tools, deny, effort, promptFile, role, taskDir, grants = NO_GRANTS, configDir, env = {} } = spec
-  assertSupportedGrants(grants)
+  const { bin, claudeBin, cwd, model, tools, deny, effort, promptFile, role, taskDir, grants = NO_GRANTS, configDir, env = {}, editAssist = null, armHooks = false } = spec
+  let arms = []
+  if (armHooks === true) arms = acpArms(grants, role, editAssist)
+  else assertSupportedGrants(grants)
   assertSkillsMaterialised({ role, taskDir, grants })
+  assertArmsMaterialised({ role, taskDir, arms })
   assertNoLocalProvider(configDir)
   if (typeof bin !== 'string' || !bin || !isAbsolute(bin)) {
     throw new Error(`adapter-claude.acpLaunch: bin must be a nonempty ABSOLUTE ACP path, got ${JSON.stringify(bin)}`)
@@ -453,6 +489,10 @@ export function acpLaunch(spec = {}) {
     ...(hasFffGrant(grants) ? ['mcp__fff__find_files', 'mcp__fff__grep', 'mcp__fff__multi_grep'] : []),
   ])]
   const acpTools = hasSkills ? [...acpAllowedTools.filter((tool) => tool !== 'Skill'), 'Skill'] : acpAllowedTools
+  const plugins = [
+    ...(hasSkills ? [{ type: 'local', path: skillsPluginDir({ taskDir, role }) }] : []),
+    ...(arms.length > 0 ? [{ type: 'local', path: armsPluginDir({ taskDir, role }) }] : []),
+  ]
   return {
     bin,
     args: [],
@@ -468,7 +508,7 @@ export function acpLaunch(spec = {}) {
         strictMcpConfig: true,
         allowedTools: acpTools,
         tools: acpTools,
-        ...(hasSkills ? { plugins: [{ type: 'local', path: skillsPluginDir({ taskDir, role }) }] } : {}),
+        ...(plugins.length > 0 ? { plugins } : {}),
         disallowedTools: deniedTools(deny, grants).split(',').filter(Boolean),
         additionalDirectories: spec.writableDirs,
         extraArgs: { ...(effort ? { effort } : {}), 'append-system-prompt-file': promptFile },

@@ -993,7 +993,24 @@ export function createBuilderLoop(value = {}) {
     return result
   }
 
-  return { onToolCall, onToolResult, onBeforeAgentStart }
+  // A host that runs each hook in a fresh process (the claude seat plugin) keeps the rerun guard and the
+  // result corpus between calls. Pi never calls these.
+  function exportState() { return { last, current_id: currentId, corpus: [...corpus] } }
+
+  function importState(state) {
+    const stored = state?.last
+    const wordsOk = (words) => Array.isArray(words) && words.every((word) => typeof word === 'string')
+    if (!state || typeof state !== 'object' || !Array.isArray(state.corpus) || !state.corpus.every((text) => typeof text === 'string')
+      || (state.current_id !== null && typeof state.current_id !== 'string')
+      || (stored !== null && !(stored && wordsOk(stored.words) && typeof stored.digest === 'string' && typeof stored.raw === 'string' && typeof stored.toolName === 'string'))) throw new Error('builder loop state is malformed')
+    last = stored === null ? null : { words: [...stored.words], digest: stored.digest, raw: stored.raw, toolName: stored.toolName }
+    currentId = state.current_id
+    corpus.length = 0; corpusBytes = 0
+    for (const text of state.corpus) { corpus.push(text); corpusBytes += bytes(text) }
+    while (corpus.length && corpusBytes > EDIT_CORPUS_CAP_BYTES) corpusBytes -= bytes(corpus.shift())
+  }
+
+  return { onToolCall, onToolResult, onBeforeAgentStart, exportState, importState }
 }
 
 function failedEdit(event, { cwd, env, corpus, readFile, statFile, appendFile, journalPath, now }) {

@@ -671,7 +671,8 @@ test('readgate is zero-dependency, erasable, and exposes three lifecycle registr
   const source = readFileSync(new URL('./readgate.ts', import.meta.url), 'utf8')
   const imports = [...source.matchAll(/^import[\s\S]*?from\s+["']([^"']+)["']/gm)].map((match) => match[1])
   assert.ok(imports.length > 0)
-  assert.ok(imports.every((specifier) => specifier.startsWith('node:')), imports.join(', '))
+  // The lane layout's journal path is the one shared resolver; nothing else is imported.
+  assert.ok(imports.every((specifier) => specifier.startsWith('node:') || specifier === '../context-layout.mjs'), imports.join(', '))
   assert.doesNotMatch(source, /^\s*(enum|namespace)\s/m)
   assert.deepEqual(Object.keys(mod).sort(), ['DEFAULT_MAX_LINES', 'MAX_LINES_ENV', 'DEFAULT_MAX_BYTES', 'MAX_BYTES_ENV', 'attachReadGate', 'createReadGate', 'default', 'fffSearchProgram'].sort())
 
@@ -685,6 +686,8 @@ test('readgate is zero-dependency, erasable, and exposes three lifecycle registr
     onToolCall: gate.onToolCall,
     onToolResult: gate.onToolResult,
     onTurnStart: gate.onTurnStart,
+    exportState: gate.exportState,
+    importState: gate.importState,
   })
 })
 

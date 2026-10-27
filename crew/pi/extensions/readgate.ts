@@ -6,6 +6,7 @@
 import { createHash } from 'node:crypto'
 import { appendFileSync, readFileSync, realpathSync, statSync, readdirSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path'
+import { journalPathOf } from '../context-layout.mjs'
 
 export const DEFAULT_MAX_LINES = 350
 export const MAX_LINES_ENV = 'CREW_READGATE_MAX_LINES'
@@ -480,7 +481,7 @@ export function createReadGate(options = {}) {
   const cwdDefault = input.cwd || deps.cwd || process.cwd()
   let taskDir = ''
   try { taskDir = String(input.taskDir || deps.taskDir || env?.CREW_TASK_DIR || '') } catch { taskDir = '' }
-  const journalPath = input.journalPath || deps.journalPath || (taskDir ? join(dirname(taskDir), 'journal.jsonl') : null)
+  const journalPath = input.journalPath || deps.journalPath || (taskDir ? journalPathOf(taskDir, env) : null)
   const appendFile = input.appendFile || deps.appendFile || deps.appendFileSync || defaultAppend
   const now = input.now || deps.now || defaultNow
   const countLines = input.countLines || deps.countLines || defaultCountLines
@@ -808,7 +809,27 @@ export function createReadGate(options = {}) {
     }
   }
 
-  return { onToolCall, onToolResult, onTurnStart }
+  // A host that runs each hook in a fresh process (the claude seat plugin) keeps what the gate has seen between calls.
+  // Pi never calls these: its closure lives for the whole session.
+  function exportState() {
+    return {
+      turn: currentTurn,
+      ranges: [...readRanges].map(([file, byFingerprint]) => [file, [...byFingerprint]]),
+      pending: [...pendingReads],
+    }
+  }
+
+  function importState(state) {
+    const rows = (value) => { if (!Array.isArray(value) || !value.every((row) => Array.isArray(row) && row.length === 2)) throw new Error('read gate state is malformed'); return value }
+    if (!state || typeof state !== 'object' || !Number.isSafeInteger(state.turn) || state.turn < 1) throw new Error('read gate state is malformed')
+    const ranges = new Map(rows(state.ranges).map(([file, byFingerprint]) => [String(file), new Map(rows(byFingerprint))]))
+    const pending = new Map(rows(state.pending))
+    currentTurn = state.turn
+    readRanges.clear(); for (const [file, byFingerprint] of ranges) readRanges.set(file, byFingerprint)
+    pendingReads.clear(); for (const [id, read] of pending) pendingReads.set(id, read)
+  }
+
+  return { onToolCall, onToolResult, onTurnStart, exportState, importState }
 }
 
 export function attachReadGate(pi, options = {}) {

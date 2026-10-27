@@ -1,13 +1,12 @@
 // crew closeout <lane> — close a merged lean lane: remove its worktree, delete its branch, archive its lane directory.
 //
 // Three steps, in this order, each checked:
-//   1. git worktree remove <worktree>          (never --force: git itself refuses a worktree with uncommitted changes)
-//   2. git branch -D <lane>                    (local only, and only when its tip is the PR head GitHub merged)
+//   1. git worktree remove <worktree>   (never --force, so git refuses a worktree with uncommitted changes)
+//   2. git branch -D <lane>             (local only)
 //   3. move ~/.crew/dt-<lane> to ~/.crew-journal-archive/dt-<lane>  (moved, never deleted)
-// Only for a live lane whose journal records a PR that GitHub reports MERGED, whose worktree is dt-<lane> on
-// branch <lane>, and whose branch tip is that PR's head. The PR is looked up by its recorded URL, so the cwd's
-// repository never answers for it. Every check runs before the first effect, and the first effect refuses a dirty
-// worktree, so a refusal before it changes nothing on disk or in git.
+// The lane's recorded PR must be MERGED on GitHub, in the worktree's origin repository, with the lane branch's tip
+// as its head; the worktree must be dt-<lane> on that branch. All of it is checked before step 1, so a refusal
+// changes nothing on disk or in git.
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { homedir } from 'node:os'
@@ -69,35 +68,30 @@ export function closeoutLane({ lane, root = join(homedir(), '.crew'), archiveRoo
   const worktree = found.spec.cwd
   if (typeof worktree !== 'string' || !worktree || !isDir(worktree)) refuse('lean.json names no existing worktree')
   if (basename(worktree) !== `dt-${lane}`) refuse(`worktree ${worktree} is not dt-${lane}`)
-  const branch = lane
   const laneDir = join(root, `dt-${lane}`)
   const archivedDir = join(archive, `dt-${lane}`)
   if (existsSync(archivedDir)) refuse(`${archivedDir} already exists`)
 
+  const viewText = must(run, 'gh pr view', 'gh', ['pr', 'view', pr.url, '--json', 'state,headRefOid'])
   let view
-  try { view = JSON.parse(must(run, 'gh pr view', 'gh', ['pr', 'view', pr.url, '--json', 'state,headRefOid'])) } catch (error) {
-    if (error instanceof CloseoutRefusal) throw error
-    refuse('gh pr view returned unparseable output')
-  }
+  try { view = JSON.parse(viewText) } catch { refuse('gh pr view returned unparseable output') }
   if (view?.state !== 'MERGED') refuse(`pull request #${pr.number} is not merged (${String(view?.state)})`)
 
-  const common = must(run, 'git rev-parse', 'git', ['-C', worktree, 'rev-parse', '--path-format=absolute', '--git-common-dir']).trim()
-  if (!common) refuse('could not find the main checkout')
-  const mainCheckout = dirname(common)
+  const mainCheckout = dirname(must(run, 'git rev-parse', 'git', ['-C', worktree, 'rev-parse', '--path-format=absolute', '--git-common-dir']).trim())
   const origin = repoOf(must(run, 'git remote get-url', 'git', ['-C', worktree, 'remote', 'get-url', 'origin']).trim())
   const prRepo = repoOf(pr.url.replace(/\/pull\/\d+$/, ''))
   if (!origin || origin !== prRepo) refuse(`pull request ${pr.url} is not in this worktree's origin (${origin ?? 'not a GitHub remote'})`)
   const head = must(run, 'git symbolic-ref', 'git', ['-C', worktree, 'symbolic-ref', '-q', 'HEAD']).trim()
-  if (head !== `refs/heads/${branch}`) refuse(`worktree ${worktree} is on ${head || 'a detached HEAD'}, not ${branch}`)
-  const tip = must(run, 'git rev-parse', 'git', ['-C', mainCheckout, 'rev-parse', '--verify', `refs/heads/${branch}^{commit}`]).trim()
-  if (typeof view.headRefOid !== 'string' || tip !== view.headRefOid) refuse(`branch ${branch} is at ${tip}, not the merged head ${String(view.headRefOid)}`)
+  if (head !== `refs/heads/${lane}`) refuse(`worktree ${worktree} is on ${head || 'a detached HEAD'}, not ${lane}`)
+  const tip = must(run, 'git rev-parse', 'git', ['-C', mainCheckout, 'rev-parse', '--verify', `refs/heads/${lane}^{commit}`]).trim()
+  if (typeof view.headRefOid !== 'string' || tip !== view.headRefOid) refuse(`branch ${lane} is at ${tip}, not the merged head ${String(view.headRefOid)}`)
   must(run, 'git worktree remove', 'git', ['-C', mainCheckout, 'worktree', 'remove', worktree])
-  must(run, 'git branch -D', 'git', ['-C', mainCheckout, 'branch', '-D', branch])
+  must(run, 'git branch -D', 'git', ['-C', mainCheckout, 'branch', '-D', lane])
   try {
     mkdir(archive, { recursive: true })
     rename(laneDir, archivedDir)
   } catch (error) { refuse(`could not move ${laneDir} to ${archivedDir}: ${error?.code ?? error?.message}`) }
-  return { lane, pr, worktree, branch, archivedDir }
+  return { lane, pr, worktree, archivedDir }
 }
 
 export function main(argv = process.argv.slice(2), deps = {}) {
@@ -109,7 +103,7 @@ export function main(argv = process.argv.slice(2), deps = {}) {
   }
   try {
     const done = closeoutLane({ lane, root: d.root, archiveRoot: d.archiveRoot, run: d.run, renameSync: d.renameSync, mkdirSync: d.mkdirSync })
-    d.stdout(`closed out ${lane}: removed ${done.worktree}, deleted branch ${done.branch}, archived to ${done.archivedDir}\n`)
+    d.stdout(`closed out ${lane}: removed ${done.worktree}, deleted branch ${lane}, archived to ${done.archivedDir}\n`)
     return 0
   } catch (error) {
     if (!(error instanceof CloseoutRefusal)) throw error

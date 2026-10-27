@@ -1286,8 +1286,8 @@ test('RE4', () => {
     assert.equal(nextModelRung(roster, cell, { ceiling: 10 }), null)
     assert.equal(nextModelRung(roster, cell).cell.id, 'b')
   }
-  assert.equal(nextModelRung(SHIPPED_ROSTER, SHIPPED_ROSTER.tiers.build.planner, { ceiling: 25 }), null)
-  assert.equal(nextModelRung(SHIPPED_ROSTER, SHIPPED_ROSTER.tiers.build.planner).cell.id, 'gpt-6-astra')
+  assert.equal(nextModelRung(SHIPPED_ROSTER, SHIPPED_ROSTER.tiers.build.reviewer, { ceiling: 25 }), null)
+  assert.equal(nextModelRung(SHIPPED_ROSTER, SHIPPED_ROSTER.tiers.build.reviewer).cell.id, 'gpt-6-astra')
 })
 
 // Kill mutation: read judge's ceiling instead of crew.tier's ceiling.
@@ -1345,16 +1345,17 @@ test('RE9', () => {
       assert.deepEqual([climbed.applied, climbed.to?.provider, climbed.to?.id, climbed.to?.effort, climbed.rung],
         [true, 'anthropic', 'claude-opus-5-5', builder.effort, 'model:claude-sonnet-5-5→claude-opus-5-5'])
     }
-    // The Sol planners and Opus reviewers declare no fallback and have no in-ceiling model upgrade
-    // (Sol's next rung, Astra, is over every tier ceiling): only a tier step to a higher effort moves them.
+    // The Muse planners and Sol reviewers declare no fallback and have no in-ceiling model upgrade
+    // (Sol's next rung, Astra, is over every tier ceiling): only a tier step to a higher effort moves them,
+    // and Muse's borrowed, estimated rate is not measured, so no tier step lands on a Muse cell.
     for (const role of ['planner', 'reviewer']) {
       const cell = SHIPPED_ROSTER.tiers[tier][role]
       assert.equal(cell.fallback, undefined)
       const fixture = makeTierFixture({ role, tier, cell, readRoster: () => SHIPPED_ROSTER, readLadder: () => ladder })
       const seat = fixture.io.reseat(role)
-      // The planner runs medium on mechanical and high on build and judge, so only the mechanical planner
-      // climbs; the reviewer runs high below judge's xhigh, so only the build reviewer climbs.
-      const climbs = role === 'planner' ? tier === 'mechanical' : tier === 'build'
+      // The planner never climbs: its next tier's cell is a Muse cell with an estimated rate. The reviewer
+      // runs high below judge's xhigh, so only the build reviewer climbs.
+      const climbs = role === 'reviewer' && tier === 'build'
       assert.deepEqual([role, seat.applied, seat.applied ? seat.rung : seat.reason, seat.to?.id ?? cell.id],
         [role, climbs, climbs ? `${tier}→${tier === 'mechanical' ? 'build' : 'judge'}` : 'exhausted', cell.id])
       // A climb moves the effort to the next tier's cell, in the result and in the in-memory crew record

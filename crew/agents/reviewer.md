@@ -3,8 +3,8 @@ name: reviewer
 description: Reviews the built diff against the plan and its acceptance checks.
 role: reviewer
 writes: task-dir
-agent: claude
-model: anthropic/claude-opus-5-5
+agent: pi
+model: openai/gpt-6.1-sol
 effort: high
 advisor: null
 tiers: {"judge":{"effort":"xhigh"}}

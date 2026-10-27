@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-10-24",
+  "updated_at": "2026-10-27",
   "tiers": {
     "mechanical": {
       "advisor": null,
       "lead": null,
       "planner": {
-        "provider": "openai",
-        "id": "gpt-6.1-sol",
+        "provider": "meta",
+        "id": "muse-wonder-1.0-contributor",
         "agent": "pi",
         "effort": "medium"
       },
@@ -18,9 +18,9 @@
         "effort": "high"
       },
       "reviewer": {
-        "provider": "anthropic",
-        "id": "claude-opus-5-5",
-        "agent": "claude",
+        "provider": "openai",
+        "id": "gpt-6.1-sol",
+        "agent": "pi",
         "effort": "high"
       }
     },
@@ -41,8 +41,8 @@
         ]
       },
       "planner": {
-        "provider": "openai",
-        "id": "gpt-6.1-sol",
+        "provider": "meta",
+        "id": "muse-wonder-1.0-contributor",
         "agent": "pi",
         "effort": "high"
       },
@@ -53,9 +53,9 @@
         "effort": "high"
       },
       "reviewer": {
-        "provider": "anthropic",
-        "id": "claude-opus-5-5",
-        "agent": "claude",
+        "provider": "openai",
+        "id": "gpt-6.1-sol",
+        "agent": "pi",
         "effort": "high"
       }
     },
@@ -76,8 +76,8 @@
         ]
       },
       "planner": {
-        "provider": "openai",
-        "id": "gpt-6.1-sol",
+        "provider": "meta",
+        "id": "muse-wonder-full-1.0-contributor",
         "agent": "pi",
         "effort": "high"
       },
@@ -88,9 +88,9 @@
         "effort": "xhigh"
       },
       "reviewer": {
-        "provider": "anthropic",
-        "id": "claude-opus-5-5",
-        "agent": "claude",
+        "provider": "openai",
+        "id": "gpt-6.1-sol",
+        "agent": "pi",
         "effort": "xhigh"
       },
       "tech-lead": {

@@ -4807,9 +4807,9 @@ test('D1-valid shipped workflow validates', () => {
     assert.equal(seat.availability, 'unmeasured')
     assert.equal(Object.isFrozen(seat), true)
   }
-  assert.equal(resolved.seats.planner.id, 'gpt-6.1-sol')
+  assert.equal(resolved.seats.planner.id, 'muse-wonder-1.0-contributor')
   assert.equal(resolved.seats.lead.id, 'gpt-6-astra')
-  assert.equal(resolved.seats.reviewer.id, 'claude-opus-5-5')
+  assert.equal(resolved.seats.reviewer.id, 'gpt-6.1-sol')
   assert.equal(resolved.seats.builder.id, 'claude-sonnet-5-5')
 })
 

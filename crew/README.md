@@ -27,9 +27,9 @@ still win over the one-flag form.
 
 | tier | advisor | lead | planner | builder | reviewer | tech-lead |
 |---|---|---|---|---|---|---|
-| `mechanical` | — | — | pi/gpt-6.1-sol, medium | claude/claude-sonnet-5-5, high | claude/claude-opus-5-5, high | — |
-| `build` | — | pi/gpt-6-astra, high | pi/gpt-6.1-sol, high | claude/claude-sonnet-5-5, high | claude/claude-opus-5-5, high | — |
-| `judge` | — | pi/gpt-6-astra, high | pi/gpt-6.1-sol, high | claude/claude-sonnet-5-5, xhigh | claude/claude-opus-5-5, xhigh | claude/claude-opus-5-5, xhigh |
+| `mechanical` | — | — | pi/muse-wonder-1.0-contributor, medium | claude/claude-sonnet-5-5, high | pi/gpt-6.1-sol, high | — |
+| `build` | — | pi/gpt-6-astra, high | pi/muse-wonder-1.0-contributor, high | claude/claude-sonnet-5-5, high | pi/gpt-6.1-sol, high | — |
+| `judge` | — | pi/gpt-6-astra, high | pi/muse-wonder-full-1.0-contributor, high | claude/claude-sonnet-5-5, xhigh | pi/gpt-6.1-sol, xhigh | claude/claude-opus-5-5, xhigh |
 
 Cells are `<agent>/<id>, <effort>`, or — for an unseated role.
 This table shows the primary rung only; `crew/roster.json` is authoritative.

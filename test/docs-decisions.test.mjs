@@ -203,7 +203,7 @@ test('RS2', () => {
   assert.ok(seatTableDisagreements(missingColumn, roster).length > 0)
   const duplicateColumn = table.replace('| tier | advisor | lead |', '| tier | advisor | advisor |')
   assert.ok(seatTableDisagreements(duplicateColumn, roster).length > 0)
-  const malformedWidth = table.replace('claude/claude-opus-5-5, high | — |', 'claude/claude-opus-5-5, high |')
+  const malformedWidth = table.replace('pi/gpt-6.1-sol, high | — |', 'pi/gpt-6.1-sol, high |')
   assert.notEqual(malformedWidth, table)
   assert.ok(seatTableDisagreements(malformedWidth, roster).some((error) => error.includes('width')))
   const nullCellMarkdown = table.replace('| `mechanical` | — | — |', '| `mechanical` | pi/gpt-5.6-terra, medium | — |')

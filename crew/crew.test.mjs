@@ -2404,20 +2404,21 @@ test('assertPanelAgentsDistinct refuses only equal agents under the flag', () =>
   )
 })
 
-test('shipped roster and ladder seat the ratified Sol, Astra, Sonnet and Opus cells, Fable as tech-lead fallback, and no advisor', () => {
+test('shipped roster and ladder seat the ratified Muse, Sol, Astra, Sonnet and Opus cells, Fable as tech-lead fallback, and no advisor', () => {
   const shipped = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
-  assert.equal(shipped.updated_at, '2026-10-24')
-  // Operator, 2026-10-24: Sol plans through pi, Sonnet builds and Opus reviews through claude, Astra leads
-  // build and judge through pi with Sol behind it; judge raises builder, reviewer and tech-lead to xhigh; the Sol
-  // planner runs medium on mechanical and high above it; no advisor.
+  assert.equal(shipped.updated_at, '2026-10-27')
+  // Operator, 2026-10-27: Muse Wonder plans through pi (Wonder Full on judge), Sonnet builds through claude, Sol
+  // reviews through pi, Astra leads build and judge through pi with Sol behind it; judge raises builder, reviewer
+  // and tech-lead to xhigh; the planner runs medium on mechanical and high above it; no advisor.
   const sol = (effort) => ({ provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort })
+  const museCell = (effort, id = 'muse-wonder-1.0-contributor') => ({ provider: 'meta', id, agent: 'pi', effort })
   const sonnet = (effort) => ({ provider: 'anthropic', id: 'claude-sonnet-5-5', agent: 'claude', effort })
   const opus = (effort) => ({ provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort })
   const astraLead = { provider: 'openai', id: 'gpt-6-astra', agent: 'pi', effort: 'high', fallback: [sol('high')] }
-  assert.deepEqual(shipped.tiers.mechanical, { advisor: null, lead: null, planner: sol('medium'), builder: sonnet('high'), reviewer: opus('high') })
-  assert.deepEqual(shipped.tiers.build, { advisor: null, lead: astraLead, planner: sol('high'), builder: sonnet('high'), reviewer: opus('high') })
+  assert.deepEqual(shipped.tiers.mechanical, { advisor: null, lead: null, planner: museCell('medium'), builder: sonnet('high'), reviewer: sol('high') })
+  assert.deepEqual(shipped.tiers.build, { advisor: null, lead: astraLead, planner: museCell('high'), builder: sonnet('high'), reviewer: sol('high') })
   assert.deepEqual(shipped.tiers.judge, {
-    advisor: null, lead: astraLead, planner: sol('high'), builder: sonnet('xhigh'), reviewer: opus('xhigh'),
+    advisor: null, lead: astraLead, planner: museCell('high', 'muse-wonder-full-1.0-contributor'), builder: sonnet('xhigh'), reviewer: sol('xhigh'),
     'tech-lead': { provider: 'anthropic', id: 'claude-opus-5-5', agent: 'claude', effort: 'xhigh', fallback: [{ provider: 'anthropic', id: 'claude-fable-5-1', agent: 'claude', effort: 'medium' }] },
   })
   // Fable is reached by explicit seating only: its override-only tag keeps the failure-upgrade
@@ -2820,10 +2821,11 @@ test('QW1', () => {
   const seats = (tier, role) => { const cell = shipped.tiers[tier][role]; return cell && [cell.provider, cell.id, cell.agent, cell.effort].join('/') }
   const effort = { mechanical: 'high', build: 'high', judge: 'xhigh' }
   const plannerEffort = { mechanical: 'medium', build: 'high', judge: 'high' }
+  const plannerModel = { mechanical: 'muse-wonder-1.0-contributor', build: 'muse-wonder-1.0-contributor', judge: 'muse-wonder-full-1.0-contributor' }
   for (const tier of ['mechanical', 'build', 'judge']) {
-    assert.equal(seats(tier, 'planner'), `openai/gpt-6.1-sol/pi/${plannerEffort[tier]}`, `${tier}/planner`)
+    assert.equal(seats(tier, 'planner'), `meta/${plannerModel[tier]}/pi/${plannerEffort[tier]}`, `${tier}/planner`)
     assert.equal(seats(tier, 'builder'), `anthropic/claude-sonnet-5-5/claude/${effort[tier]}`, `${tier}/builder`)
-    assert.equal(seats(tier, 'reviewer'), `anthropic/claude-opus-5-5/claude/${effort[tier]}`, `${tier}/reviewer`)
+    assert.equal(seats(tier, 'reviewer'), `openai/gpt-6.1-sol/pi/${effort[tier]}`, `${tier}/reviewer`)
     assert.equal(shipped.tiers[tier].advisor, null, `${tier}/advisor`)
     assert.equal(shipped.tiers[tier].builder.fallback, undefined, `${tier}/builder fallback`)
   }
@@ -2842,9 +2844,9 @@ test('QW1', () => {
 test('QW2', async () => {
   const shipped = shippedRoster()
   const expected = {
-    mechanical: { planner: 'pi', builder: 'claude', reviewer: 'claude' },
-    build: { lead: 'pi', planner: 'pi', builder: 'claude', reviewer: 'claude' },
-    judge: { lead: 'pi', planner: 'pi', builder: 'claude', reviewer: 'claude', 'tech-lead': 'claude' },
+    mechanical: { planner: 'pi', builder: 'claude', reviewer: 'pi' },
+    build: { lead: 'pi', planner: 'pi', builder: 'claude', reviewer: 'pi' },
+    judge: { lead: 'pi', planner: 'pi', builder: 'claude', reviewer: 'pi', 'tech-lead': 'claude' },
   }
   for (const [tier, agents] of Object.entries(expected)) {
     const args = { 'headless-all': true }

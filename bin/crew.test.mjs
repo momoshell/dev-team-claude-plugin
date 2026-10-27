@@ -20,6 +20,7 @@ function fakeHome(root) {
   writeFileSync(join(root, 'crew', 'start.mjs'), echo(0))
   writeFileSync(join(root, 'crew', 'show.mjs'), echo(7))
   writeFileSync(join(root, 'crew', 'roster-generate.mjs'), echo(0))
+  writeFileSync(join(root, 'crew', 'record-pr.mjs'), echo(0))
   writeFileSync(join(root, 'scripts', 'factory', 'ledger.mjs'), echo(0))
   return root
 }
@@ -68,11 +69,11 @@ test('a crew.mjs verb passes through with its argv, the caller cwd and its exit 
 })
 
 // MUTATION: drop start from ENTRY and `crew start` reaches crew.mjs as an unknown verb.
-test('ctl, ledger, start, show and roster route to their own entry points with the verb stripped', () => {
+test('ctl, ledger, start, show, roster and record-pr route to their own entry points with the verb stripped', () => {
   const root = scratch('route')
   try {
     const home = fakeHome(join(root, 'home'))
-    for (const [verb, entry] of [['ctl', 'crew/factoryctl.mjs'], ['ledger', 'scripts/factory/ledger.mjs'], ['start', 'crew/start.mjs'], ['show', 'crew/show.mjs'], ['roster', 'crew/roster-generate.mjs']]) {
+    for (const [verb, entry] of [['ctl', 'crew/factoryctl.mjs'], ['ledger', 'scripts/factory/ledger.mjs'], ['start', 'crew/start.mjs'], ['show', 'crew/show.mjs'], ['roster', 'crew/roster-generate.mjs'], ['record-pr', 'crew/record-pr.mjs']]) {
       const out = crew([verb, 'cells', '--since', '2026-10-01'], { cwd: root, env: { CREW_HOME: home } })
       assert.equal(out.status, verb === 'show' ? 7 : 0)
       assert.deepEqual(JSON.parse(out.stdout).entry, join(home, entry))

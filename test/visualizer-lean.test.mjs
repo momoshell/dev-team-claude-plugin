@@ -159,3 +159,29 @@ test('a lane whose spec or crew file symlinks out of the lane is not listed', as
     assert.deepEqual((await get('/api/sessions')).body.runs.map((run) => run.adw_id), [])
   })
 })
+
+test('LV-HF a lane whose last row is an operator pr row is done and hand-finished; the final pr row decides', async () => {
+  await withServer(async ({ crewRoot, archiveRoot, get }) => {
+    const stop = [{ event: 'verdict', stage: 'build', status: 'stopped', reason: 'seat-unmeasured' }, { event: 'stage-end', stage: 'build' }]
+    const pr = { number: 5, url: 'https://github.com/o/r/pull/5' }
+    const dir = lane(crewRoot, 'hf-live', stop)
+    lane(archiveRoot, 'hf-arch', [...stop, { event: 'pr', actor: 'operator', pr }])
+    lane(crewRoot, 'hf-loop', [...stop, { event: 'pr', actor: 'operator', pr }, { event: 'pr', stage: 'start', pr }])
+    const byGoal = async () => Object.fromEntries((await get('/api/sessions')).body.runs.map((run) => [run.goal, run]))
+    assert.equal((await byGoal())['hf-live'].status, 'stopped')
+    assert.equal((await byGoal())['hf-live'].hand_finished, false)
+    appendFileSync(join(dir, 'task', 'journal.jsonl'), jsonl([{ event: 'pr', actor: 'operator', pr }]))
+    const runs = await byGoal()
+    for (const name of ['hf-live', 'hf-arch']) {
+      assert.equal(runs[name].status, 'done')
+      assert.equal(runs[name].running, false)
+      assert.equal(runs[name].hand_finished, true)
+      assert.equal(runs[name].pr_actor, 'operator')
+      assert.deepEqual(runs[name].pr, pr)
+      assert.notEqual(runs[name].ship.state, 'merged')
+    }
+    assert.equal(runs['hf-loop'].status, 'done')
+    assert.equal(runs['hf-loop'].hand_finished, false)
+    assert.equal(runs['hf-loop'].pr_actor, 'loop')
+  })
+})

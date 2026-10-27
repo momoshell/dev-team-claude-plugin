@@ -10,7 +10,10 @@ export function journalLines(rows = []) {
     if (row.event === 'check') detail = `${row.check ?? 'check'}: ${row.result?.status ?? 'result not recorded'}`
     else if (row.event === 'stage-end') detail = row.outcome?.status ?? (row.outcome?.code != null ? `exit ${row.outcome.code}` : 'outcome not recorded')
     else if (row.event === 'verdict') detail = [row.status, row.verdict, row.reason].filter((part) => typeof part === 'string' && part).join(' · ') || 'verdict fields not recorded'
-    else if (row.event === 'pr') detail = row.pr?.url ?? (row.pr?.number != null ? `#${row.pr.number}` : 'pull request not recorded')
+    else if (row.event === 'pr') {
+      detail = row.pr?.url ?? (row.pr?.number != null ? `#${row.pr.number}` : 'pull request not recorded')
+      if (row.actor === 'operator') detail += ' · recorded by operator · hand-finished'
+    }
     return { index: row.index, event: row.event ?? 'unknown', stage, detail }
   })
 }

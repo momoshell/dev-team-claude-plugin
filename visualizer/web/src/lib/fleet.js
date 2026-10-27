@@ -533,7 +533,7 @@ export function leanStatus(run = {}) {
   const status = typeof run.status === 'string' ? run.status : 'unknown'
   const key = KEYS[status] ?? 'unknown'
   const open = status === 'running' || status === 'reviewed'
-  const word = status === 'running' ? 'open · no terminal record' : status === 'unknown' ? 'status not recorded' : status
+  const word = status === 'running' ? 'open · no terminal record' : status === 'unknown' ? 'status not recorded' : status === 'done' && run.hand_finished === true ? 'done · hand-finished' : status
   const why = typeof run.reason === 'string' && run.reason ? run.reason : null
   return { key, word, tone: TONES[status] ?? 'quiet', where: null, why, open }
 }

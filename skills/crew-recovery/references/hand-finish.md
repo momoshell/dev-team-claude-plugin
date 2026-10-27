@@ -80,6 +80,16 @@ Re-dispatch instead when:
    sentence saying it stays open. State the denominators, what was done by hand,
    what the lane's own review never saw, and every residual. Verify the PR's
    first line after creating it. Keep the worktree until the operator merges.
+10. **Record the PR on a stopped lean lane.** A lean lane the loop stopped never
+    wrote a `pr` row, so the visualizer shows it stopped forever. Once the lane
+    is stopped and quiet (nothing is still writing its journal), run
+    `crew record-pr <lane> --pr https://github.com/<owner>/<repo>/pull/<number>`.
+    It finds the lane live, then as its newest `.archive-*` sibling, then under
+    `.crew-journal-archive`, and appends one `pr` row marked as written by the
+    operator (`crew/record-pr.mjs@operator-pr-row`), so the
+    visualizer reads it as done, hand-finished, never as a loop publish. It only
+    appends: no existing row is rewritten, a lane whose journal already records
+    any `pr` is refused, and it does not check that the PR merged.
 
 ## Skills: loading is not applying
 

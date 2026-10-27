@@ -7,5 +7,6 @@
   "scripts/factory/make-brief.mjs:1210": "function colourNeutralEnv(base = process.env)",
   "crew/crew.mjs:4212": "escalation -> NEVER teardown",
   "crew/crew.mjs:4884": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
-  "crew/crew.mjs:4766": "const seats = rows.length"
+  "crew/crew.mjs:4766": "const seats = rows.length",
+  "crew/record-pr.mjs@operator-pr-row": "actor: 'operator'"
 }

@@ -1,16 +1,20 @@
 // crew start <brief.md> [--check] [--checkout <dir>]
 //
 // The lean entry (ADR-052 phase 1): one P1 brief in, one running lane out. It checks the
-// brief, creates the lane worktree, boots the crew headless and starts the run detached,
-// handing the brief to the planner as its whole input. No compile, no baseline, no gate.
-// The lane name is the brief's file name. The crew boots the roster generated from the P5
-// agent definitions, refused before any git call if it cannot boot. --check validates the
-// brief and that generated roster, needs no checkout, and stops.
+// brief, creates the lane worktree and starts the run detached, handing the brief to the
+// planner as its whole input. No compile, no baseline, no gate. The lane name is the
+// brief's file name. --check validates the brief and needs no checkout.
 //
-// Until phase 3 the lane runs on today's driver, so the brief the run reads carries the
-// driver's fixed header (`# Task`, then the bound-issue slot when `closes` is set) and is
-// checked with the driver's own parsers: the driver refuses to publish an issue-bound lane
-// whose plan declares no issue, and promotes the bound issue to a Closes trailer.
+// `--loop lean` stands on the brief parser and the agent definitions alone: it refuses
+// before any git call when the brief is not P1 or the definitions do not resolve, and it
+// never loads the old driver, roster or crew modules.
+//
+// Without `--loop lean` the lane runs on today's driver, so the brief the run reads carries
+// the driver's fixed header (`# Task`, then the bound-issue slot when `closes` is set) and
+// is checked with the driver's own parsers: the driver refuses to publish an issue-bound
+// lane whose plan declares no issue, and promotes the bound issue to a Closes trailer. The
+// crew boots the roster generated from the agent definitions, refused before any git call
+// if it cannot boot. Those old-path modules load by dynamic import on that path only.
 import { spawn, spawnSync } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -18,11 +22,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseBrief } from './protocols.mjs'
 import { resolveAgents } from './agents.mjs'
-import { bootRefusals } from './roster-validate.mjs'
-import { normalizeRoster } from './roster.mjs'
-import { generateRoster } from './roster-generate.mjs'
 import { SLOT_ENV } from './reclaim.mjs'
-import { acceptanceIds, boundIssueOf } from './drive.mjs'
 
 const HOME = dirname(dirname(fileURLToPath(import.meta.url)))
 const CREW = join(HOME, 'crew', 'crew.mjs')
@@ -42,8 +42,7 @@ export function runBrief(text, closes) {
 }
 
 const defaultDeps = () => ({
-  readFileSync, existsSync, mkdirSync, writeFileSync, openSync, closeSync, resolveAgents, bootRefusals,
-  driverReads: (text) => ({ acceptance: acceptanceIds(text), bound: boundIssueOf(text) }),
+  readFileSync, existsSync, mkdirSync, writeFileSync, openSync, closeSync, resolveAgents,
   spawnSync: (file, args, options) => spawnSync(file, args, { encoding: 'utf8', ...options }),
   spawnDetached: (file, args, { cwd, log, env }) => {
     const out = openSync(log, 'a')
@@ -70,30 +69,40 @@ export async function startLane({ briefPath, checkout, check = false, loop, deps
   const { fields, defects } = parseBrief(text)
   if (defects.length) throw new StartRefusal(`brief ${briefPath} is not a P1 brief:\n- ${defects.join('\n- ')}`)
   const run = runBrief(text, fields.closes)
-  const driver = d.driverReads(run)
-  const bound = fields.closes === null ? null : String(fields.closes)
-  if (JSON.stringify(driver.acceptance) !== JSON.stringify(fields.acceptance) || driver.bound !== bound) {
-    throw new StartRefusal(`the driver reads brief ${briefPath} differently: acceptance ${JSON.stringify(driver.acceptance)} and bound issue ${driver.bound ?? 'none'}, against ${JSON.stringify(fields.acceptance)} and ${bound ?? 'none'}`)
-  }
-  if (fields.shape === 'finish') throw new StartRefusal('shape finish starts from an escalated lane, not a new brief; crew start runs standard and stepped')
-  if (loop === 'lean' && fields.shape !== 'standard') throw new StartRefusal(`--loop lean runs the standard shape only; brief ${briefPath} declares shape ${fields.shape}`)
+  let rosterText, roster, resolved
+  if (loop === 'lean') {
+    if (fields.shape === 'finish') throw new StartRefusal('shape finish starts from an escalated lane, not a new brief; crew start runs standard and stepped')
+    if (fields.shape !== 'standard') throw new StartRefusal(`--loop lean runs the standard shape only; brief ${briefPath} declares shape ${fields.shape}`)
+    try { resolved = d.resolveAgents(fields.tier) } catch (cause) { throw new StartRefusal(`cannot resolve the agent definitions: ${cause.message}`, { cause }) }
+  } else {
+    // The old path, loaded only here: the driver's own read of the brief, then the roster.
+    const [drive, { normalizeRoster }, { generateRoster }, { bootRefusals }] = await Promise.all([
+      import('./drive.mjs'), import('./roster.mjs'), import('./roster-generate.mjs'), import('./roster-validate.mjs'),
+    ])
+    const driverReads = d.driverReads ?? ((text) => ({ acceptance: drive.acceptanceIds(text), bound: drive.boundIssueOf(text) }))
+    const driver = driverReads(run)
+    const bound = fields.closes === null ? null : String(fields.closes)
+    if (JSON.stringify(driver.acceptance) !== JSON.stringify(fields.acceptance) || driver.bound !== bound) {
+      throw new StartRefusal(`the driver reads brief ${briefPath} differently: acceptance ${JSON.stringify(driver.acceptance)} and bound issue ${driver.bound ?? 'none'}, against ${JSON.stringify(fields.acceptance)} and ${bound ?? 'none'}`)
+    }
+    if (fields.shape === 'finish') throw new StartRefusal('shape finish starts from an escalated lane, not a new brief; crew start runs standard and stepped')
 
-  // The deployed roster.json supplies what the agent definitions do not carry; every seat
-  // and the advisor come from the definitions (crew/roster-generate.mjs). The check runs on
-  // those bytes normalized exactly as boot will normalize them.
-  let rosterText, roster
-  try {
-    rosterText = generateRoster(d.readFileSync(join(HOME, 'crew', 'roster.json'), 'utf8'), d.resolveAgents) + '\n'
-    roster = normalizeRoster(JSON.parse(rosterText))
-  } catch (cause) {
-    throw new StartRefusal(`cannot generate the roster from the agent definitions: ${cause.message}`, { cause })
+    // The deployed roster.json supplies what the agent definitions do not carry; every seat
+    // and the advisor come from the definitions (crew/roster-generate.mjs). The check runs on
+    // those bytes normalized exactly as boot will normalize them.
+    try {
+      rosterText = generateRoster(d.readFileSync(join(HOME, 'crew', 'roster.json'), 'utf8'), d.resolveAgents) + '\n'
+      roster = normalizeRoster(JSON.parse(rosterText))
+    } catch (cause) {
+      throw new StartRefusal(`cannot generate the roster from the agent definitions: ${cause.message}`, { cause })
+    }
+    let refusals
+    try { refusals = await (d.bootRefusals ?? bootRefusals)(roster) } catch (cause) {
+      throw new StartRefusal(`cannot check the generated roster: ${cause.message}`, { cause })
+    }
+    const refusalText = refusals.map((refusal) => JSON.stringify(refusal)).join('\n')
+    if (refusals.length) throw new StartRefusal('generated roster is refused:\n' + refusalText)
   }
-  let refusals
-  try { refusals = await d.bootRefusals(roster) } catch (cause) {
-    throw new StartRefusal(`cannot check the generated roster: ${cause.message}`, { cause })
-  }
-  const refusalText = refusals.map((refusal) => JSON.stringify(refusal)).join('\n')
-  if (refusals.length) throw new StartRefusal('generated roster is refused:\n' + refusalText)
   if (check) { d.log(`crew start: brief ok lane=${lane} tier=${fields.tier} shape=${fields.shape} closes=${fields.closes ?? 'none'}`); return { lane, fields, checked: true } }
 
   checkout ??= git(d, process.cwd(), ['rev-parse', '--show-toplevel'])
@@ -103,15 +112,15 @@ export async function startLane({ briefPath, checkout, check = false, loop, deps
   const base = (git(d, checkout, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']) || 'origin/main').replace(/^origin\//, '')
   if (git(d, checkout, ['worktree', 'add', '-b', lane, worktree, base]) === null) throw new StartRefusal(`git worktree add -b ${lane} ${worktree} ${base} failed in ${checkout}`)
 
-  // The run reads a snapshot, so editing the draft cannot change a running lane; the
-  // boot reads the validated roster beside it, not a re-resolution.
+  // The run reads a snapshot, so editing the draft cannot change a running lane; on the old
+  // path the boot reads the validated roster beside it, not a re-resolution.
   const started = join(d.crewRoot, 'briefs', 'started')
   const brief = join(started, `${lane}.md`)
   const rosterPath = join(started, `${lane}.roster.json`)
   try {
     d.mkdirSync(started, { recursive: true })
     d.writeFileSync(brief, run)
-    d.writeFileSync(rosterPath, rosterText)
+    if (loop !== 'lean') d.writeFileSync(rosterPath, rosterText)
   } catch (cause) {
     throw new StartRefusal(`cannot snapshot lane ${lane} into ${started}: ${cause.code ?? cause.message}; the worktree ${worktree} and branch ${lane} are left for inspection`, { cause })
   }
@@ -127,8 +136,8 @@ export async function startLane({ briefPath, checkout, check = false, loop, deps
     const crewDir = join(d.crewRoot, `dt-${lane}`, lane)
     const taskDir = join(crewDir, 'task')
     const specPath = join(taskDir, 'lean.json')
-    const members = Object.fromEntries(Object.entries(roster.tiers[fields.tier])
-      .filter(([role, cell]) => role !== 'advisor' && cell)
+    const members = Object.fromEntries(Object.entries(resolved.seats)
+      .filter(([, cell]) => cell)
       .map(([role, cell]) => [role, { agent: cell.agent, model: `${cell.provider}/${cell.id}`, transport: 'lean-acp' }]))
     const spec = {
       id: lane, cwd: worktree, taskDir, tier: fields.tier, shape: fields.shape, brief: run, acceptance: fields.acceptance,
@@ -149,7 +158,7 @@ export async function startLane({ briefPath, checkout, check = false, loop, deps
     d.log(`  log      ${log}`)
     d.log(`  spec     ${specPath}`)
     d.log(`  sessions node ${join(HOME, 'bin', 'crew.mjs')} show ${lane} [<role>]`)
-    return { lane, fields, worktree, brief, rosterPath, log, pid, specPath }
+    return { lane, fields, worktree, brief, log, pid, specPath }
   }
 
   const boot = d.spawnSync(process.execPath, [CREW, 'boot', '--task', lane, '--checkout', worktree, '--tier', fields.tier, '--roster', rosterPath, '--headless-all'], { cwd: worktree })

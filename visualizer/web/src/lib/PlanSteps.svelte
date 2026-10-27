@@ -61,8 +61,6 @@
   .step-card { min-width:0; background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:.75rem; }
   .step-card > header { display:flex; justify-content:space-between; gap:1rem; }
   .step-card p { margin:.5rem 0; }
-  dl { display:grid; grid-template-columns:auto minmax(0,1fr); gap:.35rem .75rem; margin:.5rem 0; }
-  dd { margin:0; overflow-wrap:anywhere; }
   .checks,.round { display:flex; flex-wrap:wrap; gap:.5rem; margin-top:.5rem; }
   .round { background:var(--bg); border-top:1px solid var(--line); padding:.5rem; font-variant-numeric:tabular-nums; }
   .round span { overflow-wrap:anywhere; }

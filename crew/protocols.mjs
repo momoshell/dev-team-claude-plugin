@@ -225,6 +225,8 @@ const DETAIL_KEYS = Object.freeze({
 // Fields a role may carry beyond its required ones. A planner states the context the builder's arms read.
 const OPTIONAL_DETAIL_KEYS = Object.freeze({
   planner: ['files_in_scope', 'validation_lane', 'gate_cmd'],
+  // A finish builder may replace the declaration for an acceptance id it re-aims; the loop proves the replacements.
+  builder: ['mutations'],
 })
 const DETAIL_RULES = {
   subject: [(v) => typeof v === 'string' && v.length <= 72 && !/[\x00-\x1f\x7f]/.test(v)
@@ -297,7 +299,13 @@ export function validateEnvelope(role, envelope) {
     else {
       const optional = OPTIONAL_DETAIL_KEYS[role] ?? []
       for (const key of Object.keys(details)) {
-        if (optional.includes(key)) { if (!DETAIL_RULES[key][0](details[key])) defects.push(`details.${key} ${DETAIL_RULES[key][1]}`) }
+        if (optional.includes(key)) {
+          if (key === 'mutations') {
+            // A builder's replacements: nonempty, structurally sound; membership in the acceptance is the loop's to check.
+            if (Array.isArray(details[key]) && details[key].length === 0) defects.push('details.mutations is a nonempty list of declarations')
+            else defects.push(...mutationDefects(details[key], undefined))
+          } else if (!DETAIL_RULES[key][0](details[key])) defects.push(`details.${key} ${DETAIL_RULES[key][1]}`)
+        }
         else if (!required.includes(key)) defects.push(`details.${key} is not a field of ${role} details`)
       }
       for (const key of required) {

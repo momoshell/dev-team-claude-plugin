@@ -22,3 +22,5 @@ Envelope keys: `role`, `id`, `status`, `summary`, `details`.
 Statuses: `done`, `insufficient`, `escalate`.
 
 Details keys: `summary`.
+
+On a finish run only, details may also carry `mutations`: replacement `{check, file, find, replace}` declarations for the acceptance ids you re-aim (a mutation that could not kill, or a gate you repaired). The loop re-proves them by mutation before review.

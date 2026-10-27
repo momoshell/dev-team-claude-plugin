@@ -20,6 +20,8 @@ export const LOOP_REASONS = Object.freeze([
 ])
 
 const REQUIRED_ROLES = ['planner', 'builder', 'reviewer']
+const FINISH_ROLES = ['builder', 'reviewer']
+const FINISH_REVIEW_ROUNDS = 3
 const text = (v) => typeof v === 'string' && v !== ''
 const strings = (v) => Array.isArray(v) && v.every(text)
 const describe = (error) => ({ code: error?.code ?? null, message: String(error?.message ?? error) })
@@ -72,7 +74,8 @@ function parseChangedPaths(stdout) {
 export async function runLoop(spec, deps = {}) {
   // Nothing is read or run until every field and seam is sound.
   if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return refusal('invalid-input')
-  if (spec.shape !== 'standard') return refusal('unsupported-shape')
+  if (spec.shape !== 'standard' && spec.shape !== 'finish') return refusal('unsupported-shape')
+  const isFinish = spec.shape === 'finish'
   const sound = [spec.id, spec.cwd, spec.taskDir, spec.brief, spec.source, spec.branch, spec.base].every(text) && TIERS.includes(spec.tier)
     && strings(spec.acceptance) && spec.acceptance.length > 0 && new Set(spec.acceptance).size === spec.acceptance.length
     && text(spec.suite?.command) && (spec.suite.args === undefined || Array.isArray(spec.suite.args))
@@ -80,6 +83,11 @@ export async function runLoop(spec, deps = {}) {
     && [spec.closes, spec.refs].every((v) => v === undefined || Array.isArray(v))
     && (spec.timeoutMs === undefined || (Number.isSafeInteger(spec.timeoutMs) && spec.timeoutMs > 0))
   if (!sound) return refusal('invalid-input')
+  const fin = spec.finish
+  // A finish run re-enters a stopped lane: its accepted plan, gate and declarations, why it stopped, and the open findings.
+  if (isFinish && !(fin && typeof fin === 'object' && [fin.planPath, fin.gatePath, fin.subject].every(text)
+    && Array.isArray(fin.mutations) && Array.isArray(fin.findings) && text(fin.stop?.reason)
+    && Number.isSafeInteger(fin.turnOffset) && fin.turnOffset >= 0)) return refusal('invalid-input')
   const d = {
     resolveAgents, mkdir, readFile, checkBaseline, runGate, proveMutations, runSuite, commitChanges, rebaseBranch, openPullRequest,
     run: runSuite,
@@ -91,7 +99,7 @@ export async function runLoop(spec, deps = {}) {
   let resolved
   try { resolved = d.resolveAgents(spec.tier) } catch { return refusal('seat-unmeasured') }
   const seats = { ...resolved?.seats }
-  if (!REQUIRED_ROLES.every((role) => seats[role] && typeof seats[role] === 'object')) return refusal('seat-unmeasured')
+  if (!(isFinish ? FINISH_ROLES : REQUIRED_ROLES).every((role) => seats[role] && typeof seats[role] === 'object')) return refusal('seat-unmeasured')
   const bounded = (cell) => cell.rounds === undefined || (Number.isSafeInteger(cell.rounds) && cell.rounds > 0)
   if (!Object.values(seats).every(bounded)) return refusal('invalid-input')
 
@@ -100,9 +108,9 @@ export async function runLoop(spec, deps = {}) {
   const rounds = { planner: 0, builder: 0, reviewer: 0, lead: 0 }
   const last = {}
   let where = null
-  let turn = 0
-  let planPath = null
-  let gatePath = null
+  let turn = isFinish ? fin.turnOffset : 0
+  let planPath = isFinish ? fin.planPath : null
+  let gatePath = isFinish ? fin.gatePath : null
   let changedPaths = []
 
   const emit = async (event, fields) => {
@@ -220,23 +228,31 @@ export async function runLoop(spec, deps = {}) {
   try {
     try { await d.mkdir(spec.taskDir, { recursive: true }) } catch (error) { return await stop('runner-threw', { mkdir: describe(error) }) }
     // The lane's own start, written once: the arms of every seat (and every retry) date the planner's return against it.
-    await emit('run-start', { at: Date.now(), run_id: spec.id })
+    // A finish run appends none: the original row stays the anchor the arms date the accepted plan against.
+    if (!isFinish) await emit('run-start', { at: Date.now(), run_id: spec.id })
 
-    const planned = await stage('plan', () => seatTurn('planner'))
-    if (planned.halt) return planned.halt
-    const { acceptance, subject } = planned.envelope.details
-    const mutations = planned.envelope.details.mutations
-    planPath = planned.envelope.details.plan_path
-    gatePath = planned.envelope.details.gate_path
-    if (acceptance.length !== spec.acceptance.length || !acceptance.every((id) => spec.acceptance.includes(id))) return await stop('envelope-refused', { acceptance })
+    const planned = isFinish ? null : await stage('plan', () => seatTurn('planner'))
+    if (planned?.halt) return planned.halt
+    const acceptance = isFinish ? spec.acceptance : planned.envelope.details.acceptance
+    const subject = isFinish ? fin.subject : planned.envelope.details.subject
+    let mutations = isFinish ? [...fin.mutations] : planned.envelope.details.mutations
+    if (!isFinish) {
+      planPath = planned.envelope.details.plan_path
+      gatePath = planned.envelope.details.gate_path
+      if (acceptance.length !== spec.acceptance.length || !acceptance.every((id) => spec.acceptance.includes(id))) return await stop('envelope-refused', { acceptance })
+    } else {
+      seats.reviewer = { ...seats.reviewer, rounds: FINISH_REVIEW_ROUNDS }
+    }
 
     const measurements = []
-    const baseline = await stage('baseline', () => callCheck('baseline', d.checkBaseline, { cwd, gatePath, timeoutMs }))
-    if (!baseline.accepted) return stop(baseline.reason, baseline)
-    if (baseline.reason !== 'gate-failed' || baseline.result?.status !== 'red' || baseline.result.reason !== 'gate-failed' || !(baseline.result.failingIds?.length > 0)) return stop('runner-threw', baseline)
-    measurements.push(`- Baseline gate: ${baseline.result.status}; failing ids: ${baseline.result.failingIds.join(', ')}.`)
+    const baseline = isFinish ? null : await stage('baseline', () => callCheck('baseline', d.checkBaseline, { cwd, gatePath, timeoutMs }))
+    if (!isFinish) {
+      if (!baseline.accepted) return stop(baseline.reason, baseline)
+      if (baseline.reason !== 'gate-failed' || baseline.result?.status !== 'red' || baseline.result.reason !== 'gate-failed' || !(baseline.result.failingIds?.length > 0)) return stop('runner-threw', baseline)
+      measurements.push(`- Baseline gate: ${baseline.result.status}; failing ids: ${baseline.result.failingIds.join(', ')}.`)
+    }
 
-    let feedback = []
+    let feedback = isFinish ? [{ id: 'finish-stop', reason: fin.stop.reason, observation: fin.stop.observation }, ...fin.findings] : []
     // A suite red on both runs sends the lane back through build, gate, proof and review once, with the failures as feedback.
     let repairing = false
     let repaired = false
@@ -245,6 +261,12 @@ export async function runLoop(spec, deps = {}) {
         const built = await stage(repairing ? 'suite-repair' : 'build', () => seatTurn('builder', feedback, { singleTurn: repairing }))
         repairing = false
         if (built.halt) return built.halt
+        // A finish builder may re-aim a declaration the proof runs; the gate and proof below re-prove whatever it changed.
+        const replacements = built.envelope.details.mutations
+        if (replacements !== undefined) {
+          if (!isFinish || replacements.some((r) => !acceptance.includes(r.check))) return await stop('envelope-refused', { mutations: replacements })
+          mutations = mutations.map((declaration) => replacements.find((replacement) => replacement.check === declaration.check) ?? declaration)
+        }
         const gate = await stage('gate', () => callCheck('gate', d.runGate, { cwd, gatePath, timeoutMs }, { command: true }))
         if (gate.status !== 'green') return stop(gate.reason, gate)
         measurements.push(`- Gate: ${gate.status}.`)
@@ -261,7 +283,8 @@ export async function runLoop(spec, deps = {}) {
         changedPaths = status.status === 'green' && typeof status.stdout === 'string' ? parseChangedPaths(status.stdout) : null
         if (changedPaths === null) return stop('paths-unmeasured', status)
 
-        const reviewed = await stage('review', () => seatTurn('reviewer'))
+        // A finish review is capped outright: its bound ends the run, never a lead bounce into a fourth round.
+        const reviewed = await stage('review', () => seatTurn('reviewer', [], { singleTurn: isFinish }))
         if (reviewed.halt) return reviewed.halt
         const review = reviewed.envelope
         await emit('verdict', { status: 'reviewed', verdict: review.details.verdict, findings: review.details.findings })
@@ -294,7 +317,7 @@ export async function runLoop(spec, deps = {}) {
             failingFiles: failures.files,
             ...(failures.tail.length ? { outputTail: failures.tail } : {}),
           }]
-          for (const role of ['builder', 'reviewer']) seats[role] = { ...seats[role], rounds: Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }
+          for (const role of isFinish ? ['builder'] : ['builder', 'reviewer']) seats[role] = { ...seats[role], rounds: Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }
           repairing = true
           repaired = true
           continue
@@ -325,6 +348,11 @@ export async function runLoop(spec, deps = {}) {
 
     const rebased = await stage('rebase', () => callCheck('rebase', d.rebaseBranch, { cwd, base: spec.base, timeoutMs }))
     if (rebased.status !== 'green' || !text(rebased.head)) return stop(rebased.reason ?? 'runner-threw', rebased)
+
+    if (isFinish) {
+      await emit('finish-ready', { status: 'ready-for-operator', head: rebased.head })
+      return { status: 'done', reason: null, pr: null }
+    }
 
     const published = await stage('publish', () => callCheck('publish', d.openPullRequest, {
       cwd, branch: spec.branch, base: spec.base, title: subject, body, closes: spec.closes ?? [], refs: spec.refs ?? [], timeoutMs,

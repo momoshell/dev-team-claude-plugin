@@ -16,7 +16,7 @@ const CHARTER_LINK = /\]\((\.\.?\/[^)\s]+\.md)\)/g
 const stopped = (reason) => ({ status: 'stopped', reason, pr: null })
 
 // The P2 shape this turn must write; the role's own detail keys, with the issued role and id.
-function exampleEnvelope(role, id, acceptance) {
+function exampleEnvelope(role, id, acceptance, shape = 'standard') {
   const review = { verdict: 'pass', findings: [{ id: 'R1', severity: 'should-fix', location: 'path/to/file.mjs:10', summary: 'what is wrong and why' }] }
   const details = {
     planner: {
@@ -29,7 +29,10 @@ function exampleEnvelope(role, id, acceptance) {
       validation_lane: '<the node --test command that checks the change>',
       gate_cmd: '<the command that runs your gate>',
     },
-    builder: { summary: '<what you built>' },
+    builder: {
+      summary: '<what you built>',
+      ...(shape === 'finish' ? { mutations: [{ check: '<acceptance id whose declaration you replace>', file: '<repo-relative file>', find: '<literal text in that file>', replace: '<different literal text that makes the check fail>' }] } : {}),
+    },
     reviewer: review,
     'tech-lead': review,
     lead: { decision: 'bounce' },
@@ -74,7 +77,7 @@ function repairPromptFor({ request, spec }) {
     'P2 envelope, as JSON, to that same path; nothing else you write counts as your return.',
     `Envelope id: ${id}`,
     `Return path: ${returnPath}`,
-    JSON.stringify(exampleEnvelope(role, id, spec.acceptance), null, 2),
+    JSON.stringify(exampleEnvelope(role, id, spec.acceptance, spec.shape), null, 2),
     'status is done, insufficient or escalate; use insufficient or escalate instead of faking a done.',
     '',
   ].join('\n')
@@ -104,7 +107,7 @@ function promptFor({ request, spec, source, charters, body }) {
     `Envelope id: ${id}`,
     `Return path: ${returnPath}`,
     `Task directory: ${spec.taskDir}`,
-    JSON.stringify(exampleEnvelope(role, id, spec.acceptance), null, 2),
+    JSON.stringify(exampleEnvelope(role, id, spec.acceptance, spec.shape), null, 2),
     'status is done, insufficient or escalate; use insufficient or escalate instead of faking a done.',
     '',
   ]

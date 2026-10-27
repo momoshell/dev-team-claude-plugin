@@ -659,7 +659,7 @@ test('the journal carries each envelope, verdict, check, commit and PR observati
 // MUTATION: skip input validation and an unsupported or malformed lane starts effects.
 test('an unsupported shape, invalid input or unsound seam is refused before any effect', async () => {
   const cases = [
-    [{ shape: 'stepped' }, 'unsupported-shape'], [{ shape: 'finish' }, 'unsupported-shape'], [{ shape: undefined }, 'unsupported-shape'],
+    [{ shape: 'stepped' }, 'unsupported-shape'], [{ shape: 'finish' }, 'invalid-input'], [{ shape: undefined }, 'unsupported-shape'],
     [{ tier: 'rigorous' }, 'invalid-input'], [{ id: '' }, 'invalid-input'], [{ cwd: 3 }, 'invalid-input'], [{ taskDir: undefined }, 'invalid-input'],
     [{ brief: '' }, 'invalid-input'], [{ acceptance: [] }, 'invalid-input'], [{ acceptance: ['A1', 'A1'] }, 'invalid-input'],
     [{ suite: null }, 'invalid-input'], [{ suite: { command: '' } }, 'invalid-input'],
@@ -941,4 +941,63 @@ test('a task dir that cannot be made writes no run-start', async () => {
   const f = fakes({ deps: { mkdir: async () => { throw new Error('denied') } } })
   assert.equal((await f.go()).reason, 'runner-threw')
   assert.equal(f.rows.some((row) => row.event === 'run-start'), false)
+})
+
+// ---- finish shape (lean plan 3.5): a stopped lane re-entered by its builder ----
+const STOP = { reason: 'mutations-survived', observation: { stage: 'mutations', detail: 'A1 survived' } }
+const REPLACEMENT = { check: 'A1', file: 'lib.mjs', find: 're-aimed', replace: 'new2' }
+const finishSpec = (over = {}) => ({
+  shape: 'finish',
+  finish: { planPath: '/virtual/task/plan.md', gatePath: '/virtual/task/gate.mjs', subject: 'fix(crew): planned lane', mutations: [MUTATION], stop: STOP, findings: [finding], turnOffset: 3, ...over },
+})
+const FINISH_SUCCESS = ['seat:builder', 'gate', 'mutations', 'review-paths', 'seat:reviewer', 'suite', 'paths', 'commit', 'fetch', 'rebase']
+
+// MUTATION: run the plan or baseline stage on a finish run and the planner request or baseline call appears.
+test('a finish run issues no planner turn and no baseline, and ends after rebase without a PR (FN1, FN2, FN6)', async () => {
+  const f = fakes({ spec: finishSpec(), unseated: ['planner'] })
+  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: null })
+  assert.deepEqual(f.calls, ['mkdir', ...FINISH_SUCCESS])
+  assert.equal(f.rows.filter((r) => r.event === 'run-start').length, 0)
+  assert.equal(f.rows.some((r) => r.event === 'pr'), false)
+  const ready = f.rows.at(-1)
+  assert.equal(ready.event, 'finish-ready')
+  assert.equal(ready.status, 'ready-for-operator')
+  assert.equal(ready.head, 'b'.repeat(40))
+  assert.equal(f.rows.findIndex((r) => r.event === 'finish-ready') > f.rows.findLastIndex((r) => r.stage === 'rebase'), true)
+})
+
+// MUTATION: start the first builder feedback empty and the stop reason and findings never reach it.
+test('the finish builder first hears the stop reason with its observation, then the open findings; seat ids start past the stopped lane', async () => {
+  const f = fakes({ spec: finishSpec(), unseated: ['planner'] })
+  await f.go()
+  assert.deepEqual(f.requests[0].feedback, [{ id: 'finish-stop', reason: STOP.reason, observation: STOP.observation }, finding])
+  assert.equal(f.requests[0].planPath, '/virtual/task/plan.md')
+  assert.equal(f.requests[0].gatePath, '/virtual/task/gate.mjs')
+  assert.equal(f.requests[0].id, 'lane.builder.4')
+  assert.equal(f.requests[0].role, 'builder')
+})
+
+// MUTATION: ignore details.mutations from the builder and the proof runs the planner's stale declaration.
+test('a builder replacement mutation is the declaration the proof runs; one outside the acceptance stops the lane (FN5)', async () => {
+  const f = fakes({ spec: finishSpec(), unseated: ['planner'], edit: (v) => (v.role === 'builder' ? { ...v, details: { summary: 'built', mutations: [REPLACEMENT] } } : v) })
+  assert.equal((await f.go()).status, 'done')
+  assert.deepEqual(f.seen.mutations.mutations, [REPLACEMENT])
+  const out = fakes({ spec: finishSpec(), unseated: ['planner'], edit: (v) => (v.role === 'builder' ? { ...v, details: { summary: 'built', mutations: [{ ...REPLACEMENT, check: 'ZZ' }] } } : v) })
+  assert.deepEqual(await out.go(), stopped('envelope-refused'))
+  assert.equal(out.calls.includes('gate'), false)
+  // the standard shape never takes a builder's declarations
+  const std = fakes({ edit: (v) => (v.role === 'builder' ? { ...v, details: { summary: 'built', mutations: [REPLACEMENT] } } : v) })
+  assert.deepEqual(await std.go(), stopped('envelope-refused'))
+})
+
+// MUTATION: leave the reviewer at two rounds and the third finish review bounds out.
+test('a finish run gives the reviewer three rounds and refuses an unsound finish spec', async () => {
+  const f = fakes({ spec: finishSpec(), unseated: ['planner'], review: 2, bounds: { builder: 3 } })
+  assert.equal((await f.go()).status, 'done')
+  assert.equal(count(f, 'reviewer'), 3)
+  for (const bad of [undefined, finishSpec({ planPath: '' }).finish, finishSpec({ stop: {} }).finish, finishSpec({ turnOffset: -1 }).finish, finishSpec({ findings: null }).finish]) {
+    const g = fakes({ spec: { shape: 'finish', finish: bad }, unseated: ['planner'] })
+    assert.deepEqual(await g.go(), stopped('invalid-input'))
+    assert.deepEqual(g.calls, [])
+  }
 })

@@ -314,9 +314,16 @@ test('P2 planner mutations declare exactly one {check, file, find, replace} per 
   assert.ok(refusedWith([one, { ...two, replace: two.find }], 'replace differs from find'))
   for (const bad of [null, 'x', {}, [null], [[]], [one, 7]]) assert.ok(refusedWith(bad, 'details.mutations'), JSON.stringify(bad))
   assert.deepEqual(validateEnvelope('planner', envelope('planner')).defects, [])
-  // Only the planner carries them.
-  const stray = envelope('builder'); stray.details.mutations = []
-  assert.ok(refusedFor('builder', stray, 'details.mutations is not a field').length)
+  // A builder may carry replacements (a finish run's re-aimed declarations), refused when malformed; no other role may.
+  const replacement = [{ check: 'EV1', file: 'a.mjs', find: 'x2', replace: 'y2' }]
+  const sound = envelope('builder'); sound.details.mutations = replacement
+  assert.deepEqual(validateEnvelope('builder', sound).defects, [])
+  for (const bad of [[], 'x', [null], [{ ...replacement[0], find: '' }], [{ ...replacement[0], replace: 'x2' }], [replacement[0], replacement[0]], [{ check: 'EV1' }]]) {
+    const malformed = envelope('builder'); malformed.details.mutations = bad
+    assert.ok(refusedFor('builder', malformed, 'details.mutations').length, JSON.stringify(bad))
+  }
+  const stray = envelope('reviewer'); stray.details.mutations = replacement
+  assert.ok(refusedFor('reviewer', stray, 'details.mutations is not a field').length)
 })
 
 // MUTATION: add approved to REVIEW_VERDICTS or retry to LEAD_DECISIONS and the closed enum opens.

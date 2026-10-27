@@ -23,7 +23,9 @@ export function laneRows({ root, archiveRoot, all = false } = {}) {
       reason: run.reason,
       pr: run.pr?.url ?? null,
       archived: run.archived,
-      unreadable_rows: run.journal_skipped_malformed,
+      // null when the journal itself could not be read: its rows were never counted.
+      unreadable_rows: run.journal_error === null ? run.journal_skipped_malformed : null,
+      unreadable_rows_reason: run.journal_error,
     }))
 }
 

@@ -60,7 +60,7 @@ test('--json prints the same rows', () => {
   try {
     const rows = JSON.parse(w.run(['--json', '--all']).out)
     assert.deepEqual(rows.map((row) => row.lane), ['alpha', 'beta', 'delta', 'gamma'])
-    assert.deepEqual(rows.find((row) => row.lane === 'beta'), { lane: 'beta', status: 'stopped', latest_stage: 'build', reason: 'seat-unmeasured', pr: null, archived: false, unreadable_rows: 0 })
+    assert.deepEqual(rows.find((row) => row.lane === 'beta'), { lane: 'beta', status: 'stopped', latest_stage: 'build', reason: 'seat-unmeasured', pr: null, archived: false, unreadable_rows: 0, unreadable_rows_reason: null })
     assert.equal(rows.find((row) => row.lane === 'gamma').pr, PR)
     assert.equal(rows.find((row) => row.lane === 'delta').archived, true)
   } finally { w.done() }
@@ -89,5 +89,22 @@ test('a journal with an unreadable row flags its status and reports the count', 
     const run = (argv) => { const out = []; main(argv, { root, archiveRoot: join(home, 'archive'), stdout: (t) => out.push(t), stderr: () => {} }); return out.join('') }
     assert.match(run([]), /^eps \| running \(journal has 1 unreadable rows\) \| /)
     assert.equal(JSON.parse(run(['--json']))[0].unreadable_rows, 1)
+  } finally { rmSync(home, { recursive: true, force: true }) }
+})
+
+// MUTATION: count an unread journal's rows as 0 and an unmeasured journal reads as a clean one.
+test('a journal that cannot be read reports its unreadable-row count as null with the read error', () => {
+  const home = realpathSync(scratchDir('lanes-'))
+  try {
+    const root = join(home, '.crew')
+    const dir = join(root, 'dt-zeta', 'zeta')
+    put(join(dir, 'crew.json'), JSON.stringify({ members: { planner: { agent: 'pi' } } }))
+    put(join(dir, 'task', 'lean.json'), JSON.stringify({ id: 'zeta' }))
+    const out = []
+    main(['--json'], { root, archiveRoot: join(home, 'archive'), stdout: (t) => out.push(t), stderr: () => {} })
+    const [row] = JSON.parse(out.join(''))
+    assert.equal(row.unreadable_rows, null)
+    assert.equal(typeof row.unreadable_rows_reason, 'string')
+    assert.notEqual(row.unreadable_rows_reason, '')
   } finally { rmSync(home, { recursive: true, force: true }) }
 })

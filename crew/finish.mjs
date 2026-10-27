@@ -169,8 +169,7 @@ function readText(d, file, what) {
   }
 }
 
-// The PR text is the measured text, character for character, plus the lane's issues on trailer lines. openPullRequest
-// rewrites issue tokens in prose ("#42" -> "issue 42") when it creates a PR, so the text is applied again with gh pr edit.
+// The PR text is the measured text, character for character, plus the lane's issues on trailer lines.
 function prBody(body, closes, refs) {
   const open = refs.filter((issue) => !closes.includes(issue))
   const trailers = [...closes.map((issue) => `Closes: #${issue}`), ...(open.length ? [`Refs: ${open.map((issue) => `#${issue}`).join(', ')}`] : [])]
@@ -225,13 +224,10 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
       if (head?.status !== 'green' || String(head.stdout ?? '').trim() !== ready.head) throw new FinishRefusal('finish-head-moved', `lane ${lane}'s checkout is not measured at the finish run's head ${ready.head}; nothing was published`)
       const published = await d.openPullRequest({ cwd: spec.cwd, branch: spec.branch, base: spec.base, title: ready.subject, body, closes, refs })
       if (published?.status !== 'green' || !isObject(published.pr)) throw new FinishRefusal('finish-publish', `the pull request did not open: ${published?.reason ?? 'unmeasured'}`)
-      // Every returned PR gets the measured text: openPullRequest rewrites issue tokens, and a PR it found rather than
-      // created (reused, or opened by someone else between its lookup and its create) carries whatever text it had.
-      {
-        const text = prBody(body, closes, refs)
-        const edited = await d.run({ cwd: spec.cwd, command: 'gh', args: ['pr', 'edit', String(published.pr.number), '--title', ready.subject, '--body', text], timeoutMs: 60_000 })
-        if (edited?.status !== 'green') throw new FinishRefusal('finish-publish', `the pull request ${published.pr.number} (${published.pr.url ?? 'no url'}) is open but could not be updated with the measured text, and is not recorded: ${edited?.reason ?? 'unmeasured'}`)
-      }
+      // Every returned PR gets the measured text: openPullRequest rewrites issue tokens ("#42" -> "issue 42"), and a PR it
+      // found rather than created (reused, or opened by someone else between its lookup and its create) has its own text.
+      const edited = await d.run({ cwd: spec.cwd, command: 'gh', args: ['pr', 'edit', String(published.pr.number), '--title', ready.subject, '--body', prBody(body, closes, refs)], timeoutMs: 60_000 })
+      if (edited?.status !== 'green') throw new FinishRefusal('finish-publish', `the pull request ${published.pr.number} (${published.pr.url ?? 'no url'}) is open but could not be updated with the measured text, and is not recorded: ${edited?.reason ?? 'unmeasured'}`)
       d.appendFileSync(journal, `${JSON.stringify({ event: 'pr', lane, stage: 'publish', pr: published.pr })}\n`)
       decision()
       d.log(`crew finish: lane=${lane} published ${published.pr.url ?? ''}`)

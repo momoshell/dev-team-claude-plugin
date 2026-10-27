@@ -1,9 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { appendFileSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { startServer } from '../visualizer/server/server.mjs'
+import { tmpdir } from 'node:os'
+import { scratchDir } from './helpers.mjs'
+
+process.env.DEVTEAM_LEDGER_DIR = scratchDir('viz-ledger-', { parent: tmpdir() })
 
 const jsonl = (rows) => rows.map((row) => JSON.stringify(row)).join('\n') + '\n'
 const put = (file, text) => { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, text) }
@@ -19,7 +22,7 @@ function lane(root, name, rows, suffix = '') {
 }
 
 async function withServer(work) {
-  const sandbox = mkdtempSync(join(tmpdir(), 'lean-viz-'))
+  const sandbox = scratchDir('lean-viz-')
   const crewRoot = join(sandbox, '.crew'), archiveRoot = join(sandbox, '.crew-journal-archive')
   mkdirSync(crewRoot); mkdirSync(archiveRoot)
   const handles = startServer({ port: 0, host: '127.0.0.1', crewRoot, home: sandbox, checkout: sandbox, ledgerDb: join(sandbox, 'none', 'ledger.db'), triageDb: join(sandbox, 'side', 'v.db'), shipState: { resolve: async () => new Map() } })

@@ -193,10 +193,13 @@ Sol review, because the current factory is what is being replaced. From phase 4,
       port. The three files test only old-path code (`seatIo`, `acpIo`, reseat, the ledger usage writer, the old
       descendant sweep); every behaviour the new path keeps has its own tests in `crew/checks.test.mjs`,
       `crew/acp/seat.test.mjs`, `crew/skills-proof.test.mjs` and `crew/start.test.mjs`. They go at 5.2.
+      One behaviour is dropped on purpose: a child that leaves its seat's or check's process group is not swept
+      (operator decision 2026-10-26, noted at `crew/checks.mjs:40`). The new path kills its own groups only.
 - [ ] 3.7 The new path imports nothing that 5.2 deletes. Today `crew/lean.mjs` and `crew/acp-client.mjs` import from
       `headless.mjs` and `headless-rpc.mjs`; `crew/lean.mjs` and `crew/acp/seat.mjs` from `capabilities.mjs`;
-      `crew/acp/seat.mjs` reaches `make-brief.mjs` through `skeletonread.ts`; `crew/start.mjs` imports `drive.mjs` and
-      `roster-validate.mjs` (which imports `crew.mjs`), and spawns `crew.mjs boot` and `crew.mjs run`.
+      `crew/acp/seat.mjs` reaches `make-brief.mjs` through `skeletonread.ts`; `crew/start.mjs` imports `drive.mjs`,
+      `roster.mjs` and `roster-validate.mjs` (which imports `crew.mjs` and `assurances.mjs`), and spawns
+      `crew.mjs boot` and `crew.mjs run`.
 - Done means: a lane runs plan to PR on the new loop over ACP, and each seat's session reads back in full.
 
 ### Phase 4: run on the new path

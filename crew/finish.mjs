@@ -60,13 +60,12 @@ export function finishLane({ lane, root, deps = {} }) {
   const rows = journalText.split('\n').filter((line) => line.trim() !== '').map((line) => {
     try { return JSON.parse(line) } catch { throw new FinishRefusal('finish-unreadable', 'the lane journal has a malformed row') }
   }).filter(isObject)
-  const lastRow = (test) => rows.findLast(test)
 
   let isDir = false
   try { isDir = typeof spec?.cwd === 'string' && d.statSync(spec.cwd).isDirectory() } catch { isDir = false }
   if (!isDir) throw new FinishRefusal('finish-worktree', `the lane worktree ${spec?.cwd} does not exist`)
 
-  const stopped = lastRow((row) => row.event === 'verdict' && row.status === 'stopped')
+  const stopped = rows.findLast((row) => row.event === 'verdict' && row.status === 'stopped')
   if (!stopped) throw new FinishRefusal('finish-premise', `lane ${lane} has not stopped`)
   // A stop the loop writes after a stage closed carries stage null, so the stage it stopped in is the last one started.
   const stopAt = rows.lastIndexOf(stopped)
@@ -79,8 +78,7 @@ export function finishLane({ lane, root, deps = {} }) {
   if (rows.some((row) => row.event === 'pr')) throw new FinishRefusal('finish-published', `lane ${lane} already has a recorded PR`)
   if (rows.some((row) => row.event === 'commit')) throw new FinishRefusal('finish-committed', `lane ${lane} already committed its build`)
 
-  const built = rows.some((row) => row.event === 'envelope' && row.role === 'builder' && Array.isArray(row.defects) && row.defects.length === 0 && row.parsed?.status === 'done')
-  if (!built) throw new FinishRefusal('finish-no-build', `lane ${lane} has no accepted builder envelope in its journal`)
+  if (!rows.some((row) => row.event === 'envelope' && row.role === 'builder' && Array.isArray(row.defects) && row.defects.length === 0 && row.parsed?.status === 'done')) throw new FinishRefusal('finish-no-build', `lane ${lane} has no accepted builder envelope in its journal`)
 
   let plannerFile = null
   let best = 0
@@ -93,7 +91,7 @@ export function finishLane({ lane, root, deps = {} }) {
   if (checked.defects.length > 0 || checked.envelope?.status !== 'done') throw new FinishRefusal('finish-premise', `the planner return ${plannerFile} is not an accepted plan`)
   const { subject, plan_path: planPath, gate_path: gatePath, mutations } = checked.envelope.details
 
-  const reviewed = lastRow((row) => row.event === 'verdict' && row.status === 'reviewed')
+  const reviewed = rows.findLast((row) => row.event === 'verdict' && row.status === 'reviewed')
   const finish = {
     planPath, gatePath, subject, mutations,
     stop: { reason: stopped.reason, observation: stopped.observation ?? null },

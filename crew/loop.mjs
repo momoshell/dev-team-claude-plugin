@@ -256,17 +256,24 @@ export async function runLoop(spec, deps = {}) {
     // A suite red on both runs sends the lane back through build, gate, proof and review once, with the failures as feedback.
     let repairing = false
     let repaired = false
+    // A standard proof whose only non-killed rows are bind-fail earns the builder one re-aim turn, for those ids alone.
+    let reaiming = false
+    let reaimUsed = false
+    let reaimIds = []
     for (;;) {
       for (;;) {
-        const built = await stage(repairing ? 'suite-repair' : 'build', () => seatTurn('builder', feedback, { singleTurn: repairing }))
+        const built = await stage(reaiming ? 'mutation-reaim' : repairing ? 'suite-repair' : 'build', () => seatTurn('builder', feedback, { singleTurn: repairing || reaiming }))
         repairing = false
         if (built.halt) return built.halt
-        // A finish builder may re-aim a declaration the proof runs; the gate and proof below re-prove whatever it changed.
+        // A finish builder, or a standard re-aim turn, may replace declarations the proof runs; the gate and proof below re-prove whatever it changed.
         const replacements = built.envelope.details.mutations
         if (replacements !== undefined) {
-          if (!isFinish || replacements.some((r) => !acceptance.includes(r.check))) return await stop('envelope-refused', { mutations: replacements })
+          const mayReaim = isFinish || reaiming
+          const allowed = isFinish ? acceptance : reaimIds
+          if (!mayReaim || replacements.some((r) => !allowed.includes(r.check))) return await stop('envelope-refused', { mutations: replacements })
           mutations = mutations.map((declaration) => replacements.find((replacement) => replacement.check === declaration.check) ?? declaration)
         }
+        reaiming = false
         const gate = await stage('gate', () => callCheck('gate', d.runGate, { cwd, gatePath, timeoutMs }, { command: true }))
         if (gate.status !== 'green') return stop(gate.reason, gate)
         measurements.push(`- Gate: ${gate.status}.`)
@@ -275,7 +282,24 @@ export async function runLoop(spec, deps = {}) {
         const rows = Array.isArray(proof.rows) ? proof.rows : []
         const proofOK = proof.status === 'green' && proof.reason === null && rows.length === acceptance.length
           && acceptance.every((id) => rows.filter((row) => row?.check === id && row.outcome === 'killed' && row.reason === null).length === 1)
-        if (!proofOK) return stop(proof.reason ?? 'mutation-unmeasured', proof)
+        if (!proofOK) {
+          const nonKilled = rows.filter((row) => row?.outcome !== 'killed')
+          const bindFailRows = rows.filter((row) => row?.outcome === 'unmeasured' && row?.reason === 'bind-fail')
+          const canReaim = !isFinish && !reaimUsed && rows.length === acceptance.length && nonKilled.length > 0 && bindFailRows.length === nonKilled.length
+          if (!canReaim) return stop(proof.reason ?? 'mutation-unmeasured', proof)
+          reaimUsed = true
+          reaiming = true
+          reaimIds = bindFailRows.map((row) => row.check)
+          seats.builder = { ...seats.builder, rounds: Math.max(seats.builder.rounds ?? DEFAULT_ROUNDS, rounds.builder + 1) }
+          feedback = bindFailRows.map((row) => ({
+            id: row.check,
+            severity: 'must-fix',
+            summary: `Mutation ${row.check} failed to bind (bind-fail); return details.mutations replacing only this declaration with a find text that occurs exactly once.`,
+            check: row.check,
+            occurrences: row.occurrences ?? null,
+          }))
+          continue
+        }
         measurements.push(`- Mutations: ${rows.filter((row) => row.outcome === 'killed').length}/${acceptance.length} killed (${rows.map((row) => `${row.check}: ${row.outcome}`).join(', ')}).`)
 
         // The reviewer is told what git reports changed now, remeasured every round; an unreadable status stops the lane.

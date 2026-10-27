@@ -546,6 +546,44 @@ test('the writes a seat receives are the effective definition writes, tier overr
   assert.equal(tiered.requests[0].definition.role, 'planner')
 })
 
+// MUTATION: skip the effective memory check and a lean seat boots without the memory its definition declares.
+test('a lean seat whose effective definition declares memory: true is refused before ACP, naming memory', async () => {
+  const edit = (role, line) => (path, ...args) => {
+    const text = readFileSync(path, ...args)
+    return path === join(AGENTS, `${role}.md`) ? text.replace(/tiers: .*/, line) : text
+  }
+  const cases = [
+    ['planner', 'memory: true\ntiers: {}', []],
+    ['planner', 'tiers: {"build":{"memory":true}}', []],
+    ['planner', 'memory: false\ntiers: {"build":{"memory":true}}', []],
+    ['builder', 'memory: true\ntiers: {}', ['planner']],
+  ]
+  for (const [role, line, booted] of cases) {
+    const rows = []
+    const f = leanFixture({ deps: { readFileSync: edit(role, line) }, loopDeps: { journal: async (row) => { rows.push(row) } } })
+    const result = await f.go()
+    assert.deepEqual(result, { status: 'stopped', reason: 'seat-unmeasured', pr: null }, line)
+    assert.deepEqual(f.requests.map((r) => r.definition.role), booted, line)
+    const verdict = rows.find((row) => row.event === 'verdict')
+    assert.match(verdict.observation.error.message, /lean seat .* declares memory: true.*\[grant-unsupported\]/, line)
+    assert.ok(verdict.observation.error.message.includes(`lean seat ${role} `), line)
+  }
+})
+
+// MUTATION: refuse on any memory field, or on the base field before the tier override, and a permitted definition fails to boot.
+test('a lean seat whose effective memory is false or absent boots, an overriding false cancels a true base, an unselected tier is ignored', async () => {
+  const planner = join(AGENTS, 'planner.md')
+  const edit = (line) => (path, ...args) => {
+    const text = readFileSync(path, ...args)
+    return path === planner ? text.replace(/tiers: .*/, line) : text
+  }
+  for (const line of ['tiers: {}', 'memory: false\ntiers: {}', 'memory: true\ntiers: {"build":{"memory":false}}', 'tiers: {"build":{"memory":false}}', 'tiers: {"judge":{"memory":true}}']) {
+    const f = leanFixture({ deps: { readFileSync: edit(line) } })
+    assert.equal((await f.go()).status, 'done', line)
+    assert.deepEqual(f.requests.map((r) => r.definition.role), ['planner', 'builder', 'reviewer'], line)
+  }
+})
+
 // MUTATION: drop effective.tools from the dispatched definition and an authored tool list never reaches the seat.
 test('the tools a seat receives are the effective definition tools, tier override and empty list included, absent when unset', async () => {
   const planner = join(AGENTS, 'planner.md')

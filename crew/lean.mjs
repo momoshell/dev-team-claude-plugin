@@ -6,6 +6,7 @@ import { appendFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } 
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runAcpSeat } from './acp/seat.mjs'
+import { refuse } from './capabilities.mjs'
 import { acpProviderFailureKind, acpTextReset, providerRetryDecision, PROVIDER_RETRY_TOTAL_WAIT_MS } from './headless.mjs'
 import { runLoop } from './loop.mjs'
 import { AGENT_ROLES, parseAgent } from './protocols.mjs'
@@ -46,6 +47,7 @@ function definitionFor({ role, seat }, tier, d) {
   const override = fields.tiers?.[tier]
   if (override === null) throw new Error(`role ${role} is unseated at tier ${tier}`)
   const effective = { ...fields, ...override }
+  if (effective.memory === true) throw refuse('grant-unsupported', `lean seat ${role} declares memory: true, which lean cannot honour — refusing to boot a silently weaker seat`)
   const charters = [...body.matchAll(CHARTER_LINK)].map((link) => resolve(dirname(source), link[1]))
   return {
     definition: { role, agent: seat.agent, model: `${seat.provider}/${seat.id}`, effort: seat.effort, writes: effective.writes ?? 'none', skills: effective.skills ?? [], requires: effective.requires ?? [],

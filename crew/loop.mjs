@@ -3,7 +3,7 @@
 // check, git, journal) crosses an injected seam, and nothing here is wired to the boot path yet.
 // A seat's return is never trusted from the callback: the envelope is read back from the path
 // the loop issued, parsed and validated as P2, and must carry the id the loop issued.
-import { appendFile, mkdir, readFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { resolveAgents } from './agents.mjs'
 import {
@@ -87,14 +87,16 @@ export async function runLoop(spec, deps = {}) {
   // A finish run re-enters a stopped lane: its accepted plan, gate and declarations, why it stopped, and the open findings.
   if (isFinish && !(fin && typeof fin === 'object' && [fin.planPath, fin.gatePath, fin.subject].every(text)
     && Array.isArray(fin.mutations) && Array.isArray(fin.findings) && text(fin.stop?.reason)
-    && Number.isSafeInteger(fin.turnOffset) && fin.turnOffset >= 0)) return refusal('invalid-input')
+    && Number.isSafeInteger(fin.turnOffset) && fin.turnOffset >= 0
+    && (fin.guidance === undefined || typeof fin.guidance === 'string')
+    && (fin.priorReviewRounds === undefined || (Number.isSafeInteger(fin.priorReviewRounds) && fin.priorReviewRounds >= 0)))) return refusal('invalid-input')
   const d = {
-    resolveAgents, mkdir, readFile, checkBaseline, runGate, proveMutations, runSuite, commitChanges, rebaseBranch, openPullRequest,
+    resolveAgents, mkdir, readFile, writeFile, checkBaseline, runGate, proveMutations, runSuite, commitChanges, rebaseBranch, openPullRequest,
     run: runSuite,
     journal: async (row) => appendFile(join(spec.taskDir, 'journal.jsonl'), `${JSON.stringify(row)}\n`),
     ...deps,
   }
-  const seams = ['runSeat', 'resolveAgents', 'mkdir', 'readFile', 'journal', 'checkBaseline', 'runGate', 'proveMutations', 'runSuite', 'commitChanges', 'rebaseBranch', 'openPullRequest', 'run']
+  const seams = ['runSeat', 'resolveAgents', 'mkdir', 'readFile', 'writeFile', 'journal', 'checkBaseline', 'runGate', 'proveMutations', 'runSuite', 'commitChanges', 'rebaseBranch', 'openPullRequest', 'run']
   if (!seams.every((name) => typeof d[name] === 'function')) return refusal('invalid-input')
   let resolved
   try { resolved = d.resolveAgents(spec.tier) } catch { return refusal('seat-unmeasured') }
@@ -241,10 +243,12 @@ export async function runLoop(spec, deps = {}) {
       gatePath = planned.envelope.details.gate_path
       if (acceptance.length !== spec.acceptance.length || !acceptance.every((id) => spec.acceptance.includes(id))) return await stop('envelope-refused', { acceptance })
     } else {
-      seats.reviewer = { ...seats.reviewer, rounds: FINISH_REVIEW_ROUNDS }
+      // A --return pass counts the reviews the finish run already spent: it never grants new rounds.
+      seats.reviewer = { ...seats.reviewer, rounds: FINISH_REVIEW_ROUNDS - (fin.priorReviewRounds ?? 0) }
     }
 
     const measurements = []
+    const finishReviews = []
     const baseline = isFinish ? null : await stage('baseline', () => callCheck('baseline', d.checkBaseline, { cwd, gatePath, timeoutMs }))
     if (!isFinish) {
       if (!baseline.accepted) return stop(baseline.reason, baseline)
@@ -252,7 +256,7 @@ export async function runLoop(spec, deps = {}) {
       measurements.push(`- Baseline gate: ${baseline.result.status}; failing ids: ${baseline.result.failingIds.join(', ')}.`)
     }
 
-    let feedback = isFinish ? [{ id: 'finish-stop', reason: fin.stop.reason, observation: fin.stop.observation }, ...fin.findings] : []
+    let feedback = isFinish ? [{ id: 'finish-stop', reason: fin.stop.reason, observation: fin.stop.observation }, ...(fin.guidance !== undefined ? [{ id: 'finish-return', guidance: fin.guidance }] : []), ...fin.findings] : []
     // A suite red on both runs sends the lane back through build, gate, proof and review once, with the failures as feedback.
     let repairing = false
     let repaired = false
@@ -311,6 +315,7 @@ export async function runLoop(spec, deps = {}) {
         const reviewed = await stage('review', () => seatTurn('reviewer', [], { singleTurn: isFinish }))
         if (reviewed.halt) return reviewed.halt
         const review = reviewed.envelope
+        finishReviews.push({ verdict: review.details.verdict, findings: review.details.findings })
         await emit('verdict', { status: 'reviewed', verdict: review.details.verdict, findings: review.details.findings })
         if (review.details.verdict === 'changes-needed') {
           // The suite repair is one builder turn: a review that asks for more after it stops the lane.
@@ -374,7 +379,11 @@ export async function runLoop(spec, deps = {}) {
     if (rebased.status !== 'green' || !text(rebased.head)) return stop(rebased.reason ?? 'runner-threw', rebased)
 
     if (isFinish) {
-      await emit('finish-ready', { status: 'ready-for-operator', head: rebased.head })
+      // The fused report the deciding session reads instead of the journal; a run that cannot write it is not ready.
+      const reviewRounds = (fin.priorReviewRounds ?? 0) + rounds.reviewer
+      const report = { schema: 'finish-report/1', lane: spec.id, stop: { reason: fin.stop.reason, observation: fin.stop.observation ?? null }, subject, body, head: rebased.head, reviewRounds, reviews: finishReviews, measurements, acceptance }
+      await d.writeFile(join(spec.taskDir, 'finish-report.json'), `${JSON.stringify(report, null, 2)}\n`)
+      await emit('finish-ready', { status: 'ready-for-operator', head: rebased.head, subject, body, reviewRounds, mutations })
       return { status: 'done', reason: null, pr: null }
     }
 

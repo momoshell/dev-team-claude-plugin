@@ -45,7 +45,7 @@ function lastPr(text) {
 }
 
 // owner/repo of a GitHub remote URL (https or ssh), lowercased; null for anything else.
-const repoOf = (remote) => /github\.com[:/]([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/.exec(remote)?.slice(1, 3).join('/').toLowerCase() ?? null
+const repoOf = (remote) => /^(?:https:\/\/(?:[^@/\s]+@)?github\.com\/|(?:ssh:\/\/)?git@github\.com[:/])([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/.exec(remote)?.slice(1, 3).join('/').toLowerCase() ?? null
 
 // Run a command and refuse unless it exits 0.
 function must(run, what, cmd, args) {

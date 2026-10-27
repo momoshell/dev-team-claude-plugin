@@ -175,3 +175,23 @@ test('a merged PR from another repository is refused with nothing changed', () =
     assertUnchanged(w)
   } finally { w.done() }
 })
+
+// MUTATION: unanchor the host in repoOf and a lookalike host ending in github.com passes as this repository.
+test('an origin on a lookalike host is refused with nothing changed', () => {
+  for (const origin of ['https://evilgithub.com/o/r.git', 'git@evilgithub.com:o/r.git', 'https://github.com.evil.io/o/r.git']) {
+    const w = world({ origin })
+    try {
+      const r = close(w)
+      assert.equal(r.status, 1, origin)
+      assert.match(r.err, /not a GitHub remote/)
+      assertUnchanged(w)
+    } finally { w.done() }
+  }
+})
+
+test('https and ssh GitHub origins both match the PR repository', () => {
+  for (const origin of ['https://github.com/O/R.git', 'ssh://git@github.com/o/r', 'git@github.com:o/r.git']) {
+    const w = world({ origin })
+    try { assert.equal(close(w).status, 0, origin) } finally { w.done() }
+  }
+})

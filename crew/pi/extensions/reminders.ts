@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { logLine, parseAssignment } from '../../driver.mjs'
+import { parseAssignment } from '../../acp/assignment.mjs'
+import { logLine } from '../../acp/log.mjs'
 import { journalPathOf } from '../context-layout.mjs'
 
 const TABLE_PATH = join(dirname(fileURLToPath(import.meta.url)), 'reminders.json')

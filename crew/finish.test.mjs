@@ -430,7 +430,7 @@ test('--accept leaves the PR with the measured subject and notes literally, also
 })
 
 // MUTATION: skip the head check and a commit added after finish-ready is pushed under the earlier run's measurements.
-test('--accept refuses a checkout that moved off the finish run head, publishing and recording nothing (R3)', async () => {
+test('--accept refuses a checkout that moved off the finish run head, publishing and recording nothing', async () => {
   const r = ready()
   try {
     const before = r.rowsOf().length
@@ -441,7 +441,7 @@ test('--accept refuses a checkout that moved off the finish run head, publishing
 })
 
 // MUTATION: treat a failed HEAD probe as a match and a moved checkout is published under the earlier measurements.
-test('--accept refuses when the HEAD probe is red or unmeasured, publishing and recording nothing (R1)', async () => {
+test('--accept refuses when the HEAD probe is red or unmeasured, publishing and recording nothing', async () => {
   for (const probe of [{ status: 'red', code: 1, reason: 'exit', stdout: '' }, { status: 'unmeasured', reason: 'spawn', stdout: '' }, undefined]) {
     const r = ready()
     try {
@@ -453,7 +453,7 @@ test('--accept refuses when the HEAD probe is red or unmeasured, publishing and 
 })
 
 // MUTATION: default a missing reviewRounds to zero and a legacy ready row regains three review rounds.
-test('--return on a legacy ready row counts the finish reviews already in the journal (R2)', async () => {
+test('--return on a legacy ready row counts the finish reviews already in the journal', async () => {
   const review = (n) => [{ event: 'envelope', role: 'reviewer', id: `lane9.reviewer.${n}`, parsed: {}, defects: [], error: null }, { event: 'verdict', status: 'reviewed', verdict: 'changes-needed', findings: [] }]
   const r = ready([], { legacy: true, before: [1, 2, 3].flatMap(review) })
   try {
@@ -466,7 +466,7 @@ test('--return on a legacy ready row counts the finish reviews already in the jo
 })
 
 // MUTATION: reload the planner's declarations on return and a replacement the ready run proved is lost.
-test('--return carries the mutation declarations the ready run proved (R2)', async () => {
+test('--return carries the mutation declarations the ready run proved', async () => {
   const proven = [{ ...MUTATION, find: 'older' }]
   const r = ready()
   try {

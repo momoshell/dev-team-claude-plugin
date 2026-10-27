@@ -141,7 +141,8 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
     const phases = []
     let latest_stage = null, status = 'unknown', reason = null, pr = null, running = false, started_at = null
     for (const row of rows) {
-      if (row.event === 'run-start' && Number.isFinite(row.at)) started_at = new Date(row.at).toISOString()
+      // A number past the Date range makes an Invalid Date, whose toISOString throws.
+      if (row.event === 'run-start') started_at = Number.isFinite(row.at) && !Number.isNaN(new Date(row.at).getTime()) ? new Date(row.at).toISOString() : null
       const stage = nonEmpty(row.stage) ? row.stage : null
       if (stage) latest_stage = stage
       if (row.event === 'stage-start' && stage) phases.push({ id: phases.length + 1, name: stage, status: 'running', checks: [] })
@@ -185,7 +186,7 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
       archived: found.archived, journal_rows: rows.length, journal_skipped_malformed: skipped_malformed,
       tier: nonEmpty(found.spec.tier) ? found.spec.tier : null, shape: nonEmpty(found.spec.shape) ? found.spec.shape : null,
       mode: null, started_at, ended_at: null, duration_ms: null, last_heartbeat_at: null,
-      pending: { ...pendingReasons, ...(started_at ? {} : { started_at: 'the lane journal records no run-start time' }) },
+      pending: { ...pendingReasons, ...(started_at ? {} : { started_at: 'the lane journal records no valid run-start time' }) },
       ship: { state: 'unmeasured', reason: pr ? 'pull request recorded; merge state is not recorded in the lane' : 'lean lanes record no ship state', stale: false },
     }
   }

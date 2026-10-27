@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { appendFileSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { startServer } from '../visualizer/server/server.mjs'
 import { tmpdir } from 'node:os'
@@ -135,5 +135,27 @@ test('a lane is dated by its run-start and placed in the time window by it', asy
     assert.deepEqual(runs.map((run) => [run.adw_id, run.started_at]), [['lean:dated', new Date(at).toISOString()]])
     const undated = (await get('/api/sessions')).body.runs.find((run) => run.adw_id === 'lean:undated')
     assert.equal(undated.started_at, null); assert.ok(undated.pending.started_at)
+  })
+})
+
+test('a run-start time out of the date range leaves that lane undated and every lane listed', async () => {
+  await withServer(async ({ crewRoot, get }) => {
+    lane(crewRoot, 'far', [{ event: 'run-start', at: 8640000000000001, run_id: 'far' }])
+    lane(crewRoot, 'near', [{ event: 'run-start', at: Date.now(), run_id: 'near' }])
+    const runs = Object.fromEntries((await get('/api/sessions')).body.runs.map((run) => [run.adw_id, run]))
+    assert.equal(runs['lean:far'].started_at, null); assert.ok(runs['lean:far'].pending.started_at)
+    assert.ok(runs['lean:near'].started_at)
+  })
+})
+
+test('a lane whose spec or crew file symlinks out of the lane is not listed', async () => {
+  await withServer(async ({ crewRoot, get }) => {
+    for (const [name, file] of [['spec-out', join('task', 'lean.json')], ['crew-out', 'crew.json']]) {
+      const dir = lane(crewRoot, name, [{ event: 'stage-start', stage: 'plan' }])
+      const outside = join(crewRoot, `${name}.json`)
+      put(outside, readFileSync(join(dir, file), 'utf8'))
+      rmSync(join(dir, file)); symlinkSync(outside, join(dir, file))
+    }
+    assert.deepEqual((await get('/api/sessions')).body.runs.map((run) => run.adw_id), [])
   })
 })

@@ -1,12 +1,6 @@
-// Pure presentation for lean lanes (ADR-052). Lean rows carry no timestamps, heartbeat or usage:
-// every unmeasured value is shown absent with the reason the server gave, never guessed.
-import { isLeanRun, leanActivity, leanStatus } from './fleet.js'
-export { isLeanRun, leanActivity, leanStatus }
-
-export function absent(run, field) {
-  if (run?.[field] != null) return { value: run[field], text: String(run[field]), reason: null }
-  return { value: null, text: '—', reason: run?.pending?.[field] ?? 'not recorded' }
-}
+// Pure presentation for lean lanes (ADR-052). Lean lanes record no heartbeat or usage and date only their
+// run-start: every unrecorded value is shown absent with the reason the server gave, never guessed.
+import { leanStatus } from './fleet.js'
 
 // Journal rows → recorded-order lines. No time is read or invented.
 export function journalLines(rows = []) {

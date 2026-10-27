@@ -652,7 +652,7 @@ export function startServer(options = {}) {
         const result = feed.listRuns(filters)
         const shipStates = await ship.resolve(result.runs)
         const runs = result.runs.map((run) => ({ ...run, ship: shipStates?.get?.(run.adw_id) || { state: 'unmeasured', reason: 'ship state not measured', stale: false } }))
-        // Lean lanes live on disk, not in the ledger: list them after the ledger rows, unfiltered by the ledger.
+        // Lean lanes live on disk, not in the ledger: list them after the ledger rows, filtered by their own records.
         let leanRuns = []
         try { leanRuns = lean.listRuns(filters) } catch {}
         return json(res, 200, { schema, ...result, runs: [...runs, ...leanRuns] })

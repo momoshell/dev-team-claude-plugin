@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ROOT } from './helpers.mjs'
-import { journalLines, leanActivity, leanStatus, leanView } from '../visualizer/web/src/lib/lean.js'
+import { journalLines, leanView } from '../visualizer/web/src/lib/lean.js'
+import { leanActivity, leanStatus } from '../visualizer/web/src/lib/fleet.js'
 import { deriveDisplayStatus, deriveStatus, fleetActivity, runActivity } from '../visualizer/web/src/lib/fleet.js'
 
 const src = (path) => readFileSync(join(ROOT, 'visualizer/web/src', path), 'utf8')

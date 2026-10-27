@@ -764,7 +764,7 @@
 .roster-shell :global(button:disabled) { cursor:not-allowed; }
 .roster-shell :global(p) { line-height:1.5; }
 .roster-shell :global(a) { color:var(--accent); }
-.roster-shell :global(summary) { cursor:pointer; font-size:.85rem; padding:.6rem 0; }
+.roster-shell summary { cursor:pointer; font-size:.85rem; padding:.6rem 0; }
 .roster-shell :global(input:not([type=checkbox])),.roster-shell :global(select) { font-size:1rem; border:1px solid var(--muted); border-radius:.45rem; background:var(--panel); color:var(--text); padding:.6rem .7rem; min-width:0; max-width:100%; }
 .roster-views,.preset-tabs { display:flex; flex-wrap:wrap; gap:.5rem; }
 .roster-views { border-bottom:1px solid var(--line); }

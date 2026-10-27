@@ -10,18 +10,18 @@ Case-insensitive literal census over the 39 `.svelte` files directly under the v
 
 | spelling | occurrences | files |
 |---|---|---|
-| `—` | 95 | 21 |
+| `—` | 94 | 21 |
 | `unavailable` | 90 | 26 |
 | `unmeasured` | 14 | 7 |
-| `not measured` | 22 | 7 |
+| `not measured` | 23 | 8 |
 
-`—` files: AcceptPanel.svelte, CellHealthPanel.svelte, EnvelopeInspector.svelte, EventStory.svelte, GateChips.svelte, IntakePanel.svelte, MetricsStrip.svelte, OperationsOverview.svelte, PhaseDots.svelte, PhaseGantt.svelte, PhasePanel.svelte, PlanSteps.svelte, ReviewPanel.svelte, RosterPanel.svelte, RunCard.svelte, RunDetail.svelte, RunSetPanel.svelte, TaskList.svelte, TeardownPanel.svelte, Trajectory.svelte.
+`—` files: AcceptPanel.svelte, CellHealthPanel.svelte, EnvelopeInspector.svelte, EventStory.svelte, GateChips.svelte, IntakePanel.svelte, LeanRunDetail.svelte, MetricsStrip.svelte, OperationsOverview.svelte, PhaseDots.svelte, PhaseGantt.svelte, PhasePanel.svelte, PlanSteps.svelte, ReviewPanel.svelte, RosterPanel.svelte, RunCard.svelte, RunDetail.svelte, RunSetPanel.svelte, TaskList.svelte, TeardownPanel.svelte, Trajectory.svelte.
 
 `unavailable` files: AcceptPanel.svelte, AgentsPage.svelte, AssurancePage.svelte, CellHealthPanel.svelte, EnvelopeInspector.svelte, EventStream.svelte, GateChips.svelte, IntakePanel.svelte, MetricsStrip.svelte, OperationsOverview.svelte, PhaseDots.svelte, PhaseGantt.svelte, PhasePanel.svelte, PlanSteps.svelte, PromptsPage.svelte, ReviewPanel.svelte, RosterPanel.svelte, RunDetail.svelte, RunSetPanel.svelte, SkillRules.svelte, SkillsPage.svelte, TaskList.svelte, TeardownPanel.svelte, Trajectory.svelte, WorkflowGraph.svelte, WorkflowsPage.svelte.
 
 `unmeasured` files: CellHealthPanel.svelte, IntakePanel.svelte, OperationsOverview.svelte, RosterPanel.svelte, RunSetPanel.svelte, SkillDelivery.svelte, WorkflowGraph.svelte.
 
-`not measured` files: FleetTable.svelte, MetricsStrip.svelte, PhasePanel.svelte, RosterPanel.svelte, RunDetail.svelte, TaskList.svelte, TeardownPanel.svelte.
+`not measured` files: FleetTable.svelte, LeanRunDetail.svelte, MetricsStrip.svelte, PhasePanel.svelte, RosterPanel.svelte, RunDetail.svelte, TaskList.svelte, TeardownPanel.svelte.
 
 One exact line per spelling: `—` at `visualizer/web/src/lib/RunCard.svelte:54`; `unavailable` at `visualizer/web/src/lib/PhaseDots.svelte:6`; `unmeasured` at `visualizer/web/src/lib/OperationsOverview.svelte:64`; `not measured` at `visualizer/web/src/lib/RunDetail.svelte:322`. Supporting exhibits: a closed reason at `visualizer/web/src/lib/agents.js:209`, and the explicit null-not-zero statement at `visualizer/web/src/lib/RosterPanel.svelte:656`.
 

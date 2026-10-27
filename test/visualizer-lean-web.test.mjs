@@ -48,3 +48,15 @@ test('an operator-written pr row reads as done, hand-finished; a loop-written on
   assert.notEqual(op.detail, lp.detail)
   assert.ok(op.detail.includes(pr.url) && /operator/.test(op.detail))
 })
+
+test('lean presentation distinguishes accepted failing baselines, open stages and terminal task results', async () => {
+  const {leanOutcome,leanStageStatus,leanCheckStatus,leanPullRequestUrl}=await import('../visualizer/web/src/lib/lean.js')
+  const baseline=leanCheckStatus({result:{accepted:true,result:{status:'red'}}})
+  assert.equal(baseline.tone,'attention');assert.match(baseline.label,/accepted.*failed/)
+  assert.equal(leanStageStatus('green').tone,'ok');assert.equal(leanStageStatus('red').tone,'fail')
+  assert.equal(leanStageStatus('running').label,'No stage-end record');assert.equal(leanStageStatus(undefined).label,'Outcome not recorded')
+  assert.match(leanOutcome({status:'running'}).next,/does not establish/);assert.match(leanOutcome({status:'done',pr:{number:1}}).next,/Merge status is not recorded/)
+  assert.match(leanOutcome({status:'stopped'}).next,/before deciding/);assert.equal(leanOutcome({status:'failed'}).tone,'fail')
+  assert.equal(leanPullRequestUrl({url:'javascript:alert(1)'}),null);assert.equal(leanPullRequestUrl({url:'https://user:secret@github.com/o/r/pull/1'}),null);assert.equal(leanPullRequestUrl({url:'https://github.com/o/r/pull/1'}),'https://github.com/o/r/pull/1')
+  assert.equal(leanCheckStatus({result:{code:0}}).label,'Exit code 0 recorded');assert.equal(leanCheckStatus({result:{accepted:false}}).tone,'fail')
+})

@@ -15,7 +15,7 @@ The current palette uses distinct light and dark status values. The following ra
 
 The escalation raw token is declared at `visualizer/web/src/lib/theme.css:28` and its paper literal at `visualizer/web/src/lib/theme.css:62`. The skipped status remains 5.27:1 on ink and 3.41:1 on paper; the paper value remains below 4.5:1. Primary text, muted text and accent on their matching ground are: `--ink-text` 17.15:1, `--paper-text` 17.06:1, `--ink-muted` 7.59:1, `--paper-muted` 5.50:1, `--spot-dark` 8.82:1, `--spot-light` 5.06:1.
 
-The existing lane-block treatment at `visualizer/web/src/lib/PhaseGantt.svelte:257` still uses white text on the failed-status fill. Role/lane colors and dense run-detail charts have not had a complete rendered contrast audit in this change. Do not extend these page-ground results to every chart label.
+The existing lane-block treatment at `visualizer/web/src/lib/PhaseGantt.svelte:260` still uses white text on the failed-status fill. Role/lane colors and dense run-detail charts have not had a complete rendered contrast audit in this change. Do not extend these page-ground results to every chart label.
 
 ## Hover contrast — per-rule register
 
@@ -101,7 +101,13 @@ Each of the 24 `:hover` rule blocks below is classified independently from sourc
 | `PromptsPage.svelte` | `button:hover:not(:disabled)` | `border-color: var(--accent); background: var(--accent-surface)` | token | `var(--panel)` | `var(--accent-surface)` | Unmeasured — hover ground token --accent-surface has no source-declared value |
 | `PromptsPage.svelte` | `button.primary:hover:not(:disabled)` | `background: var(--accent-solid)` | token | `var(--accent-solid)` | `var(--accent-solid)` | Unmeasured — rest ground token --accent-solid has no source-declared value |
 
-24 rules in 11/39 components. Three rules carry measured rest → hover ratios; the rest stop at a closed reason instead of borrowing a ground.
+### `LeanRunDetail.svelte` — 1 rule
+
+| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
+|---|---|---|---|---|---|---|
+| `LeanRunDetail.svelte` | `button:not(:disabled):hover,summary:hover` | `background: var(--panel-raised)` | token | `var(--panel)` | `var(--panel-raised)` | paper 17.81 → 16.04; ink 15.92 → 14.01 |
+
+25 rules in 12/39 components. Four rules carry measured rest → hover ratios; the rest stop at a closed reason instead of borrowing a ground.
 
 ## Vacuous theme-sheet coverage
 

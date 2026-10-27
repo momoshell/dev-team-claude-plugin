@@ -41,10 +41,10 @@ const UNPINNABLE_PINS = [
   ["visualizer/web/src/lib/IntakePanel.svelte", 91, ".actor input { min-width:0; width:100%;"],
   ["visualizer/web/src/lib/PhaseDots.svelte", 5, "--lane-color: var(--lane-${phase.lane})"],
   ["visualizer/web/src/lib/PhaseDots.svelte", 8, ".lane-dot { background:var(--lane-color); }"],
-  ["visualizer/web/src/lib/PhaseGantt.svelte", 143, "--role-color:var(--lane-${block.lane ?? 6})"],
-  ["visualizer/web/src/lib/PhaseGantt.svelte", 146, "--bar-color:var(--lane-${block.lane ?? 6})"],
-  ["visualizer/web/src/lib/PhaseGantt.svelte", 254, "--identity-column:17rem; --lane-gap:.6rem"],
-  ["visualizer/web/src/lib/PhaseGantt.svelte", 257, ".bar.failed { background:var(--status-fail); color:#fff; }"],
+  ["visualizer/web/src/lib/PhaseGantt.svelte", 144, "--role-color:var(--lane-${block.lane ?? 6})"],
+  ["visualizer/web/src/lib/PhaseGantt.svelte", 147, "--bar-color:var(--lane-${block.lane ?? 6})"],
+  ["visualizer/web/src/lib/PhaseGantt.svelte", 257, "--identity-column:17rem; --lane-gap:.6rem"],
+  ["visualizer/web/src/lib/PhaseGantt.svelte", 260, ".bar.failed { background:var(--status-fail); color:#fff; }"],
   ["visualizer/web/src/lib/PhasePanel.svelte", 99, ".chip.unproven { color:#92400e; background:#fef3c7; }"],
   ["visualizer/web/src/lib/RoleTag.svelte", 4, "--role-color: var(--role-${role})"],
   ["visualizer/web/src/lib/RoleTag.svelte", 9, ".swatch { width:.65rem; height:.65rem; background:var(--role-color);"],
@@ -434,8 +434,8 @@ test('G1', () => {
   assert.equal(hoverRes.paper, '4.76')
   assert.equal(hoverRes.ink, '7.20')
   const rows = registerRows()
-  assert.equal(rows.length, 24)
-  assert.equal(new Set(rows.map((row) => row.file)).size, 11)
+  assert.equal(rows.length, 25)
+  assert.equal(new Set(rows.map((row) => row.file)).size, 12)
   for (const file of libFiles()) {
     const expected = extractHoverRules(styleTextOf(file))
     for (const rule of expected) {
@@ -588,9 +588,9 @@ test('pin-sweep D1', () => {
 // Guard for RV1-1: editing the register's denominator sentence reddens this test.
 test('K1', () => {
   const { rows, measured } = assertHoverDenominators()
-  assert.equal(rows.length, 24)
-  assert.equal(new Set(rows.map((row) => row.file)).size, 11)
-  assert.equal(measured, 3)
+  assert.equal(rows.length, 25)
+  assert.equal(new Set(rows.map((row) => row.file)).size, 12)
+  assert.equal(measured, 4)
 })
 
 function parseChecklist(body) {

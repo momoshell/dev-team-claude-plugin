@@ -86,7 +86,7 @@ The paper block selector is at `visualizer/web/src/lib/theme.css:44`; the ink bl
 
 Permit two component-local custom-property patterns, and do not confuse either with a new colour tier:
 
-1. Layout locals belong to the element that consumes geometry: `--identity-column:17rem` and `--lane-gap:.6rem` at `visualizer/web/src/lib/PhaseGantt.svelte:254`, with the `calc()` that consumes them pinned by the visualizer panel suite.
-2. A token-indirection local may carry a runtime role or lane suffix: `visualizer/web/src/lib/RoleTag.svelte:4` sets `--role-color` from a role alias, `visualizer/web/src/lib/PhaseDots.svelte:5` sets `--lane-color`, and `visualizer/web/src/lib/PhaseGantt.svelte:146` supplies the lane indirection. The declaration still resolves to a Tier-2 alias; it does not license a literal colour.
+1. Layout locals belong to the element that consumes geometry: `--identity-column:17rem` and `--lane-gap:.6rem` at `visualizer/web/src/lib/PhaseGantt.svelte:257`, with the `calc()` that consumes them pinned by the visualizer panel suite.
+2. A token-indirection local may carry a runtime role or lane suffix: `visualizer/web/src/lib/RoleTag.svelte:4` sets `--role-color` from a role alias, `visualizer/web/src/lib/PhaseDots.svelte:5` sets `--lane-color`, and `visualizer/web/src/lib/PhaseGantt.svelte:147` supplies the lane indirection. The declaration still resolves to a Tier-2 alias; it does not license a literal colour.
 
 The canonical measured source for this table is `visualizer/web/src/lib/theme.css`; values not present in that source do not belong in this reference.

@@ -8,6 +8,6 @@
 
 ## Measured branch census
 
-A component counts as state-branched when its rendered markup before `<style>` contains a class token `empty`, or when an `{#if}` or `{:else if}` condition contains `loading`. By that predicate 19 of 39 components branch: AgentsPage.svelte, AssurancePage.svelte, CellHealthPanel.svelte, EnvelopeInspector.svelte, EventStream.svelte, IntakePanel.svelte, OperationsOverview.svelte, PhaseGantt.svelte, PromptsPage.svelte, RosterPanel.svelte, RunDetail.svelte, SkillDelivery.svelte, SkillsPage.svelte, TaskList.svelte, TaskPreparation.svelte, TeardownPanel.svelte, Trajectory.svelte, WorkflowGraph.svelte, WorkflowsPage.svelte.
+A component counts as state-branched when its rendered markup before `<style>` contains a class token `empty`, or when an `{#if}` or `{:else if}` condition contains `loading`. By that predicate 20 of 39 components branch: AgentsPage.svelte, AssurancePage.svelte, CellHealthPanel.svelte, EnvelopeInspector.svelte, EventStream.svelte, IntakePanel.svelte, LeanRunDetail.svelte, OperationsOverview.svelte, PhaseGantt.svelte, PromptsPage.svelte, RosterPanel.svelte, RunDetail.svelte, SkillDelivery.svelte, SkillsPage.svelte, TaskList.svelte, TaskPreparation.svelte, TeardownPanel.svelte, Trajectory.svelte, WorkflowGraph.svelte, WorkflowsPage.svelte.
 
-**Stated gap:** 20/39 components show no loading or empty branch under this predicate.
+**Stated gap:** 19/39 components show no loading or empty branch under this predicate.

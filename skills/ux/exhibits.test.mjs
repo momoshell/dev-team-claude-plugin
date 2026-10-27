@@ -87,7 +87,7 @@ test('ux manifest pins carry current exact content', () => {
 test('ux absence vocabulary re-derives from the component tree', () => {
   const body = readFileSync(join(REF_DIR, 'absence.md'), 'utf8')
   const dash = census('—', 'g')
-  assert.equal(dash.occurrences, 95)
+  assert.equal(dash.occurrences, 94)
   assert.equal(dash.files, 21)
   const unavailable = census('unavailable', 'gi')
   assert.equal(unavailable.occurrences, 90)
@@ -96,18 +96,18 @@ test('ux absence vocabulary re-derives from the component tree', () => {
   assert.equal(unmeasured.occurrences, 14)
   assert.equal(unmeasured.files, 7)
   const notMeasured = census('not measured', 'gi')
-  assert.equal(notMeasured.occurrences, 22)
-  assert.equal(notMeasured.files, 7)
+  assert.equal(notMeasured.occurrences, 23)
+  assert.equal(notMeasured.files, 8)
   const union = new Set([...dash.hit, ...unavailable.hit, ...unmeasured.hit, ...notMeasured.hit])
   assert.equal(union.size, 31)
   assert.equal(libFiles().length, 39)
-  for (const row of ['| `—` | 95 | 21 |', '| `unavailable` | 90 | 26 |', '| `unmeasured` | 14 | 7 |', '| `not measured` | 22 | 7 |']) {
+  for (const row of ['| `—` | 94 | 21 |', '| `unavailable` | 90 | 26 |', '| `unmeasured` | 14 | 7 |', '| `not measured` | 23 | 8 |']) {
     assert.ok(body.includes(row), `absence.md must carry ${row}`)
   }
   assert.ok(body.includes('`Unmeasured — <reason>`'), 'absence.md must name the canonical vocabulary')
 })
 
-test('ux state branches re-derive to nineteen of thirty nine', () => {
+test('ux state branches re-derive to twenty of thirty nine', () => {
   const body = readFileSync(join(REF_DIR, 'states.md'), 'utf8')
   assert.ok(body.includes('## Adopted rules'), 'states.md must carry the adopted rules heading')
   const hit = []
@@ -117,10 +117,10 @@ test('ux state branches re-derive to nineteen of thirty nine', () => {
     const conditions = [...markup.matchAll(/\{#if\s+([^}]+)\}|\{:else if\s+([^}]+)\}/g)].map((match) => match[1] || match[2] || '')
     if (hasEmptyClass || conditions.some((condition) => condition.includes('loading'))) hit.push(file)
   }
-  assert.equal(hit.length, 19)
-  assert.equal(libFiles().length - hit.length, 20)
-  assert.ok(body.includes('19/39') || body.includes('19 of 39'), 'states.md must record the branched count')
-  assert.ok(body.includes('20/39'), 'states.md must record the unbranched remainder')
+  assert.equal(hit.length, 20)
+  assert.equal(libFiles().length - hit.length, 19)
+  assert.ok(body.includes('20/39') || body.includes('20 of 39'), 'states.md must record the branched count')
+  assert.ok(body.includes('19/39'), 'states.md must record the unbranched remainder')
 })
 
 test('ux keyboard and focus register re-derives', () => {
@@ -132,28 +132,28 @@ test('ux keyboard and focus register re-derives', () => {
   assert.equal(modern.occurrences, 1)
   assert.equal(modern.files, 1)
   const visible = census(':focus-visible', 'g')
-  assert.equal(visible.occurrences, 27)
-  assert.equal(visible.files, 8)
+  assert.equal(visible.occurrences, 32)
+  assert.equal(visible.files, 9)
   const plain = census(':focus(?!-)', 'g')
   assert.equal(plain.occurrences, 5)
   assert.equal(plain.files, 2)
   const tab = census('tabindex', 'g')
-  assert.equal(tab.occurrences, 17)
-  assert.equal(tab.files, 9)
+  assert.equal(tab.occurrences, 22)
+  assert.equal(tab.files, 11)
   const aria = census('aria-', 'g')
-  assert.equal(aria.occurrences, 217)
+  assert.equal(aria.occurrences, 237)
   assert.equal(aria.files, 34)
   const role = census('role=', 'g')
-  assert.equal(role.occurrences, 82)
+  assert.equal(role.occurrences, 91)
   assert.equal(role.files, 19)
   for (const row of [
     '| legacy `on:keydown` attributes | 0 | 0 |',
     '| modern `onkeydown=` attributes | 1 | 1 |',
-    '| `:focus-visible` selectors | 27 | 8 |',
+    '| `:focus-visible` selectors | 32 | 9 |',
     '| plain `:focus` selectors | 5 | 2 |',
-    '| `tabindex` attributes | 17 | 9 |',
-    '| `aria-` attributes | 217 | 34 |',
-    '| `role=` attributes | 82 | 19 |',
+    '| `tabindex` attributes | 22 | 11 |',
+    '| `aria-` attributes | 237 | 34 |',
+    '| `role=` attributes | 91 | 19 |',
   ]) {
     assert.ok(body.includes(row), `keyboard-focus.md must carry ${row}`)
   }

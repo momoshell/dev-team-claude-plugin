@@ -8,7 +8,7 @@ A component may name only Tier-2 aliases: `--bg`, `--panel`, `--line`, `--muted`
 
 ## T2 - painted colour comes from a token
 
-Make every painted foreground, background, border, marker, and fill resolve to a token rather than a literal colour. The measured code violates this in **4 of 39 components, 22 times**, all in state-colour rules; the inventory is in `references/state-colour.md` L1. Exhibit: `visualizer/web/src/lib/GateChips.svelte:13`, `visualizer/web/src/lib/AcceptPanel.svelte:23`, `visualizer/web/src/lib/PhasePanel.svelte:99`, and the gantt row at `visualizer/web/src/lib/PhaseGantt.svelte:257`. The suite currently has no general hex ban and no general requirement that a colour declaration use `var()`.
+Make every painted foreground, background, border, marker, and fill resolve to a token rather than a literal colour. The measured code violates this in **4 of 39 components, 22 times**, all in state-colour rules; the inventory is in `references/state-colour.md` L1. Exhibit: `visualizer/web/src/lib/GateChips.svelte:13`, `visualizer/web/src/lib/AcceptPanel.svelte:23`, `visualizer/web/src/lib/PhasePanel.svelte:99`, and the gantt row at `visualizer/web/src/lib/PhaseGantt.svelte:260`. The suite currently has no general hex ban and no general requirement that a colour declaration use `var()`.
 
 ## T3 - escalation goes through the alias
 
@@ -28,7 +28,7 @@ The mechanical floor is narrow and must be described honestly:
 
 - `test/visualizer-shape.test.mjs` checks role/lane name presence against `theme.css`: each role name exists and each lane index points at the expected role. It inspects no colour value or count.
 - `test/visualizer-panels.test.mjs` pins two exact FleetTable CSS strings: the stale rule at `visualizer/web/src/lib/FleetTable.svelte:36` and its `currentColor` replacement at `visualizer/web/src/lib/FleetTable.svelte:42`, including the escalation status rule at `visualizer/web/src/lib/FleetTable.svelte:41`.
-- `test/visualizer-panels.test.mjs` pins PhaseGantt's `--identity-column`, `--lane-gap`, and their `calc()` geometry at `visualizer/web/src/lib/PhaseGantt.svelte:254`.
+- `test/visualizer-panels.test.mjs` pins PhaseGantt's `--identity-column`, `--lane-gap`, and their `calc()` geometry at `visualizer/web/src/lib/PhaseGantt.svelte:257`.
 - The role/lane isolation list names the panel suites, with `visualizer/web/src/lib/TeardownPanel.svelte` and `visualizer/web/src/lib/RosterPanel.svelte` covered by the teardown and server suites.
 - The blanket Svelte shape rule bans `export let` and `$:` in every `.svelte` file; components use runes instead.
 

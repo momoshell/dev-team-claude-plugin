@@ -331,11 +331,11 @@
 <style>
   .detail { width:min(1240px,100%); margin:auto; padding:2rem 2rem 4rem; display:grid; gap:1.25rem; min-width:0; }
   .detail :global(*) { box-sizing:border-box; }
-  .detail :global(h2) { font-size:1.05rem; letter-spacing:-.025em; }
-  .detail :global(h3) { font-size:1rem; }
-  .detail :global(p) { line-height:1.55; }
+  .detail h2 { font-size:1.05rem; letter-spacing:-.025em; }
+  .detail h3 { font-size:1rem; }
+  .detail p { line-height:1.55; }
   .detail :global(code) { overflow-wrap:anywhere; }
-  .detail :global(summary) { cursor:pointer; padding:.7rem 0; font-size:.875rem; }
+  .detail summary { cursor:pointer; padding:.7rem 0; font-size:.875rem; }
   .detail :global(button) { cursor:pointer; }
   .detail :global(button:disabled) { cursor:wait; }
   .detail :global(a) { color:var(--accent); }

@@ -6,6 +6,7 @@
 //   crew show <lane> [<role>] [--json]  read a lane's recorded sessions (crew/show.mjs)
 //   crew record-pr <lane> --pr <url>  record the PR a stopped lean lane was hand-finished in (crew/record-pr.mjs)
 //   crew finish <lane>           finish a stopped lean lane with its own builder seat; stops committed and rebased, unpublished (crew/finish.mjs)
+//   crew finish <lane> --accept [--notes <file>] | --return <file> | --abandon  decide a lane whose finish run is ready (crew/finish.mjs)
 //   crew closeout <lane>         remove a merged lean lane's worktree and branch, archive its lane directory (crew/closeout.mjs)
 //   crew lanes [--all] [--json]  list lean lanes from their journals (crew/lanes.mjs)
 //   crew roster generate [--check]  write crew/roster.json from crew/agents/*.md (crew/roster-generate.mjs)

@@ -16,7 +16,7 @@ const MUTATION = { check: 'A1', file: 'lib.mjs', find: 'old', replace: 'new' }
 // Every effect is a recorded call; nothing touches a model, git, gh, the network or the disk.
 // A seat "returns" by writing its envelope into a virtual file the loop then reads back.
 function fakes(options = {}) {
-  const calls = [], rows = [], requests = [], seen = {}, returns = new Map()
+  const calls = [], rows = [], requests = [], seen = {}, returns = new Map(), writes = new Map()
   let reviewTurns = 0, reviewReads = 0
   const spec = {
     id: 'lane', cwd: '/virtual/checkout', taskDir: '/virtual/task', tier: 'build', shape: 'standard', brief: 'operator task',
@@ -43,6 +43,7 @@ function fakes(options = {}) {
       if (options.readError) throw Object.assign(new Error('denied'), { code: options.readError })
       return returns.get(path) ?? ''
     },
+    writeFile: async (path, content) => { if (options.writeError) throw Object.assign(new Error('denied'), { code: options.writeError }); writes.set(path, String(content)) },
     journal: options.journal ?? (async (row) => { rows.push(structuredClone(row)) }),
     runSeat: async (request) => {
       calls.push(`seat:${request.role}`); requests.push(structuredClone(request))
@@ -71,7 +72,7 @@ function fakes(options = {}) {
     openPullRequest: measured('publish', options.publish ?? { status: 'green', reason: null, pr: PR }),
     ...options.deps,
   }
-  return { spec, deps, calls, rows, requests, seen, go: () => runLoop(spec, deps) }
+  return { spec, deps, calls, rows, requests, seen, writes, go: () => runLoop(spec, deps) }
 }
 const BODY = ['Source: "issue 12"', '', '## Acceptance', '- A1', '', '## Measurements', '- Baseline gate: red; failing ids: A1.', '- Gate: green.', '- Mutations: 1/1 killed (A1: killed).', '- Suite: green; exit 0.'].join('\n')
 const count = (f, role) => f.requests.filter((r) => r.role === role).length
@@ -982,6 +983,7 @@ test('a builder replacement mutation is the declaration the proof runs; one outs
   const f = fakes({ spec: finishSpec(), unseated: ['planner'], edit: (v) => (v.role === 'builder' ? { ...v, details: { summary: 'built', mutations: [REPLACEMENT] } } : v) })
   assert.equal((await f.go()).status, 'done')
   assert.deepEqual(f.seen.mutations.mutations, [REPLACEMENT])
+  assert.deepEqual(f.rows.at(-1).mutations, [REPLACEMENT])
   const out = fakes({ spec: finishSpec(), unseated: ['planner'], edit: (v) => (v.role === 'builder' ? { ...v, details: { summary: 'built', mutations: [{ ...REPLACEMENT, check: 'ZZ' }] } } : v) })
   assert.deepEqual(await out.go(), stopped('envelope-refused'))
   assert.equal(out.calls.includes('gate'), false)
@@ -1063,4 +1065,36 @@ test('a proof with a survived row stops without another builder turn (RA5)', asy
   })
   assert.deepEqual(await f.go(), stopped('mutations-survived'))
   assert.equal(count(f, 'builder'), 1)
+})
+
+// MUTATION: drop the report write, the guidance entry or the prior-rounds deduction and the matching assertion fails.
+test('a green finish run writes a fused report and a finish-ready row with the measured subject and body; a return pass keeps the cap (FD1, FD2, FD7)', async () => {
+  const f = fakes({ spec: finishSpec(), unseated: ['planner'], review: 1, bounds: { builder: 3 } })
+  assert.equal((await f.go()).status, 'done')
+  const report = JSON.parse(f.writes.get('/virtual/task/finish-report.json'))
+  assert.equal(report.stop.reason, STOP.reason)
+  assert.deepEqual(report.reviews, [{ verdict: 'changes-needed', findings: [finding] }, { verdict: 'pass', findings: [] }])
+  assert.equal(report.measurements.some((m) => m.startsWith('- Suite')), true)
+  const ready = f.rows.at(-1)
+  assert.deepEqual([ready.subject, ready.reviewRounds, ready.body.includes('## Measurements')], ['fix(crew): planned lane', 2, true])
+  assert.equal(ready.body, report.body)
+  assert.deepEqual(ready.mutations, [MUTATION])
+
+  const g = fakes({ spec: finishSpec({ guidance: 'Fix it first', priorReviewRounds: 2 }), unseated: ['planner'], review: 2, bounds: { builder: 3 } })
+  assert.deepEqual(await g.go(), stopped('round-bound'))
+  assert.deepEqual(g.requests[0].feedback.slice(0, 2), [{ id: 'finish-stop', reason: STOP.reason, observation: STOP.observation }, { id: 'finish-return', guidance: 'Fix it first' }])
+  assert.equal(count(g, 'reviewer'), 1)
+  for (const bad of [{ guidance: 5 }, { priorReviewRounds: -1 }, { priorReviewRounds: 1.5 }]) {
+    assert.deepEqual(await fakes({ spec: finishSpec(bad), unseated: ['planner'] }).go(), stopped('invalid-input'))
+  }
+})
+
+// MUTATION: ignore a failed report write and the lane is announced ready without its report.
+test('a finish run that cannot write its report emits no finish-ready, and the standard shape writes none', async () => {
+  const f = fakes({ spec: finishSpec(), unseated: ['planner'], writeError: 'EACCES' })
+  assert.deepEqual(await f.go(), stopped('runner-threw'))
+  assert.equal(f.rows.some((r) => r.event === 'finish-ready'), false)
+  const std = fakes()
+  await std.go()
+  assert.equal(std.writes.size, 0)
 })

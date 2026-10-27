@@ -6,7 +6,7 @@ import { appendFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } 
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runAcpSeat } from './acp/seat.mjs'
-import { refuse } from './capabilities.mjs'
+import { refuse } from './acp/grants.mjs'
 import { acpProviderFailureKind, acpTextReset, providerRetryDecision, PROVIDER_RETRY_TOTAL_WAIT_MS } from './acp/provider.mjs'
 import { runLoop } from './loop.mjs'
 import { AGENT_ROLES, parseAgent } from './protocols.mjs'

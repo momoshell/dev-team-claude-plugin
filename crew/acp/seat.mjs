@@ -6,7 +6,7 @@ import { basename, delimiter, dirname, isAbsolute, join, parse, relative, resolv
 import { fileURLToPath } from 'node:url'
 import { ACP_POLL_MS, ACP_UPDATE_KINDS, acpClient } from '../acp-client.mjs'
 import { permissionHandler, readOnlyCommand } from '../acp-permission.mjs'
-import { armGrants, PI_AGENT_DIR_ENV, refuse } from '../capabilities.mjs'
+import { armGrants, PI_AGENT_DIR_ENV, refuse } from './grants.mjs'
 import { AGENT_ROLES, validateEnvelope } from '../protocols.mjs'
 import * as claudeAdapter from '../adapters/adapter-claude.mjs'
 import * as piAdapter from '../adapters/adapter-pi.mjs'

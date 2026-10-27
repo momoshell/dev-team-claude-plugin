@@ -5,9 +5,13 @@
 // close-surface and doc mounts are window-scoped, send/send-key resolve
 // globally; `send` never auto-submits — send-key enter does).
 import { spawnSync } from 'node:child_process'
-import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readSync } from 'node:fs'
+import { closeSync, fstatSync, openSync, readSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
+import { DOTS_ONLY_RE, SAFE_PATH_RE, SAFE_RUN_TOKEN_RE, parseAssignment, runTokenFromReturnPath } from './acp/assignment.mjs'
+import { logLine } from './acp/log.mjs'
+
+export { parseAssignment, logLine }
 
 const CMUX_BIN = process.env.CMUX_BIN || 'cmux'
 const SPAWN_TIMEOUT_MS = 10_000
@@ -69,7 +73,6 @@ export function locate(t, id) {
 // box and never throws on an unproved submit. Assignment lines obey the
 // allowlist charset; content travels in files, never in the line.
 const SAFE_LINE_RE = /^[A-Za-z0-9 _.,:;=/@'+\"-]+$/
-const SAFE_PATH_RE = /^\/[A-Za-z0-9._/-]+$/
 const SEND_SETTLE_MS = 250
 const SEND_VERIFY_WINDOW_MS = 3000
 const SEND_READY_TIMEOUT_MS = 60_000
@@ -106,11 +109,6 @@ export function assertSafeLine(line) {
 // space-split tokens and skips any token without a '/': a relative brief path
 // ('brief.md') or a path split in half by an embedded space would pass it unseen.
 const SAFE_TOKEN_RE = /^[A-Za-z0-9._-]+$/
-// Path separators are already outside SAFE_TOKEN_RE; dot-only tokens ('.', '..')
-// are not, and they are the ones that turn into traversal when a caller joins an
-// id or role into a filesystem path.
-const DOTS_ONLY_RE = /^\.+$/
-const SAFE_RUN_TOKEN_RE = /^[A-Za-z0-9._-]{1,64}$/
 
 function assertToken(name, value) {
   if (typeof value !== 'string' || !SAFE_TOKEN_RE.test(value) || DOTS_ONLY_RE.test(value)) {
@@ -122,18 +120,6 @@ function assertPathValue(name, value) {
   if (typeof value !== 'string' || !SAFE_PATH_RE.test(value)) {
     throw new Error(`assignmentLine: ${name} must be an absolute charset-clean path: ${value}`)
   }
-}
-
-function runTokenFromReturnPath(returnPath) {
-  if (typeof returnPath !== 'string' || !returnPath.startsWith('/')) return null
-  const segments = returnPath.split('/')
-  const returns = segments.lastIndexOf('returns')
-  if (returns < 1 || returns + 3 !== segments.length) return null
-  const token = segments[returns + 1]
-  const file = segments[returns + 2]
-  if (typeof token !== 'string' || !SAFE_RUN_TOKEN_RE.test(token) || DOTS_ONLY_RE.test(token)) return null
-  if (typeof file !== 'string' || !/^[A-Za-z0-9._-]+\.json$/.test(file)) return null
-  return token
 }
 
 function runIdentityInstruction(returnPath) {
@@ -177,20 +163,6 @@ export function assignmentDelivery({ briefFile, readFileSync }) {
     if (bytes === 0 || bytes > ASSIGNMENT_INLINE_BYTE_LIMIT) return { delivery: 'path', briefText: null, brief_bytes: bytes, unmeasured_reason: null }
     return { delivery: 'inline', briefText, brief_bytes: bytes, unmeasured_reason: null }
   } catch { return { delivery: 'path', briefText: null, brief_bytes: null, unmeasured_reason: 'brief-unreadable' } }
-}
-
-export function parseAssignment(text) {
-  if (typeof text !== 'string' || !text.length) return null
-  const line = text.split(/\r?\n/, 1)[0]
-  const safePath = (value) => SAFE_PATH_RE.test(value) && value.split('/').every((part) => part !== '.' && part !== '..')
-  const match = line.match(/^ASSIGNMENT ([A-Za-z0-9._-]+): (?:read your brief at ([^ ]+)\.|your brief body follows below verbatim — do not re-read the brief file; if the brief itself names a plan, a diff or files, read those\.) Task dir: ([^ ]+)\. Write your ReturnEnvelope to ([^ ]+)(?: Add top-level JSON field "run_id":"([A-Za-z0-9._-]+)" to your ReturnEnvelope\.)? then print exactly: CREW-DONE ([A-Za-z0-9._-]+) ([A-Za-z0-9._-]+)$/)
-  if (!match) return null
-  const [, id, briefFile, taskDir, returnPath, instructedRunId, role, tailId] = match
-  if (tailId !== id || !SAFE_RUN_TOKEN_RE.test(id) || DOTS_ONLY_RE.test(id) || DOTS_ONLY_RE.test(role)) return null
-  if ((briefFile && !safePath(briefFile)) || !safePath(taskDir) || !safePath(returnPath)) return null
-  const runId = runTokenFromReturnPath(returnPath)
-  if (instructedRunId && instructedRunId !== runId) return null
-  return { id, role, returnPath, taskDir, runId: instructedRunId ? runId : null }
 }
 
 export function assignmentPrompt({ id, role, briefFile, returnPath, taskDir, delivery = 'path', briefText = null }) {
@@ -662,14 +634,6 @@ export function closeWorkspace(id) {
   return cmux('close-workspace', ['--workspace', id]).ok
 }
 
-
-// --- crew log ------------------------------------------------------------------
-export function logLine(file, obj) {
-  try {
-    mkdirSync(dirname(file), { recursive: true })
-    appendFileSync(file, `${JSON.stringify(obj)}\n`)
-  } catch { /* logging never throws */ }
-}
 
 // --- surface -> process tree (read-only observability, #149) -----------------
 // ADR-029:68 said the pane transport owns no process handle. `cmux top

@@ -7,7 +7,7 @@ import { appendFileSync, closeSync, openSync, readFileSync, readSync, readdirSyn
 import { StringDecoder } from 'node:string_decoder'
 import { join, relative, resolve } from 'node:path'
 import { journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../context-layout.mjs'
-import { exportEntries } from '../../../scripts/factory/make-brief.mjs'
+import { exportEntries } from '../../acp/export-entries.mjs'
 import { DEFAULT_MAX_LINES, MAX_LINES_ENV } from './readgate.ts'
 
 const READ_CAP_BYTES = 256 * 1024

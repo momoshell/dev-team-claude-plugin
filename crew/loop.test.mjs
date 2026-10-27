@@ -61,9 +61,9 @@ function fakes(options = {}) {
     proveMutations: measured('mutations', 'proof' in options ? options.proof : { status: 'green', reason: null, rows: [{ check: 'A1', outcome: 'killed', reason: null }] }),
     runSuite: measured('suite', options.suite ?? green()),
     commitChanges: measured('commit', options.commit ?? { status: 'green', reason: null, head: 'a'.repeat(40), files: ['lib.mjs'] }),
-    // the status probe before the suite measures the reviewer's paths, the one after it measures the commit's
+    // the status probe right after a suite measures the commit's paths, any other measures the reviewer's
     run: (input) => input.args.includes('status')
-      ? (calls.includes('suite')
+      ? (calls.at(-1) === 'suite'
         ? measured('paths', options.pathsResult ?? (() => ({ ...green(), stdout: options.paths ?? ' M lib.mjs\0' })))
         : measured('review-paths', options.reviewResult ?? (() => ({ ...green(), stdout: [options.reviewPaths].flat()[Math.min(reviewReads++, [options.reviewPaths].flat().length - 1)] ?? ' M lib.mjs\0' }))))(input)
       : measured('fetch', options.fetch ?? green())(input),
@@ -499,22 +499,22 @@ test('a suite red on both runs gives the builder one repair turn whose feedback 
   const empty = sequenced([redRun(1), redRun(1), green()])
   assert.equal((await empty.go()).status, 'done')
   assert.equal(builderTurns(empty).length, 2)
-  // the repair turn is granted even when review fixes spent both builder rounds, and needs no lead
-  const spent = sequenced([redOut(SPEC_OUT), redOut(TAP_OUT), green()], { review: 1, bounds: { builder: 2 } })
+  // the repair turn and its review are granted even when review fixes spent both rounds, and need no lead
+  const spent = sequenced([redOut(SPEC_OUT), redOut(TAP_OUT), green()], { review: 1, bounds: { builder: 2, reviewer: 2 } })
   assert.equal((await spent.go()).status, 'done')
   assert.equal(builderTurns(spent).length, 3)
   assert.equal(count(spent, 'lead'), 0)
 })
 
-// MUTATION: skip the fresh gate or the fresh suite after the repair and a stale green is published.
-test('after a suite repair the gate and suite run again, then the lane commits and opens its PR with every measurement', async () => {
+// MUTATION: skip the fresh gate, proof, review or suite after the repair and an unproven green is published.
+test('after a suite repair the gate, proof, review and suite run again, then the lane commits and opens its PR with every measurement', async () => {
   const f = sequenced([redRun(1), redRun(2), green()])
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
   const at = f.calls.lastIndexOf('seat:builder')
-  assert.deepEqual(f.calls.slice(at), ['seat:builder', 'gate', 'suite', ...EFFECTS])
+  assert.deepEqual(f.calls.slice(at), ['seat:builder', 'gate', 'mutations', 'review-paths', 'seat:reviewer', 'suite', ...EFFECTS])
   assert.equal(f.inputs.length, 3)
   assert.deepEqual(f.inputs[2], f.inputs[0])
-  const body = BODY.replace('- Suite: green; exit 0.', '- Suite: red; exit 1.\n- Suite re-run: red; exit 2.\n- Gate after suite repair: green.\n- Suite after repair: green; exit 0.')
+  const body = BODY.replace('- Suite: green; exit 0.', '- Suite: red; exit 1.\n- Suite re-run: red; exit 2.\n- Gate: green.\n- Mutations: 1/1 killed (A1: killed).\n- Suite: green; exit 0.')
   assert.equal(f.seen.commit.body, body)
   assert.equal(f.seen.publish.body, body)
   const bad = [{ ...green(), status: 'red', code: 1, reason: 'gate-failed' }, { ...green(), status: 'unmeasured', code: null, reason: 'timeout', timedOut: true }, { ...green(), code: 3 }]
@@ -528,10 +528,11 @@ test('after a suite repair the gate and suite run again, then the lane commits a
 
 // MUTATION: accept a red repaired suite, retry it, or let a non-done repair bounce into more builders.
 test('a suite still red after the repair turn stops with no second repair turn and no publication', async () => {
-  const f = sequenced([redRun(1), redRun(2), redRun(3), green()])
+  // the repaired suite gets the same single re-run as any red suite, and two more reds stop the lane
+  const f = sequenced([redRun(1), redRun(2), redRun(3), redRun(4), green()])
   assert.deepEqual(await f.go(), stopped('exit-nonzero'))
   assert.equal(builderTurns(f).length, 2)
-  assert.equal(f.inputs.length, 3)
+  assert.equal(f.inputs.length, 4)
   for (const effect of EFFECTS) assert.equal(f.calls.includes(effect), false, effect)
   for (const post of [timeoutRun(), new Error('crashed'), { ...green(), code: 4 }]) {
     const r = sequenced([redRun(), redRun(), post, green()])
@@ -599,8 +600,8 @@ test('every started stage ends on success and refusal, in order', async () => {
   assert.ok(ok.rows.every((r) => r.lane === 'lane' && typeof r.event === 'string' && 'stage' in r))
   const refused = fakes({ suite: { ...green(), status: 'red', code: 1, reason: 'exit-nonzero' } })
   await refused.go()
-  // a red suite is run once more, then repaired once: the builder, a fresh gate and a fresh suite follow
-  assert.deepEqual(pairs(refused.rows), [...STAGES.slice(0, 8), 'suite', 'suite-repair', 'gate', 'suite'].flatMap((s) => [['stage-start', s], ['stage-end', s]]))
+  // a red suite is run once more, then repaired once: the builder, gate, proof, review and both suite runs follow
+  assert.deepEqual(pairs(refused.rows), [...STAGES.slice(0, 8), 'suite', 'suite-repair', ...STAGES.slice(3, 8), 'suite'].flatMap((s) => [['stage-start', s], ['stage-end', s]]))
   const thrown = fakes({ deps: { mkdir: async () => {}, resolveAgents: undefined } })
   assert.deepEqual(await thrown.go(), stopped('invalid-input'))
   const lead = fakes({ edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate' } : v })

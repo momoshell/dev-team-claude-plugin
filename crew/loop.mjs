@@ -26,7 +26,7 @@ const describe = (error) => ({ code: error?.code ?? null, message: String(error?
 const refusal = (reason) => ({ status: 'stopped', reason, pr: null })
 
 // The failing tests and file locations a red suite printed, from the Node spec reporter (`test at file:l:c`,
-// `✖ name`) or TAP (`not ok N - name`, `location: 'file:l:c'`); a bounded tail stands in when neither is found.
+// `✖ name`) or TAP (`not ok N - name`, `location: 'file:l:c'`), with a bounded tail of each run for the diagnostics.
 const SUITE_LIST_MAX = 40
 const SUITE_TAIL_MAX = 2000
 function suiteFailures(results) {
@@ -47,8 +47,7 @@ function suiteFailures(results) {
     }
     tails.push(out.slice(-SUITE_TAIL_MAX))
   }
-  const found = tests.size > 0 || files.size > 0
-  return { tests: [...tests].slice(0, SUITE_LIST_MAX), files: [...files].slice(0, SUITE_LIST_MAX), tail: found ? null : tails.filter((t) => t !== '') }
+  return { tests: [...tests].slice(0, SUITE_LIST_MAX), files: [...files].slice(0, SUITE_LIST_MAX), tail: tails.filter((t) => t !== '') }
 }
 
 // `git status --porcelain=v1 -z`: `XY path` records, a rename or copy (in either column) followed by its
@@ -238,71 +237,75 @@ export async function runLoop(spec, deps = {}) {
     measurements.push(`- Baseline gate: ${baseline.result.status}; failing ids: ${baseline.result.failingIds.join(', ')}.`)
 
     let feedback = []
+    // A suite red on both runs sends the lane back through build, gate, proof and review once, with the failures as feedback.
+    let repairing = false
+    let repaired = false
     for (;;) {
-      const built = await stage('build', () => seatTurn('builder', feedback))
-      if (built.halt) return built.halt
-      const gate = await stage('gate', () => callCheck('gate', d.runGate, { cwd, gatePath, timeoutMs }, { command: true }))
-      if (gate.status !== 'green') return stop(gate.reason, gate)
-      measurements.push(`- Gate: ${gate.status}.`)
+      for (;;) {
+        const built = await stage(repairing ? 'suite-repair' : 'build', () => seatTurn('builder', feedback, { singleTurn: repairing }))
+        repairing = false
+        if (built.halt) return built.halt
+        const gate = await stage('gate', () => callCheck('gate', d.runGate, { cwd, gatePath, timeoutMs }, { command: true }))
+        if (gate.status !== 'green') return stop(gate.reason, gate)
+        measurements.push(`- Gate: ${gate.status}.`)
 
-      const proof = await stage('mutations', () => callCheck('mutations', d.proveMutations, { cwd, gatePath, checks: acceptance, mutations, timeoutMs }))
-      const rows = Array.isArray(proof.rows) ? proof.rows : []
-      const proofOK = proof.status === 'green' && proof.reason === null && rows.length === acceptance.length
-        && acceptance.every((id) => rows.filter((row) => row?.check === id && row.outcome === 'killed' && row.reason === null).length === 1)
-      if (!proofOK) return stop(proof.reason ?? 'mutation-unmeasured', proof)
-      measurements.push(`- Mutations: ${rows.filter((row) => row.outcome === 'killed').length}/${acceptance.length} killed (${rows.map((row) => `${row.check}: ${row.outcome}`).join(', ')}).`)
+        const proof = await stage('mutations', () => callCheck('mutations', d.proveMutations, { cwd, gatePath, checks: acceptance, mutations, timeoutMs }))
+        const rows = Array.isArray(proof.rows) ? proof.rows : []
+        const proofOK = proof.status === 'green' && proof.reason === null && rows.length === acceptance.length
+          && acceptance.every((id) => rows.filter((row) => row?.check === id && row.outcome === 'killed' && row.reason === null).length === 1)
+        if (!proofOK) return stop(proof.reason ?? 'mutation-unmeasured', proof)
+        measurements.push(`- Mutations: ${rows.filter((row) => row.outcome === 'killed').length}/${acceptance.length} killed (${rows.map((row) => `${row.check}: ${row.outcome}`).join(', ')}).`)
 
-      // The reviewer is told what git reports changed now, remeasured every round; an unreadable status stops the lane.
-      const status = await stage('review-paths', () => callCheck('review-paths', d.run, { cwd, command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs }, { command: true }))
-      changedPaths = status.status === 'green' && typeof status.stdout === 'string' ? parseChangedPaths(status.stdout) : null
-      if (changedPaths === null) return stop('paths-unmeasured', status)
+        // The reviewer is told what git reports changed now, remeasured every round; an unreadable status stops the lane.
+        const status = await stage('review-paths', () => callCheck('review-paths', d.run, { cwd, command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs }, { command: true }))
+        changedPaths = status.status === 'green' && typeof status.stdout === 'string' ? parseChangedPaths(status.stdout) : null
+        if (changedPaths === null) return stop('paths-unmeasured', status)
 
-      const reviewed = await stage('review', () => seatTurn('reviewer'))
-      if (reviewed.halt) return reviewed.halt
-      const review = reviewed.envelope
-      await emit('verdict', { status: 'reviewed', verdict: review.details.verdict, findings: review.details.findings })
-      if (review.details.verdict === 'changes-needed') {
-        feedback = review.details.findings
-        continue
+        const reviewed = await stage('review', () => seatTurn('reviewer'))
+        if (reviewed.halt) return reviewed.halt
+        const review = reviewed.envelope
+        await emit('verdict', { status: 'reviewed', verdict: review.details.verdict, findings: review.details.findings })
+        if (review.details.verdict === 'changes-needed') {
+          feedback = review.details.findings
+          continue
+        }
+        break
+      }
+
+      const runSuite = () => stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs ?? timeoutMs }, { command: true }))
+      const suite = await runSuite()
+      // Only a measured red is run once more; an unmeasured suite stops as it is, and the first red stays in the PR text.
+      if (suite.status === 'red') {
+        measurements.push(`- Suite: ${suite.status}; exit ${suite.code}.`)
+        const rerun = await runSuite()
+        if (rerun.status === 'red') {
+          measurements.push(`- Suite re-run: ${rerun.status}; exit ${rerun.code}.`)
+          if (repaired) return stop(suite.reason, rerun)
+          // Two measured reds earn one builder turn and one review (beyond their rounds if spent), then the gate, proof, review and suite again.
+          const failures = suiteFailures([suite, rerun])
+          const suiteFeedback = [{
+            id: 'suite-repair',
+            severity: 'must-fix',
+            summary: 'The full suite is red on two runs after your change, usually because a skill doc pins code you moved (anchors.json line spans, census figures in exhibits tests). Fix the failing tests; for anchor spans run skills/qa-test-writing/anchor-pin.mjs --repair-all <dir> --root <checkout> with node. This is your only repair turn.',
+            checkout: cwd,
+            failingTests: failures.tests,
+            failingFiles: failures.files,
+            ...(failures.tail.length ? { outputTail: failures.tail } : {}),
+          }]
+          for (const role of ['builder', 'reviewer']) seats[role] = { ...seats[role], rounds: Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }
+          feedback = suiteFeedback
+          repairing = true
+          repaired = true
+          continue
+        } else {
+          if (rerun.status !== 'green') return stop(rerun.reason, rerun)
+          measurements.push(`- Suite re-run: ${rerun.status}; exit ${rerun.code}.`)
+        }
+      } else {
+        if (suite.status !== 'green') return stop(suite.reason, suite)
+        measurements.push(`- Suite: ${suite.status}; exit ${suite.code}.`)
       }
       break
-    }
-
-    const runSuite = () => stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs ?? timeoutMs }, { command: true }))
-    const suite = await runSuite()
-    // Only a measured red is run once more; an unmeasured suite stops as it is, and the first red stays in the PR text.
-    if (suite.status === 'red') {
-      measurements.push(`- Suite: ${suite.status}; exit ${suite.code}.`)
-      const rerun = await runSuite()
-      if (rerun.status === 'red') {
-        measurements.push(`- Suite re-run: ${rerun.status}; exit ${rerun.code}.`)
-        // Two measured reds earn one builder turn (beyond its rounds if spent), then a fresh gate and a fresh suite.
-        const failures = suiteFailures([suite, rerun])
-        const suiteFeedback = [{
-          id: 'suite-repair',
-          severity: 'must-fix',
-          summary: 'The full suite is red on two runs after your change, usually because a skill doc pins code you moved (anchors.json line spans, census figures in exhibits tests). Fix the failing tests; for anchor spans run skills/qa-test-writing/anchor-pin.mjs --repair-all <dir> --root <checkout> with node. This is your only repair turn.',
-          checkout: cwd,
-          failingTests: failures.tests,
-          failingFiles: failures.files,
-          ...(failures.tail ? { outputTail: failures.tail } : {}),
-        }]
-        seats.builder = { ...seats.builder, rounds: Math.max(seats.builder.rounds ?? DEFAULT_ROUNDS, rounds.builder + 1) }
-        const repaired = await stage('suite-repair', () => seatTurn('builder', suiteFeedback, { singleTurn: true }))
-        if (repaired.halt) return repaired.halt
-        const repairGate = await stage('gate', () => callCheck('gate', d.runGate, { cwd, gatePath, timeoutMs }, { command: true }))
-        if (repairGate.status !== 'green') return stop(repairGate.reason, repairGate)
-        measurements.push(`- Gate after suite repair: ${repairGate.status}.`)
-        const repairedSuite = await runSuite()
-        if (repairedSuite.status !== 'green') return stop(repairedSuite.reason, repairedSuite)
-        measurements.push(`- Suite after repair: ${repairedSuite.status}; exit ${repairedSuite.code}.`)
-      } else {
-        if (rerun.status !== 'green') return stop(rerun.reason, rerun)
-        measurements.push(`- Suite re-run: ${rerun.status}; exit ${rerun.code}.`)
-      }
-    } else {
-      if (suite.status !== 'green') return stop(suite.reason, suite)
-      measurements.push(`- Suite: ${suite.status}; exit ${suite.code}.`)
     }
     const body = [`Source: ${JSON.stringify(spec.source)}`, '', '## Acceptance', ...acceptance.map((id) => `- ${id}`), '', '## Measurements', ...measurements].join('\n')
 

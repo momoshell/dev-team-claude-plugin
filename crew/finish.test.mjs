@@ -169,3 +169,15 @@ test('a lane with a recorded PR or a committed build is refused', () => {
     try { assert.equal(refusal(f)?.reason, reason) } finally { cleanup(f) }
   }
 })
+
+// MUTATION: keep the claim when the launch fails and a retry after the fix is refused as finish-running.
+test('a launch that fails releases its claim, so a retry after the fix spawns', () => {
+  const f = fixture()
+  try {
+    const failing = run(f, { spawnDetached: () => { throw Object.assign(new Error('spawn failed'), { code: 'EAGAIN' }) } })
+    assert.throws(() => failing.go(), /spawn failed/)
+    const retry = run(f)
+    retry.go()
+    assert.equal(retry.spawned.length, 1)
+  } finally { cleanup(f) }
+})

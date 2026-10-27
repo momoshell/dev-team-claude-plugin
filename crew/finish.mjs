@@ -7,7 +7,7 @@
 // a build), `finish-running` (a run re-entered or claimed the lane after its stop), `finish-published` and
 // `finish-committed` (nothing uncommitted is left), `finish-no-build` (no accepted builder envelope in the journal).
 import { spawn } from 'node:child_process'
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -26,7 +26,7 @@ export class FinishRefusal extends Error {
 }
 
 const defaultDeps = () => ({
-  readFileSync, readdirSync, existsSync, statSync, mkdirSync, writeFileSync,
+  readFileSync, readdirSync, existsSync, statSync, mkdirSync, writeFileSync, rmSync,
   spawnDetached: (file, args, { cwd, log, env }) => {
     const out = openSync(log, 'a')
     try {
@@ -102,16 +102,24 @@ export function finishLane({ lane, root, deps = {} }) {
   }
   const specPath = join(taskDir, 'finish.json')
   // The claim is exclusive and names the stop it finishes, so two calls before the run's first row cannot both spawn.
-  try { d.writeFileSync(join(taskDir, `finish-${stopAt}.claim`), `${process.pid}\n`, { flag: 'wx' }) } catch (error) {
+  const claim = join(taskDir, `finish-${stopAt}.claim`)
+  try { d.writeFileSync(claim, `${process.pid}\n`, { flag: 'wx' }) } catch (error) {
     if (error?.code === 'EEXIST') throw new FinishRefusal('finish-running', `lane ${lane} is already being finished from this stop`)
     throw new FinishRefusal('finish-unreadable', `cannot claim lane ${lane}: ${error?.code ?? error?.message}`)
   }
   const started = join(crewRoot, 'briefs', 'started')
-  d.mkdirSync(started, { recursive: true })
-  d.writeFileSync(specPath, `${JSON.stringify({ ...spec, shape: 'finish', finish }, null, 2)}\n`)
   const log = join(started, `${lane}.run.log`)
-  const env = { ...process.env, [SLOT_ENV.capacity]: '0' }
-  const pid = d.spawnDetached(process.execPath, [LEAN, specPath], { cwd: spec.cwd, log, env })
+  let pid
+  // A launch that fails releases its claim, so the lane can be finished once the cause is fixed.
+  try {
+    d.mkdirSync(started, { recursive: true })
+    d.writeFileSync(specPath, `${JSON.stringify({ ...spec, shape: 'finish', finish }, null, 2)}\n`)
+    const env = { ...process.env, [SLOT_ENV.capacity]: '0' }
+    pid = d.spawnDetached(process.execPath, [LEAN, specPath], { cwd: spec.cwd, log, env })
+  } catch (error) {
+    try { d.rmSync(claim, { force: true }) } catch { /* the launch error is the one reported */ }
+    throw error
+  }
   d.log(`crew finish: lane=${lane} stop=${finish.stop.reason} findings=${finish.findings.length} pid=${pid}`)
   d.log(`  worktree ${spec.cwd}`)
   d.log(`  log      ${log}`)

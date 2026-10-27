@@ -25,6 +25,32 @@ const strings = (v) => Array.isArray(v) && v.every(text)
 const describe = (error) => ({ code: error?.code ?? null, message: String(error?.message ?? error) })
 const refusal = (reason) => ({ status: 'stopped', reason, pr: null })
 
+// The failing tests and file locations a red suite printed, from the Node spec reporter (`test at file:l:c`,
+// `✖ name`) or TAP (`not ok N - name`, `location: 'file:l:c'`); a bounded tail stands in when neither is found.
+const SUITE_LIST_MAX = 40
+const SUITE_TAIL_MAX = 2000
+function suiteFailures(results) {
+  const tests = new Set()
+  const files = new Set()
+  const tails = []
+  for (const result of results) {
+    const out = typeof result?.stdout === 'string' ? result.stdout : ''
+    for (const line of out.split(/\r?\n/)) {
+      const at = /^\s*test at (\S+)\s*$/.exec(line)
+      const loc = /^\s*location:\s*['"]?([^'"]+?)['"]?\s*$/.exec(line)
+      const spec = /^\s*✖\s+(.+?)(?:\s+\(\d+(?:\.\d+)?ms\))?\s*$/.exec(line)
+      const tap = /^\s*not ok\s+\d+\s*-?\s*(.*?)\s*$/.exec(line)
+      if (at) files.add(at[1])
+      else if (loc) files.add(loc[1])
+      else if (spec && !/^failing tests:?$/.test(spec[1])) tests.add(spec[1])
+      else if (tap?.[1]) tests.add(tap[1])
+    }
+    tails.push(out.slice(-SUITE_TAIL_MAX))
+  }
+  const found = tests.size > 0 || files.size > 0
+  return { tests: [...tests].slice(0, SUITE_LIST_MAX), files: [...files].slice(0, SUITE_LIST_MAX), tail: found ? null : tails.filter((t) => t !== '') }
+}
+
 // `git status --porcelain=v1 -z`: `XY path` records, a rename or copy (in either column) followed by its
 // source. Returns every path named, or null when the output is truncated, mis-framed or names an unsafe path.
 function parseChangedPaths(stdout) {
@@ -115,8 +141,8 @@ export async function runLoop(spec, deps = {}) {
 
   // One role's turn: issue, await, read back, validate (a schema-refused file gets one repair turn that
   // costs no round). Returns { envelope } for a done envelope or { halt }.
-  // A valid non-done envelope, or an exhausted bound, is put to the lead.
-  const seatTurn = async (role, feedback = []) => {
+  // A valid non-done envelope, or an exhausted bound, is put to the lead; a singleTurn turn stops there instead.
+  const seatTurn = async (role, feedback = [], { singleTurn = false } = {}) => {
     for (;;) {
       let held
       if (rounds[role] >= (seats[role].rounds ?? DEFAULT_ROUNDS)) {
@@ -171,6 +197,7 @@ export async function runLoop(spec, deps = {}) {
         if (checked.envelope.status === 'done') return { envelope: checked.envelope }
         held = { reason: checked.envelope.status, envelope: checked.envelope }
       }
+      if (singleTurn) return { halt: await stop('round-bound', { role, ...held }) }
       // The lead is never consulted about itself: no recursion, an unusable lead turn ends the lane.
       if (role === 'lead') return { halt: await stop(held.envelope ? 'lead-refused' : 'round-bound', held) }
       const decided = await consultLead(role, held, feedback)
@@ -247,8 +274,32 @@ export async function runLoop(spec, deps = {}) {
     if (suite.status === 'red') {
       measurements.push(`- Suite: ${suite.status}; exit ${suite.code}.`)
       const rerun = await runSuite()
-      if (rerun.status !== 'green') return stop(rerun.status === 'red' ? suite.reason : rerun.reason, rerun)
-      measurements.push(`- Suite re-run: ${rerun.status}; exit ${rerun.code}.`)
+      if (rerun.status === 'red') {
+        measurements.push(`- Suite re-run: ${rerun.status}; exit ${rerun.code}.`)
+        // Two measured reds earn one builder turn (beyond its rounds if spent), then a fresh gate and a fresh suite.
+        const failures = suiteFailures([suite, rerun])
+        const suiteFeedback = [{
+          id: 'suite-repair',
+          severity: 'must-fix',
+          summary: 'The full suite is red on two runs after your change, usually because a skill doc pins code you moved (anchors.json line spans, census figures in exhibits tests). Fix the failing tests; for anchor spans run skills/qa-test-writing/anchor-pin.mjs --repair-all <dir> --root <checkout> with node. This is your only repair turn.',
+          checkout: cwd,
+          failingTests: failures.tests,
+          failingFiles: failures.files,
+          ...(failures.tail ? { outputTail: failures.tail } : {}),
+        }]
+        seats.builder = { ...seats.builder, rounds: Math.max(seats.builder.rounds ?? DEFAULT_ROUNDS, rounds.builder + 1) }
+        const repaired = await stage('suite-repair', () => seatTurn('builder', suiteFeedback, { singleTurn: true }))
+        if (repaired.halt) return repaired.halt
+        const repairGate = await stage('gate', () => callCheck('gate', d.runGate, { cwd, gatePath, timeoutMs }, { command: true }))
+        if (repairGate.status !== 'green') return stop(repairGate.reason, repairGate)
+        measurements.push(`- Gate after suite repair: ${repairGate.status}.`)
+        const repairedSuite = await runSuite()
+        if (repairedSuite.status !== 'green') return stop(repairedSuite.reason, repairedSuite)
+        measurements.push(`- Suite after repair: ${repairedSuite.status}; exit ${repairedSuite.code}.`)
+      } else {
+        if (rerun.status !== 'green') return stop(rerun.reason, rerun)
+        measurements.push(`- Suite re-run: ${rerun.status}; exit ${rerun.code}.`)
+      }
     } else {
       if (suite.status !== 'green') return stop(suite.reason, suite)
       measurements.push(`- Suite: ${suite.status}; exit ${suite.code}.`)

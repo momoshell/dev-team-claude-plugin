@@ -13,7 +13,8 @@ import { createLeanSource } from '../visualizer/server/lean-source.mjs'
 export class RecordPrRefusal extends Error {}
 
 const LANE = /^[a-z0-9][a-z0-9-]{0,62}$/
-const PR_URL = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/([1-9][0-9]*)$/
+// A dot segment (`.` or `..`) is refused: a URL parser resolves it away and the link names another PR.
+const PR_URL = /^https:\/\/github\.com\/(?!\.\.?\/)[A-Za-z0-9_.-]+\/(?!\.\.?\/)[A-Za-z0-9_.-]+\/pull\/([1-9][0-9]*)$/
 const refuse = (message) => { throw new RecordPrRefusal(message) }
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 

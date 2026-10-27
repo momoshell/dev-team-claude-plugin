@@ -76,7 +76,7 @@ test('HF1 refuses open, reviewed, empty, torn, non-lean, missing lanes and bad a
     for (const name of [...Object.keys(files), 'missing']) assert.equal(run(w, name).status, 1, name)
     for (const [k, f] of Object.entries(files)) assert.equal(readFileSync(f, 'utf8'), before[k], k)
     const f = w.lane('args'), text = readFileSync(f, 'utf8')
-    for (const url of ['http://github.com/o/r/pull/1', 'https://github.com/o/r/pull/0', 'https://github.com/o/r/pull/1/files', 'https://github.com/o/r/pull/99999999999999999999', 'https://evil.example/o/r/pull/1']) {
+    for (const url of ['http://github.com/o/r/pull/1', 'https://github.com/o/r/pull/0', 'https://github.com/o/r/pull/1/files', 'https://github.com/o/r/pull/99999999999999999999', 'https://evil.example/o/r/pull/1', 'https://github.com/../r/pull/12', 'https://github.com/o/./pull/12', 'https://github.com/o/../pull/12']) {
       assert.equal(run(w, 'args', url).status, 1, url)
       assert.throws(() => parsePrUrl(url))
     }

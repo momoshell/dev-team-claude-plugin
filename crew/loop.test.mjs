@@ -376,8 +376,10 @@ test('an unseated, refusing or insufficient lead stops without recursion', async
   assert.deepEqual(await bad.go(), stopped('lead-refused'))
   assert.equal(count(bad, 'lead'), 2)
   const insufficient = fakes({ edit: (v) => v.role === 'planner' || v.role === 'lead' ? { ...v, status: 'insufficient' } : v })
-  assert.deepEqual(await insufficient.go(), stopped('lead-refused'))
+  assert.deepEqual(await insufficient.go(), stopped('lead-escalated'))
   assert.equal(count(insufficient, 'lead'), 1)
+  const undecided = fakes({ edit: (v) => v.role === 'planner' ? { ...v, status: 'insufficient' } : v.role === 'lead' ? { ...v, status: 'insufficient', details: {} } : v })
+  assert.deepEqual(await undecided.go(), stopped('lead-refused'))
   const crashed = fakes({ seatThrows: 'lead', edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate' } : v })
   assert.deepEqual(await crashed.go(), stopped('lead-refused'))
 })
@@ -951,6 +953,7 @@ const finishSpec = (over = {}) => ({
   shape: 'finish',
   finish: { planPath: '/virtual/task/plan.md', gatePath: '/virtual/task/gate.mjs', subject: 'fix(crew): planned lane', mutations: [MUTATION], stop: STOP, findings: [finding], turnOffset: 3, ...over },
 })
+const FINISH_GATE = { id: 'finish-gate', summary: 'You may repair the lane gate at the Gate path; return replacement mutations for any check you change.' }
 const FINISH_SUCCESS = ['seat:builder', 'gate', 'mutations', 'review-paths', 'seat:reviewer', 'suite', 'paths', 'commit', 'fetch', 'rebase']
 
 // MUTATION: run the plan or baseline stage on a finish run and the planner request or baseline call appears.
@@ -971,7 +974,7 @@ test('a finish run issues no planner turn and no baseline, and ends after rebase
 test('the finish builder first hears the stop reason with its observation, then the open findings; seat ids start past the stopped lane', async () => {
   const f = fakes({ spec: finishSpec(), unseated: ['planner'] })
   await f.go()
-  assert.deepEqual(f.requests[0].feedback, [{ id: 'finish-stop', reason: STOP.reason, observation: STOP.observation }, finding])
+  assert.deepEqual(f.requests[0].feedback, [{ id: 'finish-stop', reason: STOP.reason, observation: STOP.observation }, finding, FINISH_GATE])
   assert.equal(f.requests[0].planPath, '/virtual/task/plan.md')
   assert.equal(f.requests[0].gatePath, '/virtual/task/gate.mjs')
   assert.equal(f.requests[0].id, 'lane.builder.4')
@@ -1097,4 +1100,45 @@ test('a finish run that cannot write its report emits no finish-ready, and the s
   const std = fakes()
   await std.go()
   assert.equal(std.writes.size, 0)
+})
+
+// MUTATION: refuse a lead decision carried by a non-done status and the held role gets no second turn.
+test('a lead envelope with status insufficient and decision bounce gives the held role one more turn (LF4)', async () => {
+  const f = fakes({ lead: 'bounce', edit: (v, r) => (v.role === 'planner' && r.id.endsWith('.1') ? { ...v, status: 'insufficient' } : v.role === 'lead' ? { ...v, status: 'insufficient' } : v) })
+  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
+  assert.equal(count(f, 'planner'), 2)
+  assert.equal(count(f, 'lead'), 1)
+})
+
+// MUTATION: keep the re-aim to the standard shape and a finish bind-fail stops as mutation-unmeasured.
+test('a finish proof with only bind-fail rows gives the builder one more turn naming those ids (LF1)', async () => {
+  const f = fakes({ spec: finishSpec(), unseated: ['planner'], bounds: { builder: 1 }, proof: sequence(unbound(BIND_FAIL('A1')), killedProof('A1')) })
+  assert.equal((await f.go()).status, 'done')
+  const builders = f.requests.filter((r) => r.role === 'builder')
+  assert.equal(builders.length, 2)
+  assert.equal(builders[1].feedback.find((entry) => entry.id === 'A1')?.check, 'A1')
+  const again = fakes({ spec: finishSpec(), unseated: ['planner'], proof: unbound(BIND_FAIL('A1')) })
+  assert.deepEqual(await again.go(), stopped('mutation-unmeasured'))
+  assert.equal(count(again, 'builder'), 2)
+})
+
+// MUTATION: tell standard builders they may repair the gate, or leave finish builders unaware.
+test('only a finish builder is told it may repair the gate, in the first turn and in builder.md (LF2, LF3)', async () => {
+  const fin = fakes({ spec: finishSpec(), unseated: ['planner'] })
+  await fin.go()
+  assert.deepEqual(fin.requests[0].feedback.filter((e) => e.id === 'finish-gate'), [FINISH_GATE])
+  const std = fakes()
+  await std.go()
+  assert.equal(std.requests.some((r) => r.feedback.some((e) => e.id === 'finish-gate')), false)
+  const text = readFileSync(new URL('./agents/builder.md', import.meta.url), 'utf8')
+  assert.ok(text.includes("Do not rewrite the planner's task artifacts or gate on a standard run."))
+  assert.ok(text.includes("On a finish run, you may repair the lane's gate"))
+})
+
+// MUTATION: raise the bound to max(bound, rounds + 1) and the re-aim turn spends a round the builder still had.
+test('a re-aim turn leaves a standard builder the rounds it had before it (LF5)', async () => {
+  const f = fakes({ review: 1, proof: sequence(unbound(BIND_FAIL('A1')), killedProof('A1')) })
+  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
+  assert.equal(count(f, 'builder'), 3)
+  assert.equal(count(f, 'lead'), 0)
 })

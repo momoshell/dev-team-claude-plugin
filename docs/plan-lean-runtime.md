@@ -189,8 +189,8 @@ Sol review, because the current factory is what is being replaced. From phase 4,
 - [ ] 3.5 `crew/loop.mjs` behind `crew start --loop lean`, with the `stepped` and `finish` shapes and the
       arm fields (advisor, edit assist, codemode, lab, readgate, memory, extensions) wired from frontmatter.
       Partial: the standard shape and the arm fields are wired; `crew start --loop lean` refuses `stepped`. The `finish`
-      run is `crew finish <lane>` (`crew/finish.mjs`): it stops committed and rebased, unpushed; the operator's
-      `--accept`, `--return` and `--abandon` are not built yet.
+      run is `crew finish <lane>` (`crew/finish.mjs`): it stops committed and rebased, unpushed; the operator decisions
+      `crew finish --accept`, `crew finish --return` and `crew finish --abandon` are built (`crew/finish.mjs` `decideFinish`).
 - [x] 3.6 Rewrite the 3 tests in the "rewrite" group against `crew/acp/` and `closeout`. Audited 2026-10-27: nothing to
       port. The three files test only old-path code (`seatIo`, `acpIo`, reseat, the ledger usage writer, the old
       descendant sweep); every behaviour the new path keeps has its own tests in `crew/checks.test.mjs`,

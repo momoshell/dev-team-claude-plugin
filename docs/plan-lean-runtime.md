@@ -189,14 +189,24 @@ Sol review, because the current factory is what is being replaced. From phase 4,
 - [ ] 3.5 `crew/loop.mjs` behind `crew start --loop lean`, with the `stepped` and `finish` shapes and the
       arm fields (advisor, edit assist, codemode, lab, readgate, memory, extensions) wired from frontmatter.
       Partial: the standard shape and the arm fields are wired; `crew start --loop lean` refuses `stepped` and `finish`.
-- [ ] 3.6 Rewrite the 3 tests in the "rewrite" group against `crew/acp/` and `closeout`.
+- [x] 3.6 Rewrite the 3 tests in the "rewrite" group against `crew/acp/` and `closeout`. Audited 2026-10-27: nothing to
+      port. The three files test only old-path code (`seatIo`, `acpIo`, reseat, the ledger usage writer, the old
+      descendant sweep); every behaviour the new path keeps has its own tests in `crew/checks.test.mjs`,
+      `crew/acp/seat.test.mjs`, `crew/skills-proof.test.mjs` and `crew/start.test.mjs`. They go at 5.2.
+      One behaviour is dropped on purpose: a child that leaves its seat's or check's process group is not swept
+      (operator decision 2026-10-26, noted at `crew/checks.mjs:41`). The new path kills its own groups only.
+- [ ] 3.7 The new path imports nothing that 5.2 deletes. Today `crew/lean.mjs` and `crew/acp-client.mjs` import from
+      `headless.mjs` and `headless-rpc.mjs`; `crew/lean.mjs` and `crew/acp/seat.mjs` from `capabilities.mjs`;
+      `crew/acp/seat.mjs` reaches `make-brief.mjs` through `skeletonread.ts`; `crew/start.mjs` imports `drive.mjs`,
+      `roster.mjs` and `roster-validate.mjs` (which imports `crew.mjs` and `assurances.mjs`), and spawns
+      `crew.mjs boot` and `crew.mjs run`.
 - Done means: a lane runs plan to PR on the new loop over ACP, and each seat's session reads back in full.
 
 ### Phase 4: run on the new path
 
 - [ ] 4.1 Lanes in this repo start with `--loop lean`; failures are fixed in the new path, not the old one.
-- [ ] 4.2 P4 journal writer from `emit.mjs`, never throws.
-- [ ] 4.3 One `closeout.mjs` and one `status.mjs` for the new path.
+- [x] 4.2 P4 journal writer, never throws. Built into the lean loop (`crew/loop.mjs:86`, guarded at `:110`; `crew/loop.test.mjs:634`), not taken from `emit.mjs`.
+- [x] 4.3 One `closeout.mjs` and one `status.mjs` for the new path. Shipped as `crew closeout` (PR 2016) and `crew lanes` (PR 2017; `status` stays the old driver's verb until the switch).
 - [ ] 4.4 Visualizer reads journals and session files instead of the ledger; its roster editor edits
       `crew/agents/*.md`.
 

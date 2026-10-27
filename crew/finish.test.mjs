@@ -147,3 +147,25 @@ test('main routes usage to 2, a refusal to 1 with its reason on stderr, and succ
   const g = fixture()
   try { assert.equal(await main(['lane9'], { crewRoot: g.root, spawnDetached: () => 1, log: () => {} }), 0) } finally { cleanup(g) }
 })
+
+// MUTATION: drop the exclusive claim and two calls before the run's first row both spawn.
+test('a second crew finish from the same stop is refused as finish-running before it spawns', () => {
+  const f = fixture()
+  try {
+    const first = run(f)
+    first.go()
+    assert.equal(first.spawned.length, 1)
+    const second = run(f)
+    assert.throws(() => second.go(), (e) => e instanceof FinishRefusal && e.reason === 'finish-running')
+    assert.equal(second.spawned.length, 0)
+  } finally { cleanup(f) }
+})
+
+// MUTATION: drop the published and committed checks and a lane with nothing uncommitted is re-entered.
+test('a lane with a recorded PR or a committed build is refused', () => {
+  const stop = { event: 'verdict', stage: null, status: 'stopped', reason: 'rebase-conflict' }
+  for (const [row, reason] of [[{ event: 'pr', stage: 'operator', pr: { number: 1 } }, 'finish-published'], [{ event: 'commit', stage: 'commit', head: 'a'.repeat(40) }, 'finish-committed']]) {
+    const f = fixture({ rows: [{ event: 'run-start', stage: null }, { event: 'stage-start', stage: 'build' }, builderRow, row, stop] })
+    try { assert.equal(refusal(f)?.reason, reason) } finally { cleanup(f) }
+  }
+})

@@ -4,8 +4,8 @@
 // detached `finish` run: builder triage -> gate -> mutation proof -> review -> suite -> commit -> rebase. It never
 // re-plans, never re-runs the baseline and publishes nothing; the operator's publish decision is a later step.
 // Refused, with nothing written: `finish-worktree` (the worktree is gone), `finish-premise` (the lane never reached
-// a build), `finish-running` (a run re-entered the lane after its stop), `finish-no-build` (no accepted builder
-// envelope in the journal).
+// a build), `finish-running` (a run re-entered or claimed the lane after its stop), `finish-published` and
+// `finish-committed` (nothing uncommitted is left), `finish-no-build` (no accepted builder envelope in the journal).
 import { spawn } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -75,6 +75,10 @@ export function finishLane({ lane, root, deps = {} }) {
   // A row after the stop means a run has re-entered the lane since: a second finish would race it.
   if (rows.slice(stopAt + 1).some((row) => row.event === 'stage-start' || row.event === 'finish-ready')) throw new FinishRefusal('finish-running', `lane ${lane} has run again since it stopped`)
 
+  // A published or committed lane has no uncommitted build left to finish.
+  if (rows.some((row) => row.event === 'pr')) throw new FinishRefusal('finish-published', `lane ${lane} already has a recorded PR`)
+  if (rows.some((row) => row.event === 'commit')) throw new FinishRefusal('finish-committed', `lane ${lane} already committed its build`)
+
   const built = rows.some((row) => row.event === 'envelope' && row.role === 'builder' && Array.isArray(row.defects) && row.defects.length === 0 && row.parsed?.status === 'done')
   if (!built) throw new FinishRefusal('finish-no-build', `lane ${lane} has no accepted builder envelope in its journal`)
 
@@ -97,6 +101,11 @@ export function finishLane({ lane, root, deps = {} }) {
     turnOffset: rows.filter((row) => row.event === 'envelope').length,
   }
   const specPath = join(taskDir, 'finish.json')
+  // The claim is exclusive and names the stop it finishes, so two calls before the run's first row cannot both spawn.
+  try { d.writeFileSync(join(taskDir, `finish-${stopAt}.claim`), `${process.pid}\n`, { flag: 'wx' }) } catch (error) {
+    if (error?.code === 'EEXIST') throw new FinishRefusal('finish-running', `lane ${lane} is already being finished from this stop`)
+    throw new FinishRefusal('finish-unreadable', `cannot claim lane ${lane}: ${error?.code ?? error?.message}`)
+  }
   const started = join(crewRoot, 'briefs', 'started')
   d.mkdirSync(started, { recursive: true })
   d.writeFileSync(specPath, `${JSON.stringify({ ...spec, shape: 'finish', finish }, null, 2)}\n`)

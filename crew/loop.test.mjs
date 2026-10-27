@@ -1001,3 +1001,12 @@ test('a finish run gives the reviewer three rounds and refuses an unsound finish
     assert.deepEqual(g.calls, [])
   }
 })
+
+// MUTATION: let the lead bounce a spent finish reviewer and a fourth review runs.
+test('a finish review that still asks for changes after three rounds stops the run without consulting the lead', async () => {
+  const f = fakes({ spec: finishSpec(), unseated: ['planner'], review: 3, bounds: { builder: 4 } })
+  assert.deepEqual(await f.go(), stopped('round-bound'))
+  assert.equal(count(f, 'reviewer'), 3)
+  assert.equal(f.calls.includes('seat:lead'), false)
+  assert.equal(f.calls.includes('commit'), false)
+})

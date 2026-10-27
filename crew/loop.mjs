@@ -21,6 +21,7 @@ export const LOOP_REASONS = Object.freeze([
 
 const REQUIRED_ROLES = ['planner', 'builder', 'reviewer']
 const FINISH_ROLES = ['builder', 'reviewer']
+const FINISH_REVIEW_ROUNDS = 3
 const text = (v) => typeof v === 'string' && v !== ''
 const strings = (v) => Array.isArray(v) && v.every(text)
 const describe = (error) => ({ code: error?.code ?? null, message: String(error?.message ?? error) })
@@ -240,7 +241,7 @@ export async function runLoop(spec, deps = {}) {
       gatePath = planned.envelope.details.gate_path
       if (acceptance.length !== spec.acceptance.length || !acceptance.every((id) => spec.acceptance.includes(id))) return await stop('envelope-refused', { acceptance })
     } else {
-      seats.reviewer = { ...seats.reviewer, rounds: Math.max(seats.reviewer.rounds ?? DEFAULT_ROUNDS, 3) }
+      seats.reviewer = { ...seats.reviewer, rounds: FINISH_REVIEW_ROUNDS }
     }
 
     const measurements = []
@@ -282,7 +283,8 @@ export async function runLoop(spec, deps = {}) {
         changedPaths = status.status === 'green' && typeof status.stdout === 'string' ? parseChangedPaths(status.stdout) : null
         if (changedPaths === null) return stop('paths-unmeasured', status)
 
-        const reviewed = await stage('review', () => seatTurn('reviewer'))
+        // A finish review is capped outright: its bound ends the run, never a lead bounce into a fourth round.
+        const reviewed = await stage('review', () => seatTurn('reviewer', [], { singleTurn: isFinish }))
         if (reviewed.halt) return reviewed.halt
         const review = reviewed.envelope
         await emit('verdict', { status: 'reviewed', verdict: review.details.verdict, findings: review.details.findings })
@@ -315,7 +317,7 @@ export async function runLoop(spec, deps = {}) {
             failingFiles: failures.files,
             ...(failures.tail.length ? { outputTail: failures.tail } : {}),
           }]
-          for (const role of ['builder', 'reviewer']) seats[role] = { ...seats[role], rounds: Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }
+          for (const role of isFinish ? ['builder'] : ['builder', 'reviewer']) seats[role] = { ...seats[role], rounds: Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }
           repairing = true
           repaired = true
           continue

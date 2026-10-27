@@ -1010,3 +1010,57 @@ test('a finish review that still asks for changes after three rounds stops the r
   assert.equal(f.calls.includes('seat:lead'), false)
   assert.equal(f.calls.includes('commit'), false)
 })
+
+// A standard proof whose only non-killed rows are bind-fail earns the builder one re-aim turn.
+const BIND_FAIL = (check) => ({ check, outcome: 'unmeasured', reason: 'bind-fail', occurrences: 0 })
+const KILLED = (check) => ({ check, outcome: 'killed', reason: null })
+const REAIM = { check: 'A1', file: 'lib.mjs', find: 're-aimed', replace: 'new' }
+const sequence = (...proofs) => { let n = 0; return () => proofs[Math.min(n++, proofs.length - 1)] }
+const unbound = (...rows) => ({ status: 'unmeasured', reason: 'mutation-unmeasured', rows })
+const killedProof = (...ids) => ({ status: 'green', reason: null, rows: ids.map(KILLED) })
+const twoIds = (value) => value.role === 'planner' ? { ...value, details: { ...value.details, acceptance: ['A1', 'A2'], mutations: [MUTATION, { ...MUTATION, check: 'A2' }] } } : value
+const twoBaseline = { accepted: true, reason: 'gate-failed', result: { ...green(), status: 'red', code: 1, reason: 'gate-failed', failingIds: ['A1', 'A2'] } }
+
+// MUTATION: stop a bind-fail proof at once, or never raise the builder bound, and the lane dies without a re-aim turn.
+test('a bind-fail proof gives the builder one more turn whose feedback names the failed acceptance id (RA1)', async () => {
+  const f = fakes({ bounds: { builder: 1 }, proof: sequence(unbound(BIND_FAIL('A1')), killedProof('A1')) })
+  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
+  const builders = f.requests.filter((r) => r.role === 'builder')
+  assert.equal(builders.length, 2)
+  assert.equal(builders[1].feedback.find((entry) => entry.id === 'A1')?.check, 'A1')
+})
+
+// MUTATION: drop the builder's replacement and the next proof runs the stale declaration.
+test('the replacement the re-aim turn returns is the declaration the next proof runs (RA2)', async () => {
+  const f = fakes({ proof: sequence(unbound(BIND_FAIL('A1')), killedProof('A1')), edit: (v, request) => (v.role === 'builder' && request.id.endsWith('.3') ? { ...v, details: { summary: 'built', mutations: [REAIM] } } : v) })
+  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
+  assert.deepEqual(f.seen.mutations.mutations, [REAIM])
+})
+
+// MUTATION: allow any acceptance id in the re-aim turn and a builder swaps a declaration that already bound.
+test('a re-aim replacement for an id whose declaration bound stops the lane (RA3)', async () => {
+  const f = fakes({
+    spec: { acceptance: ['A1', 'A2'] }, baseline: twoBaseline, edit: (v, request) => (v.role === 'builder' && request.id.endsWith('.3') ? { ...v, details: { summary: 'built', mutations: [{ ...REAIM, check: 'A2' }] } } : twoIds(v)),
+    proof: sequence(unbound(BIND_FAIL('A1'), KILLED('A2')), killedProof('A1', 'A2')),
+  })
+  assert.deepEqual(await f.go(), stopped('envelope-refused'))
+  assert.equal(f.calls.filter((c) => c === 'mutations').length, 1)
+})
+
+// MUTATION: allow a second re-aim turn and a still-unbound proof never stops.
+test('a proof still bind-fail after the re-aim turn stops as mutation-unmeasured (RA4)', async () => {
+  const f = fakes({ proof: unbound(BIND_FAIL('A1')) })
+  assert.deepEqual(await f.go(), stopped('mutation-unmeasured'))
+  assert.equal(count(f, 'builder'), 2)
+  assert.equal(f.calls.filter((c) => c === 'mutations').length, 2)
+})
+
+// MUTATION: re-aim whenever any row is bind-fail and a survived mutation earns the builder an easier target.
+test('a proof with a survived row stops without another builder turn (RA5)', async () => {
+  const f = fakes({
+    spec: { acceptance: ['A1', 'A2'] }, baseline: twoBaseline, edit: twoIds,
+    proof: { status: 'red', reason: 'mutations-survived', rows: [{ check: 'A1', outcome: 'survived', reason: 'gate-green' }, BIND_FAIL('A2')] },
+  })
+  assert.deepEqual(await f.go(), stopped('mutations-survived'))
+  assert.equal(count(f, 'builder'), 1)
+})

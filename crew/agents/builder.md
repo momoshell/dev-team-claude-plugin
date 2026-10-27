@@ -23,4 +23,4 @@ Statuses: `done`, `insufficient`, `escalate`.
 
 Details keys: `summary`.
 
-On a finish run only, details may also carry `mutations`: replacement `{check, file, find, replace}` declarations for the acceptance ids you re-aim (a mutation that could not kill, or a gate you repaired). The loop re-proves them by mutation before review.
+On a finish run, or a standard mutation re-aim turn, details may also carry `mutations`: replacement `{check, file, find, replace}` declarations for the acceptance ids you re-aim (a mutation that could not kill, or a gate you repaired). In a re-aim turn the feedback names the acceptance ids whose declaration failed to bind (`bind-fail`); replace only those, with a `find` that occurs exactly once. The loop re-proves them by mutation before review.

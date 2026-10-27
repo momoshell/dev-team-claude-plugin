@@ -6,7 +6,7 @@
 //   3. move ~/.crew/dt-<lane> to ~/.crew-journal-archive/dt-<lane>  (moved, never deleted)
 // The lane's recorded PR must be MERGED on GitHub, in the worktree's origin repository, with the lane branch's tip
 // as its head; the worktree must be dt-<lane> on that branch. All of it is checked before step 1, so a refusal
-// changes nothing on disk or in git.
+// there changes nothing. A failed move in step 3 is refused after steps 1 and 2 ran; the lane directory stays put.
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { homedir } from 'node:os'

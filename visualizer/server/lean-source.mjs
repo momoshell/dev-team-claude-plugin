@@ -186,7 +186,7 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
     return {
       source: 'lean', adw_id: leanIdentity(found.lane), goal: found.lane, repo_slug: `dt-${found.lane}`, task_slug: found.lane,
       latest_stage, status, reason, running, phases, seats, pr, hand_finished, pr_actor,
-      archived: found.archived, journal_rows: rows.length, journal_skipped_malformed: skipped_malformed,
+      archived: found.archived, journal_rows: rows.length, journal_skipped_malformed: skipped_malformed, journal_error: error ?? null,
       tier: nonEmpty(found.spec.tier) ? found.spec.tier : null, shape: nonEmpty(found.spec.shape) ? found.spec.shape : null,
       mode: null, started_at, ended_at: null, duration_ms: null, last_heartbeat_at: null,
       pending: { ...pendingReasons, ...(started_at ? {} : { started_at: 'the lane journal records no valid run-start time' }) },

@@ -25,7 +25,9 @@ function dirs(path) {
 function isDir(path) {
   try { return statSync(path).isDirectory() } catch { return false }
 }
-function readJson(path) {
+// A lane file is read only when it resolves inside the lane: a symlink out of the lane reads as absent.
+function readJson(path, laneDir) {
+  if (!within(laneDir, path)) return null
   try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return null }
 }
 function within(root, path) {
@@ -54,9 +56,9 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
     if (typeof lane !== 'string' || !LANE.test(lane)) return null
     for (const candidate of candidates(lane)) {
       if (!isDir(candidate.dir) || !within(candidate.base, candidate.dir)) continue
-      const spec = readJson(join(candidate.dir, 'task', LEAN_SPEC_FILE))
+      const spec = readJson(join(candidate.dir, 'task', LEAN_SPEC_FILE), candidate.dir)
       if (!isObject(spec) || spec.id !== lane) continue
-      const crew = readJson(join(candidate.dir, 'crew.json'))
+      const crew = readJson(join(candidate.dir, 'crew.json'), candidate.dir)
       if (!isObject(crew) || !isObject(crew.members)) continue
       const seats = Object.entries(crew.members)
       if (!seats.length || seats.some(([name, member]) => !ROLE.test(name) || !isObject(member))) continue
@@ -85,8 +87,13 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
 
   function readJournalRows(found) {
     const out = { rows: [], skipped_malformed: 0, skipped_line_numbers: [], error: null }
+    const path = join(found.dir, 'task', LEAN_JOURNAL_FILE)
     let text
-    try { text = readFileSync(join(found.dir, 'task', LEAN_JOURNAL_FILE), 'utf8') } catch (error) {
+    try {
+      // A missing journal makes within() false too; statSync tells the two apart by throwing ENOENT.
+      if (!within(found.dir, path) && statSync(path)) { out.error = 'task journal resolves outside the lane'; return out }
+      text = readFileSync(path, 'utf8')
+    } catch (error) {
       out.error = error?.code === 'ENOENT' ? 'task journal was not recorded' : `task journal unreadable: ${error?.code ?? error?.message}`
       return out
     }
@@ -124,7 +131,7 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
   }
 
   const pendingReasons = {
-    started_at: 'lean journal rows carry no timestamps', duration_ms: 'lean journal rows carry no timestamps',
+    duration_ms: 'lean journal rows after run-start carry no timestamps', ended_at: 'lean journal rows after run-start carry no timestamps',
     last_heartbeat_at: 'lean lanes record no heartbeat', tokens: 'lean seat recordings are not counted', cost: 'lean lanes record no cost',
     mode: 'lean lanes record no mode',
   }
@@ -132,8 +139,9 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
   function summarize(found) {
     const { rows, skipped_malformed, error } = readJournalRows(found)
     const phases = []
-    let latest_stage = null, status = 'unknown', reason = null, pr = null, running = false
+    let latest_stage = null, status = 'unknown', reason = null, pr = null, running = false, started_at = null
     for (const row of rows) {
+      if (row.event === 'run-start' && Number.isFinite(row.at)) started_at = new Date(row.at).toISOString()
       const stage = nonEmpty(row.stage) ? row.stage : null
       if (stage) latest_stage = stage
       if (row.event === 'stage-start' && stage) phases.push({ id: phases.length + 1, name: stage, status: 'running', checks: [] })
@@ -152,7 +160,9 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
         phases.push({ id: phases.length + 1, name: stage, status: nonEmpty(row.status) ? row.status : 'unknown', checks: [] })
       }
     }
-    const last = rows.at(-1)
+    // A stop inside a stage is followed by that stage's (and any enclosing stage's) stage-end row, so the
+    // lane's state is its last row that is not a stage-end.
+    const last = rows.findLast((row) => row.event !== 'stage-end') ?? rows.at(-1)
     if (error || !rows.length) {
       reason = error ?? (skipped_malformed ? 'task journal has no readable rows' : 'task journal is empty')
     } else if (last.event === VERDICT_EVENT) {
@@ -174,15 +184,22 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
       latest_stage, status, reason, running, phases, seats, pr,
       archived: found.archived, journal_rows: rows.length, journal_skipped_malformed: skipped_malformed,
       tier: nonEmpty(found.spec.tier) ? found.spec.tier : null, shape: nonEmpty(found.spec.shape) ? found.spec.shape : null,
-      mode: null, started_at: null, ended_at: null, duration_ms: null, last_heartbeat_at: null,
-      pending: { ...pendingReasons },
+      mode: null, started_at, ended_at: null, duration_ms: null, last_heartbeat_at: null,
+      pending: { ...pendingReasons, ...(started_at ? {} : { started_at: 'the lane journal records no run-start time' }) },
       ship: { state: 'unmeasured', reason: pr ? 'pull request recorded; merge state is not recorded in the lane' : 'lean lanes record no ship state', stale: false },
     }
   }
 
-  // Filters match what the lean rows carry: status by equality; mode and time bounds need values lean rows lack.
+  // Filters match what the lean rows carry: status by equality, the time window by the run-start time. Lean
+  // lanes record no mode, so a mode filter matches none; a lane with no start time cannot be placed in a window.
   function listRuns(filters = {}) {
-    return lanes().map(summarize).filter((run) => (!filters.mode) && (!filters.status || filters.status === run.status) && !filters.since && !filters.until)
+    const inWindow = (run) => {
+      if (!filters.since && !filters.until) return true
+      if (run.started_at === null) return false
+      const at = Date.parse(run.started_at)
+      return (!filters.since || at >= Date.parse(filters.since)) && (!filters.until || at < Date.parse(filters.until))
+    }
+    return lanes().map(summarize).filter((run) => !filters.mode && (!filters.status || filters.status === run.status) && inWindow(run))
   }
 
   return { listRuns, identify, readJournalRows, readSeatSessions, resolveLane }

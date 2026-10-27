@@ -104,3 +104,36 @@ test('LV4 seat sessions are served by role in numeric turn order, confined to th
     assert.ok((await get(`/api/seat-sessions?${q('s', { role: 'builder' })}`)).body.absent)
   })
 })
+
+test('a lane stopped inside a stage reads as stopped though its stage-end rows follow the verdict', async () => {
+  await withServer(async ({ crewRoot, get }) => {
+    lane(crewRoot, 'mid', [{ event: 'stage-start', stage: 'build' }, { event: 'verdict', stage: 'build', status: 'stopped', reason: 'seat-unmeasured' }, { event: 'stage-end', stage: 'build', outcome: null }])
+    const [run] = (await get('/api/sessions')).body.runs
+    assert.deepEqual([run.status, run.reason, run.running], ['stopped', 'seat-unmeasured', false])
+  })
+})
+
+test('a lane journal that symlinks out of the lane is never read', async () => {
+  await withServer(async ({ crewRoot, get }) => {
+    const dir = lane(crewRoot, 'leak', [])
+    put(join(crewRoot, 'outside.jsonl'), jsonl([{ event: 'stage-start', stage: 'OUTSIDE' }]))
+    rmSync(join(dir, 'task', 'journal.jsonl'))
+    symlinkSync(join(crewRoot, 'outside.jsonl'), join(dir, 'task', 'journal.jsonl'))
+    const { body } = await get(`/api/journal?${q('leak')}`)
+    assert.deepEqual(body.rows, [])
+    assert.ok(!JSON.stringify((await get('/api/sessions')).body).includes('OUTSIDE'))
+  })
+})
+
+test('a lane is dated by its run-start and placed in the time window by it', async () => {
+  await withServer(async ({ crewRoot, get }) => {
+    const at = Date.now() - 10_000
+    lane(crewRoot, 'dated', [{ event: 'run-start', at, run_id: 'dated' }, { event: 'stage-start', stage: 'plan' }])
+    lane(crewRoot, 'undated', [{ event: 'stage-start', stage: 'plan' }])
+    const since = new Date(Date.now() - 7 * 86_400_000).toISOString()
+    const { runs } = (await get(`/api/sessions?since=${encodeURIComponent(since)}`)).body
+    assert.deepEqual(runs.map((run) => [run.adw_id, run.started_at]), [['lean:dated', new Date(at).toISOString()]])
+    const undated = (await get('/api/sessions')).body.runs.find((run) => run.adw_id === 'lean:undated')
+    assert.equal(undated.started_at, null); assert.ok(undated.pending.started_at)
+  })
+})

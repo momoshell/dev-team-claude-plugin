@@ -9,9 +9,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLeanSource } from '../visualizer/server/lean-source.mjs'
 
-const NOT_RECORDED = 'not recorded'
-const shown = (value) => (typeof value === 'string' && value !== '' ? value : NOT_RECORDED)
-const statusOf = (row) => row.unreadable_rows > 0 ? `${shown(row.status)} (journal has ${row.unreadable_rows} unreadable rows)` : shown(row.status)
+const shown = (value) => (typeof value === 'string' && value !== '' ? value : 'not recorded')
 
 export function laneRows({ root, archiveRoot, all = false } = {}) {
   return createLeanSource({ crewRoot: root, archiveRoot }).listRuns()
@@ -39,7 +37,7 @@ export function main(argv = process.argv.slice(2), deps = {}) {
   const rows = laneRows({ root: d.root, archiveRoot: d.archiveRoot, all: argv.includes('--all') })
   if (argv.includes('--json')) d.stdout(`${JSON.stringify(rows, null, 2)}\n`)
   else for (const row of rows) {
-    d.stdout(`${[row.lane, statusOf(row), shown(row.latest_stage), shown(row.reason), shown(row.pr), row.archived ? 'archived' : 'not archived'].join(' | ')}\n`)
+    d.stdout(`${[row.lane, row.unreadable_rows > 0 ? `${shown(row.status)} (journal has ${row.unreadable_rows} unreadable rows)` : shown(row.status), shown(row.latest_stage), shown(row.reason), shown(row.pr), row.archived ? 'archived' : 'not archived'].join(' | ')}\n`)
   }
   return 0
 }

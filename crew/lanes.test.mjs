@@ -60,7 +60,7 @@ test('--json prints the same rows', () => {
   try {
     const rows = JSON.parse(w.run(['--json', '--all']).out)
     assert.deepEqual(rows.map((row) => row.lane), ['alpha', 'beta', 'delta', 'gamma'])
-    assert.deepEqual(rows.find((row) => row.lane === 'beta'), { lane: 'beta', status: 'stopped', latest_stage: 'build', reason: 'seat-unmeasured', pr: null, archived: false })
+    assert.deepEqual(rows.find((row) => row.lane === 'beta'), { lane: 'beta', status: 'stopped', latest_stage: 'build', reason: 'seat-unmeasured', pr: null, archived: false, unreadable_rows: 0 })
     assert.equal(rows.find((row) => row.lane === 'gamma').pr, PR)
     assert.equal(rows.find((row) => row.lane === 'delta').archived, true)
   } finally { w.done() }
@@ -75,4 +75,19 @@ test('a bogus flag or positional prints usage and exits 2', () => {
       assert.equal(r.err, 'usage: crew lanes [--all] [--json]\n')
     }
   } finally { w.done() }
+})
+
+// MUTATION: drop unreadable_rows from the row and a status read past a truncated row prints as definite.
+test('a journal with an unreadable row flags its status and reports the count', () => {
+  const home = realpathSync(scratchDir('lanes-'))
+  try {
+    const root = join(home, '.crew')
+    const dir = join(root, 'dt-eps', 'eps')
+    put(join(dir, 'crew.json'), JSON.stringify({ members: { planner: { agent: 'pi' } } }))
+    put(join(dir, 'task', 'lean.json'), JSON.stringify({ id: 'eps' }))
+    put(join(dir, 'task', 'journal.jsonl'), `${JSON.stringify({ event: 'stage-start', stage: 'review' })}\n{"event":"verdict","sta\n`)
+    const run = (argv) => { const out = []; main(argv, { root, archiveRoot: join(home, 'archive'), stdout: (t) => out.push(t), stderr: () => {} }); return out.join('') }
+    assert.match(run([]), /^eps \| running \(journal has 1 unreadable rows\) \| /)
+    assert.equal(JSON.parse(run(['--json']))[0].unreadable_rows, 1)
+  } finally { rmSync(home, { recursive: true, force: true }) }
 })

@@ -1,7 +1,8 @@
 // crew lanes [--all] [--json] — list lean lanes from their journals.
 //
 // Status, latest stage, stop reason and PR come from the lane journal only (the visualizer's lean source).
-// Lean lanes record no pid, so this never says whether a lane's processes are alive or dead.
+// Lean lanes record no pid, so this never says whether a lane's processes are alive or dead. A journal with
+// unreadable rows is flagged on its status, since the status was read past a gap.
 import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -10,6 +11,7 @@ import { createLeanSource } from '../visualizer/server/lean-source.mjs'
 
 const NOT_RECORDED = 'not recorded'
 const shown = (value) => (typeof value === 'string' && value !== '' ? value : NOT_RECORDED)
+const statusOf = (row) => row.unreadable_rows > 0 ? `${shown(row.status)} (journal has ${row.unreadable_rows} unreadable rows)` : shown(row.status)
 
 export function laneRows({ root, archiveRoot, all = false } = {}) {
   return createLeanSource({ crewRoot: root, archiveRoot }).listRuns()
@@ -21,6 +23,7 @@ export function laneRows({ root, archiveRoot, all = false } = {}) {
       reason: run.reason,
       pr: run.pr?.url ?? null,
       archived: run.archived,
+      unreadable_rows: run.journal_skipped_malformed,
     }))
 }
 
@@ -34,7 +37,7 @@ export function main(argv = process.argv.slice(2), deps = {}) {
   const rows = laneRows({ root: d.root, archiveRoot: d.archiveRoot, all: argv.includes('--all') })
   if (argv.includes('--json')) d.stdout(`${JSON.stringify(rows, null, 2)}\n`)
   else for (const row of rows) {
-    d.stdout(`${[row.lane, shown(row.status), shown(row.latest_stage), shown(row.reason), shown(row.pr), row.archived ? 'archived' : 'not archived'].join(' | ')}\n`)
+    d.stdout(`${[row.lane, statusOf(row), shown(row.latest_stage), shown(row.reason), shown(row.pr), row.archived ? 'archived' : 'not archived'].join(' | ')}\n`)
   }
   return 0
 }

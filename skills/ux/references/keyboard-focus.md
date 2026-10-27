@@ -5,7 +5,7 @@
 
 ## Measured operability register
 
-Literal census over the 38 `.svelte` files directly under the visualizer lib directory:
+Literal census over the 39 `.svelte` files directly under the visualizer lib directory:
 
 | signal | occurrences | files |
 |---|---|---|
@@ -14,11 +14,11 @@ Literal census over the 38 `.svelte` files directly under the visualizer lib dir
 | `:focus-visible` selectors | 27 | 8 |
 | plain `:focus` selectors | 5 | 2 |
 | `tabindex` attributes | 17 | 9 |
-| `aria-` attributes | 214 | 33 |
-| `role=` attributes | 79 | 18 |
+| `aria-` attributes | 217 | 34 |
+| `role=` attributes | 82 | 19 |
 
 Roster editing uses a native modal dialog, opened by `visualizer/web/src/lib/RosterPanel.svelte:243` and labelled at `visualizer/web/src/lib/RosterPanel.svelte:714`. The browser supplies Escape, focus containment and an inert background; the action restores trigger focus. The remaining explicit key handler belongs to Dropdown. Focus-dependent chart labels and component focus treatment remain at `visualizer/web/src/lib/OperationsOverview.svelte:158` and `visualizer/web/src/lib/PhaseGantt.svelte:258`.
 
-**Stated gap:** modern handlers cover 1/38 components and visible focus covers 8/38 components; that narrow coverage is recorded as-is, not as proof that all 38 components need handlers.
+**Stated gap:** modern handlers cover 1/39 components and visible focus covers 8/39 components; that narrow coverage is recorded as-is, not as proof that all 39 components need handlers.
 
 The shared theme sheet supplies focus outlines for native controls across the application. This component-only census does not measure that global coverage.

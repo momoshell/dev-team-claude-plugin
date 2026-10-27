@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { createFeed } from './feed.mjs'
 import { createReturnsSource } from './returns-source.mjs'
 import { createJournalSource } from './journal-source.mjs'
+import { createLeanSource } from './lean-source.mjs'
 import { createShipStateResolver } from './ship-state.mjs'
 import { createRosterSource } from './roster-source.mjs'
 import { createWorkflowsSource } from './workflows-source.mjs'
@@ -94,6 +95,7 @@ export const ROUTE_PARAMS = Object.freeze({
   '/api/events': ['adw_id', 'after', 'limit', 'type', 'role', 'phase_id'],
   '/api/returns': ['repo_slug', 'task_slug', 'adw_id'],
   '/api/journal': ['repo_slug', 'task_slug', 'adw_id'],
+  '/api/seat-sessions': ['repo_slug', 'task_slug', 'adw_id', 'role'],
   '/api/roster': [],
   '/api/plugin-write-mode': [],
   '/api/roster/pick': ['tier', 'role'],
@@ -587,7 +589,8 @@ export function startServer(options = {}) {
   const env = config.env ?? process.env
   const feed = config.feed || createFeed({ kind: config.kind || 'ledger', ledgerDb: config.ledgerDb, triageDb: config.triageDb, crewRoot: config.crewRoot })
   const returns = config.returns || createReturnsSource({ crewRoot: config.crewRoot })
-  const journal = config.journal || createJournalSource({ crewRoot: config.crewRoot })
+  const lean = config.lean || createLeanSource({ crewRoot: config.crewRoot, archiveRoot: config.leanArchiveRoot })
+  const journal = config.journal || createJournalSource({ crewRoot: config.crewRoot, lean })
   const ship = config.shipState || createShipStateResolver({ journalSource: journal, fetchImpl: config.fetchImpl, token: env.GITHUB_TOKEN, apiUrl: env.DEVTEAM_GITHUB_API_URL, repository: env.GITHUB_REPOSITORY })
   const roster = config.roster || createRosterSource({ rosterPath: config.rosterPath })
   const assurancePreview = createAssurancePreview({roster,capabilitiesPath:config.capabilitiesPath})
@@ -649,7 +652,10 @@ export function startServer(options = {}) {
         const result = feed.listRuns(filters)
         const shipStates = await ship.resolve(result.runs)
         const runs = result.runs.map((run) => ({ ...run, ship: shipStates?.get?.(run.adw_id) || { state: 'unmeasured', reason: 'ship state not measured', stale: false } }))
-        return json(res, 200, { schema, ...result, runs })
+        // Lean lanes live on disk, not in the ledger: list them after the ledger rows, filtered by their own records.
+        let leanRuns = []
+        try { leanRuns = lean.listRuns(filters) } catch {}
+        return json(res, 200, { schema, ...result, runs: [...runs, ...leanRuns] })
       }
       if (url.pathname === '/api/workflows') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
@@ -771,6 +777,16 @@ export function startServer(options = {}) {
         if (!journalRepo || !journalTask) return json(res, 400, { schema, error: 'repo_slug and task_slug are required' })
         const result = journal.readJournal({ repo_slug: journalRepo, task_slug: journalTask, adw_id: url.searchParams.get('adw_id') || '' })
         return json(res, 200, { schema, ...result })
+      }
+      if (url.pathname === '/api/seat-sessions') {
+        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
+        const repo_slug = url.searchParams.get('repo_slug'), task_slug = url.searchParams.get('task_slug')
+        if (!repo_slug || !task_slug) return json(res, 400, { schema, error: 'repo_slug and task_slug are required' })
+        const identity = lean.identify({ repo_slug, task_slug, adw_id: url.searchParams.get('adw_id') || '' })
+        if (!identity.lean) return json(res, 404, { schema, error: 'not a lean lane', sessions: [] })
+        if (identity.error) return json(res, 404, { schema, error: identity.error, sessions: [] })
+        const { status, ...body } = lean.readSeatSessions(identity.lane, url.searchParams.get('role'))
+        return json(res, status, { schema, ...body, ...(status === 200 ? {} : { sessions: [] }) })
       }
       if (url.pathname === '/api/plugin-write-mode') {
         if (method !== 'GET') return json(res, 405, { schema, error:'method not allowed' }, { allow:'GET' })

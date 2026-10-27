@@ -19,6 +19,7 @@
   import PromptsPage from './lib/PromptsPage.svelte'
   import WorkflowsPage from './lib/WorkflowsPage.svelte'
   import RunDetail from './lib/RunDetail.svelte'
+  import LeanRunDetail from './lib/LeanRunDetail.svelte'
   import Dropdown from './lib/Dropdown.svelte'
 
   const THEME_OPTIONS = [{ value:'ink', label:'Dark' }, { value:'paper', label:'Light' }, { value:'os', label:'System' }]
@@ -123,7 +124,7 @@
       now = Date.now()
       lastRead = now
       error = ''
-      probeEnvelopes(nextRuns)
+      probeEnvelopes(nextRuns.filter((run) => run?.source !== 'lean'))
       journalPulse.pulse()
     } catch (err) {
       if (generation === refreshGeneration) {
@@ -185,7 +186,9 @@
 {#if error}<p class="error-banner" role="alert">Could not refresh the ledger: {error}. Use Refresh to try again. Existing rows may be out of date.</p>{/if}
 
 {#if route.view === 'run' || route.view === 'phase'}
-  {#if selectedRun}
+  {#if selectedRun?.source === 'lean'}
+    <LeanRunDetail run={selectedRun} onback={backToTasks} />
+  {:else if selectedRun}
     <RunDetail run={selectedRun} phase={route.phase} onback={backToTasks} onphase={openPhase} />
   {:else if !lastRead && !error}
     <main class="page"><section class="empty-state" role="status"><h1>Loading task…</h1><p>Reading the ledger and task evidence.</p></section></main>

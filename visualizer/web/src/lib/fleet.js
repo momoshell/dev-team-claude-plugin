@@ -522,7 +522,29 @@ export function operationsOverview(runs = []) {
   }
 }
 
+// Lean lanes (ADR-052): rows from journals, not the ledger. No heartbeat, so an open journal is never 'live'.
+export const isLeanRun = (run) => run?.source === 'lean'
+
+const TONES = { running: 'busy', reviewed: 'busy', done: 'ok', stopped: 'aborted' }
+const KEYS = { running: 'running', reviewed: 'running', done: 'success', stopped: 'aborted' }
+
+// A lean "running" is an open journal, not a measured live process.
+export function leanStatus(run = {}) {
+  const status = typeof run.status === 'string' ? run.status : 'unknown'
+  const key = KEYS[status] ?? 'unknown'
+  const open = status === 'running' || status === 'reviewed'
+  const word = status === 'running' ? 'open · no terminal record' : status === 'unknown' ? 'status not recorded' : status
+  const why = typeof run.reason === 'string' && run.reason ? run.reason : null
+  return { key, word, tone: TONES[status] ?? 'quiet', where: null, why, open }
+}
+
+export function leanActivity(run = {}) {
+  const open = run.running === true
+  return runActivityResult(open ? 'journal-open' : 'settled', { live: false, heartbeat: heartbeatCell(run, 0), driver: driverObservation(run), word: open ? 'journal open · liveness not measured' : 'settled', tone: 'quiet', why: open ? (run.pending?.last_heartbeat_at ?? 'lean lanes record no heartbeat') : null })
+}
+
 export function deriveStatus(run = {}, taskEnvelope = null) {
+  if (isLeanRun(run)) return leanStatus(run)
   const escalation = taskEnvelope?.details?.escalation
   const typed = {
     escalated: { key: 'escalated', word: 'escalated', tone: 'serious', where: escalation?.where ?? null, why: escalation?.why ?? null },
@@ -680,6 +702,7 @@ export function runActivityResult(key, values) {
 }
 
 export function runActivity(run = {}, now = Date.now()) {
+  if (isLeanRun(run)) return leanActivity(run)
   const driver = driverObservation(run)
   if (!run?.running) return runActivityResult('settled', { live: false, heartbeat: heartbeatCell(run, now), driver })
   const heartbeat = heartbeatCell(run, now)
@@ -768,6 +791,7 @@ export function fleetActivity(runs = [], now = Date.now()) {
 }
 
 export function deriveDisplayStatus(run = {}, taskEnvelope = null, now = Date.now()) {
+  if (isLeanRun(run)) return leanStatus(run)
   const recorded = deriveStatus(run, taskEnvelope)
   if (!['running', 'queued'].includes(recorded.key)) return recorded
   const activity = runActivity(run, now)

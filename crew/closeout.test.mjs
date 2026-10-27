@@ -10,7 +10,7 @@ const LANE = 'demo'
 const PR_ROW = { event: 'pr', lane: LANE, pr: { number: 7, url: 'https://github.com/o/r/pull/7' } }
 const jsonl = (rows) => rows.map((row) => JSON.stringify(row)).join('\n') + '\n'
 
-function world({ rows = [{ event: 'run-start', lane: LANE }, PR_ROW], cwd } = {}) {
+function world({ rows = [{ event: 'run-start', lane: LANE }, PR_ROW], cwd, origin = 'git@github.com:o/r.git' } = {}) {
   const home = realpathSync(scratchDir('closeout-'))
   const checkout = join(home, 'repos', 'checkout')
   const worktree = join(home, 'repos', `dt-${LANE}`)
@@ -24,6 +24,7 @@ function world({ rows = [{ event: 'run-start', lane: LANE }, PR_ROW], cwd } = {}
   writeFileSync(join(checkout, 'tracked.txt'), 'one\n')
   git(checkout, 'add', '.')
   git(checkout, 'commit', '-qm', 'one')
+  git(checkout, 'remote', 'add', 'origin', origin)
   git(checkout, 'worktree', 'add', '-q', '-b', LANE, worktree, 'main')
   writeFileSync(join(leaf, 'crew.json'), JSON.stringify({ members: { planner: { agent: 'pi' } } }))
   git(checkout, 'worktree', 'add', '-q', '-b', 'other', join(home, 'repos', 'dt-other'), 'main')
@@ -160,6 +161,17 @@ test('a lane worktree checked out on another branch is refused with nothing chan
     const r = close(w)
     assert.equal(r.status, 1)
     assert.match(r.err, /refs\/heads\/side, not demo/)
+    assertUnchanged(w)
+  } finally { w.done() }
+})
+
+// MUTATION: drop the origin comparison and a merged PR in another repository authorizes deleting this branch.
+test('a merged PR from another repository is refused with nothing changed', () => {
+  const w = world({ origin: 'https://github.com/o/elsewhere.git' })
+  try {
+    const r = close(w)
+    assert.equal(r.status, 1)
+    assert.match(r.err, /not in this worktree's origin \(o\/elsewhere\)/)
     assertUnchanged(w)
   } finally { w.done() }
 })

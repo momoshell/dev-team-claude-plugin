@@ -44,6 +44,9 @@ function lastPr(text) {
   try { return parsePrUrl(pr.url) } catch { refuse(`task journal records a malformed pull request url: ${pr.url}`) }
 }
 
+// owner/repo of a GitHub remote URL (https or ssh), lowercased; null for anything else.
+const repoOf = (remote) => /github\.com[:/]([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/.exec(remote)?.slice(1, 3).join('/').toLowerCase() ?? null
+
 // Run a command and refuse unless it exits 0.
 function must(run, what, cmd, args) {
   const result = run(cmd, args)
@@ -81,6 +84,9 @@ export function closeoutLane({ lane, root = join(homedir(), '.crew'), archiveRoo
   const common = must(run, 'git rev-parse', 'git', ['-C', worktree, 'rev-parse', '--path-format=absolute', '--git-common-dir']).trim()
   if (!common) refuse('could not find the main checkout')
   const mainCheckout = dirname(common)
+  const origin = repoOf(must(run, 'git remote get-url', 'git', ['-C', worktree, 'remote', 'get-url', 'origin']).trim())
+  const prRepo = repoOf(pr.url.replace(/\/pull\/\d+$/, ''))
+  if (!origin || origin !== prRepo) refuse(`pull request ${pr.url} is not in this worktree's origin (${origin ?? 'not a GitHub remote'})`)
   const head = must(run, 'git symbolic-ref', 'git', ['-C', worktree, 'symbolic-ref', '-q', 'HEAD']).trim()
   if (head !== `refs/heads/${branch}`) refuse(`worktree ${worktree} is on ${head || 'a detached HEAD'}, not ${branch}`)
   const tip = must(run, 'git rev-parse', 'git', ['-C', mainCheckout, 'rev-parse', '--verify', `refs/heads/${branch}^{commit}`]).trim()

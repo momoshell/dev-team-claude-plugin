@@ -25,14 +25,7 @@ carries its resolved non-pane transport — the shape `crew/daemon.mjs` accepts
 for a headless run. Explicit per-seat `--headless` / `--headless-rpc` flags
 still win over the one-flag form.
 
-| tier | advisor | lead | planner | builder | reviewer | tech-lead |
-|---|---|---|---|---|---|---|
-| `mechanical` | — | — | pi/muse-wonder-1.0-contributor, medium | claude/claude-sonnet-5-5, high | pi/gpt-6.1-sol, high | — |
-| `build` | — | pi/gpt-6-astra, high | pi/muse-wonder-1.0-contributor, high | claude/claude-sonnet-5-5, high | pi/gpt-6.1-sol, high | — |
-| `judge` | — | pi/gpt-6-astra, high | pi/muse-wonder-full-1.0-contributor, high | claude/claude-sonnet-5-5, xhigh | pi/gpt-6.1-sol, xhigh | claude/claude-opus-5-5, xhigh |
-
-Cells are `<agent>/<id>, <effort>`, or — for an unseated role.
-This table shows the primary rung only; `crew/roster.json` is authoritative.
+Seat assignments by tier live in `crew/roster.json`; per-seat definitions are in `crew/agents/*.md` — those files are the seat authority.
 
 Seating no longer requires two vendors on review (#983). No ADR ratified that requirement, and nothing at boot ever enforced it. A hard two-vendor requirement makes every roster illegal during a single-provider outage — measured 2026-09-06, when an Anthropic limit parked six lanes for ~2h44m.
 

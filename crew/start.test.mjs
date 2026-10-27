@@ -402,10 +402,68 @@ test('--loop lean refuses a non-standard shape before any git call', async () =>
   await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'other', deps: fakes().deps }), /--loop takes lean/)
 })
 
+// MUTATION: reach for the old driver or roster on a lean start and it fails when they are unreadable or unusable.
+const readRoster = (path) => { if (path === ROSTER) throw new Error('roster.json unreadable'); return BRIEF }
+
+test('(LS1) crew/start.mjs imports none of the old driver or roster modules statically', () => {
+  const source = readFileSync(fileURLToPath(new URL('./start.mjs', import.meta.url)), 'utf8')
+  assert.doesNotMatch(source, /^\s*(import|export)\b[^\n]*from\s+['"]\.\/(drive|roster|roster-validate|roster-generate)\.mjs['"]/m)
+})
+
+test('(LS2) a lean --check in a child process loads no old driver, roster or crew module', () => {
+  const dir = scratchDir('lean-start-trace-')
+  const tracer = join(dir, 'trace.mjs')
+  const trace = join(dir, 'trace.log')
+  const brief = join(dir, 'b1.md')
+  writeFileSync(brief, BRIEF)
+  writeFileSync(tracer, `import { registerHooks } from 'node:module'\nimport { appendFileSync } from 'node:fs'\nregisterHooks({ load(url, context, next) { appendFileSync(${JSON.stringify(trace)}, url + '\\n'); return next(url, context) } })\n`)
+  const start = fileURLToPath(new URL('./start.mjs', import.meta.url))
+  const child = spawnSync(process.execPath, ['--import', tracer, start, brief, '--check', '--loop', 'lean'], { encoding: 'utf8' })
+  assert.equal(child.status, 0, child.stderr)
+  const loaded = readFileSync(trace, 'utf8')
+  assert.match(loaded, /crew\/start\.mjs/)
+  for (const name of ['drive', 'roster', 'roster-validate', 'roster-generate', 'crew']) assert.equal(loaded.includes(`/crew/${name}.mjs`), false, name)
+})
+
+test('(LS3, LS5) a lean start succeeds with roster.json unreadable and a throwing driverReads, and keeps the member shape', async () => {
+  for (const options of [{ readFileSync: true }, { driverReads: () => { throw new Error('driver exploded') } }]) {
+    const run = fakes({ driverReads: options.driverReads })
+    if (options.readFileSync) run.deps.readFileSync = readRoster
+    const result = await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps: run.deps })
+    assert.equal(result.pid, 4242)
+    assert.equal(leanLaunch(run.calls).length > 0, true)
+    assert.equal(spawned(run.calls, 'boot'), undefined)
+    assert.equal(spawned(run.calls, 'run'), undefined)
+    assert.equal(run.calls.some(([kind]) => kind === 'validate'), false)
+    assert.equal(written(run.calls, '.roster.json'), undefined)
+    const { members } = JSON.parse(written(run.calls, '/dt-b1/b1/crew.json')[2])
+    const { seats, advisor } = resolveAgents('build')
+    assert.deepEqual(members, Object.fromEntries(Object.entries(seats).map(([role, cell]) => [role, { agent: cell.agent, model: `${cell.provider}/${cell.id}`, transport: 'lean-acp' }])))
+    assert.equal(advisor !== null && 'advisor' in members, false)
+  }
+})
+
+test('(LS4) a lean --check succeeds with roster.json unreadable and starts nothing', async () => {
+  const run = fakes()
+  run.deps.readFileSync = readRoster
+  const result = await startLane({ briefPath: '/d/b1.md', checkout: null, check: true, loop: 'lean', deps: run.deps })
+  assert.equal(result.checked, true)
+  assert.deepEqual(effects(run.calls), [])
+})
+
+test('a lean start refuses before any effect when the agent definitions do not resolve or the brief is not P1', async () => {
+  const bad = fakes({ resolve: () => { throw new Error('agent definitions are refused: empty') } })
+  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps: bad.deps }), (error) => error instanceof StartRefusal && /agent definitions/.test(error.message))
+  assert.deepEqual(bad.calls.filter(([kind]) => kind !== 'log'), [])
+  const defect = fakes({ brief: BRIEF.replace('tier: build', 'tier: rigorous') })
+  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps: defect.deps }), /tier is one of/)
+  assert.deepEqual(defect.calls.filter(([kind]) => kind !== 'log'), [])
+})
+
 // MUTATION: swallow the metadata failure and the bridge launches without a spec.
 test('a denied lean metadata write stops the launch and names the left worktree', async () => {
-  for (const [failing, at] of [['mkdir', 2], ['write', 3], ['write', 4]]) {
-    // mkdir 1 and write 1-2 are the existing snapshot; the lean directory and its two files follow.
+  for (const [failing, at] of [['mkdir', 2], ['write', 2], ['write', 3]]) {
+    // mkdir 1 and write 1 are the brief snapshot (lean writes no roster); the lean directory and its two files follow.
     const seen = { mkdir: 0, write: 0 }
     const { deps, calls } = fakes({ write: (kind) => { if (++seen[kind] === at && kind === failing) throw Object.assign(new Error('EPERM injected'), { code: 'EPERM' }) } })
     await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps }), (error) => error instanceof StartRefusal && error.message.includes('EPERM') && /worktree \/repo\/dt-b1 and branch b1 are left for inspection/.test(error.message), `${failing} ${at}`)

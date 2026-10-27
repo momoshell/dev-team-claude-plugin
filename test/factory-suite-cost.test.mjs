@@ -121,7 +121,9 @@ test('D1 a tracked suite added after the recorded measurement is unmeasured, not
   assert.deepEqual(result.unmeasured, [
     'bin/crew.test.mjs',
     'crew/acp-permission.test.mjs',
+    'crew/acp/provider.test.mjs',
     'crew/acp/seat.test.mjs',
+    'crew/acp/wire.test.mjs',
     'crew/adapters/claude-arms.test.mjs',
     'crew/agents.test.mjs',
     'crew/batch-report.test.mjs',

@@ -7,9 +7,8 @@ import {
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-import { splitFrames, seatCommandPath, inCrewSeatCommandPath, seatCommandRootPrivate } from './headless-rpc.mjs'
+import { inCrewSeatCommandPath, seatCommandPath, seatCommandRootPrivate, shq, splitFrames } from './acp/wire.mjs'
 import { piSeatSpawnEnv } from './adapters/adapter-pi.mjs'
-import { shq } from './headless.mjs'
 import { reclaimStore, PHASES, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 
 export const ACP_PROTOCOL_VERSION = 1

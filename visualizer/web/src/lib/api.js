@@ -13,6 +13,7 @@ export const getEvents = (adwId, after = 0, limit, filters = {}, options) => {
 }
 export const getReturns = (repoSlug, taskSlug, adwId, options) => request(`/api/returns?${new URLSearchParams({ repo_slug: repoSlug, task_slug: taskSlug, adw_id: adwId })}`, options)
 export const getJournal = (repoSlug, taskSlug, adwId, options) => request(`/api/journal?${new URLSearchParams({ repo_slug: repoSlug, task_slug: taskSlug, adw_id: adwId })}`, options)
+export const getSeatSessions = (repoSlug, taskSlug, adwId, role, options) => request(`/api/seat-sessions?${new URLSearchParams({ repo_slug: repoSlug, task_slug: taskSlug, adw_id: adwId, role })}`, options)
 export const getRoster = () => request('/api/roster')
 export const getAgents = () => request('/api/agents')
 export const proposeAgent = (name, entry) => request('/api/agents/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, entry }) })

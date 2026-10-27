@@ -1,0 +1,189 @@
+// Read-only view of lean lanes (ADR-052): ~/.crew/dt-<lane>/<lane>/{crew.json,task/...}.
+// Lanes are found live, then as the newest sibling <lane>.archive-*, then under the separate
+// archive root. Nothing here writes, spawns, or trusts a path the lane's own files name.
+import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
+import { dirname, join, resolve, sep } from 'node:path'
+
+const LEAN_SPEC_FILE = 'lean.json'
+const VERDICT_EVENT = 'verdict'
+const LEAN_JOURNAL_FILE = 'journal.jsonl'
+const LEAN_SESSIONS_DIR = 'lean'
+
+const LANE = /^[a-z0-9][a-z0-9-]{0,62}$/
+const ROLE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/
+const PREFIX = 'lean:'
+const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+const nonEmpty = (value) => typeof value === 'string' && value.trim() !== ''
+
+export const leanIdentity = (lane) => `${PREFIX}${lane}`
+export const isLeanIdentity = (id) => typeof id === 'string' && id.startsWith(PREFIX)
+export const isLeanSlug = (slug) => typeof slug === 'string' && slug.startsWith('dt-')
+
+function dirs(path) {
+  try { return readdirSync(path).sort() } catch { return [] }
+}
+function isDir(path) {
+  try { return statSync(path).isDirectory() } catch { return false }
+}
+function readJson(path) {
+  try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return null }
+}
+function within(root, path) {
+  try {
+    const real = realpathSync(path), base = realpathSync(root)
+    return real === base || real.startsWith(`${base}${sep}`)
+  } catch { return false }
+}
+
+export function createLeanSource({ crewRoot, archiveRoot } = {}) {
+  const root = resolve(crewRoot)
+  const archive = resolve(archiveRoot ?? join(dirname(root), '.crew-journal-archive'))
+
+  // Candidate lane directories, best first: live, newest sibling archive, then the archive root's.
+  function candidates(lane) {
+    const out = []
+    for (const base of [root, archive]) {
+      const laneDir = join(base, `dt-${lane}`)
+      const siblings = dirs(laneDir).filter((name) => name.startsWith(`${lane}.archive-`)).reverse()
+      for (const name of [lane, ...siblings]) out.push({ base, dir: join(laneDir, name), archived: name !== lane || base === archive })
+    }
+    return out
+  }
+
+  function resolveLane(lane) {
+    if (typeof lane !== 'string' || !LANE.test(lane)) return null
+    for (const candidate of candidates(lane)) {
+      if (!isDir(candidate.dir) || !within(candidate.base, candidate.dir)) continue
+      const spec = readJson(join(candidate.dir, 'task', LEAN_SPEC_FILE))
+      if (!isObject(spec) || spec.id !== lane) continue
+      const crew = readJson(join(candidate.dir, 'crew.json'))
+      if (!isObject(crew) || !isObject(crew.members)) continue
+      const seats = Object.entries(crew.members)
+      if (!seats.length || seats.some(([name, member]) => !ROLE.test(name) || !isObject(member))) continue
+      return { lane, dir: candidate.dir, base: candidate.base, archived: candidate.archived, spec, members: crew.members }
+    }
+    return null
+  }
+
+  function lanes() {
+    const names = new Set()
+    for (const base of [root, archive]) for (const name of dirs(base)) if (name.startsWith('dt-') && LANE.test(name.slice(3))) names.add(name.slice(3))
+    return [...names].sort().map(resolveLane).filter(Boolean)
+  }
+
+  // Resolve a request's identity: all three of repo_slug, task_slug and adw_id must name the same lane.
+  function identify({ repo_slug, task_slug, adw_id } = {}) {
+    const wanted = isLeanIdentity(adw_id) ? adw_id.slice(PREFIX.length) : null
+    const bare = wanted === null && !adw_id && isLeanSlug(repo_slug) && repo_slug === `dt-${task_slug}` && resolveLane(task_slug) !== null
+    if (wanted === null && !bare) return { lean: false }
+    const lane = wanted ?? task_slug
+    if (lane !== task_slug || repo_slug !== `dt-${lane}`) return { lean: true, error: 'lean identity does not match repo_slug and task_slug' }
+    const found = resolveLane(lane)
+    if (!found) return { lean: true, error: `no lean lane ${lane}` }
+    return { lean: true, lane: found }
+  }
+
+  function readJournalRows(found) {
+    const out = { rows: [], skipped_malformed: 0, skipped_line_numbers: [], error: null }
+    let text
+    try { text = readFileSync(join(found.dir, 'task', LEAN_JOURNAL_FILE), 'utf8') } catch (error) {
+      out.error = error?.code === 'ENOENT' ? 'task journal was not recorded' : `task journal unreadable: ${error?.code ?? error?.message}`
+      return out
+    }
+    const lines = text.split('\n')
+    for (let i = 0; i < lines.length; i += 1) {
+      if (!lines[i].trim()) continue
+      let row
+      try { row = JSON.parse(lines[i]) } catch { row = null }
+      if (!isObject(row)) { out.skipped_malformed += 1; out.skipped_line_numbers.push(i + 1); continue }
+      out.rows.push({ ...row, index: out.rows.length, line_number: i + 1, channel: row.channel ?? null })
+    }
+    return out
+  }
+
+  // Seat recordings of one role, numeric turn order, confined to the resolved lane.
+  function readSeatSessions(found, role) {
+    if (typeof role !== 'string' || !ROLE.test(role) || !Object.hasOwn(found.members, role)) return { status: 400, error: `${JSON.stringify(role)} is not a member of lane ${found.lane}` }
+    const roleDir = join(found.dir, 'task', LEAN_SESSIONS_DIR, role)
+    const turn = new RegExp(`^[A-Za-z0-9._-]+\\.${role}\\.([0-9]+)(?:\\.[A-Za-z0-9-]+)*\\.jsonl$`)
+    const files = dirs(roleDir).flatMap((name) => (turn.test(name) ? [[Number(name.match(turn)[1]), name]] : []))
+      .sort((a, b) => a[0] - b[0] || (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0))
+    const sessions = [], errors = []
+    for (const [, name] of files) {
+      const path = join(roleDir, name)
+      const file = `task/${LEAN_SESSIONS_DIR}/${role}/${name}`
+      if (!within(found.dir, path)) { errors.push({ file, error: 'recording resolves outside the lane' }); continue }
+      try { sessions.push({ file, raw: readFileSync(path, 'utf8') }) } catch (error) { errors.push({ file, error: `unreadable: ${error?.code ?? error?.message}` }) }
+    }
+    return {
+      status: 200, role, sessions,
+      absent: sessions.length ? null : errors.length ? 'recordings exist but could not be read' : `no ${role} recording under task/${LEAN_SESSIONS_DIR}/${role}`,
+      ...(errors.length ? { errors } : {}),
+      source: found.archived ? 'archive' : 'live',
+    }
+  }
+
+  const pendingReasons = {
+    started_at: 'lean journal rows carry no timestamps', duration_ms: 'lean journal rows carry no timestamps',
+    last_heartbeat_at: 'lean lanes record no heartbeat', tokens: 'lean seat recordings are not counted', cost: 'lean lanes record no cost',
+    mode: 'lean lanes record no mode',
+  }
+
+  function summarize(found) {
+    const { rows, skipped_malformed, error } = readJournalRows(found)
+    const phases = []
+    let latest_stage = null, status = 'unknown', reason = null, pr = null, running = false
+    for (const row of rows) {
+      const stage = nonEmpty(row.stage) ? row.stage : null
+      if (stage) latest_stage = stage
+      if (row.event === 'stage-start' && stage) phases.push({ id: phases.length + 1, name: stage, status: 'running', checks: [] })
+      else if (row.event === 'stage-end' && stage) {
+        const phase = phases.findLast((entry) => entry.name === stage && entry.status === 'running')
+        const code = row.outcome?.code
+        const outcome = nonEmpty(row.outcome?.status) ? row.outcome.status : (typeof code === 'number' && code !== 0 ? 'failed' : 'done')
+        if (phase) phase.status = outcome
+        else phases.push({ id: phases.length + 1, name: stage, status: outcome, checks: [] })
+      } else if (row.event === 'check' && stage) {
+        const phase = phases.findLast((entry) => entry.name === stage)
+        const check = { check: row.check ?? null, result: row.result ?? null }
+        if (phase) phase.checks.push(check)
+        else phases.push({ id: phases.length + 1, name: stage, status: 'running', checks: [check] })
+      } else if (row.event === VERDICT_EVENT && stage && !phases.some((entry) => entry.name === stage)) {
+        phases.push({ id: phases.length + 1, name: stage, status: nonEmpty(row.status) ? row.status : 'unknown', checks: [] })
+      }
+    }
+    const last = rows.at(-1)
+    if (error || !rows.length) {
+      reason = error ?? (skipped_malformed ? 'task journal has no readable rows' : 'task journal is empty')
+    } else if (last.event === VERDICT_EVENT) {
+      status = nonEmpty(last.status) ? last.status : 'unknown'
+      reason = typeof last.reason === 'string' ? last.reason : null
+      if (!nonEmpty(last.status)) reason = 'final verdict records no status'
+      running = status === 'reviewed'
+    } else if (last.event === 'pr' && isObject(last.pr)) {
+      status = 'done'; pr = last.pr
+    } else {
+      status = 'running'; running = true
+    }
+    const seats = Object.entries(found.members).map(([role, member]) => ({
+      role, agent: nonEmpty(member.agent) ? member.agent : null, model: nonEmpty(member.model) ? member.model : null,
+      transport: nonEmpty(member.transport) ? member.transport : null,
+    }))
+    return {
+      source: 'lean', adw_id: leanIdentity(found.lane), goal: found.lane, repo_slug: `dt-${found.lane}`, task_slug: found.lane,
+      latest_stage, status, reason, running, phases, seats, pr,
+      archived: found.archived, journal_rows: rows.length, journal_skipped_malformed: skipped_malformed,
+      tier: nonEmpty(found.spec.tier) ? found.spec.tier : null, shape: nonEmpty(found.spec.shape) ? found.spec.shape : null,
+      mode: null, started_at: null, ended_at: null, duration_ms: null, last_heartbeat_at: null,
+      pending: { ...pendingReasons },
+      ship: { state: 'unmeasured', reason: pr ? 'pull request recorded; merge state is not recorded in the lane' : 'lean lanes record no ship state', stale: false },
+    }
+  }
+
+  // Filters match what the lean rows carry: status by equality; mode and time bounds need values lean rows lack.
+  function listRuns(filters = {}) {
+    return lanes().map(summarize).filter((run) => (!filters.mode) && (!filters.status || filters.status === run.status) && !filters.since && !filters.until)
+  }
+
+  return { listRuns, identify, readJournalRows, readSeatSessions, resolveLane }
+}

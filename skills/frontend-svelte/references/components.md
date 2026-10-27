@@ -10,7 +10,7 @@ Declare props with one destructuring `$props()` line and put defaults there:
 - `let { rows = [], onopen = () => {} } = $props()` — `visualizer/web/src/lib/FleetTable.svelte:2`.
 - `let { run, phase = null, returns = {}, events = [] } = $props()` — `visualizer/web/src/lib/PhasePanel.svelte:5`.
 
-Keep callbacks as props named `on<verb>` (`onopen`, `onback`, `onphase`, `onselectphase`) rather than adding an event-dispatching seam. `visualizer/web/src/lib/PhaseGantt.svelte:8` uses `onselectphase`; `visualizer/web/src/App.svelte:189` passes `onback` to `RunDetail`. Defaults make the component's call shape visible at its boundary.
+Keep callbacks as props named `on<verb>` (`onopen`, `onback`, `onphase`, `onselectphase`) rather than adding an event-dispatching seam. `visualizer/web/src/lib/PhaseGantt.svelte:8` uses `onselectphase`; `visualizer/web/src/App.svelte:192` passes `onback` to `RunDetail`. Defaults make the component's call shape visible at its boundary.
 
 ## Two-way state is explicit
 
@@ -22,17 +22,17 @@ The census found `{#snippet` 4 times in 3 files and `{@render` 21 times in 3 fil
 
 ## Events and bindings
 
-Use native `onclick=` attributes: the census found 161 across 25 files and zero `on:click` uses (measured over visualizer/web/src/**/*.svelte, 35 files). Exhibits include `visualizer/web/src/App.svelte:165`, `visualizer/web/src/lib/RunCard.svelte:56`, and `visualizer/web/src/lib/EventStream.svelte:44`. Existing form bindings are `bind:value` and `bind:checked`, with the filter state declared at `visualizer/web/src/lib/Filters.svelte:4`; follow the existing spelling and route uncertain binding semantics to the MCP.
+Use native `onclick=` attributes: the census found 163 across 26 files and zero `on:click` uses (measured over visualizer/web/src/**/*.svelte, 35 files). Exhibits include `visualizer/web/src/App.svelte:166`, `visualizer/web/src/lib/RunCard.svelte:56`, and `visualizer/web/src/lib/EventStream.svelte:44`. Existing form bindings are `bind:value` and `bind:checked`, with the filter state declared at `visualizer/web/src/lib/Filters.svelte:4`; follow the existing spelling and route uncertain binding semantics to the MCP.
 
 ## Runes census and effects
 
-The measured source (visualizer/web/src/**/*.svelte, 35 files) contains `$state(` 257 times in 26 files, `$derived` 177 times in 32 files, `$props()` 26 times in 26 files, `$effect` 23 times in 13 files, and `$bindable(` 5 times in 3 files, exhibited at `visualizer/web/src/lib/Filters.svelte:4`. The visualizer has no legacy `export let` or `$:`: `test/visualizer-shape.test.mjs:1018-1020` checks those strings across every `.svelte` file.
+The measured source (visualizer/web/src/**/*.svelte, 35 files) contains `$state(` 261 times in 27 files, `$derived` 179 times in 33 files, `$props()` 27 times in 27 files, `$effect` 26 times in 14 files, and `$bindable(` 5 times in 3 files, exhibited at `visualizer/web/src/lib/Filters.svelte:4`. The visualizer has no legacy `export let` or `$:`: `test/visualizer-shape.test.mjs:1018-1020` checks those strings across every `.svelte` file.
 
 A correct effect has a dependency and a cleanup boundary. `visualizer/web/src/lib/RunCard.svelte:20-22` carries the `state_referenced_locally` comment: `previousRunning` is left undefined until the effect's first pass so a true running-to-finished transition can trigger the final drain. Treat that comment's shape—local previous value, guarded work, returned cleanup—as the repo's measured effect idiom, not as a generic API tutorial.
 
 ## Scoped styles
 
-Component styles are scoped by default. Reserve `:global` for descendants produced by markdown rendering, where the compiler cannot see the generated elements: `.evidence :global(.markdown-document)` appears at `visualizer/web/src/lib/AcceptPanel.svelte:23` and `visualizer/web/src/lib/PhasePanel.svelte:99`. The scoped workspace layout in `visualizer/web/src/App.svelte:248` keeps shell positioning local; the single box-sizing reset lives in theme.css. The repo has zero `{@html}` uses in the measured component suite.
+Component styles are scoped by default. Reserve `:global` for descendants produced by markdown rendering, where the compiler cannot see the generated elements: `.evidence :global(.markdown-document)` appears at `visualizer/web/src/lib/AcceptPanel.svelte:23` and `visualizer/web/src/lib/PhasePanel.svelte:99`. The scoped workspace layout in `visualizer/web/src/App.svelte:251` keeps shell positioning local; the single box-sizing reset lives in theme.css. The repo has zero `{@html}` uses in the measured component suite.
 
 ## Composition over cross-cutting colour
 

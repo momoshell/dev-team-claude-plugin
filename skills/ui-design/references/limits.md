@@ -101,7 +101,7 @@ Each of the 24 `:hover` rule blocks below is classified independently from sourc
 | `PromptsPage.svelte` | `button:hover:not(:disabled)` | `border-color: var(--accent); background: var(--accent-surface)` | token | `var(--panel)` | `var(--accent-surface)` | Unmeasured — hover ground token --accent-surface has no source-declared value |
 | `PromptsPage.svelte` | `button.primary:hover:not(:disabled)` | `background: var(--accent-solid)` | token | `var(--accent-solid)` | `var(--accent-solid)` | Unmeasured — rest ground token --accent-solid has no source-declared value |
 
-24 rules in 11/38 components. Three rules carry measured rest → hover ratios; the rest stop at a closed reason instead of borrowing a ground.
+24 rules in 11/39 components. Three rules carry measured rest → hover ratios; the rest stop at a closed reason instead of borrowing a ground.
 
 ## Vacuous theme-sheet coverage
 

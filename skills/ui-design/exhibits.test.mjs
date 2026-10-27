@@ -18,14 +18,14 @@ const MIN_ANCHORS = 46;
 // JSON-compatible triple naming the line the prose claims.
 const UNPINNABLE_PINS = [
   ["visualizer/web/index.html", 2, "<meta charset=\"UTF-8\">"],
-  ["visualizer/web/src/App.svelte", 27, "let themeValue = 'os'"],
-  ["visualizer/web/src/App.svelte", 28, "try { themeValue = localStorage.getItem('dt-theme') || 'os' } catch {}"],
-  ["visualizer/web/src/App.svelte", 70, "document.documentElement.dataset.theme = theme"],
-  ["visualizer/web/src/App.svelte", 71, "delete document.documentElement.dataset.theme"],
-  ["visualizer/web/src/App.svelte", 72, "localStorage.setItem('dt-theme', theme)"],
-  ["visualizer/web/src/App.svelte", 181, "<Dropdown bind:value={theme}"],
-  ["visualizer/web/src/App.svelte", 248, ".workspace { margin-inline-start:13.5rem;"],
-  ["visualizer/web/src/App.svelte", 251, ".error-banner { margin:1rem; border:1px solid var(--status-fail);"],
+  ["visualizer/web/src/App.svelte", 28, "let themeValue = 'os'"],
+  ["visualizer/web/src/App.svelte", 29, "try { themeValue = localStorage.getItem('dt-theme') || 'os' } catch {}"],
+  ["visualizer/web/src/App.svelte", 71, "document.documentElement.dataset.theme = theme"],
+  ["visualizer/web/src/App.svelte", 72, "delete document.documentElement.dataset.theme"],
+  ["visualizer/web/src/App.svelte", 73, "localStorage.setItem('dt-theme', theme)"],
+  ["visualizer/web/src/App.svelte", 182, "<Dropdown bind:value={theme}"],
+  ["visualizer/web/src/App.svelte", 251, ".workspace { margin-inline-start:13.5rem;"],
+  ["visualizer/web/src/App.svelte", 254, ".error-banner { margin:1rem; border:1px solid var(--status-fail);"],
   ["visualizer/web/src/lib/AcceptPanel.svelte", 23, ".chip.held { color:#166534; background:#dcfce7; }"],
   ["visualizer/web/src/lib/EnvelopeInspector.svelte", 85, ".error { border:1px solid color-mix(in srgb,var(--status-fail) 40%,var(--line));"],
   ["visualizer/web/src/lib/FleetTable.svelte", 14, "status ${row.status.tone}"],
@@ -358,7 +358,7 @@ function assertHoverDenominators() {
 // Mutation killed: hard-coding the denominator instead of counting the component tree.
 test('D1', () => {
   const componentCount = libFiles().length
-  assert.equal(componentCount, 38)
+  assert.equal(componentCount, 39)
   const docs = [SKILL_DOC, join(REF_DIR, 'contract.md'), join(REF_DIR, 'state-colour.md')]
   let seen = 0
   for (const doc of docs) {

@@ -165,6 +165,8 @@ test('D1 a tracked suite added after the recorded measurement is unmeasured, not
     'test/visualizer-agent-library.test.mjs',
     'test/visualizer-assurance-preview.test.mjs',
     'test/visualizer-harness-settings.test.mjs',
+    'test/visualizer-lean-web.test.mjs',
+    'test/visualizer-lean.test.mjs',
     'test/visualizer-prepared-tasks.test.mjs',
     'test/visualizer-prompt-library.test.mjs',
     'test/visualizer-skill-library.test.mjs',

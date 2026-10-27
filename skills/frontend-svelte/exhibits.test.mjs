@@ -270,12 +270,12 @@ test('frontend-svelte prose census figures match the measured tree', () => {
   const sources = files.map((file) => readFileSync(file, 'utf8'))
   const occurrences = (pattern) => sources.reduce((total, source) => total + source.split(pattern).length - 1, 0)
   const carriers = (pattern) => sources.filter((source) => source.includes(pattern)).length
-  for (const [pattern, occ, hits] of [['{#snippet', 4, 3], ['{@render', 21, 3], ['onclick=', 161, 25], ['on:click', 0, 0], ['$state(', 257, 26], ['$derived', 177, 32], ['$props()', 26, 26], ['$effect', 23, 13], ['$bindable(', 5, 3]]) {
+  for (const [pattern, occ, hits] of [['{#snippet', 4, 3], ['{@render', 21, 3], ['onclick=', 163, 26], ['on:click', 0, 0], ['$state(', 261, 27], ['$derived', 179, 33], ['$props()', 27, 27], ['$effect', 26, 14], ['$bindable(', 5, 3]]) {
     assert.equal(occurrences(pattern), occ, `${pattern} occurrences`)
     assert.equal(carriers(pattern), hits, `${pattern} files`)
   }
   const components = readFileSync(join(HERE, 'references/components.md'), 'utf8')
-  for (const phrase of ['`{#snippet` 4 times in 3 files', '`{@render` 21 times in 3 files', '161 across 25 files', '`$state(` 257 times in 26 files', '`$derived` 177 times in 32 files', '`$props()` 26 times in 26 files', '`$effect` 23 times in 13 files', '`$bindable(` 5 times in 3 files', 'visualizer/web/src/**/*.svelte, 35 files']) {
+  for (const phrase of ['`{#snippet` 4 times in 3 files', '`{@render` 21 times in 3 files', '163 across 26 files', '`$state(` 261 times in 27 files', '`$derived` 179 times in 33 files', '`$props()` 27 times in 27 files', '`$effect` 26 times in 14 files', '`$bindable(` 5 times in 3 files', 'visualizer/web/src/**/*.svelte, 35 files']) {
     assert.ok(components.includes(phrase), `components.md must carry ${phrase}`)
   }
   assert.ok(readFileSync(join(HERE, 'references/structure.md'), 'utf8').includes('34 `.svelte` components'), 'structure.md must carry the lib component count')

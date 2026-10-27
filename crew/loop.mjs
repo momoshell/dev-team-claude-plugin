@@ -266,6 +266,8 @@ export async function runLoop(spec, deps = {}) {
         const review = reviewed.envelope
         await emit('verdict', { status: 'reviewed', verdict: review.details.verdict, findings: review.details.findings })
         if (review.details.verdict === 'changes-needed') {
+          // The suite repair is one builder turn: a review that asks for more after it stops the lane.
+          if (repaired) return stop('round-bound', { role: 'reviewer', findings: review.details.findings })
           feedback = review.details.findings
           continue
         }

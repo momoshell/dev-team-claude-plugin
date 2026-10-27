@@ -496,6 +496,8 @@ test('a suite red on both runs gives the builder one repair turn whose feedback 
   const feedback = JSON.stringify(builderTurns(f)[1].feedback)
   for (const needle of ['skills/qa-test-writing/exhibits.test.mjs', 'skills/ux/exhibits.test.mjs', 'anchor spans remain current', 'exhibit census remains current']) assert.ok(feedback.includes(needle), needle)
   assert.ok(feedback.includes('anchor-pin.mjs --repair-all'))
+  // parsed names never drop the diagnostics: both runs' output tails ride along
+  assert.deepEqual(builderTurns(f)[1].feedback[0].outputTail, [SPEC_OUT, TAP_OUT])
   const empty = sequenced([redRun(1), redRun(1), green()])
   assert.equal((await empty.go()).status, 'done')
   assert.equal(builderTurns(empty).length, 2)
@@ -541,6 +543,11 @@ test('a suite still red after the repair turn stops with no second repair turn a
     assert.equal(r.inputs.length, 3)
     for (const effect of EFFECTS) assert.equal(r.calls.includes(effect), false, effect)
   }
+  // a review asking for changes after the repair stops the lane, even with builder rounds to spare
+  const bounced = sequenced([redRun(), redRun(), green()], { bounds: { builder: 3, reviewer: 3 }, edit: (v, req) => req.role === 'reviewer' && count(bounced, 'builder') === 2 ? { ...v, details: { verdict: 'changes-needed', findings: [finding] } } : v })
+  assert.deepEqual(await bounced.go(), stopped('round-bound'))
+  assert.equal(builderTurns(bounced).length, 2)
+  for (const effect of EFFECTS) assert.equal(bounced.calls.includes(effect), false, effect)
   for (const status of ['insufficient', 'escalate']) {
     const r = sequenced([redRun(), redRun(), green()], { lead: 'bounce', edit: (v, req) => req.role === 'builder' && req.feedback.length ? { ...v, status } : v })
     assert.equal((await r.go()).status, 'stopped')

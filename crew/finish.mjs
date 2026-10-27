@@ -230,7 +230,7 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
       {
         const text = prBody(body, closes, refs)
         const edited = await d.run({ cwd: spec.cwd, command: 'gh', args: ['pr', 'edit', String(published.pr.number), '--title', ready.subject, '--body', text], timeoutMs: 60_000 })
-        if (edited?.status !== 'green') throw new FinishRefusal('finish-publish', `the pull request ${published.pr.number} could not be updated with the measured text: ${edited?.reason ?? 'unmeasured'}`)
+        if (edited?.status !== 'green') throw new FinishRefusal('finish-publish', `the pull request ${published.pr.number} (${published.pr.url ?? 'no url'}) is open but could not be updated with the measured text, and is not recorded: ${edited?.reason ?? 'unmeasured'}`)
       }
       d.appendFileSync(journal, `${JSON.stringify({ event: 'pr', lane, stage: 'publish', pr: published.pr })}\n`)
       decision()
@@ -257,10 +257,19 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
       guidance: notes,
       priorReviewRounds,
     }
-    // The decision is recorded once the run is launched: a launch that fails leaves the lane ready, so the pass can be retried.
-    const started = launch(d, { crewRoot, taskDir, spec, finish, claim: claimStop(d, lane, taskDir, readyAt) })
-    // The ready pass's report no longer describes the lane: only the new pass, if it ends ready, writes one.
-    d.rmSync(join(taskDir, 'finish-report.json'), { force: true })
+    // The ready pass's report no longer describes the lane, so it is retired before the new pass can write its own,
+    // and put back if the launch fails. The decision is recorded once the run is launched: a failed launch leaves the
+    // lane ready, so the pass can be retried.
+    const reportPath = join(taskDir, 'finish-report.json')
+    const report = d.existsSync(reportPath) ? d.readFileSync(reportPath, 'utf8') : null
+    d.rmSync(reportPath, { force: true })
+    let started
+    try {
+      started = launch(d, { crewRoot, taskDir, spec, finish, claim: claimStop(d, lane, taskDir, readyAt) })
+    } catch (error) {
+      if (report !== null) try { d.writeFileSync(reportPath, report) } catch { /* the launch error is the one reported */ }
+      throw error
+    }
     decision()
     return { ...started, choice }
   } catch (error) {

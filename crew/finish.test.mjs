@@ -258,17 +258,32 @@ test('--return spawns a finish run whose spec carries the guidance and the spent
   try {
     const file = join(r.f.base, 'return.md')
     writeFileSync(file, 'Fix the widget first')
-    writeFileSync(join(r.f.taskDir, 'finish-report.json'), '{}')
+    const report = join(r.f.taskDir, 'finish-report.json')
+    writeFileSync(report, '{}')
+    // MUTATION: retire the report after the launch, or not at all, and the new pass's report can be the one removed.
+    const spawn = r.deps.spawnDetached
+    let reportAtSpawn = null
+    r.deps.spawnDetached = (...args) => { reportAtSpawn = existsSync(report); return spawn(...args) }
     await r.decide('return', file)
     assert.equal(r.spawned.length, 1)
-    // MUTATION: keep the report and the deciding session reads the ready pass as the lane's state.
-    assert.equal(existsSync(join(r.f.taskDir, 'finish-report.json')), false, 'the ready pass report outlived the return')
+    assert.equal(reportAtSpawn, false, 'the ready pass report was still there when the new pass started')
+    assert.equal(existsSync(report), false, 'the ready pass report outlived the return')
     const spec = JSON.parse(readFileSync(join(r.f.taskDir, 'finish.json'), 'utf8'))
     assert.deepEqual([spec.shape, spec.finish.guidance, spec.finish.priorReviewRounds, spec.finish.stop.reason, spec.finish.turnOffset], ['finish', 'Fix the widget first', 2, STOP.reason, 2])
     assert.equal(r.rowsOf().at(-1).choice, 'return')
   } finally { cleanup(r.f) }
   const bare = ready()
   try { assert.equal(await reasonOf(bare.decide('return')), 'finish-unreadable') } finally { cleanup(bare.f) }
+  // MUTATION: drop the restore and a failed launch leaves a ready lane with no report.
+  const failed = ready()
+  try {
+    const file = join(failed.f.base, 'return.md')
+    writeFileSync(file, 'again')
+    writeFileSync(join(failed.f.taskDir, 'finish-report.json'), '{"kept":1}')
+    failed.deps.spawnDetached = () => { throw Object.assign(new Error('spawn failed'), { code: 'EAGAIN' }) }
+    await assert.rejects(failed.decide('return', file))
+    assert.equal(readFileSync(join(failed.f.taskDir, 'finish-report.json'), 'utf8'), '{"kept":1}')
+  } finally { cleanup(failed.f) }
 })
 
 // MUTATION: skip the ready test and a decision publishes a lane that never finished.

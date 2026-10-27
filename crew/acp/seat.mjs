@@ -71,17 +71,13 @@ const SAFE_CELL_VALUE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/
 const nonempty = (value) => typeof value === 'string' && value !== ''
 
 // The arms the effective definition declares, as the seat's grants. An arm the adapter cannot express
-// is refused here or by the adapter itself; none is dropped. Claude expresses only the fff and lab MCP servers.
+// is refused here or by the adapter itself; none is dropped. Claude runs the arms adapter-claude lists as plugin hooks,
+// expresses the fff and lab MCP servers, and refuses the rest (subagent among them) when it builds the launch.
 function seatGrants(definition, { role, isClaude, skills, deps }) {
   const extensions = definition.extensions ?? []
   if (!Array.isArray(extensions) || !extensions.every(nonempty)) throw new Error('extensions must be a list of extension names')
   const advisor = definition.advisor !== undefined && definition.advisor !== null
-  for (const [arm, set] of [['advisor', advisor], ['edit_assist', definition.edit_assist === true], ['codemode', definition.codemode === true]]) {
-    if (isClaude && set) throw refuse('grant-unsupported', `adapter-claude cannot express the ${arm} arm of seat ${role} — refusing to boot a silently weaker seat`)
-  }
-  // Only a pi seat has the lean lane's context to read; a claude seat would load these arms and see none.
-  const unported = isClaude ? extensions.filter((name) => CONTEXT_EXTENSIONS.includes(name)) : []
-  if (unported.length) throw refuse('grant-unsupported', `seat ${role} declares ${unported.join(', ')}, which read the lane context a claude seat does not get — refusing to boot a silently weaker seat`)
+  if (isClaude && definition.codemode === true) throw refuse('grant-unsupported', `adapter-claude cannot express the codemode arm of seat ${role} — refusing to boot a silently weaker seat`)
   const armed = armGrants({ role, agent: definition.agent, extensions }, { register: deps.register, root: deps.root, exists: deps.exists })
   const mcp = armed.mcp_servers.length > 0
   const piBuiltins = isClaude ? [] : [...(definition.codemode === true ? ['builtin:codemode'] : []), ...(mcp ? ['builtin:mcp'] : [])]
@@ -286,7 +282,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, briefText, sessio
   // fff replaces native search, as the old path's effectiveDeny did; pi reads Glob and Grep as find and grep.
   if (grants.mcp_servers.some((server) => server.name === 'fff')) deny = [deny, 'Glob,Grep'].filter(Boolean).join(',')
   const editAssist = typeof definition.edit_assist === 'boolean' ? (definition.edit_assist ? 'on' : 'off') : null
-  const contextArms = isClaude ? [] : [
+  const contextArms = [
     ...(definition.extensions ?? []).filter((name) => CONTEXT_EXTENSIONS.includes(name)),
     ...(grants.advisor ? ['advisor'] : []), ...(definition.edit_assist === true ? ['edit_assist'] : []),
   ]
@@ -363,7 +359,9 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, briefText, sessio
     let launch
     if (isClaude) {
       claudeAdapter.writeSeatSkills({ taskDir: runtime, role, grants }, deps.skillDeps ?? {})
-      launch = claudeAdapter.acpLaunch({ ...spec, bin: claudeAcp, claudeBin: claude, model })
+      // The arms' hooks keep their state in the lane's task dir (spec.env), not in this runtime.
+      claudeAdapter.writeSeatArms({ taskDir: runtime, role, grants, cwd: workdir, editAssist, env: spec.env }, deps.armDeps ?? {})
+      launch = claudeAdapter.acpLaunch({ ...spec, bin: claudeAcp, claudeBin: claude, model, armHooks: true })
       launch.sessionParams._meta.systemPrompt = LEAN_CLAUDE_SYSTEM_PROMPT
       const options = launch.sessionParams._meta.claudeCode.options
       // The target checkout's permissions.allow would approve calls before they reach onPermission.

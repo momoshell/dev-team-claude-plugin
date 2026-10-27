@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { mcpConfigDocument, effectiveDeny, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveTier, resolveSeatModels, loadLadder, shadowPickBoot, bootCmd, CAPABILITY_REFUSALS, loadCapabilities, EMPTY_GRANTS } from './crew.mjs'
-import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString, mcpConfigPath, paneUsageRecords, skillsPluginDir, skillDirName, seatSkillFiles, writeSeatSkills, assertSkillsMaterialised, acpLaunch as claudeAcpLaunch, ACP_BINARY, FFF_HOOK_PATH, hasSkillIsolationSettings, PANE_USAGE_SETTINGS } from './adapters/adapter-claude.mjs'
+import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString, mcpConfigPath, paneUsageRecords, skillsPluginDir, skillDirName, seatSkillFiles, writeSeatSkills, assertSkillsMaterialised, acpLaunch as claudeAcpLaunch, writeSeatArms, ACP_BINARY, FFF_HOOK_PATH, hasSkillIsolationSettings, PANE_USAGE_SETTINGS } from './adapters/adapter-claude.mjs'
 import { capabilitiesFor as piCapabilitiesFor, translateDeny, piSeatAgentDir } from './adapters/adapter-pi.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
 import { ROOT, scratchDir } from '../test/helpers.mjs'
@@ -574,6 +574,45 @@ test('SI3 Claude ACP disables inherited instructions and memory for every seat',
 test('Claude ACP launch refuses relative binaries and extension grants', () => {
   assert.throws(() => claudeAcpLaunch({ bin: '/bin/acp', claudeBin: 'claude' }), /adapter-claude\.acpLaunch.*claudeBin.*ABSOLUTE/)
   assert.throws(() => claudeAcpLaunch({ bin: '/bin/acp', claudeBin: '/frozen/claude', grants: { extensions: ['x'] } }), (error) => error.reason === 'grant-unsupported')
+  // subagent is an extension the ACP launch does not carry, alone or beside one it does.
+  for (const names of [['subagent'], ['readgate', 'subagent']]) {
+    const grants = { tools: [], skills: [], mcp_servers: [], extensions: names.map((name) => join(ROOT, 'crew/pi/extensions', `${name}.ts`)) }
+    assert.throws(() => claudeAcpLaunch({ bin: '/bin/acp', claudeBin: '/frozen/claude', grants, role: 'builder', taskDir: '/task', armHooks: true }), (error) => error.reason === 'grant-unsupported' && /subagent\.ts/.test(error.message))
+  }
+})
+
+test('ACA2 Claude ACP launch without the armHooks opt-in keeps the old rule: extensions refuse, advisor and edit_assist are ignored, no arms plugin', () => {
+  // MUTATION: make acpLaunch read advisor/editAssist (or accept readgate) without the armHooks opt-in.
+  // crew/acp-io.mjs launches with the register's role-level advisor grant and a rotation-set edit_assist for every claude role.
+  withAcpSkillFixture(false, (spec) => {
+    const spec0 = { ...spec, grants: { ...spec.grants, skills: [] } }
+    for (const role of ['lead', 'reviewer', 'planner', 'builder']) {
+      const launch = claudeAcpLaunch({ ...spec0, role, grants: { ...spec0.grants, advisor: true }, editAssist: 'on' })
+      assert.equal(launch.sessionParams._meta.claudeCode.options.plugins, undefined)
+    }
+    const readgate = { ...spec0.grants, extensions: [join(ROOT, 'crew/pi/extensions/readgate.ts')] }
+    assert.throws(() => claudeAcpLaunch({ ...spec0, grants: readgate }), (error) => error.reason === 'grant-unsupported')
+    // The opt-in is what makes the same inputs a refusal or a plugin.
+    assert.throws(() => claudeAcpLaunch({ ...spec0, role: 'reviewer', grants: { ...spec0.grants, advisor: true }, armHooks: true }), (error) => error.reason === 'grant-unsupported')
+    assert.throws(() => claudeAcpLaunch({ ...spec0, role: 'builder', editAssist: 'on', armHooks: true }), (error) => error.reason === 'grant-unsupported')
+  })
+})
+
+test('ACA1 Claude ACP launch lists the arms plugin after the skills plugin, and the old transports still refuse the same grants', () => {
+  // MUTATION: drop the arms plugin from acpLaunch's plugins, or let assertSupportedGrants accept readgate.
+  withAcpSkillFixture(true, (spec) => {
+    const grants = { ...spec.grants, extensions: [join(ROOT, 'crew/pi/extensions/readgate.ts')] }
+    const armed = { ...spec, grants, env: { CREW_TASK_DIR: spec.taskDir }, armHooks: true }
+    assert.throws(() => claudeAcpLaunch(armed), (error) => error.reason === 'grant-unsupported' && /not materialised/.test(error.message))
+    writeSeatArms({ ...armed, cwd: spec.taskDir })
+    const options = claudeAcpLaunch(armed).sessionParams._meta.claudeCode.options
+    assert.deepEqual(options.plugins, [
+      { type: 'local', path: skillsPluginDir({ taskDir: spec.taskDir, role: spec.role }) },
+      { type: 'local', path: join(spec.taskDir, 'claude-arms', spec.role) },
+    ])
+    assert.throws(() => seatCommand({ role: spec.role, model: 'opus', promptFile: '/p.md', tools: 'Read', deny: '', taskDir: spec.taskDir, bootBrief: 'b', grants }), (error) => error.reason === 'grant-unsupported')
+    assert.throws(() => claudeHeadlessCommand({ role: spec.role, model: 'opus', promptFile: '/p.md', tools: 'Read', deny: '', taskDir: spec.taskDir, prompt: 'p', sessionId: 's', bin: '/bin/claude', grants }), (error) => error.reason === 'grant-unsupported')
+  })
 })
 
 test('seatTransport keeps explicit transports ahead of --headless-all and defaults to pane', () => {

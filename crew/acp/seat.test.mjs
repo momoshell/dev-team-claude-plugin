@@ -1225,10 +1225,9 @@ test('a claude seat that declares lab launches with the lab server and its tool 
   assert.ok(options.allowedTools.includes('mcp__lab__lab'))
 })
 
-test('a claude seat never drops an arm it cannot express: every pi-only extension, advisor, edit assist and codemode refuse before a client', () => {
+test('a claude seat refuses the arms it cannot carry before a client: subagent and codemode, alone or beside arms it can', () => {
   const requests = [
-    ...['readgate', 'builderloop', 'reminders', 'skeletonread', 'subagent'].map((name) => ({ extensions: [name] })),
-    { advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' } }, { edit_assist: true }, { codemode: true },
+    { extensions: ['subagent'] }, { extensions: ['readgate', 'subagent'] }, { extensions: ['subagent'], advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' } }, { codemode: true },
   ]
   for (const arms of requests) {
     const probe = armLaunch('claude', 'builder', arms)
@@ -1238,6 +1237,14 @@ test('a claude seat never drops an arm it cannot express: every pi-only extensio
   }
   // Only a requested arm refuses: false is the absence of the arm.
   assert.equal(armed('claude', 'builder', { edit_assist: false, codemode: false, advisor: null, extensions: [] }).created.length, 1)
+})
+
+test('a claude seat granted readgate and reminders launches with the arms plugin; one granted nothing launches without', () => {
+  const { launch } = armed('claude', 'builder', { extensions: ['readgate', 'reminders'] })
+  const [plugin, ...others] = claudeOptions(launch).plugins
+  assert.deepEqual(others, [])
+  assert.match(plugin.path, /\/claude-arms\/builder$/)
+  assert.equal(Object.hasOwn(claudeOptions(armed('claude', 'builder', {}).launch), 'plugins'), false)
 })
 
 // The lane context a lean pi seat's context arms read: the loop's run-start and the planner's return, in the lane's own task dir.
@@ -1318,6 +1325,45 @@ test('a lean pi seat granted the advisor refuses without a pi cell or a written 
   }
   const failing = refusedBeforeClient({ advisor: advisorArm }, (taskDir) => leanLane(taskDir), { deps: { writeFileSync: (path, ...rest) => { if (path.includes('advisor-manifest')) throw new Error('disk full'); return writeFileSync(path, ...rest) } } })
   assert.equal(existsSync(join(failing.taskDir, 'advisor-manifest.json')), false)
+})
+
+test('a lean claude builder declaring advisor, edit assist, builderloop and skeletonread launches with all four on the lane layout', () => {
+  const probe = armLaunch('claude', 'builder', contextArms, { briefText: 'Tripwire tests:\n- a.test.mjs · tripwire\nBroad keys\n' })
+  const anchor = Date.now() - 60_000
+  leanLane(probe.taskDir, { anchor })
+  probe.run()
+  const [launch] = probe.created
+  assert.equal(launch.env.CREW_CONTEXT_LAYOUT, 'lean')
+  assert.equal(launch.env.CREW_TASK_DIR, probe.taskDir)
+  const config = JSON.parse(readFileSync(join(claudeOptions(launch).plugins[0].path, 'config.json'), 'utf8'))
+  assert.deepEqual(config.arms, ['builderloop', 'skeletonread', 'advisor'])
+  assert.equal(config.edit_assist, 'on')
+  assert.equal(config.lane_task_dir, probe.taskDir)
+  assert.ok(config.state_dir.startsWith(join(probe.taskDir, 'claude-arms')), 'what the hooks keep lives in the lane, not in the disposable runtime')
+  const manifest = JSON.parse(readFileSync(join(probe.taskDir, 'advisor-manifest.json'), 'utf8'))
+  assert.equal(manifest.run_started_at, anchor)
+  assert.deepEqual(manifest.cell, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'high', model: 'openai/gpt-6.1-sol' })
+})
+
+test('a claude seat with context arms refuses before a client when the lane has no run-start of its own or a usable planner return', () => {
+  const refusedClaude = (arms, lane) => {
+    const probe = armLaunch('claude', 'builder', arms)
+    lane(probe.taskDir)
+    assert.throws(() => probe.run(), { reason: 'grant-unsupported' }, JSON.stringify(arms))
+    assert.equal(probe.created.length, 0, 'a refused seat constructs no client')
+    assert.deepEqual(readdirSync(probe.runtimeRoot), [], 'a refused seat leaves no runtime')
+  }
+  for (const arms of [{ advisor: advisorArm }, { edit_assist: true }, { extensions: ['builderloop'] }, { extensions: ['skeletonread'] }]) {
+    refusedClaude(arms, (taskDir) => {
+      writeFileSync(join(dirname(taskDir), 'journal.jsonl'), `${JSON.stringify({ event: 'run-start', at: 1, run_id: 'foreign' })}\n`)
+      leanLane(taskDir, { anchor: null })
+    })
+    refusedClaude(arms, (taskDir) => leanLane(taskDir, { details: null }))
+  }
+  // edit_assist runs inside builderloop.
+  refusedClaude({ edit_assist: true, extensions: ['skeletonread'] }, (taskDir) => leanLane(taskDir))
+  // Arms that read no lane context need none.
+  assert.equal(armed('claude', 'builder', { extensions: ['readgate', 'reminders'] }).created.length, 1)
 })
 
 test('a pi builder with edit assist off carries off; an unset field carries none', () => {

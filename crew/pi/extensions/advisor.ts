@@ -1061,6 +1061,8 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   }
 
   async function consult(trigger, eventId, callOrdinal) {
+    // A host whose hooks are fresh processes (the claude seat plugin) cannot hold a consult open: tier 0 only.
+    if (deps.tier1 === false) return
     const context = currentContext()
     if (!context?.cell) return
     if (consults >= TIER1_MAX_CONSULTS) return
@@ -1300,8 +1302,34 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     return undefined
   }
 
+  // What the tier-0 predicates keep between calls: a host that runs each hook in a fresh process stores it
+  // and hands it back. Pi never calls these. The judgment channel's delta is not part of it.
+  function exportState() {
+    return {
+      context_epoch: contextEpoch, context_row_epoch: contextRowEpoch, calls, consults, growth_baseline: growthBaseline,
+      call_ordinals: [...callOrdinals], fired: [...fired], failure_counts: [...failureCounts],
+      injected: [...injected], dedupe: [...dedupe],
+    }
+  }
+
+  function importState(state) {
+    const pairs = (value) => { if (!Array.isArray(value) || !value.every((pair) => Array.isArray(pair) && pair.length === 2)) throw new Error('advisor state is malformed'); return value }
+    const strings = (value) => { if (!Array.isArray(value) || !value.every((item) => typeof item === 'string')) throw new Error('advisor state is malformed'); return value }
+    const key = (value) => { if (value !== null && typeof value !== 'string') throw new Error('advisor state is malformed'); return value }
+    if (!state || typeof state !== 'object' || !Number.isSafeInteger(state.calls) || state.calls < 0 || !Number.isSafeInteger(state.consults) || state.consults < 0) throw new Error('advisor state is malformed')
+    const growth = state.growth_baseline
+    if (growth !== null && !(growth && Number.isFinite(growth.bytes) && typeof growth.truncated === 'boolean')) throw new Error('advisor state is malformed')
+    const ordinals = pairs(state.call_ordinals), counts = pairs(state.failure_counts)
+    if (!ordinals.every(([id, ordinal]) => typeof id === 'string' && Number.isSafeInteger(ordinal)) || !counts.every(([id, count]) => typeof id === 'string' && Number.isSafeInteger(count))) throw new Error('advisor state is malformed')
+    contextEpoch = key(state.context_epoch); contextRowEpoch = key(state.context_row_epoch)
+    calls = state.calls; consults = state.consults; growthBaseline = growth
+    callOrdinals.clear(); for (const [id, ordinal] of ordinals) callOrdinals.set(id, ordinal)
+    failureCounts = new Map(counts)
+    fired = new Set(strings(state.fired)); injected = new Set(strings(state.injected)); dedupe = new Set(strings(state.dedupe))
+  }
+
   return {
-    onToolCall, onToolResult,
+    onToolCall, onToolResult, exportState, importState,
     notes: () => [...notes],
     settled: async () => { await Promise.allSettled([...inFlight]) },
   }

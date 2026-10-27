@@ -364,3 +364,11 @@ test('MP1', () => {
     assert.ok(text.includes(token), 'mutation-proof.md must name ' + token)
   }
 })
+
+// Mutation killed: dropping the record step, its command or its operator-provenance pin from the hand-finish procedure.
+test('hand-finish records a stopped lean lane\'s PR as operator-written, pinned to the producer', () => {
+  const text = readText(join(HERE, 'references/hand-finish.md'))
+  assert.ok(text.includes('crew record-pr <lane> --pr'), 'hand-finish.md must name the record-pr command')
+  assert.ok(text.includes('crew/record-pr.mjs@operator-pr-row'), 'hand-finish.md must cite the operator pr row')
+  assert.equal(JSON.parse(readText(MANIFEST))['crew/record-pr.mjs@operator-pr-row'], "actor: 'operator'")
+})

@@ -32,3 +32,19 @@ test('ledger rows keep their old status derivation and App wires lean only', () 
   assert.match(app, /selectedRun\?\.source === 'lean'[\s\S]*LeanRunDetail/); assert.match(app, /probeEnvelopes\(nextRuns\.filter\(\(run\) => run\?\.source !== 'lean'\)\)/)
   assert.match(src('lib/api.js'), /getSeatSessions[\s\S]*seat-sessions/); assert.match(src('lib/LeanRunDetail.svelte'), /journalPulse/)
 })
+
+test('an operator-written pr row reads as done, hand-finished; a loop-written one stays plain done', () => {
+  const pr = { number: 7, url: 'https://github.com/o/r/pull/7' }
+  const operator = { status: 'done', pr, hand_finished: true, pr_actor: 'operator' }
+  const loop = { status: 'done', pr, hand_finished: false, pr_actor: 'loop' }
+  assert.equal(leanStatus(operator).word, 'done · hand-finished')
+  assert.equal(leanStatus(operator).key, 'success')
+  assert.equal(deriveDisplayStatus({ source: 'lean', ...operator }).word, 'done · hand-finished')
+  assert.equal(leanStatus(loop).word, 'done')
+  assert.equal(leanStatus({ status: 'stopped', hand_finished: true }).word, 'stopped')
+  const [op] = journalLines([{ event: 'pr', actor: 'operator', pr, index: 0 }])
+  const [lp] = journalLines([{ event: 'pr', pr, index: 0 }])
+  assert.equal(lp.detail, pr.url)
+  assert.notEqual(op.detail, lp.detail)
+  assert.ok(op.detail.includes(pr.url) && /operator/.test(op.detail))
+})

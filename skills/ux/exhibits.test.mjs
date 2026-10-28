@@ -90,7 +90,7 @@ test('ux absence vocabulary re-derives from the component tree', () => {
   assert.equal(dash.occurrences, 94)
   assert.equal(dash.files, 21)
   const unavailable = census('unavailable', 'gi')
-  assert.equal(unavailable.occurrences, 90)
+  assert.equal(unavailable.occurrences, 91)
   assert.equal(unavailable.files, 26)
   const unmeasured = census('unmeasured', 'gi')
   assert.equal(unmeasured.occurrences, 14)
@@ -101,7 +101,7 @@ test('ux absence vocabulary re-derives from the component tree', () => {
   const union = new Set([...dash.hit, ...unavailable.hit, ...unmeasured.hit, ...notMeasured.hit])
   assert.equal(union.size, 31)
   assert.equal(libFiles().length, 39)
-  for (const row of ['| `—` | 94 | 21 |', '| `unavailable` | 90 | 26 |', '| `unmeasured` | 14 | 7 |', '| `not measured` | 23 | 8 |']) {
+  for (const row of ['| `—` | 94 | 21 |', '| `unavailable` | 91 | 26 |', '| `unmeasured` | 14 | 7 |', '| `not measured` | 23 | 8 |']) {
     assert.ok(body.includes(row), `absence.md must carry ${row}`)
   }
   assert.ok(body.includes('`Unmeasured — <reason>`'), 'absence.md must name the canonical vocabulary')
@@ -141,7 +141,7 @@ test('ux keyboard and focus register re-derives', () => {
   assert.equal(tab.occurrences, 22)
   assert.equal(tab.files, 11)
   const aria = census('aria-', 'g')
-  assert.equal(aria.occurrences, 237)
+  assert.equal(aria.occurrences, 241)
   assert.equal(aria.files, 34)
   const role = census('role=', 'g')
   assert.equal(role.occurrences, 91)
@@ -152,7 +152,7 @@ test('ux keyboard and focus register re-derives', () => {
     '| `:focus-visible` selectors | 32 | 9 |',
     '| plain `:focus` selectors | 5 | 2 |',
     '| `tabindex` attributes | 22 | 11 |',
-    '| `aria-` attributes | 237 | 34 |',
+    '| `aria-` attributes | 241 | 34 |',
     '| `role=` attributes | 91 | 19 |',
   ]) {
     assert.ok(body.includes(row), `keyboard-focus.md must carry ${row}`)

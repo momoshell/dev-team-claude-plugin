@@ -170,6 +170,7 @@ test('D1 a tracked suite added after the recorded measurement is unmeasured, not
     'test/factory-shape-scan.test.mjs',
     'test/factory-skill-reads.test.mjs',
     'test/visualizer-agent-library.test.mjs',
+    'test/visualizer-agents-edit.test.mjs',
     'test/visualizer-assurance-preview.test.mjs',
     'test/visualizer-harness-settings.test.mjs',
     'test/visualizer-lean-web.test.mjs',

@@ -11,7 +11,7 @@ Case-insensitive literal census over the 39 `.svelte` files directly under the v
 | spelling | occurrences | files |
 |---|---|---|
 | `—` | 94 | 21 |
-| `unavailable` | 90 | 26 |
+| `unavailable` | 91 | 26 |
 | `unmeasured` | 14 | 7 |
 | `not measured` | 23 | 8 |
 
@@ -23,7 +23,7 @@ Case-insensitive literal census over the 39 `.svelte` files directly under the v
 
 `not measured` files: FleetTable.svelte, LeanRunDetail.svelte, MetricsStrip.svelte, PhasePanel.svelte, RosterPanel.svelte, RunDetail.svelte, TaskList.svelte, TeardownPanel.svelte.
 
-One exact line per spelling: `—` at `visualizer/web/src/lib/RunCard.svelte:54`; `unavailable` at `visualizer/web/src/lib/PhaseDots.svelte:6`; `unmeasured` at `visualizer/web/src/lib/OperationsOverview.svelte:64`; `not measured` at `visualizer/web/src/lib/RunDetail.svelte:322`. Supporting exhibits: a closed reason at `visualizer/web/src/lib/agents.js:209`, and the explicit null-not-zero statement at `visualizer/web/src/lib/RosterPanel.svelte:656`.
+One exact line per spelling: `—` at `visualizer/web/src/lib/RunCard.svelte:54`; `unavailable` at `visualizer/web/src/lib/PhaseDots.svelte:6`; `unmeasured` at `visualizer/web/src/lib/OperationsOverview.svelte:64`; `not measured` at `visualizer/web/src/lib/RunDetail.svelte:322`. Supporting exhibits: a closed reason at `visualizer/web/src/lib/agents.js:209`, and the explicit null-not-zero statement at `visualizer/web/src/lib/RosterPanel.svelte:679`.
 
 **Stated gap:** 4 spellings across 31/39 components share no single vocabulary; the canonical phrase `Unmeasured — <reason>` appears literally in 0/39 components; components using shared copy helpers are outside this literal census.
 

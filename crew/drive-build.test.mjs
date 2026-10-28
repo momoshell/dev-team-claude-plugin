@@ -113,13 +113,13 @@ test('RV1-2 full reorder pins the same refusal as every other shape', () => {
 })
 
 // Derived from the live inventory, never copied from it: a lane that edits
-// crew/reclaim-descendants.test.mjs or test/visualizer-shape.test.mjs moves both
+// crew/reclaim-descendants.test.mjs or test/visualizer-server.test.mjs moves both
 // values, and literal replacements then silently no-op (b740, b741).
 const frozenSourcePair = () => {
   const current = readFileSync(join(ROOT, FROZEN_INVENTORY_FILE), 'utf8')
   const committed = current
     .replace(/crew\/reclaim-descendants\.test\.mjs:(\d+)/, (_, line) => `crew/reclaim-descendants.test.mjs:${Number(line) === 820 ? 821 : 820}`)
-    .replace(/('test\/visualizer-shape\.test\.mjs': ')([0-9a-f]{64})'/, (_, key, hash) => `${key}${hash === '0'.repeat(64) ? '1'.repeat(64) : '0'.repeat(64)}'`)
+    .replace(/('test\/visualizer-server\.test\.mjs': ')([0-9a-f]{64})'/, (_, key, hash) => `${key}${hash === '0'.repeat(64) ? '1'.repeat(64) : '0'.repeat(64)}'`)
   assert.equal(current.split('\n').filter((line, index) => line !== committed.split('\n')[index]).length, 2, 'frozenSourcePair must move exactly one citation and one digest')
   return { committed, current }
 }
@@ -7488,7 +7488,7 @@ test('D1 frozen inventory repair refuses audited identity changes', () => {
   const factoryEntry = "['crew/arms.test.mjs', frozenTempSites(1)],"
   for (const current of [
     factory.replace(factoryEntry, ''),
-    factory.replace('assert.equal(total, 201)', 'assert.equal(total, 200)'),
+    factory.replace('assert.equal(total, 156)', 'assert.equal(total, 155)'),
     factory.replace('frozenTempSites(1)', 'frozenTempSites(0)'),
   ]) {
     const result = classifyFrozenInventoryDelta(FROZEN_FACTORY_ENV_FILE, factory, current)

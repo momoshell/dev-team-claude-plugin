@@ -52,6 +52,19 @@ test('harness preferences persist with CAS, preserve declarations and reset to r
  assert.equal(library.saveHarness({name:'claude',default_transport:null,expected_revision:latest}).ok,true)
  assert.deepEqual(JSON.parse(readFileSync(path,'utf8')),value)
 })
+test('a malformed transports declaration refuses save and reset and leaves the register bytes unchanged',t=>{
+ const {path,value,library}=fixture(t)
+ for(const bad of ['headless-json',[],['pane','invented'],null]){
+  const broken=structuredClone(value);broken.coding_agents.claude.transports=bad
+  writeFileSync(path,JSON.stringify(broken,null,2)+'\n')
+  const bytes=readFileSync(path,'utf8'),revision=library.read().config_revision
+  for(const default_transport of ['json','headless-json','pane',null]){
+   const result=library.saveHarness({name:'claude',default_transport,expected_revision:revision})
+   assert.equal(result.ok,false,JSON.stringify(bad)+' '+default_transport);assert.equal(result.status,400)
+   assert.equal(readFileSync(path,'utf8'),bytes)
+  }
+ }
+})
 test('read-only and linked capability files cannot be configured',t=>{
  const {root,path,library}=fixture(t),revision=library.read().config_revision
  const readonly=createAgentLibrary({checkout:root,home:join(root,'home'),writable:false})

@@ -67,9 +67,18 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
     return null
   }
 
+  // A root that does not exist holds no lanes; any other read failure (not a directory, permission denied)
+  // is thrown so the caller reports the source unreadable rather than an empty list.
+  function laneNames(base) {
+    try { return readdirSync(base).sort() } catch (error) {
+      if (error?.code === 'ENOENT') return []
+      throw new Error(`lean root ${base} unreadable: ${error?.code ?? error?.message}`)
+    }
+  }
+
   function lanes() {
     const names = new Set()
-    for (const base of [root, archive]) for (const name of dirs(base)) if (name.startsWith('dt-') && LANE.test(name.slice(3))) names.add(name.slice(3))
+    for (const base of [root, archive]) for (const name of laneNames(base)) if (name.startsWith('dt-') && LANE.test(name.slice(3))) names.add(name.slice(3))
     return [...names].sort().map(resolveLane).filter(Boolean)
   }
 

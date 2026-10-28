@@ -1,7 +1,7 @@
 // Proposes one-line edits to a crew/agents/<role>.md frontmatter field. Pure: it reads
 // nothing and writes nothing; the caller supplies the file text and applies the diff.
 import { AGENT_ROLES, TIERS, parseAgent } from '../../crew/protocols.mjs'
-import { unifiedDiff } from './roster-edit.mjs'
+import { unifiedDiff } from './diff.mjs'
 
 const FIELDS = ['model', 'effort']
 

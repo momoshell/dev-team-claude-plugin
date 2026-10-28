@@ -42,12 +42,14 @@
   }
   function cacheRate(value) { return value == null ? null : `${value.toFixed(1)}% cache hit` }
 
+  // Lean lanes carry no merge state, so a board with no measured ship state has no shipped count.
+  let shipMeasured = $derived(runs.some((run) => shipStatus(run).key !== 'unmeasured'))
   let counts = $derived({
     all: runs.filter((run) => (showArchived || !run.triage?.reviewed_at)).length,
     active: runs.filter((run) => activityFor(run).live && (showArchived || !run.triage?.reviewed_at)).length,
     completed: runs.filter((run) => !run.running && (showArchived || !run.triage?.reviewed_at)).length,
     attention: runs.filter((run) => needsAttention(statusFor(run).key) && (showArchived || !run.triage?.reviewed_at)).length,
-    shipped: runs.filter((run) => shipStatus(run).key === 'merged' && (showArchived || !run.triage?.reviewed_at)).length,
+    shipped: shipMeasured ? runs.filter((run) => shipStatus(run).key === 'merged' && (showArchived || !run.triage?.reviewed_at)).length : null,
   })
   let baseRows = $derived(runs.filter((run) => (showArchived || !run.triage?.reviewed_at) && matchesState(run) && matchesQuery(run)))
   let configurationView = $derived(configurationFilterView(baseRows, { task_profile: taskProfile, execution_shape: executionShape, assurance }))
@@ -77,7 +79,7 @@
   <div class="status-tabs" role="group" aria-label="Task status">
     {#each [['all','All tasks'], ['active','Live now'], ['completed','Finished'], ['attention','Needs attention'], ['shipped','Shipped']] as tab (tab[0])}
       <button type="button" class:active={state === tab[0]} class:has-attention={tab[0] === 'attention' && counts[tab[0]] > 0} onclick={() => state = tab[0]} aria-pressed={state === tab[0]}>
-        {tab[1]} <span>{counts[tab[0]]}</span>
+        {tab[1]} <span title={counts[tab[0]] == null ? 'ship state not measured' : undefined}>{counts[tab[0]] ?? '—'}</span>
       </button>
     {/each}
   </div>

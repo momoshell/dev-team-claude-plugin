@@ -3,10 +3,7 @@ import assert from 'node:assert/strict'
 import { appendFileSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { startServer } from '../visualizer/server/server.mjs'
-import { tmpdir } from 'node:os'
 import { scratchDir } from './helpers.mjs'
-
-process.env.DEVTEAM_LEDGER_DIR = scratchDir('viz-ledger-', { parent: tmpdir() })
 
 const jsonl = (rows) => rows.map((row) => JSON.stringify(row)).join('\n') + '\n'
 const put = (file, text) => { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, text) }
@@ -25,14 +22,13 @@ async function withServer(work, overrides = {}) {
   const sandbox = scratchDir('lean-viz-')
   const crewRoot = join(sandbox, '.crew'), archiveRoot = join(sandbox, '.crew-journal-archive')
   mkdirSync(crewRoot); mkdirSync(archiveRoot)
-  const handles = startServer({ port: 0, host: '127.0.0.1', crewRoot, home: sandbox, checkout: sandbox, ledgerDb: join(sandbox, 'none', 'ledger.db'), triageDb: join(sandbox, 'side', 'v.db'), shipState: { resolve: async () => new Map() }, ...overrides })
+  const handles = startServer({ port: 0, host: '127.0.0.1', crewRoot, home: sandbox, checkout: sandbox, leanArchiveRoot: archiveRoot, ...overrides })
   await new Promise((ok) => handles.server.once('listening', ok))
   const base = `http://127.0.0.1:${handles.server.address().port}`
   const get = async (path, options) => { const r = await fetch(base + path, options); return { status: r.status, body: await r.json() } }
   try { await work({ crewRoot, archiveRoot, get }) } finally {
     handles.server.closeAllConnections?.()
     await new Promise((ok) => handles.server.close(ok))
-    handles.feed.close?.()
     rmSync(sandbox, { recursive: true, force: true })
   }
 }
@@ -186,28 +182,26 @@ test('LV-HF a lane whose last row is an operator pr row is done and hand-finishe
   })
 })
 
-test('VJ1 sessions: lean runs with no ledger state each source separately and are not an unavailable feed', async () => {
+test('VJ1 sessions: lean runs with no ledger state their source and are not an unavailable feed', async () => {
   await withServer(async ({ crewRoot, get }) => {
     lane(crewRoot, 'vj1', [{ event: 'stage-start', stage: 'plan' }])
     const { body } = await get('/api/sessions')
     assert.ok(body.runs.some((run) => run.adw_id === 'lean:vj1'))
     assert.deepEqual(body.sources.lean, { readable: true, absent: null, runs: 1 })
-    assert.equal(body.sources.ledger.readable, false); assert.ok(body.sources.ledger.absent.length > 0)
+    assert.equal(Object.hasOwn(body.sources, 'ledger'), false) // the ledger is no longer a source
     assert.equal(body.degraded, false)
   })
 })
 
-test('VJ2 sessions: a throwing lean read is stated unreadable and ledger runs still return', async () => {
-  const feed = { listRuns: () => ({ runs: [{ adw_id: 'ledger-1' }], degraded: false, probe: {} }), listEvents: () => ({ events: [], cursor: 0 }), health: () => ({ degraded: false }), _reason: () => null, close: () => {} }
+test('VJ2 sessions: a throwing lean read is stated unreadable with a null count and an unavailable feed', async () => {
   const lean = { listRuns: () => { throw new Error('lean boom') }, identify: () => ({ lean: false }), resolveLane: () => null, readJournalRows: () => ({ rows: [], error: null }), readSeatSessions: () => ({ status: 400, error: 'n/a' }) }
   await withServer(async ({ get }) => {
     const { body } = await get('/api/sessions')
-    assert.deepEqual(body.runs.map((run) => run.adw_id), ['ledger-1'])
+    assert.deepEqual(body.runs, [])
     assert.equal(body.sources.lean.readable, false); assert.match(body.sources.lean.absent, /lean boom/)
     assert.equal(body.sources.lean.runs, null) // unmeasured, not zero
-    assert.equal(body.sources.ledger.readable, true)
-    assert.equal(body.degraded, false)
-  }, { feed, lean })
+    assert.equal(body.degraded, true)
+  }, { lean })
 })
 
 test('VJ4 events: a lean lane answers its journal rows in order with a cursor and null timestamps, no ledger read', async () => {
@@ -236,41 +230,38 @@ test('VJ5 events: phase_id on a lean lane is refused, never answered with unfilt
   })
 })
 
-test('VJ1 sessions: a broken triage sidecar over a readable ledger does not make the ledger unreadable', async () => {
-  const feed = { listRuns: () => ({ runs: [{ adw_id: 'ledger-1' }], degraded: true, probe: {} }), listEvents: () => ({ events: [], cursor: 0 }), health: () => ({ degraded: true }), _reason: () => null, close: () => {} }
-  await withServer(async ({ get }) => {
+test('VJ2 sessions: a crew root that is a file is unreadable with a null count and a reason, not an empty list', async () => {
+  await withServer(async ({ crewRoot, get }) => {
+    rmSync(crewRoot, { recursive: true, force: true }); writeFileSync(crewRoot, 'not a directory')
     const { body } = await get('/api/sessions')
-    assert.deepEqual(body.sources.ledger, { readable: true, absent: null })
-    assert.equal(body.degraded, false) // a sidecar fault over a readable ledger is not an unavailable feed
-  }, { feed })
-})
-
-test('VJ2 sessions: both sources unreadable states both reasons and an unavailable feed', async () => {
-  const feed = { listRuns: () => ({ runs: [], degraded: true, probe: {} }), listEvents: () => ({ events: [], cursor: 0 }), health: () => ({ degraded: true }), _reason: () => 'ledger gone', close: () => {} }
-  const lean = { listRuns: () => { throw new Error('lean boom') }, identify: () => ({ lean: false }), resolveLane: () => null, readJournalRows: () => ({ rows: [], error: null }), readSeatSessions: () => ({ status: 400, error: 'n/a' }) }
-  await withServer(async ({ get }) => {
-    const { body } = await get('/api/sessions')
+    assert.deepEqual(body.runs, [])
+    assert.equal(body.sources.lean.readable, false); assert.match(body.sources.lean.absent, /unreadable: ENOTDIR/)
+    assert.equal(body.sources.lean.runs, null)
     assert.equal(body.degraded, true)
-    assert.match(body.sources.lean.absent, /lean boom/); assert.equal(body.sources.ledger.absent, 'ledger gone')
-  }, { feed, lean })
+  })
 })
 
-test('VJ1 sessions: an empty readable lean source with an unreadable ledger is still an available feed', async () => {
+test('VJ2 sessions: an absent crew root holds no lanes and stays readable', async () => {
+  await withServer(async ({ crewRoot, get }) => {
+    rmSync(crewRoot, { recursive: true, force: true })
+    const { body } = await get('/api/sessions')
+    assert.deepEqual(body.sources.lean, { readable: true, absent: null, runs: 0 })
+  })
+})
+
+test('VJ1 sessions: an empty readable lean source is an available feed with a measured zero', async () => {
   await withServer(async ({ get }) => {
     const { body } = await get('/api/sessions')
     assert.deepEqual(body.runs, [])
     assert.deepEqual(body.sources.lean, { readable: true, absent: null, runs: 0 })
-    assert.equal(body.sources.ledger.readable, false)
     assert.equal(body.degraded, false)
   })
 })
 
-test('VJ4 events: a lean lane request makes no ledger feed call', async () => {
-  const boom = () => { throw new Error('ledger read') }
-  const feed = { listRuns: boom, listEvents: boom, health: boom, _reason: boom, close: () => {} }
-  await withServer(async ({ crewRoot, get }) => {
-    lane(crewRoot, 'vj4n', [{ event: 'stage-start', stage: 'plan' }])
-    const { status, body } = await get('/api/events?adw_id=lean%3Avj4n')
-    assert.equal(status, 200); assert.equal(body.events.length, 1); assert.equal(body.degraded, false)
-  }, { feed })
+test('VJ4 events: a non-lean lane states the removed ledger source as absent, never an empty measured page', async () => {
+  await withServer(async ({ get }) => {
+    const { status, body } = await get('/api/events?adw_id=0123-old-ledger-run&after=7')
+    assert.equal(status, 200); assert.deepEqual(body.events, []); assert.equal(body.cursor, 7)
+    assert.equal(body.degraded, true); assert.match(body.absent, /ledger event source removed/)
+  })
 })

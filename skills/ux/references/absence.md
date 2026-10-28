@@ -10,21 +10,21 @@ Case-insensitive literal census over the 39 `.svelte` files directly under the v
 
 | spelling | occurrences | files |
 |---|---|---|
-| `—` | 94 | 21 |
-| `unavailable` | 91 | 26 |
-| `unmeasured` | 14 | 7 |
-| `not measured` | 23 | 8 |
+| `—` | 61 | 15 |
+| `unavailable` | 51 | 16 |
+| `unmeasured` | 2 | 2 |
+| `not measured` | 19 | 6 |
 
-`—` files: AcceptPanel.svelte, CellHealthPanel.svelte, EnvelopeInspector.svelte, EventStory.svelte, GateChips.svelte, IntakePanel.svelte, LeanRunDetail.svelte, MetricsStrip.svelte, OperationsOverview.svelte, PhaseDots.svelte, PhaseGantt.svelte, PhasePanel.svelte, PlanSteps.svelte, ReviewPanel.svelte, RosterPanel.svelte, RunCard.svelte, RunDetail.svelte, RunSetPanel.svelte, TaskList.svelte, TeardownPanel.svelte, Trajectory.svelte.
+`—` files: AcceptPanel.svelte, EnvelopeInspector.svelte, EventStory.svelte, GateChips.svelte, LeanRunDetail.svelte, MetricsStrip.svelte, PhaseDots.svelte, PhaseGantt.svelte, PhasePanel.svelte, PlanSteps.svelte, ReviewPanel.svelte, RunCard.svelte, RunDetail.svelte, TaskList.svelte, Trajectory.svelte.
 
-`unavailable` files: AcceptPanel.svelte, AgentsPage.svelte, AssurancePage.svelte, CellHealthPanel.svelte, EnvelopeInspector.svelte, EventStream.svelte, GateChips.svelte, IntakePanel.svelte, MetricsStrip.svelte, OperationsOverview.svelte, PhaseDots.svelte, PhaseGantt.svelte, PhasePanel.svelte, PlanSteps.svelte, PromptsPage.svelte, ReviewPanel.svelte, RosterPanel.svelte, RunDetail.svelte, RunSetPanel.svelte, SkillRules.svelte, SkillsPage.svelte, TaskList.svelte, TeardownPanel.svelte, Trajectory.svelte, WorkflowGraph.svelte, WorkflowsPage.svelte.
+`unavailable` files: AcceptPanel.svelte, AgentsPage.svelte, EnvelopeInspector.svelte, EventStream.svelte, GateChips.svelte, MetricsStrip.svelte, PhaseDots.svelte, PhaseGantt.svelte, PhasePanel.svelte, PlanSteps.svelte, ReviewPanel.svelte, RunDetail.svelte, SkillRules.svelte, SkillsPage.svelte, TaskList.svelte, Trajectory.svelte.
 
-`unmeasured` files: CellHealthPanel.svelte, IntakePanel.svelte, OperationsOverview.svelte, RosterPanel.svelte, RunSetPanel.svelte, SkillDelivery.svelte, WorkflowGraph.svelte.
+`unmeasured` files: SkillDelivery.svelte, TaskList.svelte.
 
-`not measured` files: FleetTable.svelte, LeanRunDetail.svelte, MetricsStrip.svelte, PhasePanel.svelte, RosterPanel.svelte, RunDetail.svelte, TaskList.svelte, TeardownPanel.svelte.
+`not measured` files: FleetTable.svelte, LeanRunDetail.svelte, MetricsStrip.svelte, PhasePanel.svelte, RunDetail.svelte, TaskList.svelte.
 
-One exact line per spelling: `—` at `visualizer/web/src/lib/RunCard.svelte:54`; `unavailable` at `visualizer/web/src/lib/PhaseDots.svelte:6`; `unmeasured` at `visualizer/web/src/lib/OperationsOverview.svelte:64`; `not measured` at `visualizer/web/src/lib/RunDetail.svelte:322`. Supporting exhibits: a closed reason at `visualizer/web/src/lib/agents.js:209`, and the explicit null-not-zero statement at `visualizer/web/src/lib/RosterPanel.svelte:679`.
+One exact line per spelling: `—` at `visualizer/web/src/lib/RunCard.svelte:53`; `unavailable` at `visualizer/web/src/lib/PhaseDots.svelte:6`; `unmeasured` at `visualizer/web/src/lib/SkillDelivery.svelte:32`; `not measured` at `visualizer/web/src/lib/RunDetail.svelte:322`. Supporting exhibits: a closed reason at `visualizer/web/src/lib/agents.js:209`.
 
-**Stated gap:** 4 spellings across 31/39 components share no single vocabulary; the canonical phrase `Unmeasured — <reason>` appears literally in 0/39 components; components using shared copy helpers are outside this literal census.
+**Stated gap:** 4 spellings across 21/27 components share no single vocabulary; the canonical phrase `Unmeasured — <reason>` appears literally in 0/27 components; components using shared copy helpers are outside this literal census.
 
 PlanSteps routes closed reasons through reason-copy.js plain sentences, with the slug kept in the title attribute.

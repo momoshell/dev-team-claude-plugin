@@ -82,7 +82,7 @@ These are the component-facing names. The paper and ink columns identify the val
 
 ## Cascade and legitimate locals
 
-The paper block selector is at `visualizer/web/src/lib/theme.css:44`; the ink block selector is at `visualizer/web/src/lib/theme.css:71`; the media-dark block opens at `visualizer/web/src/lib/theme.css:98` with its inner selector at `visualizer/web/src/lib/theme.css:99`. Bare `:root` is therefore the paper floor when there is no attribute and no dark-media match. The explicit ink selector wins, and the media block is guarded so an explicit paper choice survives a dark OS. `visualizer/web/src/App.svelte:29` and `visualizer/web/src/App.svelte:30` supply the stored choice, `visualizer/web/src/App.svelte:73` and `visualizer/web/src/App.svelte:74` write or delete `data-theme`, and `visualizer/web/src/App.svelte:189` offers the selector.
+The paper block selector is at `visualizer/web/src/lib/theme.css:44`; the ink block selector is at `visualizer/web/src/lib/theme.css:71`; the media-dark block opens at `visualizer/web/src/lib/theme.css:98` with its inner selector at `visualizer/web/src/lib/theme.css:99`. Bare `:root` is therefore the paper floor when there is no attribute and no dark-media match. The explicit ink selector wins, and the media block is guarded so an explicit paper choice survives a dark OS. `visualizer/web/src/App.svelte:18` and `visualizer/web/src/App.svelte:19` supply the stored choice, `visualizer/web/src/App.svelte:56` and `visualizer/web/src/App.svelte:57` write or delete `data-theme`, and `visualizer/web/src/App.svelte:128` offers the selector.
 
 Permit two component-local custom-property patterns, and do not confuse either with a new colour tier:
 

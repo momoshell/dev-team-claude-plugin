@@ -1,4 +1,4 @@
-import { TASK_PROFILES } from '../../../../crew/task-profiles.mjs'
+import { TASK_PROFILES } from './run-shapes.js'
 import { reasonText } from './reason-copy.js'
 import { assuranceMeta, executionMeta, taskProfileMeta } from './workflow-semantics.js'
 

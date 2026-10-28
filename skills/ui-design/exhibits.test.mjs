@@ -10,115 +10,110 @@ import { checkAnchorManifests, checkSkillAnchors, pinnedKey } from '../qa-test-w
 const HERE = fileURLToPath(new URL('./', import.meta.url))
 const MANIFEST = join(HERE, 'anchors.json')
 const OWNER = 'skills/ui-design/anchors.json'
-const MIN_ANCHORS = 46;
+const MIN_ANCHORS = 41;
 
 // The shipped helper cannot see css or html citations, so this table covers
 // every such citation endpoint in the repaired docs, alongside an independent
 // Svelte content census of the manifest-backed source pins. Each row is a
 // JSON-compatible triple naming the line the prose claims.
 const UNPINNABLE_PINS = [
-  ["visualizer/web/index.html", 2, "<meta charset=\"UTF-8\">"],
-  ["visualizer/web/src/App.svelte", 29, "let themeValue = 'os'"],
-  ["visualizer/web/src/App.svelte", 30, "try { themeValue = localStorage.getItem('dt-theme') || 'os' } catch {}"],
-  ["visualizer/web/src/App.svelte", 73, "document.documentElement.dataset.theme = theme"],
-  ["visualizer/web/src/App.svelte", 74, "delete document.documentElement.dataset.theme"],
-  ["visualizer/web/src/App.svelte", 75, "localStorage.setItem('dt-theme', theme)"],
-  ["visualizer/web/src/App.svelte", 189, "<Dropdown bind:value={theme}"],
-  ["visualizer/web/src/App.svelte", 258, ".workspace { margin-inline-start:13.5rem;"],
-  ["visualizer/web/src/App.svelte", 261, ".error-banner { margin:1rem; border:1px solid var(--status-fail);"],
-  ["visualizer/web/src/lib/AcceptPanel.svelte", 23, ".chip.held { color:#166534; background:#dcfce7; }"],
-  ["visualizer/web/src/lib/EnvelopeInspector.svelte", 85, ".error { border:1px solid color-mix(in srgb,var(--status-fail) 40%,var(--line));"],
-  ["visualizer/web/src/lib/FleetTable.svelte", 14, "status ${row.status.tone}"],
-  ["visualizer/web/src/lib/FleetTable.svelte", 15, "{@render mark(row.tier)}"],
-  ["visualizer/web/src/lib/FleetTable.svelte", 21, "{@render mark(row.heartbeat)}"],
-  ["visualizer/web/src/lib/FleetTable.svelte", 32, "th, td { border-top:1px solid var(--line);"],
-  ["visualizer/web/src/lib/FleetTable.svelte", 36, ".status-dot { width:.55rem; height:.55rem; background:var(--neutral);"],
-  ["visualizer/web/src/lib/FleetTable.svelte", 37, ".status.ok { color:var(--status-ok); }"],
-  ["visualizer/web/src/lib/FleetTable.svelte", 41, ".stale { color:var(--status-escalated); }"],
-  ["visualizer/web/src/lib/FleetTable.svelte", 42, ".status-dot { background:currentColor; }"],
-  ["visualizer/web/src/lib/GateChips.svelte", 13, ".chip.proven { color:#166534; background:#dcfce7; }"],
-  ["visualizer/web/src/lib/IntakePanel.svelte", 90, ".loop-state { display:flex; gap:.7rem;"],
-  ["visualizer/web/src/lib/IntakePanel.svelte", 91, ".actor input { min-width:0; width:100%;"],
-  ["visualizer/web/src/lib/PhaseDots.svelte", 5, "--lane-color: var(--lane-${phase.lane})"],
-  ["visualizer/web/src/lib/PhaseDots.svelte", 8, ".lane-dot { background:var(--lane-color); }"],
-  ["visualizer/web/src/lib/PhaseGantt.svelte", 144, "--role-color:var(--lane-${block.lane ?? 6})"],
-  ["visualizer/web/src/lib/PhaseGantt.svelte", 147, "--bar-color:var(--lane-${block.lane ?? 6})"],
-  ["visualizer/web/src/lib/PhaseGantt.svelte", 257, "--identity-column:17rem; --lane-gap:.6rem"],
-  ["visualizer/web/src/lib/PhaseGantt.svelte", 260, ".bar.failed { background:var(--status-fail); color:#fff; }"],
-  ["visualizer/web/src/lib/PhasePanel.svelte", 99, ".chip.unproven { color:#92400e; background:#fef3c7; }"],
-  ["visualizer/web/src/lib/RoleTag.svelte", 4, "--role-color: var(--role-${role})"],
-  ["visualizer/web/src/lib/RoleTag.svelte", 9, ".swatch { width:.65rem; height:.65rem; background:var(--role-color);"],
-  ["visualizer/web/src/lib/RosterPanel.svelte", 752, ".notice strong { color:var(--status-fail); }"],
-  ["visualizer/web/src/lib/RosterPanel.svelte", 767, ".source-setup input { min-width:0; border:1px solid var(--line);"],
-  ["visualizer/web/src/lib/RosterPanel.svelte", 782, ".pick-evidence pre { max-height:12rem;"],
-  ["visualizer/web/src/lib/RunCard.svelte", 53, "status ${status.tone}"],
-  ["visualizer/web/src/lib/RunCard.svelte", 65, ".status-dot { width:.55rem; height:.55rem; background:currentColor;"],
-  ["visualizer/web/src/lib/RunCard.svelte", 66, ".status.ok { color:var(--status-ok); }"],
-  ["visualizer/web/src/lib/RunCard.svelte", 69, ".status.serious { color:var(--status-escalated); }"],
-  ["visualizer/web/src/lib/RunCard.svelte", 71, ".events { white-space:nowrap; padding:.5rem; border-top:1px solid var(--line); }"],
-  ["visualizer/web/src/lib/RunDetail.svelte", 352, ".error-banner { border-left-color:var(--status-fail); }"],
-  ["visualizer/web/src/lib/TeardownPanel.svelte", 63, ".chip.unproven { color:var(--status-running); }"],
-  ["visualizer/web/src/lib/theme.css", 2, "--ink-ground: #111214;"],
-  ["visualizer/web/src/lib/theme.css", 3, "--ink-panel: #191a1d;"],
-  ["visualizer/web/src/lib/theme.css", 4, "--ink-panel-raised: #242529;"],
-  ["visualizer/web/src/lib/theme.css", 5, "--ink-hairline: #34363b;"],
-  ["visualizer/web/src/lib/theme.css", 6, "--ink-text: #f3f5f7;"],
-  ["visualizer/web/src/lib/theme.css", 7, "--ink-muted: #a1a5ae;"],
-  ["visualizer/web/src/lib/theme.css", 8, "--paper-ground: #fafafa;"],
-  ["visualizer/web/src/lib/theme.css", 9, "--paper-panel: #ffffff;"],
-  ["visualizer/web/src/lib/theme.css", 10, "--paper-panel-raised: #f2f3f5;"],
-  ["visualizer/web/src/lib/theme.css", 11, "--paper-hairline: #e6e7eb;"],
-  ["visualizer/web/src/lib/theme.css", 12, "--paper-text: #15181c;"],
-  ["visualizer/web/src/lib/theme.css", 13, "--paper-muted: #626671;"],
-  ["visualizer/web/src/lib/theme.css", 14, "--spot-light: #5c63bd;"],
-  ["visualizer/web/src/lib/theme.css", 15, "--spot-dark: #a5acfa;"],
-  ["visualizer/web/src/lib/theme.css", 16, "--role-planner-dark: #9c8cff;"],
-  ["visualizer/web/src/lib/theme.css", 17, "--role-builder-dark: #52ced8;"],
-  ["visualizer/web/src/lib/theme.css", 18, "--role-reviewer-dark: #6fdda0;"],
-  ["visualizer/web/src/lib/theme.css", 19, "--role-tech-lead-dark: #f0b85c;"],
-  ["visualizer/web/src/lib/theme.css", 20, "--role-lead-dark: #ef7ca9;"],
-  ["visualizer/web/src/lib/theme.css", 21, "--role-driver-dark: #7da7ff;"],
-  ["visualizer/web/src/lib/theme.css", 22, "--role-planner-light: #6652db;"],
-  ["visualizer/web/src/lib/theme.css", 23, "--role-builder-light: #087f89;"],
-  ["visualizer/web/src/lib/theme.css", 24, "--role-reviewer-light: #198a54;"],
-  ["visualizer/web/src/lib/theme.css", 25, "--role-tech-lead-light: #a16500;"],
-  ["visualizer/web/src/lib/theme.css", 26, "--role-lead-light: #b43f71;"],
-  ["visualizer/web/src/lib/theme.css", 27, "--role-driver-light: #315eae;"],
-  ["visualizer/web/src/lib/theme.css", 28, "--serious: #ff806f;"],
-  ["visualizer/web/src/lib/theme.css", 29, "--status-ok-raw: #4dcc87;"],
-  ["visualizer/web/src/lib/theme.css", 30, "--status-fail-raw: #ff6b6b;"],
-  ["visualizer/web/src/lib/theme.css", 31, "--status-running-raw: #f2bf62;"],
-  ["visualizer/web/src/lib/theme.css", 32, "--status-skipped-raw: #7e8996;"],
-  ["visualizer/web/src/lib/theme.css", 44, ":root[data-theme='paper'] {"],
-  ["visualizer/web/src/lib/theme.css", 49, "--bg: var(--paper-ground);"],
-  ["visualizer/web/src/lib/theme.css", 50, "--panel: var(--paper-panel);"],
-  ["visualizer/web/src/lib/theme.css", 52, "--line: var(--paper-hairline);"],
-  ["visualizer/web/src/lib/theme.css", 53, "--muted: var(--paper-muted);"],
-  ["visualizer/web/src/lib/theme.css", 54, "--accent: var(--spot-light);"],
-  ["visualizer/web/src/lib/theme.css", 57, "--neutral: var(--paper-muted);"],
-  ["visualizer/web/src/lib/theme.css", 58, "--status-ok: #167346;"],
-  ["visualizer/web/src/lib/theme.css", 59, "--status-fail: #c83f49;"],
-  ["visualizer/web/src/lib/theme.css", 60, "--status-running: #875600;"],
-  ["visualizer/web/src/lib/theme.css", 62, "--status-escalated: #b44432;"],
-  ["visualizer/web/src/lib/theme.css", 63, "--role-planner: var(--role-planner-light);"],
-  ["visualizer/web/src/lib/theme.css", 64, "--role-builder: var(--role-builder-light);"],
-  ["visualizer/web/src/lib/theme.css", 65, "--role-reviewer: var(--role-reviewer-light);"],
-  ["visualizer/web/src/lib/theme.css", 66, "--role-tech-lead: var(--role-tech-lead-light);"],
-  ["visualizer/web/src/lib/theme.css", 67, "--role-lead: var(--role-lead-light);"],
-  ["visualizer/web/src/lib/theme.css", 68, "--role-driver: var(--role-driver-light);"],
-  ["visualizer/web/src/lib/theme.css", 71, ":root[data-theme='ink'] {"],
-  ["visualizer/web/src/lib/theme.css", 98, "@media (prefers-color-scheme: dark) {"],
-  ["visualizer/web/src/lib/theme.css", 99, ":root:not([data-theme='paper']) {"],
-  ["visualizer/web/src/lib/theme.css", 133, "--lane-0: var(--role-planner);"],
-  ["visualizer/web/src/lib/theme.css", 134, "--lane-1: var(--role-builder);"],
-  ["visualizer/web/src/lib/theme.css", 135, "--lane-2: var(--role-reviewer);"],
-  ["visualizer/web/src/lib/theme.css", 136, "--lane-3: var(--role-tech-lead);"],
-  ["visualizer/web/src/lib/theme.css", 137, "--lane-4: var(--role-lead);"],
-  ["visualizer/web/src/lib/theme.css", 138, "--lane-5: var(--role-driver);"],
-  ["visualizer/web/src/lib/theme.css", 139, "--lane-6: var(--neutral);"],
-  ["visualizer/web/src/lib/theme.css", 140, "--lane-7: var(--muted);"],
-  ["visualizer/web/src/lib/theme.css", 152, "*, *::before, *::after { box-sizing: border-box; }"]
-  ,["visualizer/web/src/lib/theme.css", 165, ".mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }"],
+  ["visualizer/web/index.html",2,"<meta charset=\"UTF-8\">"],
+  ["visualizer/web/src/App.svelte",18,"let themeValue = 'os'"],
+  ["visualizer/web/src/App.svelte",19,"try { themeValue = localStorage.getItem('dt-theme') || 'os' } catch {}"],
+  ["visualizer/web/src/App.svelte",56,"document.documentElement.dataset.theme = theme"],
+  ["visualizer/web/src/App.svelte",57,"delete document.documentElement.dataset.theme"],
+  ["visualizer/web/src/App.svelte",58,"localStorage.setItem('dt-theme', theme)"],
+  ["visualizer/web/src/App.svelte",128,"<Dropdown bind:value={theme}"],
+  ["visualizer/web/src/App.svelte",172,".workspace { margin-inline-start:13.5rem;"],
+  ["visualizer/web/src/App.svelte",175,".error-banner { margin:1rem; border:1px solid var(--status-fail);"],
+  ["visualizer/web/src/lib/AcceptPanel.svelte",23,".chip.held { color:#166534; background:#dcfce7; }"],
+  ["visualizer/web/src/lib/EnvelopeInspector.svelte",85,".error { border:1px solid color-mix(in srgb,var(--status-fail) 40%,var(--line));"],
+  ["visualizer/web/src/lib/FleetTable.svelte",14,"status ${row.status.tone}"],
+  ["visualizer/web/src/lib/FleetTable.svelte",15,"{@render mark(row.tier)}"],
+  ["visualizer/web/src/lib/FleetTable.svelte",21,"{@render mark(row.heartbeat)}"],
+  ["visualizer/web/src/lib/FleetTable.svelte",32,"th, td { border-top:1px solid var(--line);"],
+  ["visualizer/web/src/lib/FleetTable.svelte",36,".status-dot { width:.55rem; height:.55rem; background:var(--neutral);"],
+  ["visualizer/web/src/lib/FleetTable.svelte",37,".status.ok { color:var(--status-ok); }"],
+  ["visualizer/web/src/lib/FleetTable.svelte",41,".stale { color:var(--status-escalated); }"],
+  ["visualizer/web/src/lib/FleetTable.svelte",42,".status-dot { background:currentColor; }"],
+  ["visualizer/web/src/lib/GateChips.svelte",13,".chip.proven { color:#166534; background:#dcfce7; }"],
+  ["visualizer/web/src/lib/PhaseDots.svelte",5,"--lane-color: var(--lane-${phase.lane})"],
+  ["visualizer/web/src/lib/PhaseDots.svelte",8,".lane-dot { background:var(--lane-color); }"],
+  ["visualizer/web/src/lib/PhaseGantt.svelte",144,"--role-color:var(--lane-${block.lane ?? 6})"],
+  ["visualizer/web/src/lib/PhaseGantt.svelte",147,"--bar-color:var(--lane-${block.lane ?? 6})"],
+  ["visualizer/web/src/lib/PhaseGantt.svelte",257,"--identity-column:17rem; --lane-gap:.6rem"],
+  ["visualizer/web/src/lib/PhaseGantt.svelte",260,".bar.failed { background:var(--status-fail); color:#fff; }"],
+  ["visualizer/web/src/lib/PhasePanel.svelte",99,".chip.unproven { color:#92400e; background:#fef3c7; }"],
+  ["visualizer/web/src/lib/RoleTag.svelte",4,"--role-color: var(--role-${role})"],
+  ["visualizer/web/src/lib/RoleTag.svelte",9,".swatch { width:.65rem; height:.65rem; background:var(--role-color);"],
+  ["visualizer/web/src/lib/RunCard.svelte",52,"status ${status.tone}"],
+  ["visualizer/web/src/lib/RunCard.svelte",64,".status-dot { width:.55rem; height:.55rem; background:currentColor;"],
+  ["visualizer/web/src/lib/RunCard.svelte",65,".status.ok { color:var(--status-ok); }"],
+  ["visualizer/web/src/lib/RunCard.svelte",68,".status.serious { color:var(--status-escalated); }"],
+  ["visualizer/web/src/lib/RunCard.svelte",70,".events { white-space:nowrap; padding:.5rem; border-top:1px solid var(--line); }"],
+  ["visualizer/web/src/lib/RunDetail.svelte",352,".error-banner { border-left-color:var(--status-fail); }"],
+  ["visualizer/web/src/lib/theme.css",2,"--ink-ground: #111214;"],
+  ["visualizer/web/src/lib/theme.css",3,"--ink-panel: #191a1d;"],
+  ["visualizer/web/src/lib/theme.css",4,"--ink-panel-raised: #242529;"],
+  ["visualizer/web/src/lib/theme.css",5,"--ink-hairline: #34363b;"],
+  ["visualizer/web/src/lib/theme.css",6,"--ink-text: #f3f5f7;"],
+  ["visualizer/web/src/lib/theme.css",7,"--ink-muted: #a1a5ae;"],
+  ["visualizer/web/src/lib/theme.css",8,"--paper-ground: #fafafa;"],
+  ["visualizer/web/src/lib/theme.css",9,"--paper-panel: #ffffff;"],
+  ["visualizer/web/src/lib/theme.css",10,"--paper-panel-raised: #f2f3f5;"],
+  ["visualizer/web/src/lib/theme.css",11,"--paper-hairline: #e6e7eb;"],
+  ["visualizer/web/src/lib/theme.css",12,"--paper-text: #15181c;"],
+  ["visualizer/web/src/lib/theme.css",13,"--paper-muted: #626671;"],
+  ["visualizer/web/src/lib/theme.css",14,"--spot-light: #5c63bd;"],
+  ["visualizer/web/src/lib/theme.css",15,"--spot-dark: #a5acfa;"],
+  ["visualizer/web/src/lib/theme.css",16,"--role-planner-dark: #9c8cff;"],
+  ["visualizer/web/src/lib/theme.css",17,"--role-builder-dark: #52ced8;"],
+  ["visualizer/web/src/lib/theme.css",18,"--role-reviewer-dark: #6fdda0;"],
+  ["visualizer/web/src/lib/theme.css",19,"--role-tech-lead-dark: #f0b85c;"],
+  ["visualizer/web/src/lib/theme.css",20,"--role-lead-dark: #ef7ca9;"],
+  ["visualizer/web/src/lib/theme.css",21,"--role-driver-dark: #7da7ff;"],
+  ["visualizer/web/src/lib/theme.css",22,"--role-planner-light: #6652db;"],
+  ["visualizer/web/src/lib/theme.css",23,"--role-builder-light: #087f89;"],
+  ["visualizer/web/src/lib/theme.css",24,"--role-reviewer-light: #198a54;"],
+  ["visualizer/web/src/lib/theme.css",25,"--role-tech-lead-light: #a16500;"],
+  ["visualizer/web/src/lib/theme.css",26,"--role-lead-light: #b43f71;"],
+  ["visualizer/web/src/lib/theme.css",27,"--role-driver-light: #315eae;"],
+  ["visualizer/web/src/lib/theme.css",28,"--serious: #ff806f;"],
+  ["visualizer/web/src/lib/theme.css",29,"--status-ok-raw: #4dcc87;"],
+  ["visualizer/web/src/lib/theme.css",30,"--status-fail-raw: #ff6b6b;"],
+  ["visualizer/web/src/lib/theme.css",31,"--status-running-raw: #f2bf62;"],
+  ["visualizer/web/src/lib/theme.css",32,"--status-skipped-raw: #7e8996;"],
+  ["visualizer/web/src/lib/theme.css",44,":root[data-theme='paper'] {"],
+  ["visualizer/web/src/lib/theme.css",49,"--bg: var(--paper-ground);"],
+  ["visualizer/web/src/lib/theme.css",50,"--panel: var(--paper-panel);"],
+  ["visualizer/web/src/lib/theme.css",52,"--line: var(--paper-hairline);"],
+  ["visualizer/web/src/lib/theme.css",53,"--muted: var(--paper-muted);"],
+  ["visualizer/web/src/lib/theme.css",54,"--accent: var(--spot-light);"],
+  ["visualizer/web/src/lib/theme.css",57,"--neutral: var(--paper-muted);"],
+  ["visualizer/web/src/lib/theme.css",58,"--status-ok: #167346;"],
+  ["visualizer/web/src/lib/theme.css",59,"--status-fail: #c83f49;"],
+  ["visualizer/web/src/lib/theme.css",60,"--status-running: #875600;"],
+  ["visualizer/web/src/lib/theme.css",62,"--status-escalated: #b44432;"],
+  ["visualizer/web/src/lib/theme.css",63,"--role-planner: var(--role-planner-light);"],
+  ["visualizer/web/src/lib/theme.css",64,"--role-builder: var(--role-builder-light);"],
+  ["visualizer/web/src/lib/theme.css",65,"--role-reviewer: var(--role-reviewer-light);"],
+  ["visualizer/web/src/lib/theme.css",66,"--role-tech-lead: var(--role-tech-lead-light);"],
+  ["visualizer/web/src/lib/theme.css",67,"--role-lead: var(--role-lead-light);"],
+  ["visualizer/web/src/lib/theme.css",68,"--role-driver: var(--role-driver-light);"],
+  ["visualizer/web/src/lib/theme.css",71,":root[data-theme='ink'] {"],
+  ["visualizer/web/src/lib/theme.css",98,"@media (prefers-color-scheme: dark) {"],
+  ["visualizer/web/src/lib/theme.css",99,":root:not([data-theme='paper']) {"],
+  ["visualizer/web/src/lib/theme.css",133,"--lane-0: var(--role-planner);"],
+  ["visualizer/web/src/lib/theme.css",134,"--lane-1: var(--role-builder);"],
+  ["visualizer/web/src/lib/theme.css",135,"--lane-2: var(--role-reviewer);"],
+  ["visualizer/web/src/lib/theme.css",136,"--lane-3: var(--role-tech-lead);"],
+  ["visualizer/web/src/lib/theme.css",137,"--lane-4: var(--role-lead);"],
+  ["visualizer/web/src/lib/theme.css",138,"--lane-5: var(--role-driver);"],
+  ["visualizer/web/src/lib/theme.css",139,"--lane-6: var(--neutral);"],
+  ["visualizer/web/src/lib/theme.css",140,"--lane-7: var(--muted);"],
+  ["visualizer/web/src/lib/theme.css",152,"*, *::before, *::after { box-sizing: border-box; }"],
+  ["visualizer/web/src/lib/theme.css",165,".mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }"],
+  ["visualizer/web/src/lib/PhaseGantt.svelte",267,".factory-steps { border-top:1px solid var(--line); background:color-mix(in srgb,var(--bg) 36%,transparent); }"]
 ];
 
 // Mutation killed: move any cited source line, or delete a docs citation,
@@ -358,7 +353,7 @@ function assertHoverDenominators() {
 // Mutation killed: hard-coding the denominator instead of counting the component tree.
 test('D1', () => {
   const componentCount = libFiles().length
-  assert.equal(componentCount, 39)
+  assert.equal(componentCount, 27)
   const docs = [SKILL_DOC, join(REF_DIR, 'contract.md'), join(REF_DIR, 'state-colour.md')]
   let seen = 0
   for (const doc of docs) {
@@ -434,8 +429,8 @@ test('G1', () => {
   assert.equal(hoverRes.paper, '4.76')
   assert.equal(hoverRes.ink, '7.20')
   const rows = registerRows()
-  assert.equal(rows.length, 25)
-  assert.equal(new Set(rows.map((row) => row.file)).size, 12)
+  assert.equal(rows.length, 15)
+  assert.equal(new Set(rows.map((row) => row.file)).size, 8)
   for (const file of libFiles()) {
     const expected = extractHoverRules(styleTextOf(file))
     for (const rule of expected) {
@@ -448,9 +443,9 @@ test('G1', () => {
       assert.equal(found.contrast, contrastFor(rule, rule.verdict))
     }
   }
-  const scope = rows.find((row) => row.file === 'RosterPanel.svelte' && row.selector === '.scope button:hover')
-  assert.ok(scope, 'the register carries the RosterPanel scope-button hover rule')
-  assert.equal(scope.contrast, 'Unmeasured — rest ground is transparent')
+  const waterfall = rows.find((row) => row.file === 'PhaseGantt.svelte' && row.selector === '.waterfall-row:hover,.waterfall-row.selected')
+  assert.ok(waterfall, 'the register carries the PhaseGantt waterfall-row hover rule')
+  assert.equal(waterfall.contrast, 'Unmeasured — rest ground is transparent')
   assertHoverDenominators()
 })
 
@@ -461,8 +456,8 @@ test('H1', () => {
   assert.equal(records.length, 2)
   assert.equal(contrastFor(records[0], records[0].verdict), 'paper 5.17 → 4.76; ink 6.20 → 7.20')
   assert.ok(contrastFor(records[1], records[1].verdict).startsWith('Unmeasured —'))
-  const roster = registerRows().filter((row) => row.file === 'RosterPanel.svelte')
-  assert.equal(roster.length, 6, 'a mixed component keeps one row per hover rule')
+  const gantt = registerRows().filter((row) => row.file === 'PhaseGantt.svelte')
+  assert.equal(gantt.length, 6, 'a mixed component keeps one row per hover rule')
 })
 
 // Mutation killed: recognizing only #hex as a colour literal.
@@ -588,9 +583,9 @@ test('pin-sweep D1', () => {
 // Guard for RV1-1: editing the register's denominator sentence reddens this test.
 test('K1', () => {
   const { rows, measured } = assertHoverDenominators()
-  assert.equal(rows.length, 25)
-  assert.equal(new Set(rows.map((row) => row.file)).size, 12)
-  assert.equal(measured, 4)
+  assert.equal(rows.length, 15)
+  assert.equal(new Set(rows.map((row) => row.file)).size, 8)
+  assert.equal(measured, 3)
 })
 
 function parseChecklist(body) {

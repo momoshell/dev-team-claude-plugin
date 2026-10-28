@@ -1,4 +1,4 @@
-import { VARIANTS } from '../../../../crew/variants.mjs'
+import { VARIANTS } from './run-shapes.js'
 import { buildTrajectory } from './spans.js'
 
 const CATEGORY = [

@@ -150,7 +150,6 @@ const AUDITED_VACUITY_LINES = Object.freeze({
   'test/factory-make-brief.test.mjs': Object.freeze(["assert.doesNotMatch(coupled, /BROAD_PIN/)"]),
   'test/fixtures.test.mjs': Object.freeze(["assert.doesNotMatch(source, /toLowerCase/)"]),
   'test/visualizer-server.test.mjs': Object.freeze([]),
-  'test/visualizer-shape.test.mjs': Object.freeze(["assert.doesNotMatch(feed, /DatabaseSync/)"]),
 })
 
 function frozenVacuitySites(auditedIdentities, verdict, rationale, { tombstone = false } = {}) {
@@ -197,7 +196,6 @@ const VACUITY_EXEMPT = new Map([
   ['test/factory-make-brief.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['test/factory-make-brief.test.mjs'], 'by-design', 'audited 2026-09-10: the /BROAD_PIN/ section distinction is asserted at test/factory-make-brief.test.mjs:3418 and paired with a positive match for the same token in the Tripwires section.')],
   ['test/fixtures.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['test/fixtures.test.mjs'], 'by-design', 'audited 2026-09-09: the /toLowerCase/ source-text guard is at test/fixtures.test.mjs:20 and is paired with a positive production-rule import match.')],
   ['test/visualizer-server.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['test/visualizer-server.test.mjs'], 'flagged', 'audited 2026-09-18: the recordIntakeBrake presence site removed as a standalone method-presence assertion — a typeof pin proves an import, not a behaviour; the behaviour tests beside it remain', { tombstone: true })],
-  ['test/visualizer-shape.test.mjs', frozenVacuitySites(AUDITED_VACUITY_LINES['test/visualizer-shape.test.mjs'], 'by-design', 'audited 2026-09-15: the /DatabaseSync/ import-firewall pin is at test/visualizer-shape.test.mjs:1025 and is paired with a positive openLedger import match.')],
 ])
 
 const VACUITY_SOURCE_SHA256 = Object.freeze({
@@ -211,8 +209,7 @@ const VACUITY_SOURCE_SHA256 = Object.freeze({
   'test/factory-emit.test.mjs': 'f61a1ccdb34677289554b81acbff45da425c97d1225a20325c24754da97b06d3',
   'test/factory-make-brief.test.mjs': '8241c19524114afea1b76f4edfdfddfff0d5476852754eca006490df19981964',
   'test/fixtures.test.mjs': '20a7b9c408ca687f8378c3c70ced32c7943179fb520f6326384426f3bb698c55',
-  'test/visualizer-server.test.mjs': '5df5228244c5596f25b9395b31a10c46523991909fd42f90fd2380b83e4bf620',
-  'test/visualizer-shape.test.mjs': '64f5b362a6b94cda643b23a6039f415afffa4b1fbb04ac3bf81cd0c6a800fa21',
+  'test/visualizer-server.test.mjs': '877b672c74e543cd226734c3ce00a21315abc4d889311d61fb7362e2398e49f7',
 })
 
 const SKELETONREAD_FILE = 'crew/pi/extensions/skeletonread.test.mjs'
@@ -278,7 +275,6 @@ test('A1.factory-emit', () => assertIdentityWarranty('test/factory-emit.test.mjs
 test('A1.factory-make-brief', () => assertIdentityWarranty('test/factory-make-brief.test.mjs'))
 test('A1.fixtures', () => assertIdentityWarranty('test/fixtures.test.mjs'))
 test('A1.visualizer-server', () => assertIdentityWarranty('test/visualizer-server.test.mjs'))
-test('A1.visualizer-shape', () => assertIdentityWarranty('test/visualizer-shape.test.mjs'))
 
 test('B1', () => {
   let total = 0
@@ -299,8 +295,8 @@ test('B1', () => {
     }
     total += file === SKELETONREAD_FILE ? exemption.sites : exemption.auditedIdentities.length
   }
-  assert.equal(sharedTotal, 9)
-  assert.equal(total, 11)
+  assert.equal(sharedTotal, 8)
+  assert.equal(total, 10)
 })
 
 test('C1', () => {
@@ -442,5 +438,5 @@ test('presence-only tripwire — the live report distinguishes flagged from by-d
   console.log(`VACUITY-REPORT ${JSON.stringify(report)}`)
   assert.ok(report.flagged > 0, 'a report with nothing flagged is a suspicious result, not a clean bill of health')
   assert.ok(report.by_design > 0, 'a report with nothing permitted by design means the pattern set is too wide')
-  assert.equal(report.sites, 11)
+  assert.equal(report.sites, 10)
 })

@@ -241,13 +241,9 @@ test('builder ACP roster approvals bypass lead while reviewer gated writes consu
   assert.equal(calls, 1)
 })
 
-test('ACP C4 real submit grant activates submit_envelope', () => {
+test('ACP C4 a submit extension grant is refused: lean seats have no submit tool', () => {
   const extension = join(ROOT, 'crew/pi/extensions/submit.ts')
-  const launch = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'x', promptFile: '/tmp/prompt.md', cwd: process.cwd(), env: {}, grants: { tools: [], extensions: [extension], agents: [], skills: [], advisor: false } })
-  const extensionIndex = launch.args.indexOf(extension)
-  assert.ok(extensionIndex > 0 && launch.args[extensionIndex - 1] === '-e')
-  const tools = launch.args[launch.args.indexOf('--tools') + 1].split(',')
-  assert.ok(tools.includes('submit_envelope'))
+  assert.throws(() => acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'x', promptFile: '/tmp/prompt.md', cwd: process.cwd(), env: {}, grants: { tools: [], extensions: [extension], agents: [], skills: [], advisor: false } }), /unknown-registering-extension/)
 })
 
 test('PI_BUILTIN_TOOLS and every seat activator stay pinned to pi\'s complete built-in set', () => {

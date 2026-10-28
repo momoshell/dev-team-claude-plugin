@@ -43,7 +43,7 @@ What to change and why, in a few sentences. State the invariant the change must 
 
 ## Context
 
-- `crew/roster-validate.mjs` `bootRefusals`: what it already checks.
+- `crew/agents.mjs` `resolveAgents`: what it already checks.
 - `test/visualizer-server.test.mjs`: the test that pins the current behaviour.
 
 ## Acceptance

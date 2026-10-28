@@ -10,7 +10,17 @@
 // binary-contrast is not shipped (a heuristic hit 0 of 100 corpus items, so its
 // precision is unmeasurable).
 import { readFileSync } from 'node:fs'
-import { stripPromptClaims } from '../../crew/prompt-claim.mjs'
+
+// The measured, unmeasured and not-applicable claim lines a prompt change carries; they
+// are exempt from the em-dash limit.
+const CLAIM_LINE_START = String.raw`(?:^|\n)`
+const MEASURE_NAME = String.raw`(?:first-round pass rate|turns per seat|[a-z0-9][a-z0-9._-]* refusal frequency)`
+const MEASURE_SAMPLE = String.raw`[^;\n]+\s+\(n=[1-9]\d*\)`
+const MEASURED_CLAIM = new RegExp(String.raw`${CLAIM_LINE_START}Measure: ${MEASURE_NAME}; before: ${MEASURE_SAMPLE}; after: ${MEASURE_SAMPLE}\.?(?:\n|$)`, 'i')
+const UNMEASURED_CLAIM = new RegExp(String.raw`${CLAIM_LINE_START}unmeasured \u2014 n insufficient; reason: [^;\n]*[^\s;\n][^;\n]*; re-measure after [1-9]\d* seats\.?(?:\n|$)`, 'i')
+export const PROMPT_NOT_APPLICABLE = 'not applicable \u2014 citation-only; no seat-behaviour change intended.'
+const isClaim = (line) => MEASURED_CLAIM.test(line) || UNMEASURED_CLAIM.test(line) || line === PROMPT_NOT_APPLICABLE
+export function stripPromptClaims(body) { return String(body ?? '').split('\n').filter((line) => !isClaim(line)).join('\n') }
 
 // Upstream banned-outright list minus harness, this repo noun (mutation harness,
 // 28 uses): flagging it would drown the signal.

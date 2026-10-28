@@ -97,8 +97,7 @@
         "pi": {
           "extensions": [
             "crew/pi/extensions/subagent.ts",
-            "crew/pi/extensions/readgate.ts",
-            "crew/pi/extensions/submit.ts"
+            "crew/pi/extensions/readgate.ts"
           ],
           "mcp_servers": [{ "name": "lab", "command": { "bin": "node", "args": ["crew/mcp/lab-server.mjs"] }, "url": null }, { "name": "fff", "command": { "bin": "/opt/homebrew/bin/fff-mcp", "args": [] }, "url": null }],
           "skills": [],
@@ -148,7 +147,6 @@
             "crew/pi/extensions/builderloop.ts",
             "crew/pi/extensions/readgate.ts",
             "crew/pi/extensions/skeletonread.ts",
-            "crew/pi/extensions/submit.ts",
             "crew/pi/extensions/reminders.ts"
           ],
           "skills": []
@@ -180,9 +178,7 @@
       "mcp_servers": [],
       "by_agent": {
         "pi": {
-          "extensions": [
-            "crew/pi/extensions/submit.ts"
-          ],
+          "extensions": [],
           "skills": [
             "skills/code-less/SKILL.md"
           ],
@@ -225,8 +221,7 @@
       "by_agent": {
         "pi": {
           "extensions": [
-            "crew/pi/extensions/readgate.ts",
-            "crew/pi/extensions/submit.ts"
+            "crew/pi/extensions/readgate.ts"
           ],
           "skills": [],
           "mcp_servers": [

@@ -1103,7 +1103,6 @@ test('seat requirements deliver pi scouts, preserve genuine shortfalls, and reje
   assert.deepEqual(resolvedPlanner.planner.grants.extensions, [
     join(ROOT, 'crew/pi/extensions/subagent.ts'),
     join(ROOT, 'crew/pi/extensions/readgate.ts'),
-    join(ROOT, 'crew/pi/extensions/submit.ts'),
     'builtin:codemode',
     'builtin:mcp',
   ])

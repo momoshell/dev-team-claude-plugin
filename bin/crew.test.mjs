@@ -72,11 +72,11 @@ test('a crew.mjs verb passes through with its argv, the caller cwd and its exit 
 })
 
 // MUTATION: drop start from ENTRY and `crew start` reaches crew.mjs as an unknown verb.
-test('ctl, ledger, start, show, roster, record-pr, closeout, finish and lanes route to their own entry points with the verb stripped', () => {
+test('start, show, record-pr, closeout, finish and lanes route to their own entry points with the verb stripped', () => {
   const root = scratch('route')
   try {
     const home = fakeHome(join(root, 'home'))
-    for (const [verb, entry] of [['ctl', 'crew/factoryctl.mjs'], ['ledger', 'scripts/factory/ledger.mjs'], ['start', 'crew/start.mjs'], ['show', 'crew/show.mjs'], ['roster', 'crew/roster-generate.mjs'], ['record-pr', 'crew/record-pr.mjs'], ['closeout', 'crew/closeout.mjs'], ['finish', 'crew/finish.mjs'], ['lanes', 'crew/lanes.mjs']]) {
+    for (const [verb, entry] of [['start', 'crew/start.mjs'], ['show', 'crew/show.mjs'], ['record-pr', 'crew/record-pr.mjs'], ['closeout', 'crew/closeout.mjs'], ['finish', 'crew/finish.mjs'], ['lanes', 'crew/lanes.mjs']]) {
       const out = crew([verb, 'cells', '--since', '2026-10-01'], { cwd: root, env: { CREW_HOME: home } })
       assert.equal(out.status, verb === 'show' ? 7 : 0)
       assert.deepEqual(JSON.parse(out.stdout).entry, join(home, entry))

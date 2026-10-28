@@ -5,9 +5,6 @@ import { dirname, join } from 'node:path'
 import { scratchDir } from '../../../test/helpers.mjs'
 import { assignmentPrompt, assignmentLine, parseAssignment } from '../../driver.mjs'
 import { attachSubmit, SUBMIT_REFUSAL_REASONS } from './submit.ts'
-import { PI_FIRST_PARTY_EXTENSION_TOOLS, piActivatedTools, seatCommand } from '../../adapters/adapter-pi.mjs'
-import { grantsFor, loadCapabilities } from '../../capabilities.mjs'
-import { rpcCommand } from '../../headless-rpc.mjs'
 
 function fixture({ scoped = true, name = 's', renameSync } = {}) {
   const root = scratchDir(`submit-${name}-`)
@@ -135,22 +132,6 @@ test('S6 settle nudges once, skips existing return and rearms on next assignment
   assert.equal((await cleared.call(cleared.envelope())).details.reason, 'no-assignment')
   assert.equal(cleared.settle(), undefined)
   assert.equal(existsSync(cleared.returnPath), false)
-})
-
-test('S7 shipped planner, builder, and tech-lead grants activate submit in pane and RPC compositions', () => {
-  assert.deepEqual(PI_FIRST_PARTY_EXTENSION_TOOLS['crew/pi/extensions/submit.ts'], ['submit_envelope'])
-  const register = loadCapabilities()
-  for (const role of ['planner', 'builder', 'tech-lead']) {
-    const grants = grantsFor(register, role, { agent: 'pi' })
-    assert.ok(grants.extensions.some((item) => item.endsWith('/crew/pi/extensions/submit.ts')), role)
-    assert.ok(piActivatedTools({ extensions: grants.extensions }).includes('submit_envelope'))
-    const command = seatCommand({ role, model: 'openai-codex/gpt-5.6', promptFile: '/tmp/role.md', tools: [], deny: [], taskDir: '/tmp/task', grants })
-    assert.ok(command.includes('/crew/pi/extensions/submit.ts'))
-    const rpc = rpcCommand({ bin: '/repo/pi', model: 'openai-codex/gpt-5.6', sessionDir: '/tmp/task/sessions', sessionId: role, promptFile: '/tmp/role.md', deny: [], env: {}, grants })
-    assert.ok(rpc.args.some((value) => value.endsWith('/crew/pi/extensions/submit.ts')))
-    assert.ok(rpc.args[rpc.args.indexOf('--tools') + 1].split(',').includes('submit_envelope'))
-  }
-  assert.equal(existsSync(new URL('./submit.ts', import.meta.url)), true)
 })
 
 test('RR1 submit_envelope journal rows carry top-level ISO at within bracketing reads', async () => {

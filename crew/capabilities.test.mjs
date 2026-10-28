@@ -36,7 +36,6 @@ test('QC1 freezes the exhaustive first-party extension declaration table and mat
     'crew/pi/extensions/lab.ts': ['lab'],
     'crew/pi/extensions/skeletonread.ts': ['retrieve'],
     'crew/pi/extensions/subagent.ts': ['agent'],
-    'crew/pi/extensions/submit.ts': ['submit_envelope'],
     'crew/pi/extensions/reminders.ts': [],
   }
   assert.deepEqual(PI_FIRST_PARTY_EXTENSION_TOOLS, expected)
@@ -667,7 +666,6 @@ test('the shipped planner pi overlay resolves its checkout-pinned bundle', () =>
   const expected = [
     join(REGISTER_ROOT, 'crew/pi/extensions/subagent.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/readgate.ts'),
-    join(REGISTER_ROOT, 'crew/pi/extensions/submit.ts'),
   ]
   const grants = grantsFor(loaded, 'planner', { agent: 'pi' })
   assert.deepEqual(grants.extensions, expected)
@@ -754,7 +752,6 @@ test('the shipped builder pi overlay resolves its checkout-pinned extensions', (
     join(REGISTER_ROOT, 'crew/pi/extensions/builderloop.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/readgate.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/skeletonread.ts'),
-    join(REGISTER_ROOT, 'crew/pi/extensions/submit.ts'),
     join(REGISTER_ROOT, 'crew/pi/extensions/reminders.ts'),
   ]
   // MUTATION: restore code-less to the builder pi overlay and the empty-skills pin fails.
@@ -791,7 +788,7 @@ test('GR1', () => {
 
 test('the shipped tech-lead pi overlay resolves its checkout-pinned read gate only', () => {
   const loaded = loadCapabilities()
-  const expected = [join(REGISTER_ROOT, 'crew/pi/extensions/readgate.ts'), join(REGISTER_ROOT, 'crew/pi/extensions/submit.ts')]
+  const expected = [join(REGISTER_ROOT, 'crew/pi/extensions/readgate.ts')]
   const pi = grantsFor(loaded, 'tech-lead', { agent: 'pi' })
   assert.deepEqual(pi.extensions, expected)
   assert.equal(existsSync(expected[0]), true)
@@ -1445,7 +1442,7 @@ test('the pi subagents probe exercises the granted fan-out bundle', async () => 
   assert.equal(argv[argv.indexOf('--tools') + 1].includes('edit'), false)
   assert.equal(argv[argv.indexOf('--tools') + 1].includes('write'), false)
   assert.equal(argv[argv.indexOf('--tools') + 1].includes('bash'), false)
-  assert.deepEqual(finding('extensions-loaded')?.value, ['subagent.ts', 'readgate.ts', 'submit.ts'])
+  assert.deepEqual(finding('extensions-loaded')?.value, ['subagent.ts', 'readgate.ts'])
   assert.equal(Object.hasOwn(process.env, 'CREW_PI_AGENTS'), hadAgents)
   assert.equal(process.env.CREW_PI_AGENTS, beforeAgents)
 })

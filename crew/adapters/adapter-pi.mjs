@@ -224,7 +224,6 @@ export const PI_FIRST_PARTY_EXTENSION_TOOLS = Object.freeze({
   'crew/pi/extensions/lab.ts': Object.freeze(['lab']),
   'crew/pi/extensions/skeletonread.ts': Object.freeze(['retrieve']),
   'crew/pi/extensions/subagent.ts': Object.freeze(['agent']),
-  'crew/pi/extensions/submit.ts': Object.freeze(['submit_envelope']),
   'crew/pi/extensions/reminders.ts': Object.freeze([]),
 })
 

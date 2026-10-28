@@ -9,9 +9,6 @@
 //   crew finish <lane> --accept [--notes <file>] | --return <file> | --abandon  decide a lane whose finish run is ready (crew/finish.mjs)
 //   crew closeout <lane>         remove a merged lean lane's worktree and branch, archive its lane directory (crew/closeout.mjs)
 //   crew lanes [--all] [--json]  list lean lanes from their journals (crew/lanes.mjs)
-//   crew roster generate [--check]  write crew/roster.json from crew/agents/*.md (crew/roster-generate.mjs)
-//   crew ctl [...]               run crew/factoryctl.mjs
-//   crew ledger [...]            run scripts/factory/ledger.mjs
 //   crew viz                     serve the visualizer from the crew home
 //   crew where                   print the crew home, its commit and its roster date
 //   crew update [--force]        fast-forward the crew home to origin/main and rebuild what changed
@@ -28,7 +25,7 @@ export function crewHome(env = process.env, self = fileURLToPath(import.meta.url
   return env.CREW_HOME ? resolve(env.CREW_HOME) : dirname(dirname(realpathSync(self)))
 }
 
-const ENTRY = { ctl: 'crew/factoryctl.mjs', ledger: 'scripts/factory/ledger.mjs', start: 'crew/start.mjs', show: 'crew/show.mjs', roster: 'crew/roster-generate.mjs', 'record-pr': 'crew/record-pr.mjs', closeout: 'crew/closeout.mjs', finish: 'crew/finish.mjs', lanes: 'crew/lanes.mjs' }
+const ENTRY = { start: 'crew/start.mjs', show: 'crew/show.mjs', 'record-pr': 'crew/record-pr.mjs', closeout: 'crew/closeout.mjs', finish: 'crew/finish.mjs', lanes: 'crew/lanes.mjs' }
 
 function run(cmd, args, opts = {}) {
   const result = spawnSync(cmd, args, { stdio: 'inherit', ...opts })

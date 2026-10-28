@@ -6,8 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { scratchDir, ROOT } from './helpers.mjs'
-import { BANNED_WORDS, RECAP_OPENERS, lintText } from '../scripts/factory/prose-lint.mjs'
-import { PROMPT_NOT_APPLICABLE } from '../crew/prompt-claim.mjs'
+import { BANNED_WORDS, PROMPT_NOT_APPLICABLE, RECAP_OPENERS, lintText } from '../scripts/factory/prose-lint.mjs'
 
 const SCRIPT = fileURLToPath(new URL('../scripts/factory/prose-lint.mjs', import.meta.url))
 const DASH = '\u2014'

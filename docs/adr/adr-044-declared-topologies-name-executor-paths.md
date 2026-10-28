@@ -1,6 +1,6 @@
 # ADR-044 — Declared topologies name hand-written executor paths; stage declarations are not programs
 
-**Status:** ratified 2026-09-16 · **Issue:** #1298 (D8 of #1288)
+**Status:** superseded by ADR-052 (the lean runtime retired it) · was ratified 2026-09-16 · **Issue:** #1298 (D8 of #1288)
 
 ## Context
 

@@ -1,6 +1,6 @@
 # ADR-046: Suite policy is a ledger fact, so every suite-run decision is stamped, ingested and rated
 
-**Status:** ratified 2026-09-25 (operator decision) · **Owner:** operator · **Issue:** #1527 ask 4
+**Status:** superseded by ADR-052 (the lean runtime retired it) · was ratified 2026-09-25 (operator decision) · **Owner:** operator · **Issue:** #1527 ask 4
 
 ## Decision
 

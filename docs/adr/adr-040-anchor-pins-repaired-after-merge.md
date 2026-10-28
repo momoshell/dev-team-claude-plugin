@@ -1,6 +1,6 @@
 # ADR-040 — Anchor pins are repaired after the merge, not inside the lane
 
-**Status:** ratified 2026-09-04 · **Issue:** #882 · **Owner:** operator
+**Status:** superseded by ADR-052 (the lean runtime retired it) · was ratified 2026-09-04 · **Issue:** #882 · **Owner:** operator
 
 ## Decision
 

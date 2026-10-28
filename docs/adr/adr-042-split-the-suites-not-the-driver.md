@@ -1,6 +1,6 @@
 # ADR-042 — Split the test suites, not the driver
 
-**Status:** ratified 2026-09-08 · **superseded in part 2026-09-09, see Amendments 3 and 4 — the park is LIFTED and the source order is aimed at the queue** · **Issue:** #1033 · **Owner:** operator
+**Status:** superseded by ADR-052 (the lean runtime retired it) · was ratified 2026-09-08 · **superseded in part 2026-09-09, see Amendments 3 and 4 — the park is LIFTED and the source order is aimed at the queue** · **Issue:** #1033 · **Owner:** operator
 
 ## Decision
 

@@ -1,31 +1,37 @@
 # crew
 
-**A team runtime: code disposes, agents decide.**
+**A team runtime: agents do the work, code keeps it correct.**
 
-One task gets a whole team booted in a single declarative call — planner,
-builder, reviewer, an optional tech-lead adversary, and a lead that serves as
-the judge. A deterministic driver runs the entire task loop (plan → gate-first
-acceptance → build → scope gate → validation → review → full suite →
-commit-on-green); agents are consulted only where judgment genuinely lives, and
-every consultation is a closed-enum decision the code branches on.
+One brief goes in; a lean lane comes out. `crew start <brief.md>` makes a
+worktree and a journal, then plays four seats over ACP: a **planner** explores
+the code and writes the plan and an acceptance gate, a **builder** edits the
+repo, a **reviewer** gives a verdict, and a **lead** answers escalations with
+one closed decision. Code only checks the result: the gate is red at baseline
+and green after the build, each gate check has a mutation that kills it, the
+full suite is green, and commit, rebase and PR happen only on green. A stopped
+lane is picked up again with `crew finish`. Every seat's full session is
+recorded, so any lane can be inspected afterwards, and the visualizer reads
+those journals and session files.
 
-**Two modes on one backbone.** On the *shop floor* the team lives in a cmux
-workspace you watch. In *factory* mode the same driver runs headless workers
-owned by a long-lived daemon, and a stateless client drives it — no terminal,
-no human in the loop.
+The design is [ADR-052](docs/adr/adr-052-agents-do-the-work.md) and
+[`docs/plan-lean-runtime.md`](docs/plan-lean-runtime.md).
 
-**→ [crew/README.md](crew/README.md)** for the full model, verbs, seat
-charters, contracts, and posture.
+**→ [crew/README.md](crew/README.md)** for the loop, the seats, the contracts
+and where each piece lives.
 
 ```bash
-# shop floor — a cmux workspace per task
-node crew/crew.mjs boot --task my-task --roles lead,planner,builder,reviewer
-node crew/crew.mjs run  --task my-task --brief-file /abs/path/brief.md
-
-# factory — no workspace; the daemon boots and owns the workers
-node crew/factoryctl.mjs run --brief /abs/path/brief.md --tier build
-node crew/factoryctl.mjs ls
+crew start /abs/path/brief.md          # worktree + journal + a detached lane
+crew lanes                              # list lanes from their journals
+crew show <lane> [<role>]               # read a seat's recorded session
+crew finish <lane>                      # finish a stopped lane; stops committed and rebased
+crew finish <lane> --accept | --return <file> | --abandon
+crew record-pr <lane> --pr <url>        # record a PR you finished by hand
+crew closeout <lane>                    # remove a merged lane's worktree and branch
+crew viz                                # serve the visualizer
+crew where | crew update                # the crew home; fast-forward it
 ```
+
+From a clone without the launcher, run the same verbs as `node bin/crew.mjs <verb>`.
 
 ## Install
 
@@ -51,12 +57,12 @@ There are two ways to use it:
 - **The crew runtime.** Lanes need one clone of this repo, node 26 or newer
   (`engines` in `package.json`), and a crew root (`~/.crew`, or
   `DEVTEAM_CREW_ROOT`). Run the runtime from the clone and point it at the
-  target with `--checkout`. Headless is the default transport; cmux is needed
-  only to watch a lane in panes.
+  target with `--checkout`. Seats run over ACP; no terminal
+  multiplexer is needed.
 
 You do not need the operator's pinned worktree or a `crew` launcher on your
 PATH (`bin/crew.mjs`). Both are the operator's own setup for running lanes from
-a frozen copy. A clone run with `node crew/crew.mjs` is enough.
+a frozen copy. A clone run with `node bin/crew.mjs` is enough.
 
 An optional operator setup keeps a stable worktree at ~/Dev/dev-team-stable installed user-scope through a local link-mode marketplace, with ~/.local/bin/crew linked to its bin/crew.mjs; `crew update`, which fast-forwards that home to origin/main, rebuilds what changed, and refuses unless it is on branch stable and clean and, without --force, runs no process.
 
@@ -66,37 +72,35 @@ before its first lane.
 
 ## What's in this repo
 
-- **`crew/`** — the runtime: a cmux driver (verified-send, context-aware ops),
-  the deterministic task-loop driver (fully unit-tested via dependency
-  injection), the CLI, and the seat charters. Self-contained apart from
-  `scripts/factory/`, which six non-test modules import: `crew/breaker.mjs`, `crew/child.mjs`, `crew/crew.mjs`, `crew/factoryctl.mjs`, `crew/provenance.mjs` and `crew/seat-io.mjs`; `crew/crew.mjs` also imports `hooks/skill-gate.mjs`.
-- **`scripts/factory/`** — the run-trace mirror: a never-throwing emitter
-  facade over a SQLite WAL ledger (instrumentation is never load-bearing).
+- **`crew/`** — the runtime: `start.mjs` (lane start), `lean.mjs` and
+  `loop.mjs` (the loop), `checks.mjs` (gate, mutation proof, suite, commit,
+  PR), `agents.mjs` and `protocols.mjs` (seat definitions and the closed
+  protocols), `acp/` and `acp-client.mjs` (the ACP seat transport), and the
+  verbs `show`, `finish`, `record-pr`, `closeout` and `lanes`. Seat definitions
+  are `crew/agents/*.md`; charters are `crew/roles/*.md`.
 - **`skills/`, `commands/`** — the operating knowledge as Claude Code surfaces.
   The knowledge skills (`pr-review`, `qa-test-writing`, `backend-node`,
   `frontend-svelte`, `ui-design`, `devops`, `ux`, `code-less`, `prose-plain`)
   work in any repo the moment the plugin is installed; the runtime skills
-  (`crew-dispatch`, `crew-recovery`)
-  drive the crew CLI and need this source tree. `crew-onboard` owns the split
-  and the foreign-checkout procedure. Commands are thin entry points that name
-  the skill owning each procedure: `/dispatch`, `/close-out`, `/status`,
-  `/onboard`, `/review`.
-- **`bin/crew.mjs`** — the crew launcher: where, update, viz, ctl, ledger.
-- **`hooks/`** — the skill-map selector crew.mjs uses for seat skills; the plugin registers no hook.
-- **`visualizer/`** — the local factory visualizer (see Visualizer below).
+  (`lane-brief`, `crew-dispatch`, `crew-recovery`) drive the crew CLI and need
+  this source tree. `crew-onboard` owns the split and the foreign-checkout
+  procedure. Commands are thin entry points that name the skill owning each
+  procedure: `/dispatch`, `/close-out`, `/status`, `/onboard`, `/review`.
+- **`bin/crew.mjs`** — the crew launcher: start, show, record-pr, finish,
+  closeout, lanes, viz, where, update.
+- **`hooks/`** — the skill-map selector (`hooks/skill-gate.mjs`); the plugin
+  registers no hook.
+- **`visualizer/`** — the local visualizer over lane journals (see Visualizer
+  below).
 - **`docs/`** — the live design record: [`docs/adr/`](docs/adr/) is the
   architecture decision register (**grep it before minting an ADR number**);
   [`docs/decisions-needed.md`](docs/decisions-needed.md) is the open
   owner-decision register; [`docs/conventions.md`](docs/conventions.md) the
-  cross-cutting conventions.
+  cross-cutting conventions. `docs/archive/` holds design records of the
+  retired driver.
   [`CLAUDE.md`](CLAUDE.md) is the operating brief a session should read first —
   it carries only the rules that are expensive to rediscover and points at
   everything else.
-- **`tasks/`, `.claude/dev-team/`** — historical design records, including the
-  retired first-generation runtime (a 14-agent orchestrator/lead/coder
-  hierarchy with spec contracts and a review ladder). That system was retired
-  in v0.2.0 after the crew proved itself on live tasks; its full source lives
-  in git history.
 
 ## Versioning
 
@@ -113,7 +117,7 @@ What is enforced instead is the thing that actually shipped wrong metadata:
 
 ## Visualizer
 
-The local factory visualizer reads its Artificial Analysis catalog key from
+The local visualizer reads its Artificial Analysis catalog key from
 the process environment. To keep it across restarts without committing it,
 copy `.env.example` to `.env.local`, set `ARTIFICIAL_ANALYSIS_API_KEY`, then
 start the server normally:
@@ -128,13 +132,3 @@ npm run viz:serve
 is the only committed template. The roster UI can save or replace this one
 variable in `.env.local`, or connect with a temporary key for the current
 server process. Clearing a temporary key restores the saved environment key.
-
-## Lineage
-
-The crew synthesizes the strongest idea from three reference patterns —
-declarative whole-team boot with a lead in the workspace; "agent proposes,
-code disposes" with typed envelopes and testing-as-code; and gate-first
-acceptance where the gate is written before the build and must fail red at
-baseline — on top of hard-won cmux driving mechanics (build-102 flag
-grammar, echo-verified sends, lazy-materialization handling) proven live in
-this repo.

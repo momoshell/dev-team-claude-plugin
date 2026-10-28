@@ -1,6 +1,6 @@
 # ADR-035: Run configuration is five independent axes; `--variant` and `--tier` retire after one release window
 
-**Status:** RATIFIED 2026-08-30 · **Source:** issue #778 (epic #788) · **Record:** `docs/trd-task-configuration-and-run-state.md` §1, §3, §4, §13 decision 1
+**Status:** superseded by ADR-052 (the lean runtime retired it) · was RATIFIED 2026-08-30 · **Source:** issue #778 (epic #788) · **Record:** `docs/trd-task-configuration-and-run-state.md` §1, §3, §4, §13 decision 1
 
 ## 1. The decision
 

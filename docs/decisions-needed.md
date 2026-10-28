@@ -4,15 +4,15 @@ This is the open owner-decision register. Decisions close only through an ADR li
 
 Line counts here use `split("\n").length`, which is one greater than `wc -l` for a newline-terminated file.
 
-## 1. Split `crew/drive.mjs`?
+## 1. Split `drive.mjs`?
 
-- **Question:** Split `crew/drive.mjs`?
+- **Question:** Split `drive.mjs`?
 - **Measurement:** 7,522 lines at `72d87b6`. It is on the protected floor, so every judge lane is a drive.mjs lane; b533's builder fetched 4,730 distinct lines of it against 148 its plan cited, in 35 paged reads.
-- **Options:** Split `crew/drive.mjs` through an ADR-sized migration; keep it intact.
+- **Options:** Split `drive.mjs` through an ADR-sized migration; keep it intact.
 - **Blocked:** #1033 and the seam report scoped from it; a split also reaches every import, every anchor manifest, every `allow_test_reach` naming the file, and the protected-floor list.
-- **Raised:** 2026-09-08 (Split `crew/drive.mjs`?)
-- **CLOSED 2026-09-08 by [ADR-042](adr/adr-042-split-the-suites-not-the-driver.md):** `crew/drive.mjs` is NOT split. `scripts/factory/seams.mjs` measured **30 clusters at 9,634 cross-cluster edges (321.1 per cluster)**, 28 anchor pins across six manifests and 12 reaching tests — one module with a wide interface, so a split would cut live coupling and produce layers that only forward arguments. #1061's sub-file scopes are sequenced AHEAD of any structural work and unlock the eight-issue driver queue at no migration cost.
-- **Not a permanent verdict, and re-opened only as a different question.** The owner's standing direction is recorded in ADR-042: every large file should become modules with proper boundaries. Giving `crew/drive.mjs` boundaries is a **refactor, not a split** — the narrow interfaces must be CREATED before any file division is safe. That is a larger act, it wants its own ADR, and it follows #1061. Do not re-raise this entry as "split?"; raise the refactor.
+- **Raised:** 2026-09-08 (Split `drive.mjs`?)
+- **CLOSED 2026-09-08 by [ADR-042](adr/adr-042-split-the-suites-not-the-driver.md):** `drive.mjs` is NOT split. `seams.mjs` measured **30 clusters at 9,634 cross-cluster edges (321.1 per cluster)**, 28 anchor pins across six manifests and 12 reaching tests — one module with a wide interface, so a split would cut live coupling and produce layers that only forward arguments. #1061's sub-file scopes are sequenced AHEAD of any structural work and unlock the eight-issue driver queue at no migration cost.
+- **Not a permanent verdict, and re-opened only as a different question.** The owner's standing direction is recorded in ADR-042: every large file should become modules with proper boundaries. Giving `drive.mjs` boundaries is a **refactor, not a split** — the narrow interfaces must be CREATED before any file division is safe. That is a larger act, it wants its own ADR, and it follows #1061. Do not re-raise this entry as "split?"; raise the refactor.
 - **Stale-measurement note, 2026-09-09:** this entry said 7,522 lines for a day after it was closed, and the file is now **8,257**. A closed decision keeps its original measurement; the growth is recorded here so a later reader does not mistake the old number for a live one.
 
 ## 2. Effort per stage, not per seat?
@@ -33,7 +33,7 @@ Line counts here use `split("\n").length`, which is one greater than `wc -l` for
 - **Options:** Re-prove after a moved-base rebase; retain the current proof sequencing.
 - **Blocked:** Commit/rebase/publish sequencing and preservation of the post-rebase tree.
 - **Raised:** 2026-09-08 (Re-prove after a moved-base rebase?)
-- **Built 2026-09-12:** shipped in commit `f74decc0`. `crew/drive.mjs:11713` marks whether the base moved; at `crew/drive.mjs:11903` a moved rebase with a gate and proof-tree witness enters proof, and `crew/drive.mjs:11934` refreshes proof on the rebased tree. Archived sweep observations: 471 journals and 233 post-ship rebase stages; moved publications had 37 proof and 2 direct-suite runs (both on the old head); unmoved cases had 120 direct-suite and 7 proof runs (one inspected double rebase, six not verified). b980's stage trace re-proves on a moved base. Six unmoved→proof cases remain unverified, so this entry remains open.
+- **Built 2026-09-12:** shipped in commit `f74decc0`. `drive.mjs:11713` marks whether the base moved; at `drive.mjs:11903` a moved rebase with a gate and proof-tree witness enters proof, and `drive.mjs:11934` refreshes proof on the rebased tree. Archived sweep observations: 471 journals and 233 post-ship rebase stages; moved publications had 37 proof and 2 direct-suite runs (both on the old head); unmoved cases had 120 direct-suite and 7 proof runs (one inspected double rebase, six not verified). b980's stage trace re-proves on a moved base. Six unmoved→proof cases remain unverified, so this entry remains open.
 
 ## 4. Do prompt changes require a measured eval (#1031)?
 
@@ -46,7 +46,7 @@ Line counts here use `split("\n").length`, which is one greater than `wc -l` for
 ## 5. The builder turn-ceiling number (#1028 ask 1)
 
 - **Question:** What should the builder turn-ceiling number be (#1028 ask 1)?
-- **Measurement:** `TURN_CEILING_DEFAULTS` at `crew/drive.mjs:139` gives the builder `null`; measured first rounds this week were 99, 130, 151 and 40 turns. The number must come from the POST-fix distribution or the ceiling encodes today's waste.
+- **Measurement:** `TURN_CEILING_DEFAULTS` at `drive.mjs:139` gives the builder `null`; measured first rounds this week were 99, 130, 151 and 40 turns. The number must come from the POST-fix distribution or the ceiling encodes today's waste.
 - **Options:** Set a numeric ceiling from the POST-fix distribution; leave the builder ceiling unset.
 - **Blocked:** #1028 ask 1; the decision itself is blocked on #1027 and #1026 landing.
 - **Raised:** 2026-09-08 (The builder turn-ceiling number)
@@ -66,8 +66,8 @@ Line counts here use `split("\n").length`, which is one greater than `wc -l` for
 
 ## 7. Let the shadow seat pick seat for real? (amends ADR-032)
 
-- **Question:** Should the shadow seat pick (#291 L2, already in `crew/crew.mjs`) be promoted from record-only to actually choosing a producing seat at boot, from the roster's admissible cells, by task shape and measured availability?
-- **Measurement:** The pick exists and is dark. `SHADOW_OUTCOMES` (`picked / stands / abstained / no-candidate / not-consulted`), `SHADOW_EXCLUSIONS` (`band-unknown / band-below-floor / capability-shortfall / agent-unresolved / breaker-open`) and `SHADOW_ABSENT` are shipped at `crew/crew.mjs:1519-1529`. Both of its inputs are unmeasured: `CREW_BREAKER_THRESHOLD` is unset, so cell health reads *UNMEASURED, never healthy*; `eval_cells` has 0 rows, so pass rate and cost per candidate are absent. The roster seats two agents (`pi`, `claude`) and 7 models, three of which (`fable-5`, `sonnet-5`, `haiku-4-5`) have never been seated in 876 recorded sessions. Today a 429 parks, a 5xx backs off, an auth failure refuses; nothing ever picks a different cell (`PROVIDER_RETRY_ACTIONS`, `crew/headless.mjs:293`).
+- **Question:** Should the shadow seat pick (#291 L2, already in `crew.mjs`) be promoted from record-only to actually choosing a producing seat at boot, from the roster's admissible cells, by task shape and measured availability?
+- **Measurement:** The pick exists and is dark. `SHADOW_OUTCOMES` (`picked / stands / abstained / no-candidate / not-consulted`), `SHADOW_EXCLUSIONS` (`band-unknown / band-below-floor / capability-shortfall / agent-unresolved / breaker-open`) and `SHADOW_ABSENT` are shipped at `crew.mjs:1519-1529`. Both of its inputs are unmeasured: `CREW_BREAKER_THRESHOLD` is unset, so cell health reads *UNMEASURED, never healthy*; `eval_cells` has 0 rows, so pass rate and cost per candidate are absent. The roster seats two agents (`pi`, `claude`) and 7 models, three of which (`fable-5`, `sonnet-5`, `haiku-4-5`) have never been seated in 876 recorded sessions. Today a 429 parks, a 5xx backs off, an auth failure refuses; nothing ever picks a different cell (`PROVIDER_RETRY_ACTIONS`, `headless.mjs:293`).
 - **What ADR-032 ratified (2026-08-16):** the breaker refuses an open cell at boot and does not reroute; a cell is `{provider, id, agent, effort}` and nothing else; chain-walking is *deliberately deferred behind a ratified roster field*. Promoting the pick is exactly that field. It is not a reversal of ADR-032's reasoning — a silent downgrade stays forbidden — it is the deferred half arriving with its evidence.
 - **Options:** Promote the pick so producing seats (planner, builder) float among admissible cells while reviewer and tech-lead floors stay pinned by tier, every pick journalled with its exclusions; keep it record-only and read the would-have-picked as a report.
 - **Blocked:** #1105 (the instruments must be lit first — a pick from unmeasured health is the guess ADR-032 forbids); #1106 (an agent register, so "the agents we have" is data); #781 (shape and strength recorded separately per dispatch, so cost-vs-outcome per cell is measurable). Nothing here is a lane until #1105 lands.

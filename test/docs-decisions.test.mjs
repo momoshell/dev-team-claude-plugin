@@ -36,8 +36,8 @@ const OLD_VISUALIZER_POLICY = '`npm test` and `npm run viz:build` are the two re
 
 const expected = [
   {
-    heading: '## 1. Split `crew/drive.mjs`?',
-    question: 'Split `crew/drive.mjs`?',
+    heading: '## 1. Split `drive.mjs`?',
+    question: 'Split `drive.mjs`?',
     measurement: '7,522 lines at `72d87b6`. It is on the protected floor, so every judge lane is a drive.mjs lane; b533\'s builder fetched 4,730 distinct lines of it against 148 its plan cited, in 35 paged reads.',
   },
   {
@@ -58,7 +58,7 @@ const expected = [
   {
     heading: '## 5. The builder turn-ceiling number (#1028 ask 1)',
     question: 'What should the builder turn-ceiling number be (#1028 ask 1)?',
-    measurement: '`TURN_CEILING_DEFAULTS` at `crew/drive.mjs:139` gives the builder `null`; measured first rounds this week were 99, 130, 151 and 40 turns. The number must come from the POST-fix distribution or the ceiling encodes today\'s waste.',
+    measurement: '`TURN_CEILING_DEFAULTS` at `drive.mjs:139` gives the builder `null`; measured first rounds this week were 99, 130, 151 and 40 turns. The number must come from the POST-fix distribution or the ceiling encodes today\'s waste.',
   },
   {
     heading: '## 6. ACP via `claude-agent-acp` for the claude seat (#1034)',
@@ -67,8 +67,8 @@ const expected = [
   },
   {
     heading: '## 7. Let the shadow seat pick seat for real? (amends ADR-032)',
-    question: 'Should the shadow seat pick (#291 L2, already in `crew/crew.mjs`) be promoted from record-only to actually choosing a producing seat at boot, from the roster\'s admissible cells, by task shape and measured availability?',
-    measurement: 'The pick exists and is dark. `SHADOW_OUTCOMES` (`picked / stands / abstained / no-candidate / not-consulted`), `SHADOW_EXCLUSIONS` (`band-unknown / band-below-floor / capability-shortfall / agent-unresolved / breaker-open`) and `SHADOW_ABSENT` are shipped at `crew/crew.mjs:1519-1529`. Both of its inputs are unmeasured: `CREW_BREAKER_THRESHOLD` is unset, so cell health reads *UNMEASURED, never healthy*; `eval_cells` has 0 rows, so pass rate and cost per candidate are absent. The roster seats two agents (`pi`, `claude`) and 7 models, three of which (`fable-5`, `sonnet-5`, `haiku-4-5`) have never been seated in 876 recorded sessions. Today a 429 parks, a 5xx backs off, an auth failure refuses; nothing ever picks a different cell (`PROVIDER_RETRY_ACTIONS`, `crew/headless.mjs:293`).',
+    question: 'Should the shadow seat pick (#291 L2, already in `crew.mjs`) be promoted from record-only to actually choosing a producing seat at boot, from the roster\'s admissible cells, by task shape and measured availability?',
+    measurement: 'The pick exists and is dark. `SHADOW_OUTCOMES` (`picked / stands / abstained / no-candidate / not-consulted`), `SHADOW_EXCLUSIONS` (`band-unknown / band-below-floor / capability-shortfall / agent-unresolved / breaker-open`) and `SHADOW_ABSENT` are shipped at `crew.mjs:1519-1529`. Both of its inputs are unmeasured: `CREW_BREAKER_THRESHOLD` is unset, so cell health reads *UNMEASURED, never healthy*; `eval_cells` has 0 rows, so pass rate and cost per candidate are absent. The roster seats two agents (`pi`, `claude`) and 7 models, three of which (`fable-5`, `sonnet-5`, `haiku-4-5`) have never been seated in 876 recorded sessions. Today a 429 parks, a 5xx backs off, an auth failure refuses; nothing ever picks a different cell (`PROVIDER_RETRY_ACTIONS`, `headless.mjs:293`).',
   },
 ]
 
@@ -249,10 +249,10 @@ test('OD4', () => {
 })
 
 test('RV1-1 ledger advisor-ab row escapes the placeholder pipe', () => {
-  // MUTATION RV1-1: unescape <iso\|ms> to <iso|ms> in docs/ledger-queries.md and the advisor-ab row splits into an extra table cell, hiding --adjudications and the dispatch ids.
-  const docs = read('docs/ledger-queries.md')
+  // MUTATION RV1-1: unescape <iso\|ms> to <iso|ms> in docs/archive/ledger-queries.md and the advisor-ab row splits into an extra table cell, hiding --adjudications and the dispatch ids.
+  const docs = read('docs/archive/ledger-queries.md')
   const row = docs.split('\n').find((line) => line.startsWith('|') && line.includes('ledger.mjs advisor-ab'))
-  assert.ok(row, 'missing advisor-ab row in docs/ledger-queries.md')
+  assert.ok(row, 'missing advisor-ab row in docs/archive/ledger-queries.md')
   assert.ok(row.includes('--run-started-at <iso\\|ms>'), 'advisor-ab row must escape the placeholder pipe as <iso\\|ms>')
   const cells = row.split(/(?<!\\)\|/).slice(1, -1)
   assert.equal(cells.length, 2, 'advisor-ab row must render as two table cells')

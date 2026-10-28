@@ -6,15 +6,15 @@ it has to rediscover it.
 
 ## What this is
 
-`dev-team` — a Claude Code plugin whose subject is a **team runtime**. A
-deterministic driver runs the whole task loop (plan → gate-first acceptance →
-build → scope gate → validation → review → full suite → commit-on-green), and
-agents are consulted only where judgment lives, through closed-enum decision
-envelopes. Two transports on one backbone: cmux panes you watch, or headless
-workers owned by a daemon.
+`dev-team` — a Claude Code plugin whose subject is a **team runtime**. One brief
+starts a lane (`crew start`): a planner, builder and reviewer, and a lead on
+escalation, play their seats over ACP. Code only checks the result — the gate is
+red at baseline and green after the build, each check has a kill-mutation, the
+full suite is green — then commits and opens the PR (ADR-052). A stopped lane is
+finished with `crew finish`.
 
-`README.md` is the map. `crew/README.md` is the full model, verbs, seat
-charters and contracts.
+`README.md` is the map. `crew/README.md` is the full model, verbs, seats and
+contracts.
 
 ## Commands
 
@@ -22,8 +22,7 @@ charters and contracts.
 npm test              # node --test over **/*.test.mjs — gates every commit
 npm run viz:build     # release-time check: operator runs it on main before tagging
 npm run viz:serve     # local visualizer, reads .env.local
-npm run crew:watch    # lane state
-npm run crew:reap     # stale-descendant sweep
+crew lanes            # lane state, from the lane journals
 ```
 
 `npm test` is the lane gate. `npm run viz:build` is a RELEASE-TIME check the
@@ -69,37 +68,20 @@ enforced by tests, not just preferred:
 - **A guard is vacuous unless proven by mutation.** A gate check without a
   kill-mutation is not evidence.
 - **Never report a rate without its denominator.**
-- **Instrumentation is never load-bearing.** The emitter facade over the ledger
-  never throws into the caller.
+- **Instrumentation is never load-bearing.** Writing the lane journal and the
+  session files never throws into the caller.
 - **A blind spot is stated, not omitted.** Tools here print what they could not
   measure and refuse to call that a clear.
 
 ## Working on a lane
 
-Lanes are dispatched, not hand-edited. `skills/crew-dispatch/SKILL.md` owns the
-procedure; `/dispatch` names it.
+Lanes start from a brief, not from hand edits. `skills/lane-brief/SKILL.md` owns
+writing the brief and `skills/crew-dispatch/SKILL.md` the dispatch; `/dispatch`
+names it.
 
-- **Fence the tests that ASSERT what the lane changes** (#702). A fence that
-  omits the test guarding the changed behaviour is an operator error, and it
-  costs the lane a full boot.
-- **A fence is a lane's own write surface, never a lock** (ADR-043). Lanes may overlap on files; worktrees isolate them and `rebase` resolves them. Dispatch one lane per register.
-- Verify a fence **arrived** in `crew.json` and `journal.jsonl` — not merely
-  that it parsed.
+- **Scope is context, not enforcement** (ADR-045). A lane may write any file;
+  worktrees isolate lanes and `rebase` resolves them.
 - Rebase onto `main` before opening the PR.
-- `judge` is the legacy alias of the assurance preset `rigorous` (ADR-035), and
-  ADR-038 means the protected floor no longer forces the plan-check loop — a floor
-  touch forces a kill-mutation on the changed behaviour plus rigorous review, not
-  plan-time adversary rounds.
-
-### Lessons
-
-- **a fenced test can drag non-test files into the fence** — `crew/drive.test.mjs`
-  requires `crew/roles/anchors.json`, `crew/roles/planner.md` and
-  `crew/roles/tech-lead.md`; b362/b365 paid for it. Extends #702.
-- **`returns/` must never land in the checkout** (b363) — hence the `.gitignore`
-  entry below.
-- **Reconcile a brief's premise against `crew/roster.json` before dispatch**
-  (b372).
 
 ## Where the doctrine lives
 
@@ -109,15 +91,16 @@ procedure; `/dispatch` names it.
 | Cross-cutting conventions | `docs/conventions.md` |
 | Architecture decisions | `docs/adr/` (register in `README.md`) |
 | Review rubric and findings shape | `skills/pr-review/` |
-| Dispatch, fences, tiers, flags | `skills/crew-dispatch/` |
+| Writing a brief | `skills/lane-brief/` |
+| Dispatch and tiers | `skills/crew-dispatch/` |
 | Lane recovery and closeout | `skills/crew-recovery/` |
 | Worktrees, PRs, orphans | `skills/devops/` |
-| Test authoring and anchor pinning | `skills/qa-test-writing/` |
+| Test authoring | `skills/qa-test-writing/` |
 | The review *procedure* layer | `.agents/skills/review-procedure/` |
 
-Most of `docs/conventions.md` predates v0.2.0 and describes the **retired**
-first-generation runtime. Its header names the entries that are still binding;
-read that header before citing anything from it.
+Much of `docs/conventions.md` describes runtimes the lean runtime replaced. Its
+header names the entries that still bind; read that header before citing
+anything from it.
 
 ## Commit conventions
 

@@ -5,7 +5,7 @@ lane in the right direction and hand it its first context; the planner, builder 
 lane work with their skills. The core runtime goes from 92,321 lines to at most 10,000.
 
 Decision record: `docs/adr/adr-052-agents-do-the-work.md`. Every test file and its fate:
-`docs/plan-lean-runtime-tests.md`. Source figures measured at `416ddb2a`, test figures at `a73ab2ad`.
+`docs/archive/plan-lean-runtime-tests.md`. Source figures measured at `416ddb2a`, test figures at `a73ab2ad`.
 
 ## Operator decisions (2026-10-24)
 
@@ -16,7 +16,7 @@ Decision record: `docs/adr/adr-052-agents-do-the-work.md`. Every test file and i
 | D3 | Keep the three tiers: `mechanical`, `build`, `judge`. |
 | D4 | The ledger is replaced by the lane journal at the switch. |
 | D5 | Keep advisor, edit assist, codemode, lab, readgate, stepped execution, the finish shape and memory, and the pi extensions builderloop, reminders, skeletonread, subagent and fff. Each is decided in a later phase. |
-| D6 | Lane b1354 finished: PR #1968 merged, issue #1961 closed. Its `crew/roster-validate.mjs` validates agent frontmatter in phase 2. |
+| D6 | Lane b1354 finished: PR #1968 merged, issue #1961 closed. Its `roster-validate.mjs` validates agent frontmatter in phase 2. |
 | D7 | Build the new path beside the old one, then switch. |
 | D8 | Work stays in this repository. No other project (the-power included) is touched. |
 | D9 | No gates or measurements while working: no host-load gate, no dispatch-time baseline, no timing yardstick, no lane-count comparison before the switch. The operator switches when satisfied. The lane's correctness checks (acceptance gate, kill-mutations, suite, commit on green) stay. |
@@ -26,7 +26,7 @@ Decisions 2026-10-25:
 | Id | Decision |
 |---|---|
 | D10 | `crew start` runs its lane with `CREW_SUITE_SLOTS=0`. The slot pool is shared with every project on the host, and a lane that waited out the 30-minute ceiling ran unslotted anyway (PR #1977). |
-| D11 | The seat files are the roster source. `crew roster generate` writes `crew/roster.json` from `crew/agents/*.md`, and the parity test becomes "`roster.json` equals the generated roster". Until 4.4, a roster edit made in the visualizer is overwritten by the next generate. |
+| D11 | The seat files are the roster source. `crew roster generate` writes `roster.json` from `crew/agents/*.md`, and the parity test becomes "`roster.json` equals the generated roster". Until 4.4, a roster edit made in the visualizer is overwritten by the next generate. |
 | D12 | 2.2 moves to phase 3: the skill proof needs the per-seat ACP session files from 3.1. |
 | D13 | Phase 3 starts with a hand probe for 3.1 (does `claude-agent-acp` load plugin skills and agent definitions). Then 3.1, 3.3 and 3.4 run as parallel lanes, and 3.5 follows. |
 
@@ -58,7 +58,7 @@ Core code surface:
 | `crew/acp/` | the ACP client (from `acp-client.mjs`, `acp-io.mjs`, `acp-permission.mjs`), claude and pi launch, session file writer | 1,200 |
 | `crew/skills-proof.mjs` | prove `requires` skills loaded before the first write, from the session file | 200 |
 | `crew/closeout.mjs` | teardown, reap orphans, archive the journal | 400 |
-| `crew/status.mjs` | `crew status` (lane state) and `crew show <lane> [seat]` (full session) | 400 |
+| `status.mjs` | `crew status` (lane state) and `crew show <lane> [seat]` (full session) | 400 |
 
 About 6,300 lines. The kept arms are counted separately until each is decided: the pi extensions
 (6,758 lines), `crew/mcp/lab-server.mjs`, `crew/memory*.mjs`, and the advisor, edit assist and codemode wiring
@@ -119,12 +119,12 @@ K = keep and slim into a core piece. A = kept arm, carried over unchanged. S = r
 
 ## Tests
 
-Measured per file in `docs/plan-lean-runtime-tests.md` (179,479 lines, 132 files):
+Measured per file in `docs/archive/plan-lean-runtime-tests.md` (179,479 lines, 132 files):
 
 | Fate | Files | Lines | When |
 |---|---|---|---|
 | Delete at the switch | 72 | 133,240 | with the module each one tests, in the switch PR |
-| Delete with the pin machinery | 13 | 6,485 | at the switch: 9 `skills/*` exhibit and anchor suites, `cli-contract`, `test/factory-env.test.mjs`, `test/vacuity.test.mjs`, `crew/gate-lint.test.mjs` |
+| Delete with the pin machinery | 13 | 6,485 | at the switch: 9 `skills/*` exhibit and anchor suites, `cli-contract`, `factory-env.test.mjs`, `vacuity.test.mjs`, `gate-lint.test.mjs` |
 | Rewrite against the new modules | 3 | 3,787 | while building: `io-contract`, `seat-io-acp`, `reclaim-descendants` cases move to `crew/acp/` and `closeout` tests |
 | Keep | 25 | 15,771 | slimmed with their module |
 | Keep until the arm is decided | 9 | 8,313 | later phase |
@@ -170,9 +170,9 @@ Sol review, because the current factory is what is being replaced. From phase 4,
 ### Phase 2: seats as agent files
 
 - [x] 2.1 P5 schema and `crew/agents.mjs`, with `bootRefusals` from `roster-validate.mjs` run on every
-      edit. `crew start` boots from `crew/agents/*.md`; the old path keeps reading `crew/roster.json`.
+      edit. `crew start` boots from `crew/agents/*.md`; the old path keeps reading `roster.json`.
       Built in #1975 and #1976: `crew start` generates the roster in memory. `crew roster generate` (D11)
-      writes `crew/roster.json` from the definitions, and a test holds the committed file to it.
+      writes `roster.json` from the definitions, and a test holds the committed file to it.
 - Done means: a roster swap on the new path is one frontmatter edit; one lane per role boots from it.
 
 ### Phase 3: ACP seats and the minimal loop

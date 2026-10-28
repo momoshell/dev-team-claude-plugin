@@ -11,7 +11,7 @@ import { spawn, spawn as spawnProcess, spawnSync } from 'node:child_process'
 import { parseCliArgs, pluginWriteMode, pluginWriteTargetMode, sameOrigin, hostGuard, ROUTE_PARAMS, ServerUsageError, startServer as startVisualizerServer, writeGuard } from '../visualizer/server/server.mjs'
 import { createJournalSource } from '../visualizer/server/journal-source.mjs'
 import * as webApi from '../visualizer/web/src/lib/api.js'
-import { createAgentsSource, proposeAgent, proposePrompt, proposeSkills } from '../visualizer/server/agents-source.mjs'
+import { createAgentsSource, proposeAgent, proposeSkills } from '../visualizer/server/agents-source.mjs'
 import { normalizeSkillsPage } from '../visualizer/web/src/lib/agents.js'
 import { ROOT, rawRequest, scratchDir, treeDigest } from './helpers.mjs'
 const require = createRequire(import.meta.url)
@@ -271,7 +271,6 @@ test('raw Host values are refused without killing the visualizer', { skip: SKIP 
 const WRITE_ROUTES = [
   { path: '/api/agents/propose', body: JSON.stringify({ name: 'future-agent', entry: {} }) },
   { path: '/api/skills/propose', body: JSON.stringify({ role: 'builder', skills: [] }) },
-  { path: '/api/prompts/propose', body: JSON.stringify({ role: 'builder', text: 'proposal' }) },
 ]
 
 test('state-writing routes refuse CORS simple requests before reading the body', { skip: SKIP }, async () => {
@@ -343,11 +342,10 @@ test('B1 agents page proposal endpoints are diff-only', async () => {
     assert.equal(agent.status, 200); assert.equal(agent.json.ok, true); assert.ok(agent.json.diff); assert.deepEqual(agent.json.refusals, []); assert.equal(Object.hasOwn(agent.json, 'target_path'), false); assert.equal(Object.hasOwn(agent.json, 'after_text'), false)
     const skills = await post('/api/skills/propose', { role: 'builder', skills: ['frontend-svelte'] })
     assert.equal(skills.status, 200); assert.equal(skills.json.ok, true); assert.match(skills.json.diff, /crew\/capabilities\.json/); assert.deepEqual(skills.json.refusals, [])
-    const prompt = await post('/api/prompts/propose', { role: 'builder', text: '# replacement charter\n' })
-    assert.equal(prompt.status, 200); assert.equal(prompt.json.ok, true); assert.match(prompt.json.diff, /crew\/roles\/builder\.md/); assert.deepEqual(prompt.json.refusals, []); assert.deepEqual(prompt.json.labels, ['protected: prompt-surface'])
+    assert.equal((await post('/api/prompts/propose', { role: 'builder', text: '# replacement charter\n' })).status, 405)
     assert.equal(treeDigest(fixture.checkout), checkoutBefore)
     assert.equal(treeDigest(fixture.crewRoot), crewBefore)
-    for (const [path, body] of [['/api/agents/propose', '{ not json'], ['/api/skills/propose', JSON.stringify({ role: 'builder', skills: 'frontend-svelte' })], ['/api/prompts/propose', JSON.stringify({ role: 'builder' })]]) {
+    for (const [path, body] of [['/api/agents/propose', '{ not json'], ['/api/skills/propose', JSON.stringify({ role: 'builder', skills: 'frontend-svelte' })]]) {
       const response = await json(server.base, path, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
       assert.equal(response.status, 400, path)
     }
@@ -445,34 +443,9 @@ test('prompts-page:C1', async () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ role: 'builder', text: '# replacement charter\\n' }),
     })
-    assert.equal(response.status, 200)
-    assert.equal(response.json.ok, true)
-    assert.match(response.json.diff, /crew\/roles\/builder\.md/)
-    assert.deepEqual(response.json.labels, ['protected: prompt-surface'])
+    assert.equal(response.status, 405)
     assert.equal(treeDigest(fixture.checkout), checkoutBefore)
     assert.equal(treeDigest(fixture.crewRoot), crewBefore)
-    for (const body of ['{ not json', JSON.stringify({ role: 'builder' })]) {
-      const malformed = await json(server.base, '/api/prompts/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body })
-      assert.equal(malformed.status, 400)
-    }
-  } finally {
-    if (server) await stopInProcess(server)
-  }
-})
-
-test('D1 agents page labels prompt proposals protected', async () => {
-  const fixture = agentsFixture('visualizer-agents-prompts-')
-  const source = createAgentsSource({ checkout: fixture.checkout, crewRoot: fixture.crewRoot })
-  const before = treeDigest(fixture.checkout)
-  let server
-  try {
-    server = await startInProcess({}, { checkout: fixture.checkout, crewRoot: fixture.crewRoot, agents: source, ledgerDb: join(fixture.dir, 'ledger.db'), triageDb: join(fixture.dir, 'triage.db') })
-    const response = await json(server.base, '/api/prompts/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ role: 'builder', text: '# changed\n' }) })
-    assert.equal(response.status, 200)
-    assert.deepEqual(response.json.labels, ['protected: prompt-surface'])
-    assert.match(response.json.diff, /^--- a\/crew\/roles\/builder\.md$/m)
-    assert.match(response.json.diff, /^\+\+\+ b\/crew\/roles\/builder\.md$/m)
-    assert.equal(treeDigest(fixture.checkout), before)
   } finally {
     if (server) await stopInProcess(server)
   }
@@ -706,23 +679,6 @@ test('V1 agents resources come from the plugin root for a foreign checkout', asy
   }
 })
 
-test('V4 prompt proposal reads the target checkout, not plugin resources', async () => {
-  const root = scratchDir('visualizer-foreign-prompt-')
-  let server
-  try {
-    assert.equal(spawnSync('git', ['init', root], { encoding: 'utf8' }).status, 0)
-    server = await startInProcess({ close() {} }, { checkout: root, ledgerDb: join(root, 'ledger.db'), triageDb: join(root, 'triage.db'), crewRoot: join(root, 'runtime') })
-    // Mutation: change only the prompt proposal wrapper to checkout: resourcesRoot.
-    const prompt = await json(server.base, '/api/prompts/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ role: 'builder', text: '# replacement\n' }) })
-    assert.equal(prompt.status, 200)
-    assert.equal(prompt.json.ok, false)
-    assert.equal(prompt.json.refusals[0].code, 'read-unavailable')
-    assert.ok(prompt.json.refusals[0].message.includes(join(root, 'crew', 'roles', 'builder.md')))
-  } finally {
-    if (server) await stopInProcess(server)
-  }
-})
-
 test('agents source separates plugin reads from target proposals compatibly', () => {
   const target = agentsFixture('visualizer-agents-target-root-')
   const plugin = agentsFixture('visualizer-agents-plugin-root-')
@@ -750,11 +706,7 @@ test('agents source separates plugin reads from target proposals compatibly', ()
     assert.equal(read.plugin_root, path.resolve(plugin.checkout))
     assert.equal(read.crew_root, path.resolve(target.crewRoot))
 
-    const prompt = source.proposePrompt({ role: 'builder', text: '# proposed target charter\n' })
-    assert.equal(prompt.ok, true)
-    assert.equal(prompt.target_path, join(target.checkout, 'crew', 'roles', 'builder.md'))
-    assert.match(prompt.diff, /Fixture charter for builder/)
-    assert.doesNotMatch(prompt.diff, /PLUGIN-ONLY builder charter/)
+    assert.equal(source.proposePrompt, undefined)
     const agent = source.proposeAgent({ name: 'future-agent', entry: { providers: ['openai'], transports: ['pane'], adapter: 'crew/adapters/adapter-future-agent.mjs', refuses: [], availability: 'proposal-stub' } })
     assert.equal(agent.ok, true)
     assert.equal(agent.target_path, join(target.checkout, 'crew', 'capabilities.json'))

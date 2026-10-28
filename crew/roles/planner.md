@@ -79,7 +79,7 @@ asserts on all count — grep the repo for that file's own repo-relative path,
 and, when it is a code module, also for its exported symbols, its error codes,
 and the paths and filenames it writes; every test file that hits belongs in
 scope too. A doc carrying an `## Implementation files` header is a coupled artifact of the files it names, so a change to one of those files puts that doc in scope.
-Any test reading a file by path pins it, even when a file exports nothing. `.github/workflows/test.yml` is pinned by `test/factory-ledger-floor.test.mjs`; `crew/daemon.mjs` needs `crew/daemon.test.mjs` AND `crew/factoryctl.test.mjs`; adapters need `crew/adapter-*.test.mjs`. #193 and #199 are unrelated stale numbers. Scope uses literal paths, never globs. Tests inspecting manifests, fixtures, configuration, workflows, or prose belong in scope.
+Any test reading a file by path pins it, even when a file exports nothing. A workflow file is pinned by any test that reads it; a module needs every test that imports it; adapters need their adapter tests. #193 and #199 are unrelated stale numbers. Scope uses literal paths, never globs. Tests inspecting manifests, fixtures, configuration, workflows, or prose belong in scope.
 
 `gate_path` is required whenever you return a `gate_cmd`; it must be an absolute
 path inside the task dir. The driver measures gate bytes from that path and
@@ -136,7 +136,7 @@ outside the builder's reach. Rules the driver enforces mechanically:
 - A check may assert only against an authoritative stream or mutable data,
   never against the presence of a service, method, key or symbol. A gate check
   that reads a name into existence is the vacuous shape
-  `test/vacuity.test.mjs` exists to catch; see
+  the vacuity checks exist to catch; see
   `skills/qa-test-writing/references/vacuity.md`. #623
 - Map each brief requirement to a check; print
   `FAIL <check>: expected X, found Y at PATH`; Y is never a bare test status.
@@ -168,7 +168,7 @@ comes from the reviewer and the lead not sharing your premises.
 
 You get **exactly one authoring moment for `details.mutations`** and
 `files_in_scope`: the driver binds both from the accepted plan envelope
-(`crew/drive.mjs:9249` (scope) and `crew/drive.mjs:9384` (mutations)) and never assigns you again, so a check you cannot
+(scope and mutations) and never assigns you again, so a check you cannot
 author now **cannot be added later** by anyone — not the tech-lead, not the
 lead, not the builder. The only thing a later seat can do with a gap you left is
 RECORD it as a residual. Author the check you would want at plan-check, or say
@@ -195,8 +195,8 @@ not restate it. The three items, one line each:
 A declaration is MACHINE-APPLIED: the driver find-and-replaces on a scratch copy of
 the built tree, re-runs the gate, and requires that one check to redden. A prose
 field cannot be applied, which is why `{ "check": "A1", "kills": "leaving the loop
-unconditional" }` is refused — the enforcement point is `validateMutations` in
-`crew/drive.mjs` and nothing here relaxes it. Each entry is EITHER a mutation OR an
+unconditional" }` is refused — the enforcement point is `proveMutations` in
+`crew/checks.mjs` and nothing here relaxes it. Each entry is EITHER a mutation OR an
 exemption, never both; at most `MUTATIONS_MAX` (32) entries.
 
     { "check": "C1", "file": "lib/widget.mjs", "find": "<literal text present in the file>", "replace": "<literal replacement>" }
@@ -215,7 +215,7 @@ The human sentence goes in a comment beside the check, never in the entry:
     // no compiled brief carries it any more.
     check('C1', …)
 
-paired with `{ "check": "C1", "file": "scripts/factory/make-brief.mjs", "find": "'## Per-check mutations', blocks.mutations]", "replace": "'## Per-check mutations', '']" }`.
+paired with `{ "check": "C1", "file": "lib/brief.mjs", "find": "'## Per-check mutations', blocks.mutations]", "replace": "'## Per-check mutations', '']" }`.
 Each compiled brief repeats it under `## Per-check mutations`.
 Rationale: #330.
 
@@ -227,7 +227,7 @@ An absent anchor is no longer the lead's to repair and never was: since #874 the
 bind-checks every declaration before it applies one, and an anchor that does not reach the built
 tree escalates as `anchor-absent` — a PLAN/BUILD disagreement — instead of spending gate custody's
 one repair. The BUILDER gets one correction (`details.mutation_corrections`,
-`crew/roles/builder.md`), and it is accepted only for a check whose declared anchor is absent, only
+`crew/agents/builder.md`), and it is accepted only for a check whose declared anchor is absent, only
 when the correction binds exactly once, and only when the corrected mutation is then ADJUDICATED
 `killed`. A correction that survives is `correction-green`; one whose proof never adjudicated at
 all is `correction-unproven`; both end the lane. That is a safety net for a `find` you got slightly

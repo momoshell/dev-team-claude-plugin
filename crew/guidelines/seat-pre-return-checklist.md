@@ -12,8 +12,8 @@ mid-round, and shipping the self-applied version first is what gives that
 advisor's A/B a fair baseline instead of credit for bounces the checklist alone
 would have prevented.
 
-Measured over 164 archived lanes on 2026-08-19 (`~/.crew/*/*/journal.jsonl`
-plus `returns/*.json`): 220 first reviews, 94 bounced — a 43% first-review
+Measured over 164 archived lanes on 2026-08-19 (each lane's `journal.jsonl`
+plus its `returns/` files): 220 first reviews, 94 bounced — a 43% first-review
 bounce rate, each bounce costing two seat hops and roughly ten minutes. Of the
 93 recorded must-fix findings, the two dominant classifiable families are
 unhandled edge paths (19%) and over-claimed verdicts (13%). Both are visible in
@@ -43,7 +43,7 @@ the builder's own diff; neither needs a reviewer to notice.
   plan's validation lane after your last edit, not before it, and paste the
   final pass/fail counts into `details.validation` and your summary; an earlier
   green on an earlier tree is not evidence about this one. Kills: the stale-lane
-  bounce — the charter already requires the run (`crew/roles/builder.md`), and a
+  bounce — the charter already requires the run (`crew/agents/builder.md`), and a
   claimed green the driver's own suite stage then reddens costs the whole round.
 
 ## Planner — before you return
@@ -61,14 +61,14 @@ the builder's own diff; neither needs a reviewer to notice.
   exits non-zero with `errored: 0`, and record the literal summary line as a
   verified Ground truth fact in `plan.md`. Kills: the gate bounce that spends a
   whole plan round on a vacuous or broken gate — the driver enforces exactly
-  this at baseline (`baselineGateDefect` in `crew/drive.mjs`) and a second green baseline
+  this at baseline (`checkBaseline` in `crew/checks.mjs`) and a second green baseline
   escalates the task.
 - **P3 — every gate check names the mutation that kills it.** Each check
   carries a `MUTATION:` comment naming one edit to an in-scope file that turns
   that check red, and the same set is declared in `details.mutations` so the
   driver can apply them to the built tree. Kills: the whole-gate false positive
   — a gate that is red overall while some individual check adjudicates nothing
-  (#330, `validateMutations` in `crew/drive.mjs`).
+  (#330, `proveMutations` in `crew/checks.mjs`).
   The entry is machine-applied, not prose: `{ "check": "<stable token>", "file":
   "<a file inside files_in_scope>", "find": "<non-empty literal text in that file>",
   "replace": "<a different string>" }` — or, for a check no single edit can kill,

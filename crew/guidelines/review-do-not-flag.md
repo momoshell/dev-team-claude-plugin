@@ -15,15 +15,15 @@ a `consider` naming the defense you think fails.
   you are about to cite before you cite it; the fix may have landed after the
   evidence you are working from. Defense: the tree is the review's subject and
   it is one read away — `git diff` plus the file itself settle it (Method step
-  1 of `crew/roles/reviewer.md`), and the plan's validation lane runs against
+  1 of `crew/agents/reviewer.md`), and the plan's validation lane runs against
   that same tree. Six archived runs ended with the lead refuting a must-fix
   as already closed on disk.
 - **Task-dir drift — `plan.md`, `gate.mjs` or an earlier `review.md`
   disagreeing with the built code.** Say it in your review's prose if it
   misleads the crew; it is not a finding against the build. Defense: the task
-  dir is `~/.crew/<repo>/<task>/task` (`pathsFor` in `crew/crew.mjs`), outside the
+  dir is `~/.crew/<repo>/<task>/task`, outside the
   checkout, so nothing in it can reach a commit — the scope gate diffs `git
-  status --porcelain` against `files_in_scope` (`outOfScopeFiles` with `scopeMatcher` in `crew/drive.mjs`)
+  status --porcelain` against `files_in_scope` (the scope check in `crew/loop.mjs`)
   and the task dir never appears there.
 - **A failure reachable only through a caller that does not exist** — a
   `Symbol` or `Proxy` argument, a hand-injected dependency, an exotic value no
@@ -31,14 +31,13 @@ a `consider` naming the defense you think fails.
   must-fix. Defense: the call sites are enumerable — grep the module's exported
   name; if every caller is in this repo and none can produce that value, there
   is no failure to fix. In run `45-breaker` the lead refuted exactly this with
-  the sole caller cited in `crew/crew.mjs`.
+  the sole caller cited.
 - **A fault needing a second, independent failure of the subsystem that would
   do the recovering** — the registry append failing while the fork succeeds, a
   kill inside a two-statement window followed by a restart. Not a must-fix.
   Defense: name the first fault's own consequence. Where it already leaves that
   subsystem's state unwritable, no handler could have recovered, so the missing
-  handling changes nothing; the lead refuted this in `crew/daemon.mjs`
-  in run `205-regrant`.
+  handling changes nothing; the lead refuted this in run `205-regrant`.
 - **A remedy that cannot be built in this slice** — the fix needs a file
   outside the plan's `files_in_scope`, or a mechanism the plan or an ADR
   defers. Write it as a `consider` naming the deferred work. Defense: the remedy is out of this slice, not invisible — you read the complete diff, so say what is wrong and name the deferred work. Under ADR-045 an out-of-context write is recorded and the lane proceeds, so a repair that needs a file outside `files_in_scope` CAN now be built; raise it as a `consider` only when the plan or an ADR defers the mechanism itself (runs `83-headless-io` → #125, `46-tier-boot` → #193).

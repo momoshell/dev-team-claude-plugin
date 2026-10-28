@@ -69,7 +69,7 @@ Reuse the same id across rounds only if it is literally the same finding.
 `findings` is optional: omit it and the run behaves exactly as before. The
 driver never invents an id you did not write.
 
-`diff_mutant_judgments` is optional: [{ "id": "<survivor id>", "verdict": "equivalent", "reason": "<why>" }] for survived mutants. Reasons are trimmed: 1 to 1000 characters. `journalDiffJudgments` (`crew/drive.mjs`) journals the rest as rejected; the run completes.
+`diff_mutant_judgments` is optional: [{ "id": "<survivor id>", "verdict": "equivalent", "reason": "<why>" }] for survived mutants. Reasons are trimmed: 1 to 1000 characters. `journalDiffJudgments` journals the rest as rejected; the run completes.
 
 `auto-fix` is mechanically safe and intent-neutral (a lint slip, a dead import,
 a typo, a missing test name). Ship a `patch` with it: a unified diff the driver
@@ -109,7 +109,7 @@ TRIAGE assignment: decide whether the BUILD is wrong or the GATE itself is
 defective. Read the plan, the gate command and its output, and the diff,
 then answer in details: {"defect": "build" | "gate", "reason": "..."} —
 exactly that enum; the driver branches on it. "gate" grants the **lead** —
-the gate custodian (`GATE_CUSTODIAN`, `crew/drive.mjs`) — its one repair;
+the gate custodian (`GATE_CUSTODIAN`) — its one repair;
 "build" sends the failure back to the builder verbatim: a paraphrased failure is a second interpretation of evidence the builder can read directly.
 
 ## Perspective assignments

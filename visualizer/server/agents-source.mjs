@@ -87,13 +87,6 @@ function validPath(value) {
   return typeof value === 'string' && value !== '' && !isAbsolute(value) && !value.split('/').includes('..') && /^[A-Za-z0-9._/-]+$/.test(value)
 }
 
-function targetInside(root, target) {
-  const base = resolve(root)
-  const full = resolve(target)
-  const suffix = relative(base, full)
-  return suffix !== '' && suffix !== '..' && !suffix.startsWith(`..${requirePathSeparator()}`) && !isAbsolute(suffix)
-}
-
 function requirePathSeparator() {
   return process.platform === 'win32' ? '\\' : '/'
 }
@@ -463,24 +456,6 @@ export function proposeSkills({ checkout = process.cwd(), role, skills, readFile
   return proposalResult({ ok: true, diff: unifiedDiff(source.before, after, { path: 'crew/capabilities.json' }), target_path: target, after_text: after })
 }
 
-export function proposePrompt({ checkout = process.cwd(), role, text, readFileSync = fsReadFileSync } = {}) {
-  const root = resolve(checkout)
-  const roleRoot = join(root, 'crew', 'roles')
-  const target = join(roleRoot, `${String(role || '')}.md`)
-  const publicTarget = `crew/roles/${String(role || '')}.md`
-  const refusals = []
-  if (!CHARTER_ROLES.includes(role)) refusals.push(refusal('role-invalid', `role must be one of ${CHARTER_ROLES.join(', ')}`))
-  if (!targetInside(roleRoot, target)) refusals.push(refusal('path-confined', 'prompt target must remain under crew/roles/'))
-  if (typeof text !== 'string' || text === '') refusals.push(refusal('text-empty', 'prompt text must be a non-empty string'))
-  if (text.includes('\u0000')) refusals.push(refusal('text-invalid', 'prompt text contains a NUL byte'))
-  if (refusals.length) return proposalResult({ target_path: target, refusals, extra: { labels: ['protected: prompt-surface'], public_target_path: publicTarget } })
-  const beforeSource = safeRead(readFileSync, target, target)
-  if (!beforeSource.text) return proposalResult({ target_path: target, refusals: [refusal('read-unavailable', beforeSource.reason || `${target} is unavailable`)], extra: { labels: ['protected: prompt-surface'], public_target_path: publicTarget } })
-  const after = text.endsWith('\n') ? text : `${text}\n`
-  return proposalResult({ ok: true, diff: unifiedDiff(beforeSource.text, after, { path: publicTarget }), target_path: target, after_text: after, extra: { labels: ['protected: prompt-surface'], public_target_path: publicTarget } })
-}
-
-
 export function createAgentsSource({ checkout = process.cwd(), pluginRoot = checkout, crewRoot = process.env.HOME ? join(process.env.HOME, '.crew') : process.cwd(), readFileSync = fsReadFileSync, readdirSync = fsReaddirSync, statSync = fsStatSync } = {}) {
   const root = resolve(checkout)
   const resourcesRoot = resolve(pluginRoot)
@@ -522,6 +497,5 @@ export function createAgentsSource({ checkout = process.cwd(), pluginRoot = chec
     },
     proposeAgent(input = {}) { return proposeAgent({ ...input, checkout: root, readFileSync: read }) },
     proposeSkills(input = {}) { return proposeSkills({ ...input, checkout: root, readFileSync: read, readdirSync: readdir }) },
-    proposePrompt(input = {}) { return proposePrompt({ ...input, checkout: root, readFileSync: read }) },
   }
 }

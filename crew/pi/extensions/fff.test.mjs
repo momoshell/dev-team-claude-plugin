@@ -205,7 +205,7 @@ test('fff-D1-search', async () => {
   assert.deepEqual(entry.search, { tools: ['grep', 'find'], fff: 'withheld', reason: 'binary-absent' })
   assert.equal(entry.grants.mcp_servers.some((server) => server.name === 'fff'), false)
   const command = piCommand(entry)
-  assert.match(command, /--tools "read,bash,edit,write,grep,find,ls,retrieve,submit_envelope,codemode"/)
+  assert.match(command, /--tools "read,bash,edit,write,grep,find,ls,retrieve,codemode"/)
   assert.doesNotMatch(command, /mcp__fff__(grep|find_files|multi_grep)/)
   assert.doesNotMatch(command, /--exclude-tools "find,grep"/)
 })

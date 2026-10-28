@@ -108,3 +108,27 @@ test('a journal that cannot be read reports its unreadable-row count as null wit
     assert.notEqual(row.unreadable_rows_reason, '')
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
+
+test('LP1 LP2 lanes shows the PR of an accepted finish and keeps a finish-ready lane waiting', () => {
+  const home = realpathSync(scratchDir('lanes-'))
+  try {
+    const root = join(home, '.crew')
+    const lane = (name, rows) => {
+      const dir = join(root, `dt-${name}`, name)
+      put(join(dir, 'crew.json'), JSON.stringify({ members: { planner: { agent: 'pi' } } }))
+      put(join(dir, 'task', 'lean.json'), JSON.stringify({ id: name }))
+      put(join(dir, 'task', 'journal.jsonl'), jsonl(rows))
+    }
+    const ready = [{ event: 'verdict', stage: 'build', status: 'reviewed' }, { event: 'finish-ready', status: 'ready-for-operator' }]
+    lane('accepted', [...ready, { event: 'pr', stage: 'publish', pr: { number: 7, url: PR } }, { event: 'finish-decision', choice: 'accept' }])
+    lane('waiting', ready)
+    const out = []
+    assert.equal(main(['--json'], { root, archiveRoot: join(home, 'archive'), stdout: (t) => out.push(t), stderr: () => {} }), 0)
+    const rows = JSON.parse(out.join(''))
+    const accepted = rows.find((row) => row.lane === 'accepted'), waiting = rows.find((row) => row.lane === 'waiting')
+    assert.equal(accepted.status, 'done')
+    assert.equal(accepted.pr, PR)
+    assert.equal(waiting.status, 'running')
+    assert.equal(waiting.pr, null)
+  } finally { rmSync(home, { recursive: true, force: true }) }
+})

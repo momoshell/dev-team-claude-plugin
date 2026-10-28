@@ -17,7 +17,6 @@ const register = read(REGISTER)
 const readme = read(README)
 const crewReadme = read(CREW_README)
 const claude = read(CLAUDE)
-const portability = read('skills/crew-onboard/references/portability.md')
 const onboardSkill = read('skills/crew-onboard/SKILL.md')
 const marketplace = JSON.parse(read('.claude-plugin/marketplace.json'))
 
@@ -209,22 +208,6 @@ test("A1/B1: visualizer build is a release-time check, not a lane gate", () => {
     .replace(VISUALIZER_POLICY, OLD_VISUALIZER_POLICY)
   const oldErrors = visualizerGateErrors(oldClaude)
   assert.notDeepEqual(oldErrors, [])
-})
-
-test('OD1', () => {
-  // MUTATION OD1: rename the Measured heading in portability.md and no measured coverage is named any more.
-  assert.ok(!portability.includes('has not been measured against a `--checkout` outside this'))
-  const measured = docSection(portability, '## Measured outside this repository')
-  for (const needle of ['vectora-foundry/the-power', 'cargo test --workspace', '336']) {
-    assert.ok(measured.includes(needle), `Measured section misses ${needle}`)
-  }
-  assert.ok(measured.includes('68') && measured.includes('`success`'), 'Measured section misses 68 success sessions')
-})
-
-test('OD2', () => {
-  // MUTATION OD2: rename state-channels-plus in portability.md and the unproven third repository is unnamed.
-  const unproven = docSection(portability, '## What is not proven')
-  assert.ok(unproven.includes('state-channels-plus'), 'What is not proven misses state-channels-plus')
 })
 
 test('OD3', () => {

@@ -1,45 +1,36 @@
 ---
 name: devops
 description: >-
-  Use when creating or removing a Git worktree, preparing a lane branch,
-  invoking `gh`, publishing from a checkout, investigating stray processes,
-  reclaiming an orphan, or operating the crew daemon. Use when a linked
-  checkout might share Git state, when a command needs an absolute body file,
-  when a pull request must remain open, or when liveness is uncertain. Use
-  when choosing dry-run versus reclaim, reading daemon paths and verbs, or
-  recording an operational rule whose checkout has no local exhibit.
+  Load when working the git and GitHub side of a lean crew lane: lane worktrees, pushing
+  the lane branch, opening and checking pull requests with gh, and updating the
+  crew install with crew update.
 ---
 
-Every rule here is a measured lifecycle boundary. The references separate
-safe mechanics from rules whose evidence is explicitly absent in this checkout.
+# Devops
 
-## Routing
+## Worktrees
 
-| Doing… | Rule | Details |
-|---|---|---|
-| Creating or retiring a checkout | Register, use, then remove worktrees | `references/worktrees.md` |
-| Calling GitHub CLI | Use absolute files, explicit cwd, and a fakeable binary | `references/gh.md` |
-| Publishing a lane branch | Protect the open PR and worker-path boundary | `references/lane-branches.md` |
-| Handling stray descendants | Offer reclaim, default to dry run, and preserve uncertainty | `references/processes.md` |
-| Operating the long-lived control plane | Read the daemon's paths, verbs, and log | `references/daemon.md` |
-| Stating an unmeasured operational rule | Keep the search result in the register | `references/evidence.md` |
-| Stopping a live lane | Tear down, signal the driver by pid, then settle the session | `references/processes.md` |
+- `crew start` creates the lane worktree `dt-<lane>` beside the checkout, on a
+  new branch named for the lane (`crew/start.mjs`).
+- `git worktree list` shows every worktree; a lane worktree with no lane in
+  `crew lanes --all` is an orphan to look at, not to delete blindly.
+- A merged lane's worktree is removed by `crew closeout <lane>`. By hand use
+  `git worktree remove <path>`, never `--force`: git refuses a dirty worktree,
+  and that refusal protects uncommitted work.
 
-## Critical rules
+## Pull requests
 
-- Create worktrees with Git's registration command, remove them with `git worktree remove`, and gate teardown on the run outcome. Exhibit: `crew/arms.mjs@worktree-exists-refusal` and `crew/crew.mjs@auto-teardown-on-done`. Cost: deleting a directory alone leaves Git's registration behind.
-- Treat a linked checkout as shared Git state: detect linked status by comparing `--git-dir` with `--git-common-dir`, and never assume its stash or object metadata is lane-local. Status: no checkout implementation reachable from a production entry point performs that probe, so the detection half is unbacked here; see `references/evidence.md`. Exhibit (shared state only): `crew/seat-io.mjs@common-git-dir`. Cost: a lane can restore another lane's stash entry (#471).
-- Give `gh` an absolute `--body-file` and an explicit cwd, then list the output; never a relative path. Exhibit: `scripts/factory/intake.mjs@gh-spawn` and `scripts/factory/probe-repo.mjs@gh-bin-env`. Cost: a compound `cd` changed the meaning of a relative file twice.
-- Keep an open lane PR intact and refuse publishing from a worker path; do not run `git push origin --delete` against a live lane branch. Status: no checkout implementation reachable from a production entry point publishes a branch, so both halves are unbacked here; see `references/evidence.md`. Cost: a lane writing to the host remote, and the deletion behavior recorded as unbacked in `references/evidence.md`.
-- Offer a reclaim command but never kill or signal unasked; default orphan work to a dry run and report `proven`, `failed`, or `unproven`. Exhibit: `scripts/factory/reap-stale.mjs@reclaim-turns-destructive` and `crew/crew.mjs@unknown-boot-descendant`. Cost: an unknown process is not evidence of death (#473).
-- Stop a live lane by tearing it down, then signalling the driver by pid, then confirming its session reached a terminal row; do not expect SIGTERM to end a driver, because an armed exit-marker handler suppresses the default disposition while being unable to dispatch inside a synchronous nap. Exhibit: `crew/crew.mjs@signal-exit-loop` and `scripts/factory/ledger.mjs@install-finalizer-optin`. Cost: a SIGKILLed driver lands no terminal row, so its session reads `running` forever — two were found in the live ledger, one 4.4 days old (#877).
-- Operate the daemon from its measured Unix-socket surface, and record that this repository has no launchd service rather than inventing one. Exhibit: `crew/daemon.mjs@daemon-commands` and `crew/daemon.mjs@daemon-sock-path`. Cost: a control command aimed at an assumed service can target nothing or the wrong process.
+- Push the lane branch: `git push -u origin <lane>`.
+- Write the body to a file and open with an absolute path:
+  `gh pr create --head <lane> --title <title> --body-file <absolute-path>`.
+- Confirm with `gh pr view <number> --json state,headRefOid,mergeStateStatus` and
+  `gh pr checks <number>`. The head must be the lane branch tip.
+- Never merge for the operator. Report the state and stop.
 
-## Key references
+## The crew install
 
-- `references/worktrees.md` — registration, linked-worktree probes, shared state, and teardown.
-- `references/gh.md` — absolute body files, cwd, confirmation, and GH_BIN.
-- `references/lane-branches.md` — open PR preservation and worker-path refusal.
-- `references/processes.md` — dry-run reclaim, proof states, and kill guards.
-- `references/daemon.md` — daemon paths, command vocabulary, journal, and negative launchd fact.
-- `references/evidence.md` — rules searched for but not exhibited locally.
+- `crew where` prints the crew home, its branch and its commit.
+- `crew update [--force]` fast-forwards the crew home to `origin/main` and
+  rebuilds what changed (`bin/crew.mjs`). It refuses unless the home is on
+  `stable` with no local changes, and refuses while processes run from the home
+  unless `--force`; with `--force`, restart those processes afterwards.

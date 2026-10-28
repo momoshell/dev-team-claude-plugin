@@ -1,5 +1,5 @@
 ---
-description: Onboard a checkout — decide what it can use, profile it, and ratify the profile before any lane runs.
+description: Onboard a checkout for lean lanes — install the plugin and set the checkout's suite command.
 argument-hint: <path-to-checkout-or-blank-for-here>
 ---
 

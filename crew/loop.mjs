@@ -288,12 +288,12 @@ export async function runLoop(spec, deps = {}) {
     // A suite red on both runs sends the lane back through build, gate, proof and review once, with the failures as feedback.
     let repairing = false
     let repaired = false
-    // A proof whose only non-killed rows are bind-fail earns the builder one re-aim turn, for those ids alone.
+    // A proof whose only non-killed rows are bind-fail earns the builder one re-aim turn, for those ids alone; a re-aim turn never earns another.
     let reaiming = false
-    let reaimUsed = false
     let reaimIds = []
     for (;;) {
       for (;;) {
+        const wasReaimTurn = reaiming
         const built = await stage(reaiming ? 'mutation-reaim' : repairing ? 'suite-repair' : 'build', () => seatTurn('builder', feedback, { singleTurn: repairing || reaiming }))
         repairing = false
         if (built.halt) return built.halt
@@ -301,7 +301,7 @@ export async function runLoop(spec, deps = {}) {
         const replacements = built.envelope.details.mutations
         if (replacements !== undefined) {
           const mayReaim = isFinish || reaiming
-          const allowed = isFinish ? acceptance : reaimIds
+          const allowed = reaiming ? reaimIds : acceptance
           if (!mayReaim || replacements.some((r) => !allowed.includes(r.check))) return await stop('envelope-refused', { mutations: replacements })
           mutations = mutations.map((declaration) => replacements.find((replacement) => replacement.check === declaration.check) ?? declaration)
         }
@@ -317,9 +317,8 @@ export async function runLoop(spec, deps = {}) {
         if (!proofOK) {
           const nonKilled = rows.filter((row) => row?.outcome !== 'killed')
           const bindFailRows = rows.filter((row) => row?.outcome === 'unmeasured' && row?.reason === 'bind-fail')
-          const canReaim = !reaimUsed && rows.length === acceptance.length && nonKilled.length > 0 && bindFailRows.length === nonKilled.length
+          const canReaim = !wasReaimTurn && rows.length === acceptance.length && nonKilled.length > 0 && bindFailRows.length === nonKilled.length
           if (!canReaim) return stop(proof.reason ?? 'mutation-unmeasured', proof)
-          reaimUsed = true
           reaiming = true
           reaimIds = bindFailRows.map((row) => row.check)
           seats.builder = { ...seats.builder, rounds: (seats.builder.rounds ?? DEFAULT_ROUNDS) + 1 }

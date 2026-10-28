@@ -656,9 +656,22 @@ export function startServer(options = {}) {
         const shipStates = await ship.resolve(result.runs)
         const runs = result.runs.map((run) => ({ ...run, ship: shipStates?.get?.(run.adw_id) || { state: 'unmeasured', reason: 'ship state not measured', stale: false } }))
         // Lean lanes live on disk, not in the ledger: list them after the ledger rows, filtered by their own records.
+        // Each source states its own health; a lean read that throws is unreadable, not "no lean lanes".
         let leanRuns = []
-        try { leanRuns = lean.listRuns(filters) } catch {}
-        return json(res, 200, { schema, ...result, runs: [...runs, ...leanRuns] })
+        let leanSource = { readable: true, absent: null }
+        try { leanRuns = lean.listRuns(filters) } catch (err) { leanSource = { readable: false, absent: err?.message || String(err) } }
+        // result.degraded also covers a broken triage sidecar over a ledger that read fine: only a stated read
+        // failure (a typed absent, or the feed's own latched reason) makes the ledger unreadable.
+        const ledgerReason = typeof feed._reason === 'function' ? feed._reason() : null
+        const ledgerAbsent = result.degraded !== true ? null
+          : (typeof result.absent === 'string' && result.absent) ? result.absent
+          : (typeof ledgerReason === 'string' && ledgerReason) ? ledgerReason
+          : typeof feed._reason === 'function' ? null : 'the ledger could not be opened'
+        const sources = { lean: { ...leanSource, runs: leanSource.readable ? leanRuns.length : null }, ledger: { readable: ledgerAbsent === null, absent: ledgerAbsent } }
+        // The feed is unavailable only when no source could be read, whatever the row counts; a broken triage
+        // sidecar over a readable source is not a read failure.
+        const degraded = !(sources.lean.readable || sources.ledger.readable)
+        return json(res, 200, { schema, ...result, runs: [...runs, ...leanRuns], sources, degraded })
       }
       if (url.pathname === '/api/workflows') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
@@ -752,7 +765,21 @@ export function startServer(options = {}) {
         const filters = {}
         for (const key of ['type', 'role']) if (url.searchParams.get(key)) filters[key] = url.searchParams.get(key)
         if (phase_id !== undefined) filters.phase_id = phase_id
-        const result = feed.listEvents({ adw_id: url.searchParams.get('adw_id') || '', after, limit, ...filters })
+        const adwId = url.searchParams.get('adw_id') || ''
+        if (adwId.startsWith('lean:')) {
+          // Lean lanes are journals on disk: answer from the journal, never the ledger.
+          const found = lean.resolveLane(adwId.slice('lean:'.length))
+          if (!found) return json(res, 200, { schema, events: [], cursor: after, degraded: false, absent: `no lean lane ${adwId.slice('lean:'.length)}` })
+          const read = lean.readJournalRows(found)
+          if (read.error) return json(res, 200, { schema, events: [], cursor: after, degraded: true, absent: read.error })
+          const matching = read.rows.filter((row) => (!filters.type || row.event === filters.type) && (!filters.role || row.role === filters.role)).map((row) => {
+            const timestamp = Number.isFinite(row.at) && !Number.isNaN(new Date(row.at).getTime()) ? new Date(row.at).toISOString() : null
+            return { ...row, id: row.index + 1, adw_id: adwId, type: row.event ?? null, timestamp, timestamp_reason: timestamp ? null : 'lean journal row carries no timestamp' }
+          })
+          const events = matching.filter((event) => event.id > after).slice(0, limit)
+          return json(res, 200, { schema, events, cursor: events.length ? events.at(-1).id : after, degraded: false, absent: null })
+        }
+        const result = feed.listEvents({ adw_id: adwId, after, limit, ...filters })
         // Read AFTER the query it reports on, like /api/run-set: the feed's db open is
         // lazy. listEvents answers { events: [], cursor } for an unopenable ledger,
         // byte-identical to a genuinely empty page — the one reader on this surface

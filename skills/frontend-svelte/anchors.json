@@ -44,13 +44,13 @@
   "visualizer/web/src/lib/trace.js:546": "tone: gateTone(generation?.verdict),",
   "visualizer/web/src/lib/RunDetail.svelte:332": "padding:2rem 2rem 4rem; display:grid; gap:1.25rem; min-width:0;",
   "visualizer/web/src/lib/api.js:27": "export const getSeatTeardowns = (params = {}) => request(",
-  "visualizer/web/src/App.svelte:192": "<RunDetail run={selectedRun} phase={route.phase} onback={backToTasks} onphase={openPhase} />",
-  "visualizer/web/src/App.svelte:166": "onclick={() => navigate({ view:'fleet' })}",
-  "visualizer/web/src/App.svelte:251": ".workspace { margin-inline-start:13.5rem;",
-  "visualizer/web/src/App.svelte:27": "let route = $state(parseHash(location.hash))",
-  "visualizer/web/src/App.svelte:71": "document.documentElement.dataset.theme = theme",
-  "visualizer/web/src/App.svelte:119": "const result = await getSessions({}, { signal: AbortSignal.timeout(15000) })",
-  "visualizer/web/src/App.svelte:203": "<OperationsOverview loading={!lastRead && !error}",
-  "visualizer/web/src/App.svelte:239": "<TaskList {runs} {envelopes} {now} onopen={openRun} focus={taskFocus} />",
-  "visualizer/web/src/App.svelte:31": "let runs = $state([])"
+  "visualizer/web/src/App.svelte:199": "<RunDetail run={selectedRun} phase={route.phase} onback={backToTasks} onphase={openPhase} />",
+  "visualizer/web/src/App.svelte:173": "onclick={() => navigate({ view:'fleet' })}",
+  "visualizer/web/src/App.svelte:258": ".workspace { margin-inline-start:13.5rem;",
+  "visualizer/web/src/App.svelte:28": "let route = $state(parseHash(location.hash))",
+  "visualizer/web/src/App.svelte:73": "document.documentElement.dataset.theme = theme",
+  "visualizer/web/src/App.svelte:123": "const result = await getSessions({}, { signal: AbortSignal.timeout(15000) })",
+  "visualizer/web/src/App.svelte:210": "<OperationsOverview loading={!lastRead && !error}",
+  "visualizer/web/src/App.svelte:246": "<TaskList {runs} {envelopes} {now} onopen={openRun} focus={taskFocus} />",
+  "visualizer/web/src/App.svelte:32": "let runs = $state([])"
 }

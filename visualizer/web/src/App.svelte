@@ -2,6 +2,7 @@
   import { onMount, tick } from 'svelte'
   import { ListTodo, Activity, Users, Bot, BookOpen, FileText, Workflow, ShieldCheck, RefreshCw } from 'lucide-svelte'
   import { getReturns, getSessions } from './lib/api.js'
+  import { sessionsFeedState } from './lib/activity.js'
   import { attentionBreakdown, createSemaphore, deriveDisplayStatus, fleetActivity, needsAttention } from './lib/fleet.js'
   import { createRefreshLoop, journalPulse } from './lib/live.js'
   import { formatHash, parseHash, subscribeHash } from './lib/route.js'
@@ -31,6 +32,7 @@
   let runs = $state([])
   let envelopes = $state(new Map())
   let feedDegraded = $state(false)
+  let feedSources = $state(null)
   let error = $state('')
   let now = $state(Date.now())
   let taskFocus = $state(null)
@@ -110,6 +112,8 @@
     drainEnvelopeQueue()
   }
 
+  const sourceLine = (sources) => ['lean', 'ledger'].map((name) => `${name === 'lean' ? 'Lean' : 'Ledger'} ${sources[name].readable ? 'readable' : `unavailable${sources[name].absent ? ` — ${sources[name].absent}` : ''}`}`).join(' · ')
+
   async function refresh() {
     if (refreshInFlight) return
     refreshInFlight = true
@@ -120,7 +124,9 @@
       if (generation !== refreshGeneration) return
       const nextRuns = Array.isArray(result?.runs) ? result.runs : []
       runs = nextRuns
-      feedDegraded = result?.degraded === true
+      const nextFeed = sessionsFeedState(result)
+      feedDegraded = nextFeed.degraded
+      feedSources = nextFeed.sources
       now = Date.now()
       lastRead = now
       error = ''
@@ -130,6 +136,7 @@
       if (generation === refreshGeneration) {
         error = err.message || 'session request failed'
         feedDegraded = true
+        feedSources = null
       }
     } finally {
       refreshInFlight = false
@@ -174,7 +181,7 @@
     <button class:active={route.view === 'assurances'} onclick={() => navigate({ view:'assurances' })}><ShieldCheck size={18} aria-hidden="true" />Assurances</button>
   </nav>
   <div class="sidebar-footer">
-    <span class="connection" class:degraded={feedDegraded}>{feedDegraded ? 'Feed unavailable' : lastRead ? 'Ledger connected' : 'Connecting to ledger…'}</span>
+    <span class="connection" class:degraded={feedDegraded}>{feedDegraded ? 'Feed unavailable' : feedSources ? '' : 'Connecting to sources…'}{#if feedSources}{feedDegraded ? ' — ' : ''}{sourceLine(feedSources)}{/if}</span>
     <small>{lastRead ? `Read at ${new Date(lastRead).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' })}` : 'Waiting for the first reading'}</small>
     <button class="refresh" onclick={() => refreshLoop?.refresh()} disabled={refreshing}><RefreshCw size={15} aria-hidden="true" />{refreshing ? 'Refreshing…' : 'Refresh now'}</button>
     <label class="auto-refresh"><input type="checkbox" bind:checked={autoRefresh} onchange={(event) => refreshLoop?.setEnabled(event.currentTarget.checked)} />Auto-refresh</label>

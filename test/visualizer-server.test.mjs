@@ -2922,10 +2922,12 @@ test('/api/events names absence when its ledger cannot be opened', { skip: SKIP 
   mkdirSync(brokenDb, { recursive: true })
   let child, base
   try {
-    ({ child, base } = await startServer(brokenDb, brokenTriage))
+    ({ child, base } = await startServer(brokenDb, brokenTriage, join(dir, 'no-lanes')))
     const control = await json(base, '/api/sessions')
     assert.equal(control.status, 200)
-    assert.equal(control.json.degraded, true)
+    assert.equal(control.json.sources.ledger.readable, false)
+    assert.equal(typeof control.json.sources.ledger.absent, 'string')
+    assert.equal(control.json.degraded, false) // an empty but readable lean source keeps the feed available
     const events = await json(base, '/api/events?adw_id=x&after=0')
     assert.equal(events.status, 200)
     assert.equal(events.json.degraded, true)
@@ -2956,10 +2958,11 @@ test('/api/events does not confuse a degraded triage sidecar with a degraded led
   mkdirSync(triageDb, { recursive: true })
   let child, base
   try {
-    ({ child, base } = await startServer(ledgerDb, triageDb))
+    ({ child, base } = await startServer(ledgerDb, triageDb, join(dir, 'no-lanes')))
     const sessions = await json(base, '/api/sessions')
     assert.equal(sessions.status, 200)
-    assert.equal(sessions.json.degraded, true)
+    assert.equal(sessions.json.sources.ledger.readable, true) // the sidecar fault is not a ledger read failure
+    assert.equal(sessions.json.degraded, false)
     const events = await json(base, `/api/events?adw_id=${done}&after=0&limit=10`)
     assert.equal(events.status, 200)
     assert.equal(events.json.events.length > 0, true)

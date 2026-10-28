@@ -14,6 +14,19 @@ export const OUTCOMES = Object.freeze([
   { key: 'open', label: 'Open', tone: 'busy' },
   { key: 'unknown', label: 'Unknown', tone: 'quiet' },
 ])
+// Turns a /api/sessions response into the feed state: the feed is unavailable only when no source was readable.
+export function sessionsFeedState(result = {}) {
+  const pick = (name, fallback) => {
+    const entry = result?.sources?.[name]
+    if (entry && typeof entry === 'object') return { readable: entry.readable === true, runs: Number.isFinite(entry.runs) ? entry.runs : null, absent: typeof entry.absent === 'string' && entry.absent ? entry.absent : null }
+    return { readable: fallback, runs: null, absent: null }
+  }
+  const lean = pick('lean', false)
+  const ledger = pick('ledger', result?.degraded !== true)
+  const degraded = !(lean.readable || ledger.readable)
+  return { degraded, available: !degraded, sources: { lean, ledger } }
+}
+
 const terminal = new Set(['success', 'escalated', 'fail', 'aborted'])
 const day = 86400000
 const finite = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0

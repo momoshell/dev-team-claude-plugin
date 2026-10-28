@@ -4,13 +4,13 @@ The app is a small Svelte shell over plain JavaScript shaping modules. These fac
 
 ## Shell and ownership
 
-`visualizer/web/src/main.js` imports the token sheet and mounts `App` into `#app`. `App.svelte` owns hash route state (`visualizer/web/src/App.svelte:27`), the `os`/`paper`/`ink` theme choice (`visualizer/web/src/App.svelte:71`), and the fleet/envelope fetch loop (`visualizer/web/src/App.svelte:119`), and composes the top-level views (`visualizer/web/src/App.svelte:203`, `visualizer/web/src/App.svelte:239`). It passes shaped rows and callbacks into the components under `visualizer/web/src/lib/`; a child does not take over route or theme ownership.
+`visualizer/web/src/main.js` imports the token sheet and mounts `App` into `#app`. `App.svelte` owns hash route state (`visualizer/web/src/App.svelte:28`), the `os`/`paper`/`ink` theme choice (`visualizer/web/src/App.svelte:73`), and the fleet/envelope fetch loop (`visualizer/web/src/App.svelte:123`), and composes the top-level views (`visualizer/web/src/App.svelte:210`, `visualizer/web/src/App.svelte:246`). It passes shaped rows and callbacks into the components under `visualizer/web/src/lib/`; a child does not take over route or theme ownership.
 
 main.js is the only importer of theme.css.
 
-The stylesheet is loaded before the mount call in `visualizer/web/src/main.js:1-5`. `visualizer/web/src/App.svelte:71` applies the selected `data-theme` after the component starts; a new component consumes aliases and does not import or re-select the sheet.
+The stylesheet is loaded before the mount call in `visualizer/web/src/main.js:1-5`. `visualizer/web/src/App.svelte:73` applies the selected `data-theme` after the component starts; a new component consumes aliases and does not import or re-select the sheet.
 
-There are 34 `.svelte` components under `visualizer/web/src/lib/` (tracked files: `git ls-files 'visualizer/web/src/lib/*.svelte'`). The shell composes them for fleet, operations, roster, run, and phase views. A panel's placement matters for spacing: `visualizer/web/src/App.svelte:203`, `visualizer/web/src/App.svelte:239` mounts panels directly under `.page`, while `visualizer/web/src/lib/RunDetail.svelte:332` owns a grid gap for its children.
+There are 34 `.svelte` components under `visualizer/web/src/lib/` (tracked files: `git ls-files 'visualizer/web/src/lib/*.svelte'`). The shell composes them for fleet, operations, roster, run, and phase views. A panel's placement matters for spacing: `visualizer/web/src/App.svelte:210`, `visualizer/web/src/App.svelte:246` mounts panels directly under `.page`, while `visualizer/web/src/lib/RunDetail.svelte:332` owns a grid gap for its children.
 
 ## Plain module split
 
@@ -27,7 +27,7 @@ Keep data acquisition, route parsing, drains, shaping, envelope diffing, layout,
 | `timeline.js` | turn timed phases and events into gantt lanes and blocks | `visualizer/web/src/lib/timeline.js:1-83` |
 | `trace.js` | own `ROLE_ORDER`, lane rows, gate markers, markdown shaping, and phase panels | `visualizer/web/src/lib/trace.js:1-546` |
 
-The data flow is server -> `api.js` -> a plain-module shaper (`fleet.js`, `panels.js`, `timeline.js`, or `trace.js`) -> a Svelte component. `visualizer/web/src/App.svelte:31-119` demonstrates the fetch-to-derived-view hop; `visualizer/web/src/lib/FleetTable.svelte:2` demonstrates the component boundary.
+The data flow is server -> `api.js` -> a plain-module shaper (`fleet.js`, `panels.js`, `timeline.js`, or `trace.js`) -> a Svelte component. `visualizer/web/src/App.svelte:32-123` demonstrates the fetch-to-derived-view hop; `visualizer/web/src/lib/FleetTable.svelte:2` demonstrates the component boundary.
 
 ## Adding a feature
 

@@ -265,3 +265,24 @@ test('VJ4 events: a non-lean lane states the removed ledger source as absent, ne
     assert.equal(body.degraded, true); assert.match(body.absent, /ledger event source removed/)
   })
 })
+
+test('LP1 LP2 a lane that ends pr then finish-decision is done with that pr; a trailing finish-ready still reads as running', async () => {
+  await withServer(async ({ crewRoot, get }) => {
+    const pr = { number: 7, url: 'https://github.com/o/r/pull/7' }
+    const ready = { event: 'finish-ready', status: 'ready-for-operator' }
+    const stop = [{ event: 'verdict', stage: 'build', status: 'stopped', reason: 'seat-unmeasured' }, { event: 'stage-end', stage: 'build' }, ready]
+    lane(crewRoot, 'lp-accepted', [...stop, { event: 'pr', stage: 'publish', pr }, { event: 'finish-decision', choice: 'accept' }])
+    lane(crewRoot, 'lp-ready', stop)
+    lane(crewRoot, 'lp-reject', [...stop, { event: 'finish-decision', choice: 'reject' }])
+    lane(crewRoot, 'lp-stale-pr', [{ event: 'pr', pr }, ...stop, { event: 'finish-decision', choice: 'reject' }])
+    const runs = Object.fromEntries((await get('/api/sessions')).body.runs.map((run) => [run.goal, run]))
+    assert.equal(runs['lp-accepted'].status, 'done')
+    assert.equal(runs['lp-accepted'].running, false)
+    assert.deepEqual(runs['lp-accepted'].pr, pr)
+    for (const name of ['lp-ready', 'lp-reject', 'lp-stale-pr']) {
+      assert.equal(runs[name].status, 'running')
+      assert.equal(runs[name].running, true)
+      assert.equal(runs[name].pr, null)
+    }
+  })
+})

@@ -173,7 +173,14 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
     }
     // A stop inside a stage is followed by that stage's (and any enclosing stage's) stage-end row, so the
     // lane's state is its last row that is not a stage-end.
-    const last = rows.findLast((row) => row.event !== 'stage-end') ?? rows.at(-1)
+    let last = rows.findLast((row) => row.event !== 'stage-end') ?? rows.at(-1)
+    // `crew finish --accept` appends a `pr` row then a `finish-decision` row: a pr row after the last
+    // finish-ready, followed only by those, is the lane's state.
+    if (last?.event === 'finish-decision') {
+      const tail = rows.findLast((row) => row.event !== 'stage-end' && row.event !== 'finish-decision')
+      const ready = rows.findLastIndex((row) => row.event === 'finish-ready')
+      if (tail?.event === 'pr' && isObject(tail.pr) && tail.index > ready) last = tail
+    }
     if (error || !rows.length) {
       reason = error ?? (skipped_malformed ? 'task journal has no readable rows' : 'task journal is empty')
     } else if (last.event === VERDICT_EVENT) {

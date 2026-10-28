@@ -77,12 +77,12 @@ before its first lane.
   PR), `agents.mjs` and `protocols.mjs` (seat definitions and the closed
   protocols), `acp/` and `acp-client.mjs` (the ACP seat transport), and the
   verbs `show`, `finish`, `record-pr`, `closeout` and `lanes`. Seat definitions
-  are `crew/agents/*.md`; charters are `crew/roles/*.md`.
+  are in `crew/agents/`; charters are in `crew/roles/`.
 - **`skills/`, `commands/`** — the operating knowledge as Claude Code surfaces.
   The knowledge skills (`pr-review`, `qa-test-writing`, `backend-node`,
   `frontend-svelte`, `ui-design`, `devops`, `ux`, `code-less`, `prose-plain`)
   work in any repo the moment the plugin is installed; the runtime skills
-  (`lane-brief`, `crew-dispatch`, `crew-recovery`) drive the crew CLI and need
+  (`lane-brief`, `crew-recovery`) drive the crew CLI and need
   this source tree. `crew-onboard` owns the split and the foreign-checkout
   procedure. Commands are thin entry points that name the skill owning each
   procedure: `/dispatch`, `/close-out`, `/status`, `/onboard`, `/review`.

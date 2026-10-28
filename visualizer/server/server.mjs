@@ -511,14 +511,14 @@ export function startServer(options = {}) {
         const result = typeof agents.read === 'function' ? await agents.read() : { degraded: true, reasons: ['agents source is unavailable'], agents: [], skills: [], roles: [], prompts: [] }
         return json(res, 200, { schema, ...result })
       }
-      if (url.pathname === '/api/agents/propose' || url.pathname === '/api/skills/propose' || url.pathname === '/api/prompts/propose') {
+      if (url.pathname === '/api/agents/propose' || url.pathname === '/api/skills/propose') {
         if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
         const refusal = writeGuard(req)
         if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
         let input
         try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
         if (!input || typeof input !== 'object' || Array.isArray(input)) return json(res, 400, { schema, error: 'request body must be an object' })
-        const route = url.pathname === '/api/agents/propose' ? 'agents' : url.pathname === '/api/skills/propose' ? 'skills' : 'prompts'
+        const route = url.pathname === '/api/agents/propose' ? 'agents' : 'skills'
         // One endpoint, two proposals: {role, tier, field, value} edits a crew/agents/<role>.md frontmatter
         // field; {name, entry} proposes a coding_agents register entry. A body with `field` is the first.
         if (route === 'agents' && Object.hasOwn(input, 'field')) {
@@ -538,21 +538,18 @@ export function startServer(options = {}) {
           const { afterText, ...editResponse } = edit
           return json(res, 200, { schema, proposal: 'agent-edit', agent_path: `crew/agents/${input.role}.md`, applyable_with: 'git apply / patch -p1', ...editResponse })
         }
-        const fields = route === 'agents' ? ['name', 'entry'] : route === 'skills' ? ['role', 'skills'] : ['role', 'text']
+        const fields = route === 'agents' ? ['name', 'entry'] : ['role', 'skills']
         const unknownFields = Object.keys(input).filter((field) => !fields.includes(field))
         if (unknownFields.length) return json(res, 400, { schema, error: `unknown field ${unknownFields[0]}` })
         if (route === 'agents' && (typeof input.name !== 'string' || !input.name.trim() || !input.entry || typeof input.entry !== 'object' || Array.isArray(input.entry))) return json(res, 400, { schema, error: 'name and entry object are required' })
         if (route === 'skills' && (typeof input.role !== 'string' || !Array.isArray(input.skills))) return json(res, 400, { schema, error: 'role and skills array are required' })
-        if (route === 'prompts' && (typeof input.role !== 'string' || typeof input.text !== 'string')) return json(res, 400, { schema, error: 'role and text are required' })
         let result
         if (route === 'agents') result = await agents.proposeAgent(input)
-        else if (route === 'skills') result = await agents.proposeSkills(input)
-        else result = await agents.proposePrompt(input)
+        else result = await agents.proposeSkills(input)
         const { target_path, after_text, ...response } = result || { ok: false, diff: null, refusals: [{ code: 'source-unavailable', message: 'agents source returned no proposal' }] }
         if (route === 'agents') {
           return json(res, 200, { schema, proposal: 'agents', ...response })
         }
-        if (route === 'prompts') return json(res, 200, { schema, proposal: 'prompts', ...response })
         return json(res, 200, { schema, proposal: 'skills', ...response })
       }
       if (url.pathname === '/api/model-catalog') {

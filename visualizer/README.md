@@ -14,7 +14,7 @@ server cannot read is `null` with a reason, never a guess or a zero.
 
 Kept routes: `/api/sessions`, `/api/events` (lean lanes), `/api/returns`,
 `/api/journal`, `/api/seat-sessions`, `/api/agents` (+ `/api/agents/propose`,
-`/api/skills/propose`, `/api/prompts/propose`), `/api/agent-library*`,
+`/api/skills/propose`), `/api/agent-library*`,
 `/api/harness-settings`, `/api/skill-library*`, `/api/skill-rules`,
 `/api/model-catalog*`, `/api/plugin-write-mode` and `/api/health`.
 

@@ -14,7 +14,7 @@ import { crewSummary } from '../visualizer/web/src/lib/crew.js'
 import { assuranceMeta, assuranceOption, executionMeta, runConfiguration, taskProfileMeta } from '../visualizer/web/src/lib/workflow-semantics.js'
 import { diffLines } from '../visualizer/web/src/lib/diff-lines.js'
 import { ROOT, scratchDir, sqliteAvailable } from './helpers.mjs'
-import { getPluginWriteMode, proposePrompt, proposeSkills } from '../visualizer/web/src/lib/api.js'
+import { getPluginWriteMode, proposeSkills } from '../visualizer/web/src/lib/api.js'
 import { activitySummary } from '../visualizer/web/src/lib/activity.js'
 test('RO6', async () => {
   // MUTATION: change the getter URL; the behavioral fetch assertion must fail.

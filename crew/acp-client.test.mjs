@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
 import {
   appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync,
@@ -11,8 +11,9 @@ import { scratchDir, trackProcessGroupFile } from '../test/helpers.mjs'
 import {
   ACP_CLIENT_CAPABILITIES, ACP_UPDATE_KINDS, ACP_WRITE_DEADLINE_MS, acpClient, acpSeatPaths,
 } from './acp-client.mjs'
-import { seatCommandPath } from './headless-rpc.mjs'
-import { REGISTER_ROOT } from './capabilities.mjs'
+import { seatCommandPath } from './acp/wire.mjs'
+
+const REGISTER_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
 const FIXTURES = join(REGISTER_ROOT, 'test', 'fixtures', 'acp')
 const CLAUDE_AGENT = ['@agentclientprotocol', ['claude', 'agent', 'acp'].join('-')].join('/')

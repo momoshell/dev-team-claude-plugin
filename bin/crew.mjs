@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 // crew — run the deployed crew from any folder.
 //
-//   crew <crew.mjs verb> [...]   run crew/crew.mjs; the current folder stays the checkout
 //   crew start <brief.md>        run crew/start.mjs: start a lane from a P1 brief (ADR-052)
 //   crew show <lane> [<role>] [--json]  read a lane's recorded sessions (crew/show.mjs)
 //   crew record-pr <lane> --pr <url>  record the PR a stopped lean lane was hand-finished in (crew/record-pr.mjs)
@@ -10,14 +9,13 @@
 //   crew closeout <lane>         remove a merged lean lane's worktree and branch, archive its lane directory (crew/closeout.mjs)
 //   crew lanes [--all] [--json]  list lean lanes from their journals (crew/lanes.mjs)
 //   crew viz                     serve the visualizer from the crew home
-//   crew where                   print the crew home, its commit and its roster date
+//   crew where                   print the crew home, its branch and its commit
 //   crew update [--force]        fast-forward the crew home to origin/main and rebuild what changed
 //
 // The crew home is the checkout this file lives in, after symlinks resolve
 // (~/.local/bin/crew -> ~/Dev/dev-team-stable/bin/crew.mjs), or CREW_HOME when set.
-// Running the home's own crew.mjs is what makes its roster.json the seating roster (#983).
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -65,9 +63,7 @@ export function rebuildPlan(changed, { hasModules, hasDist }) {
 function where(home) {
   const head = git(home, ['log', '-1', '--format=%h %s'])
   const branch = git(home, ['rev-parse', '--abbrev-ref', 'HEAD'])
-  let roster = 'unreadable'
-  try { roster = JSON.parse(readFileSync(join(home, 'crew', 'roster.json'), 'utf8')).updated_at } catch {}
-  process.stdout.write(`home    ${home}\nbranch  ${branch}\nhead    ${head}\nroster  updated ${roster}\n`)
+  process.stdout.write(`home    ${home}\nbranch  ${branch}\nhead    ${head}\n`)
   return 0
 }
 
@@ -104,7 +100,8 @@ export function main(argv = process.argv.slice(2), env = process.env) {
   if (verb === 'viz') { const vizEnv = env.DEVTEAM_INTAKE_CHECKOUT ? env : { ...env, DEVTEAM_INTAKE_CHECKOUT: process.cwd() }; return run(process.execPath, ['--env-file-if-exists=.env.local', 'visualizer/server/server.mjs', ...rest], { cwd: home, env: vizEnv }) }
   const entry = ENTRY[verb]
   if (entry) return run(process.execPath, [join(home, entry), ...rest])
-  return run(process.execPath, [join(home, 'crew', 'crew.mjs'), ...argv])
+  process.stderr.write(`crew: unknown verb ${JSON.stringify(verb ?? '')}; expected start, show, record-pr, closeout, finish, lanes, viz, where or update\n`)
+  return 2
 }
 
 if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {

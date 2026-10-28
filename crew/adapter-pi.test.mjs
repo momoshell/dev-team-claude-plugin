@@ -10,10 +10,19 @@ import { delimiter, dirname, join, basename } from 'node:path'
 import { seatCommand, acpLaunch, piRpcSeatParts, capabilitiesFor, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_BUILTIN_EXTENSION_TOOLS, PI_MCP_SERVER_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, PI_EDIT_ASSIST_ENV, EDIT_ASSIST_VALUES, PI_CODEMODE_ENV, PI_CODEMODE_VALUES, shellSingleQuote, ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapters/adapter-pi.mjs'
 import { seatCommand as claudeSeatCommand, PANE_USAGE_SETTINGS } from './adapters/adapter-claude.mjs'
 import { scratchDir, ROOT } from '../test/helpers.mjs'
-import { SEAT_DEFAULTS, ROLE_ORDER, assertFanoutCoherent } from './crew.mjs'
 import { childArgs, resolvePiBinary } from './pi/extensions/subagent.ts'
 import { EDIT_ASSIST_ENV } from './pi/extensions/builderloop.ts'
-import { PI_CODEMODE_VALUES as LEDGER_PI_CODEMODE_VALUES } from '../scripts/factory/ledger.mjs'
+
+// Seat tool boundaries the pi seat command must translate (the retired driver's seat defaults).
+const NO_FANOUT = 'Task,Agent,Workflow'
+const ROLE_ORDER = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
+const SEAT_DEFAULTS = Object.freeze({
+  lead: { tools: 'Read,Glob,Grep,Bash,Write', deny: `Edit,NotebookEdit,${NO_FANOUT}` },
+  planner: { tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit' },
+  builder: { tools: 'Read,Edit,Write,Glob,Grep,Bash', deny: NO_FANOUT },
+  reviewer: { tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit' },
+  'tech-lead': { tools: 'Read,Glob,Grep,Bash,Write', deny: `Edit,NotebookEdit,${NO_FANOUT}` },
+})
 
 // Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
 delete process.env.CREW_ROUTER_ATTEMPT_URL
@@ -101,7 +110,6 @@ test('PC11', () => {
   assert.equal(PI_CODEMODE_ENV, 'CREW_PI_CODEMODE')
   assert.deepEqual(PI_CODEMODE_VALUES, ['on', 'off'])
   assert.equal(Object.isFrozen(PI_CODEMODE_VALUES), true)
-  assert.equal(LEDGER_PI_CODEMODE_VALUES, PI_CODEMODE_VALUES)
 })
 
 test('EA6 edit assist is builder-only, strips inherited values, and crosses ACP', () => {
@@ -527,10 +535,6 @@ test('ungranted pi seats disable extension and skill discovery across the full s
   assert.equal(child.some((arg) => arg === '--provider' || String(arg).startsWith('--provider=')), false)
   assert.ok(child.includes('--no-extensions'))
   assert.equal(child.includes('-e'), false)
-  assert.throws(
-    () => assertFanoutCoherent('builder', { agents: [{ name: 'scout', def: '/tmp/scout.json' }] }),
-    (err) => err.reason === 'grant-contradicts-deny',
-  )
 })
 
 test('granted pi seats append deduped activators and checkout-pinned extension, skill, and config paths', () => {

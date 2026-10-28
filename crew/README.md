@@ -58,45 +58,18 @@ lands in `journal.jsonl` and on the workspace's live `crew-stage` pill.
 ## Runtime feature map
 | Feature | Where it lives | ADR | Doc |
 |---|---|---|---|
-| Plan and plan checks | `crew/drive.mjs` | - | [Plan check](#plan-check-growth-evidence-and-the-carve-verdict) |
-| Acceptance gate and kill-mutations | `crew/drive.mjs` | ADR-030 ([decision](../docs/adr/adr-030-acceptance-authorship.md)) | [Acceptance gate](#the-acceptance-gate-gate-first) |
-| Build | `crew/drive.mjs` | - | [Model](#the-model) |
 | Pi planner lab | `crew/mcp/lab-server.mjs` → `crew/pi/extensions/lab.ts` | - | - |
 | Builderloop | `crew/pi/extensions/builderloop.ts` | - | - |
 | Readgate | `crew/pi/extensions/readgate.ts` | - | - |
-| FFF | `crew/capabilities.json`, `crew/crew.mjs`, `crew/adapters/adapter-pi.mjs` | - | - |
+| FFF | `crew/capabilities.json`, `crew/adapters/adapter-pi.mjs` | - | - |
 | Rule reminders (pi builder) | `crew/pi/extensions/reminders.ts` | - | - |
-| Pi native codemode and MCP (default on; per-lane `pi_codemode: off` or standalone `CREW_PI_CODEMODE=off` opts out; MCP independent) | `crew/crew.mjs`, `crew/adapters/adapter-pi.mjs` | - | [Conventions 2026-10-03](../docs/conventions.md) |
+| Pi native codemode and MCP (default on; per-lane `pi_codemode: off` or standalone `CREW_PI_CODEMODE=off` opts out; MCP independent) | `crew/adapters/adapter-pi.mjs` | - | [Conventions 2026-10-03](../docs/conventions.md) |
 | Advisor | `crew/pi/extensions/advisor.ts` | ADR-047 ([decision](../docs/adr/adr-047-the-advisor-is-a-roster-seat.md)) | [The advisor is a roster seat](../docs/adr/adr-047-the-advisor-is-a-roster-seat.md) |
-| Scope and out-of-context journal | `crew/drive.mjs` | ADR-045 ([decision](../docs/adr/adr-045-scope-is-context-not-enforcement.md)) | [Scope decision](../docs/adr/adr-045-scope-is-context-not-enforcement.md) |
-| Validation | `crew/drive.mjs` | - | [Acceptance gate](#the-acceptance-gate-gate-first) |
-| Review | `crew/drive.mjs` | ADR-038 ([decision](../docs/adr/adr-038-floor-forces-proof-not-rounds.md)) | [Review](../docs/adr/adr-038-floor-forces-proof-not-rounds.md) |
-| Suite | `crew/drive.mjs` | ADR-042 ([decision](../docs/adr/adr-042-split-the-suites-not-the-driver.md)) | [Suite decision](../docs/adr/adr-042-split-the-suites-not-the-driver.md) Suite timeout resolves from DEVTEAM_SUITE_TIMEOUT_S, then a ratified profile suite_timeout_s, then 900 s, bounded 60 to 14400; an invalid value refuses suite-timeout-invalid. |
-| Document | `crew/drive.mjs` | - | [Model](#the-model) |
-| Commit | `crew/drive.mjs` | ADR-034 ([decision](../docs/adr/adr-034-driver-publishes.md)) | [Publication](../docs/adr/adr-034-driver-publishes.md) |
-| Rebase and post-rebase proof | `crew/drive.mjs` | ADR-034 ([decision](../docs/adr/adr-034-driver-publishes.md)) | [Publication](../docs/adr/adr-034-driver-publishes.md) |
-| Publish and open PR, never merge | `crew/drive.mjs` | ADR-034 ([decision](../docs/adr/adr-034-driver-publishes.md)) | [Publication](../docs/adr/adr-034-driver-publishes.md) |
-| Resume (`resumeCmd`) | `crew/crew.mjs` | - | [Model](#the-model) |
-| Converge | `crew/converge.mjs` | - | - |
-| Execution shapes: `review_only`, `review_panel`, `directed`, `verify_only`, `scout`, `repair`, `finish`, `stepped` | `crew/variants.mjs` | ADR-035 ([decision](../docs/adr/adr-035-run-configuration-axes.md)); `finish` (ADR-051, lane 1 built: shape and executor path; the operator verb is pending), `stepped` (ADR-048) | [Run configuration](../docs/trd-task-configuration-and-run-state.md) |
-| Seat skills | `skills/skill-map.json`, `crew/crew.mjs` | ADR-050 ([decision](../docs/adr/adr-050-seat-skills-are-granted-not-pasted.md)) | [Seat skills](../docs/adr/adr-050-seat-skills-are-granted-not-pasted.md) |
+| Seat skills | `skills/skill-map.json` | ADR-050 ([decision](../docs/adr/adr-050-seat-skills-are-granted-not-pasted.md)) | [Seat skills](../docs/adr/adr-050-seat-skills-are-granted-not-pasted.md) |
 | Builder edit assist | `crew/pi/extensions/builderloop.ts`, `crew/adapters/adapter-pi.mjs` | ADR-049 ([decision](../docs/adr/adr-049-builder-edit-assist.md)) | per-lane dispatch-batch rotation for headless pi builders that leave edit_assist unset; an inherited CREW_EDIT_ASSIST is refused; a standalone crew boot stays off unless CREW_EDIT_ASSIST=on: [Builder edit assist](../docs/adr/adr-049-builder-edit-assist.md) |
-| Turn ceilings | `crew/drive.mjs` | - | [Decisions needed](../docs/decisions-needed.md) |
-| Anchors and pins | `skills/qa-test-writing/anchor-pin.test.mjs` | ADR-040 ([decision](../docs/adr/adr-040-anchor-pins-repaired-after-merge.md)) | [Anchor pins](../docs/adr/adr-040-anchor-pins-repaired-after-merge.md) |
-| Assurance presets and task profiles | `crew/assurances.mjs` | ADR-035 ([decision](../docs/adr/adr-035-run-configuration-axes.md)) | [Run configuration](../docs/trd-task-configuration-and-run-state.md) |
-| Workflows | `crew/workflows.mjs` | ADR-044 ([decision](../docs/adr/adr-044-declared-topologies-name-executor-paths.md)) | [Workflow documentation](../crew/workflows/README.md) |
-| Factory dispatch | `scripts/factory/dispatch-batch.mjs` | - | - |
-| Factory intake | `scripts/factory/intake.mjs` | - | - |
-| Breaker | `crew/breaker.mjs` | ADR-032 ([register](../docs/adr/README.md)) | [Breaker decision](../docs/adr/README.md) |
-| Screener | `crew/screener.mjs` | - | - |
-| Harvest and arms | `crew/harvest.mjs`, `crew/arms.mjs` | - | - |
 | Memory | `crew/memory.mjs` | - | - |
-| Narration | `crew/drive.mjs` | - | [Model](#the-model) |
 | Visualizer | `visualizer/web/src/lib/LeanRunDetail.svelte` | - | [Visualizer](../visualizer/README.md) |
-| Pane transport | `crew/driver.mjs` | ADR-033 ([register](../docs/adr/README.md)) | [Adapters](#adapters-hot-seats) |
-| Headless daemon | `crew/daemon.mjs` | ADR-029 ([decision](../docs/adr/adr-029-headless-observability-interjection.md)) | [The daemon](#the-daemon) |
 | ACP | `crew/acp-client.mjs` | ADR-036 ([decision](../docs/adr/adr-036-acp-seat-transport.md)) | [ACP decision](../docs/adr/adr-036-acp-seat-transport.md) |
-| Return paths | `crew/crew.mjs`, `crew/daemon.mjs` | - | [Contracts](#contracts) |
 
 The planner's pi seat receives native `mcp__lab__lab` (timeout 960 seconds); the retained `lab.ts` implements the tool. If the server file is absent or its probe fails, the grant is withheld with `server-absent`.
 

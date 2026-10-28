@@ -372,7 +372,7 @@ export async function runLoop(spec, deps = {}) {
           feedback = [{
             id: 'suite-repair',
             severity: 'must-fix',
-            summary: 'The full suite is red on two runs after your change, usually because a skill doc pins code you moved (anchors.json line spans, census figures in exhibits tests). Fix the failing tests; for anchor spans run skills/qa-test-writing/anchor-pin.mjs --repair-all <dir> --root <checkout> with node. This is your only repair turn.',
+            summary: 'The full suite is red on two runs after your change. Fix the failing tests. This is your only repair turn.',
             checkout: cwd,
             failingTests: failures.tests,
             failingFiles: failures.files,

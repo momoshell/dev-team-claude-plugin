@@ -10,8 +10,6 @@ import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, gateProofStory, 
 import { eventStory, eventStreamSummary } from '../visualizer/web/src/lib/event-story.js'
 import { STORY_KINDS, assignmentPath, envelopeFacts, envelopeGroups, envelopeOverview, envelopeSections, journalLines, trajectoryRowStory, trajectorySummary } from '../visualizer/web/src/lib/diagnostic-story.js'
 import { executionTopology, factoryStepCategory, factoryStepName, factoryStepTrace } from '../visualizer/web/src/lib/execution-steps.js'
-import { VARIANTS } from '../crew/variants.mjs'
-import { shapeValidationDefect } from '../crew/shape-validator.mjs'
 import { crewSummary } from '../visualizer/web/src/lib/crew.js'
 import { assuranceMeta, assuranceOption, executionMeta, runConfiguration, taskProfileMeta } from '../visualizer/web/src/lib/workflow-semantics.js'
 import { diffLines } from '../visualizer/web/src/lib/diff-lines.js'
@@ -1670,66 +1668,12 @@ test('A1.multiline-call', () => {
   assert.deepEqual(scanStageSites("stage(\n  'multi-line'\n)"), [{ line: 1, callee: 'stage', label: 'multi-line' }])
 })
 
-test('A1.variable-callers', () => {
-  const drive = readFileSync(join(ROOT, 'crew/drive.mjs'), 'utf8')
-  const docs = JSON.parse(readFileSync(join(ROOT, 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
-  const calls = scanStageSites(drive)
-  // recordGateProof's third caller is the reshape re-proof (issue 1760).
-  for (const [callee, label, count] of [
-    ['recordGateProof', 'gate-proof:${gateGeneration}', 3],
-    ['acceptRepairedGate', 'gate-reverify:${gateRepairs}', 2],
-  ]) assert.equal(calls.filter((site) => site.callee === callee && site.label === label).length, count, `${callee} callers are not all scanned`)
-  assert.deepEqual(docs['gate-proof'].source.sites, [
-    { callee: 'recordGateProof', label: 'gate-proof:${gateGeneration}', occurrence: 1 },
-    { callee: 'recordGateProof', label: 'gate-proof:${gateGeneration}', occurrence: 2 },
-    { callee: 'recordGateProof', label: 'gate-proof:${gateGeneration}', occurrence: 3 },
-  ])
-  assert.deepEqual(docs['gate-reverify'].source.sites, [
-    { callee: 'acceptRepairedGate', label: 'gate-reverify:${gateRepairs}', occurrence: 1 },
-    { callee: 'acceptRepairedGate', label: 'gate-reverify:${gateRepairs}', occurrence: 2 },
-  ])
-  for (const site of [...docs['gate-proof'].source.sites, ...docs['gate-reverify'].source.sites]) {
-    assert.ok(resolveStageSite(site, calls), `${site.callee} occurrence ${site.occurrence} does not resolve`)
-  }
-})
-
 test('A1.variant-sites', () => {
   const docs = JSON.parse(readFileSync(join(ROOT, 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
   assert.deepEqual(docs.repair.source.sites, [{ callee: 'stage', label: '${variant}:r1', occurrence: 2, bindings: { variant: 'repair' } }])
   assert.deepEqual(docs.directed.source.sites, [{ callee: 'stage', label: '${variant}:r1', occurrence: 3, bindings: { variant: 'directed' } }])
   for (const key of ['scout', 'review_only', 'verify_only']) {
     assert.deepEqual(docs[key].source.sites, [{ callee: 'stage', label: '${variant}:r1', occurrence: 1, bindings: { variant: key } }])
-  }
-})
-
-test('A1.swap-sites', () => {
-  const drive = readFileSync(join(ROOT, 'crew/drive.mjs'), 'utf8')
-  const docs = JSON.parse(readFileSync(join(ROOT, 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
-  const declared = new Set(Object.values(VARIANTS).flatMap((variant) => variant.stages))
-  const scannedCalls = scanStageSites(drive)
-  for (const call of scannedCalls) {
-    const resolved = resolveStageLabel(call)
-    if (!resolved.includes('${')) declared.add(stageHeadFromLabel(resolved))
-    else if (stageHeadFromLabel(resolved) !== '${variant}') declared.add(stageHeadFromLabel(resolved))
-  }
-  assert.deepEqual(Object.keys(docs).sort(), [...declared].sort())
-  const lines = drive.split('\n')
-  for (const [stage, doc] of Object.entries(docs)) {
-    assert.equal(typeof doc.description, 'string')
-    assert.ok(doc.description.trim().length > 20)
-    assert.doesNotMatch(doc.description, /\n/)
-    assert.ok(Object.prototype.hasOwnProperty.call(doc, 'charter'))
-    const sites = doc.source.sites
-    assert.ok(Array.isArray(sites), `${stage} sites are not measured`)
-    if (sites.length === 0) assert.equal(NO_CALL_REASONS.includes(doc.source.reason?.includes('no executable') ? 'declared-without-executor-call' : null), true)
-    for (const site of sites) {
-      const call = resolveStageSite(site, scannedCalls)
-      assert.ok(call && call.line >= 1 && call.line <= lines.length && lines[call.line - 1].trim().length > 0, `${stage} citation occurrence ${site.occurrence} is not a ${site.callee} call`)
-      const resolved = resolveStageLabel(site)
-      assert.equal(stageHeadFromLabel(resolved), stage, `${stage} citation resolves to ${resolved}`)
-      if (site.label.includes('${variant}')) assert.deepEqual(Object.keys(site.bindings || {}), ['variant'])
-      else assert.equal(Object.prototype.hasOwnProperty.call(site, 'bindings'), false)
-    }
   }
 })
 

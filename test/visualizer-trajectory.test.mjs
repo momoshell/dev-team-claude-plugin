@@ -7,7 +7,7 @@ import { startServer } from '../visualizer/server/server.mjs'
 import { createJournalSource } from '../visualizer/server/journal-source.mjs'
 import { buildTrajectory, focusTrajectory, MARKER_EVENTS, SUBSTRATE_DOWN, SUBSTRATE_RECOVERED, projectSpan, spansActiveIn, toMs } from '../visualizer/web/src/lib/spans.js'
 import { applyRead, createPulse, initialJournalState, select, setRange, setReveal, shouldRead, trajectoryView } from '../visualizer/web/src/lib/live.js'
-import { JOURNAL_CHANNELS } from '../crew/drive.mjs'
+const JOURNAL_CHANNELS = Object.freeze({ record: 'record', operational: 'operational' })
 import { scratchDir, treeDigest } from './helpers.mjs'
 
 const DURATION_KEY = /dur|elaps|_ms$|secs|seconds/i

@@ -78,7 +78,7 @@ test('RP3 M1 shipped role packs pin exactly and session start is silent', () => 
   const dir = fixture()
   const result = invoke(dir, 'session-start', {}, {}, ROOT)
   assert.equal(result.status, 0)
-  assert.deepEqual(JSON.parse(readFileSync(join(ROOT, MAP_PATH), 'utf8')), { version: 1, exempt: ['**/anchors.json', 'docs/audits/**'], rules: [
+  assert.deepEqual(JSON.parse(readFileSync(join(ROOT, MAP_PATH), 'utf8')), { version: 1, exempt: ['docs/audits/**'], rules: [
     { when: { roles: ['planner'] }, delivery: 'inline', skills: ['dev-team:qa-test-writing#gates'] },
     { when: { roles: ['builder'] }, delivery: 'inline', skills: ['dev-team:code-less', 'dev-team:qa-test-writing#vacuity'] },
     { when: { roles: ['reviewer'] }, delivery: 'inline', skills: ['dev-team:pr-review'] },

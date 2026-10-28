@@ -7,7 +7,117 @@ import { AGENT_ROLES, TIERS, parseAgent, validateEnvelope, ENVELOPE_FIELDS, ENVE
 import { resolveAgents } from './agents.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
-const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
+// The tier cells the committed definitions must resolve to (the retired roster file's snapshot).
+const roster = {
+  "tiers": {
+    "mechanical": {
+      "advisor": null,
+      "lead": null,
+      "planner": {
+        "provider": "meta",
+        "id": "muse-wonder-1.0-contributor",
+        "agent": "pi",
+        "effort": "medium"
+      },
+      "builder": {
+        "provider": "anthropic",
+        "id": "claude-sonnet-5-5",
+        "agent": "claude",
+        "effort": "high"
+      },
+      "reviewer": {
+        "provider": "openai",
+        "id": "gpt-6.1-sol",
+        "agent": "pi",
+        "effort": "high"
+      }
+    },
+    "build": {
+      "advisor": null,
+      "lead": {
+        "provider": "openai",
+        "id": "gpt-6-astra",
+        "agent": "pi",
+        "effort": "high",
+        "fallback": [
+          {
+            "provider": "openai",
+            "id": "gpt-6.1-sol",
+            "agent": "pi",
+            "effort": "high"
+          }
+        ]
+      },
+      "planner": {
+        "provider": "meta",
+        "id": "muse-wonder-1.0-contributor",
+        "agent": "pi",
+        "effort": "high"
+      },
+      "builder": {
+        "provider": "anthropic",
+        "id": "claude-sonnet-5-5",
+        "agent": "claude",
+        "effort": "high"
+      },
+      "reviewer": {
+        "provider": "openai",
+        "id": "gpt-6.1-sol",
+        "agent": "pi",
+        "effort": "high"
+      }
+    },
+    "judge": {
+      "advisor": null,
+      "lead": {
+        "provider": "openai",
+        "id": "gpt-6-astra",
+        "agent": "pi",
+        "effort": "high",
+        "fallback": [
+          {
+            "provider": "openai",
+            "id": "gpt-6.1-sol",
+            "agent": "pi",
+            "effort": "high"
+          }
+        ]
+      },
+      "planner": {
+        "provider": "meta",
+        "id": "muse-wonder-full-1.0-contributor",
+        "agent": "pi",
+        "effort": "high"
+      },
+      "builder": {
+        "provider": "anthropic",
+        "id": "claude-sonnet-5-5",
+        "agent": "claude",
+        "effort": "xhigh"
+      },
+      "reviewer": {
+        "provider": "openai",
+        "id": "gpt-6.1-sol",
+        "agent": "pi",
+        "effort": "xhigh"
+      },
+      "tech-lead": {
+        "provider": "anthropic",
+        "id": "claude-opus-5-5",
+        "agent": "claude",
+        "effort": "xhigh",
+        "fallback": [
+          {
+            "provider": "anthropic",
+            "id": "claude-fable-5-1",
+            "agent": "claude",
+            "effort": "medium"
+          }
+        ]
+      }
+    }
+  }
+}
 const AGENTS_DIR = fileURLToPath(new URL('./agents/', import.meta.url))
 
 // A private copy of the committed definitions, so a test can edit them.

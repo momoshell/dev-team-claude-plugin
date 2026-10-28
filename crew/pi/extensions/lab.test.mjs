@@ -6,7 +6,6 @@ import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import * as mod from './lab.ts'
-import * as capabilities from '../../capabilities.mjs'
 import { createLabServer } from '../../mcp/lab-server.mjs'
 import { ROOT, git, scratchDir } from '../../../test/helpers.mjs'
 
@@ -299,7 +298,6 @@ test('the extension registers one lab tool and one result handler', () => {
 })
 
 const QA_GRANT_OWNER = 'skills/qa-test-writing/grants.json'
-const QA_EVIDENCE_OWNER = 'skills/qa-test-writing/anchor-evidence.mjs'
 
 function skillGrant(ops = [], hostAuthority = []) {
   return { schema_version: 1, lab: { ops, host_authority: hostAuthority } }
@@ -429,63 +427,6 @@ test('skill identities reject absolute, traversing, and non-canonical paths befo
     const result = await tool.execute('x', paramsFor('export default 1', skill), null, null, { cwd: ROOT })
     assert.equal(result.details.refused, 'skill-grant-invalid')
     assert.deepEqual(calls, [])
-  }
-})
-
-test('E1 shipped anchor evidence program runs under its grant', async () => {
-  const citationsFile = 'skills/qa-test-writing/references/citations.md'
-  const anchorPinFile = 'skills/qa-test-writing/anchor-pin.mjs'
-  const hitsFor = (file, pattern) => readFileSync(join(ROOT, file), 'utf8').split(/\r?\n/).flatMap((text, index) => text.includes(pattern) ? [{ file, line: index + 1, text }] : [])
-  const expectedAnchors = { pattern: 'anchors.json', hits: hitsFor(citationsFile, 'anchors.json'), truncated: false }
-  const expectedShifted = { pattern: 'shifted', hits: hitsFor(anchorPinFile, 'shifted'), truncated: false }
-  const source = readFileSync(join(ROOT, QA_EVIDENCE_OWNER), 'utf8')
-  const copied = join(temp('lab-anchor-evidence-'), 'anchor-evidence.mjs')
-  writeFileSync(copied, source)
-  const calls = []
-  const previousLab = Object.getOwnPropertyDescriptor(globalThis, 'lab')
-  try {
-    globalThis.lab = Object.freeze({
-      scratchCheckout: async () => {
-        calls.push({ op: 'scratchCheckout' })
-        return { path: '/tmp/qa-anchor-evidence' }
-      },
-      grep: async (pattern, options) => {
-        calls.push({ op: 'grep', pattern, options })
-        if (pattern === 'anchors.json') return expectedAnchors
-        if (pattern === 'shifted') return expectedShifted
-        throw new Error('unexpected grep pattern')
-      },
-    })
-    const imported = await import(new URL(copied, 'file:').href)
-    assert.deepEqual(imported.default, { anchors: expectedAnchors, shifted: expectedShifted })
-    assert.deepEqual(calls.map(({ op }) => op), ['scratchCheckout', 'grep', 'grep'])
-    assert.deepEqual(calls[1], {
-      op: 'grep', pattern: 'anchors.json', options: { fixedString: true, pathspec: [citationsFile] },
-    })
-    assert.deepEqual(calls[2], {
-      op: 'grep', pattern: 'shifted', options: { fixedString: true, pathspec: [anchorPinFile] },
-    })
-    assert.deepEqual(expectedAnchors.hits, hitsFor(citationsFile, 'anchors.json'))
-    assert.deepEqual(expectedShifted.hits, hitsFor(anchorPinFile, 'shifted'))
-    const declared = JSON.parse(readFileSync(join(ROOT, QA_GRANT_OWNER), 'utf8'))
-    assert.deepEqual(declared, skillGrant(['scratchCheckout', 'read', 'grep']))
-
-    const run = scriptedHarness({
-      requests: [
-        { id: 1, op: 'scratchCheckout', args: [] },
-        { id: 2, op: 'read', args: [SUITE_PATH] },
-        { id: 3, op: 'grep', args: ['x', { fixedString: true, pathspec: [SUITE_PATH] }] },
-      ],
-      deps: { spawnSync: fakeGitSpawnSync() },
-      skill: 'skills/qa-test-writing',
-    })
-    const result = await run.tool.execute('x', paramsFor('export default 1', run.skill), null, null, { cwd: ROOT })
-    assert.equal(result.details.outcome, 'ok')
-    assert.deepEqual(result.details.ops, ['scratchCheckout', 'read', 'grep'])
-    assertOpsAnswered(run, 3)
-  } finally {
-    if (previousLab) Object.defineProperty(globalThis, 'lab', previousLab)
-    else delete globalThis.lab
   }
 })
 
@@ -699,25 +640,10 @@ test('a normal close cancels the escalation timer', async () => {
   assert.equal(deadline.cleared, true)
 })
 
-// MUTATION: re-add the retired lab extension to planner/pi's raw grant.
 test('LM4', () => {
   const grantsDocument = JSON.parse(readFileSync(join(ROOT, 'skills/qa-test-writing/grants.json'), 'utf8'))
   assert.deepEqual(grantsDocument.lab.ops, ['scratchCheckout', 'read', 'grep'])
   assert.deepEqual(grantsDocument.lab.host_authority, [])
-  const evidence = readFileSync(join(ROOT, 'skills/qa-test-writing/anchor-evidence.mjs'), 'utf8')
-  assert.match(evidence, /lab\.scratchCheckout/)
-  const register = capabilities.loadCapabilities()
-  const planner = capabilities.grantsFor(register, 'planner', { agent: 'pi' })
-  assert.deepEqual(planner.mcp_servers.find((server) => server.name === 'lab'), { name: 'lab', command: { bin: 'node', args: ['crew/mcp/lab-server.mjs'] }, url: null })
-  assert.equal(planner.extensions.some((path) => path.endsWith('/crew/pi/extensions/lab.ts')), false)
-  for (const role of ['lead', 'builder', 'reviewer', 'tech-lead']) {
-    const grants = capabilities.grantsFor(register, role, { agent: 'pi' })
-    assert.equal(grants.extensions.some((path) => path.endsWith('/crew/pi/extensions/lab.ts')), false)
-    assert.equal(grants.mcp_servers.some((server) => server.name === 'lab'), false)
-  }
-  const claude = capabilities.grantsFor(register, 'planner', { agent: 'claude' })
-  assert.equal(claude.mcp_servers.some((server) => server.name === 'lab'), false)
-  assert.equal(claude.extensions.some((path) => path.endsWith('/crew/pi/extensions/lab.ts')), false)
 })
 
 test('the exported API has exactly six operation names', () => {
@@ -1163,20 +1089,16 @@ test('a red suite is data while a suite without TAP summary is suite-failed', as
   assert.equal(red.program.responses[1].value.exit_code, 1)
   assert.deepEqual(red.program.responses[1].value.structural_failures, [])
 
-  const structural = scriptedHarness({
+  const whole = scriptedHarness({
     requests: [
       { id: 1, op: 'scratchCheckout', args: [] },
-      { id: 2, op: 'runSuite', args: [['test/factory-probe-repo.test.mjs']] },
+      { id: 2, op: 'runSuite', args: [['crew/pi/extensions/subagent.test.mjs']] },
     ],
     suite: { stdout: '# pass 1\n# fail 1\n', close: [1, null] },
     deps: { kill: (pid, signal) => { if (signal === 0) throw Object.assign(new Error('gone'), { code: 'ESRCH' }) } },
   })
-  await structural.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
-  const failures = structural.program.responses[1].value.structural_failures
-  assert.equal(failures.length, 1)
-  assert.equal(failures[0].file, mod.LAB_STRUCTURAL_FAILURES[0].file)
-  assert.equal(failures[0].test, mod.LAB_STRUCTURAL_FAILURES[0].test)
-  assert.ok(failures[0].reason)
+  await whole.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.deepEqual(whole.program.responses[1].value.structural_failures, [])
 
   const empty = scriptedHarness({
     requests: [
@@ -1190,18 +1112,11 @@ test('a red suite is data while a suite without TAP summary is suite-failed', as
   assert.equal(empty.program.responses[1].refused, 'suite-failed')
 })
 
-test('the structural failure selector follows suite paths', () => {
-  const all = mod.labStructuralFailures([])
-  assert.deepEqual(all, [...mod.LAB_STRUCTURAL_FAILURES])
-  const target = mod.LAB_STRUCTURAL_FAILURES[0]
-  assert.deepEqual(mod.labStructuralFailures([target.file]), [target])
-  assert.deepEqual(mod.labStructuralFailures(['test']), [target])
+test('no structural failure exception is named for any suite path', () => {
+  assert.deepEqual([...mod.LAB_STRUCTURAL_FAILURES], [])
+  assert.deepEqual(mod.labStructuralFailures([]), [])
+  assert.deepEqual(mod.labStructuralFailures(['test']), [])
   assert.deepEqual(mod.labStructuralFailures(['crew/pi/extensions/lab.test.mjs']), [])
-  for (const entry of all) {
-    const path = join(ROOT, entry.file)
-    assert.equal(existsSync(path), true)
-    assert.ok(readFileSync(path, 'utf8').includes(entry.test))
-  }
 })
 
 test('scratch clone mirrors origin values, absence, and detaches in three steps', async () => {

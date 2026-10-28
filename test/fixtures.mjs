@@ -1,21 +1,20 @@
 import { mkdtempSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
-import { slug } from '../crew/slug.mjs'
 
 // Root cause this guards: a test that PREDICTS a path the code DERIVES.
-// Here: `pathsFor` slugs the checkout basename and `slug()` lowercases
-// (crew/crew.mjs:85,92), so a mkdtemp name — whose random suffix is mixed
-// case — resolves back to the state dir only on a case-INSENSITIVE
-// filesystem. Green on macOS, ENOENT on Linux CI (shipped in PR #190, fixed
-// in 24a3941). The rule is imported, never re-implemented: a second copy of
-// the lowercasing is exactly the copy that goes stale.
+// Here: code that slugs the checkout basename lowercases it, so a mkdtemp
+// name — whose random suffix is mixed case — resolves back to the state dir
+// only on a case-INSENSITIVE filesystem. Green on macOS, ENOENT on Linux CI
+// (shipped in PR #190, fixed in 24a3941).
 //
 // Same root cause, opposite direction — not guarded here: macOS's `tmpdir()`
 // is a symlink (`/var` -> `/private/var`), so a test comparing a
 // realpath-resolved path against a raw `tmpdir()` join fails on macOS and
 // passes on Linux. If you hit that, the fix is the same shape: derive, do not
 // predict.
+const slug = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+
 export function assertSlugStable(pathOrName) {
   const name = basename(pathOrName)
   const normalized = slug(name)

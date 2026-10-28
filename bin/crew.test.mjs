@@ -15,11 +15,8 @@ function fakeHome(root) {
   const echo = (code) => `process.stdout.write(JSON.stringify({ entry: process.argv[1], argv: process.argv.slice(2), cwd: process.cwd() })); process.exitCode = ${code}\n`
   mkdirSync(join(root, 'crew'), { recursive: true })
   mkdirSync(join(root, 'scripts', 'factory'), { recursive: true })
-  writeFileSync(join(root, 'crew', 'crew.mjs'), echo(3))
-  writeFileSync(join(root, 'crew', 'factoryctl.mjs'), echo(0))
   writeFileSync(join(root, 'crew', 'start.mjs'), echo(0))
   writeFileSync(join(root, 'crew', 'show.mjs'), echo(7))
-  writeFileSync(join(root, 'crew', 'roster-generate.mjs'), echo(0))
   writeFileSync(join(root, 'crew', 'record-pr.mjs'), echo(0))
   writeFileSync(join(root, 'crew', 'closeout.mjs'), echo(0))
   writeFileSync(join(root, 'crew', 'finish.mjs'), echo(0))
@@ -59,19 +56,20 @@ function gitHome(root) {
   return { seed, origin, home }
 }
 
-test('a crew.mjs verb passes through with its argv, the caller cwd and its exit code', () => {
-  const root = scratch('pass')
+test('an unknown or missing verb is refused with exit 2 and runs nothing', () => {
+  const root = scratch('unknown')
   try {
     const home = fakeHome(join(root, 'home'))
-    const project = join(root, 'project')
-    mkdirSync(project)
-    const out = crew(['boot', '--task', 'x', '--tier', 'build'], { cwd: project, env: { CREW_HOME: home } })
-    assert.equal(out.status, 3)
-    assert.deepEqual(JSON.parse(out.stdout), { entry: join(home, 'crew', 'crew.mjs'), argv: ['boot', '--task', 'x', '--tier', 'build'], cwd: project })
+    for (const args of [['boot', '--task', 'x'], []]) {
+      const out = crew(args, { cwd: root, env: { CREW_HOME: home } })
+      assert.equal(out.status, 2)
+      assert.equal(out.stdout, '')
+      assert.match(out.stderr, /^crew: unknown verb ".*"; expected start, show, record-pr, closeout, finish, lanes, viz, where or update$/m)
+    }
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-// MUTATION: drop start from ENTRY and `crew start` reaches crew.mjs as an unknown verb.
+// MUTATION: drop start from ENTRY and `crew start` is refused as an unknown verb.
 test('start, show, record-pr, closeout, finish and lanes route to their own entry points with the verb stripped', () => {
   const root = scratch('route')
   try {
@@ -99,7 +97,7 @@ test('the home is the checkout the file lives in after symlinks resolve, unless 
 
 test('rebuildPlan installs on a lockfile move or absent modules, and builds on any web change or absent dist', () => {
   const present = { hasModules: true, hasDist: true }
-  assert.deepEqual(rebuildPlan(['crew/roster.json'], present), { install: false, build: false })
+  assert.deepEqual(rebuildPlan(['crew/start.mjs'], present), { install: false, build: false })
   assert.deepEqual(rebuildPlan(['package-lock.json'], present), { install: true, build: true })
   assert.deepEqual(rebuildPlan(['visualizer/web/src/App.svelte'], present), { install: false, build: true })
   assert.deepEqual(rebuildPlan(['visualizer/server/server.mjs'], present), { install: false, build: false })
@@ -178,16 +176,14 @@ test('viz injects the caller cwd as DEVTEAM_INTAKE_CHECKOUT unless preset', () =
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('where prints the home, branch, head and roster date', () => {
+test('where prints the home, branch and head', () => {
   const root = scratch('where')
   try {
     const { home } = gitHome(root)
-    mkdirSync(join(home, 'crew'))
-    writeFileSync(join(home, 'crew', 'roster.json'), JSON.stringify({ updated_at: '2026-10-16' }))
     const out = crew(['where'], { cwd: root, env: { CREW_HOME: home } })
     assert.equal(out.status, 0, out.stderr)
     assert.match(out.stdout, new RegExp(`^home    ${home}$`, 'm'))
     assert.match(out.stdout, /^branch  stable$/m)
-    assert.match(out.stdout, /^roster  updated 2026-10-16$/m)
+    assert.doesNotMatch(out.stdout, /roster/)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })

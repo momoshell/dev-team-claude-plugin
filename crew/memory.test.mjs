@@ -158,7 +158,7 @@ test('propose rejects a delta that restates a run fact and writes nothing', () =
         () => mem.propose({ name, description: 'a run fact', type: 'project', body }),
         (thrown) => {
           err = thrown
-          return /ledger\.mjs/.test(thrown.message)
+          return /bin\/crew\.mjs/.test(thrown.message)
         },
       )
       assert.equal(err.code, 'run-fact')
@@ -185,7 +185,7 @@ test('reconcile rejects a run-fact delta', () => {
       }),
       (thrown) => {
         err = thrown
-        return /ledger\.mjs/.test(thrown.message)
+        return /bin\/crew\.mjs/.test(thrown.message)
       },
     )
     assert.equal(err.code, 'run-fact')
@@ -224,8 +224,8 @@ test('lintMemoryDelta is a pure verdict', () => {
     })
     assert.equal(verdict.ok, false)
     assert.equal(verdict.findings[0].rule, 'adw-id')
-    assert.match(verdict.findings[0].query, /ledger\.mjs/)
-    assert.match(verdict.reason, /ledger\.mjs/)
+    assert.match(verdict.findings[0].query, /bin\/crew\.mjs/)
+    assert.match(verdict.reason, /bin\/crew\.mjs/)
     assert.deepEqual(
       memory.lintMemoryDelta({ body: "Deny-only is the pi seat's tool posture." }),
       { ok: true, findings: [] },
@@ -388,32 +388,30 @@ test('gc dry run reports without mutating MEMORY.md', () => {
   } finally { clean(dir) }
 })
 
-// MUTATION: restore relative node scripts/factory/ledger.mjs query arguments.
-test('P5 emitted task, sessions, and run-set queries resolve to the plugin ledger CLI', async () => {
+// MUTATION: point the emitted queries at a relative or deleted script.
+test('P5 emitted queries resolve to the lean crew CLI and its show and lanes verbs', async () => {
   const result = memory.lintMemoryDelta({ body: 'PR #219 merged. 400 tokens. Suite ran 5/6 green.' })
-  const expected = fileURLToPath(new URL('../scripts/factory/ledger.mjs', import.meta.url))
-  const families = result.findings.map(({ query }) => query.includes(' task ') ? 'task' : query.includes(' sessions') ? 'sessions' : 'run-set')
-  for (const family of ['task', 'sessions', 'run-set']) assert.ok(families.includes(family))
+  const expected = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url))
+  const verbs = new Set(result.findings.map(({ query }) => query.includes(' show ') ? 'show' : 'lanes'))
+  assert.deepEqual([...verbs].sort(), ['lanes', 'show'])
+  const argvOf = (query) => execFileSync('/bin/sh', ['-c', 'eval "set -- $1"; printf \'%s\\0\' "$@"', '_', query], { encoding: 'utf8' }).split('\0').filter(Boolean)
   for (const { query } of result.findings) {
-    const probe = query.replace(' <adw_id|task_slug>', '').replace(' --since <iso>', '')
-    const output = execFileSync('/bin/sh', ['-c', 'eval "set -- $1"; printf \'%s\\0\' "$@"', '_', probe], { encoding: 'utf8' })
-    const cli = output.split('\0').filter(Boolean)[1]
+    const [, cli, verb] = argvOf(query.replace(' <lane>', ''))
     assert.equal(cli, expected)
     assert.equal(isAbsolute(cli), true)
     assert.equal(existsSync(cli), true)
+    assert.ok(['show', 'lanes'].includes(verb))
   }
   const copied = scratchDir("memory path ' with space-")
   assert.match(copied, /memory path ' with space-/)
   mkdirSync(join(copied, 'crew'), { recursive: true })
-  mkdirSync(join(copied, 'scripts/factory'), { recursive: true })
+  mkdirSync(join(copied, 'bin'), { recursive: true })
   cpSync(new URL('./memory.mjs', import.meta.url), join(copied, 'crew/memory.mjs'))
   cpSync(new URL('./memory-md.mjs', import.meta.url), join(copied, 'crew/memory-md.mjs'))
-  cpSync(new URL('../scripts/factory/ledger.mjs', import.meta.url), join(copied, 'scripts/factory/ledger.mjs'))
+  cpSync(new URL('../bin/crew.mjs', import.meta.url), join(copied, 'bin/crew.mjs'))
   const copiedMemory = await import(pathToFileURL(join(copied, 'crew/memory.mjs')).href)
   const copiedQuery = copiedMemory.lintMemoryDelta({ body: 'PR #219 merged.' }).findings[0].query
-  const copiedPrefix = copiedQuery.replace(' <adw_id|task_slug>', '')
-  const copiedOutput = execFileSync('/bin/sh', ['-c', 'eval "set -- $1"; printf \'%s\\0\' "$@"', '_', copiedPrefix], { encoding: 'utf8' })
-  const copiedCli = copiedOutput.split('\0').filter(Boolean)[1]
-  assert.equal(copiedCli, realpathSync(join(copied, 'scripts/factory/ledger.mjs')))
+  const copiedCli = argvOf(copiedQuery.replace(' <lane>', '').replace(' --all', ''))[1]
+  assert.equal(copiedCli, realpathSync(join(copied, 'bin/crew.mjs')))
   assert.equal(existsSync(copiedCli), true)
 })

@@ -7,7 +7,6 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ROOT } from '../test/helpers.mjs'
-import { PR_REVIEW_REFUSALS } from '../scripts/factory/pr-review.mjs'
 
 const HERE = fileURLToPath(new URL('./', import.meta.url))
 const SKILLS = join(ROOT, 'skills')
@@ -82,36 +81,19 @@ test('argument-taking commands declare a hint and pass the argument through', ()
   }
 })
 
-// MUTATION RC1: replace raw-argument node execution with the retired npm command.
+// MUTATION RC1: point the review command back at the deleted pr-review module.
 test('RC1', () => {
   const { front, body } = parts('review.md')
-  const executable = 'node "${CLAUDE_PLUGIN_ROOT}/scripts/factory/pr-review.mjs" $ARGUMENTS'
-  const literal = 'node "${CLAUDE_PLUGIN_ROOT}/scripts/factory/pr-review.mjs" --pr <positive decimal integer> [--request-changes] [--no-post] [--panel] [--panel-distinct-agents]'
-  const local = 'node "${CLAUDE_PLUGIN_ROOT}/scripts/factory/pr-review.mjs" --local [--repo <path>] [--base <ref>] [--model-reviewer <provider/model>] [--artifact-dir <path>] [--no-post] [--panel] [--panel-distinct-agents]'
-  assert.ok(body.includes(`- Executable: \`${executable}\``))
-  assert.ok(body.includes(`- Literal: \`${literal}\``))
-  assert.ok(body.includes(`- Local: \`${local}\``))
-  assert.equal(body.includes('npm run crew:review'), false)
-  assert.ok(frontValue(front, 'argument-hint')?.includes('--pr <positive decimal integer>'))
-  assert.ok(frontValue(front, 'argument-hint')?.includes('--local [options]'))
-  assert.ok(body.includes('Use `/review --pr 123`'))
+  assert.ok(frontValue(front, 'argument-hint')?.includes('<pull request number>'))
+  assert.ok(frontValue(front, 'argument-hint')?.includes('--local'))
+  assert.ok(body.includes('Use `/review 123`'))
   assert.ok(body.includes('`/review --local`'))
-  const rootLines = body.split(/\r?\n/).filter((line) => line.includes('CLAUDE_PLUGIN_ROOT'))
-  assert.deepEqual(rootLines.map((line) => line.match(/^- (Literal|Local|Executable):/)?.[1]).sort(), ['Executable', 'Literal', 'Local'])
-  // The front matter is the literal file text, so a substitution placed there would be read here.
-  assert.equal(front.includes('CLAUDE_PLUGIN_ROOT'), false)
-  assert.ok(body.split(/\r?\n/).filter((line) => line.trimStart().startsWith('!')).every((line) => !line.includes('CLAUDE_PLUGIN_ROOT')))
-  assert.match(body, /`--no-post`[^.\n]*without touching GitHub/)
-  assert.match(body, /never posts APPROVE/)
-  for (const phrase of ['atomic review', 'inline comments on RIGHT-side added or context lines', 'suggestion blocks', 'Every finding remains in the summary', 'exact inline comments array', 'location-unparsed', 'file-not-in-diff', 'line-outside-diff']) assert.ok(body.includes(phrase), phrase)
-
-  const refusalSection = body.split(/^## Refusals\s*$/m)[1] ?? ''
-  const rows = [...refusalSection.matchAll(/^- `([^`]+)` — ([^\r\n]+)$/gm)]
-  const names = rows.map(([, name]) => name).sort()
-  const expected = Object.values(PR_REVIEW_REFUSALS).sort()
-  assert.equal(rows.length, expected.length, 'review.md must explain every refusal exactly once')
-  assert.deepEqual(names, expected, 'review.md refusals must equal the module-owned closed vocabulary')
-  for (const [, name, meaning] of rows) assert.ok(meaning.trim(), `${name} must have a refusal meaning`)
+  assert.equal(body.includes('CLAUDE_PLUGIN_ROOT'), false, 'review.md runs no plugin script')
+  assert.equal(body.includes('pr-review.mjs'), false)
+  assert.match(body, /never post an approval/)
+  // The review action itself: what is read, from which base, including uncommitted work.
+  for (const phrase of ['.agents/skills/review-procedure/SKILL.md', '`gh pr diff <number>`', 'never from the local checkout', '`git show <head>:<path>`', '`git fetch origin pull/<number>/head <base>`', 'a file the PR deletes is read at its base', 'the first of `origin/main` and `main` that resolves', 'stop and ask for `--base`', 'if it prints no commit, stop and say the base is unrelated', '`git diff <merge base>`', 'every untracked file `git status --short --untracked-files=all` lists', 'Read each changed file in full']) assert.ok(body.includes(phrase), phrase)
+  assert.equal(/do not read|report no findings/i.test(body), false)
 })
 
 test('the status command takes no argument', () => {

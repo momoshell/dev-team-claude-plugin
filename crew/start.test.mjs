@@ -9,7 +9,7 @@ import { main as leanMain, runLean } from './lean.mjs'
 import { runAcpSeat } from './acp/seat.mjs'
 import { parseAgent, validateEnvelope } from './protocols.mjs'
 import { resolveAgents } from './agents.mjs'
-import { PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS } from './headless.mjs'
+import { PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS } from './acp/provider.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
 const AGENTS = fileURLToPath(new URL('./agents/', import.meta.url))

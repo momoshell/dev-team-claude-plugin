@@ -7,8 +7,6 @@ import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as mod from './subagent.ts'
 import * as adapter from '../../adapters/adapter-pi.mjs'
-import * as capabilities from '../../capabilities.mjs'
-import * as rpc from '../../headless-rpc.mjs'
 
 // Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
 delete process.env.CREW_ROUTER_ATTEMPT_URL
@@ -769,30 +767,19 @@ test('the granted pi seat activates the agent tool and transports the allowlist'
   assert.match(bare, /-u CREW_PI_AGENTS /)
 })
 
-test('the register resolves the shipped bundle end to end', () => {
-  const register = JSON.parse(readFileSync(join(ROOT, 'crew/capabilities.json'), 'utf8'))
-  register.roles.planner.extensions = ['crew/pi/extensions/subagent.ts']
-  register.roles.planner.agents = [{ name: 'scout', def: 'crew/pi/agents/scout.json' }]
-  const loaded = capabilities.loadCapabilities({ register })
-  const grants = capabilities.grantsFor(loaded, 'planner', { root: ROOT })
-  capabilities.assertGrantsBacked('planner', grants, loaded)
-  assert.equal(grants.extensions[0], join(ROOT, 'crew/pi/extensions/subagent.ts'))
-  assert.equal(grants.agents[0].def, join(ROOT, 'crew/pi/agents/scout.json'))
+test('the shipped scout bundle loads and declares subagents', () => {
+  const grants = {
+    extensions: [join(ROOT, 'crew/pi/extensions/subagent.ts')],
+    agents: [{ name: 'scout', def: join(ROOT, 'crew/pi/agents/scout.json') }],
+  }
   assert.equal(mod.loadAgentDefinition(grants.agents[0]).error, undefined)
-  const declared = adapter.capabilitiesFor({ transport: 'pane', grants })
-  const bare = adapter.capabilitiesFor({ transport: 'pane' })
-  const effective = capabilities.effectiveCapabilities({ declared, bare, grants })
-  assert.equal(effective.subagents, true)
+  assert.equal(adapter.capabilitiesFor({ transport: 'pane', grants }).subagents, true)
+  assert.equal(adapter.capabilitiesFor({ transport: 'pane' }).subagents, false)
   assert.equal(basename(grants.agents[0].def), 'scout.json')
 })
 
-// ONE table, both reducers. The rule about which pi frame carries a seat's own
-// spend is held in two files that cannot import each other (subagent.ts is
-// zero-dep by hard constraint, and crew/headless-rpc.mjs must not take a
-// type-stripped .ts module into the crew runtime), so the coupling is enforced
-// HERE, where a test file may import both: every row is asserted against BOTH
-// exported rules AND against what the two reducers actually fold. Make either
-// side disagree and this goes red.
+// Which pi frame carries a seat's own spend: every row is asserted against the
+// exported rule and against what the reducer actually folds.
 //
 // Usage values are plain non-negative integers on purpose: the rule under test
 // is which frame is admitted, not how each reducer coerces a scalar.
@@ -807,14 +794,13 @@ const OWN_SPEND_TABLE = [
   { name: 'a non-frame is not', frame: null, own: false },
 ]
 
-test("the two reducers agree on which pi frame carries a seat's own spend", () => {
+test("the reducer admits only the pi frame that carries a seat's own spend", () => {
   for (const row of OWN_SPEND_TABLE) {
     assert.equal(mod.carriesOwnSpend(row.frame), row.own, `subagent.ts rule: ${row.name}`)
-    assert.equal(rpc.carriesOwnSpend(row.frame), row.own, `headless-rpc.mjs rule: ${row.name}`)
   }
 })
 
-test('the two reducers agree in what they fold, not only in what they claim', () => {
+test('the reducer folds what the rule claims', () => {
   for (const row of OWN_SPEND_TABLE) {
     const usage = row.frame?.message?.usage
     const want = row.own && usage
@@ -823,7 +809,6 @@ test('the two reducers agree in what they fold, not only in what they claim', ()
         billed_cache_write_tokens: usage.cacheWrite ?? 0, billed_cache_read_tokens: usage.cacheRead ?? 0,
       }
       : null
-    assert.deepEqual(rpc.foldRpcUsage([row.frame]), want, `headless-rpc.mjs folded: ${row.name}`)
     assert.deepEqual(mod.foldUsage([row.frame]), want, `subagent.ts folded: ${row.name}`)
   }
 })

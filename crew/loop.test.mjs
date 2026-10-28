@@ -500,7 +500,7 @@ test('a suite red on both runs gives the builder one repair turn whose feedback 
   assert.deepEqual(builderTurns(f)[0].feedback, [])
   const feedback = JSON.stringify(builderTurns(f)[1].feedback)
   for (const needle of ['skills/qa-test-writing/exhibits.test.mjs', 'skills/ux/exhibits.test.mjs', 'anchor spans remain current', 'exhibit census remains current']) assert.ok(feedback.includes(needle), needle)
-  assert.ok(feedback.includes('anchor-pin.mjs --repair-all'))
+  assert.equal(feedback.includes('anchor-pin.mjs'), false, 'the repair hint names no deleted tool')
   // parsed names never drop the diagnostics: both runs' output tails ride along
   assert.deepEqual(builderTurns(f)[1].feedback[0].outputTail, [SPEC_OUT, TAP_OUT])
   const empty = sequenced([redRun(1), redRun(1), green()])

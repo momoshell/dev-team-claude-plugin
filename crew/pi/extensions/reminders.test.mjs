@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { scratchDir, ROOT } from '../../../test/helpers.mjs'; process.chdir(ROOT)
-import { assignmentPrompt } from '../../driver.mjs'
 import { createReminders, attachReminders } from './reminders.ts'
 
 const ids = ['S1','S2','S3','S4','S5','P1','P2','P3','P4','E1','R1','O1','O2','J1','U1','T1','FA6','FA6-grep','FA7']
@@ -16,7 +15,7 @@ function setup({ table = shipped, role = 'builder', task = true } = {}) {
   return { hooks, rows, env }
 }
 const bash = (command) => ({ toolName: 'bash', input: { command }, content: [{ type: 'text', text: 'original' }] })
-const assignment = (id) => assignmentPrompt({ id, role: 'builder', briefFile: '/tmp/brief.md', returnPath: `/tmp/returns/run-1/${id}.builder.json`, taskDir: '/tmp/task' })
+const assignment = (id) => `ASSIGNMENT ${id}: read your brief at /tmp/brief.md. Task dir: /tmp/task. Write your ReturnEnvelope to /tmp/returns/run-1/${id}.builder.json then print exactly: CREW-DONE builder ${id}`
 
 test('S1 shipped table has exactly three expected rules', () => { assert.equal(shipped.rules.length, 3); assert.deepEqual(shipped.rules.map((r) => r.id), ['raw-temp-call', 'test-name-pattern', 'fff-search-evasion']); assert.equal(setup().hooks.usable, true) })
 test('S2 rejects unknown keys, invalid regex, duplicate ids, bad source and top-level keys', () => {
@@ -68,7 +67,7 @@ test('FA6 builder piped grep and node -e scans fire fff-search-evasion', () => {
   assert.ok(grep.content[0].text.startsWith('reminder (fff-search-evasion): '))
   assert.ok(grep.content[0].text.includes('mcp__fff__grep'))
   f.hooks.beforeAgentStart({ prompt: assignment('fa6-b') })
-  const command = `const t=require('fs').readFileSync(${JSON.stringify(join(ROOT, 'crew/drive.mjs'))},'utf8');console.log(t.indexOf('RUN_START_EVENT'))`
+  const command = `const t=require('fs').readFileSync(${JSON.stringify(join(ROOT, 'crew/loop.mjs'))},'utf8');console.log(t.indexOf('RUN_START_EVENT'))`
   const scanned = f.hooks.toolResult(bash(`node -e '${command.replaceAll("'", "'\\''")}'`))
   assert.ok(scanned)
   assert.ok(scanned.content[0].text.startsWith('reminder (fff-search-evasion): '))
@@ -86,7 +85,7 @@ test('FA6-grep the piped grep command alone fires fff-search-evasion', () => {
 
 test('FA7 plain test, node and sed commands never fire the search rule', () => {
   // MUTATION: prefix the pattern with .| and the rule fires on npm test, node --test and sed commands it must not fire on.
-  for (const [index, command] of ['npm test', 'node --test crew/drive.test.mjs', 'sed -n 1,40p crew/drive.mjs'].entries()) {
+  for (const [index, command] of ['npm test', 'node --test crew/loop.test.mjs', 'sed -n 1,40p crew/loop.mjs'].entries()) {
     const f = setup()
     f.hooks.beforeAgentStart({ prompt: assignment('fa7-' + index) })
     assert.equal(f.hooks.toolResult(bash(command)), undefined, command)

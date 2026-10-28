@@ -6,10 +6,6 @@ import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import * as advisor from './advisor.ts'
 import { seatCommand } from '../../adapters/adapter-pi.mjs'
-import {
-  ADVISOR_BOOT_REFUSALS as bootAdvisorRefusals, classifyAdvisorCell as bootClassifyAdvisorCell,
-  DEFAULT_TRANSPORT, advisorBootRecord, assertAdvisorCellLive,
-} from '../../crew.mjs'
 import { leanLaneFixture, scratchDir } from '../../../test/helpers.mjs'
 function fixture() {
   const root = scratchDir('advisor-test-')
@@ -379,24 +375,12 @@ test('RV1-1 extension classifies an unset endpoint without roster membership as 
   assert.deepEqual(advisor.classifyAdvisorCell(sharedAdvisorCells[9]), { reason: 'model-unsafe' })
 })
 
-test('C1 extension and boot classifiers agree across the shared input table', () => {
-  const extensionVerdicts = sharedAdvisorCells.map((cell) => advisor.classifyAdvisorCell(cell))
-  const bootVerdicts = sharedAdvisorCells.map((cell) => bootClassifyAdvisorCell(cell))
-  assert.deepEqual(extensionVerdicts, bootVerdicts)
-})
-
 test('D1 extension and boot refusal vocabularies retain exact frozen ordered values', () => {
   assert.equal(Object.isFrozen(advisor.UNAVAILABLE_REASONS), true)
   assert.deepEqual(advisor.UNAVAILABLE_REASONS, [
     'role-unsupported', 'endpoint-unset', 'endpoint-not-local',
     'endpoint-credentials', 'model-unset', 'model-unsafe', 'endpoint-dead',
     'manifest-cell-invalid',
-  ])
-  assert.equal(Object.isFrozen(bootAdvisorRefusals), true)
-  assert.deepEqual(bootAdvisorRefusals, [
-    'role-unsupported', 'adapter-unsupported', 'transport-unsupported',
-    'endpoint-unset', 'endpoint-not-local', 'endpoint-credentials',
-    'model-unset', 'model-unsafe', 'endpoint-dead', 'advisor-env-retired',
   ])
 })
 
@@ -879,35 +863,13 @@ test('F1 advisor refusal and judgment vocabularies remain frozen', () => {
   ])
   assert.equal(Object.isFrozen(advisor.JUDGMENT_CLASSES), true)
   assert.deepEqual(advisor.JUDGMENT_CLASSES, ['edge-path', 'over-claim'])
-  assert.equal(Object.isFrozen(bootAdvisorRefusals), true)
-  assert.deepEqual(bootAdvisorRefusals, [
-    'role-unsupported', 'adapter-unsupported', 'transport-unsupported',
-    'endpoint-unset', 'endpoint-not-local', 'endpoint-credentials',
-    'model-unset', 'model-unsafe', 'endpoint-dead', 'advisor-env-retired',
-  ])
 })
 
-// The resolved roster cell a boot admits grants against (ADR-047); the retired env never grants.
-const BOOT_CELL = Object.freeze({
-  models: { 'anthropic/claude-sonnet-5': {} },
-  advisor: { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'pi', effort: 'medium', model: 'anthropic/claude-sonnet-5' },
-})
-
-test('G1 boot-admitted planner receives plan and gate judgment context from the pi child', async () => {
+test('G1 planner receives plan and gate judgment context from the pi child', async () => {
   const f = fixture()
   assert.equal(existsSync(join(f.taskDir, advisor.TRIPWIRE_MANIFEST_FILE)), true)
   assert.equal(existsSync(join(f.root, 'returns')), true)
   const plannerEnv = env({ CREW_ROLE: 'planner', CREW_TASK_DIR: f.taskDir })
-  const bootAdapters = { planner: { name: 'pi', transport: DEFAULT_TRANSPORT, grants: { advisor: true } } }
-  // ADR-047: boot admits a planner grant against the RESOLVED roster cell.
-  const record = advisorBootRecord({ adapters: bootAdapters, ...BOOT_CELL })
-  assert.deepEqual(record.granted, ['planner'])
-  let probes = 0
-  await assertAdvisorCellLive({ record, adapters: bootAdapters,
-    probeEndpoint: async () => { probes += 1; return true },
-    note: () => { throw new Error('planner boot should be admitted') },
-  })
-  assert.equal(probes, 0)
 
   const planPath = join(f.taskDir, 'plan.md')
   const gatePath = join(f.taskDir, 'gate.mjs')
@@ -945,11 +907,10 @@ test('G1 boot-admitted planner receives plan and gate judgment context from the 
   assert.equal(user.delta.some((entry) => String(entry.text).includes('escape.md')), false)
 })
 
-test('I1 extension and boot role gates agree', async () => {
+test('I1 extension role gate admits builder and planner only', async () => {
   const roles = ['builder', 'planner', 'lead', 'tech-lead', 'reviewer']
   const expected = [true, true, false, false, false]
   const extension = []
-  const boot = []
   for (const role of roles) {
     const f = fixture(); const p = pi(); const journal = sink(); const values = env({ CREW_ROLE: role, CREW_TASK_DIR: f.taskDir })
     try {
@@ -961,20 +922,8 @@ test('I1 extension and boot role gates agree', async () => {
       assert.equal(error.reason, 'role-unsupported')
       extension.push(false)
     }
-    const adapters = { [role]: { name: 'pi', transport: DEFAULT_TRANSPORT, grants: { advisor: true } } }
-    const record = advisorBootRecord({ adapters, ...BOOT_CELL })
-    assert.deepEqual(record.granted, [role])
-    try {
-      await assertAdvisorCellLive({ record, adapters, probeEndpoint: async () => true })
-      boot.push(true)
-    } catch (error) {
-      assert.equal(error.reason, 'role-unsupported')
-      boot.push(false)
-    }
   }
   assert.deepEqual(extension, expected)
-  assert.deepEqual(boot, expected)
-  assert.deepEqual(extension, boot)
 })
 
 test('K1 planner edge-path gloss fits plan and gate', () => {
@@ -1084,13 +1033,6 @@ test('spend class (j): an aggregate past MAX_SAFE_INTEGER leaves the spend unmea
   const run = await spendRun([ownFrame({ ...COMPLETE_USAGE, input: Number.MAX_SAFE_INTEGER }), ownFrame({ ...COMPLETE_USAGE, input: 1 })])
   assert.equal(run.row.usage, null); assert.equal(run.row.usage_reason, 'usage-incomplete')
   assert.equal(run.consult.usage_partial, true)
-  const { openLedger } = await import('../../../scripts/factory/ledger.mjs')
-  const dir = scratchDir('advisor-aggregate-')
-  const ledger = openLedger({ dbPath: join(dir, 'ledger.db'), stderr: { write: () => {} } })
-  try {
-    assert.doesNotThrow(() => ledger.recordAdvisorUsage({ adw_id: 'advisor-aggregate', ...run.row }))
-    assert.equal(ledger.dumpTable('advisor_usage').length, 1)
-  } finally { ledger.close(); rmSync(dir, { recursive: true, force: true }) }
 })
 
 // Stream conditions of the same invariant: complete usage frames, then the stream does not end

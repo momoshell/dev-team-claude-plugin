@@ -515,17 +515,11 @@ function boundedTextInfo(text: any, cap = LAB_OUTPUT_CAP_BYTES, lineCap = LAB_OU
 
 export interface LabStructuralFailure { file: string; test: string; reason: string }
 
-// A lab scratch is `git clone --local`, and a local clone can never satisfy an assertion
-// about THIS repository's remote identity. That is a property of the lab, not a defect in
-// the tree under test, and the seat's program cannot know it — a bare fail: 1 reads as a
-// regression forever. Measured 2026-08-26 by cloning this worktree with `git clone --local`
-// and running `npm test`: exactly one failure, named here with its reason. No count is
-// subtracted anywhere; the consumer compares `fail` against these named entries.
-export const LAB_STRUCTURAL_FAILURES: readonly LabStructuralFailure[] = Object.freeze([Object.freeze({
-  file: 'test/factory-probe-repo.test.mjs',
-  test: 'self-hosting proposes the local lane, CI shape, conventions, and remote identity',
-  reason: 'it asserts profile.repo_key === momoshell__dev-team-claude-plugin, and git clone --local rewrites remote.origin.url to the source path, so the probe derives the scratch path instead and the assertion cannot pass in any local clone, ever',
-})])
+// Named lab-only failures a whole-suite run is known to produce in a `git clone --local`
+// scratch. None remain: the one entry that asserted this repository's remote identity
+// went with the deleted probe-repo suite. The list and its selector stay so the result
+// shape (`structural_failures`) is stable for the seat-authored program.
+export const LAB_STRUCTURAL_FAILURES: readonly LabStructuralFailure[] = Object.freeze([])
 
 // Selected against the paths runSuite actually ran: no paths means the whole suite, an
 // exact path matches its own entry, and a path that is a DIRECTORY prefix carries every

@@ -5,11 +5,20 @@ import assert from 'node:assert/strict'
 import {mkdirSync,writeFileSync,readFileSync,realpathSync,rmSync,symlinkSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
-import {runInNewContext} from 'node:vm'
-import {seatTransport,transportFor,HEADLESS_TRANSPORTS,resolveAdapters,loadCapabilities} from '../crew/crew.mjs'
-import {capabilityRegister} from '../crew/crew-test-helpers.mjs'
 import {createAgentLibrary} from '../visualizer/server/agent-library.mjs'
 import {startServer} from '../visualizer/server/server.mjs'
+function capabilityRegister() {
+ const grant=(extra={})=>({tools:[],extensions:[],agents:[],skills:[],advisor:false,requires:[],mcp_servers:[],...extra})
+ return {
+  schema_version:1,updated_at:'2026-08-17',
+  roles:{lead:grant(),planner:grant({requires:['subagents']}),builder:grant(),reviewer:grant(),'tech-lead':grant()},
+  local_providers:{},
+  coding_agents:{
+   pi:{providers:['openai','anthropic','llama-swap'],transports:['pane','headless-rpc'],adapter:'crew/adapters/adapter-pi.mjs',refuses:['mcp_servers'],display_name:'Pi',binary:'pi',install_hint:'Install Pi and ensure the pi binary is on PATH.',availability:'executable',availability_reason:'executable'},
+   claude:{providers:['anthropic'],transports:['pane','headless-json'],adapter:'crew/adapters/adapter-claude.mjs',refuses:['extensions','skills','local_provider'],display_name:'Claude Code',binary:'claude',install_hint:'Install Claude Code and ensure the claude binary is on PATH.',availability:'executable',availability_reason:'executable'},
+  },
+ }
+}
 function fixture(t) {
  const root=realpathSync(scratchDir('harness-settings-'));t.after(()=>rmSync(root,{recursive:true,force:true}))
  mkdirSync(join(root,'crew'));mkdirSync(join(root,'home'))
@@ -17,28 +26,6 @@ function fixture(t) {
  writeFileSync(path,JSON.stringify(value,null,2)+'\n')
  return {root,path,value,library:createAgentLibrary({checkout:root,home:join(root,'home'),env:{PATH:''}})}
 }
-test('preferred transport changes boot selection; role flags win and background launches remain background',()=>{
- const adapter={capabilitiesFor({transport}){if(!['pane','headless-json','headless-rpc','acp'].includes(transport)) throw new Error('unsupported')}}
- const options={role:'builder',agentName:'stub',adapter}
- assert.equal(seatTransport({...options,args:{}}),'pane')
- assert.equal(seatTransport({...options,args:{},preferredTransport:'headless-rpc'}),'headless-rpc')
- assert.equal(seatTransport({...options,args:{'headless-all':true},preferredTransport:'acp'}),'acp')
- assert.equal(seatTransport({...options,args:{'headless-all':true},preferredTransport:'pane'}),'headless-json')
- assert.equal(seatTransport({...options,args:{headless:'builder'},preferredTransport:'acp'}),'headless-json')
- assert.throws(()=>seatTransport({...options,args:{},preferredTransport:'invented'}),/unsupported/)
- // Kill mutation: dropping the preference must fail the exact same behavior witness.
- const witness=fn=>assert.equal(fn({...options,args:{},preferredTransport:'headless-rpc'}),'headless-rpc')
- witness(seatTransport)
- const mutant=runInNewContext('('+seatTransport.toString().replace('return preferredTransport || DEFAULT_TRANSPORT','return DEFAULT_TRANSPORT')+')',{transportFor,DEFAULT_TRANSPORT:'pane',HEADLESS_TRANSPORTS})
- assert.throws(()=>witness(mutant),assert.AssertionError)
-})
-test('resolveAdapters consumes the saved preference while capability validation rejects unsupported modes',async()=>{
- const register=capabilityRegister();register.coding_agents.claude.default_transport='headless-json'
- const adapters=await resolveAdapters(['builder'],{'agent-builder':'claude'},null,{register})
- assert.equal(adapters.builder.transport,'headless-json')
- register.coding_agents.claude.default_transport='headless-rpc'
- assert.throws(()=>loadCapabilities({register}),/default_transport/)
-})
 test('harness preferences persist with CAS, preserve declarations and reset to runtime default',t=>{
  const {library,path,value}=fixture(t),revision=library.read().config_revision
  assert.equal(library.saveHarness({name:'claude',default_transport:'headless-json',expected_revision:revision}).ok,true)

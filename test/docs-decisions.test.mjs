@@ -188,7 +188,7 @@ test('runtime feature map has concrete paths and pins ACP', () => {
   assert.equal(lines[1], '| Feature | Where it lives | ADR | Doc |')
   assert.equal(lines[2], '|---|---|---|---|')
   const rows = lines.slice(3).filter((line) => line.startsWith('|') && line.endsWith('|'))
-  assert.ok(rows.length >= 20, `expected at least 20 feature rows, got ${rows.length}`)
+  assert.ok(rows.length >= 12, `expected at least 12 feature rows, got ${rows.length}`)
 
   for (const row of rows) {
     const paths = [...row.matchAll(/`([^`]+)`/g)].map(([, value]) => value).filter((value) => value.includes('/'))
@@ -276,15 +276,6 @@ test('RD1', () => {
   assert.equal(row.includes('off unless CREW_EDIT_ASSIST is set'), false)
 })
 
-test('RD2', () => {
-  // MUTATION RD2: renaming DEVTEAM_SUITE_TIMEOUT_S breaks the suite-timeout pin.
-  const row = crewReadme.split('\n').find((line) => line.startsWith('| Suite |'))
-  assert.ok(row, 'missing Suite row')
-  for (const token of ['DEVTEAM_SUITE_TIMEOUT_S', 'suite_timeout_s', 'suite-timeout-invalid']) {
-    assert.ok(row.includes(token), 'Suite row must name ' + token)
-  }
-})
-
 test('RD3', () => {
   // MUTATION RD3: replacing keeps with drops hides the reseat drift.
   const line = crewReadme.split('\n').find((line) => line.includes('keeps a raw override'))
@@ -299,7 +290,7 @@ test('RM1', () => {
     const text = read(join('crew', name))
     return /from\s+['"]\.\.\/scripts\/factory\//.test(text) || /import\(['"]\.\.\/scripts\/factory\//.test(text)
   }).map((name) => name.replace(/\.mjs$/, '')).sort()
-  assert.deepEqual(derived, ['breaker', 'child', 'crew', 'factoryctl', 'provenance', 'seat-io'])
+  assert.deepEqual(derived, [])
   for (const name of derived) {
     assert.ok(readme.includes('`crew/' + name + '.mjs`'), 'crew/ bullet must name crew/' + name + '.mjs')
   }

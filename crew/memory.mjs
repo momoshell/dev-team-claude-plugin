@@ -5,16 +5,16 @@
 import { openMarkdownMemory } from './memory-md.mjs'
 import { fileURLToPath } from 'node:url'
 
-const LEDGER_PATH = fileURLToPath(new URL('../scripts/factory/ledger.mjs', import.meta.url))
-const LEDGER_CLI_SHELL = `'${LEDGER_PATH.replaceAll("'", "'\\''")}'`
+const CREW_PATH = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url))
+const CREW_CLI_SHELL = `'${CREW_PATH.replaceAll("'", "'\\''")}'`
 
 export const DEFAULT_BACKEND = 'markdown'
 export const DEFAULT_BUDGET_BYTES = 8000
 
-const TASK_QUERY = `node ${LEDGER_CLI_SHELL} task <adw_id|task_slug>`
-const SESSIONS_QUERY = `node ${LEDGER_CLI_SHELL} sessions`
-const RUN_SET_QUERY = `node ${LEDGER_CLI_SHELL} run-set --since <iso>`
-export const LEDGER_QUERIES_DOC = 'docs/ledger-queries.md'
+// Run facts live in the lane journals; the lean `show` and `lanes` verbs read them.
+const TASK_QUERY = `node ${CREW_CLI_SHELL} show <lane>`
+const SESSIONS_QUERY = `node ${CREW_CLI_SHELL} lanes --all`
+const RUN_SET_QUERY = `node ${CREW_CLI_SHELL} lanes --all`
 
 // The battery is deliberately narrow. Every rule demands a concrete run-scoped token —
 // a uuid, a hex sha behind the word "commit", an N/N count, a money/token figure, an
@@ -108,7 +108,7 @@ export function lintMemoryDelta(delta = {}) {
   return {
     ok: false,
     findings,
-    reason: `memory delta restates a run fact (${first.what}): "${first.excerpt}" — memory carries distilled judgment; ask the ledger instead: ${first.query} (see ${LEDGER_QUERIES_DOC})`,
+    reason: `memory delta restates a run fact (${first.what}): "${first.excerpt}" — memory carries distilled judgment; read the lane journal instead: ${first.query}`,
   }
 }
 

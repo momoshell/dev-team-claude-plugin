@@ -264,10 +264,7 @@ function frozenHelperSites(sites, why) {
 //   test/factory-ci-*.test.mjs (2 sites) — retired by this lane with the unreached
 //     CI watcher module it tested (#535); named by glob because no live citation of
 //     those modules may survive this commit
-const HELPER_EXEMPT = new Map([
-  ['test/factory-probe-repo.test.mjs', frozenHelperSites(1, 'audited 2026-08-24: one local git with a DIFFERENT identity (probe@example.invalid); outside this lane\'s fence, so frozen rather than converted')],
-  ['test/factory-pr-review.test.mjs', frozenHelperSites(1, 'audited 2026-09-25: the fake-git seam matches the literal --show-toplevel argv to answer a stubbed rev-parse; it never derives the real repo root (lane b939, RV3-1)')],
-])
+const HELPER_EXEMPT = new Map()
 
 test('helper duplication tripwire — no test file re-declares a consolidated helper', () => {
   const scanned = helperScannedFiles()
@@ -290,7 +287,7 @@ test('helper duplication tripwire — every exemption has a live, load-bearing w
     assert.ok(exemption.sites > 0, `exemption ${file} is redundant`)
     total += exemption.sites
   }
-  assert.equal(total, 2)
+  assert.equal(total, 0)
 })
 
 test('helper duplication tripwire — the detector flags a hand-rolled copy and clears an import', () => {

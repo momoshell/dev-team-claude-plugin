@@ -8,7 +8,6 @@ import { join } from 'node:path'
 import { runInNewContext } from 'node:vm'
 import { createServer, connect } from 'node:net'
 import { spawn, spawn as spawnProcess, spawnSync } from 'node:child_process'
-import { gitGrepHits } from '../scripts/factory/absence.mjs'
 import { parseCliArgs, pluginWriteMode, pluginWriteTargetMode, sameOrigin, hostGuard, ROUTE_PARAMS, ServerUsageError, startServer as startVisualizerServer, writeGuard } from '../visualizer/server/server.mjs'
 import { createJournalSource } from '../visualizer/server/journal-source.mjs'
 import * as webApi from '../visualizer/web/src/lib/api.js'
@@ -497,12 +496,10 @@ test('the visualizer CLI announces a port through a symlinked repository path', 
   }
 })
 
-test('the deleted usage absence cause is absent from visualizer and present in scripts', () => {
+test('the deleted usage absence cause is absent from visualizer', () => {
   const needle = 'predates per-agent token measurement'
-  const visualizer = gitGrepHits({ needle, paths: ['visualizer/'], cwd: ROOT })
-  const scripts = gitGrepHits({ needle, paths: ['scripts/'], cwd: ROOT })
-  assert.equal(visualizer.count, 0)
-  assert.ok(scripts.count > 0)
+  const hit = spawnSync('git', ['grep', '-c', '-F', '-e', needle, '--', 'visualizer/'], { cwd: ROOT, encoding: 'utf8' })
+  assert.equal(hit.status, 1, hit.stdout)
 })
 
 test('viz-cli-unknown-flag-refusal — an unknown flag or a bad flag value refuses with exit 2 and never leaks a stack', () => {

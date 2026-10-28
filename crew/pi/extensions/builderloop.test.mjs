@@ -901,15 +901,6 @@ test('TF10', async () => {
   const result = await loop.onToolResult(event('edit', join(f.root, 'fixture.mjs')), { cwd: f.root })
   assert.doesNotMatch(appendedText(result), /^\s*✔ /m)
 })
-// MUTATION: let the private builder reducer retain TAP passing YAML.
-test('TF11', async () => {
-  const lane = await import(`../../${['lane', 'red.mjs'].join('-')}`)
-  const { loop } = filterLoop()
-  const patch = await bashResult(loop, 'node --test x.test.mjs', tfCapture.tap)
-  const notice = patch.content[0].text.lastIndexOf('\n[test output filtered:')
-  assert.equal(patch.content[0].text.slice(0, notice), lane.dropPassingLines(tfCapture.tap))
-})
-
 function deferredLane() {
   const calls = []
   const pending = []

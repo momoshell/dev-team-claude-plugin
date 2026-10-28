@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "exempt": ["**/anchors.json", "docs/audits/**"],
+  "exempt": ["docs/audits/**"],
   "rules": [
     {"when":{"roles":["planner"]},"delivery":"inline","skills":["dev-team:qa-test-writing#gates"]},
     {"when":{"roles":["builder"]},"delivery":"inline","skills":["dev-team:code-less","dev-team:qa-test-writing#vacuity"]},

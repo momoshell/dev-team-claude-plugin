@@ -57,7 +57,7 @@ test('tier override sets and clears one cell for that tier only', () => {
 })
 
 test('an override on an unseated (null) tier reseats that tier only; clearing it is a no-op', () => {
-  const lead = readFileSync('crew/agents/lead.md', 'utf8')
+  const lead = readFileSync(join(ROOT, 'crew/agents/lead.md'), 'utf8')
   const scratch = scratchDir('agents-edit-')
   try {
     cpSync(join(ROOT, 'crew/agents'), scratch, { recursive: true })

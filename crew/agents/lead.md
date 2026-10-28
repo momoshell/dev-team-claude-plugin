@@ -25,3 +25,5 @@ Envelope keys: `role`, `id`, `status`, `summary`, `details`.
 Statuses: `done`, `insufficient`, `escalate`.
 
 Details keys: `decision`.
+
+Return a made decision with `status: "done"`, carrying it in `details.decision`. The loop also acts on a valid decision carried by a non-`done` status (for example `insufficient` with `bounce`); an envelope with no valid decision is refused.

@@ -204,6 +204,8 @@ export async function runLoop(spec, deps = {}) {
         if (failure) return { halt: await stop(role === 'lead' ? 'lead-refused' : failure.reason, { role, id, ...failure }) }
         last[role] = checked.envelope
         if (checked.envelope.status === 'done') return { envelope: checked.envelope }
+        // A lead's schema-valid envelope carries its decision whatever the status; the loop acts on the decision.
+        if (role === 'lead') return { envelope: checked.envelope }
         held = { reason: checked.envelope.status, envelope: checked.envelope }
       }
       if (singleTurn) return { halt: await stop('round-bound', { role, ...held }) }
@@ -256,11 +258,11 @@ export async function runLoop(spec, deps = {}) {
       measurements.push(`- Baseline gate: ${baseline.result.status}; failing ids: ${baseline.result.failingIds.join(', ')}.`)
     }
 
-    let feedback = isFinish ? [{ id: 'finish-stop', reason: fin.stop.reason, observation: fin.stop.observation }, ...(fin.guidance !== undefined ? [{ id: 'finish-return', guidance: fin.guidance }] : []), ...fin.findings] : []
+    let feedback = isFinish ? [{ id: 'finish-stop', reason: fin.stop.reason, observation: fin.stop.observation }, ...(fin.guidance !== undefined ? [{ id: 'finish-return', guidance: fin.guidance }] : []), ...fin.findings, { id: 'finish-gate', summary: 'You may repair the lane gate at the Gate path; return replacement mutations for any check you change.' }] : []
     // A suite red on both runs sends the lane back through build, gate, proof and review once, with the failures as feedback.
     let repairing = false
     let repaired = false
-    // A standard proof whose only non-killed rows are bind-fail earns the builder one re-aim turn, for those ids alone.
+    // A proof whose only non-killed rows are bind-fail earns the builder one re-aim turn, for those ids alone.
     let reaiming = false
     let reaimUsed = false
     let reaimIds = []
@@ -289,12 +291,12 @@ export async function runLoop(spec, deps = {}) {
         if (!proofOK) {
           const nonKilled = rows.filter((row) => row?.outcome !== 'killed')
           const bindFailRows = rows.filter((row) => row?.outcome === 'unmeasured' && row?.reason === 'bind-fail')
-          const canReaim = !isFinish && !reaimUsed && rows.length === acceptance.length && nonKilled.length > 0 && bindFailRows.length === nonKilled.length
+          const canReaim = !reaimUsed && rows.length === acceptance.length && nonKilled.length > 0 && bindFailRows.length === nonKilled.length
           if (!canReaim) return stop(proof.reason ?? 'mutation-unmeasured', proof)
           reaimUsed = true
           reaiming = true
           reaimIds = bindFailRows.map((row) => row.check)
-          seats.builder = { ...seats.builder, rounds: Math.max(seats.builder.rounds ?? DEFAULT_ROUNDS, rounds.builder + 1) }
+          seats.builder = { ...seats.builder, rounds: (seats.builder.rounds ?? DEFAULT_ROUNDS) + 1 }
           feedback = bindFailRows.map((row) => ({
             id: row.check,
             severity: 'must-fix',

@@ -43,9 +43,15 @@ longer the head the run measured. Read the refusal; it names the cause.
 
 ## Close it out
 
-- Finished by hand: open the PR yourself, then `crew record-pr <lane> --pr <url>`
-  appends one operator-marked `pr` row so the lane stops reading as stopped. The
-  lane must be quiet and record no PR yet (`crew/record-pr.mjs`).
+- Finished by hand: in the lane worktree, commit every change the build made
+  (`git status --short` shows nothing left), fetch, and rebase onto the base the
+  lane recorded as `origin/<base>` (`base` in `task/lean.json`; a local `<base>` does not move on fetch). Then, on
+  that rebased tree, run the gate, prove each acceptance check's mutation turns it
+  red, run the suite, and push only if all three hold.
+  Then open the PR and run `crew record-pr <lane> --pr <url>`, which appends one
+  operator-marked `pr` row so the lane stops reading as stopped. `record-pr`
+  checks only that the lane is quiet and records no PR yet, not that the PR holds
+  the build (`crew/record-pr.mjs`).
 - After the PR merges: `crew closeout <lane>` removes the worktree (never
   forced), deletes the lane branch and moves the lane directory to
   `~/.crew-journal-archive/` (`crew/closeout.mjs`). It refuses unless the

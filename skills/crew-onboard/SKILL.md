@@ -34,4 +34,6 @@ If you only want the skills, stop here: no lane is needed.
    split on whitespace and run without a shell, so no pipes or `&&`.
 4. Write the brief with the `lane-brief` skill (`skills/lane-brief/SKILL.md`).
 5. Validate with `crew start <brief> --check`; it needs no checkout. Then
-   `crew start <brief>` from inside the checkout starts the lane.
+   `crew start <brief>` from inside the checkout starts the lane. `crew` on `PATH`
+   is a launcher you set up; installing the plugin does not add one. Without it,
+   run `node <dev-team clone>/bin/crew.mjs start <brief> --checkout <target>`.

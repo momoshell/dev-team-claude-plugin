@@ -1,4 +1,4 @@
-// The skill's documented findings shape and crew/pi/agents/scout.json's are ONE
+// The skill's documented findings shape and the scout agent definition's are ONE
 // contract. This check reads both and compares each against a literal written
 // here, so neither side can move without a deliberate edit to this file.
 import { test } from 'node:test'
@@ -11,21 +11,21 @@ const FINDING_DISPOSITIONS = Object.freeze(['auto-fix', 'ask-user', 'no-op'])
 const FINDING_ID_SHAPE = /^[A-Za-z0-9_-]{1,64}$/
 
 const HERE = fileURLToPath(new URL('./', import.meta.url))
-const SCOUT = join(REPO, 'crew/pi/agents/scout.json')
+const SCOUT = join(REPO, 'crew', 'pi', 'agents', 'scout.json')
 const DOC = join(HERE, 'references/findings-shape.md')
 const SKILL = join(HERE, 'SKILL.md')
-const CHARTER = join(REPO, 'crew/roles/reviewer.md')
+const CHARTER = join(REPO, 'crew/agents/reviewer.md')
+const PROTOCOLS = join(REPO, 'crew/protocols.mjs')
 
 const TOP_KEYS = ['summary', 'findings', 'gaps']
 const FINDING_KEYS = ['claim', 'evidence', 'confidence']
 const CONFIDENCE_ENUM = '"verified" | "assumed"'
 const MANDATORY = '`confidence` is not optional'
 const CLOSED = 'No other keys are permitted'
-const CATEGORY_INTRO = 'The optional reviewer finding `category` is closed to the five complexity tags the reviewer charter owns'
-const REVIEWER_CHARTER = join(REPO, 'crew/roles/reviewer.md')
-const REPLACEMENT_RULE = 'A finding carrying any category above must also name a replacement: what to use instead, never only a complaint.'
-const NET_SUMMARY = 'Summarize the total removable code as `net: -N lines possible`.'
-const SKILL_ROUTE = 'When this rubric finds over-building, route the finding through the closed `category` in `references/findings-shape.md` and name what to use instead.'
+const TAGS = ['delete', 'stdlib', 'native', 'yagni', 'shrink']
+const NO_CATEGORY = 'The finding carries no `category` key.'
+const REPLACEMENT_RULE = 'Every such finding names a concrete replacement, never only a complaint.'
+const NET_SUMMARY = 'the total removable code as `net: -N lines possible`'
 
 // Collect `"key":` tokens at a fixed brace/bracket depth, in source order.
 function keysAtDepth(block, wantDepth) {
@@ -56,13 +56,6 @@ function blockFrom(text, from) {
   throw new Error('unterminated shape block')
 }
 
-// The five tags have ONE home: the reviewer charter's 'Tags are closed:' sentence. The
-// reference doc points at it and restates nothing, so this parses the charter, not the doc.
-function overBuildingCategories(charter) {
-  const sentence = charter.replace(/\s+/g, ' ').match(/Tags are closed: (.+?)\. Every tag names a concrete replacement\./)
-  return sentence ? [...sentence[1].matchAll(/\`([a-z]+)\`/g)].map((m) => m[1]) : []
-}
-
 const scoutPrompt = JSON.parse(readFileSync(SCOUT, 'utf8')).prompt
 const doc = readFileSync(DOC, 'utf8')
 const skill = readFileSync(SKILL, 'utf8')
@@ -87,7 +80,7 @@ test('the skill documents that shape and no other', () => {
 })
 
 test('the skill names the definition it is pinned to', () => {
-  assert.ok(doc.includes('crew/pi/agents/scout.json'))
+  assert.ok(doc.includes('`scout.json` under `crew/pi/agents/`'))
   assert.ok(doc.includes('skills/pr-review/findings-shape.test.mjs'))
 })
 
@@ -98,24 +91,25 @@ test('the skill documents the reviewer finding disposition', () => {
   assert.deepEqual(values, [...FINDING_DISPOSITIONS])
 })
 
-test('the skill and the reviewer charter agree on the disposition set', () => {
+test('the skill, the reviewer definition and the protocol agree on the disposition set', () => {
   const charter = readFileSync(CHARTER, 'utf8')
-  const line = charter.split('\n').find((entry) => entry.includes('"disposition":'))
+  assert.ok(charter.includes('`auto-fix`, `ask-user` or `no-op`'))
+  const protocols = readFileSync(PROTOCOLS, 'utf8')
+  const line = protocols.split('\n').find((entry) => entry.startsWith('export const FINDING_DISPOSITIONS'))
   assert.ok(line)
-  const values = [...line.slice(line.indexOf(':') + 1).matchAll(/"([^"]+)"/g)].map((match) => match[1])
+  const values = [...line.matchAll(/'([^']+)'/g)].map((match) => match[1])
   assert.deepEqual(values, [...FINDING_DISPOSITIONS])
 })
 
 test('the skill states the disposition window and the pass/must-fix refusal', () => {
-  assert.match(doc, /`disposition` field is optional in this release and required from the next/i)
+  assert.match(doc, /`disposition` field is optional\./i)
   assert.match(doc, /`pass` may\s+not carry a `must-fix`/)
 })
 
-test('the skill and the charter state the same finding-id shape', () => {
-  const charter = readFileSync(CHARTER, 'utf8')
+test('the skill and the protocol state the same finding-id shape', () => {
   const shape = String(FINDING_ID_SHAPE).slice(1, -1)
   assert.equal(doc.includes(shape), true)
-  assert.equal(charter.includes(shape), true)
+  assert.equal(readFileSync(PROTOCOLS, 'utf8').includes(shape), true)
   assert.equal(shape, '^[A-Za-z0-9_-]{1,64}$')
 })
 
@@ -141,16 +135,12 @@ test('every worked example in the skill conforms to the shape', () => {
   assert.ok(examples >= 1, 'the skill carries no worked example of the shape')
 })
 
-test('over-building category is closed and requires replacements', () => {
-  // Derived from the reviewer charter — the one home. Five, distinct; the exact set is digest-pinned in crew/drive-docs.test.mjs.
-  const categories = overBuildingCategories(readFileSync(REVIEWER_CHARTER, 'utf8'))
-  assert.equal(categories.length, 5)
-  assert.equal(new Set(categories).size, 5)
-  // The reference doc names the home and restates no tag bullet.
-  assert.ok(doc.includes(CATEGORY_INTRO))
-  assert.ok(doc.includes('crew/roles/reviewer.md'))
-  assert.equal([...doc.matchAll(new RegExp('^- \`(' + categories.join('|') + ')\` — ', 'gm'))].length, 0, 'tags restated in findings-shape.md')
+test('over-building is a summary tag, not a finding key', () => {
+  for (const tag of TAGS) assert.ok(doc.includes('`' + tag + '`'), `findings-shape.md omits the ${tag} tag`)
   assert.ok(doc.includes(REPLACEMENT_RULE))
   assert.ok(doc.includes(NET_SUMMARY))
-  assert.ok(skill.includes(SKILL_ROUTE))
+  assert.ok(skill.includes(NO_CATEGORY))
+  // The protocol refuses any finding key outside its closed set, so no skill text may ask for one.
+  assert.equal(/closed `category`/.test(doc + skill), false)
+  assert.equal(/"category"\s*:/.test(doc + skill), false)
 })

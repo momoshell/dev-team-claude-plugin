@@ -1,59 +1,36 @@
 # Closed enums are consulted data
 
 Declare a finite vocabulary as data that callers actually consult.
-Exhibit: `scripts/factory/ledger.mjs:554` (`CI_DECISIONS`).
+Exhibit: `CHECK_REASONS` in `crew/checks.mjs`, frozen with `Object.freeze` at the
+export boundary.
 
-`DECISIONS` is frozen with `Object.freeze` at the export boundary.
-Exhibit: `crew/drive.mjs:569`.
-
-Production code reads `CI_DECISIONS` when it validates a decision.
-Exhibit: `scripts/factory/ledger.mjs:4502`.
-
-`DECISIONS` is exported and frozen but read by no production code; only
-`crew/drive-review.test.mjs:1628-1630` reads it, so it is not the exhibit for "callers
-actually consult".
-
-Keep the refusal message derived from the same set.
-Exhibit: `crew/shape-validator.mjs:261`.
+Production code reads the set when it validates a value.
+Exhibit: `crew/loop.mjs` extends the check vocabulary into its own reason list.
 
 Pin the expected members independently in the test.
-Exhibit: `crew/drive-review.test.mjs:1630`.
+Exhibit: `crew/checks.test.mjs` asserts the count and names tokens by literal.
 
-Pin immutability independently with `Object.isFrozen`.
-Exhibit: `crew/drive-review.test.mjs:1629`.
+Pin immutability independently with `Object.isFrozen`, and uniqueness with a
+`Set` size check. Exhibit: `crew/checks.test.mjs`.
 
-The paired assertions catch value drift and freeze drift.
-Exhibit: `crew/drive-review.test.mjs:1630`.
+The paired assertions catch value drift and freeze drift. A mutation that
+removes the freeze must make the test fail even when members are unchanged; a
+mutation that adds a member must also make the literal expectation fail.
 
-`PARK_STATES` supplies the same frozen-data pattern elsewhere.
-Exhibit: `crew/reclaim.mjs:12`.
-
-`REAP_ACCOUNTING` shows the pattern in a factory script.
-Exhibit: `scripts/factory/reap-stale.mjs:80`.
+Pin that a downstream vocabulary stays a superset when it extends the set.
+Exhibit: `crew/loop.test.mjs` asserts every `CHECK_REASONS` entry is in the
+loop's reasons.
 
 Do not infer closure from an uppercase name or an exported array alone.
-Exhibit: `crew/drive-review.test.mjs:1630`.
 
-A mutation that removes the freeze must make the test fail even when members
-are unchanged.
-Exhibit: `crew/drive-review.test.mjs:1629`.
-
-A mutation that adds a member must also make the literal expectation fail.
-Exhibit: `crew/drive-review.test.mjs:1630`.
-
-Read `docs/conventions.md:134` for the repo decision; this file owns the test
-shape that keeps the decision observable.
-
-Unknown values should take the existing refusal path rather than being silently
-added to a vocabulary.
-Exhibit: `crew/shape-validator.mjs:261`.
+Keep a refusal message derived from the same set, and send unknown values down
+the existing refusal path rather than adding them silently.
 
 Empty and null declarations are invalid data, not empty closed enums.
-Exhibit: `crew/shape-validator.mjs:250`.
 
-Keep a rule's exhibit beside the declaration and beside its drift guard.
-Exhibit: `crew/drive-review.test.mjs:1629` and `:4161`.
+Read `docs/conventions.md` for the repo decision; this file owns the test shape
+that keeps the decision observable.
 
-The cost of one missing half is a contract that appears closed while remaining
+Keep a rule's exhibit beside the declaration and beside its drift guard. The
+cost of one missing half is a contract that appears closed while remaining
 mutable.
-Exhibit: `crew/drive-review.test.mjs:1630`.

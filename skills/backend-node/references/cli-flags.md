@@ -1,60 +1,38 @@
 # Refuse flags a verb does not read
 
-Give every CLI verb an explicit entry in `VERB_FLAGS`.
-Exhibit: `scripts/factory/ledger.mjs:8627`.
+Give every CLI verb an explicit flag vocabulary and refuse everything outside it.
+Exhibit: `crew/start.mjs` (its `main` parses `--check`, `--checkout` and `--loop`
+and nothing else).
 
-Use `refuseUnknownFlags` as the one vocabulary check.
-Exhibit: `scripts/factory/ledger.mjs:8668`.
+A misspelling or an extra argument must produce a usage refusal instead of a
+default. Exhibit: `crew/start.mjs` writes the usage line and returns exit 2;
+`crew/start.test.mjs` pins that status for no argument, two briefs, a missing
+`--checkout` value, and a missing, duplicate or unknown `--loop` value.
 
-A misspelling must produce a usage refusal instead of a default.
-Exhibit: `scripts/factory/ledger.mjs:8676` and `test/factory-ledger-cli.test.mjs:334`.
+Pin the refusal direction and the accepted direction as separate observations:
+the same test file also asserts that a valid `--check --loop lean` call exits 0.
 
-The measured failure was `run-set --since X --untill Y` returning an unbounded
-window at exit 0 (#443).
-Exhibit: `scripts/factory/ledger.mjs:8676`.
+Pin the usage text and the status together.
+Exhibit: `crew/start.test.mjs` captures stderr from `main` and asserts the exact
+usage line beside the exit code.
 
-Pin the refusal direction in the ledger test.
-Exhibit: `test/factory-ledger-cli.test.mjs:332`.
-
-Pin the inverse direction so accepted window flags still work.
-Exhibit: `test/factory-ledger-cli.test.mjs:339`.
-
-Pin the process-level status as `exit 2` for the emit CLI.
-Exhibit: `test/factory-emit.test.mjs:1849`.
-
-The same refusal shape is mirrored in `scripts/factory/emit.mjs:1645`.
-Exhibit: `scripts/factory/emit.mjs:1645`.
-
-Do not let an unknown option become an omitted bound or a null filter.
-Exhibit: `scripts/factory/ledger.mjs:8676` and `test/factory-ledger-cli.test.mjs:332`.
+Do not let an unknown option become an omitted bound or a null filter. The cost
+of ignoring one flag is an apparently successful command that did something
+other than what was asked.
 
 An empty vocabulary means a verb accepts no flags; it is not an open parser.
-Exhibit: `scripts/factory/ledger.mjs:8627`.
 
-An unknown verb must refuse before a flag can acquire accidental meaning.
-Exhibit: `scripts/factory/ledger.mjs:10552`.
+An unknown value for a closed flag (`--loop old`) must refuse before it can
+acquire accidental meaning. Exhibit: `crew/start.test.mjs` (`(SW3)`).
 
-If parsing is interrupted, do not resume with the default window.
+If a value is missing, report usage rather than reading the next option as data.
+Status: the missing-value edge is backed for `--checkout` and `--loop` only; any
+other verb is unbacked, see `evidence.md`.
+
+If parsing is interrupted, do not resume with a default.
 Status: this interrupted-parser edge is unbacked in this checkout; see
 `evidence.md`.
 
-If a value is missing, report usage rather than reading the next option as data.
-Status: this missing-value edge is unbacked in this checkout; see `evidence.md`.
-
-Test a typo, a valid option, and the exit status as three distinct observations.
-Exhibit: `test/factory-ledger-cli.test.mjs:332`, `test/factory-ledger-cli.test.mjs:339`, and `test/factory-emit.test.mjs:1849`.
-
-The test expectation must come from the CLI contract, not from parsed output.
-Exhibit: `test/factory-ledger-cli.test.mjs:332` and `test/factory-ledger-cli.test.mjs:339`.
-
-A green happy-path test alone cannot catch the one-letter window regression.
-Exhibit: `test/factory-ledger-cli.test.mjs:332`.
-
-Keep the exhibit and the accepted vocabulary updated in one change.
-Exhibit: `scripts/factory/ledger.mjs:8627` and `:3406`.
-
-The cost of ignoring one flag was an apparently successful, unbounded report.
-Exhibit: `scripts/factory/ledger.mjs:8676`.
+Keep the usage line and the accepted vocabulary updated in one change.
 
 Use this rule for each verb even when several verbs share a parser helper.
-Exhibit: `scripts/factory/ledger.mjs:8627`.

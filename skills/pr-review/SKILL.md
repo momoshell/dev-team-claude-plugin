@@ -21,7 +21,7 @@ place that runs the review flow.
 | Choosing what to attack and how to grade it | `references/rubric.md` | Four axes, ordered by measured yield |
 | Recording a typed scout finding | `references/findings-shape.md` | Keep the scout contract pinned |
 | Resolving two verdicts on one line | `references/divergence.md` | Treat disagreement as signal |
-| Selecting reviewer posture by tier | `references/posture.md` | The panel is shipped; name which gate a lone reviewer hit |
+| Selecting reviewer posture by tier | `references/posture.md` | One reviewer per round; a tech-lead review is assigned by hand |
 | Sizing a claim or naming an evidence gap | `references/evidence.md` | Keep denominators and unbacked rules visible |
 | Deciding whether a candidate finding survives, and how a ruling carries across rounds | `references/falsification.md` | The diff is not evidence; re-derive input, path and outcome; rulings persist |
 
@@ -41,11 +41,10 @@ place that runs the review flow.
   both positions and resolve it using `references/divergence.md`.
 - Never report a rate without its denominator. A measured yield is a claim about
   the corpus and its denominator, not a free-floating percentage.
-- The reviewer envelope's finding object is at `crew/roles/reviewer.md:56-64` and
-  it is `{id, severity, disposition, patch, location, summary}` — not the
-  four-field shape the sentence claims; `findings` is optional, at
-  `crew/roles/reviewer.md:69`. `confidence` appears in reviewer.md only in the
-  scout/recommendation shape.
+- The reviewer envelope's finding object is `{id, severity, location, summary}`
+  with an optional `disposition` and a `patch` only for `auto-fix`
+  (`crew/agents/reviewer.md`); `confidence` appears only in the scout shape. A
+  pass cannot carry a `must-fix`.
 
 - The do-not-flag guidelines are repo data loaded by the procedure layer, and a
   review is in exactly one of two states: the guidelines loaded, or they did not
@@ -54,7 +53,7 @@ place that runs the review flow.
 
 ## Rubric, ordered by measured yield
 
-When this rubric finds over-building, route the finding through the closed `category` in `references/findings-shape.md` and name what to use instead.
+When this rubric finds over-building, open the finding's `summary` with one of the five complexity tags in `references/findings-shape.md` and name what to use instead. The finding carries no `category` key.
 
 | # | area | exhibit | measured |
 |---|---|---|---|
@@ -75,6 +74,6 @@ When this rubric finds over-building, route the finding through the closed `cate
 - `references/rubric.md` — the four review axes and their grading rules.
 - `references/findings-shape.md` — the scout findings contract and its pin.
 - `references/divergence.md` — divergence-as-signal and the recording example.
-- `references/posture.md` — tier-scaled reviewer posture and the two gates on the shipped panel.
+- `references/posture.md` — tier-scaled reviewer posture and the manually assigned tech-lead review.
 - `references/evidence.md` — corpus denominators, limits, and rules with no exhibit.
 - `references/falsification.md` — what survives: the diff is not evidence, the falsification pass, the fix bar, rulings across rounds, calibration.

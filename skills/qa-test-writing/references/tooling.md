@@ -67,19 +67,16 @@ A detached worktree **shares the object store and must be removed** with
 
 ## Timeouts
 
-`--test-timeout=30000` per test. The brief compiler's baseline has a fixed 300s
-timeout and runs the **whole suite on every compile** (~50s alone; longer when
-several compiles contend). Compile briefs separately or in the background —
-three in one foreground shell call will exceed a two-minute tool timeout.
+`--test-timeout=30000` per test. A full-suite run takes about a minute; run it in the background or
+run the targeted test file instead, so one foreground call stays under the
+tool timeout.
 
 ## Reading a run's results
 
-- A driver run's roll-up is `returns/task.json`, but it records only **which
-  fields** a seat envelope carried.
-- **Scout findings live in `returns/d1.planner.json`**, not `task.json`. Reading
-  `task.json` shows `findings: 0` and means nothing.
-- The journal is `journal.jsonl` in the task dir; the boot journal is one level
-  up, beside `crew.json`.
+- A seat's envelope is the JSON file at its return path in the task dir
+  (`builder-2.json`, `reviewer-1.json`). Read the envelope, not a roll-up.
+- Each seat turn is recorded under `lean/<role>/<id>.jsonl` in the task dir, and
+  the run's journal is `journal.jsonl` beside it.
 
 ## Re-derive a surprising measurement
 

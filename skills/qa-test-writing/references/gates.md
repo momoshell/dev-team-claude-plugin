@@ -1,7 +1,7 @@
 # Acceptance gates
 
-An acceptance gate is a program the planner authors per task, which the driver
-executes. It is the task's definition of done, expressed as something that runs.
+An acceptance gate is a program the planner authors per task, which the loop
+runs (`runGate` in `crew/checks.mjs`). It is the task's definition of done, expressed as something that runs.
 
 ## The four properties
 
@@ -15,12 +15,14 @@ executes. It is the task's definition of done, expressed as something that runs.
    prints `GATE-SUMMARY {"total":n,"failed":n,"errored":n}` and `errored` must be
    `0` at baseline.
 
-3. **Discrimination is proved by the driver, once per gate version** — not
+3. **Discrimination is proved by the loop, once per gate version** — not
    asserted in prose in the brief (#168). A gate that claims to discriminate and
    was never made to, is a claim.
 
-4. **Every declared mutation kills its own check.** Name the mutation beside the
-   check, and demonstrate it reddens.
+4. **Every declared mutation kills its own check.** Declare `{check, file, find,
+   replace}` for each acceptance id; `proveMutations` in `crew/checks.mjs` applies
+   it in a scratch copy and requires that check to go red. The `find` must occur
+   exactly once in the file.
 
 A failing check must print `FAIL <label>` ending the line, or `FAIL <label>: <why>`. Nothing else matches. The strict separator prevents a shorter check label from falsely matching a longer prefix label.
 
@@ -42,69 +44,52 @@ A failing check must print `FAIL <label>` ending the line, or `FAIL <label>: <wh
   after a manual mutation wipes an escalated lane's work. Commit first, then
   revert.
 
+- **The gate runs in a git-free tree.** `proveMutations` in `crew/checks.mjs`
+  copies the tree for every mutation, and for its green preflight, without the
+  top-level `.git`. A gate that shells out to `git` (`git grep`, `git ls-files`,
+  `git diff`) exits with "not a git repository" there and cannot complete the
+  proof, even when it works at baseline and after the build. Inspect the
+  filesystem rooted at `process.cwd()` instead.
+
 - **An absence check must distinguish "no match" from "the search broke."**
-  `git grep` — like `grep`, and any tool that signals "no match" through exit
-  status — exits 1 on zero matches, and `execFileSync`/`execSync` throw on a
-  non-zero exit, so such a check
-  **errors exactly when the criterion is satisfied**. A violating gate lets
-  that throw escape and the builder's success arrives as a crash; a correct
-  one catches, keeps exit 1 with empty stdout as the pass, and rethrows
-  everything else —
-  collapsing the two is worse than the original bug, because a broken search
-  then reads as clean. `errored` and `failed` are different columns in
-  `GATE-SUMMARY`:
-  an errored check is not a failed check, and the driver refuses a baseline
-  with either one non-zero (#581, PR #577).
+  Read each file with `readFileSync` and test it with `includes`. A path that
+  is missing throws `ENOENT`, which is the search breaking: let it propagate
+  rather than reading it as clean. A tool that signals "no match" through exit
+  status (`grep`) makes the check error exactly when the criterion is
+  satisfied, because `execFileSync` throws on a non-zero exit. `errored` and
+  `failed` are different columns in `GATE-SUMMARY`: an errored check is not a
+  failed check, and the loop refuses a baseline with either one non-zero
+  (#581, PR #577).
 
 An absence check MUST be demonstrated red by ADDING the thing it forbids, not merely observed red at baseline.
-"red at baseline" is not evidence for an absence check when it can be red by ERRORING on the no-match status.
+"red at baseline" is not evidence for an absence check when it can be red by ERRORING instead of failing.
 
 ### The absence-check shape (copy this)
 
-Copy this self-contained shape; it imports nothing from the checkout, so it runs in any repo:
+Copy this self-contained shape; it imports only node built-ins, needs no git
+metadata, and runs in the scratch copy the loop proves mutations in:
 
 ```js
-    import { execFileSync } from 'node:child_process'
+    import { readFileSync } from 'node:fs'
+    import { join } from 'node:path'
     const REPO = process.cwd()
-    let hits
-    try {
-      hits = execFileSync('git', ['grep', '-c', '-F', '-e', NEEDLE, '--', ...PATHS],
-        { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
-    } catch (err) {
-      if (err?.status !== 1) throw err
-      hits = String(err.stdout ?? '').trim()
-    }
-    if (hits) return `expected no reference to ${NEEDLE}, found ${hits}`
+    // PATHS are repo-relative files. A missing file throws ENOENT: the search broke, not "clean".
+    const hits = PATHS.filter((path) => readFileSync(join(REPO, path), 'utf8').includes(NEEDLE))
+    if (hits.length) return `expected no reference to ${NEEDLE}, found in ${hits.join(', ')}`
 ```
 
-Wrong — the throw lands precisely when the criterion is met:
+To cover a directory, list it with `readdirSync(dir, { recursive: true })` and
+keep the files you mean to read. Do not walk `node_modules` or `.git`.
 
-    // WRONG: throws on zero matches, i.e. exactly when the check should pass.
-    const hits = execFileSync('git', ['grep', '-c', '-F', '-e', NEEDLE, '--', ...PATHS],
-      { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
-    if (hits) return `expected no reference to ${NEEDLE}, found ${hits}`
+Wrong — shells out to git, which the proof copy does not have:
 
-Right — exit 1 with empty stdout is the pass; every other failure still throws:
+    // WRONG: throws "not a git repository" inside proveMutations' scratch copy.
+    execFileSync('git', ['grep', '-c', '-F', '-e', NEEDLE, '--', ...PATHS], { cwd: REPO })
 
-    // RIGHT: 1 is "no match"; 128 (bad pathspec magic, not a repo) stays fatal.
-    let hits
-    try {
-      hits = execFileSync('git', ['grep', '-c', '-F', '-e', NEEDLE, '--', ...PATHS],
-        { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
-    } catch (err) {
-      // no match: exit 1 with empty stdout is the PASS
-      if (err?.status !== 1) throw err
-      hits = String(err.stdout ?? '').trim()
-    }
-    if (hits) return `expected no reference to ${NEEDLE}, found ${hits}`
-
-This repo's `scripts/factory/absence.mjs` implements the same shape; pair either with the positive control below.
-
-Exit 1 does not prove the search looked where you meant. A pathspec naming a
-directory that does not exist also exits 1 with empty stdout **and empty
-stderr** — byte-identical to a genuine no-match (measured, git 2.55.0). Pair
-the absence check with a positive control: the same search for a needle that
-MUST match, failing loudly if it does not.
+Pair the absence check with a positive control: the same read for a needle
+that MUST be present in a file that must exist, failing loudly if it is not.
+An empty `PATHS`, or a path list that names the wrong files, is otherwise
+byte-identical to a genuine absence.
 
 ## The proof loop
 

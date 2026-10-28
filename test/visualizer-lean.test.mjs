@@ -226,6 +226,16 @@ test('VJ4 events: a lean lane answers its journal rows in order with a cursor an
   })
 })
 
+test('VJ5 events: phase_id on a lean lane is refused, never answered with unfiltered rows', async () => {
+  await withServer(async ({ crewRoot, get }) => {
+    lane(crewRoot, 'vj5', [{ event: 'stage-start', stage: 'plan' }, { event: 'stage-start', stage: 'build' }])
+    const refused = await get('/api/events?adw_id=lean%3Avj5&phase_id=1')
+    assert.equal(refused.status, 400); assert.match(refused.body.error, /phase_id/)
+    assert.equal(refused.body.events, undefined)
+    assert.equal((await get('/api/events?adw_id=lean%3Avj5')).body.events.length, 2)
+  })
+})
+
 test('VJ1 sessions: a broken triage sidecar over a readable ledger does not make the ledger unreadable', async () => {
   const feed = { listRuns: () => ({ runs: [{ adw_id: 'ledger-1' }], degraded: true, probe: {} }), listEvents: () => ({ events: [], cursor: 0 }), health: () => ({ degraded: true }), _reason: () => null, close: () => {} }
   await withServer(async ({ get }) => {

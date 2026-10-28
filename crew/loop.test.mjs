@@ -1130,12 +1130,42 @@ test('a re-aim replacement for an id whose declaration bound stops the lane (RA3
   assert.equal(f.calls.filter((c) => c === 'mutations').length, 1)
 })
 
+// MUTATION: let a finish re-aim turn replace any acceptance id and a builder swaps a declaration that already bound.
+test('a finish re-aim replacement for an id whose declaration bound stops the lane (RA3)', async () => {
+  let builderTurns = 0
+  const f = fakes({
+    spec: { ...finishSpec({ mutations: [MUTATION, { ...MUTATION, check: 'A2' }] }), acceptance: ['A1', 'A2'] }, unseated: ['planner'],
+    edit: (v) => (v.role === 'builder' && ++builderTurns === 2 ? { ...v, details: { summary: 'built', mutations: [{ ...REAIM, check: 'A2' }] } } : v),
+    proof: sequence(unbound(BIND_FAIL('A1'), KILLED('A2')), killedProof('A1', 'A2')),
+  })
+  assert.deepEqual(await f.go(), stopped('envelope-refused'))
+  assert.equal(builderTurns, 2)
+  assert.equal(f.calls.filter((c) => c === 'mutations').length, 1)
+})
+
 // MUTATION: allow a second re-aim turn and a still-unbound proof never stops.
 test('a proof still bind-fail after the re-aim turn stops as mutation-unmeasured (RA4)', async () => {
   const f = fakes({ proof: unbound(BIND_FAIL('A1')) })
   assert.deepEqual(await f.go(), stopped('mutation-unmeasured'))
   assert.equal(count(f, 'builder'), 2)
   assert.equal(f.calls.filter((c) => c === 'mutations').length, 2)
+})
+
+// MUTATION: keep a once-per-run re-aim flag and a bind-fail after a review-fix build stops the lane.
+test('a bind-fail proof after a review-fix build earns its own re-aim turn (RB1)', async () => {
+  const f = fakes({ review: 1, proof: sequence(unbound(BIND_FAIL('A1')), killedProof('A1'), unbound(BIND_FAIL('A1')), killedProof('A1')) })
+  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
+  assert.equal(count(f, 'builder'), 4)
+})
+
+// MUTATION: let a re-aim turn clear its own flag and a persistent bind-fail loops through re-aims.
+test('a run never takes two re-aim turns in a row (RB3)', async () => {
+  const f = fakes({ proof: sequence(unbound(BIND_FAIL('A1')), unbound(BIND_FAIL('A1')), killedProof('A1')) })
+  assert.deepEqual(await f.go(), stopped('mutation-unmeasured'))
+  assert.equal(count(f, 'builder'), 2)
+  const starts = f.rows.filter((row) => row.event === 'stage-start').map((row) => row.stage)
+  assert.equal(starts.filter((name) => name === 'mutation-reaim').length, 1)
+  assert.ok(!starts.some((name, i) => name === 'mutation-reaim' && starts[i + 1] === 'mutation-reaim'))
 })
 
 // MUTATION: re-aim whenever any row is bind-fail and a survived mutation earns the builder an easier target.

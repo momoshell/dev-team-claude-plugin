@@ -767,6 +767,7 @@ export function startServer(options = {}) {
         if (phase_id !== undefined) filters.phase_id = phase_id
         const adwId = url.searchParams.get('adw_id') || ''
         if (adwId.startsWith('lean:')) {
+          if (phase_id !== undefined) return json(res, 400, { schema, error: 'phase_id is not supported for lean lanes: lean journal rows carry no phase_id' })
           // Lean lanes are journals on disk: answer from the journal, never the ledger.
           const found = lean.resolveLane(adwId.slice('lean:'.length))
           if (!found) return json(res, 200, { schema, events: [], cursor: after, degraded: false, absent: `no lean lane ${adwId.slice('lean:'.length)}` })
@@ -1173,6 +1174,7 @@ export function startServer(options = {}) {
         try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
         if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.role !== 'string' || typeof input.field !== 'string') return json(res, 400, { schema, error: 'role and field are required strings' })
         const tier = input.tier ?? null
+        if (!Object.hasOwn(input, 'value')) return json(res, 400, { schema, error: 'value is required: only an explicit null clears a tier override' })
         const value = input.value ?? null
         if (tier !== null && typeof tier !== 'string') return json(res, 400, { schema, error: 'tier must be a string or null' })
         if (value !== null && typeof value !== 'string') return json(res, 400, { schema, error: 'value must be a string or null' })

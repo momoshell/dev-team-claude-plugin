@@ -427,6 +427,13 @@ export async function runLoop(spec, deps = {}) {
     const rebased = await stage('rebase', () => callCheck('rebase', d.rebaseBranch, { cwd, base: spec.base, timeoutMs }))
     if (rebased.status !== 'green' || !text(rebased.head)) return stop(rebased.reason ?? 'runner-threw', rebased)
 
+    if (rebased.head !== committed.head) {
+      const postGate = await stage('gate', () => callCheck('gate', d.runGate, { cwd, gatePath, timeoutMs }, { command: true }))
+      if (postGate.status !== 'green') return stop(postGate.reason, postGate)
+      const postSuite = await stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs ?? timeoutMs }, { command: true }))
+      if (postSuite.status !== 'green') return stop(postSuite.reason, postSuite)
+    }
+
     if (isFinish) {
       // The fused report the deciding session reads instead of the journal; a run that cannot write it is not ready.
       const reviewRounds = (fin.priorReviewRounds ?? 0) + rounds.reviewer

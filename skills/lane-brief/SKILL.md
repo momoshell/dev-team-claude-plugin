@@ -20,10 +20,10 @@ fence register, symbol index, tripwire list or baseline. The format is protocol 
    `~/.crew/briefs/started/`).
 4. Validate: `crew start ~/.crew/briefs/<lane>.md --check`. In this repo, run the checkout's own copy:
    `node crew/start.mjs <brief> --check`. Fix every defect it names.
-5. Start: the same command without `--check`. It creates `../dt-<lane>`, boots the crew headless at the
-   brief's tier and starts the run detached on a snapshot of the brief. Both steps also check the brief
-   with the driver's own parsers and refuse if the driver would read it differently. It prints the
-   worktree, the brief snapshot, the run log and the status command.
+5. Start: the same command without `--check`. It creates `../dt-<lane>`, snapshots the brief, writes the lean
+   spec and starts the lean loop detached. Both steps check the brief with the P1 brief check and resolve the
+   agent definitions (standard shape only); they do not run the old driver's parsers. It prints the worktree,
+   the brief snapshot, the run log and the status command.
 6. Close the lane out after its PR merges with the `crew-recovery` skill, as before.
 
 ## Format

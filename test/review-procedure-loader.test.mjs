@@ -65,16 +65,19 @@ test('the stated empty list is a blind spot, not a broken-checkout claim', () =>
   assert.equal(/broken checkout/i.test(out), false)
 })
 
-test('posture.md names the continuation gate on the shipped panel', () => {
+test('posture.md names the lean tier posture: one reviewer per round at the lane tier', () => {
   const text = readFileSync(join(ROOT, 'skills/pr-review/references/posture.md'), 'utf8')
-  assert.ok(text.includes('ctx.continuation'))
-  assert.ok(text.includes('crew/drive.mjs:11530'))
+  assert.ok(text.includes('One reviewer per round is the standing posture'))
+  assert.ok(text.includes('`TIERS` in `crew/protocols.mjs`'))
+  assert.equal(text.includes('crew/drive.mjs'), false)
 })
 
-test('posture.md names the tech-lead seat gate on the shipped panel', () => {
+test('posture.md names the tech-lead seat as manually assigned, with no panel', () => {
   const text = readFileSync(join(ROOT, 'skills/pr-review/references/posture.md'), 'utf8')
-  assert.ok(text.includes('without a seated tech-lead'))
-  assert.ok(text.includes('crew/drive.mjs:767'))
+  assert.ok(text.includes('not an automatic stage'))
+  assert.ok(text.includes('reviews only when a person assigns it'))
+  assert.equal(text.includes('speaks only on escalation'), false)
+  assert.ok(text.includes('never runs two\nreviewers on one round'))
 })
 
 test('no review-skill document calls the shipped panel parked', () => {

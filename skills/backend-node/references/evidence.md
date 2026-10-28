@@ -10,7 +10,7 @@ covered by the nearest passing check.
 ### No repository-wide import scan
 
 The zero-dependency assertion is per module, not a whole-repository sweep.
-Exhibit for that limitation: `crew/pi/extensions/subagent.test.mjs:174`.
+Exhibit for that limitation: `crew/pi/extensions/subagent.test.mjs`.
 
 No checkout-wide import scan was found in the cited enforcement shape.
 
@@ -22,7 +22,7 @@ This is an enforcement gap, not a claim that the module rule lacks evidence.
 ### TypeScript constructs outside the grep
 
 The extension test searches `enum` and `namespace`.
-Exhibit: `crew/pi/extensions/subagent.test.mjs:182` and `crew/pi/extensions/subagent.test.mjs:183`.
+Exhibit: `crew/pi/extensions/subagent.test.mjs`.
 
 It does not grep `parameter properties`.
 
@@ -43,11 +43,12 @@ Unknown or interrupted loader results remain indeterminate until observed.
 
 ### Import-firewall interrupted reads
 
-No dedicated local test distinguishes an interrupted daemon source read from an
-empty import list while checking an allowlisted leaf.
+No dedicated local test distinguishes an interrupted adapter source read from an
+empty import list while checking an admitted leaf.
 
-The firewall test does pin the leaf's normal import-free state at
-`crew/daemon.test.mjs:264`; the interrupted-read edge remains unbacked.
+The subagent test does pin the adapter's normal node-only state in
+`crew/pi/extensions/subagent.test.mjs`; the interrupted-read edge remains
+unbacked.
 
 Keep that edge marked unbacked in `import-firewall.md` until a mutation pins it.
 
@@ -64,14 +65,11 @@ pins EPERM, unknown, interrupted, and empty import-scan outcomes.
 
 ### CLI parser interruption and missing values
 
-No dedicated local test or source exhibit was found for an interrupted flag parse
-or for a flag whose value is missing at the end of argv.
+No dedicated local test or source exhibit was found for an interrupted flag parse.
+A missing value is measured for `--checkout` and `--loop` in
+`crew/start.test.mjs`; other verbs are unmeasured.
 
-The refusal and accepted-window directions are measured in
-`test/factory-ledger-cli.test.mjs:334` and `test/factory-ledger-cli.test.mjs:339`; these two edges remain separate.
-
-Keep those two CLI edge rules in `cli-flags.md` marked unbacked until a test
-pins interrupted parsing and missing-value behavior.
+Keep those edge rules in `cli-flags.md` marked unbacked until a test pins them.
 
 ### TypeScript import interruption and empty source
 
@@ -95,6 +93,6 @@ Keep interrupted-child and failed-parse instructions in `usage-records.md`
 marked unbacked until those paths receive a measured fixture.
 
 The register is deliberately narrow: it does not erase the exhibits carried by
-the six rule references.
+the rule references.
 
 Record a new search here when a proposed rule has no local exhibit.

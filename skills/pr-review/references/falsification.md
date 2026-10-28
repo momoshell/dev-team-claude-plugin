@@ -4,9 +4,9 @@ How a finding earns the right to be written, and what happens to it across
 rounds. The rubric (`references/rubric.md`) says what to attack; this says what
 survives. Adapted from KiroCrew's review prompts (Apache-2.0; licence and
 NOTICE in `THIRD-PARTY-NOTICES.md`), rewritten for this repo's seats, severity
-enum and carriers. Nothing here overrides the verdict contract in
-`crew/roles/reviewer.md`: line 1 of a review is still the verdict. Severities
-by seat, review to plan check:
+enum and carriers. Nothing here overrides the return contract in
+`crew/agents/reviewer.md`: one P2 JSON envelope whose details carry the verdict
+and the findings. Severities by seat, review to plan check:
 `must-fix` → `blocker`, `should-fix` → `major`, `consider` → `minor`.
 
 ## The diff is not evidence
@@ -37,7 +37,7 @@ What did not survive is never a `must-fix`. It is dropped when the code you
 opened answers it; it is kept as a `consider` naming the defense you could
 not confirm when the uncertainty is itself worth recording — the rubric's rule
 (`references/rubric.md`: grade the point a consider) and the charter's
-(`crew/roles/reviewer.md`: unsupported scenarios are considers). This is the
+(`crew/agents/reviewer.md`: name concrete findings; an unsupported scenario is a consider). This is the
 counterexample rule stated as a procedure: a finding that names its state and
 wrong observable is graded must-fix **74% (95 of 129)** of the time; one that
 does not, **20% (25 of 125)** (F10).
@@ -69,27 +69,12 @@ as free.
 
 ## Rulings persist across rounds
 
-What the driver carries forward is narrower than a ruling ledger, and each
-carrier carries a different thing to a different stage:
+The loop carries a round's findings forward as feedback and nothing more: a
+bounced round hands the next seat the previous review's findings
+(`crew/loop.mjs`, the review-bounce path). It carries no *rationale*, so no
+carrier can tell a later reviewer which variants a ruling covers. What does hold:
 
-- **Carried plan-check findings** (`crew/roles/reviewer.md`, that section;
-  `carriedResolution` in `crew/drive.mjs`): each plan-check finding's id,
-  severity and prescribed correction, in the review brief, to be closed or
-  restated against the diff.
-- **`CLOSED:` markers of an adopted plan** (`predecessorFindingsClosed`): which
-  predecessor findings the adopted plan claims closed. This reaches the
-  planning-round cap, not a reviewer.
-- **A stale verdict** (`staleVerdict` in `crew/drive.mjs`): when the lead
-  bounces the *reviewer* rather than the builder, the next review brief says
-  the lead ruled the prior verdict stale against the current tree and its
-  finding already closed — the reviewer is replacing that verdict, not
-  answering it.
-
-None of them carries a *rationale*, so no carrier can tell a later reviewer
-which variants a ruling covers; the variant rules in KiroCrew's ledger have no
-carrier here and are not adopted. What does hold, per carrier:
-
-1. A carried plan-check finding is closed or restated — never silently
+1. A carried finding is closed or restated against the diff — never silently
    re-litigated from scratch.
 2. A verdict the lead ruled stale is replaced against the current tree; do not
    re-raise the finding the lead ruled closed unless the current tree shows it
@@ -104,9 +89,8 @@ carrier here and are not adopted. What does hold, per carrier:
 reviews in the corpus recorded no findings (F5) — under F28 that measures
 output frequency, not correctness, since the corpus has no independent ground
 truth for a defect (`references/evidence.md`). A quota would optimise against
-that measurement. After the mandatory verdict line, emit findings without
-narrative preamble, must-fix first, one finding per root cause, no recap of
-what the change does.
+that measurement. Put the verdict and findings in the envelope, must-fix first, one finding per
+root cause, with no recap of what the change does.
 
 ## For a hand review
 

@@ -33,7 +33,7 @@ can trust.
 | Parsing a suite summary in a script | Strip ANSI; `FORCE_COLOR=0` | `references/tooling.md` |
 | Asserting on a value nobody measured | Absent with a reason, never zero | `references/absence.md` |
 | Writing a test for a malformed or hostile input | If you cannot express the malformed input, you have not tested the guard | `references/affordances.md` |
-| Citing a file from prose or from a comment | Prose citations are pinned by content; comments name the symbol | `references/citations.md` |
+| Citing a file from prose or from a comment | Cite a path or a symbol, never a line; every cited path must exist | `references/citations.md` |
 | Pinning a universal claim about a pure function (a tokenizer, classifier, normaliser) | Generate the inputs from every production of the grammar the claim is about — `forAll` in `test/helpers.mjs`, seeded, the failing input printed — with an oracle the generator carries itself, never one rediscovered from the serialized input; keep one example test for the shape | this table |
 
 Read the reference before writing the check. The rules below are the
@@ -80,7 +80,7 @@ irreducible ones; the references carry the exhibits and the failure modes.
 
 - **Never report a value nobody measured as a zero.** Absent is `null` plus the
   reason it is absent. A zero is a measurement. This distinction is load-bearing
-  across the ledger and the seat picker, and it is pinned in both directions
+  across usage and cost records, and it is pinned in both directions
   wherever it appears.
 
 - **Always pin in both directions when you fix an asymmetry.** Fixing an
@@ -103,13 +103,13 @@ something, because the first one is trusted.
 ## Key references
 
 - `references/vacuity.md` — the three shapes of vacuity, with all nine exhibits
-  and the mutation method (disposable archives, never the checkout)
+  and the mutation method (a disposable scratch tree, never the checkout)
 - `references/gates.md` — acceptance gates: baseline-red, `errored: 0`,
-  discrimination, and why the driver proves it rather than the brief
+  discrimination, and why the loop proves it rather than the brief
 - `references/captures.md` — recording and using vendor stream captures
-- `references/tripwires.md` — declaring scope tripwires; detectors and what they
-  newly flag
-- `references/tooling.md` — running the suite, ANSI, scratch archives, timeouts
+- `references/tripwires.md` — declaring tripwires in `files_in_scope`; detectors and
+  what they newly flag
+- `references/tooling.md` — running the suite, ANSI, scratch trees, timeouts
 - `references/absence.md` — absent vs zero, and pinning it
 - `references/affordances.md` — expressing malformed and hostile inputs before testing their guards
-- `references/citations.md` — content-pinned prose citations and symbol-named cross-file comments
+- `references/citations.md` — path-or-symbol citations, no line numbers, every cited path real

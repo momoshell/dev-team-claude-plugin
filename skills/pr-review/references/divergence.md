@@ -1,8 +1,8 @@
 Divergence is a signal, not a tie to be broken. When two reviewers land on the
 same line with different verdicts, the disagreement is **itself** a finding.
 First re-read the line. Then decide whether the reviewers are answering
-different questions — conformance, correctness and shape, the three questions the
-charter separates at `crew/roles/reviewer.md:13-34`. Record both positions even
+different questions — conformance to the plan, correctness and shape, three different questions
+(`crew/agents/reviewer.md`). Record both positions even
 when one eventually wins the re-read.
 
 ## Recording a divergence
@@ -13,11 +13,11 @@ becomes `verified` only after one side is re-read against the built tree.
 
 ```json
 {
-  "summary": "two reviewers disagree on crew/drive.mjs:5182",
+  "summary": "two reviewers disagree on crew/loop.mjs:337",
   "findings": [
     {
-      "claim": "reviewer A reads the scope diff as exhaustive; reviewer B cites a path the matcher lets through",
-      "evidence": ["crew/drive.mjs:2325", "crew/drive.mjs:5182"],
+      "claim": "reviewer A reads the changed paths as the whole diff; reviewer B cites an untracked file the list omits",
+      "evidence": ["crew/loop.mjs:337", "crew/loop.mjs:343"],
       "confidence": "assumed"
     }
   ],

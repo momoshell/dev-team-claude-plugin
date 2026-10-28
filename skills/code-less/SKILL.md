@@ -6,15 +6,15 @@ compatibility: Delivered inline to the builder and granted to the reviewer; the 
 
 The ladder is in your shared charter; this skill does not restate it. Reach for the codebase's accepted shapes before inventing one.
 
-- Standard library: replace a shell-built `git add` command with `execFileSync('git', ['add', '--', ...toAdd])` (crew/seat-io.mjs:4028).
-- Closed enum: replace an open stage string with `Object.freeze(['plan', 'check', 'build', ...])` (crew/variants.mjs:12-13).
-- Existing helper: replace a reimplemented temporary-directory cleanup fixture with `scratchDir(...)` (test/helpers.mjs:39).
-- Honest absence: replace an invented candidate count of zero with `candidates: null` and a closed reason (crew/headless-rpc.mjs:137).
+- Standard library: replace a shell-built `git add` command with `execFileSync('git', ['add', '--', ...toAdd])` (`crew/checks.mjs` runs commands as `spawn(command, args)`, never a shell string).
+- Closed enum: replace an open stage string with `Object.freeze([...])` as `CHECK_REASONS` does (`crew/checks.mjs`).
+- Existing helper: replace a reimplemented temporary-directory cleanup fixture with `scratchDir(...)` (`test/helpers.mjs`).
+- Honest absence: replace an invented candidate count of zero with `usage: null` and no usage key (`crew/pi/extensions/subagent.ts`).
 
 When two standard-library options are the same size, choose the edge-case-correct one.
 A rate is never reported without its denominator; a guard is never claimed without its kill-mutation.
 
-A deliberate ceiling is a comment line, not a silence: `// lean: global lock; per-account locks if throughput matters`. The marker is the whole comment line — never trailing on code, never inside a multiline literal (the scan is line-based) — and `;` separates ceiling from upgrade path, so a ceiling may contain commas. `node scripts/factory/lean-debt.mjs` harvests every marker into a ledger and flags one with no upgrade path `no-trigger`.
+A deliberate ceiling is a comment line, not a silence: `// lean: global lock; per-account locks if throughput matters`. The marker is the whole comment line — never trailing on code — and `;` separates ceiling from upgrade path, so a ceiling may contain commas. Nothing harvests these markers; the next reader and the reviewer are the audience, so state the upgrade path.
 
 Lazy code without its check is unfinished: leave ONE runnable check per non-trivial change — the smallest thing that fails if the logic breaks. Trivial one-liners need none.
 

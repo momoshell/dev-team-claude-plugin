@@ -15,8 +15,9 @@ never against the presence of a service, method, key or symbol. Asserting that
 a name exists — a key, an export, a method — passes whether the behaviour
 behind it works or not: #578 shipped a `doesNotMatch`
 against a key that is never serialised, #603's tripwire matched only a column-0
-`function`, and #581's guard could only pass by finding hits. `test/vacuity.test.mjs`
-is the tripwire over the test tree for that shape.
+`function`, and #581's guard could only pass by finding hits. The kill-mutation proof in
+`crew/checks.mjs` (`proveMutations`) is what catches that shape now: a check
+the planner declares must go red when its mutation is applied.
 
 ## The method: mutation, not reading
 
@@ -99,20 +100,21 @@ independent angles is a strong signal; treat it as one.
 **The fix pins the detector itself**, or replaces the key with something drift
 cannot rename.
 
-This repository's own documentation had the same shape: the anchor pin was the
-only guard on 220 prose citations, and it read existence and range, never
-content. `anchor-pin.mjs` is the fix; see `references/citations.md` for the
-citation rule it enforces.
+This repository's own documentation had the same shape: a guard that reads
+existence and range, never content, passes over a citation that points at the
+wrong line. `references/citations.md` carries the rule that replaced it: cite a
+path or a symbol, not a line.
 
 ## The three verified negatives
 
 Recorded so no later sweep re-spends them — these **do** discriminate:
 
-- the billed-money null assertion (`test/visualizer-shape.test.mjs (shapeRun never derives a billed money value)` null→zero reddens)
+- the billed-money null assertion (`crew/pi/extensions/subagent.test.mjs`, the absent-usage case: omitting the key and keeping usage `null` reddens when the null becomes a zero)
 - the transcript drift guard **for the `tools` literal itself** (adding `Agent`
   reddens)
-- the direct `guardedKill` helper assertion (`scripts/factory/reap-stale.mjs (guardedKill)` → `false`
-  reddens)
+- the direct `guardedKill` helper assertion (once mutated to `false` it
+  reddens; the helper was removed with its script, so the case is recorded, not
+  citable)
 
 Note V4/N2 as a pair: that guard genuinely pins `tools` and does **not** pin
 `deny` at all. A check can discriminate for one field and be vacuous for the

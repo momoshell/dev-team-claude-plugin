@@ -4,7 +4,7 @@ The contract below is the checkable boundary recorded in `visualizer/web/src/lib
 
 ## T1 - component names only Tier-2 aliases
 
-A component may name only Tier-2 aliases: `--bg`, `--panel`, `--line`, `--muted`, `--accent`, `--neutral`, the `--status-*` aliases, `--status-escalated`, the six `--role-*` aliases, and `--lane-0` through `--lane-7`. It must not name a raw `--ink-*`, `--paper-*`, `--spot-*`, role `-dark`/`-light` half, `--serious`, or `-raw` status token. The raw block opens at `visualizer/web/src/lib/theme.css:2`, and `--serious` stays raw at `visualizer/web/src/lib/theme.css:28`. The old recorded App.svelte `--serious` exception is gone: the feed error paints only aliases at `visualizer/web/src/App.svelte:254`, so the obedience count must be remeasured before anyone claims a number. Exhibit: the raw block and the measured suite pins below.
+A component may name only Tier-2 aliases: `--bg`, `--panel`, `--line`, `--muted`, `--accent`, `--neutral`, the `--status-*` aliases, `--status-escalated`, the six `--role-*` aliases, and `--lane-0` through `--lane-7`. It must not name a raw `--ink-*`, `--paper-*`, `--spot-*`, role `-dark`/`-light` half, `--serious`, or `-raw` status token. The raw block opens at `visualizer/web/src/lib/theme.css:2`, and `--serious` stays raw at `visualizer/web/src/lib/theme.css:28`. The old recorded App.svelte `--serious` exception is gone: the feed error paints only aliases at `visualizer/web/src/App.svelte:261`, so the obedience count must be remeasured before anyone claims a number. Exhibit: the raw block and the measured suite pins below.
 
 ## T2 - painted colour comes from a token
 
@@ -12,11 +12,11 @@ Make every painted foreground, background, border, marker, and fill resolve to a
 
 ## T3 - escalation goes through the alias
 
-Use `--status-escalated` in a component; treat `--serious` as raw. Both error exhibits are alias-correct: `visualizer/web/src/App.svelte:254` paints feed errors from `--status-fail`, and `visualizer/web/src/lib/RosterPanel.svelte:752` paints the notice from `--status-fail`. No `--serious` read remains in App.svelte. This is a naming boundary even though both names currently resolve identically.
+Use `--status-escalated` in a component; treat `--serious` as raw. Both error exhibits are alias-correct: `visualizer/web/src/App.svelte:261` paints feed errors from `--status-fail`, and `visualizer/web/src/lib/RosterPanel.svelte:752` paints the notice from `--status-fail`. No `--serious` read remains in App.svelte. This is a naming boundary even though both names currently resolve identically.
 
 ## T4 - one owner writes the theme switch
 
-Only `visualizer/web/src/App.svelte:71` may write `document.documentElement.dataset.theme`, with `visualizer/web/src/App.svelte:72` deleting it for the system choice; `theme.css` may declare the selectors but no other component may set the attribute. Exhibit: `visualizer/web/src/App.svelte:28` and `visualizer/web/src/App.svelte:29` read the persisted `os`/`paper`/`ink` value, `visualizer/web/src/App.svelte:73` persists the choice, and `visualizer/web/src/App.svelte:182` offers the selector. The repo-wide grep found only the theme selectors in `visualizer/web/src/lib/theme.css:44`, `visualizer/web/src/lib/theme.css:71`, and `visualizer/web/src/lib/theme.css:99` plus those App writes.
+Only `visualizer/web/src/App.svelte:73` may write `document.documentElement.dataset.theme`, with `visualizer/web/src/App.svelte:74` deleting it for the system choice; `theme.css` may declare the selectors but no other component may set the attribute. Exhibit: `visualizer/web/src/App.svelte:29` and `visualizer/web/src/App.svelte:30` read the persisted `os`/`paper`/`ink` value, `visualizer/web/src/App.svelte:75` persists the choice, and `visualizer/web/src/App.svelte:189` offers the selector. The repo-wide grep found only the theme selectors in `visualizer/web/src/lib/theme.css:44`, `visualizer/web/src/lib/theme.css:71`, and `visualizer/web/src/lib/theme.css:99` plus those App writes.
 
 ## What the switch means
 

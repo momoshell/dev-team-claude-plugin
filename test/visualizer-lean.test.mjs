@@ -21,11 +21,11 @@ function lane(root, name, rows, suffix = '') {
   return dir
 }
 
-async function withServer(work) {
+async function withServer(work, overrides = {}) {
   const sandbox = scratchDir('lean-viz-')
   const crewRoot = join(sandbox, '.crew'), archiveRoot = join(sandbox, '.crew-journal-archive')
   mkdirSync(crewRoot); mkdirSync(archiveRoot)
-  const handles = startServer({ port: 0, host: '127.0.0.1', crewRoot, home: sandbox, checkout: sandbox, ledgerDb: join(sandbox, 'none', 'ledger.db'), triageDb: join(sandbox, 'side', 'v.db'), shipState: { resolve: async () => new Map() } })
+  const handles = startServer({ port: 0, host: '127.0.0.1', crewRoot, home: sandbox, checkout: sandbox, ledgerDb: join(sandbox, 'none', 'ledger.db'), triageDb: join(sandbox, 'side', 'v.db'), shipState: { resolve: async () => new Map() }, ...overrides })
   await new Promise((ok) => handles.server.once('listening', ok))
   const base = `http://127.0.0.1:${handles.server.address().port}`
   const get = async (path, options) => { const r = await fetch(base + path, options); return { status: r.status, body: await r.json() } }
@@ -184,4 +184,83 @@ test('LV-HF a lane whose last row is an operator pr row is done and hand-finishe
     assert.equal(runs['hf-loop'].hand_finished, false)
     assert.equal(runs['hf-loop'].pr_actor, 'loop')
   })
+})
+
+test('VJ1 sessions: lean runs with no ledger state each source separately and are not an unavailable feed', async () => {
+  await withServer(async ({ crewRoot, get }) => {
+    lane(crewRoot, 'vj1', [{ event: 'stage-start', stage: 'plan' }])
+    const { body } = await get('/api/sessions')
+    assert.ok(body.runs.some((run) => run.adw_id === 'lean:vj1'))
+    assert.deepEqual(body.sources.lean, { readable: true, absent: null, runs: 1 })
+    assert.equal(body.sources.ledger.readable, false); assert.ok(body.sources.ledger.absent.length > 0)
+    assert.equal(body.degraded, false)
+  })
+})
+
+test('VJ2 sessions: a throwing lean read is stated unreadable and ledger runs still return', async () => {
+  const feed = { listRuns: () => ({ runs: [{ adw_id: 'ledger-1' }], degraded: false, probe: {} }), listEvents: () => ({ events: [], cursor: 0 }), health: () => ({ degraded: false }), _reason: () => null, close: () => {} }
+  const lean = { listRuns: () => { throw new Error('lean boom') }, identify: () => ({ lean: false }), resolveLane: () => null, readJournalRows: () => ({ rows: [], error: null }), readSeatSessions: () => ({ status: 400, error: 'n/a' }) }
+  await withServer(async ({ get }) => {
+    const { body } = await get('/api/sessions')
+    assert.deepEqual(body.runs.map((run) => run.adw_id), ['ledger-1'])
+    assert.equal(body.sources.lean.readable, false); assert.match(body.sources.lean.absent, /lean boom/)
+    assert.equal(body.sources.lean.runs, null) // unmeasured, not zero
+    assert.equal(body.sources.ledger.readable, true)
+    assert.equal(body.degraded, false)
+  }, { feed, lean })
+})
+
+test('VJ4 events: a lean lane answers its journal rows in order with a cursor and null timestamps, no ledger read', async () => {
+  await withServer(async ({ crewRoot, get }) => {
+    lane(crewRoot, 'vj4', [{ event: 'stage-start', stage: 'plan' }, { event: 'check', stage: 'plan' }, { event: 'verdict', stage: 'plan', at: 1700000000000 }])
+    const { body } = await get('/api/events?adw_id=lean%3Avj4')
+    assert.equal(body.degraded, false); assert.equal(body.absent, null)
+    assert.deepEqual(body.events.map((e) => e.event), ['stage-start', 'check', 'verdict'])
+    assert.deepEqual(body.events.map((e) => e.id), [1, 2, 3]); assert.equal(body.cursor, 3)
+    assert.equal(body.events[0].timestamp, null); assert.match(body.events[0].timestamp_reason, /no timestamp/)
+    assert.equal(body.events[2].timestamp, new Date(1700000000000).toISOString()); assert.equal(body.events[2].timestamp_reason, null)
+    const page = (await get('/api/events?adw_id=lean%3Avj4&after=1&limit=1')).body
+    assert.deepEqual(page.events.map((e) => e.event), ['check']); assert.equal(page.cursor, 2)
+    const missing = (await get('/api/events?adw_id=lean%3Anone')).body
+    assert.deepEqual(missing.events, []); assert.match(missing.absent, /no lean lane/)
+  })
+})
+
+test('VJ1 sessions: a broken triage sidecar over a readable ledger does not make the ledger unreadable', async () => {
+  const feed = { listRuns: () => ({ runs: [{ adw_id: 'ledger-1' }], degraded: true, probe: {} }), listEvents: () => ({ events: [], cursor: 0 }), health: () => ({ degraded: true }), _reason: () => null, close: () => {} }
+  await withServer(async ({ get }) => {
+    const { body } = await get('/api/sessions')
+    assert.deepEqual(body.sources.ledger, { readable: true, absent: null })
+    assert.equal(body.degraded, false) // a sidecar fault over a readable ledger is not an unavailable feed
+  }, { feed })
+})
+
+test('VJ2 sessions: both sources unreadable states both reasons and an unavailable feed', async () => {
+  const feed = { listRuns: () => ({ runs: [], degraded: true, probe: {} }), listEvents: () => ({ events: [], cursor: 0 }), health: () => ({ degraded: true }), _reason: () => 'ledger gone', close: () => {} }
+  const lean = { listRuns: () => { throw new Error('lean boom') }, identify: () => ({ lean: false }), resolveLane: () => null, readJournalRows: () => ({ rows: [], error: null }), readSeatSessions: () => ({ status: 400, error: 'n/a' }) }
+  await withServer(async ({ get }) => {
+    const { body } = await get('/api/sessions')
+    assert.equal(body.degraded, true)
+    assert.match(body.sources.lean.absent, /lean boom/); assert.equal(body.sources.ledger.absent, 'ledger gone')
+  }, { feed, lean })
+})
+
+test('VJ1 sessions: an empty readable lean source with an unreadable ledger is still an available feed', async () => {
+  await withServer(async ({ get }) => {
+    const { body } = await get('/api/sessions')
+    assert.deepEqual(body.runs, [])
+    assert.deepEqual(body.sources.lean, { readable: true, absent: null, runs: 0 })
+    assert.equal(body.sources.ledger.readable, false)
+    assert.equal(body.degraded, false)
+  })
+})
+
+test('VJ4 events: a lean lane request makes no ledger feed call', async () => {
+  const boom = () => { throw new Error('ledger read') }
+  const feed = { listRuns: boom, listEvents: boom, health: boom, _reason: boom, close: () => {} }
+  await withServer(async ({ crewRoot, get }) => {
+    lane(crewRoot, 'vj4n', [{ event: 'stage-start', stage: 'plan' }])
+    const { status, body } = await get('/api/events?adw_id=lean%3Avj4n')
+    assert.equal(status, 200); assert.equal(body.events.length, 1); assert.equal(body.degraded, false)
+  }, { feed })
 })

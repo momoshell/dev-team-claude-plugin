@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ROOT } from './helpers.mjs'
 import { journalLines, leanView } from '../visualizer/web/src/lib/lean.js'
+import { sessionsFeedState } from '../visualizer/web/src/lib/activity.js'
 import { leanActivity, leanStatus } from '../visualizer/web/src/lib/fleet.js'
 import { deriveDisplayStatus, deriveStatus, fleetActivity, runActivity } from '../visualizer/web/src/lib/fleet.js'
 
@@ -59,4 +60,27 @@ test('lean presentation distinguishes accepted failing baselines, open stages an
   assert.match(leanOutcome({status:'stopped'}).next,/before deciding/);assert.equal(leanOutcome({status:'failed'}).tone,'fail')
   assert.equal(leanPullRequestUrl({url:'javascript:alert(1)'}),null);assert.equal(leanPullRequestUrl({url:'https://user:secret@github.com/o/r/pull/1'}),null);assert.equal(leanPullRequestUrl({url:'https://github.com/o/r/pull/1'}),'https://github.com/o/r/pull/1')
   assert.equal(leanCheckStatus({result:{code:0}}).label,'Exit code 0 recorded');assert.equal(leanCheckStatus({result:{accepted:false}}).tone,'fail')
+})
+
+test('VJ3 sessionsFeedState treats a readable lean source as available when the ledger is not', () => {
+  const src_ = (lean, ledger) => ({ degraded: !ledger, sources: { lean: { readable: lean, absent: lean ? null : 'x' }, ledger: { readable: ledger, absent: ledger ? null : 'unable to open' } } })
+  const a = sessionsFeedState(src_(true, false)); assert.equal(a.degraded, false); assert.equal(a.available, true); assert.equal(a.sources.ledger.absent, 'unable to open')
+  assert.equal(sessionsFeedState(src_(false, false)).degraded, true)
+  assert.equal(sessionsFeedState(src_(false, true)).degraded, false)
+  const empty = sessionsFeedState({ degraded: true, sources: { lean: { readable: true, runs: 0, absent: null }, ledger: { readable: false, absent: 'unable to open' } } })
+  assert.equal(empty.degraded, false); assert.equal(empty.available, true)
+  assert.equal(sessionsFeedState({ degraded: true }).degraded, true); assert.equal(sessionsFeedState({}).degraded, false)
+})
+
+test('VJ5 App.svelte takes feed state from sessionsFeedState and no longer claims a ledger connection', () => {
+  const app = src('App.svelte')
+  assert.match(app, /sessionsFeedState\(result\)/)
+  for (const gone of ['result?.degraded === true', 'Ledger connected', 'Connecting to ledger']) assert.ok(!app.includes(gone), gone)
+})
+
+test('VJ5 the sidebar keeps per-source reasons when the whole feed is unavailable', () => {
+  const app = src('App.svelte')
+  const line = app.split('\n').find((l) => l.includes('class="connection"'))
+  assert.match(line, /Feed unavailable/); assert.match(line, /sourceLine\(feedSources\)/)
+  assert.ok(line.indexOf('{#if feedSources}') > line.indexOf('Feed unavailable'), 'sources render outside the unavailable branch')
 })

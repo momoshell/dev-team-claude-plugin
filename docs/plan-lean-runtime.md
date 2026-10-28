@@ -186,11 +186,13 @@ Sol review, because the current factory is what is being replaced. From phase 4,
 - [x] 3.3 P2 envelope schemas per role in `crew/protocols.mjs`.
 - [x] 3.4 `crew/checks.mjs`: gate red and green, mutation kill, suite with timeout and process-group kill,
       commit, rebase, PR.
-- [ ] 3.5 `crew/loop.mjs` behind `crew start --loop lean`, with the `stepped` and `finish` shapes and the
+- [x] 3.5 `crew/loop.mjs` behind `crew start --loop lean`, with the `stepped` and `finish` shapes and the
       arm fields (advisor, edit assist, codemode, lab, readgate, memory, extensions) wired from frontmatter.
       Partial: the standard shape and the arm fields are wired; `crew start --loop lean` refuses `stepped`. The `finish`
       run is `crew finish <lane>` (`crew/finish.mjs`): it stops committed and rebased, unpushed; the operator decisions
       `crew finish --accept`, `crew finish --return` and `crew finish --abandon` are built (`crew/finish.mjs` `decideFinish`).
+      Done: the `stepped` shape is dropped by operator decision 2026-10-28 (33 of 36 lanes were single-chunk, and
+      `crew finish` covers recovery).
 - [x] 3.6 Rewrite the 3 tests in the "rewrite" group against `crew/acp/` and `closeout`. Audited 2026-10-27: nothing to
       port. The three files test only old-path code (`seatIo`, `acpIo`, reseat, the ledger usage writer, the old
       descendant sweep); every behaviour the new path keeps has its own tests in `crew/checks.test.mjs`,
@@ -206,11 +208,13 @@ Sol review, because the current factory is what is being replaced. From phase 4,
 
 ### Phase 4: run on the new path
 
-- [ ] 4.1 Lanes in this repo start with `--loop lean`; failures are fixed in the new path, not the old one.
+- [x] 4.1 Lanes in this repo start with `--loop lean`; failures are fixed in the new path, not the old one.
+      Every lane in this repo since b1395 started with `--loop lean`.
 - [x] 4.2 P4 journal writer, never throws. Built into the lean loop (`crew/loop.mjs:86`, guarded at `:110`; `crew/loop.test.mjs:634`), not taken from `emit.mjs`.
 - [x] 4.3 One `closeout.mjs` and one `status.mjs` for the new path. Shipped as `crew closeout` (PR 2016) and `crew lanes` (PR 2017; `status` stays the old driver's verb until the switch).
-- [ ] 4.4 Visualizer reads journals and session files instead of the ledger; its roster editor edits
-      `crew/agents/*.md`.
+- [x] 4.4 Visualizer reads journals and session files instead of the ledger; its roster editor edits
+      `crew/agents/*.md`. The lane views and the agents editor shipped in PRs 2026 and 2027; the five ledger-only
+      ops panes are dropped at 5.2 (operator decision 2026-10-28).
 
 ### Phase 5: switch and delete
 

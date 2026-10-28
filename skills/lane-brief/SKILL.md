@@ -67,6 +67,8 @@ Field rules (the validator refuses anything else):
   in parentheses. One outcome per id (no "and"), each red on main and satisfiable, each checkable by a
   top-level `test(...)`. Do not put `(a)` or `(1)` sub-lists inside an item; the driver reads them as ids.
 - `out_of_scope`: what the lane must not change.
+- `suite` (optional): the command line the lean lane runs as its suite, for example `suite: cargo test -p power-api`.
+  Absent, the lane runs `npm test`.
 
 ## Keep it short
 

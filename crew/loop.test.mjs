@@ -70,7 +70,7 @@ function fakes(options = {}) {
         ? measured('paths', options.pathsResult ?? (() => ({ ...green(), stdout: options.paths ?? ' M lib.mjs\0' })))
         : measured('review-paths', options.reviewResult ?? (() => ({ ...green(), stdout: [options.reviewPaths].flat()[Math.min(reviewReads++, [options.reviewPaths].flat().length - 1)] ?? ' M lib.mjs\0' }))))(input)
       : measured('fetch', options.fetch ?? green())(input),
-    rebaseBranch: measured('rebase', options.rebase ?? { status: 'green', reason: null, head: 'b'.repeat(40) }),
+    rebaseBranch: measured('rebase', options.rebase ?? { status: 'green', reason: null, head: 'a'.repeat(40) }),
     openPullRequest: measured('publish', options.publish ?? { status: 'green', reason: null, pr: PR }),
     ...options.deps,
   }
@@ -1044,7 +1044,7 @@ test('a finish run issues no planner turn and no baseline, and ends after rebase
   const ready = f.rows.at(-1)
   assert.equal(ready.event, 'finish-ready')
   assert.equal(ready.status, 'ready-for-operator')
-  assert.equal(ready.head, 'b'.repeat(40))
+  assert.equal(ready.head, 'a'.repeat(40))
   assert.equal(f.rows.findIndex((r) => r.event === 'finish-ready') > f.rows.findLastIndex((r) => r.stage === 'rebase'), true)
 })
 
@@ -1252,4 +1252,62 @@ test('a re-aim turn leaves a standard builder the rounds it had before it (LF5)'
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
   assert.equal(count(f, 'builder'), 3)
   assert.equal(count(f, 'lead'), 0)
+})
+
+const MOVED = { status: 'green', reason: null, head: 'b'.repeat(40) }
+// A check answering from a sequence (the last answer repeats), for gate and suite seams that must differ across calls.
+const answers = (...list) => { let n = 0; return () => structuredClone(list[Math.min(n++, list.length - 1)]) }
+const moved = (options = {}) => fakes({ rebase: MOVED, ...options })
+const redGate = () => ({ ...green(), status: 'red', code: 1, reason: 'gate-failed', failingIds: ['A1'] })
+
+// MUTATION: skip the post-rebase gate and suite and a moved head is published unchecked.
+test('a rebase that moves the head reruns the gate then the suite on the rebased tree before it publishes (RB1)', async () => {
+  const f = moved()
+  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
+  const tail = f.calls.slice(f.calls.indexOf('rebase'))
+  assert.deepEqual(tail, ['rebase', 'gate', 'suite', 'publish'])
+  assert.equal(f.calls.filter((c) => c === 'gate').length, 2)
+  assert.equal(f.calls.filter((c) => c === 'suite').length, 2)
+  assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 5000 })
+  assert.deepEqual(f.seen.gate, { cwd: '/virtual/checkout', gatePath: '/virtual/task/gate.mjs', timeoutMs: 5000 })
+})
+
+// MUTATION: rerun after the finish report and finish-ready row and a finish run reports a head no check ran on.
+test('a finish run whose rebase moves the head reruns the gate and suite before the report and finish-ready (RB1)', async () => {
+  const f = moved({ spec: finishSpec(), unseated: ['planner'] })
+  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: null })
+  assert.deepEqual(f.calls.slice(f.calls.indexOf('rebase')), ['rebase', 'gate', 'suite'])
+  const ready = f.rows.findIndex((r) => r.event === 'finish-ready')
+  const lastSuite = f.rows.findLastIndex((r) => r.stage === 'suite')
+  assert.equal(ready > lastSuite && lastSuite > f.rows.findLastIndex((r) => r.stage === 'rebase'), true)
+  assert.equal(f.rows[ready].head, 'b'.repeat(40))
+})
+
+// MUTATION: ignore the post-rebase suite result and a red suite still publishes.
+test('a red suite after a rebase that moved the head stops with its reason and publishes nothing (RB2)', async () => {
+  const red = { ...green(), status: 'red', code: 1, reason: 'exit-nonzero' }
+  const f = moved({ suite: answers(green(), red) })
+  assert.deepEqual(await f.go(), stopped('exit-nonzero'))
+  assert.equal(f.calls.filter((c) => c === 'suite').length, 2)
+  assert.equal(f.calls.includes('publish'), false)
+  const g = moved({ spec: finishSpec(), unseated: ['planner'], suite: answers(green(), red) })
+  assert.deepEqual(await g.go(), stopped('exit-nonzero'))
+  assert.equal(g.writes.size, 0)
+  assert.equal(g.rows.some((r) => r.event === 'finish-ready'), false)
+})
+
+// MUTATION: ignore the post-rebase gate result and a red gate still reaches the suite and publishes.
+test('a red gate after a rebase that moved the head stops with the gate reason, runs no suite and publishes nothing (RB2)', async () => {
+  const f = moved({ gate: answers({ ...green(), failingIds: [] }, redGate()) })
+  assert.deepEqual(await f.go(), stopped('gate-failed'))
+  assert.equal(f.calls.filter((c) => c === 'suite').length, 1)
+  assert.equal(f.calls.includes('publish'), false)
+})
+
+// MUTATION: rerun after every rebase and an unchanged head pays an extra gate and suite run.
+test('a rebase that leaves the head unchanged runs the gate and the suite once (RB3)', async () => {
+  const f = fakes()
+  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
+  assert.equal(f.calls.filter((c) => c === 'suite').length, 1)
+  assert.equal(f.calls.filter((c) => c === 'gate').length, 1)
 })

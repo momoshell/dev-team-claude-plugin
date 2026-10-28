@@ -2,7 +2,7 @@
   import { tick } from 'svelte'
   import { candidateExplanation, candidateMetrics, rosterRecommendation } from './roster-recommendation.js'
   import { replaceRosterMove, rosterChanges } from './roster-draft.js'
-  import { applyRosterLadder, composeRosterLadder, getModelCatalog, getPluginWriteMode, getRosterLadder, getRosterPick, proposeRosterEdit, setModelCatalogKey, stageRosterLadder } from './api.js'
+  import { applyRosterLadder, composeRosterLadder, getModelCatalog, getPluginWriteMode, getRosterLadder, getRosterPick, proposeAgentEdit, proposeRosterEdit, setModelCatalogKey, stageRosterLadder } from './api.js'
   import { directoryModelMatchesChip, directoryVariantLabel, fallbackModelName, groupDirectoryModels, providerDisplayName, selectedDirectoryVariant } from './model-directory.js'
   import { assuranceMeta } from './workflow-semantics.js'
   import { rosterPickPanel, rosterProposal } from './panels.js'
@@ -311,6 +311,16 @@
       if (revision === validationRevision) staging = false
     }
   }
+  let agentProposal = $state(null)
+  let agentForm = $state({ field:'effort', value:'', tier:'' })
+  async function proposeAgentChange(role, field, value, tier = null) {
+    agentProposal = { loading:true, role }
+    try {
+      agentProposal = { ...(await proposeAgentEdit(role, field, value === '' ? null : value, tier || null)), role }
+    } catch (err) {
+      agentProposal = { ok:false, role, diff:null, refusals:[{ code:'request_failed', message:err.message || 'agent proposal failed' }] }
+    }
+  }
   async function proposePolicyPick(column, seat, pick) {
     if (!pick?.chosen_cell) return
     const key = pickKey(column.tier, seat.role)
@@ -542,6 +552,19 @@
                     {/if}
                     {#if proposalEntry?.error}<p class="pick-unavailable">{proposalEntry.error}</p>{/if}
                     {#if proposal.diff !== null}<DiffBlock text={proposal.diff} empty="(no roster change)" label="Suggested roster change" />{/if}
+                  {/if}
+                </details>
+                <details class="agent-edit" aria-label={`Agent definition for ${seat.role}`}>
+                  <summary>Agent definition (crew/agents/{seat.role}.md)</summary>
+                  <form onsubmit={(event) => { event.preventDefault(); void proposeAgentChange(seat.role, agentForm.field, agentForm.value.trim(), agentForm.tier.trim()) }}>
+                    <input bind:value={agentForm.field} list="agent-edit-fields" placeholder="model or effort" aria-label="Agent field" /><datalist id="agent-edit-fields"><option value="model"></option><option value="effort"></option></datalist>
+                    <input bind:value={agentForm.tier} placeholder="tier override (blank = base)" aria-label="Tier override" />
+                    <input bind:value={agentForm.value} placeholder="value (blank clears a tier override)" aria-label="Agent value" />
+                    <button type="submit" disabled={agentProposal?.loading}>Preview agent change</button>
+                  </form>
+                  {#if agentProposal && agentProposal.role === seat.role}
+                    {#each agentProposal.refusals ?? [] as refusal}<p class="pick-unavailable">{refusal.message}</p>{/each}
+                    {#if agentProposal?.diff}<DiffBlock text={agentProposal.diff} empty="(no agent change)" label="Suggested agent change" />{/if}
                   {/if}
                 </details>
               </article>

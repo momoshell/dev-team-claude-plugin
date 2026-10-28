@@ -631,7 +631,7 @@ test('roster diffs distinguish metadata, additions, removals, and context', () =
   assert.deepEqual(lines.map((line) => line.kind), ['meta', 'meta', 'meta', 'removal', 'addition', 'context'])
   const panel = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
   const block = readFileSync(join(ROOT, 'visualizer/web/src/lib/DiffBlock.svelte'), 'utf8')
-  assert.equal((panel.match(/<DiffBlock /g) || []).length, 3)
+  assert.equal((panel.match(/<DiffBlock /g) || []).length, 4)
   assert.match(block, /diff-line\.addition/)
   assert.match(block, /diff-line\.removal/)
   assert.match(block, /diff-line\.meta/)
@@ -4356,4 +4356,19 @@ test('candidate metrics preserve measured zero and hide absent or invalid number
   assert.deepEqual(candidateMetrics({ rate:{ value:null, numerator:null, denominator:null }, cost:{ value:null } }), [])
   assert.deepEqual(candidateMetrics({ rate:{ value:0.5, numerator:1, denominator:2, reason:'rate-thin' }, cost:{ value:-1 } }), [])
   assert.deepEqual(candidateMetrics({ rate:{ value:0.8, numerator:8, denominator:10 }, cost:{ value:0.000001 } }), ['Evaluation pass rate: 80% (8/10)', 'Estimated evaluation cost: <$0.0001'])
+})
+
+test('agents editor: api client posts the proposal and RosterPanel renders its diff', async () => {
+  const api = await import(pathToFileURL(join(ROOT, 'visualizer/web/src/lib/api.js')).href)
+  const calls = []
+  const original = globalThis.fetch
+  globalThis.fetch = async (path, options = {}) => { calls.push({ path: String(path), options }); return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } }) }
+  try { await api.proposeAgentEdit('planner', 'effort', 'max', 'judge') } finally { globalThis.fetch = original }
+  assert.equal(calls[0].path, '/api/roster/agent/propose')
+  assert.deepEqual(JSON.parse(calls[0].options.body), { role: 'planner', tier: 'judge', field: 'effort', value: 'max' })
+  const panel = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  assert.match(panel, /import \{[^}]*proposeAgentEdit[^}]*\} from '\.\/api\.js'/)
+  assert.match(panel, /await proposeAgentEdit\(/)
+  assert.match(panel, /<DiffBlock text=\{agentProposal\.diff\}/)
+  assert.match(panel, /agentProposal\.refusals/)
 })

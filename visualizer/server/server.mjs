@@ -16,6 +16,8 @@ import { createWorkflowsSource } from './workflows-source.mjs'
 import { createPreparedTasks } from './prepared-tasks.mjs'
 import { createWorkflowEditor } from './workflow-editor.mjs'
 import { unifiedDiff, proposeEdit } from './roster-edit.mjs'
+import { proposeAgentEdit } from './agents-edit.mjs'
+import { AGENT_ROLES } from '../../crew/protocols.mjs'
 import { createAgentsSource } from './agents-source.mjs'
 import { createAgentLibrary } from './agent-library.mjs'
 import { createSkillLibrary } from './skill-library.mjs'
@@ -129,6 +131,7 @@ export const ROUTE_PARAMS = Object.freeze({
   '/api/cell-attribution': ['since', 'until'],
   '/api/intake/brake': [],
   '/api/roster/propose': [],
+  '/api/roster/agent/propose': [],
   '/api/roster/ladder': [],
   '/api/roster/ladder/stage': [],
   '/api/roster/ladder/compose': [],
@@ -1134,6 +1137,25 @@ export function startServer(options = {}) {
         const raw = roster.readRaw()
         const result = await proposeEdit({ rosterText: raw.text, rosterPath: raw.path, readError: raw.error, tier: input.tier, role: input.role, cell: input.cell })
         return json(res, 200, { schema, roster_path: raw.path, applyable_with: 'git apply / patch -p1', ...result })
+      }
+      if (url.pathname === '/api/roster/agent/propose') {
+        if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
+        const refusal = writeGuard(req)
+        if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
+        let input
+        try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
+        if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.role !== 'string' || typeof input.field !== 'string') return json(res, 400, { schema, error: 'role and field are required strings' })
+        const tier = input.tier ?? null
+        const value = input.value ?? null
+        if (tier !== null && typeof tier !== 'string') return json(res, 400, { schema, error: 'tier must be a string or null' })
+        if (value !== null && typeof value !== 'string') return json(res, 400, { schema, error: 'value must be a string or null' })
+        let agentText = null, readError = null
+        const agentPath = join(config.checkout, 'crew/agents', `${input.role}.md`)
+        if (AGENT_ROLES.includes(input.role)) {
+          try { agentText = readFileSync(agentPath, 'utf8') } catch (err) { readError = `unable to read agent definition: ${err.code || err.message || 'unknown read error'}, at ${agentPath}` }
+        }
+        const result = proposeAgentEdit({ agentText, agentPath, readError, role: input.role, tier, field: input.field, value })
+        return json(res, 200, { schema, agent_path: `crew/agents/${input.role}.md`, applyable_with: 'git apply / patch -p1', ...result })
       }
       if (url.pathname === '/api/roster/ladder') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })

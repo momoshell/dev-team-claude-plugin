@@ -2,7 +2,7 @@ import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, realpathSync, statSync, symlinkSync, utimesSync } from 'node:fs'
+import { cpSync, mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, realpathSync, statSync, symlinkSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runInNewContext } from 'node:vm'
@@ -495,6 +495,7 @@ const WRITE_ROUTES = [
   { path: '/api/intake/brake', body: JSON.stringify({ engaged: true, actor: 'evil.example' }) },
   { path: '/api/triage', body: JSON.stringify({ adw_id: 'csrf-0000-0000-000000000001', reviewed: true }) },
   { path: '/api/roster/propose', body: JSON.stringify({ tier: 'build', role: 'reviewer', cell: null }) },
+  { path: '/api/roster/agent/propose', body: JSON.stringify({ role: 'planner', field: 'effort', value: 'max' }) },
   { path: '/api/agents/propose', body: JSON.stringify({ name: 'future-agent', entry: {} }) },
   { path: '/api/skills/propose', body: JSON.stringify({ role: 'builder', skills: [] }) },
   { path: '/api/prompts/propose', body: JSON.stringify({ role: 'builder', text: 'proposal' }) },
@@ -830,6 +831,7 @@ test('all 405 responses advertise an allowed method', { skip: SKIP }, async () =
       ['GET', '/api/skills/propose', 'POST'],
       ['GET', '/api/prompts/propose', 'POST'],
       ['GET', '/api/roster/propose', 'POST'],
+      ['GET', '/api/roster/agent/propose', 'POST'],
       ['PUT', '/api/intake/brake', 'GET, POST'],
       ['PUT', '/', 'GET, HEAD'],
     ]) {
@@ -4478,4 +4480,40 @@ test('LH4', () => {
   const expected = hosts.flatMap(host => [refusal(host), refusal(host)])
   assert.deepEqual(actual, expected)
   assert.equal(calls, 0)
+})
+
+test('agent proposals refuse bad requests, return a diff for a valid one, and never write', async () => {
+  const dir = scratchDir('visualizer-agent-propose-')
+  const checkout = join(dir, 'checkout')
+  cpSync(join(ROOT, 'crew/agents'), join(checkout, 'crew/agents'), { recursive: true })
+  const before = readFileSync(join(checkout, 'crew/agents/planner.md'), 'utf8')
+  const post = (body) => json(base, '/api/roster/agent/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: typeof body === 'string' ? body : JSON.stringify(body) })
+  let server, base
+  try {
+    server = await startInProcess({ close() {} }, { checkout, crewRoot: join(dir, 'crew'), ledgerDb: join(dir, 'ledger.db'), triageDb: join(dir, 'viz.db') })
+    base = server.base
+    assert.equal((await json(base, '/api/roster/agent/propose')).status, 405)
+    assert.equal((await post('{ not json')).status, 400)
+    assert.equal((await post({})).status, 400)
+    assert.equal((await post({ role: 'planner', field: 'effort', value: 7 })).status, 400)
+    const ok = await post({ role: 'planner', field: 'effort', value: 'max' })
+    assert.equal(ok.status, 200)
+    assert.equal(ok.json.ok, true)
+    assert.match(ok.json.diff, /^--- a\/crew\/agents\/planner\.md$/m)
+    const bad = await post({ role: 'planner', field: 'effort', value: 'extreme' })
+    assert.equal(bad.json.ok, false)
+    assert.equal(bad.json.diff, null)
+    const unknownRole = await post({ role: '../../etc/passwd', field: 'effort', value: 'max' })
+    assert.equal(unknownRole.json.ok, false)
+    assert.match(JSON.stringify(unknownRole.json.refusals), /role is one of/)
+    rmSync(join(checkout, 'crew/agents/builder.md'))
+    const missing = await post({ role: 'builder', field: 'effort', value: 'max' })
+    assert.equal(missing.json.ok, false)
+    assert.equal(missing.json.diff, null)
+    assert.match(JSON.stringify(missing.json.refusals), /builder\.md/)
+    assert.equal(readFileSync(join(checkout, 'crew/agents/planner.md'), 'utf8'), before)
+  } finally {
+    await stopInProcess(server)
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

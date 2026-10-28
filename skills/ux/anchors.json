@@ -8,14 +8,14 @@
   "visualizer/web/src/lib/RunCard.svelte:54": "run.engineer || 'engineer —'",
   "visualizer/web/src/lib/TaskList.svelte:118": "No tasks match this view.",
   "visualizer/web/src/lib/RosterPanel.svelte:243": "function assignmentModal(node)",
-  "visualizer/web/src/lib/RosterPanel.svelte:714": "<dialog class=\"assignment-dialog\" use:assignmentModal",
   "visualizer/web/src/lib/RunDetail.svelte:322": "Missing values were not measured.",
-  "visualizer/web/src/lib/RosterPanel.svelte:656": "Null means not measured—not zero",
-  "visualizer/web/src/lib/RosterPanel.svelte:744": ".directory-loading span",
-  "visualizer/web/src/lib/RosterPanel.svelte:728": ".loading span { width:1.6rem",
   "visualizer/web/src/lib/agents.js:209": "return mark.measured === false ? `Unmeasured — ${mark.reason}`",
   "visualizer/web/src/lib/OperationsOverview.svelte:64": "unmeasured runs. Totals include recorded fields only.",
   "visualizer/web/src/lib/WorkflowsPage.svelte:73": "Reading workflows…",
   "visualizer/web/src/lib/WorkflowsPage.svelte:90": "bind:this={errorBox}",
-  "visualizer/web/src/lib/PhaseGantt.svelte:261": ".bounce-hotspot:focus-visible"
+  "visualizer/web/src/lib/PhaseGantt.svelte:261": ".bounce-hotspot:focus-visible",
+  "visualizer/web/src/lib/RosterPanel.svelte:679": "Null means not measured—not zero",
+  "visualizer/web/src/lib/RosterPanel.svelte:737": "<dialog class=\"assignment-dialog\" use:assignmentModal",
+  "visualizer/web/src/lib/RosterPanel.svelte:751": ".loading span { width:1.6rem",
+  "visualizer/web/src/lib/RosterPanel.svelte:767": ".directory-loading span"
 }

@@ -1,22 +1,22 @@
 # Theming contract
 
-The contract below is the checkable boundary recorded in `visualizer/web/src/lib/theme.css` and the visualizer suites (`test/visualizer-shape.test.mjs`, `test/visualizer-panels.test.mjs`, `test/visualizer-teardown.test.mjs`, `test/visualizer-server.test.mjs`). It describes the code that exists; it does not turn an unmeasured convention into a test.
+The contract below is the checkable boundary recorded in `visualizer/web/src/lib/theme.css` and the visualizer suites (`test/visualizer-panels.test.mjs`, `test/visualizer-server.test.mjs`). It describes the code that exists; it does not turn an unmeasured convention into a test.
 
 ## T1 - component names only Tier-2 aliases
 
-A component may name only Tier-2 aliases: `--bg`, `--panel`, `--line`, `--muted`, `--accent`, `--neutral`, the `--status-*` aliases, `--status-escalated`, the six `--role-*` aliases, and `--lane-0` through `--lane-7`. It must not name a raw `--ink-*`, `--paper-*`, `--spot-*`, role `-dark`/`-light` half, `--serious`, or `-raw` status token. The raw block opens at `visualizer/web/src/lib/theme.css:2`, and `--serious` stays raw at `visualizer/web/src/lib/theme.css:28`. The old recorded App.svelte `--serious` exception is gone: the feed error paints only aliases at `visualizer/web/src/App.svelte:261`, so the obedience count must be remeasured before anyone claims a number. Exhibit: the raw block and the measured suite pins below.
+A component may name only Tier-2 aliases: `--bg`, `--panel`, `--line`, `--muted`, `--accent`, `--neutral`, the `--status-*` aliases, `--status-escalated`, the six `--role-*` aliases, and `--lane-0` through `--lane-7`. It must not name a raw `--ink-*`, `--paper-*`, `--spot-*`, role `-dark`/`-light` half, `--serious`, or `-raw` status token. The raw block opens at `visualizer/web/src/lib/theme.css:2`, and `--serious` stays raw at `visualizer/web/src/lib/theme.css:28`. The old recorded App.svelte `--serious` exception is gone: the feed error paints only aliases at `visualizer/web/src/App.svelte:175`, so the obedience count must be remeasured before anyone claims a number. Exhibit: the raw block and the measured suite pins below.
 
 ## T2 - painted colour comes from a token
 
-Make every painted foreground, background, border, marker, and fill resolve to a token rather than a literal colour. The measured code violates this in **4 of 39 components, 22 times**, all in state-colour rules; the inventory is in `references/state-colour.md` L1. Exhibit: `visualizer/web/src/lib/GateChips.svelte:13`, `visualizer/web/src/lib/AcceptPanel.svelte:23`, `visualizer/web/src/lib/PhasePanel.svelte:99`, and the gantt row at `visualizer/web/src/lib/PhaseGantt.svelte:260`. The suite currently has no general hex ban and no general requirement that a colour declaration use `var()`.
+Make every painted foreground, background, border, marker, and fill resolve to a token rather than a literal colour. The measured code violates this in **4 of 27 components, 22 times**, all in state-colour rules; the inventory is in `references/state-colour.md` L1. Exhibit: `visualizer/web/src/lib/GateChips.svelte:13`, `visualizer/web/src/lib/AcceptPanel.svelte:23`, `visualizer/web/src/lib/PhasePanel.svelte:99`, and the gantt row at `visualizer/web/src/lib/PhaseGantt.svelte:260`. The suite currently has no general hex ban and no general requirement that a colour declaration use `var()`.
 
 ## T3 - escalation goes through the alias
 
-Use `--status-escalated` in a component; treat `--serious` as raw. Both error exhibits are alias-correct: `visualizer/web/src/App.svelte:261` paints feed errors from `--status-fail`, and `visualizer/web/src/lib/RosterPanel.svelte:752` paints the notice from `--status-fail`. No `--serious` read remains in App.svelte. This is a naming boundary even though both names currently resolve identically.
+Use `--status-escalated` in a component; treat `--serious` as raw. The error exhibit is alias-correct: `visualizer/web/src/App.svelte:175` paints feed errors from `--status-fail`. No `--serious` read remains in App.svelte. This is a naming boundary even though both names currently resolve identically.
 
 ## T4 - one owner writes the theme switch
 
-Only `visualizer/web/src/App.svelte:73` may write `document.documentElement.dataset.theme`, with `visualizer/web/src/App.svelte:74` deleting it for the system choice; `theme.css` may declare the selectors but no other component may set the attribute. Exhibit: `visualizer/web/src/App.svelte:29` and `visualizer/web/src/App.svelte:30` read the persisted `os`/`paper`/`ink` value, `visualizer/web/src/App.svelte:75` persists the choice, and `visualizer/web/src/App.svelte:189` offers the selector. The repo-wide grep found only the theme selectors in `visualizer/web/src/lib/theme.css:44`, `visualizer/web/src/lib/theme.css:71`, and `visualizer/web/src/lib/theme.css:99` plus those App writes.
+Only `visualizer/web/src/App.svelte:56` may write `document.documentElement.dataset.theme`, with `visualizer/web/src/App.svelte:57` deleting it for the system choice; `theme.css` may declare the selectors but no other component may set the attribute. Exhibit: `visualizer/web/src/App.svelte:18` and `visualizer/web/src/App.svelte:19` read the persisted `os`/`paper`/`ink` value, `visualizer/web/src/App.svelte:58` persists the choice, and `visualizer/web/src/App.svelte:128` offers the selector. The repo-wide grep found only the theme selectors in `visualizer/web/src/lib/theme.css:44`, `visualizer/web/src/lib/theme.css:71`, and `visualizer/web/src/lib/theme.css:99` plus those App writes.
 
 ## What the switch means
 
@@ -26,10 +26,10 @@ The three blocks are a cascade, not three independent palettes: `:root[data-them
 
 The mechanical floor is narrow and must be described honestly:
 
-- `test/visualizer-shape.test.mjs` checks role/lane name presence against `theme.css`: each role name exists and each lane index points at the expected role. It inspects no colour value or count.
+- `test/visualizer-panels.test.mjs` checks role/lane name presence against `theme.css`: each role name exists and each lane index points at the expected role. It inspects no colour value or count.
 - `test/visualizer-panels.test.mjs` pins two exact FleetTable CSS strings: the stale rule at `visualizer/web/src/lib/FleetTable.svelte:36` and its `currentColor` replacement at `visualizer/web/src/lib/FleetTable.svelte:42`, including the escalation status rule at `visualizer/web/src/lib/FleetTable.svelte:41`.
 - `test/visualizer-panels.test.mjs` pins PhaseGantt's `--identity-column`, `--lane-gap`, and their `calc()` geometry at `visualizer/web/src/lib/PhaseGantt.svelte:257`.
-- The role/lane isolation list names the panel suites, with `visualizer/web/src/lib/TeardownPanel.svelte` and `visualizer/web/src/lib/RosterPanel.svelte` covered by the teardown and server suites.
+- The role/lane isolation list names the panel suites.
 - The blanket Svelte shape rule bans `export let` and `$:` in every `.svelte` file; components use runes instead.
 
 There is no suite rule banning a hex colour, requiring every painted colour to be a token, counting declarations in `theme.css`, checking theme values, checking `data-theme`, or checking `prefers-color-scheme`. A checker author must not mistake issue prose for a colour: the old EventStream `#123` and MetricsStrip `#83` copy traps are gone from the sources. Restrict a detector to CSS values.
@@ -38,14 +38,14 @@ The six-filename role/lane blocklist, the exact FleetTable rules, the PhaseGantt
 
 ## Tabular numerals — measured register
 
-A component belongs in this census when its markup applies `mono` to runtime content or its local `.mono` rule declares `font-variant-numeric:tabular-nums`. Monospace alone (`font-family:var(--mono)` without the numeric declaration and without a `mono` class on runtime content) is not compliance. The global rule lives at `visualizer/web/src/lib/theme.css:165`; the only local tabular rule is at `visualizer/web/src/lib/RunCard.svelte:73`.
+A component belongs in this census when its markup applies `mono` to runtime content or its local `.mono` rule declares `font-variant-numeric:tabular-nums`. Monospace alone (`font-family:var(--mono)` without the numeric declaration and without a `mono` class on runtime content) is not compliance. The global rule lives at `visualizer/web/src/lib/theme.css:165`; the only local tabular rule is at `visualizer/web/src/lib/RunCard.svelte:72`.
 
 | Component | Verdict | Rule source |
 |---|---|---|
 | `AgentsPage.svelte` | compliant | global `.mono` at `visualizer/web/src/lib/theme.css:165` |
 | `EventStory.svelte` | compliant | global `.mono` at `visualizer/web/src/lib/theme.css:165` |
 | `FleetTable.svelte` | compliant | global `.mono` at `visualizer/web/src/lib/theme.css:165` |
-| `RunCard.svelte` | compliant | local `.mono` at `visualizer/web/src/lib/RunCard.svelte:73` |
+| `RunCard.svelte` | compliant | local `.mono` at `visualizer/web/src/lib/RunCard.svelte:72` |
 | `SkillsPage.svelte` | compliant | global `.mono` at `visualizer/web/src/lib/theme.css:165` |
 
 `6/6 compliant, 0/6 non-compliant`.

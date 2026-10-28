@@ -29,7 +29,7 @@ import {
   openLedger,
   defaultDbPath,
 } from './ledger.mjs'
-import { composeMoves, readLadder } from '../../visualizer/server/roster-ladder.mjs'
+import { composeMoves, readLadder } from './roster-ladder.mjs'
 
 export const EVAL_REFUSALS = Object.freeze([
   'bench-unreadable', 'bench-sha-mismatch',

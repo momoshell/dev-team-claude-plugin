@@ -20,7 +20,6 @@ const CONSTRUCTION_TIME_SUITES = [
   'test/factory-suite-cost.test.mjs',
   'test/visualizer-panels.test.mjs',
   'test/visualizer-server.test.mjs',
-  'test/visualizer-shape.test.mjs',
 ]
 
 function tap(tests, { pass = tests.length, fail = 0, skipped = 0, todo = 0, cancelled = 0 } = {}) {
@@ -171,14 +170,10 @@ test('D1 a tracked suite added after the recorded measurement is unmeasured, not
     'test/factory-skill-reads.test.mjs',
     'test/visualizer-agent-library.test.mjs',
     'test/visualizer-agents-edit.test.mjs',
-    'test/visualizer-assurance-preview.test.mjs',
     'test/visualizer-harness-settings.test.mjs',
     'test/visualizer-lean-web.test.mjs',
     'test/visualizer-lean.test.mjs',
-    'test/visualizer-prepared-tasks.test.mjs',
-    'test/visualizer-prompt-library.test.mjs',
     'test/visualizer-skill-library.test.mjs',
-    'test/visualizer-workflow-editor.test.mjs',
     'test/zz-added-after-measurement.test.mjs',
   ])
   assert.equal(result.reason, UNRECORDED_SUITE_REASON)

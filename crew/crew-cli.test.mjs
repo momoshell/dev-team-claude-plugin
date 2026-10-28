@@ -5566,28 +5566,6 @@ test('E1-saved workflow assignment reaches the booted seat and journal', async (
   assert.equal(shippedRoster().tiers.build.planner.effort, 'high')
 })
 
-test('E1-every workflow boots its edited assignments and preserves other tier seats', async () => {
- const {createWorkflowEditor}=await import('../visualizer/server/workflow-editor.mjs')
- const {workflowStageEntries}=await import('./workflows.mjs')
- const service=createWorkflowEditor({root:ROOT})
- for(const shape of Object.keys(SEAT_BEARING_STAGES)){
-  const assurance=shape==='review_panel'?'rigorous':'standard',tier=shape==='review_panel'?'judge':'build'
-  const view=service.read({shape,assurance});assert.equal(view.validation,null)
-  for(const [,cell] of workflowStageEntries(view.map))cell.effort='max'
-  const task=`workflow-${shape.replaceAll('_','-')}`
-  const rows=await bootSeatRows({task,tier,rosterValue:shippedRoster(),args:{workflow:view.name},readWorkflowFile:()=>JSON.stringify(view.map),afterBoot:async({home,checkout,dir})=>{
-    if(shape!=='scout')return
-    const before=readFileSync(join(dir,'crew.json'),'utf8')
-    await withHome(home,()=>assert.throws(()=>runCmd({task,checkout,execution:'full'}),/requires --execution scout/))
-    assert.equal(readFileSync(join(dir,'crew.json'),'utf8'),before)
-  }})
-  assert.equal(rows.crew.workflow_shape,shape)
-  const mapped=new Set(workflowStageEntries(view.map).map(([,cell])=>cell.role))
-  for(const role of mapped){assert.equal(rows.crew.members[role].effort,'max');assert.equal(rows.crew.members[role].workflow_seat.effort,'max');assert.equal(rows.find(row=>row.role===role).effort,'max')}
-  for(const role of rows.crew.roles.filter(role=>!mapped.has(role)))assert.equal(rows.crew.members[role].effort,shippedRoster().tiers[tier][role].effort)
- }
-})
-
 test('E1-workflow-revision is enforced before boot side effects and accepts the reviewed bytes', async () => {
  const raw=JSON.stringify(cloneWorkflow()),revision=createHash('sha256').update(raw).digest('hex')
  const rows=await bootSeatRows({task:'workflow-pinned',rosterValue:shippedRoster(),args:{workflow:'full','workflow-revision':revision},readWorkflowFile:()=>raw})

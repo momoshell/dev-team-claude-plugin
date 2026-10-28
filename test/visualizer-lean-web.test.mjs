@@ -27,10 +27,10 @@ test('lean view lists journal rows in recorded order without timestamps', () => 
   assert.deepEqual(leanView({ goal: 'x' }, null).pending, []); assert.equal(leanView({ goal: 'x' }).stageReason, 'no stage recorded')
 })
 
-test('ledger rows keep their old status derivation and App wires lean only', () => {
+test('App wires lean lanes only: no ledger detail, no envelope probe, no dropped page', () => {
   assert.equal(deriveStatus({ status: 'ok' }).key, 'success'); assert.equal(deriveStatus({ running: true, phases: [] }).key, 'queued')
   const app = src('App.svelte')
-  assert.match(app, /selectedRun\?\.source === 'lean'[\s\S]*LeanRunDetail/); assert.match(app, /probeEnvelopes\(nextRuns\.filter\(\(run\) => run\?\.source !== 'lean'\)\)/)
+  assert.match(app, /selectedRun\?\.source === 'lean'[\s\S]*LeanRunDetail/); assert.ok(!/RunDetail\.svelte|probeEnvelopes|getReturns/.test(app.replace(/LeanRunDetail/g, '')))
   assert.match(src('lib/api.js'), /getSeatSessions[\s\S]*seat-sessions/); assert.match(src('lib/LeanRunDetail.svelte'), /journalPulse/)
 })
 
@@ -62,14 +62,15 @@ test('lean presentation distinguishes accepted failing baselines, open stages an
   assert.equal(leanCheckStatus({result:{code:0}}).label,'Exit code 0 recorded');assert.equal(leanCheckStatus({result:{accepted:false}}).tone,'fail')
 })
 
-test('VJ3 sessionsFeedState treats a readable lean source as available when the ledger is not', () => {
-  const src_ = (lean, ledger) => ({ degraded: !ledger, sources: { lean: { readable: lean, absent: lean ? null : 'x' }, ledger: { readable: ledger, absent: ledger ? null : 'unable to open' } } })
-  const a = sessionsFeedState(src_(true, false)); assert.equal(a.degraded, false); assert.equal(a.available, true); assert.equal(a.sources.ledger.absent, 'unable to open')
-  assert.equal(sessionsFeedState(src_(false, false)).degraded, true)
-  assert.equal(sessionsFeedState(src_(false, true)).degraded, false)
-  const empty = sessionsFeedState({ degraded: true, sources: { lean: { readable: true, runs: 0, absent: null }, ledger: { readable: false, absent: 'unable to open' } } })
-  assert.equal(empty.degraded, false); assert.equal(empty.available, true)
-  assert.equal(sessionsFeedState({ degraded: true }).degraded, true); assert.equal(sessionsFeedState({}).degraded, false)
+test('VJ3 sessionsFeedState is the lean source alone: readable is available, anything else is unavailable', () => {
+  const src_ = (lean) => ({ degraded: !lean, sources: { lean: { readable: lean, absent: lean ? null : 'x' } } })
+  const a = sessionsFeedState(src_(true)); assert.equal(a.degraded, false); assert.equal(a.available, true); assert.equal(a.sources.lean.absent, null)
+  const b = sessionsFeedState(src_(false)); assert.equal(b.degraded, true); assert.equal(b.sources.lean.absent, 'x')
+  const empty = sessionsFeedState({ degraded: false, sources: { lean: { readable: true, runs: 0, absent: null } } })
+  assert.equal(empty.degraded, false); assert.equal(empty.available, true); assert.equal(empty.sources.lean.runs, 0)
+  assert.equal(Object.hasOwn(empty.sources, 'ledger'), false)
+  // A response that says nothing about the lean source is unreadable, never assumed readable.
+  assert.equal(sessionsFeedState({}).degraded, true); assert.equal(sessionsFeedState({}).sources.lean.runs, null)
 })
 
 test('VJ5 App.svelte takes feed state from sessionsFeedState and no longer claims a ledger connection', () => {

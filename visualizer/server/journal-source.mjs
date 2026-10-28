@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
-import { JOURNAL_CHANNELS } from '../../crew/drive.mjs'
+// The journal channels a lane writes (record and operational), fixed by the journal contract.
+const JOURNAL_CHANNELS = Object.freeze({ record: 'record', operational: 'operational' })
 
 function validSegment(value) {
   return typeof value === 'string' && value.length > 0 && value !== '.' && value !== '..' && !value.includes('/') && !value.includes('\\')

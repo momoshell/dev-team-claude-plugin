@@ -70,7 +70,7 @@ test('ux manifest keys and prose citations agree exactly', () => {
 test('ux manifest pins carry current exact content', () => {
   assert.equal(relative(ROOT, MANIFEST), OWNER)
   const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'))
-  assert.equal(Object.keys(manifest).length, 19)
+  assert.equal(Object.keys(manifest).length, 13)
   const result = checkSkillAnchors({ root: ROOT, skillDir: HERE, manifestPath: MANIFEST })
   assert.deepEqual(result.shifted, [], 'a drifted manifest pin must be repaired, not tolerated')
   assert.deepEqual(result.failures, [], `manifest-backed pins must check clean: ${result.failures.join('\n')}`)
@@ -87,27 +87,27 @@ test('ux manifest pins carry current exact content', () => {
 test('ux absence vocabulary re-derives from the component tree', () => {
   const body = readFileSync(join(REF_DIR, 'absence.md'), 'utf8')
   const dash = census('—', 'g')
-  assert.equal(dash.occurrences, 94)
-  assert.equal(dash.files, 21)
+  assert.equal(dash.occurrences, 61)
+  assert.equal(dash.files, 15)
   const unavailable = census('unavailable', 'gi')
-  assert.equal(unavailable.occurrences, 91)
-  assert.equal(unavailable.files, 26)
+  assert.equal(unavailable.occurrences, 51)
+  assert.equal(unavailable.files, 16)
   const unmeasured = census('unmeasured', 'gi')
-  assert.equal(unmeasured.occurrences, 14)
-  assert.equal(unmeasured.files, 7)
+  assert.equal(unmeasured.occurrences, 2)
+  assert.equal(unmeasured.files, 2)
   const notMeasured = census('not measured', 'gi')
-  assert.equal(notMeasured.occurrences, 23)
-  assert.equal(notMeasured.files, 8)
+  assert.equal(notMeasured.occurrences, 19)
+  assert.equal(notMeasured.files, 6)
   const union = new Set([...dash.hit, ...unavailable.hit, ...unmeasured.hit, ...notMeasured.hit])
-  assert.equal(union.size, 31)
-  assert.equal(libFiles().length, 39)
-  for (const row of ['| `—` | 94 | 21 |', '| `unavailable` | 91 | 26 |', '| `unmeasured` | 14 | 7 |', '| `not measured` | 23 | 8 |']) {
+  assert.equal(union.size, 21)
+  assert.equal(libFiles().length, 27)
+  for (const row of ['| `—` | 61 | 15 |', '| `unavailable` | 51 | 16 |', '| `unmeasured` | 2 | 2 |', '| `not measured` | 19 | 6 |']) {
     assert.ok(body.includes(row), `absence.md must carry ${row}`)
   }
   assert.ok(body.includes('`Unmeasured — <reason>`'), 'absence.md must name the canonical vocabulary')
 })
 
-test('ux state branches re-derive to twenty of thirty nine', () => {
+test('ux state branches re-derive to ten of twenty seven', () => {
   const body = readFileSync(join(REF_DIR, 'states.md'), 'utf8')
   assert.ok(body.includes('## Adopted rules'), 'states.md must carry the adopted rules heading')
   const hit = []
@@ -117,10 +117,10 @@ test('ux state branches re-derive to twenty of thirty nine', () => {
     const conditions = [...markup.matchAll(/\{#if\s+([^}]+)\}|\{:else if\s+([^}]+)\}/g)].map((match) => match[1] || match[2] || '')
     if (hasEmptyClass || conditions.some((condition) => condition.includes('loading'))) hit.push(file)
   }
-  assert.equal(hit.length, 20)
-  assert.equal(libFiles().length - hit.length, 19)
-  assert.ok(body.includes('20/39') || body.includes('20 of 39'), 'states.md must record the branched count')
-  assert.ok(body.includes('19/39'), 'states.md must record the unbranched remainder')
+  assert.equal(hit.length, 10)
+  assert.equal(libFiles().length - hit.length, 17)
+  assert.ok(body.includes('10/27') || body.includes('10 of 27'), 'states.md must record the branched count')
+  assert.ok(body.includes('17/27'), 'states.md must record the unbranched remainder')
 })
 
 test('ux keyboard and focus register re-derives', () => {
@@ -132,28 +132,28 @@ test('ux keyboard and focus register re-derives', () => {
   assert.equal(modern.occurrences, 1)
   assert.equal(modern.files, 1)
   const visible = census(':focus-visible', 'g')
-  assert.equal(visible.occurrences, 32)
-  assert.equal(visible.files, 9)
+  assert.equal(visible.occurrences, 8)
+  assert.equal(visible.files, 3)
   const plain = census(':focus(?!-)', 'g')
-  assert.equal(plain.occurrences, 5)
-  assert.equal(plain.files, 2)
+  assert.equal(plain.occurrences, 0)
+  assert.equal(plain.files, 0)
   const tab = census('tabindex', 'g')
-  assert.equal(tab.occurrences, 22)
-  assert.equal(tab.files, 11)
+  assert.equal(tab.occurrences, 10)
+  assert.equal(tab.files, 5)
   const aria = census('aria-', 'g')
-  assert.equal(aria.occurrences, 241)
-  assert.equal(aria.files, 34)
+  assert.equal(aria.occurrences, 130)
+  assert.equal(aria.files, 23)
   const role = census('role=', 'g')
-  assert.equal(role.occurrences, 91)
-  assert.equal(role.files, 19)
+  assert.equal(role.occurrences, 50)
+  assert.equal(role.files, 12)
   for (const row of [
     '| legacy `on:keydown` attributes | 0 | 0 |',
     '| modern `onkeydown=` attributes | 1 | 1 |',
-    '| `:focus-visible` selectors | 32 | 9 |',
-    '| plain `:focus` selectors | 5 | 2 |',
-    '| `tabindex` attributes | 22 | 11 |',
-    '| `aria-` attributes | 241 | 34 |',
-    '| `role=` attributes | 91 | 19 |',
+    '| `:focus-visible` selectors | 8 | 3 |',
+    '| plain `:focus` selectors | 0 | 0 |',
+    '| `tabindex` attributes | 10 | 5 |',
+    '| `aria-` attributes | 130 | 23 |',
+    '| `role=` attributes | 50 | 12 |',
   ]) {
     assert.ok(body.includes(row), `keyboard-focus.md must carry ${row}`)
   }
@@ -162,12 +162,12 @@ test('ux keyboard and focus register re-derives', () => {
 test('ux motion register re-derives with no reduced motion query', () => {
   const body = readFileSync(join(REF_DIR, 'motion.md'), 'utf8')
   const animated = census('animation:', 'g')
-  assert.equal(animated.occurrences, 3)
-  assert.equal(animated.files, 2)
+  assert.equal(animated.occurrences, 1)
+  assert.equal(animated.files, 1)
   const reduced = census('prefers-reduced-motion', 'g')
   assert.equal(reduced.occurrences, 0)
   assert.equal(reduced.files, 0)
-  assert.ok(body.includes('0/39') || body.includes('0 of 39'), 'motion.md must record the zero query count')
+  assert.ok(body.includes('0/27') || body.includes('0 of 27'), 'motion.md must record the zero query count')
 })
 
 // Mutation killed: dropping a source identity from one adopted rule breaks the provenance floor.
@@ -198,10 +198,10 @@ test('ux stated gaps are counted and few', () => {
     gaps += (body.match(/\*\*Stated gap:\*\*/g) || []).length
   }
   assert.equal(gaps, 4)
-  assert.ok(readFileSync(join(REF_DIR, 'absence.md'), 'utf8').includes('0/39'), 'absence.md must record the canonical-phrase adoption count')
+  assert.ok(readFileSync(join(REF_DIR, 'absence.md'), 'utf8').includes('0/27'), 'absence.md must record the canonical-phrase adoption count')
   for (const body of readDocs()) {
     for (const line of body.split('\n')) {
-      if (line.includes('**Stated gap:**')) assert.match(line, /\d+\/39/, 'every stated gap carries a denominator')
+      if (line.includes('**Stated gap:**')) assert.match(line, /\d+\/27/, 'every stated gap carries a denominator')
     }
   }
 })

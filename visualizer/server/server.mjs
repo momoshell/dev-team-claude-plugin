@@ -1,44 +1,22 @@
 #!/usr/bin/env node
 import { createServer } from 'node:http'
 import { isIP } from 'node:net'
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { resolve, join, dirname, basename, sep, relative } from 'node:path'
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { resolve, join, dirname, sep, relative } from 'node:path'
 import { homedir, networkInterfaces } from 'node:os'
-import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { createFeed } from './feed.mjs'
 import { createReturnsSource } from './returns-source.mjs'
 import { createJournalSource } from './journal-source.mjs'
 import { createLeanSource } from './lean-source.mjs'
-import { createShipStateResolver } from './ship-state.mjs'
-import { createRosterSource } from './roster-source.mjs'
-import { createWorkflowsSource } from './workflows-source.mjs'
-import { createPreparedTasks } from './prepared-tasks.mjs'
-import { createWorkflowEditor } from './workflow-editor.mjs'
-import { unifiedDiff, proposeEdit } from './roster-edit.mjs'
+import { createAgentsSource } from './agents-source.mjs'
 import { proposeAgentEdit } from './agents-edit.mjs'
 import { AGENT_ROLES } from '../../crew/protocols.mjs'
-import { createAgentsSource } from './agents-source.mjs'
 import { createAgentLibrary } from './agent-library.mjs'
 import { createSkillLibrary } from './skill-library.mjs'
-import { createPromptLibrary } from './prompt-library.mjs'
-import { createAssurancePreview } from './assurance-preview.mjs'
-import { VARIANTS } from '../../crew/variants.mjs'
-import { ASSURANCE_NAMES, ASSURANCES, canonicalAssurance } from '../../crew/assurances.mjs'
-import { PROTECTED_PATHS } from '../../crew/protected-paths.mjs'
-import { readLadder, readReference, ladderView, rosterPickView, stageMoves, composeMoves, applyMoves } from './roster-ladder.mjs'
 import { createArtificialAnalysisCatalog } from './model-catalog.mjs'
 import { createOpenRouterCatalog } from './openrouter-catalog.mjs'
 import { mergeModelDirectory } from '../web/src/lib/model-directory.js'
 import { saveArtificialAnalysisKey } from './local-env.mjs'
-import { breakerPolicy } from '../../crew/breaker.mjs'
-import { loadRoutingPolicy, ROUTING_SEATED_ROLES, ROUTING_TIERS } from '../../crew/crew.mjs'
-import { openLedger } from '../../scripts/factory/ledger.mjs'
-import { defaultCellWindow, defaultRunSetWindow, defaultIntakeWindow, defaultTeardownWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeRunSet, shapeIntake, shapeSeatTeardowns, shapeCellAttribution } from './shape.mjs'
-
-// Mirrored from the intake loop's contract without importing that module: this
-// server must not acquire the loop's process-spawning dependency graph.
-export const STOP_SWITCH_PATH = '.factory/STOP'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const PROJECT_ROOT = resolve(ROOT, '..')
@@ -47,8 +25,7 @@ const schema = 2
 const DEFAULT_PORT = 4488
 
 function defaults() {
-  const dir = process.env.DEVTEAM_LEDGER_DIR || join(homedir(), '.dev-team', 'factory')
-  return { port: portFromEnv(), host: '127.0.0.1', ledgerDb: process.env.DEVTEAM_LEDGER_DB || join(dir, 'ledger.db'), triageDb: undefined, crewRoot: process.env.DEVTEAM_CREW_ROOT || join(homedir(), '.crew'), checkout: resolve(process.env.DEVTEAM_INTAKE_CHECKOUT || process.cwd()), rosterPath: process.env.DEVTEAM_ROSTER_PATH || undefined, ladderPath: process.env.DEVTEAM_LADDER_PATH || undefined, referencePath: process.env.DEVTEAM_MODEL_REFERENCE || join(dir, 'model-reference.json') }
+  return { port: portFromEnv(), host: '127.0.0.1', crewRoot: process.env.DEVTEAM_CREW_ROOT || join(homedir(), '.crew'), checkout: resolve(process.env.DEVTEAM_INTAKE_CHECKOUT || process.cwd()) }
 }
 // A refusal cause, tagged so the CLI guard can map it to exit 2 without
 // conflating it with an unexpected internal throw (mapped to 1). Exit codes
@@ -79,13 +56,8 @@ export function portFromEnv(env = process.env, fallback = DEFAULT_PORT) {
 const CLI_FLAGS = Object.freeze({
   '--port': 'port',
   '--host': 'host',
-  '--ledger-db': 'ledgerDb',
-  '--triage-db': 'triageDb',
   '--crew-root': 'crewRoot',
   '--checkout': 'checkout',
-  '--roster': 'rosterPath',
-  '--ladder': 'ladderPath',
-  '--model-reference': 'referencePath',
 })
 
 // The query parameters each route reads, mapped from its pathname. One place
@@ -98,9 +70,7 @@ export const ROUTE_PARAMS = Object.freeze({
   '/api/returns': ['repo_slug', 'task_slug', 'adw_id'],
   '/api/journal': ['repo_slug', 'task_slug', 'adw_id'],
   '/api/seat-sessions': ['repo_slug', 'task_slug', 'adw_id', 'role'],
-  '/api/roster': [],
   '/api/plugin-write-mode': [],
-  '/api/roster/pick': ['tier', 'role'],
   '/api/agent-library': [],
   '/api/agent-library/save': [],
   '/api/harness-settings': [],
@@ -111,35 +81,9 @@ export const ROUTE_PARAMS = Object.freeze({
   '/api/agents/propose': [],
   '/api/skills/propose': [],
   '/api/prompts/propose': [],
-  '/api/prompt-library': [],
-  '/api/prompt-library/preview': [],
-  '/api/prompt-library/save': [],
-  '/api/workflows': ['recent'],
-  '/api/workflows/propose': [],
-  '/api/workflows/editor': ['shape','assurance','name'],
-  '/api/workflows/save': [],
-  '/api/workflows/library': [],
-  '/api/prepared-tasks': [],
-  '/api/workflows/preview': [],
-  '/api/assurances': [],
-  '/api/assurances/preview': [],
-  '/api/assurances/propose': [],
-  '/api/cell-health': ['since', 'until'],
-  '/api/run-set': ['since', 'until'],
-  '/api/intake': ['since', 'until'],
-  '/api/seat-teardowns': ['since', 'until'],
-  '/api/cell-attribution': ['since', 'until'],
-  '/api/intake/brake': [],
-  '/api/roster/propose': [],
-  '/api/roster/agent/propose': [],
-  '/api/roster/ladder': [],
-  '/api/roster/ladder/stage': [],
-  '/api/roster/ladder/compose': [],
-  '/api/roster/ladder/apply': [],
   '/api/model-catalog': [],
   '/api/model-catalog/key': [],
   '/api/health': [],
-  '/api/triage': [],
 })
 
 function refuseUnknownParams(url) {
@@ -175,9 +119,6 @@ function json(res, status, value, headers = {}) {
   const body = JSON.stringify(value)
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body), ...headers })
   res.end(body)
-}
-function assuranceRefusal(res, status, code, message, headers = {}) {
-  return json(res, status, { schema, error: message, ok: false, diff: null, wrote: false, refusals: [{ code, message }] }, headers)
 }
 
 // #543: a state-writing route must not be reachable as a CORS SIMPLE request.
@@ -229,27 +170,6 @@ export function writeGuard(req) {
   return null
 }
 
-export function writeRosterAtomically({ path, beforeText, afterText } = {}) {
-  const target = resolve(path || '')
-  if (!target || typeof beforeText !== 'string' || typeof afterText !== 'string') return { ok:false, changed:false, conflict:false, error:'roster write needs a path and before/after text' }
-  let temporary = null
-  try {
-    const current = readFileSync(target, 'utf8')
-    if (current !== beforeText) return { ok:false, changed:false, conflict:true, error:`${target} changed after the draft was validated; reload the roster and try again` }
-    if (current === afterText) return { ok:true, changed:false, conflict:false, error:null }
-    const mode = statSync(target).mode & 0o777
-    temporary = join(dirname(target), `.${basename(target)}.visualizer-${process.pid}-${randomUUID()}.tmp`)
-    writeFileSync(temporary, afterText, { flag:'wx', mode })
-    renameSync(temporary, target)
-    temporary = null
-    if (readFileSync(target, 'utf8') !== afterText) return { ok:false, changed:false, conflict:false, error:`${target} did not match the requested roster after write` }
-    return { ok:true, changed:true, conflict:false, error:null }
-  } catch (err) {
-    return { ok:false, changed:false, conflict:false, error:`${target}: ${err?.message || String(err)}` }
-  } finally {
-    if (temporary) try { rmSync(temporary, { force:true }) } catch {}
-  }
-}
 function integer(value, fallback) {
   if (value == null || value === '') return fallback
   if (!/^\d+$/.test(value)) return null
@@ -284,64 +204,7 @@ function windowBound(label, value) {
   return { value: parsed.toISOString(), error: null }
 }
 
-function readWindow(url, fallback) {
-  let since = fallback.since, until = fallback.until
-  for (const label of ['since', 'until']) {
-    if (!url.searchParams.has(label)) continue
-    const bound = windowBound(label, url.searchParams.get(label))
-    if (bound.error) return { since: null, until: null, error: bound.error }
-    if (label === 'since') since = bound.value; else until = bound.value
-  }
-  if (until != null && Date.parse(until) <= Date.parse(since)) return { since: null, until: null, error: 'until must be later than since' }
-  return { since, until, error: null }
-}
-
-function readBrake(config) {
-  const path = join(config.checkout, STOP_SWITCH_PATH)
-  try {
-    const engaged = existsSync(path)
-    return { schema, state: engaged ? 'engaged' : 'clear', measured: true, path, checkout: config.checkout, read_error: null, readonly: false }
-  } catch (err) {
-    const message = `${path}: ${err?.message || String(err)}`
-    return { schema, state: null, measured: false, path, checkout: config.checkout, read_error: message, readonly: false }
-  }
-}
-
-function recordBrake(config, args) {
-  let ledger = null
-  try {
-    ledger = openLedger({ dbPath: config.ledgerDb })
-    ledger.recordIntakeBrake(args)
-    return { recorded: true, record_error: null }
-  } catch (err) {
-    return { recorded: false, record_error: err?.message || String(err) }
-  } finally {
-    try { ledger?.close() } catch {}
-  }
-}
-
-export function budgetCeiling(env = process.env) {
-  const source = 'DEVTEAM_BUDGET_MAX_TOKENS'
-  const values = env ?? process.env
-  const rawMax = values?.DEVTEAM_BUDGET_MAX_TOKENS
-  if (rawMax == null || rawMax === '') return null
-  const parsePositiveInteger = (value) => {
-    const text = typeof value === 'number' ? String(value) : String(value)
-    if (!/^\d+$/.test(text)) return null
-    const number = Number(text)
-    return Number.isSafeInteger(number) && number >= 1 ? number : null
-  }
-  const refuse = (message) => ({ max_tokens: null, window_ms: null, source, error: message })
-  const max_tokens = parsePositiveInteger(rawMax)
-  if (max_tokens == null) return refuse('DEVTEAM_BUDGET_MAX_TOKENS must be an integer >= 1')
-  const rawWindow = values?.DEVTEAM_BUDGET_WINDOW_MS
-  const window_ms = rawWindow == null || rawWindow === '' ? RUN_SET_WINDOW_MS : parsePositiveInteger(rawWindow)
-  if (window_ms == null) return refuse('DEVTEAM_BUDGET_WINDOW_MS must be an integer >= 1')
-  return { max_tokens, window_ms, source, error: null }
-}
-
 const BODY_TOO_LARGE = 'body_too_large'
-const ASSURANCE_DOCUMENT_LINE_LIMIT = 2000
 async function body(req, limit = 4096) {
   let text = ''
   for await (const chunk of req) {
@@ -378,118 +241,6 @@ function staticResponse(req, res) {
     const data = readFileSync(target)
     res.writeHead(200, { 'content-type': types[ext] || 'application/octet-stream', 'content-length': data.length }); res.end(data)
   } catch { res.writeHead(404); res.end('Not found') }
-}
-
-function rosterPickCellKey(cell) {
-  return JSON.stringify([cell?.provider ?? null, cell?.model_id ?? cell?.id ?? null, cell?.agent ?? null, cell?.effort ?? null])
-}
-
-function rosterPickRoute(policy, tier, role) {
-  return policy?.routes?.[tier]?.[role] || policy?.[tier]?.[role] || null
-}
-
-function rosterPickBenchNewest(ledger, policy, tier, role) {
-  if (!ledger || typeof ledger.tableNames !== 'function') return { rows: [], bench: null, reason: 'ledger read handle is unavailable — eval_cells evidence is unmeasured' }
-  let tables
-  try {
-    tables = ledger.tableNames()
-  } catch (err) {
-    return { rows: [], bench: null, reason: `ledger table list failed: ${err?.message || String(err)}` }
-  }
-  if (!Array.isArray(tables) || !tables.includes('eval_cells')) return { rows: [], bench: null, reason: 'eval_cells table is unavailable — evidence is unmeasured, not zero' }
-  const route = rosterPickRoute(policy, tier, role)
-  const candidates = Array.isArray(route?.candidates) ? route.candidates : []
-  const candidateKeys = new Set(candidates.map(rosterPickCellKey))
-  const beforeStats = typeof ledger.stats === 'function' ? ledger.stats() : null
-  const beforeErrors = Number(beforeStats?.mirror_errors || 0)
-  let allRows
-  try {
-    allRows = ledger.dumpTable('eval_cells')
-  } catch (err) {
-    return { rows: [], bench: null, reason: `eval_cells read failed: ${err?.message || String(err)}` }
-  }
-  const afterStats = typeof ledger.stats === 'function' ? ledger.stats() : null
-  const afterErrors = Number(afterStats?.mirror_errors || 0)
-  if (afterErrors > beforeErrors) return { rows: [], bench: null, reason: 'eval_cells read failed — the ledger did not provide trustworthy evidence' }
-  if (!Array.isArray(allRows)) return { rows: [], bench: null, reason: 'eval_cells read returned unknown data — evidence is unmeasured' }
-  const groups = new Map()
-  for (const row of allRows) {
-    if (row?.role !== role || !candidateKeys.has(rosterPickCellKey(row)) || typeof row?.bench !== 'string' || !row.bench.trim()) continue
-    if (!groups.has(row.bench)) groups.set(row.bench, [])
-    groups.get(row.bench).push(row)
-  }
-  const complete = [...groups.entries()]
-    .map(([bench, rows]) => ({ bench, rows, keys: new Set(rows.map(rosterPickCellKey)) }))
-    .filter((group) => candidates.every((candidate) => group.keys.has(rosterPickCellKey(candidate))))
-  if (!complete.length) return { rows: [], bench: null, reason: 'no bench contains evidence for every requested role and routing-policy candidate — evidence is unmeasured' }
-  complete.sort((left, right) => {
-    const latest = (rows) => [...rows].sort((a, b) => String(a?.created_at || '').localeCompare(String(b?.created_at || '')) || Number(a?.id || 0) - Number(b?.id || 0)).at(-1)
-    const a = latest(left.rows), b = latest(right.rows)
-    return String(b?.created_at || '').localeCompare(String(a?.created_at || ''))
-      || Number(b?.id || 0) - Number(a?.id || 0)
-      || left.bench.localeCompare(right.bench)
-  })
-  const selected = complete.at(0)
-  let rows = selected.rows
-  if (typeof ledger.evalCells === 'function') {
-    try {
-      const ordered = ledger.evalCells({ bench: selected.bench })
-      if (!Array.isArray(ordered)) return { rows: [], bench: null, reason: 'eval_cells bench read returned unknown data — evidence is unmeasured' }
-      const evalStats = typeof ledger.stats === 'function' ? ledger.stats() : null
-      const evalErrors = Number(evalStats?.mirror_errors || 0)
-      if (evalErrors > afterErrors) return { rows: [], bench: null, reason: 'eval_cells bench read failed — the ledger did not provide trustworthy evidence' }
-      rows = ordered
-    } catch (err) {
-      return { rows: [], bench: null, reason: `eval_cells bench read failed: ${err?.message || String(err)}` }
-    }
-  }
-  return { rows, bench: selected.bench, reason: null }
-}
-
-function rosterPickUnavailable(tier, role, reason) {
-  const message = String(reason || 'routing pick is unavailable')
-  return {
-    schema_version: 1,
-    entry_point: 'bench',
-    tier,
-    role,
-    policy_hash: null,
-    current_cell: null,
-    current: null,
-    policy_candidates: null,
-    candidate_set: null,
-    exclusions: [],
-    ranked_survivors: [],
-    ranked: [],
-    outcome: 'abstained',
-    chosen_cell: null,
-    chosen: null,
-    abstention_reason: 'no-eligible-candidate',
-    reason: message,
-    why: message,
-    win_reason: null,
-    abstention: { reason: message },
-    band: null,
-    band_name: null,
-    band_source: null,
-    cost: { value: null, source: null, reason: message },
-    bench: null,
-    selected_bench: null,
-    evidence: [],
-    eval_cells: [],
-    evidence_reason: message,
-    unavailable: message,
-  }
-}
-
-function readPickQuery(url) {
-  const values = {}
-  for (const name of ['tier', 'role']) {
-    const matches = url.searchParams.getAll(name)
-    if (matches.length !== 1 || typeof matches[0] !== 'string' || !matches[0].trim()) return { error: `${name} must be supplied exactly once and be non-blank` }
-    values[name] = matches[0].trim()
-  }
-  return values
 }
 
 function pathIsUnder(path, dir) {
@@ -590,24 +341,14 @@ export function startServer(options = {}) {
   const pluginWriteRefusal = { schema, error:PLUGIN_WRITE_NOTICE, reason:writeMode.reason, basis:writeMode.basis, plugin_root:writeMode.plugin_root }
   config.envFile = resolve(config.envFile || join(PROJECT_ROOT, '.env.local'))
   const env = config.env ?? process.env
-  const feed = config.feed || createFeed({ kind: config.kind || 'ledger', ledgerDb: config.ledgerDb, triageDb: config.triageDb, crewRoot: config.crewRoot })
   const returns = config.returns || createReturnsSource({ crewRoot: config.crewRoot })
   const lean = config.lean || createLeanSource({ crewRoot: config.crewRoot, archiveRoot: config.leanArchiveRoot })
   const journal = config.journal || createJournalSource({ crewRoot: config.crewRoot, lean })
-  const ship = config.shipState || createShipStateResolver({ journalSource: journal, fetchImpl: config.fetchImpl, token: env.GITHUB_TOKEN, apiUrl: env.DEVTEAM_GITHUB_API_URL, repository: env.GITHUB_REPOSITORY })
-  const roster = config.roster || createRosterSource({ rosterPath: config.rosterPath })
-  const assurancePreview = createAssurancePreview({roster,capabilitiesPath:config.capabilitiesPath})
-  const workflows = config.workflows || createWorkflowsSource({ root: config.checkout, pluginRoot: PROJECT_ROOT, feed, variants: VARIANTS, rosterPath: config.rosterPath, docsPath: config.workflowsDocsPath })
-  const workflowRoot = config.workflowRoot ?? PROJECT_ROOT
-  const workflowEditor = createWorkflowEditor({root:workflowRoot,rosterPath:config.rosterPath,capabilitiesPath:config.capabilitiesPath,ladderPath:config.ladderPath,writable:writeMode.writable && pluginWriteTargetMode({target:join(workflowRoot,'crew/workflows'),home:config.home ?? homedir()}).writable})
   const modelCatalog = config.modelCatalog || createArtificialAnalysisCatalog({ apiKey: env.ARTIFICIAL_ANALYSIS_API_KEY, fetchImpl: config.fetchImpl })
-  const preparedTasks=createPreparedTasks({directory:join(config.crewRoot,'prepared-tasks'),checkout:config.checkout,runtimeRoot:workflowRoot,workflows:workflowEditor,writable:writeMode.writable})
   const agents = config.agents || config.agentsSource || createAgentsSource({ checkout: config.checkout, pluginRoot: PROJECT_ROOT, crewRoot: config.crewRoot })
   const agentLibrary = createAgentLibrary({ capabilitiesPath:config.capabilitiesPath ?? join(PROJECT_ROOT,'crew/capabilities.json'), checkout:config.checkout, home:config.home ?? homedir(), env, writable:writeMode.writable && pluginWriteTargetMode({target:join(config.checkout,'agents'),home:config.home ?? homedir()}).writable })
   const skillRoot = config.skillRoot ?? config.pluginRoot ?? PROJECT_ROOT
   const skillLibrary = createSkillLibrary({root:skillRoot,writable:writeMode.writable && pluginWriteTargetMode({target:join(skillRoot,'skills'),home:config.home ?? homedir()}).writable})
-  const promptRoot = config.promptRoot ?? config.pluginRoot ?? PROJECT_ROOT
-  const promptLibrary = createPromptLibrary({root:promptRoot,writable:writeMode.writable && pluginWriteTargetMode({target:join(promptRoot,'crew/roles'),home:config.home ?? homedir()}).writable})
   const openRouterCatalog = config.openRouterCatalog || createOpenRouterCatalog({ fetchImpl: config.fetchImpl })
   const readModelCatalog = async () => {
     const [openRouter, artificialAnalysis] = await Promise.all([openRouterCatalog.get(), modelCatalog.get()])
@@ -636,7 +377,6 @@ export function startServer(options = {}) {
       const method = req.method === 'HEAD' ? 'GET' : req.method
       const unknown = refuseUnknownParams(url)
       if (unknown) {
-        if (url.pathname === '/api/assurances' || url.pathname === '/api/assurances/propose') return assuranceRefusal(res, 400, 'unknown_query_parameter', unknown)
         return json(res, 400, { schema, error: unknown })
       }
       if (url.pathname === '/api/sessions') {
@@ -652,110 +392,13 @@ export function startServer(options = {}) {
           filters[label] = bound.value
         }
         if (filters.since && filters.until && Date.parse(filters.until) <= Date.parse(filters.since)) return json(res, 400, { schema, error: 'until must be later than since' })
-        const result = feed.listRuns(filters)
-        const shipStates = await ship.resolve(result.runs)
-        const runs = result.runs.map((run) => ({ ...run, ship: shipStates?.get?.(run.adw_id) || { state: 'unmeasured', reason: 'ship state not measured', stale: false } }))
-        // Lean lanes live on disk, not in the ledger: list them after the ledger rows, filtered by their own records.
-        // Each source states its own health; a lean read that throws is unreadable, not "no lean lanes".
-        let leanRuns = []
+        // Lean lanes are journals on disk; a lane only the ledger knew is not listed. A lean read that throws is
+        // unreadable, not "no lean lanes": its run count is null with the reason, never a zero.
+        let runs = []
         let leanSource = { readable: true, absent: null }
-        try { leanRuns = lean.listRuns(filters) } catch (err) { leanSource = { readable: false, absent: err?.message || String(err) } }
-        // result.degraded also covers a broken triage sidecar over a ledger that read fine: only a stated read
-        // failure (a typed absent, or the feed's own latched reason) makes the ledger unreadable.
-        const ledgerReason = typeof feed._reason === 'function' ? feed._reason() : null
-        const ledgerAbsent = result.degraded !== true ? null
-          : (typeof result.absent === 'string' && result.absent) ? result.absent
-          : (typeof ledgerReason === 'string' && ledgerReason) ? ledgerReason
-          : typeof feed._reason === 'function' ? null : 'the ledger could not be opened'
-        const sources = { lean: { ...leanSource, runs: leanSource.readable ? leanRuns.length : null }, ledger: { readable: ledgerAbsent === null, absent: ledgerAbsent } }
-        // The feed is unavailable only when no source could be read, whatever the row counts; a broken triage
-        // sidecar over a readable source is not a read failure.
-        const degraded = !(sources.lean.readable || sources.ledger.readable)
-        return json(res, 200, { schema, ...result, runs: [...runs, ...leanRuns], sources, degraded })
-      }
-      if (url.pathname === '/api/workflows') {
-        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
-        const recent = integer(url.searchParams.get('recent'), 5)
-        if (recent === null || recent < 0 || recent > 1000) return json(res, 400, { schema, error: 'recent must be an integer between 0 and 1000' })
-        const result = workflows.readWorkflows({ recent })
-        return json(res, 200, { schema, ...result })
-      }
-      if (url.pathname === '/api/assurances') {
-        if (method !== 'GET') return assuranceRefusal(res, 405, 'method_not_allowed', 'method not allowed', { allow: 'GET' })
-        let ladder
-        try {
-          ladder = readLadder({ ladderPath: config.ladderPath })
-        } catch (err) {
-          ladder = { tier_floors: null, error: `model ladder read failed: ${err?.message || String(err)}` }
-        }
-        const values = ladder?.degraded !== true && ladder?.tier_floors && typeof ladder.tier_floors === 'object' && !Array.isArray(ladder.tier_floors)
-          ? { ...ladder.tier_floors }
-          : null
-        const absent = values
-          ? null
-          : typeof ladder?.error === 'string' && ladder.error.trim()
-            ? ladder.error
-            : 'model ladder is unavailable — no reason was reported'
-        const presets = ASSURANCE_NAMES.map((key, rank) => ({ key, rank: rank + 1, ...ASSURANCES[key], forcing: key === 'rigorous' ? 'Any listed protected path forces rigorous assurance.' : 'This protected-path rule does not force this preset; it forces rigorous.' }))
-        return json(res, 200, {
-          schema,
-          assurance: { axis: 'review_strength', presets },
-          band_floors: { axis: 'model_seating', values, absent },
-          protected_paths: [...PROTECTED_PATHS],
-          preview_policy: assurancePreview.read(),
-        })
-      }
-      if (url.pathname === '/api/assurances/preview') {
-        if(method!=='POST') return json(res,405,{schema,error:'method not allowed'},{allow:'POST'})
-        const refusal=writeGuard(req)
-        if(refusal) return json(res,refusal.status,{schema,error:refusal.error})
-        let input
-        try {input=await body(req,131072)} catch(error) {return json(res,400,{schema,error:error.message})}
-        if(!input || typeof input!=='object' || Array.isArray(input))return json(res,400,{schema,error:'request body must be an object'})
-        const unknown=Object.keys(input).find(key=>!['assurance','context','files','extra_paths','revision'].includes(key))
-        if(unknown)return json(res,400,{schema,error:`unknown field ${unknown}`})
-        const {status,...result}=assurancePreview.preview(input)
-        return json(res,status || 200,{schema,...result})
-      }
-      if (url.pathname === '/api/assurances/propose') {
-        if (method !== 'POST') return assuranceRefusal(res, 405, 'method_not_allowed', 'method not allowed', { allow: 'POST' })
-        const refusal = writeGuard(req)
-        if (refusal) return assuranceRefusal(res, refusal.status, 'write_guard', refusal.error)
-        const reject = (code, message, status = 400) => status === 200
-          ? json(res, status, { schema, ok: false, diff: null, wrote: false, refusals: [{ code, message }] })
-          : assuranceRefusal(res, status, code, message)
-        let input
-        try { input = await body(req, 262144) } catch (err) {
-          const message = typeof err?.message === 'string' && err.message ? err.message : 'invalid json'
-          return reject(err?.code === BODY_TOO_LARGE ? BODY_TOO_LARGE : 'invalid_json', message)
-        }
-        if (!input || typeof input !== 'object' || Array.isArray(input)) return reject('body_shape', 'request body must be an object')
-        if (input.tier !== undefined && input.tier !== null) return reject('legacy_tier_conflict', 'request body cannot include a non-null legacy tier alongside assurance')
-        const unknownField = Object.keys(input).find((field) => !['document', 'assurance', 'path'].includes(field))
-        if (unknownField) return reject('unknown_field', `unknown field ${unknownField}`)
-        if (typeof input.document !== 'string') return reject('document_type', 'document must be a string')
-        if (typeof input.assurance !== 'string') return reject('assurance_type', 'assurance must be a string')
-        if (Object.hasOwn(input, 'path') && (typeof input.path !== 'string' || !input.path.trim() || /[\r\n\u2028\u2029]/.test(input.path) || input.path.length > 240)) {
-          return reject('path_invalid', 'path must be a non-blank single line of at most 240 characters')
-        }
-        const canonical = canonicalAssurance(input.assurance)
-        if (!canonical) return reject('assurance_unknown', `unknown assurance ${JSON.stringify(input.assurance)}`, 200)
-        let parsed
-        try { parsed = JSON.parse(input.document) } catch (err) {
-          return reject('document_malformed', `document is malformed JSON: ${err?.message || String(err)}`, 200)
-        }
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return reject('document_shape', 'document must contain a JSON object', 200)
-        const normalised = input.document.endsWith('\n') ? input.document.slice(0, -1) : input.document
-        const documentLineCount = normalised === '' ? 0 : normalised.split('\n').length
-        if (documentLineCount > ASSURANCE_DOCUMENT_LINE_LIMIT) {
-          return reject('document_too_many_lines', `document has ${documentLineCount} lines; the proposal endpoint accepts at most ${ASSURANCE_DOCUMENT_LINE_LIMIT}`, 200)
-        }
-        if (JSON.stringify(parsed, null, 2) !== normalised) return reject('document_not_canonical', 'document is non-canonically-formatted; refusing a misleading diff', 200)
-        if (Object.hasOwn(parsed, 'tier') && parsed.tier !== null) return reject('legacy_tier_conflict', 'document cannot carry a non-null legacy tier alongside assurance', 200)
-        parsed.assurance = canonical
-        const afterText = `${JSON.stringify(parsed, null, 2)}${input.document.endsWith('\n') ? '\n' : ''}`
-        const diff = unifiedDiff(input.document, afterText, { path: input.path ?? 'request.json' })
-        return json(res, 200, { schema, ok: true, diff, wrote: false, refusals: [] })
+        try { runs = lean.listRuns(filters) } catch (err) { leanSource = { readable: false, absent: err?.message || String(err) } }
+        const sources = { lean: { ...leanSource, runs: leanSource.readable ? runs.length : null } }
+        return json(res, 200, { schema, runs, sources, degraded: !leanSource.readable })
       }
       if (url.pathname === '/api/events') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
@@ -768,7 +411,7 @@ export function startServer(options = {}) {
         const adwId = url.searchParams.get('adw_id') || ''
         if (adwId.startsWith('lean:')) {
           if (phase_id !== undefined) return json(res, 400, { schema, error: 'phase_id is not supported for lean lanes: lean journal rows carry no phase_id' })
-          // Lean lanes are journals on disk: answer from the journal, never the ledger.
+          // Lean lanes are journals on disk: answer from the journal.
           const found = lean.resolveLane(adwId.slice('lean:'.length))
           if (!found) return json(res, 200, { schema, events: [], cursor: after, degraded: false, absent: `no lean lane ${adwId.slice('lean:'.length)}` })
           const read = lean.readJournalRows(found)
@@ -780,20 +423,8 @@ export function startServer(options = {}) {
           const events = matching.filter((event) => event.id > after).slice(0, limit)
           return json(res, 200, { schema, events, cursor: events.length ? events.at(-1).id : after, degraded: false, absent: null })
         }
-        const result = feed.listEvents({ adw_id: adwId, after, limit, ...filters })
-        // Read AFTER the query it reports on, like /api/run-set: the feed's db open is
-        // lazy. listEvents answers { events: [], cursor } for an unopenable ledger,
-        // byte-identical to a genuinely empty page — the one reader on this surface
-        // that stated an absence as a measured zero (h5 F7; #678 / #687 / #699).
-        const eventsHealth = typeof feed.health === 'function' ? feed.health() : null
-        const eventsReason = typeof feed._reason === 'function' ? feed._reason() : null
-        // feed.health() also includes the triage sidecar, so its aggregate
-        // degraded flag cannot by itself turn a successful event read into a
-        // ledger absence (review RV1-2). A private reason or an explicit feed
-        // verdict ties the typed absence to this ledger query.
-        const eventsDegraded = result?.degraded === true || (eventsHealth?.degraded === true && typeof eventsReason === 'string' && eventsReason.length > 0)
-        const eventsAbsent = eventsDegraded ? ((typeof result?.absent === 'string' && result.absent.length > 0 ? result.absent : null) || eventsReason || 'the ledger could not be opened') : null
-        return json(res, 200, { schema, ...result, degraded: eventsDegraded, absent: eventsAbsent })
+        // The ledger event source is gone: a non-lean lane answers null-with-reason, never a measured zero.
+        return json(res, 200, { schema, events: [], cursor: after, degraded: true, absent: 'ledger event source removed: only lean lanes (adw_id lean:<id>) have events' })
       }
       if (url.pathname === '/api/returns') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
@@ -822,89 +453,6 @@ export function startServer(options = {}) {
       if (url.pathname === '/api/plugin-write-mode') {
         if (method !== 'GET') return json(res, 405, { schema, error:'method not allowed' }, { allow:'GET' })
         return json(res, 200, { schema, ...writeMode, notice: writeMode.writable ? null : PLUGIN_WRITE_NOTICE })
-      }
-      if (url.pathname === '/api/roster') {
-        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
-        return json(res, 200, { schema, ...roster.readRoster() })
-      }
-      if (url.pathname === '/api/roster/pick') {
-        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
-        const query = readPickQuery(url)
-        if (query.error) return json(res, 400, { schema, error: query.error })
-        const { tier, role } = query
-        if (!ROUTING_TIERS.includes(tier) || !ROUTING_SEATED_ROLES[tier]?.includes(role)) {
-          return json(res, 400, { schema, error: `unknown roster pick tier/role ${JSON.stringify(tier)}/${JSON.stringify(role)}` })
-        }
-        let loaded
-        try {
-          loaded = loadRoutingPolicy({ path: config.routingPolicyPath || config.policyPath })
-        } catch (err) {
-          const view = rosterPickUnavailable(tier, role, `routing policy is unavailable: ${err?.message || String(err)}`)
-          return json(res, 200, { schema, ...view })
-        }
-        let currentRoster
-        try {
-          currentRoster = roster.readRoster()
-        } catch (err) {
-          currentRoster = { tiers: null, models: null, degraded: true, error: `roster read failed: ${err?.message || String(err)}` }
-        }
-        let ladder
-        try {
-          ladder = readLadder({ ladderPath: config.ladderPath })
-        } catch (err) {
-          ladder = { degraded: true, bands: null, tier_floors: null, error: `model ladder read failed: ${err?.message || String(err)}` }
-        }
-        let ledger = null
-        let evidence = { rows: [], bench: null, reason: 'ledger evidence was not read' }
-        try {
-          const openReadLedger = config.openLedger || openLedger
-          ledger = openReadLedger({ dbPath: config.ledgerDb, readOnly: true, stderr: { write() {} } })
-          if (ledger?.readConnection && !ledger.readConnection()) {
-            const stats = typeof ledger.stats === 'function' ? ledger.stats() : null
-            evidence = { rows: [], bench: null, reason: stats?.degraded_message || 'ledger could not be opened read-only — evidence is unmeasured' }
-          } else {
-            evidence = rosterPickBenchNewest(ledger, loaded.policy, tier, role)
-          }
-        } catch (err) {
-          evidence = { rows: [], bench: null, reason: `ledger evidence read failed: ${err?.message || String(err)}` }
-        } finally {
-          try { ledger?.close?.() } catch {}
-        }
-        let view
-        try {
-          view = rosterPickView({
-            policy: loaded.policy,
-            policyHash: loaded.policyHash,
-            tier,
-            role,
-            roster: currentRoster,
-            ladder,
-            eval_cells: evidence.rows,
-            bench: evidence.bench,
-            evidenceReason: evidence.reason,
-          })
-        } catch (err) {
-          view = rosterPickUnavailable(tier, role, `routing pick could not be materialised: ${err?.message || String(err)}`)
-        }
-        return json(res, 200, { schema, ...view })
-      }
-      if (url.pathname === '/api/prompt-library') {
-        if(method!=='GET') return json(res,405,{schema,error:'method not allowed'},{allow:'GET'})
-        return json(res,200,{schema,...promptLibrary.read()})
-      }
-      if (url.pathname === '/api/prompt-library/preview' || url.pathname === '/api/prompt-library/save') {
-        if(method!=='POST') return json(res,405,{schema,error:'method not allowed'},{allow:'POST'})
-        const refusal=writeGuard(req)
-        if(refusal) return json(res,refusal.status,{schema,error:refusal.error})
-        const save=url.pathname.endsWith('/save')
-        if(save && (!writeMode.writable || !pluginWriteTargetMode({target:join(promptRoot,'crew/roles'),home:config.home ?? homedir()}).writable)) return json(res,409,pluginWriteRefusal)
-        let input
-        try { input=await body(req,1572864) } catch(error) { return json(res,400,{schema,error:error.message}) }
-        if(!input || typeof input!=='object' || Array.isArray(input)) return json(res,400,{schema,error:'request body must be an object'})
-        const unknown=Object.keys(input).find(key=>!['role','text','expected_revision'].includes(key))
-        if(unknown) return json(res,400,{schema,error:`unknown field ${unknown}`})
-        const {status,...result}=save ? promptLibrary.save(input) : promptLibrary.preview(input)
-        return json(res,status || 200,{schema,...result})
       }
       if (url.pathname === '/api/skill-library') {
         if(method!=='GET') return json(res,405,{schema,error:'method not allowed'},{allow:'GET'})
@@ -971,6 +519,25 @@ export function startServer(options = {}) {
         try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
         if (!input || typeof input !== 'object' || Array.isArray(input)) return json(res, 400, { schema, error: 'request body must be an object' })
         const route = url.pathname === '/api/agents/propose' ? 'agents' : url.pathname === '/api/skills/propose' ? 'skills' : 'prompts'
+        // One endpoint, two proposals: {role, tier, field, value} edits a crew/agents/<role>.md frontmatter
+        // field; {name, entry} proposes a coding_agents register entry. A body with `field` is the first.
+        if (route === 'agents' && Object.hasOwn(input, 'field')) {
+          const unknownEdit = Object.keys(input).find((key) => !['role', 'tier', 'field', 'value'].includes(key))
+          if (unknownEdit) return json(res, 400, { schema, error: `unknown field ${unknownEdit}` })
+          if (typeof input.role !== 'string' || typeof input.field !== 'string') return json(res, 400, { schema, error: 'role and field are required strings' })
+          if (!Object.hasOwn(input, 'value')) return json(res, 400, { schema, error: 'value is required: only an explicit null clears a tier override' })
+          const tier = input.tier ?? null, value = input.value ?? null
+          if (tier !== null && typeof tier !== 'string') return json(res, 400, { schema, error: 'tier must be a string or null' })
+          if (value !== null && typeof value !== 'string') return json(res, 400, { schema, error: 'value must be a string or null' })
+          let agentText = null, readError = null
+          const agentPath = join(config.checkout, 'crew/agents', `${input.role}.md`)
+          if (AGENT_ROLES.includes(input.role)) {
+            try { agentText = readFileSync(agentPath, 'utf8') } catch (err) { readError = `unable to read agent definition: ${err.code || err.message || 'unknown read error'}, at ${agentPath}` }
+          }
+          const edit = proposeAgentEdit({ agentText, agentPath, readError, role: input.role, tier, field: input.field, value })
+          const { afterText, ...editResponse } = edit
+          return json(res, 200, { schema, proposal: 'agent-edit', agent_path: `crew/agents/${input.role}.md`, applyable_with: 'git apply / patch -p1', ...editResponse })
+        }
         const fields = route === 'agents' ? ['name', 'entry'] : route === 'skills' ? ['role', 'skills'] : ['role', 'text']
         const unknownFields = Object.keys(input).filter((field) => !fields.includes(field))
         if (unknownFields.length) return json(res, 400, { schema, error: `unknown field ${unknownFields[0]}` })
@@ -987,213 +554,6 @@ export function startServer(options = {}) {
         }
         if (route === 'prompts') return json(res, 200, { schema, proposal: 'prompts', ...response })
         return json(res, 200, { schema, proposal: 'skills', ...response })
-      }
-      if (url.pathname === '/api/cell-health') {
-        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
-        const defaults = defaultCellWindow()
-        const bounds = readWindow(url, defaults)
-        if (bounds.error) return json(res, 400, { schema, error: bounds.error })
-        const { since, until } = bounds
-        const result = feed.cellFailures({ since, until })
-        return json(res, 200, { schema, ...shapeCellHealth({ ...result, roster: roster.readRoster(), since, until, label: defaults.label }) })
-      }
-      if (url.pathname === '/api/run-set') {
-        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
-        const defaults = defaultRunSetWindow()
-        const bounds = readWindow(url, defaults)
-        if (bounds.error) return json(res, 400, { schema, error: bounds.error })
-        const { since, until } = bounds
-        const result = feed.runSet({ since, until })
-        // Read AFTER the query it reports on: the feed's db open is lazy, so a
-        // handle that has answered nothing yet reports degraded false even for
-        // a database that cannot be opened.
-        const feedHealth = typeof feed.health === 'function' ? feed.health() : null
-        // The feed's reason LATCHES for the life of the process (#475):
-        // probeColumns() records a momentary fault and nothing ever clears it,
-        // so it can only ever answer "has anything ever gone wrong", never
-        // "did this read work". It stays a fallback and never the gate.
-        const latchedReason = typeof feed._reason === 'function' ? feed._reason() : null
-        // This read's own verdict. The feed states an absence per call, so a
-        // read that answered rows is healthy however bad the process history is.
-        const readReason = typeof result?.absent === 'string' && result.absent.length > 0 ? result.absent : null
-        // A read that answered no rows stays unanswerable even if it named no
-        // reason — never a measured zero (#451) — and borrows the latched reason
-        // only to describe it.
-        const runSetReason = readReason ?? (result?.rows == null
-          ? (latchedReason || 'the ledger read that answered this window failed without naming a reason')
-          : null)
-        const runSetHealth = { ...(feedHealth || {}), degraded: typeof runSetReason === 'string' && runSetReason.length > 0 }
-        const burn = typeof feed.budgetWindow === 'function'
-          ? feed.budgetWindow({ since, until })
-          : { measured: false, total: null, sessions: null, absent: 'budget burn is unavailable from this feed' }
-        return json(res, 200, { schema, ...shapeRunSet({ ...result, degraded: runSetHealth?.degraded === true, degraded_reason: runSetReason, since, until, label: defaults.label, ceiling: budgetCeiling(env), burn }) })
-      }
-      if (url.pathname === '/api/intake') {
-        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
-        const defaults = defaultIntakeWindow()
-        const bounds = readWindow(url, defaults)
-        if (bounds.error) return json(res, 400, { schema, error: bounds.error })
-        const { since, until } = bounds
-        const result = typeof feed.intake === 'function'
-          ? feed.intake({ since, until })
-          : { sweeps: null, refusals: null, picks: null, ever: null, absent: 'intake is unavailable from this feed' }
-        return json(res, 200, { schema, ...shapeIntake({ ...result, since, until, label: defaults.label }) })
-      }
-      if (url.pathname === '/api/seat-teardowns') {
-        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
-        const defaults = defaultTeardownWindow()
-        const bounds = readWindow(url, defaults)
-        if (bounds.error) return json(res, 400, { schema, error: bounds.error })
-        const { since, until } = bounds
-        const result = typeof feed.seatTeardowns === 'function'
-          ? feed.seatTeardowns({ since, until })
-          : { runs: null, rows: null, absent: 'seat teardowns are unavailable from this feed' }
-        return json(res, 200, { schema, ...shapeSeatTeardowns({ ...result, since, until, label: defaults.label }) })
-      }
-      if (url.pathname === '/api/cell-attribution') {
-        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
-        const defaults = defaultCellWindow()
-        const bounds = readWindow(url, defaults)
-        if (bounds.error) return json(res, 400, { schema, error: bounds.error })
-        const { since, until } = bounds
-        const result = typeof feed.cellAttribution === 'function'
-          ? feed.cellAttribution({ since, until })
-          : { runs: null, rows: null, unattributable: null, absent: 'cell attribution is unavailable from this feed' }
-        return json(res, 200, { schema, ...shapeCellAttribution({ ...result, since, until, label: defaults.label }) })
-      }
-      if (url.pathname === '/api/intake/brake') {
-        if (method === 'GET') return json(res, 200, readBrake(config))
-        if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET, POST' })
-        const refusal = writeGuard(req)
-        if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
-        let input
-        try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
-        if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.engaged !== 'boolean' || typeof input.actor !== 'string') {
-          return json(res, 400, { schema, error: 'engaged must be a boolean and actor must be a non-empty string of at most 120 characters' })
-        }
-        const actor = input.actor.trim()
-        if (!actor || actor.length > 120) {
-          return json(res, 400, { schema, error: 'engaged must be a boolean and actor must be a non-empty string of at most 120 characters' })
-        }
-        const path = join(config.checkout, STOP_SWITCH_PATH)
-        const targetMode = pluginWriteTargetMode({ target: path, home: config.home ?? homedir() })
-        if (!targetMode.writable) return json(res, 409, { schema, error: PLUGIN_WRITE_NOTICE, reason: targetMode.reason, basis: targetMode.basis, plugin_root: targetMode.plugin_root })
-        const transition = input.engaged ? 'engaged' : 'cleared'
-        const at = new Date().toISOString()
-        let wrote = false
-        let writeError = null
-        try {
-          if (input.engaged) {
-            mkdirSync(dirname(path), { recursive: true })
-            writeFileSync(path, `${JSON.stringify({ actor, at })}\n`)
-          } else {
-            rmSync(path, { force: true })
-          }
-          wrote = true
-        } catch (err) {
-          writeError = `${path}: ${err?.message || String(err)}`
-        }
-        const readback = readBrake(config)
-        const expected = input.engaged ? 'engaged' : 'clear'
-        const transitionError = writeError || (readback.measured !== true
-          ? readback.read_error || `${path}: switch state could not be read after ${transition}`
-          : readback.state !== expected ? `${path}: switch state did not become ${expected}` : null)
-        const ok = transitionError == null && wrote
-        const recorded = recordBrake(config, {
-          checkout: config.checkout,
-          path,
-          transition,
-          actor,
-          outcome: ok ? 'ok' : 'failed',
-          detail: ok ? `stop switch ${transition}` : transitionError,
-          created_at: at,
-        })
-        return json(res, 200, {
-          schema, ok, ...readback, actor, at, transition, wrote,
-          ...recorded,
-          ...(transitionError ? { error: transitionError } : {}),
-        })
-      }
-      if (url.pathname === '/api/prepared-tasks') {
-        if(method==='GET'){const result=preparedTasks.list();return json(res,result.ok?200:result.status,{schema,...result})}
-        if(method!=='POST')return json(res,405,{error:'method not allowed'},{allow:'GET, POST'})
-        const refusal=writeGuard(req);if(refusal)return json(res,refusal.status,{error:refusal.error})
-        let input;try{input=await body(req,96*1024)}catch(error){return json(res,400,{error:error.message})}
-        if(!input || typeof input!=='object' || Array.isArray(input))return json(res,400,{error:'A task object is required.'})
-        const result=preparedTasks.create(input);return json(res,result.ok?200:result.status,{schema,...result})
-      }
-      if (url.pathname === '/api/workflows/library') {
-        if(method!=='GET')return json(res,405,{error:'method not allowed'},{allow:'GET'})
-        const result=workflowEditor.library();return json(res,result.ok?200:result.status,{schema,...result})
-      }
-      if (url.pathname === '/api/workflows/editor') {
-        if (method !== 'GET') return json(res,405,{error:'method not allowed'},{allow:'GET'})
-        const result=workflowEditor.read({shape:url.searchParams.get('shape') || 'full',assurance:url.searchParams.get('assurance') || 'standard',name:url.searchParams.get('name') || undefined})
-        return json(res,result.ok?200:result.status,{schema,...result})
-      }
-      if (url.pathname === '/api/workflows/save' || url.pathname === '/api/workflows/preview') {
-        if (method !== 'POST') return json(res,405,{error:'method not allowed'},{allow:'POST'})
-        const refusal=writeGuard(req)
-        if(refusal)return json(res,refusal.status,{error:refusal.error})
-        if(!writeMode.writable || !pluginWriteTargetMode({target:join(workflowRoot,'crew/workflows'),home:config.home ?? homedir()}).writable)return json(res,409,pluginWriteRefusal)
-        let input
-        try{input=await body(req,128*1024)}catch(error){return json(res,400,{error:error.message})}
-        if(!input || typeof input!=='object' || Array.isArray(input))return json(res,400,{error:'A workflow object is required.'})
-        const result=url.pathname.endsWith('/preview')?workflowEditor.preview(input):workflowEditor.save(input)
-        return json(res,result.ok?200:result.status,{schema,...result})
-      }
-      if (url.pathname === '/api/workflows/propose') {
-        if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
-        const refusal = writeGuard(req)
-        if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
-        let input
-        try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
-        if (!input || typeof input !== 'object' || Array.isArray(input) || (typeof input.workflow !== 'string' && !(input.workflow && typeof input.workflow === 'object')) || !input.edit || typeof input.edit !== 'object' || Array.isArray(input.edit)) {
-          return json(res, 400, { schema, error: 'workflow and edit are required' })
-        }
-        const result = workflowEditor.propose({ workflow: input.workflow, edit: input.edit, tier: input.tier })
-        return json(res, 200, { schema, ...result })
-      }
-      if (url.pathname === '/api/roster/propose') {
-        if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
-        const refusal = writeGuard(req)
-        if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
-        let input
-        try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
-        if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.tier !== 'string' || typeof input.role !== 'string') return json(res, 400, { schema, error: 'tier and role are required' })
-        if (input.cell !== null && (typeof input.cell !== 'object' || Array.isArray(input.cell))) return json(res, 400, { schema, error: 'cell must be an object or null' })
-        const raw = roster.readRaw()
-        const result = await proposeEdit({ rosterText: raw.text, rosterPath: raw.path, readError: raw.error, tier: input.tier, role: input.role, cell: input.cell })
-        return json(res, 200, { schema, roster_path: raw.path, applyable_with: 'git apply / patch -p1', ...result })
-      }
-      if (url.pathname === '/api/roster/agent/propose') {
-        if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
-        const refusal = writeGuard(req)
-        if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
-        let input
-        try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
-        if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.role !== 'string' || typeof input.field !== 'string') return json(res, 400, { schema, error: 'role and field are required strings' })
-        const tier = input.tier ?? null
-        if (!Object.hasOwn(input, 'value')) return json(res, 400, { schema, error: 'value is required: only an explicit null clears a tier override' })
-        const value = input.value ?? null
-        if (tier !== null && typeof tier !== 'string') return json(res, 400, { schema, error: 'tier must be a string or null' })
-        if (value !== null && typeof value !== 'string') return json(res, 400, { schema, error: 'value must be a string or null' })
-        let agentText = null, readError = null
-        const agentPath = join(config.checkout, 'crew/agents', `${input.role}.md`)
-        if (AGENT_ROLES.includes(input.role)) {
-          try { agentText = readFileSync(agentPath, 'utf8') } catch (err) { readError = `unable to read agent definition: ${err.code || err.message || 'unknown read error'}, at ${agentPath}` }
-        }
-        const result = proposeAgentEdit({ agentText, agentPath, readError, role: input.role, tier, field: input.field, value })
-        return json(res, 200, { schema, agent_path: `crew/agents/${input.role}.md`, applyable_with: 'git apply / patch -p1', ...result })
-      }
-      if (url.pathname === '/api/roster/ladder') {
-        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
-        const window = defaultCellWindow()
-        const ladder = readLadder({ ladderPath: config.ladderPath })
-        const reference = readReference({ referencePath: config.referencePath })
-        const failures = feed.cellFailures(window)
-        const view = ladderView({ roster: roster.readRoster(), ladder, reference, cells: { ...failures, measured_window: window } })
-        return json(res, 200, { schema, ...view })
       }
       if (url.pathname === '/api/model-catalog') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
@@ -1219,89 +579,9 @@ export function startServer(options = {}) {
         } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid api_key' }) }
         return json(res, 200, { schema, ...await readModelCatalog(), persisted:input.persist === true })
       }
-      if (url.pathname === '/api/roster/ladder/stage') {
-        if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
-        const refusal = writeGuard(req)
-        if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
-        let input
-        try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
-        if (!input || typeof input !== 'object' || Array.isArray(input) || !Array.isArray(input.moves)) return json(res, 400, { schema, error: 'moves must be an array' })
-        for (let index = 0; index < input.moves.length; index += 1) {
-          const move = input.moves[index]
-          if (!move || typeof move !== 'object' || Array.isArray(move) || typeof move.tier !== 'string' || typeof move.role !== 'string') return json(res, 400, { schema, error: `moves[${index}].tier and moves[${index}].role are required` })
-          if (move.cell !== null && (typeof move.cell !== 'object' || Array.isArray(move.cell))) return json(res, 400, { schema, error: `moves[${index}].cell must be an object or null` })
-        }
-        const raw = roster.readRaw()
-        const ladder = readLadder({ ladderPath: config.ladderPath })
-        const result = await stageMoves({ rosterText: raw.text, rosterPath: raw.path, readError: raw.error, moves: input.moves, ladder, breaker: { policy: breakerPolicy(env), dbPath: config.ledgerDb } })
-        return json(res, 200, { schema, roster_path: raw.path, ...result })
-      }
-      if (url.pathname === '/api/roster/ladder/compose') {
-        if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
-        const refusal = writeGuard(req)
-        if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
-        let input
-        try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
-        if (!input || typeof input !== 'object' || Array.isArray(input) || !Array.isArray(input.moves)) return json(res, 400, { schema, error: 'moves must be an array' })
-        for (let index = 0; index < input.moves.length; index += 1) {
-          const move = input.moves[index]
-          if (!move || typeof move !== 'object' || Array.isArray(move) || typeof move.tier !== 'string' || typeof move.role !== 'string') return json(res, 400, { schema, error: `moves[${index}].tier and moves[${index}].role are required` })
-          if (move.cell !== null && (typeof move.cell !== 'object' || Array.isArray(move.cell))) return json(res, 400, { schema, error: `moves[${index}].cell must be an object or null` })
-        }
-        const raw = roster.readRaw()
-        const ladder = readLadder({ ladderPath: config.ladderPath })
-        const result = await composeMoves({ rosterText: raw.text, rosterPath: raw.path, readError: raw.error, moves: input.moves, ladder, breaker: { policy: breakerPolicy(env), dbPath: config.ledgerDb } })
-        return json(res, 200, { schema, roster_path: raw.path, applyable_with: 'git apply / patch -p1', ...result })
-      }
-      if (url.pathname === '/api/roster/ladder/apply') {
-        if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
-        const refusal = writeGuard(req)
-        if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
-        if (!writeMode.writable) return json(res, 409, pluginWriteRefusal)
-        let input
-        try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
-        if (!input || typeof input !== 'object' || Array.isArray(input) || !Array.isArray(input.moves) || input.moves.length === 0) return json(res, 400, { schema, error: 'moves must be a non-empty array' })
-        if (input.allow_warnings !== undefined && typeof input.allow_warnings !== 'boolean') return json(res, 400, { schema, error: 'allow_warnings must be a boolean' })
-        for (let index = 0; index < input.moves.length; index += 1) {
-          const move = input.moves[index]
-          if (!move || typeof move !== 'object' || Array.isArray(move) || typeof move.tier !== 'string' || typeof move.role !== 'string') return json(res, 400, { schema, error: `moves[${index}].tier and moves[${index}].role are required` })
-          if (move.cell !== null && (typeof move.cell !== 'object' || Array.isArray(move.cell))) return json(res, 400, { schema, error: `moves[${index}].cell must be an object or null` })
-        }
-        const raw = roster.readRaw()
-        const ladder = readLadder({ ladderPath: config.ladderPath })
-        const targetMode = pluginWriteTargetMode({target: raw.path, home: config.home ?? homedir()})
-        if (!targetMode.writable) return json(res, 409, {schema, error: PLUGIN_WRITE_NOTICE, reason: targetMode.reason, basis: targetMode.basis, plugin_root: targetMode.plugin_root})
-        const result = await applyMoves({
-          rosterText: raw.text,
-          rosterPath: raw.path,
-          readError: raw.error,
-          moves: input.moves,
-          ladder,
-          breaker: { policy: breakerPolicy(env), dbPath: config.ledgerDb },
-          allowWarnings:input.allow_warnings === true,
-          writeRoster: ({ beforeText, afterText }) => writeRosterAtomically({ path:raw.path, beforeText, afterText }),
-        })
-        return json(res, 200, {
-          schema,
-          roster_path: raw.path,
-          applied_at:result.applied ? new Date().toISOString() : null,
-          takes_effect:result.applied ? 'next_new_task' : null,
-          ...result,
-        })
-      }
       if (url.pathname === '/api/health') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
-        return json(res, 200, { schema, ...feed.health(), ...returns.health(), returns_readonly: true })
-      }
-      if (url.pathname === '/api/triage') {
-        if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
-        const refusal = writeGuard(req) // #543: /api/triage is a state writer too
-        if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
-        let input
-        try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
-        if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.adw_id !== 'string' || typeof input.reviewed !== 'boolean') return json(res, 400, { schema, error: 'adw_id and reviewed are required' })
-        const result = feed.setTriage(input)
-        return json(res, 200, { schema, ...result })
+        return json(res, 200, { schema, ...returns.health(), ledger: { readable: false, absent: 'ledger source removed: the visualizer no longer reads the ledger' }, returns_readonly: true })
       }
       if (url.pathname.startsWith('/api/')) return method === 'GET' ? json(res, 404, { schema, error: 'not found' }) : json(res, 405, { schema, error: 'not found' }, { allow: 'GET' })
       if (method !== 'GET' && method !== 'HEAD') return res.writeHead(405, { allow: 'GET, HEAD' }).end()
@@ -1309,17 +589,14 @@ export function startServer(options = {}) {
     } catch (err) { return json(res, 500, { schema, error: err.message || 'internal error' }) }
   })
   // server.close() alone lets one in-flight request hold the process open with no
-  // timeout: the port frees while an orphan keeps ledger.db and the triage
-  // sidecar's WAL open, and only a second SIGTERM kills it — by process death,
-  // never through feed.close() (h5 F11). This closes THIS server's own sockets
-  // and signals no other process.
-  const close = () => { server.close(() => feed.close()); server.closeIdleConnections(); server.closeAllConnections() }
+  // timeout (h5 F11). This closes THIS server's own sockets and signals no other process.
+  const close = () => { server.close(); server.closeIdleConnections(); server.closeAllConnections() }
   process.once('SIGTERM', close); process.once('SIGINT', close)
   server.listen(config.port, config.host, () => {
     const address = server.address()
-    process.stdout.write(`${JSON.stringify({ listening: true, port: address.port, ledger_db: config.ledgerDb, triage_db: config.triageDb || join(dirname(config.ledgerDb), 'visualizer.db'), crew_root: config.crewRoot, returns_readonly: true, readonly: false, ledger_feed_readonly: true, triage_sidecar_writable: true, writes: ['triage sidecar (may create visualizer.db and its WAL/SHM)', 'stop-switch', 'intake brake ledger rows (may create the ledger directory, ledger.jsonl, ledger.db, WAL and SHM)', 'configured roster file when Apply for next task is explicitly requested', 'project agent definition files when Save agent is explicitly requested', 'harness execution preferences when Save harness settings is explicitly requested', 'skill definitions and selection rules when explicitly saved', 'prompt charter files when Save prompt is explicitly requested', 'native workflow assignment files when Save workflow is explicitly requested', 'local task briefs and configurations when Create local task is explicitly requested', 'Artificial Analysis key in the project .env.local when explicitly requested'] })}\n`)
+    process.stdout.write(`${JSON.stringify({ listening: true, port: address.port, crew_root: config.crewRoot, returns_readonly: true, readonly: false, writes: ['project agent definition files when Save agent is explicitly requested', 'harness execution preferences when Save harness settings is explicitly requested', 'skill definitions and selection rules when explicitly saved', 'Artificial Analysis key in the project .env.local when explicitly requested'] })}\n`)
   })
-  return { server, feed, agents }
+  return { server, agents }
 }
 
 // For the dist fence above: a path that cannot be realpathed is compared as written.

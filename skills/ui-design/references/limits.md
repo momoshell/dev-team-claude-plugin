@@ -19,7 +19,7 @@ The existing lane-block treatment at `visualizer/web/src/lib/PhaseGantt.svelte:2
 
 ## Hover contrast — per-rule register
 
-Each of the 24 `:hover` rule blocks below is classified independently from source alone: one record per hover CSS block, not one verdict per component, so a mixed component keeps every computable rule. A value is `literal` when it contains a hex, a CSS named colour (including `white`/`black`), or `rgb(`/`rgba(`/`hsl(` — even beside `var()`; it is `token` when it contains `var()`/`color-mix()` and no literal; it is `none` when the rule declares no color-affecting declaration. Only source-declared foregrounds and each state's own background are resolved: the rest ratio is computed against the rest background, never the hover background, and when a hover rule declares no background its ground is the rest rule's background on the same element. A transparent, inherited, missing, or otherwise unresolvable ground is recorded as `Unmeasured — <closed reason>` rather than borrowed. Ratios are WCAG relative-luminance contrasts of the state foreground against the state ground, paper first then ink, shown as rest → hover. The RosterPanel `.scope button` rest rule declares `background:transparent`, so its rest ratio is unmeasured because the rest ground is transparent (see `RosterPanel.svelte:725`).
+Each of the 15 `:hover` rule blocks below is classified independently from source alone: one record per hover CSS block, not one verdict per component, so a mixed component keeps every computable rule. A value is `literal` when it contains a hex, a CSS named colour (including `white`/`black`), or `rgb(`/`rgba(`/`hsl(` — even beside `var()`; it is `token` when it contains `var()`/`color-mix()` and no literal; it is `none` when the rule declares no color-affecting declaration. Only source-declared foregrounds and each state's own background are resolved: the rest ratio is computed against the rest background, never the hover background, and when a hover rule declares no background its ground is the rest rule's background on the same element. A transparent, inherited, missing, or otherwise unresolvable ground is recorded as `Unmeasured — <closed reason>` rather than borrowed. Ratios are WCAG relative-luminance contrasts of the state foreground against the state ground, paper first then ink, shown as rest → hover.
 
 ### `Dropdown.svelte` — 2 rules
 
@@ -46,11 +46,6 @@ Each of the 24 `:hover` rule blocks below is classified independently from sourc
 |---|---|---|---|---|---|---|
 | `EventStream.svelte` | `.refresh:hover,.clear:hover` | `border-color: var(--accent); color: var(--accent)` | token | `var(--panel-raised)` | `var(--panel-raised)` | paper 5.17 → 4.76; ink 6.20 → 7.20 |
 
-### `OperationsOverview.svelte` — 1 rules
-
-| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
-|---|---|---|---|---|---|---|
-| `OperationsOverview.svelte` | `.bars button:focus-visible .bar-value,.bars button:hover .bar-value` | `(none)` | none | `transparent` | `transparent` | Unmeasured — rule declares no color-affecting declaration |
 
 ### `PhaseGantt.svelte` — 6 rules
 
@@ -69,17 +64,6 @@ Each of the 24 `:hover` rule blocks below is classified independently from sourc
 |---|---|---|---|---|---|---|
 | `PhasePanel.svelte` | `.envelope-documents summary:hover` | `background: color-mix(in srgb,var(--document-role) 6%,transparent)` | token | `none declared` | `color-mix(in srgb,var(--document-role) 6%,transparent)` | Unmeasured — no source-declared rest background |
 
-### `RosterPanel.svelte` — 6 rules
-
-| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
-|---|---|---|---|---|---|---|
-| `RosterPanel.svelte` | `.seat.changeable:hover` | `border-color: var(--accent); background: var(--accent-soft)` | token | `none declared` | `var(--accent-soft)` | Unmeasured — no source-declared rest background |
-| `RosterPanel.svelte` | `.source-setup a:hover` | `color: var(--accent)` | token | `none declared` | `none declared` | Unmeasured — no source-declared rest background |
-| `RosterPanel.svelte` | `.directory-pager button:hover:not(:disabled)` | `background: var(--accent-soft); color: var(--accent)` | token | `transparent` | `var(--accent-soft)` | Unmeasured — rest ground is transparent |
-| `RosterPanel.svelte` | `.scope button:hover` | `background: var(--panel-raised); color: var(--text)` | token | `transparent` | `var(--panel-raised)` | Unmeasured — rest ground is transparent |
-| `RosterPanel.svelte` | `.model-palette article:hover` | `border-color: var(--accent-border)` | token | `var(--panel)` | `var(--panel)` | Unmeasured — rest foreground is inherited, not source-declared |
-
-| `RosterPanel.svelte` | `.model-choice:hover .choose-model-cta` | `(none)` | none | `none declared` | `none declared` | Unmeasured — rule declares no color-affecting declaration |
 
 ### `TaskList.svelte` — 2 rules
 
@@ -88,18 +72,7 @@ Each of the 24 `:hover` rule blocks below is classified independently from sourc
 | `TaskList.svelte` | `tbody tr:hover` | `background: var(--accent-soft)` | token | `none declared` | `var(--accent-soft)` | Unmeasured — no source-declared rest background |
 | `TaskList.svelte` | `tr:hover .open` | `border-color: var(--accent); color: var(--accent)` | token | `var(--panel-raised)` | `var(--panel-raised)` | Unmeasured — rest foreground is inherited, not source-declared |
 
-### `WorkflowGraph.svelte` — 1 rules
 
-| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
-|---|---|---|---|---|---|---|
-| `WorkflowGraph.svelte` | `.stage-node:hover` | `border-color: var(--accent)` | token | `var(--panel-raised)` | `var(--panel-raised)` | paper 5.17 → 5.17; ink 6.20 → 6.20 |
-
-### `PromptsPage.svelte` — 2 rules
-
-| File | Selector | Hover declarations | Verdict | Rest ground | Hover ground | Contrast (paper / ink) |
-|---|---|---|---|---|---|---|
-| `PromptsPage.svelte` | `button:hover:not(:disabled)` | `border-color: var(--accent); background: var(--accent-surface)` | token | `var(--panel)` | `var(--accent-surface)` | Unmeasured — hover ground token --accent-surface has no source-declared value |
-| `PromptsPage.svelte` | `button.primary:hover:not(:disabled)` | `background: var(--accent-solid)` | token | `var(--accent-solid)` | `var(--accent-solid)` | Unmeasured — rest ground token --accent-solid has no source-declared value |
 
 ### `LeanRunDetail.svelte` — 1 rule
 
@@ -107,13 +80,13 @@ Each of the 24 `:hover` rule blocks below is classified independently from sourc
 |---|---|---|---|---|---|---|
 | `LeanRunDetail.svelte` | `button:not(:disabled):hover,summary:hover` | `background: var(--panel-raised)` | token | `var(--panel)` | `var(--panel-raised)` | paper 17.81 → 16.04; ink 15.92 → 14.01 |
 
-25 rules in 12/39 components. Four rules carry measured rest → hover ratios; the rest stop at a closed reason instead of borrowing a ground.
+15 rules in 8/27 components. Three rules carry measured rest → hover ratios; the rest stop at a closed reason instead of borrowing a ground.
 
 ## Vacuous theme-sheet coverage
 
 Known limit: the visualizer shape suite checks role/lane name presence over theme.css and inspects no value, so deleting --status-escalated leaves the suite green.
 
-The suite check over `test/visualizer-shape.test.mjs` covers role declarations and lane-to-role names only. It does not inspect the alias values, declaration count, status aliases, ordering, theme switching, or contrast. A consumer pin in `test/visualizer-panels.test.mjs` makes one FleetTable rule exact, but it does not prove that the token exists or that every component uses a token.
+The suite check over `test/visualizer-panels.test.mjs` covers role declarations and lane-to-role names only. It does not inspect the alias values, declaration count, status aliases, ordering, theme switching, or contrast. A consumer pin in `test/visualizer-panels.test.mjs` makes one FleetTable rule exact, but it does not prove that the token exists or that every component uses a token.
 
 ## What resists mechanical enforcement
 

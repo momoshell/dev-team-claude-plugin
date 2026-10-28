@@ -270,15 +270,15 @@ test('frontend-svelte prose census figures match the measured tree', () => {
   const sources = files.map((file) => readFileSync(file, 'utf8'))
   const occurrences = (pattern) => sources.reduce((total, source) => total + source.split(pattern).length - 1, 0)
   const carriers = (pattern) => sources.filter((source) => source.includes(pattern)).length
-  for (const [pattern, occ, hits] of [['{#snippet', 4, 3], ['{@render', 21, 3], ['onclick=', 165, 26], ['on:click', 0, 0], ['$state(', 267, 27], ['$derived', 185, 33], ['$props()', 27, 27], ['$effect', 25, 14], ['$bindable(', 5, 3]]) {
+  for (const [pattern, occ, hits] of [['{#snippet', 4, 3], ['{@render', 21, 3], ['onclick=', 82, 17], ['on:click', 0, 0], ['$state(', 124, 16], ['$derived', 118, 22], ['$props()', 24, 24], ['$effect', 16, 9], ['$bindable(', 5, 3]]) {
     assert.equal(occurrences(pattern), occ, `${pattern} occurrences`)
     assert.equal(carriers(pattern), hits, `${pattern} files`)
   }
   const components = readFileSync(join(HERE, 'references/components.md'), 'utf8')
-  for (const phrase of ['`{#snippet` 4 times in 3 files', '`{@render` 21 times in 3 files', '165 across 26 files', '`$state(` 267 times in 27 files', '`$derived` 185 times in 33 files', '`$props()` 27 times in 27 files', '`$effect` 25 times in 14 files', '`$bindable(` 5 times in 3 files', 'visualizer/web/src/**/*.svelte, 35 files']) {
+  for (const phrase of ['`{#snippet` 4 times in 3 files', '`{@render` 21 times in 3 files', '82 across 17 files', '`$state(` 124 times in 16 files', '`$derived` 118 times in 22 files', '`$props()` 24 times in 24 files', '`$effect` 16 times in 9 files', '`$bindable(` 5 times in 3 files', 'visualizer/web/src/**/*.svelte, 28 files']) {
     assert.ok(components.includes(phrase), `components.md must carry ${phrase}`)
   }
-  assert.ok(readFileSync(join(HERE, 'references/structure.md'), 'utf8').includes('34 `.svelte` components'), 'structure.md must carry the lib component count')
+  assert.ok(readFileSync(join(HERE, 'references/structure.md'), 'utf8').includes('27 `.svelte` components'), 'structure.md must carry the lib component count')
 })
 // Mutation killed: giving the shell a filter-ownership clause again must make
 // this test fail — App.svelte declares no filter state, and the uncited clause

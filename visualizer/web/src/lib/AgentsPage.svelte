@@ -4,12 +4,14 @@
 <script>
   import { onMount, onDestroy, tick } from 'svelte'
   import { Plus, FileText, Download, Pencil, ArrowLeft, Search, Terminal } from 'lucide-svelte'
-  import { getAgentLibrary, saveAgentFile, getRoster, saveHarnessSettings } from './api.js'
+  import { getAgentLibrary, saveAgentFile, saveHarnessSettings, proposeAgentEdit } from './api.js'
+  import DiffBlock from './DiffBlock.svelte'
   import { parseAgentFile, composeAgentFile, validateAgentFile, AGENT_FILE_LIMIT } from './agent-files.js'
 
-  import { modelPreference, configuredModels, setModelPreference, transportLabel, capabilityLabel } from './agent-settings.js'
+  import { modelPreference, setModelPreference, transportLabel, capabilityLabel } from './agent-settings.js'
 
-  let models = $state([]), modelsLoading = $state(true), modelsError = $state(''), providerFilter = $state('')
+  // The roster that supplied model choices is gone: the list is null with a stated reason, never an empty-as-zero list.
+  let models = $state([]), modelsLoading = $state(false), modelsError = $state('the model roster is no longer read by the visualizer, so configured models cannot be listed.'), providerFilter = $state('')
   let preference = $derived(modelPreference(draft.metadata))
   let providerOptions = $derived([...new Set(models.map(model=>model.provider))])
   let filteredModels = $derived(models.filter(model=>!providerFilter || model.provider===providerFilter))
@@ -17,6 +19,17 @@
   let harnessModeInput = $state()
   let pageView = $state('agents'), harnessDraft = $state(null), harnessSaving = $state(false), harnessMessage = $state(''), harnessError = $state('')
   let loaded = $state(false)
+
+  // Crew role definitions: a read-only preview of a one-line crew/agents/<role>.md frontmatter edit.
+  const ROLE_NAMES = ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']
+  let roleForm = $state({ role:'builder', field:'effort', tier:'', value:'' }), roleProposal = $state(null)
+  async function previewRoleEdit(event) {
+    event.preventDefault()
+    const { role, field, tier, value } = roleForm, text = value.trim()
+    roleProposal = { running:true, role }
+    try { roleProposal = { ...(await proposeAgentEdit(role, field, text === '' ? null : text, tier.trim() || null)), role } }
+    catch (err) { roleProposal = { ok:false, role, diff:null, refusals:[{ code:'request_failed', message:err.message || 'agent proposal failed' }] } }
+  }
   let loading = $state(true), error = $state(''), notice = $state(''), tab = $state('local'), query = $state('')
   let discarding = $state(false), keepEditingButton = $state()
   let editor = $state(null), draft = $state({name:'',description:'',metadata:'',instructions:''})
@@ -53,10 +66,6 @@
   onMount(() => {
     if(pendingDraft) { editor=pendingDraft.editor; draft=pendingDraft.draft; notice='Your unsaved draft was restored. Save it when ready.'; pendingDraft=null }
     load()
-    getRoster().then(value=>{
-      if(value.degraded) throw new Error(value.error || 'The configured roster is unavailable.')
-      models=configuredModels(value)
-    }).catch(cause=>{modelsError=cause.message}).finally(()=>{modelsLoading=false})
   })
   onDestroy(() => { pendingDraft=editor && dirty ? {editor:$state.snapshot(editor),draft:$state.snapshot(draft)} : null })
   async function openEditor(agent=null, copy=false) {
@@ -131,11 +140,11 @@
         <div class="identity-fields"><label>Agent name<input bind:this={nameInput} bind:value={draft.name} readonly={!!editor.filename} required pattern="[a-z][a-z0-9._-]{0,79}" placeholder="code-reviewer" /><span class="hint">{editor.filename ? 'The name identifies this saved file.' : 'Lowercase letters, numbers, dots, underscores and hyphens.'}</span></label>
         <label>When to use this agent<textarea rows="3" bind:value={draft.description} required placeholder="Reviews code changes for correctness, regressions and missing tests."></textarea></label></div>
         <section class="model-settings" aria-labelledby="model-settings-title">
-          <div><h3 id="model-settings-title">Model preference <span class="hint">Optional</span></h3><p class="hint">Choose from your configured roster, or let the harness decide. Provider credentials are not checked here.</p></div>
-          {#if modelsLoading}<p class="hint" role="status">Reading configured providers and models…</p>{:else if modelsError}<p class="notice">Model choices are unavailable: {modelsError} Your existing setting is preserved. <a href="#/roster">Check the roster</a>.</p>{:else if !preference.editable}<p class="notice">This definition uses a complex model setting. It is preserved in Additional frontmatter.</p>{:else}
+          <div><h3 id="model-settings-title">Model preference <span class="hint">Optional</span></h3><p class="hint">Let the harness decide, or keep the model already set. Provider credentials are not checked here.</p></div>
+          {#if modelsLoading}<p class="hint" role="status">Reading configured providers and models…</p>{:else if modelsError}<p class="notice">Model choices are unavailable: {modelsError} Your existing setting is preserved.</p>{:else if !preference.editable}<p class="notice">This definition uses a complex model setting. It is preserved in Additional frontmatter.</p>{:else}
             <div class="identity-fields"><label>Provider<select bind:value={providerFilter}><option value="">All configured providers</option>{#each providerOptions as provider}<option value={provider}>{provider}</option>{/each}</select><span class="hint">Filters the model choices below.</span></label>
             <label>Preferred model<select value={preference.value} onchange={event=>chooseModel(event.currentTarget.value)}><option value="">Use harness default</option>{#if preference.value && !filteredModels.some(model=>model.key===preference.value)}<option value={preference.value}>Keep current: {preference.value}</option>{/if}{#each filteredModels as model}<option value={model.key}>{model.id} · {model.provider}</option>{/each}</select><span class="hint">Saved as the model field. The selected harness must support this identifier.</span></label></div>
-            {#if !models.length}<p class="hint">No models are configured. <a href="#/roster">Add models in Roster</a> to make them selectable here.</p>{/if}
+            
           {/if}
         </section>
         <label class="instructions">Instructions<textarea rows="14" bind:value={draft.instructions} required placeholder="Describe what the agent should do, how it should work, and what it should return."></textarea><span class="hint">Markdown is supported. Keep the purpose and workflow independent of a particular harness.</span></label>
@@ -165,9 +174,22 @@
     {/if}
 
     <details class="discovery"><summary>Where these agents come from</summary><p>Project library: <code>{payload.directory || 'Not available until the library is read'}</code></p><p>Discovery checks project and user agent folders for Claude Code and Codex, user Pi and Muse folders, Crew role definitions, and declared Claude plugin folders. Only Markdown files with name and description frontmatter are editable here. Other native formats need an import adapter.</p><p>Folders found: {payload.scanned.join(', ') || 'None found'}.</p>{#each payload.notes as note}<p>{note}</p>{/each}</details>
+    <section class="role-editor" aria-labelledby="role-editor-title"><header class="section-heading"><div><h2 id="role-editor-title">Crew role definitions</h2><p>Preview a one-line model or effort change to <code>crew/agents/{roleForm.role}.md</code>. Nothing is written; apply the suggested diff yourself.</p></div></header>
+      <form class="role-form" onsubmit={previewRoleEdit}>
+        <label>Role<select bind:value={roleForm.role}>{#each ROLE_NAMES as name}<option value={name}>{name}</option>{/each}</select></label>
+        <label>Field<select bind:value={roleForm.field}><option value="model">model</option><option value="effort">effort</option></select></label>
+        <label>Tier override<input bind:value={roleForm.tier} placeholder="blank means the base value" /></label>
+        <label>Value<input bind:value={roleForm.value} placeholder="blank clears a tier override" /></label>
+        <button type="submit" disabled={roleProposal?.running}>{roleProposal?.running ? 'Preparing preview…' : 'Preview agent change'}</button>
+      </form>
+      {#if roleProposal && !roleProposal.running}
+        {#each roleProposal.refusals ?? [] as refusal}<p class="notice error" role="alert">{refusal.message}</p>{/each}
+        {#if roleProposal.diff !== null && roleProposal.diff !== undefined}<DiffBlock text={roleProposal.diff} empty="(no agent change)" label="Suggested agent change" />{/if}
+      {/if}
+    </section>
     {:else}
     <section class="harnesses" aria-label="Harness configuration"><header class="section-heading"><h2>Harness configuration</h2><span class="hint">{loaded ? `${payload.harnesses.filter(h=>h.available).length} found on PATH` : 'Not read yet'}</span></header>
-      <p>Provider and execution support comes from Crew’s installed integrations. These are supported options, not a check of provider sign-in or credentials. Assign a harness and model to a role in <a href="#/roster">Roster</a>.</p>
+      <p>Provider and execution support comes from Crew’s installed integrations. These are supported options, not a check of provider sign-in or credentials.</p>
       <p class="notice">Defaults apply to future tasks. Explicit launch options take priority; running tasks stay unchanged.</p>
       {#if harnessMessage}<p class="notice success" role="status">{harnessMessage}</p>{/if}
       {#if harnessError}<p class="notice error" role="alert">{harnessError}</p>{/if}
@@ -195,6 +217,9 @@
 </section>
 
 <style>
+  .role-editor { margin-top:1.5rem }
+  .role-form { display:flex; flex-wrap:wrap; gap:.75rem; align-items:end }
+  .role-form label { display:grid; gap:.25rem; font-size:.85rem }
   .discard-notice { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:1rem; padding:1rem; border:1px solid var(--line); border-inline-start:3px solid var(--status-escalated); border-radius:var(--radius-sm); background:var(--panel); }.discard-notice p { color:var(--muted); font-size:.85rem; }
   .agents-page { display:grid; gap:1.25rem; min-width:0; }
   h2,h3,p { margin:0; } h2 { font-size:1.2rem; } h3 { font-size:1rem; overflow-wrap:anywhere; } p { line-height:1.55; }

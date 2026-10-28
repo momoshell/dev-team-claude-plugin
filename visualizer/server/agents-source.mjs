@@ -1,6 +1,6 @@
 import { readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, statSync as fsStatSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
-import { unifiedDiff } from './roster-edit.mjs'
+import { unifiedDiff } from './diff.mjs'
 
 export const AGENT_REFUSALS = Object.freeze(['extensions', 'skills', 'mcp_servers', 'local_provider'])
 export const AGENT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])

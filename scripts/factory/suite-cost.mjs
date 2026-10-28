@@ -589,10 +589,7 @@ const RECORDED_SUITE_SAMPLES = Object.freeze([
   ["test/visualizer-model-directory.test.mjs",0.11101808297634125,7,null],
   ["test/visualizer-panels.test.mjs",0.336350958108902,188,null],
   ["test/visualizer-returns.test.mjs",0.07350987499952316,1,null],
-  ["test/visualizer-roster-edit.test.mjs",0.14319766601920128,30,null],
   ["test/visualizer-server.test.mjs",7.260019000053406,106,null],
-  ["test/visualizer-shape.test.mjs",0.15336395895481109,78,null],
-  ["test/visualizer-teardown.test.mjs",0.20401062497496605,8,null],
   ["test/visualizer-trajectory.test.mjs",0.13766058298945427,36,null],
 ])
 
@@ -671,11 +668,6 @@ const RECORDED_SLOWEST_TESTS = Object.freeze({
   "raw Host values are refused without killing the visualizer",
   "viz-cli-unknown-flag-refusal — an unknown flag or a bad flag value refuses with exit 2 and never leaks a stack",
   "viz-port-env-door — a bad DEVTEAM_VIZ_PORT refuses like the flag does"
-]),
-  "test/visualizer-shape.test.mjs": Object.freeze([
-  "the run-set route keeps healthy ledger rows measured when triage is degraded",
-  "shapeCellHealth folds kinds into one cell and keeps run-less separate",
-  "visualizer architecture keeps sqlite and legacy Svelte syntax behind the boundaries"
 ]),
 })
 

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { PANEL_REFRESH_MS, PANEL_STALE_AFTER_MS, acceptRows, assurancePanel, brakePanel, cellHealthPanel, cellHealthTotals, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, operationsHealthSummary, operationsPosture, operationsRunSummary, operationsTeardownSummary, panelAgeLabel, panelReadLoop, readFreshness, reviewRows, rosterEditForm, rosterPanel, rosterPickPanel, rosterProposal, runSetPanel, teardownPanel } from '../visualizer/web/src/lib/panels.js'
+import { PANEL_REFRESH_MS, PANEL_STALE_AFTER_MS, acceptRows, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, panelAgeLabel, panelReadLoop, readFreshness, reviewRows } from '../visualizer/web/src/lib/panels.js'
 import { VIEWS, parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
 import { ATTENTION_KEYS, absenceMark, attentionBreakdown, configurationDimensionCell, configurationFilterView, costCell, createSemaphore, crewArchive, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, needsAttention, openRecordNote, operationsOverview, profileEvidenceView, reviewCell, runActivity, runDetailConfiguration, runDetailSeats, runDetailState, runtimeActivitySummary, slotWaitCell, tokenCell, shipStatus } from '../visualizer/web/src/lib/fleet.js'
 import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, gateProofStory, laneRows, phaseFilterId, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
@@ -11,18 +11,12 @@ import { eventStory, eventStreamSummary } from '../visualizer/web/src/lib/event-
 import { STORY_KINDS, assignmentPath, envelopeFacts, envelopeGroups, envelopeOverview, envelopeSections, journalLines, trajectoryRowStory, trajectorySummary } from '../visualizer/web/src/lib/diagnostic-story.js'
 import { executionTopology, factoryStepCategory, factoryStepName, factoryStepTrace } from '../visualizer/web/src/lib/execution-steps.js'
 import { VARIANTS } from '../crew/variants.mjs'
-import { TASK_PROFILES } from '../crew/task-profiles.mjs'
 import { shapeValidationDefect } from '../crew/shape-validator.mjs'
-import { compareSeat, draftTopologyEdit, inspectWorkflowNode, layoutWorkflowGraph, selectionReset, shapeWorkflowGraph, validateTopologyEdit, workflowPresentation } from '../visualizer/web/src/lib/workflows.js'
 import { crewSummary } from '../visualizer/web/src/lib/crew.js'
 import { assuranceMeta, assuranceOption, executionMeta, runConfiguration, taskProfileMeta } from '../visualizer/web/src/lib/workflow-semantics.js'
 import { diffLines } from '../visualizer/web/src/lib/diff-lines.js'
-import { shapeRun } from '../visualizer/server/shape.mjs'
-import { createCrewStateSource } from '../visualizer/server/crew-state.mjs'
-import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
-import { openLedger } from '../scripts/factory/ledger.mjs'
 import { ROOT, scratchDir, sqliteAvailable } from './helpers.mjs'
-import { getAssurances, getPluginWriteMode, proposeAssuranceChange, proposePrompt, proposeRosterEdit, proposeSkills } from '../visualizer/web/src/lib/api.js'
+import { getPluginWriteMode, proposePrompt, proposeSkills } from '../visualizer/web/src/lib/api.js'
 import { activitySummary } from '../visualizer/web/src/lib/activity.js'
 test('RO6', async () => {
   // MUTATION: change the getter URL; the behavioral fetch assertion must fail.
@@ -43,18 +37,17 @@ async function withAttentionFixture(extraKey, callback) {
     const sourcePath = join(ROOT, 'visualizer/web/src/lib/fleet.js')
     const semanticsPath = join(ROOT, 'visualizer/web/src/lib/workflow-semantics.js')
     const reasonCopyPath = join(ROOT, 'visualizer/web/src/lib/reason-copy.js')
-    const profilesPath = join(ROOT, 'crew/task-profiles.mjs')
+    const shapesPath = join(ROOT, 'visualizer/web/src/lib/run-shapes.js')
     const source = readFileSync(sourcePath, 'utf8')
     const original = "export const ATTENTION_KEYS = Object.freeze(['escalated', 'fail', 'aborted', 'silent', 'unverified', 'gone', 'contradicted'])"
     const changed = `export const ATTENTION_KEYS = Object.freeze(['escalated', 'fail', 'aborted', 'silent', 'unverified', 'gone', 'contradicted', '${extraKey}'])`
     const moduleDir = join(dir, 'visualizer', 'web', 'src', 'lib')
     assert.equal(source.includes(original), true)
     mkdirSync(moduleDir, { recursive:true })
-    mkdirSync(join(dir, 'crew'), { recursive:true })
     writeFileSync(join(moduleDir, 'workflow-semantics.js'), readFileSync(semanticsPath, 'utf8'))
     writeFileSync(join(moduleDir, 'reason-copy.js'), readFileSync(reasonCopyPath, 'utf8'))
     writeFileSync(join(moduleDir, 'fleet.js'), source.replace(original, changed))
-    writeFileSync(join(dir, 'crew', 'task-profiles.mjs'), readFileSync(profilesPath, 'utf8'))
+    writeFileSync(join(moduleDir, 'run-shapes.js'), readFileSync(shapesPath, 'utf8'))
     const module = await import(`${pathToFileURL(join(moduleDir, 'fleet.js')).href}?attention=${encodeURIComponent(extraKey)}`)
     return await callback(module)
   } finally {
@@ -157,132 +150,6 @@ test('G1', () => {
   assert.doesNotMatch(source, /runConfiguration|run\.tier|run\.variant|configuration\.legacy_(?:tier|variant)/)
 })
 
-const OPERATIONS_MIXED_CORPUS = [
-  {
-    adw_id: 'ops-success', task_profile: 'implementation', execution_shape: 'full', assurance: 'standard',
-    settlement: { state: 'settled', outcome: 'success', reason: null }, runtime: { driver_state: 'unknown' },
-    configuration: {
-      task_profile: { requested: 'implementation', effective: 'implementation', source: 'explicit' },
-      execution: { requested: 'full', effective: 'full', source: 'explicit' },
-      assurance: { requested: 'standard', effective: 'standard', source: 'explicit' },
-    },
-    seats: [{ role: 'planner', source: 'roster', policy_state: 'accepted', warnings: [] }],
-  },
-  {
-    adw_id: 'ops-escalated', task_profile: 'implementation', execution_shape: 'directed', assurance: 'rigorous',
-    settlement: { state: 'settled', outcome: 'escalated', reason: 'scope' }, runtime: { driver_state: 'unknown' },
-    configuration: {
-      task_profile: { requested: 'implementation', effective: 'implementation', source: 'explicit' },
-      execution: { requested: 'directed', effective: 'directed', source: 'explicit' },
-      assurance: { requested: 'standard', effective: 'rigorous', source: 'protected_floor' },
-    },
-    seats: [{ role: 'builder', source: 'profile_recommendation', policy_state: 'advisory', warnings: ['model-fit advisory'] }],
-  },
-  {
-    adw_id: 'ops-aborted', task_profile: 'audit', execution_shape: 'scout', assurance: 'quick',
-    settlement: { state: 'settled', outcome: 'aborted', reason: 'operator_stop' }, runtime: { driver_state: 'unknown' },
-    configuration: {
-      task_profile: { requested: 'audit', effective: 'audit', source: 'explicit' },
-      execution: { requested: 'scout', effective: 'scout', source: 'explicit' },
-      assurance: { requested: 'quick', effective: 'quick', source: 'explicit' },
-    },
-    seats: [{ role: 'reviewer', source: 'operator_override', policy_state: 'override', warnings: null }],
-  },
-  {
-    adw_id: 'ops-failed', task_profile: 'audit', execution_shape: 'scout', assurance: 'quick',
-    settlement: { state: 'settled', outcome: 'failed', reason: 'runtime' }, runtime: { driver_state: 'unknown' },
-    configuration: {
-      task_profile: { requested: 'audit', effective: 'audit', source: 'explicit' },
-      execution: { requested: 'scout', effective: 'scout', source: 'explicit' },
-      assurance: { requested: 'quick', effective: 'quick', source: 'explicit' },
-    },
-    seats: [{ role: 'lead', source: 'reseat', policy_state: 'reassigned', warnings: [] }, { role: 'legacy', source: 'legacy', policy_state: 'unknown', warnings: ['ignored'] }],
-  },
-  {
-    adw_id: 'ops-unknown-outcome', task_profile: 'implementation', execution_shape: 'full', assurance: 'standard',
-    settlement: { state: 'settled', outcome: null, reason: null }, runtime: { driver_state: 'unknown' },
-    configuration: null, seats: [],
-  },
-  {
-    adw_id: 'ops-inflight', task_profile: 'implementation', execution_shape: 'full', assurance: 'standard',
-    settlement: { state: 'unsettled', outcome: null, reason: null }, runtime: { driver_state: 'alive' },
-    configuration: null, seats: null,
-  },
-  {
-    adw_id: 'ops-historical', task_profile: null, execution_shape: null, assurance: null,
-    settlement: { state: 'settled', outcome: 'success', reason: null }, runtime: { driver_state: 'unknown' },
-    configuration: null, seats: null,
-  },
-  {
-    adw_id: 'ops-alive', task_profile: null, execution_shape: null, assurance: null,
-    settlement: { state: 'unsettled', outcome: null, reason: null }, runtime: { driver_state: 'alive' },
-    configuration: null, seats: null,
-  },
-  {
-    adw_id: 'ops-gone', task_profile: null, execution_shape: null, assurance: null,
-    settlement: { state: 'unsettled', outcome: null, reason: null }, runtime: { driver_state: 'gone' },
-    configuration: null, seats: null,
-  },
-  {
-    adw_id: 'ops-driver-unknown', task_profile: null, execution_shape: null, assurance: null,
-    settlement: { state: 'unsettled', outcome: null, reason: null }, runtime: { driver_state: 'unknown' },
-    configuration: null, seats: null,
-  },
-]
-
-const OPERATIONS_DIMENSION_LABELS = ['Profile', 'Execution', 'Assurance']
-
-const OPERATIONS_EXPECTED_DIMENSIONS = {
-  task_profile: {
-    implementation: { denominator: 4, outcomes: { success: 1, escalated: 1, aborted: 0, failed: 0, unsettled: 1, unknown: 1 } },
-    audit: { denominator: 2, outcomes: { success: 0, escalated: 0, aborted: 1, failed: 1, unsettled: 0, unknown: 0 } },
-  },
-  execution_shape: {
-    full: { denominator: 3, outcomes: { success: 1, escalated: 0, aborted: 0, failed: 0, unsettled: 1, unknown: 1 } },
-    directed: { denominator: 1, outcomes: { success: 0, escalated: 1, aborted: 0, failed: 0, unsettled: 0, unknown: 0 } },
-    scout: { denominator: 2, outcomes: { success: 0, escalated: 0, aborted: 1, failed: 1, unsettled: 0, unknown: 0 } },
-  },
-  assurance: {
-    quick: { denominator: 2, outcomes: { success: 0, escalated: 0, aborted: 1, failed: 1, unsettled: 0, unknown: 0 } },
-    rigorous: { denominator: 1, outcomes: { success: 0, escalated: 1, aborted: 0, failed: 0, unsettled: 0, unknown: 0 } },
-    standard: { denominator: 3, outcomes: { success: 1, escalated: 0, aborted: 0, failed: 0, unsettled: 1, unknown: 1 } },
-  },
-}
-
-test('operations aggregation preserves measured dimensions and separate typed outcomes', () => {
-  const result = operationsOverview(OPERATIONS_MIXED_CORPUS)
-  assert.deepEqual(result.dimensions.map((dimension) => dimension.key), ['task_profile', 'execution_shape', 'assurance'])
-  for (const dimension of result.dimensions) {
-    const expected = OPERATIONS_EXPECTED_DIMENSIONS[dimension.key]
-    assert.deepEqual(Object.fromEntries(dimension.rows.map((row) => [row.value, { denominator: row.denominator, outcomes: row.outcomes }])), expected)
-  }
-  const implementation = result.dimensions.find((dimension) => dimension.key === 'task_profile').rows.find((row) => row.value === 'implementation')
-  assert.deepEqual({ unsettled: implementation.outcomes.unsettled, unknown: implementation.outcomes.unknown }, { unsettled: 1, unknown: 1 })
-})
-
-test('operations aggregation keeps escalations independent from mechanical failures', () => {
-  const result = operationsOverview(OPERATIONS_MIXED_CORPUS)
-  assert.deepEqual(result.escalations, [{ cause: 'scope', count: 1, denominator: OPERATIONS_MIXED_CORPUS.length }])
-  assert.deepEqual(result.failures, { count: 1, denominator: OPERATIONS_MIXED_CORPUS.length })
-  assert.equal(result.escalations.some((row) => row.cause === 'runtime'), false)
-})
-
-test('operations aggregation retains provenance, seat sources, and warning absence', () => {
-  const result = operationsOverview(OPERATIONS_MIXED_CORPUS)
-  assert.deepEqual(result.configurationChanges, [{ adw_id: 'ops-escalated', dimension: 'assurance', label: 'Assurance', requested: 'standard', effective: 'rigorous', source: 'protected_floor' }])
-  // RV1-3: the provenance card must name an axis the way its throughput sibling does.
-  // `execution` is the ledger field and `Execution` is the heading; a record that
-  // carried only the raw field made one axis read two ways across adjacent cards.
-  for (const change of result.configurationChanges) {
-    assert.equal(typeof change.label, 'string')
-    assert.equal(OPERATIONS_DIMENSION_LABELS.includes(change.label), true, `configuration change label ${JSON.stringify(change.label)} is not a rendered dimension label`)
-  }
-  assert.deepEqual(result.seatEvidence.map((seat) => seat.source).sort(), ['operator_override', 'profile_recommendation', 'reseat', 'roster'])
-  assert.deepEqual(result.seatEvidence.find((seat) => seat.role === 'builder').warnings, ['model-fit advisory'])
-  assert.equal(result.seatEvidence.find((seat) => seat.role === 'reviewer').warnings, null)
-  assert.equal(result.seatEvidence.some((seat) => seat.source === 'legacy'), false)
-})
-
 test('A1 task detail configuration preserves changed requested effective and source', () => {
   const rows = runDetailConfiguration({ configuration: { assurance: { requested: 'standard', effective: 'rigorous', source: 'protected_floor' } } })
   const assurance = rows.find((row) => row.key === 'assurance')
@@ -364,37 +231,6 @@ test('H1 RunDetail composes plain detail helpers and renders each audited field'
     'run-state-card', 'Settlement', 'Driver observation', 'Heartbeat', 'caveat',
     'Latest phase', 'Latest event', 'Operator remediation', 'runState.remediation.command',
   ]) assert.match(source, new RegExp(token.replace('.', '\\.' )))
-})
-
-test('operations aggregation reports alive, gone, and unknown unsettled buckets', () => {
-  assert.deepEqual(operationsOverview(OPERATIONS_MIXED_CORPUS).unsettled, { denominator: 4, alive: 2, gone: 1, unknown: 1 })
-})
-
-test('operations aggregation omits historical and all-unmeasured configuration rows', () => {
-  const result = operationsOverview(OPERATIONS_MIXED_CORPUS)
-  assert.equal(result.dimensions.every((dimension) => dimension.rows.every((row) => row.value !== null)), true)
-  assert.deepEqual(result.dimensions.map((dimension) => dimension.rows.reduce((sum, row) => sum + row.denominator, 0)), [6, 6, 6])
-  assert.deepEqual(operationsOverview(OPERATIONS_MIXED_CORPUS.filter((run) => run.task_profile === null && run.execution_shape === null && run.assurance === null)).dimensions, [])
-})
-
-test('operations aggregate carries a denominator on every readout', () => {
-  const result = operationsOverview(OPERATIONS_MIXED_CORPUS)
-  for (const dimension of result.dimensions) {
-    for (const row of dimension.rows) assert.equal(Number.isInteger(row.denominator), true)
-  }
-  for (const row of result.escalations) assert.equal(row.denominator, OPERATIONS_MIXED_CORPUS.length)
-  assert.equal(result.failures.denominator, OPERATIONS_MIXED_CORPUS.length)
-  assert.equal(result.unsettled.denominator, 4)
-})
-
-test('Operations view delegates the aggregate to the fleet plain module', () => {
-  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/OperationsOverview.svelte'), 'utf8')
-  assert.match(source, /import \{[^}]*operationsOverview[^}]*\} from '\.\/fleet\.js'/)
-  assert.match(source, /let operations = \$derived\(operationsOverview\(summary\.rows\)\)/)
-  assert.doesNotMatch(source, /function operationsOverview\(/)
-  for (const token of ['dimensions', 'outcomes.success', 'outcomes.escalated', 'outcomes.aborted', 'outcomes.failed', 'outcomes.unsettled', 'outcomes.unknown', 'configurationChanges', 'seatEvidence', 'alive', 'gone', 'unknown']) {
-    assert.match(source, new RegExp(token.replace('.', '\\.' )))
-  }
 })
 
 test('crew summary separates distinct seats, assignment turns, and reused dispatch labels', () => {
@@ -530,313 +366,10 @@ test('fleetEscalationRate does not count a run that did not escalate', () => {
   assert.notEqual(result.percent, null)
 })
 
-test('activity metrics have one home and share the selected cohort', () => {
-  const root = join(ROOT, 'visualizer/web/src')
-  const strip = readFileSync(join(root, 'lib/MetricsStrip.svelte'), 'utf8')
-  const app = readFileSync(join(root, 'App.svelte'), 'utf8')
-  const overview = readFileSync(join(root, 'lib/OperationsOverview.svelte'), 'utf8')
-  assert.doesNotMatch(app, /<MetricsStrip/)
-  assert.match(overview, /<MetricsStrip \{summary\}/)
-  assert.match(overview, /activitySummary\(runs, \{ period, envelopes, degraded, now \}\)/)
-  for (const key of ['summary.settled', 'summary.durationMeasured', 'summary.usage.complete']) assert.ok(strip.includes(key))
-  assert.doesNotMatch(strip, /Completion quality|Workflow depth|Escalation rate/)
-  assert.match(app, /focus=\{taskFocus\}/)
-})
-
-
-test('model directory pagination uses compact named controls', () => {
-  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
-  assert.match(source, /class="directory-pager"/)
-  assert.match(source, /Previous model page/)
-  assert.match(source, /Next model page/)
-  assert.match(source, /\.directory-pager button \{ width:auto; min-width:0; height:auto; min-height:1\.5rem/)
-  assert.doesNotMatch(source, /onclick=\{\(\) => directoryPage -= 1\}>←<\/button>/)
-})
-
-test('E1 directory add uses OpenRouter runtime identity', () => {
-  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
-  assert.match(source, /const key = variant\.runtime_id/)
-  assert.match(source, /provider:variant\.runtime_id\.split\('\/'\)\[0\]/)
-  assert.match(source, /id:variant\.runtime_id\.split\('\/'\)\.slice\(1\)\.join\('\/'\)/)
-  assert.match(source, /if \(!variant\?\.runtime_id\)/)
-  assert.match(source, /disabled=\{modelState\.known \|\| modelState\.noRuntime\}/)
-})
-
-test('RV1-1 tier variants use their own runtime draft key', () => {
-  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
-  assert.match(source, /const chip = directoryChip\(variant\)/)
-  assert.match(source, /if \(directoryChip\(variant\)\)/)
-  assert.doesNotMatch(source, /const chip = directoryChip\(model\)/)
-  assert.doesNotMatch(source, /if \(directoryChip\(model\)\)/)
-})
-
-test('RV1-2 unconfigured intelligence keeps key setup and footer honest', () => {
-  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
-  assert.match(source, /\{#if directory\?\.configured === false \|\| directory\?\.artificial_analysis_unavailable \|\| !directory\?\.models\}/)
-  assert.match(source, /Model intelligence not configured/)
-  assert.match(source, /Add API key/)
-  assert.match(source, /\{#if directory\?\.models\}/)
-  assert.match(source, /function catalogConnectionState\(\) \{[\s\S]*?return 'OpenRouter listing · Artificial Analysis not connected'/)
-  assert.match(source, /<span class="connection-chip"><i><\/i>\{catalogConnectionState\(\)\}<\/span>/)
-  assert.doesNotMatch(source, /credential_source === 'environment' \? '\.env\.local' : 'temporary key'/)
-})
-
-test('RV2-1 configured AA failure keeps repair controls and footer honest', () => {
-  const directorySource = readFileSync(join(ROOT, 'visualizer/web/src/lib/model-directory.js'), 'utf8')
-  const panel = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
-  assert.match(directorySource, /\? 'aa-unavailable' : 'not-benchmarked'/)
-  assert.match(panel, /directory\?\.configured === false \|\| directory\?\.artificial_analysis_unavailable \|\| !directory\?\.models/)
-  assert.match(panel, /catalogKeyError \|\| directory\?\.artificial_analysis_absent \|\| directory\?\.absent/)
-  assert.match(panel, /if \(directory\?\.artificial_analysis_unavailable\) return 'Artificial Analysis not loading'/)
-})
-
-test('F1 null intelligence produces an unmeasured draft', () => {
-  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
-  assert.match(source, /if \(intelligence == null\) return null/)
-  assert.match(source, /chip.band \|\| 'Not rated'/)
-  assert.match(source, /reference_pending:variant\.intelligence == null \? variant\.score_absent_reason/)
-  assert.doesNotMatch(source, /if \(intelligence == null\) return 'utility'/)
-  assert.match(source, /variant.intelligence == null \? 'Not measured'/)
-})
-
-test('roster seat assignment asks for an explicit per-seat thinking effort', () => {
-  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
-  assert.match(source, /const EFFORT_OPTIONS = \[/)
-  for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) assert.match(source, new RegExp(`value:'${effort}'`))
-  assert.match(source, /function beginAssignment\(tier, role, key\)/)
-  assert.match(source, /onclick=\{\(\) => beginAssignment\(column\.tier, seat\.role, selectedModel \|\| seat\.model_key\)\}/)
-  assert.match(source, /<h2 id="assignment-title">Change model<\/h2>/)
-  assert.match(source, /bind:value=\{assignmentDraft\.effort\}/)
-  assert.match(source, /Effort is stored independently for every assurance profile and seat\./)
-  assert.match(source, /onclick=\{applyAssignment\}>Add to draft<\/button>/)
-  assert.match(source, /assignment-dialog > header button \{[^}]*width:2rem; height:2rem; min-width:2rem; min-height:2rem; flex:0 0 2rem;[^}]*padding:0;/)
-})
-
-test('roster drafts have an explicit local activation path for the next task', () => {
-  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
-  assert.match(source, /async function applyLocal\(\)/)
-  assert.match(source, /applyRosterLadder\(staged, \{ allowWarnings:!visibleResult\?\.ok \}\)/)
-  assert.match(source, /'Apply for next task'/)
-  assert.match(source, /'Apply anyway for next task'/)
-  assert.match(source, /Policy warnings do not block a local experiment/)
-  assert.match(source, /next newly booted task/)
-  assert.match(source, /Running tasks continue unchanged/)
-  assert.match(source, /no branch, commit, PR, or remote push/)
-  assert.match(source, /Prepare repository patch/)
-  assert.match(source, /staged = \[\]; selectedModel = null/)
-})
-
-test('roster diffs distinguish metadata, additions, removals, and context', () => {
-  const lines = diffLines('--- a/crew/roster.json\n+++ b/crew/roster.json\n@@ -1 +1 @@\n-  "effort": "max"\n+  "effort": "high"\n }')
-  assert.deepEqual(lines.map((line) => line.kind), ['meta', 'meta', 'meta', 'removal', 'addition', 'context'])
-  const panel = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
-  const block = readFileSync(join(ROOT, 'visualizer/web/src/lib/DiffBlock.svelte'), 'utf8')
-  assert.equal((panel.match(/<DiffBlock /g) || []).length, 4)
-  assert.match(block, /diff-line\.addition/)
-  assert.match(block, /diff-line\.removal/)
-  assert.match(block, /diff-line\.meta/)
-})
-
-test('the metrics strip probes task envelopes for successful sessions', () => {
+test('the board no longer probes task envelopes: lean lanes carry their status in the journal row', () => {
   const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
-  assert.equal(app.includes('escalationProbeTargets(nextRuns)'), false)
-  assert.ok(app.includes(`for (const run of Array.isArray(nextRuns) ? nextRuns : []) {
-      const id = run?.adw_id
-      if (!run?.repo_slug || !(run?.goal ?? run?.task_slug) || id == null) continue`))
-})
-
-test('the metrics strip publishes task envelopes as probes finish across refreshes', () => {
-  const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
-  assert.match(app, /const envelopeCache = new Map\(\)/)
-  assert.match(app, /envelopes = new Map\(envelopeCache\)/)
-  assert.match(app, /envelopeQueued\.has\(id\)/)
-  assert.doesNotMatch(app, /if \(generation === refreshGeneration\) envelopes = found/)
-  assert.doesNotMatch(app, /envelopes = new Map\(\)/)
-})
-
-test('rosterPanel passes through a degraded reason without presenting an empty roster', () => {
-  const result = rosterPanel({ tiers: null, models: null, path: '/tmp/roster.json', error: 'roster unreadable at /tmp/roster.json' })
-  assert.deepEqual(result.tiers, [])
-  assert.equal(result.pending, 'roster unreadable at /tmp/roster.json')
-  assert.notEqual(result.pending, '')
-})
-
-test('rosterPanel keeps healthy seats and never derives money', () => {
-  const result = rosterPanel({
-    tiers: [{ tier: 'build', seats: [{ role: 'reviewer', effort: 'max', model: { cost_in_per_mtok: 2, cost_out_per_mtok: 12 } }], unseated: [] }],
-    models: [{ key: 'openai/gpt-5.6-terra', cost_in_per_mtok: 2, cost_out_per_mtok: 12, last_verified: '2026-08-13' }],
-  })
-  assert.equal(result.pending, null)
-  assert.equal(result.tiers[0].seats[0].effort, 'max')
-  assert.doesNotMatch(JSON.stringify(result), /"(?:[a-z_]*(?:usd|spend|total_cost|cost_total)[a-z_]*)"/i)
-})
-
-test('rosterEditForm refuses a degraded payload instead of offering a blank form', () => {
-  const result = rosterEditForm({ tiers: null, models: null, error: 'unable to read roster at /tmp/roster.json' }, { tier: 'build', role: 'reviewer' })
-  assert.deepEqual(result.tiers, [])
-  assert.deepEqual(result.roles, [])
-  assert.equal(result.cell, null)
-  assert.equal(result.pending, 'unable to read roster at /tmp/roster.json')
-})
-
-test('rosterEditForm derives options and seeds the selected seat', () => {
-  const result = rosterEditForm({
-    tiers: [
-      { tier: 'build', seats: [{ role: 'reviewer', provider: 'openai', id: 'gpt-5', agent: 'pi', effort: 'max' }], unseated: ['tech-lead'] },
-      { tier: 'judge', seats: [], unseated: ['lead'] },
-    ],
-  }, { tier: 'build', role: 'reviewer' })
-  assert.deepEqual(result.tiers, ['build', 'judge'])
-  assert.deepEqual(result.roles, ['reviewer', 'tech-lead'])
-  assert.deepEqual(result.cell, { provider: 'openai', id: 'gpt-5', agent: 'pi', effort: 'max' })
-  assert.equal(result.pending, null)
-})
-
-test("C1 propose the pick returns today's diff without a write", async () => {
-  const originalFetch = globalThis.fetch
-  const calls = []
-  const cell = { provider:'openai', id:'gpt-5.6-sol', agent:'pi', effort:'high' }
-  globalThis.fetch = async (path, options = {}) => {
-    calls.push({ path:String(path), options })
-    return new Response(JSON.stringify({ ok:true, diff:'--- a/crew/roster.json\\n+++ b/crew/roster.json', refusals:[] }), { status:200, headers:{ 'content-type':'application/json' } })
-  }
-  try {
-    const result = await proposeRosterEdit('build', 'reviewer', cell)
-    assert.equal(result.diff, '--- a/crew/roster.json\\n+++ b/crew/roster.json')
-    assert.equal(calls.length, 1)
-    assert.equal(calls[0].path, '/api/roster/propose')
-    assert.equal(calls.filter(({ path }) => /\/apply(?:\?|$)/.test(path)).length, 0)
-    assert.deepEqual(JSON.parse(calls[0].options.body), { tier:'build', role:'reviewer', cell })
-    const panel = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
-    assert.match(panel, /Preview suggested change/)
-    assert.match(panel, /proposeRosterEdit\(column\.tier, seat\.role, pick\.chosen_cell\)/)
-    const policyStart = panel.indexOf('class="pick-explanation"')
-    const policyEnd = panel.indexOf('</section>', policyStart)
-    assert.ok(policyStart >= 0 && policyEnd > policyStart)
-    assert.doesNotMatch(panel.slice(policyStart, policyEnd), /applyRosterLadder/)
-  } finally {
-    globalThis.fetch = originalFetch
-  }
-})
-
-test('assurance API wrappers use the caller document and omit blank labels', async () => {
-  const originalFetch = globalThis.fetch
-  const calls = []
-  globalThis.fetch = async (path, options = {}) => {
-    calls.push({ path: String(path), options })
-    return new Response(JSON.stringify({ ok: true, diff: '', refusals: [], wrote: false }), { status: 200, headers: { 'content-type': 'application/json' } })
-  }
-  try {
-    const read = await getAssurances()
-    assert.equal(read.ok, true)
-    await proposeAssuranceChange('{\n  "ask": "fixture"\n}', 'judge', '  ')
-    await proposeAssuranceChange('{}', 'quick', 'lane-request.json')
-    assert.equal(calls[0].path, '/api/assurances')
-    assert.equal(calls[1].path, '/api/assurances/propose')
-    assert.deepEqual(JSON.parse(calls[1].options.body), { document: '{\n  "ask": "fixture"\n}', assurance: 'judge' })
-    assert.deepEqual(JSON.parse(calls[2].options.body), { document: '{}', assurance: 'quick', path: 'lane-request.json' })
-    assert.equal(calls[1].options.headers['content-type'], 'application/json')
-  } finally {
-    globalThis.fetch = originalFetch
-  }
-})
-
-test('assurance page preserves the server refusal message from a 400 response', async () => {
-  const originalFetch = globalThis.fetch
-  const message = 'path must be a non-blank single line of at most 240 characters'
-  globalThis.fetch = async () => new Response(JSON.stringify({ error: message, refusals: [{ code: 'path_invalid', message }] }), { status: 400, headers: { 'content-type': 'application/json' } })
-  try {
-    await assert.rejects(proposeAssuranceChange('{}', 'standard', 'x'.repeat(250)), (error) => {
-      assert.equal(error.message, message)
-      return true
-    })
-    const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/AssurancePage.svelte'), 'utf8')
-    assert.match(page, /\$\{cause\.message\}/)
-    assert.doesNotMatch(page, /request failed \(400\)/)
-  } finally {
-    globalThis.fetch = originalFetch
-  }
-})
-
-test('routing evidence reads only on disclosure and never uses draft cells', () => {
-  const panel = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
-  const start = panel.indexOf('async function loadPick(')
-  const end = panel.indexOf('$effect', start)
-  const load = panel.slice(start, end)
-  assert.match(load, /getRosterPick\(tier, role\)/)
-  assert.doesNotMatch(load, /\b(?:rail|staged)\b/)
-  assert.match(load, /revision !== pickRevision/)
-  assert.match(panel, /if \(event.currentTarget.open\) void loadPick\(column.tier, seat.role\)/)
-})
-
-test('rosterPickPanel preserves null metrics, ranked order, and raw evidence', () => {
-  const payload = {
-    current_cell:null,
-    policy_candidates:[{ rate:{ value:null, display:null, numerator:null, denominator:null, reason:'rate-absent' }, cost:{ value:null, source:null, reason:'cost-absent' } }],
-    exclusions:[{ cell:{ id:'thin' }, reason:'rate-thin' }],
-    ranked_survivors:[{ cell:{ id:'winner' } }],
-    eval_cells:[{ id:1, asserts_passed:null }],
-    chosen_cell:null,
-    outcome:'abstained',
-    reason:'no-eligible-candidate',
-  }
-  const view = rosterPickPanel(payload)
-  assert.equal(view.policy_candidates[0].rate.denominator, null)
-  assert.equal(view.policy_candidates[0].cost.value, null)
-  assert.equal(view.ranked_survivors[0].cell.id, 'winner')
-  assert.deepEqual(view.eval_cells, payload.eval_cells)
-  assert.equal(view.reason, 'no-eligible-candidate')
-})
-
-test('rosterProposal exposes refusals as pending and preserves a successful diff', () => {
-  const refused = rosterProposal({ ok: false, diff: null, refusals: [{ code: 'cross_vendor', message: 'cross-vendor planner' }] })
-  assert.equal(refused.diff, null)
-  assert.equal(refused.refusals.length, 1)
-  assert.ok(refused.pending)
-  const success = rosterProposal({ ok: true, diff: '--- a/crew/roster.json', refusals: [] })
-  assert.equal(success.diff, '--- a/crew/roster.json')
-  assert.deepEqual(success.refusals, [])
-  assert.equal(success.pending, null)
-  for (const value of [rosterEditForm({ tiers: null, error: 'unavailable' }), rosterProposal({ ok: false, refusals: [] })]) {
-    assert.doesNotMatch(JSON.stringify(value), /"(?:[a-z_]*(?:usd|spend|total_cost|cost_total)[a-z_]*)"/i)
-  }
-})
-
-test('rosterPanel marks an uncatalogued seat instead of fabricating rates', () => {
-  const result = rosterPanel({
-    tiers: [{ tier: 'build', seats: [{ role: 'builder', model_key: 'openai/ghost-1', model: null }], unseated: [] }],
-    models: [],
-  })
-  const seat = result.tiers[0].seats[0]
-  assert.ok(seat)
-  assert.equal(seat.model, null)
-  assert.ok(seat.model_pending)
-})
-
-test('assurancePanel keeps review strength, seating floors and forcing reasons honest', () => {
-  const payload = {
-    assurance: { presets: [
-      { key: 'quick', rank: 1, name: 'Quick', alias: 'mechanical', description: 'routine', forcing: 'This protected-path rule does not force this preset; it forces rigorous.' },
-      { key: 'standard', rank: 2, name: 'Standard', alias: 'build', description: 'normal', forcing: 'This protected-path rule does not force this preset; it forces rigorous.' },
-      { key: 'rigorous', rank: 3, name: 'Rigorous', alias: 'judge', description: 'sensitive', forcing: 'Any listed protected path forces rigorous assurance.' },
-    ] },
-    band_floors: { axis: 'model_seating', values: { mechanical: 'utility', build: 'utility', judge: 'utility' }, absent: null },
-    protected_paths: ['crew/protected-paths.mjs'],
-  }
-  const result = assurancePanel(payload)
-  assert.deepEqual(result.presets.map((preset) => preset.key), ['quick', 'standard', 'rigorous'])
-  assert.ok(result.presets.every((preset) => typeof preset.forcing === 'string' && preset.forcing.trim()))
-  assert.equal(result.assurance_axis, 'Review strength')
-  assert.equal(result.band_floor_axis, 'Model seating eligibility')
-  assert.deepEqual(result.band_floors, payload.band_floors.values)
-  assert.deepEqual(result.protected_paths, payload.protected_paths)
-  const absent = assurancePanel({ assurance: { presets: null }, band_floors: { values: null, absent: 'model ladder denied at /tmp/ladder.json' } })
-  assert.deepEqual(absent.presets, [])
-  assert.equal(absent.band_floors, null)
-  assert.equal(absent.band_floors_absent, 'model ladder denied at /tmp/ladder.json')
-  assert.equal(absent.absent, 'model ladder denied at /tmp/ladder.json')
-  const missingReason = assurancePanel({ assurance: { presets: [{ key: 'quick' }] }, band_floors: { values: null, absent: null } })
-  assert.equal(missingReason.presets[0].forcing, 'Forcing rule unavailable — endpoint supplied no reason')
+  for (const gone of ['probeEnvelopes', 'envelopeCache', 'envelopeQueued', 'getReturns', 'escalationProbeTargets']) assert.equal(app.includes(gone), false, gone)
+  assert.match(app, /const envelopes = new Map\(\)/)
 })
 
 test('gateChips keeps unproven distinct from failed and proven', () => {
@@ -923,138 +456,6 @@ test('acceptRows leaves absent decisions pending without fabricated counts', () 
   assert.notEqual(result.pending, 0)
 })
 
-test('cellHealthPanel states the window and never invents one', () => {
-  const result = cellHealthPanel({ window: { since: '2024-01-01T00:00:00.000Z', until: null, label: 'last 7 days' }, cells: [] })
-  assert.match(result.window_label, /2024-01-01T00:00:00.000Z/)
-  assert.equal(result.note, 'this window is the board’s own; the boot breaker (#45) owns cell policy and its own window')
-  assert.equal(cellHealthPanel({ cells: [] }).window_label, 'window unavailable')
-})
-
-test('cellHealthPanel keeps silence, run-less and recorded visually distinct', () => {
-  const result = cellHealthPanel({ cells: [
-    { key: 'a', provider: 'a', model_id: 'a', agent: 'a', effort: 'a', roles: [], tiers: [], state: 'silent', failures: 0, run_less: 0, in_run: 0, by_kind: [] },
-    { key: 'b', provider: 'b', model_id: 'b', agent: 'b', effort: 'b', roles: [], tiers: [], state: 'run-less-only', failures: 2, run_less: 2, in_run: 0, by_kind: [] },
-    { key: 'c', provider: 'c', model_id: 'c', agent: 'c', effort: 'c', roles: [], tiers: [], state: 'recorded', failures: 2, run_less: 1, in_run: 1, by_kind: [] },
-  ] })
-  assert.equal(new Set(result.rows.map((row) => row.tone)).size, 3)
-  assert.equal(new Set(result.rows.map((row) => row.label)).size, 3)
-  assert.match(result.rows[0].label, /no failures recorded/)
-  assert.doesNotMatch(result.rows[0].label, /^0\b/)
-})
-
-test('cellHealthPanel exposes the kind breakdown on the row', () => {
-  const result = cellHealthPanel({ cells: [{ key: 'a', provider: 'anthropic', model_id: 'cell', agent: 'claude', effort: 'high', roles: ['planner'], tiers: ['build'], state: 'recorded', failures: 2, run_less: 1, in_run: 1, by_kind: [
-    { kind: 'boot-refusal', failures: 1, run_less: 1 },
-    { kind: 'timeout', failures: 1, run_less: 0 },
-  ] }] })
-  assert.deepEqual(result.rows[0].kinds.map((kind) => kind.label), ['boot-refusal ×1', 'timeout ×1'])
-})
-
-test('cellHealthPanel passes an absent reason through without rows', () => {
-  const result = cellHealthPanel({ absent: 'cell_failures predates this ledger mirror', cells: [] })
-  assert.equal(result.absent, 'cell_failures predates this ledger mirror')
-  assert.deepEqual(result.rows, [])
-  assert.doesNotMatch(JSON.stringify(result), /"(failures|run_less|in_run)":\s*0/)
-})
-
-test('runSetPanel renders an unmeasured window as unmeasured, never zero', () => {
-  const result = runSetPanel({
-    window: { since: '2024-01-01T00:00:00.000Z', until: null, label: 'last 24 hours' },
-    runs: 1,
-    settled: { running: 1, ok: 0, fail: 0, aborted: 0 },
-    usage: null,
-    coverage: { measured: 0, total: 1 },
-    unmeasured: { parked: 'parks are unmeasured', usage: 'usage is unmeasured, not zero' },
-    rows: [{ adw_id: 'p1', task_slug: 'pane', repo_slug: 'repo', status: 'running', usage_measured: false }],
-  })
-  assert.match(result.usage_label, /unmeasured/i)
-  assert.doesNotMatch(result.usage_label, /0/)
-  assert.notEqual(result.rows[0].usage_label, '0')
-})
-
-test('runSetPanel keeps an empty window distinct from an unmeasured one', () => {
-  const empty = runSetPanel({ runs: 0, settled: { running: 0, ok: 0, fail: 0, aborted: 0 }, usage: null, coverage: { measured: 0, total: 0 }, unmeasured: { parked: 'parks are unmeasured' }, rows: [] })
-  const unmeasured = runSetPanel({ runs: 1, settled: { running: 1, ok: 0, fail: 0, aborted: 0 }, usage: null, coverage: { measured: 0, total: 1 }, unmeasured: { parked: 'parks are unmeasured', usage: 'usage is unmeasured' }, rows: [{ adw_id: 'p1', usage_measured: false }] })
-  assert.equal(empty.empty, true)
-  assert.equal(unmeasured.empty, false)
-  assert.notEqual(empty.usage_label, unmeasured.usage_label)
-})
-
-test('runSetPanel carries the parks marker and the coverage count', () => {
-  const result = runSetPanel({
-    runs: 2,
-    settled: { running: 0, ok: 1, fail: 0, aborted: 1 },
-    usage: { agent_sessions: 1, billed_input_tokens: 15, billed_output_tokens: null, billed_cache_write_tokens: null, billed_cache_read_tokens: null },
-    coverage: { measured: 1, total: 2 },
-    unmeasured: { parked: 'parks are unmeasured here' },
-    rows: [],
-  })
-  assert.match(result.parked_note, /park/i)
-  assert.match(result.coverage_label, /1.*2/)
-})
-
-test('runSetPanel passes an absent reason through without rows', () => {
-  const result = runSetPanel({ absent: 'sessions predates this ledger mirror', rows: [] })
-  assert.equal(result.absent, 'sessions predates this ledger mirror')
-  assert.deepEqual(result.rows, [])
-  assert.doesNotMatch(JSON.stringify(result), /"runs":\s*0/)
-})
-
-test('runSetPanel labels unmeasured rows and exposes the mean note', () => {
-  const result = runSetPanel({
-    runs: 2,
-    usage: { agent_sessions: 2, billed_input_tokens: 100, billed_output_tokens: 20, billed_cache_write_tokens: 5, billed_cache_read_tokens: 5 },
-    coverage: { measured: 1, total: 2 },
-    usage_mean_tokens_per_measured_run: 130,
-    unmeasured: { per_run: 'no agent_sessions rows for this run — unmeasured, not zero' },
-    rows: [
-      { adw_id: 'measured', usage_measured: true, billed_input_tokens: 100, billed_output_tokens: 20, billed_cache_write_tokens: 5, billed_cache_read_tokens: 5 },
-      { adw_id: 'unmeasured', usage_measured: false },
-    ],
-  })
-  const unmeasured = result.rows.find((row) => row.adw_id === 'unmeasured')
-  const measured = result.rows.find((row) => row.adw_id === 'measured')
-  assert.match(unmeasured.usage_label, /unmeasured.*not zero/i)
-  assert.doesNotMatch(unmeasured.usage_label, /(^|\D)0(\D|$)/)
-  assert.notEqual(unmeasured.usage_tone, measured.usage_tone)
-  assert.ok(result.unmeasured_note)
-  assert.ok(result.mean_label)
-})
-
-test('runSetPanel states an undeclared ceiling without a percentage', () => {
-  const result = runSetPanel({ runs: 1, budget: { ceiling_tokens: null, pending: 'no ceiling declared' }, rows: [] })
-  assert.ok(result.budget_pending)
-  assert.doesNotMatch(result.budget_label, /%/)
-  assert.doesNotMatch(result.budget_label, /\bof\b/i)
-})
-
-test('runSetPanel formats a declared ceiling and its provenance', () => {
-  const result = runSetPanel({
-    runs: 1,
-    budget: { ceiling_tokens: 1000, burn_tokens: 130, headroom_tokens: 870, fraction: 0.13, comparable: true, provenance: 'the daemon holds its own ceiling in memory only' },
-    rows: [],
-  })
-  assert.match(result.budget_label, /1,?000/)
-  assert.match(result.budget_label, /870/)
-  assert.match(result.budget_label, /13%/)
-  assert.match(result.budget_note, /daemon/i)
-})
-
-test('cellHealthPanel distinguishes undetermined cards and carries model prices', () => {
-  const result = cellHealthPanel({ cells: [
-    { key: 'silent', provider: 'openai', model_id: 'quiet', state: 'silent', roles: [], tiers: [], failures: 0, run_less: 0, in_run: 0, by_kind: [], price: null, price_pending: 'not in the roster model catalog' },
-    { key: 'unknown', provider: 'openai', model_id: 'unknown', state: 'undetermined', undetermined_why: 'cell readout absent', roles: [], tiers: [], failures: null, run_less: null, in_run: null, by_kind: [], price: null, price_pending: 'not in the roster model catalog' },
-    { key: 'priced', provider: 'openai', model_id: 'gpt-5', state: 'silent', roles: [], tiers: [], failures: 0, run_less: 0, in_run: 0, by_kind: [], price: { cost_in_per_mtok: 2, cost_out_per_mtok: 12 }, price_pending: null },
-  ] })
-  const undetermined = result.rows.find((row) => row.state === 'undetermined')
-  const priced = result.rows.find((row) => row.model_label === 'openai/gpt-5')
-  assert.notEqual(undetermined.tone, 'silent')
-  assert.match(undetermined.label, /health cannot be determined/i)
-  assert.equal(priced.model_label, 'openai/gpt-5')
-  assert.match(priced.price_label, /in \$2\/Mtok.*out \$12\/Mtok/)
-  assert.doesNotMatch(JSON.stringify(result), /"(?:[a-z_]*(?:usd|spend|total_cost|cost_total)[a-z_]*)"/i)
-})
-
 test('findingRows distinguishes absent findings from an explicit empty measurement', () => {
   const measured = findingRows({ envelopes: [
     { role: 'reviewer', dispatch_seq: 3, details: { findings: [{ id: 'f1', severity: 'must-fix', location: 'src/a.js:1', summary: 'fix it' }] } },
@@ -1069,136 +470,26 @@ test('findingRows distinguishes absent findings from an explicit empty measureme
   assert.equal(empty.groups[0].findings.length, 0)
 })
 
-test('intakePanel gives never-swept and swept-idle different headlines and tones', () => {
-  const states = ['unmeasured', 'never-swept', 'not-swept-in-window', 'parked', 'picking', 'swept-idle']
-  const panels = states.map((state) => intakePanel({ loop: { state, why: `why ${state}`, swept: null, picked: null, parked: null, none: null } }))
-  assert.equal(new Set(panels.map((panel) => panel.headline)).size, states.length)
-  assert.equal(new Set(panels.map((panel) => panel.tone)).size, states.length)
-  assert.match(panels[1].headline, /loop has not run/i)
-})
-
-test('intakePanel lists all ten refusal reasons with the human-actionable group first', () => {
-  const authoring = ['intake-block-missing', 'intake-block-malformed', 'brief-uncompilable', 'priority-unknown']
-  const guardrail = ['stop-switch', 'window-cap', 'rate-limit-floor', 'protected-path', 'tier-judge']
-  const ordering = ['not-first-in-order']
-  const groups = [
-    { group: 'authoring', title: 'an issue needs a human to author or fix it', asserts: 'a human editing the issue unblocks this', reasons: authoring.map((reason) => ({ reason, count: reason === authoring[0] ? 0 : 1 })) },
-    { group: 'guardrail', title: 'the loop refused on purpose; lifting it is a human decision', asserts: 'nothing is broken', reasons: guardrail.map((reason) => ({ reason, count: 1 })) },
-    { group: 'ordering', title: 'nothing is wrong; this candidate was simply not first', asserts: 'no action', reasons: ordering.map((reason) => ({ reason, count: 1 })) },
-  ]
-  const result = intakePanel({ refusals: { groups } })
-  assert.match(result.groups[0].title, /human.*author|fix/i)
-  assert.match(result.groups[0].asserts, /human/i)
-  assert.deepEqual(result.groups.flatMap((group) => group.rows.map((row) => row.label)), [...authoring, ...guardrail, ...ordering])
-  assert.equal(result.groups[0].rows[0].count_label, 'not refused in this window')
-})
-
-test('an absent payload renders as pending, not as an empty loop', () => {
-  const result = intakePanel({
-    absent: 'intake_sweeps predates this ledger mirror',
-    loop: { state: 'unmeasured', swept: null, picked: null, parked: null, none: null },
-    refusals: { groups: [{ group: 'authoring', reasons: [{ reason: 'intake-block-missing', count: null, state: 'unmeasured' }] }] },
-  })
-  assert.equal(result.absent, 'intake_sweeps predates this ledger mirror')
-  assert.match(result.counts_label, /—/)
-  assert.equal(result.groups[0].rows[0].count_label, '—')
-  assert.doesNotMatch(JSON.stringify(result), /not refused in this window/)
-})
-
-test('intakePanel states its window and offers no write path', () => {
-  const result = intakePanel({
-    window: { since: '2024-01-01T00:00:00.000Z', until: null, label: 'last 24 hours' },
-    loop: { state: 'picking', why: 'picking', swept: 1, picked: 1, parked: 0, none: 0 },
-    picks: [{ issue: 52, board: { owner: 'owner', project: 1 }, at: '2024-01-01T01:00:00.000Z' }],
-  })
-  assert.match(result.window_label, /last 24 hours/)
-  assert.match(result.window_label, /since 2024-01-01T00:00:00.000Z/)
-  assert.match(result.window_label, /until now/)
-  assert.equal(Object.keys(result).some((key) => /^(on|post|submit|mutate)/i.test(key)), false)
-  assert.equal(result.readonly_note, 'this view reads the ledger; the intake module owns every decision shown here')
-})
-
-test('intakeCandidateRows labels verdicts and keeps take/refuse tones distinct', () => {
-  const result = intakeCandidateRows({ candidates: {
-    measured: true, absent: null, unmeasured: 'bound', items: [
-      { issue: 7, board: { owner: 'owner', project: 1 }, verdict: 'would-refuse', reason: 'protected-path', reason_recognised: true, last_seen_at: '2024-01-01T00:00:00.000Z' },
-      { issue: 9, board: { owner: 'owner', project: 1 }, verdict: 'would-take', reason: null, reason_recognised: false, last_seen_at: '2024-01-02T00:00:00.000Z' },
-    ],
-  } })
-  assert.match(result.rows[0].label, /#7|owner/)
-  assert.equal(result.rows[0].verdict_label, 'would refuse')
-  assert.equal(result.rows[0].reason_label, 'protected-path')
-  assert.equal(result.rows[1].verdict_label, 'would take')
-  assert.notEqual(result.rows[0].tone, result.rows[1].tone)
-  assert.match(result.rows[1].at_label, /2024-01-02/)
-})
-
-test('intakeCandidateRows renders an absent source without a zero candidate count', () => {
-  const result = intakeCandidateRows({ candidates: { measured: false, absent: 'intake_refusals predates this ledger mirror', items: [], unmeasured: 'bound note' } })
-  assert.equal(result.measured, false)
-  assert.deepEqual(result.rows, [])
-  assert.equal(result.absent, 'intake_refusals predates this ledger mirror')
-  assert.match(result.note, /bound note/)
-  assert.doesNotMatch(JSON.stringify(result), /0 candidates/i)
-})
-
-test('brakePanel keeps engaged, clear and unreadable states distinct', () => {
-  const common = { checkout: '/checkout', path: '/checkout/.factory/STOP' }
-  const engaged = brakePanel({ ...common, state: 'engaged', measured: true })
-  const clear = brakePanel({ ...common, state: 'clear', measured: true })
-  const unreadable = brakePanel({ ...common, state: null, measured: false, read_error: 'permission denied' })
-  assert.match(engaged.label, /brake engaged/)
-  assert.match(clear.label, /brake clear/)
-  assert.match(unreadable.label, /unreadable/)
-  assert.equal(unreadable.tone, 'unmeasured')
-  assert.doesNotMatch(unreadable.label, /engaged|stopped/i)
-  assert.equal(new Set([engaged.tone, clear.tone, unreadable.tone]).size, 3)
-})
-
-test('brakePanel preserves a failed transition while reporting the read state', () => {
-  const result = brakePanel({ ok: false, error: 'ENOTDIR', state: 'clear', checkout: '/checkout', path: '/checkout/.factory/STOP' })
-  assert.equal(result.state, 'clear')
-  assert.match(result.label, /failed/i)
-  assert.match(result.label, /clear/)
-  assert.equal(result.tone, 'unmeasured')
-})
-
-test('brakePanel names the resolved checkout and switch path in every state', () => {
-  const common = { checkout: '/tree-a', path: '/tree-a/.factory/STOP' }
-  for (const payload of [
-    { ...common, state: 'engaged', measured: true },
-    { ...common, state: 'clear', measured: true },
-    { ...common, state: null, measured: false, read_error: 'unreadable' },
-    { ...common, ok: false, state: 'clear', error: 'failed' },
-  ]) {
-    const result = brakePanel(payload)
-    assert.match(result.path_label, /\/tree-a/)
-    assert.match(result.path_label, /STOP/)
-  }
-})
-
-test('hash routes parse and format all ten canonical views', () => {
-  for (const hash of ['#/', '#/ops', '#/roster', '#/agents', '#/skills', '#/prompts', '#/workflows', '#/assurances', '#/adw-123', '#/adw-123/plan']) {
+test('hash routes parse and format every kept canonical view', () => {
+  for (const hash of ['#/', '#/agents', '#/skills', '#/adw-123', '#/adw-123/plan']) {
     assert.equal(formatHash(parseHash(hash)), hash)
   }
   assert.deepEqual(parseHash(''), { view: 'fleet', adw_id: null, phase: null })
   assert.deepEqual(parseHash('#'), { view: 'fleet', adw_id: null, phase: null })
   assert.deepEqual(parseHash('#/adw-123/'), { view: 'run', adw_id: 'adw-123', phase: null })
-  assert.deepEqual(parseHash('#/ops/ignored/extra'), { view: 'ops', adw_id: null, phase: null })
+  assert.deepEqual(parseHash('#/agents/ignored/extra'), { view: 'agents', adw_id: null, phase: null })
+  // A dropped view's hash is read as a run id, never routed to a page that no longer exists.
+  for (const dropped of ['ops', 'roster', 'prompts', 'workflows', 'assurances']) assert.equal(parseHash(`#/${dropped}`).view, 'run')
   assert.deepEqual(parseHash('#/adw-123/plan/ignored'), { view: 'phase', adw_id: 'adw-123', phase: 'plan' })
-  assert.equal(parseHash('#/ops').adw_id, null)
-  assert.equal(parseHash('#/roster').adw_id, null)
   assert.equal(parseHash('#/agents').adw_id, null)
   assert.equal(parseHash('#/skills').adw_id, null)
-  assert.equal(parseHash('#/assurances').adw_id, null)
-  assert.equal(parseHash('#/prompts').adw_id, null)
 })
 
 test('E1 agents page route nav and title are wired', () => {
   const root = join(ROOT, 'visualizer/web/src')
   const app = readFileSync(join(root, 'App.svelte'), 'utf8')
   const page = readFileSync(join(root, 'lib/AgentsPage.svelte'), 'utf8')
-  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'skills', 'prompts', 'workflows', 'assurances', 'run', 'phase'])
+  assert.deepEqual(VIEWS, ['fleet', 'agents', 'skills', 'run', 'phase'])
   assert.match(app, /route\.view === 'agents'/)
   assert.match(app, /Agents · Factory/)
   assert.match(app, /<AgentsPage\s*\/?\s*>/)
@@ -1244,78 +535,6 @@ test('skills-page:E1', async () => {
   } finally {
     globalThis.fetch = originalFetch
   }
-})
-
-test('assurance page exposes separate axes and only prepares proposals', () => {
-  const root = join(ROOT, 'visualizer/web/src')
-  const app = readFileSync(join(root, 'App.svelte'), 'utf8')
-  const page = readFileSync(join(root, 'lib/AssurancePage.svelte'), 'utf8')
-  assert.match(app, /Assurances · Factory/)
-  assert.match(app, /route\.view === 'assurances'/)
-  assert.match(app, /<AssurancePage \/>/)
-  assert.match(app, />Assurances<\//)
-  for (const heading of ['Check a task’s scope', 'When stronger review is required']) assert.match(page, new RegExp(heading))
-  assert.match(page, /current\.matches/)
-  assert.match(page, /getAssurances\(/)
-  assert.match(page, /payload\?\.preview_policy/)
-  assert.match(page, /previewAssurance\(/)
-  assert.match(page, /No tasks started or settings changed\./)
-  assert.match(page, /bind:group=\{assurance\}/)
-  const pairedInteractive = ['button', 'form', 'a', 'label', 'select', 'option', 'textarea']
-    .flatMap((tag) => [...page.matchAll(new RegExp(`<${tag}\\b[\\s\\S]*?<\\/${tag}>`, 'gi'))])
-  const voidInteractive = [...page.matchAll(/<input\b[^>]*>/gi)]
-  const interactive = [...pairedInteractive, ...voidInteractive].map((match) => match[0]).join('\n')
-  for (const tag of ['input', 'label', 'select', 'option']) assert.match(interactive, new RegExp(`<${tag}\\b`, 'i'))
-  assert.doesNotMatch(`${interactive}\n${app}`, /\b(?:dispatch|apply|post)\b/i)
-})
-
-test('prompts-page:A1', async () => {
-  const root = join(ROOT, 'visualizer/web/src')
-  const app = readFileSync(join(root, 'App.svelte'), 'utf8')
-  const page = readFileSync(join(root, 'lib/PromptsPage.svelte'), 'utf8')
-  assert.deepEqual(parseHash('#/prompts'), { view: 'prompts', adw_id: null, phase: null })
-  assert.equal(formatHash(parseHash('#/prompts')), '#/prompts')
-  assert.match(app, /import PromptsPage from '\.\/lib\/PromptsPage\.svelte'/)
-  assert.match(app, /Prompts · Factory/)
-  assert.match(app, /route\.view === 'prompts'/)
-  assert.match(app, /route\.view === 'prompts'[^\n]*>Prompts</)
-  assert.match(app, /<PromptsPage\s*\/>/)
-  assert.equal((page.match(/onsubmit=/g) || []).length, 1)
-  assert.match(page, /onsubmit=\{submitPrompt\}/)
-  assert.match(page, /savePrompt\(/)
-  assert.match(page, /PROMPT_SURFACE_CONSEQUENCE/)
-  assert.match(page, /protected: prompt-surface/)
-  assert.match(page, /Review & preview/)
-  assert.match(page, /currentReview\?\.affected/)
-  assert.match(page, /expected_revision:editor\.revision/)
-
-  const originalFetch = globalThis.fetch
-  const calls = []
-  globalThis.fetch = async (path, options = {}) => {
-    calls.push({ path: String(path), options })
-    return new Response(JSON.stringify({ ok: true, diff: '--- a/crew/roles/builder.md\\n+++ b/crew/roles/builder.md', refusals: [], labels: ['protected: prompt-surface'] }), { status: 200, headers: { 'content-type': 'application/json' } })
-  }
-  try {
-    const result = await proposePrompt('builder', '# replacement charter\\n')
-    assert.equal(result.ok, true)
-    assert.match(result.diff, /crew\/roles\/builder\.md/)
-    assert.equal(calls.length, 1)
-    assert.equal(calls[0].path, '/api/prompts/propose')
-    assert.equal(calls[0].options.method, 'POST')
-    assert.equal(calls[0].options.headers['content-type'], 'application/json')
-    assert.deepEqual(JSON.parse(calls[0].options.body), { role: 'builder', text: '# replacement charter\\n' })
-    assert.deepEqual(result.labels, ['protected: prompt-surface'])
-    assert.doesNotMatch(calls[0].path, /\/(?:apply|dispatch)(?:\?|$)/)
-  } finally {
-    globalThis.fetch = originalFetch
-  }
-})
-
-test('prompts-page:RV1-1 consequence export resolves', async () => {
-  const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/PromptsPage.svelte'), 'utf8')
-  const agents = await import(`${pathToFileURL(join(ROOT, 'visualizer/web/src/lib/agents.js')).href}?prompts-page-rv1-1`)
-  assert.match(page, /import \{[^}]*PROMPT_SURFACE_CONSEQUENCE[^}]*\} from '\.\/agents\.js'/)
-  assert.equal(agents.PROMPT_SURFACE_CONSEQUENCE, 'Charter changes force stronger assurance and require a measurement claim in the commit message.')
 })
 
 test('F1 agents page uses only Tier-2 colour aliases', () => {
@@ -1529,8 +748,7 @@ test('role colour stays isolated and escalation reasons remain in task history',
   assert.match(tasks, /Why review\?/)
   assert.match(tasks, /status\.why/)
   assert.doesNotMatch(app, /class="attention-list"/)
-  assert.match(app, /returnRequestSemaphore = createSemaphore\(2\)/)
-  assert.match(app, /returnRequestSemaphore\.run\(\(\) => getReturns/)
+  assert.doesNotMatch(app, /getReturns|probeEnvelopes|returnRequestSemaphore/)
 })
 
 test('laneRows names lanes by event role and collapses an empty seat', () => {
@@ -1737,18 +955,8 @@ test('phase inspection explains factory checkpoints and suppresses empty gate co
   assert.match(gateEntry.text, /Validation evidence is attached to/)
 })
 
-test('activity chart offers named intervals and readable counts without hover', () => {
-  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/OperationsOverview.svelte'), 'utf8')
-  assert.match(source, /View interval counts/)
-  assert.match(source, /aria-label=\{`\$\{stamp\(bucket.start\)\}/)
-  assert.match(source, /aria-pressed=\{selectedBucket === index\}/)
-  assert.match(source, /class="x-labels"/)
-})
-
-
 test('trace source tripwires keep route, role order, and server read-only', () => {
   const root = join(ROOT, 'visualizer')
-  const shape = readFileSync(join(root, 'server/shape.mjs'), 'utf8')
   const runDetail = readFileSync(join(root, 'web/src/lib/RunDetail.svelte'), 'utf8')
   const eventStream = readFileSync(join(root, 'web/src/lib/EventStream.svelte'), 'utf8')
   assert.ok(runDetail.includes('phase = null') && runDetail.includes('$props()'))
@@ -1759,11 +967,6 @@ test('trace source tripwires keep route, role order, and server read-only', () =
     assert.equal(readFileSync(join(root, 'web/src/lib', file), 'utf8').includes('{@html'), false)
   }
   assert.deepEqual([...ROLE_ORDER], ['planner', 'builder', 'reviewer', 'tech-lead', 'lead', 'driver'])
-  assert.ok(shape.includes("Object.freeze(['planner', 'builder', 'reviewer', 'tech-lead', 'lead', 'driver'])"))
-  for (const file of ['visualizer/server/shape.mjs', 'visualizer/server/ledger-feed.mjs']) {
-    const source = readFileSync(join(ROOT, file), 'utf8')
-    assert.equal(/INSERT INTO|UPDATE \\w+ SET|DELETE FROM/i.test(source), false)
-  }
 })
 
 test('PhaseGantt resolves identity by lane key rather than timeline row position', () => {
@@ -2107,26 +1310,7 @@ test('PhasePanel shows pending gate retries alongside valid checks', () => {
   assert.equal(source.includes('{:else if panel.gate.checks_pending}'), false)
 })
 
-const PANEL_SHAPERS = { 'CellHealthPanel.svelte': cellHealthPanel, 'TeardownPanel.svelte': teardownPanel, 'RunSetPanel.svelte': runSetPanel }
 const READ_AT = 1700000000000
-
-test('the three panels date their reading and hedge only when it is old', () => {
-  assert.equal(PANEL_REFRESH_MS, 3000)
-  for (const [file, shape] of Object.entries(PANEL_SHAPERS)) {
-    const fresh = shape({}, { read_at: READ_AT, now: READ_AT + 2000, refresh_ms: PANEL_REFRESH_MS }).freshness
-    assert.equal(fresh.age_ms, 2000, file)
-    assert.equal(fresh.stale, false, file)
-    assert.equal(fresh.label, 'read 2s ago', file)
-    assert.doesNotMatch(fresh.label, /stale|may no longer|unavailable|cannot be dated/i, file)
-    assert.equal(fresh.refresh_label, 're-reads every 3s', file)
-    const old = shape({}, { read_at: READ_AT, now: READ_AT + 6600000, refresh_ms: PANEL_REFRESH_MS }).freshness
-    assert.equal(old.stale, true, file)
-    assert.match(old.label, /^read 1h50m ago — /, file)
-    assert.match(old.label, /may no longer be true/, file)
-  }
-  const absentRunSet = runSetPanel({ absent: 'sessions predates this ledger mirror' }, { read_at: READ_AT, now: READ_AT + 2000, refresh_ms: PANEL_REFRESH_MS })
-  assert.equal(absentRunSet.freshness.label, 'read 2s ago')
-})
 
 test('the staleness floor is a boundary an injected clock decides', () => {
   assert.equal(readFreshness(READ_AT, READ_AT + PANEL_STALE_AFTER_MS, PANEL_REFRESH_MS).stale, false)
@@ -2161,39 +1345,6 @@ test('the panel read loop re-reads on the family cadence and stops when the pane
   stop()
   assert.deepEqual(cleared, [41])
 })
-
-// MUTATION: this pin dies if any of the three panels stops passing its own read
-// clock to the shaper, stops rendering the dated readout, or stops clearing its
-// interval when the panel is gone. It reads comment-stripped source, so a comment
-// shaped like the wiring cannot satisfy it — a tripwire a deleted implementation
-// still passes is worse than no tripwire.
-test('each panel wires its own read clock and tears its timer down', () => {
-  const root = join(ROOT, 'visualizer/web/src/lib')
-  for (const [file, shape] of Object.entries(PANEL_SHAPERS)) {
-    const source = readFileSync(join(root, file), 'utf8')
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/<!--[\s\S]*?-->/g, '')
-      .replace(/(^|[^:])\/\/.*$/gm, '$1')
-    assert.ok(source.includes(`import { PANEL_REFRESH_MS, ${shape.name}, panelReadLoop } from './panels.js'`), file)
-    assert.ok(source.includes(`$derived(${shape.name}(`), file)
-    assert.ok(source.includes('{ read_at, now, refresh_ms: PANEL_REFRESH_MS })'), file)
-    assert.equal((source.match(/read_at = Date\.now\(\)/g) || []).length, 1, file)
-    assert.ok(source.includes('const stop = panelReadLoop('), file)
-    assert.ok(source.includes('return () => { active = false; stop() }'), file)
-    assert.doesNotMatch(source, /\bsetInterval\s*\(/, file)
-    assert.ok(source.includes('{panel.freshness.label}'), file)
-    assert.ok(source.includes('{panel.freshness.refresh_label}'), file)
-  }
-})
-
-function writeCrewCandidate(root, repo, name, adw_id, marker = 'valid') {
-  const directory = join(root, repo, name)
-  mkdirSync(directory, { recursive: true })
-  if (marker === 'absent') return directory
-  mkdirSync(join(directory, 'ledger'), { recursive: true })
-  writeFileSync(join(directory, 'ledger', 'run.json'), marker === 'malformed' ? '{ not json' : `${JSON.stringify({ adw_id })}\n`)
-  return directory
-}
 
 test('a contradicted lane names both sides and is never called stale', () => {
   const now = Date.parse('2026-09-06T00:00:00.000Z')
@@ -2294,182 +1445,6 @@ test('fleetActivity counts contradictions without changing its denominator', () 
   assert.deepEqual(fleetActivity([fresh, stale], now), { live: 0, silent: 1, contradicted: 1, unverified: 0, gone: 0, open: 2 })
 })
 
-test('shapeRun reports the crew state it was handed and never guesses', () => {
-  const session = {
-    adw_id: 'shape-crew', task_slug: 'task', repo_slug: 'repo', status: 'running',
-    started_at: '2026-09-05T20:00:00.000Z', ended_at: null,
-  }
-  const shape = (crewState, extras = {}) => shapeRun(session, [], [], null, {}, Date.parse('2026-09-06T00:00:00.000Z'), { ...extras, ...(crewState === undefined ? {} : { crewState }) })
-  const measuredTrue = shape({ archived: true, archived_at: '2026-09-05T22:15:38.543Z', archive_dir: '/crew/archive', observed_at: 'now' })
-  assert.deepEqual(measuredTrue.crew_state, { archived: true, archived_at: '2026-09-05T22:15:38.543Z', archived_at_absent: null, archive_dir: '/crew/archive', observed_at: 'now' })
-  assert.equal(measuredTrue.pending.crew_state, undefined)
-  const measuredFalse = shape({ archived: false, observed_at: 'now' })
-  assert.deepEqual(measuredFalse.crew_state, { archived: false, archived_at: null, archived_at_absent: null, archive_dir: null, observed_at: 'now' })
-  assert.equal(measuredFalse.pending.crew_state, undefined)
-  const reason = 'not measured — root EACCES'
-  const unmeasured = shape({ archived: null, reason })
-  assert.equal(unmeasured.crew_state, null)
-  assert.equal(unmeasured.pending.crew_state, reason)
-  const absent = shape(undefined)
-  assert.equal(absent.crew_state, null)
-  assert.match(absent.pending.crew_state, /not measured/)
-  assert.deepEqual(Object.keys(measuredFalse).sort(), Object.keys(absent).sort())
-})
-
-test('the crew state source resolves a directory by run identity, not by task slug', () => {
-  const root = scratchDir('visualizer-crew-state-')
-  const b313A = '5b25c6f1-8671-4bc9-ae6d-f46dbd373b5e'
-  const b313B = '82081ddd-9538-42c8-ac2a-b53a2922f7e7'
-  const repo = 'dt-b313-waitextend', task = 'b313-waitextend'
-  const firstDir = writeCrewCandidate(root, repo, `${task}.archive-2026-08-29T11-04-24-110Z`, b313A)
-  const secondDir = writeCrewCandidate(root, repo, `${task}.archive-2026-08-29T11-52-44-236Z`, b313B)
-  const source = createCrewStateSource({ crewRoot: root })
-  const states = source.readCrewStates([
-    { adw_id: b313A, repo_slug: repo, task_slug: task },
-    { adw_id: b313B, repo_slug: repo, task_slug: task },
-  ])
-  assert.equal(states.get(b313A).archived_at, '2026-08-29T11:04:24.110Z')
-  assert.equal(states.get(b313B).archived_at, '2026-08-29T11:52:44.236Z')
-  assert.equal(states.get(b313A).archive_dir, firstDir)
-  assert.equal(states.get(b313B).archive_dir, secondDir)
-
-  const liveDir = writeCrewCandidate(root, 'repo-live', 'task-live', 'live-id')
-  const live = source.readCrewStates([{ adw_id: 'live-id', repo_slug: 'repo-live', task_slug: 'task-live' }]).get('live-id')
-  assert.equal(live.archived, false)
-  assert.equal(live.reason, null)
-
-  writeCrewCandidate(root, 'repo-both', 'task-both', 'both-id')
-  writeCrewCandidate(root, 'repo-both', 'task-both.archive-2026-09-01T00-00-00-000Z', 'both-id')
-  const both = source.readCrewStates([{ adw_id: 'both-id', repo_slug: 'repo-both', task_slug: 'task-both' }]).get('both-id')
-  assert.equal(both.archived, null)
-  assert.match(both.reason, /both a live/)
-
-  const absentDir = writeCrewCandidate(root, 'repo-markers', 'task-markers.archive-2026-09-01T00-00-00-000Z', 'absent-id', 'valid')
-  rmSync(join(absentDir, 'ledger'), { recursive: true, force: true })
-  writeCrewCandidate(root, 'repo-markers', 'task-markers.archive-2026-09-02T00-00-00-000Z', 'malformed-id', 'malformed')
-  const markers = source.readCrewStates([{ adw_id: 'wanted-id', repo_slug: 'repo-markers', task_slug: 'task-markers' }]).get('wanted-id')
-  assert.equal(markers.archived, null)
-  assert.match(markers.reason, /task-markers\.archive-2026-09-01T00-00-00-000Z/)
-  assert.match(markers.reason, /task-markers\.archive-2026-09-02T00-00-00-000Z/)
-
-  writeCrewCandidate(root, 'repo-mixed-live', 'task-mixed', 'mixed-id')
-  writeCrewCandidate(root, 'repo-mixed-live', 'task-mixed.archive-2026-09-03T00-00-00-000Z', 'mixed-id')
-  rmSync(join(root, 'repo-mixed-live', 'task-mixed', 'ledger', 'run.json'), { force: true })
-  const mixedLive = source.readCrewStates([{ adw_id: 'mixed-id', repo_slug: 'repo-mixed-live', task_slug: 'task-mixed' }]).get('mixed-id')
-  assert.equal(mixedLive.archived, null)
-  assert.match(mixedLive.reason, /task-mixed directory could not be identified/)
-
-  writeCrewCandidate(root, 'repo-mixed-archive', 'task-mixed', 'mixed-archive-id')
-  writeCrewCandidate(root, 'repo-mixed-archive', 'task-mixed.archive-2026-09-03T00-00-00-000Z', 'missing-id', 'absent')
-  const mixedArchive = source.readCrewStates([{ adw_id: 'mixed-archive-id', repo_slug: 'repo-mixed-archive', task_slug: 'task-mixed' }]).get('mixed-archive-id')
-  assert.equal(mixedArchive.archived, null)
-  assert.match(mixedArchive.reason, /task-mixed\.archive-2026-09-03T00-00-00-000Z/)
-
-  const rootEacces = scratchDir('visualizer-crew-root-')
-  const rootError = new Error('injected root listing failure')
-  rootError.code = 'EACCES'
-  const injected = createCrewStateSource({
-    crewRoot: rootEacces,
-    deps: {
-      readdirSync: (path) => { if (path === rootEacces) throw rootError; return ['task-root'] },
-      statSync: () => ({ isDirectory: () => true }),
-      readFileSync: () => JSON.stringify({ adw_id: 'root-id' }),
-    },
-  })
-  const rootState = injected.readCrewStates([{ adw_id: 'root-id', repo_slug: 'repo-root', task_slug: 'task-root' }]).get('root-id')
-  assert.equal(rootState.archived, null)
-  assert.match(rootState.reason, /EACCES/)
-
-  const typeRoot = scratchDir('visualizer-crew-type-')
-  const liveTypePath = writeCrewCandidate(typeRoot, 'repo-type-live', 'task-type', 'type-id')
-  writeCrewCandidate(typeRoot, 'repo-type-live', 'task-type.archive-2026-09-04T00-00-00-000Z', 'type-id')
-  const liveType = createCrewStateSource({ crewRoot: typeRoot, deps: {
-    readdirSync, readFileSync,
-    statSync: (path, ...args) => { if (path === liveTypePath) { const error = new Error('EACCES: live type'); error.code = 'EACCES'; throw error }; return statSync(path, ...args) },
-  } }).readCrewStates([{ adw_id: 'type-id', repo_slug: 'repo-type-live', task_slug: 'task-type' }]).get('type-id')
-  assert.equal(liveType.archived, null)
-  assert.match(liveType.reason, /task-type candidate could not be typed/)
-  assert.match(liveType.reason, /EACCES/)
-
-  const archiveTypeRoot = scratchDir('visualizer-crew-type-')
-  const archiveTypePath = writeCrewCandidate(archiveTypeRoot, 'repo-type-archive', 'task-type.archive-2026-09-04T00-00-00-000Z', 'type-archive-id')
-  writeCrewCandidate(archiveTypeRoot, 'repo-type-archive', 'task-type', 'type-archive-id')
-  const archiveType = createCrewStateSource({ crewRoot: archiveTypeRoot, deps: {
-    readdirSync, readFileSync,
-    statSync: (path, ...args) => { if (path === archiveTypePath) { const error = new Error('EACCES: archive type'); error.code = 'EACCES'; throw error }; return statSync(path, ...args) },
-  } }).readCrewStates([{ adw_id: 'type-archive-id', repo_slug: 'repo-type-archive', task_slug: 'task-type' }]).get('type-archive-id')
-  assert.equal(archiveType.archived, null)
-  assert.match(archiveType.reason, /archive candidate could not be typed/)
-  assert.match(archiveType.reason, /EACCES/)
-})
-
-test('the crew state source lists the crew root once per call and each repo once', () => {
-  const root = scratchDir('visualizer-crew-budget-')
-  const sessions = []
-  for (const [repo, tasks] of [['repo-one', ['one-a', 'one-b', 'one-c']], ['repo-two', ['two-a', 'two-b', 'two-c']]]) {
-    for (const task of tasks) {
-      const adw_id = `${repo}-${task}`
-      writeCrewCandidate(root, repo, task, adw_id)
-      sessions.push({ adw_id, repo_slug: repo, task_slug: task })
-    }
-  }
-  let listings = 0
-  let markers = 0
-  const source = createCrewStateSource({ crewRoot: root, deps: {
-    readdirSync: (path, ...args) => { listings += 1; return readdirSync(path, ...args) },
-    statSync,
-    readFileSync: (path, ...args) => { markers += 1; return readFileSync(path, ...args) },
-  } })
-  const states = source.readCrewStates(sessions)
-  assert.equal(listings, 3)
-  assert.equal(states.size, 6)
-  assert.equal(markers, 6)
-  for (const session of sessions) assert.equal(states.get(session.adw_id).archived, false)
-})
-
-test('the feed carries the crew state it measured, and says so when it measured none', { skip: sqliteAvailable() ? false : 'node:sqlite unavailable' }, () => {
-  const dir = scratchDir('visualizer-crew-feed-')
-  const ledgerDb = join(dir, 'ledger.db')
-  const adw_id = 'feed-crew-run'
-  const ledger = openLedger({ dbPath: ledgerDb, stderr: { write() {} } })
-  ledger.startSession({ adw_id, repo_slug: 'repo', task_slug: 'task' })
-  ledger.close()
-  const crewRoot = join(dir, 'crew')
-  writeCrewCandidate(crewRoot, 'repo', 'task.archive-2026-09-05T22-15-38-543Z', adw_id)
-  const feed = createLedgerFeed({ ledgerDb, triageDb: join(dir, 'triage.db'), crewRoot })
-  const measured = feed.listRuns().runs.find((run) => run.adw_id === adw_id)
-  assert.equal(measured.crew_state.archived, true)
-  feed.close()
-  const unmeasuredFeed = createLedgerFeed({ ledgerDb, triageDb: join(dir, 'triage-no-root.db') })
-  const unmeasured = unmeasuredFeed.listRuns().runs.find((run) => run.adw_id === adw_id)
-  assert.equal(unmeasured.crew_state, null)
-  assert.match(unmeasured.pending.crew_state, /not measured/)
-  unmeasuredFeed.close()
-})
-
-test('an unmeasured archive instant carries its own reason to the row', { skip: sqliteAvailable() ? false : 'node:sqlite unavailable' }, () => {
-  const reason = 'archive instant was not recorded in the directory name'
-  const session = { adw_id: 'unmeasured-instant', task_slug: 'task', repo_slug: 'repo', status: 'running', started_at: '2026-09-05T20:00:00.000Z', ended_at: null }
-  const shaped = shapeRun(session, [], [], null, {}, Date.parse('2026-09-06T00:00:00.000Z'), { crewState: { archived: true, archived_at: null, reason } })
-  assert.equal(shaped.crew_state.archived_at_absent, reason)
-  const measured = shapeRun(session, [], [], null, {}, Date.parse('2026-09-06T00:00:00.000Z'), { crewState: { archived: true, archived_at: '2026-09-05T22:15:38.543Z', reason: null } })
-  assert.equal(measured.crew_state.archived_at_absent, null)
-
-  const dir = scratchDir('visualizer-crew-instant-')
-  const ledgerDb = join(dir, 'ledger.db')
-  const ledger = openLedger({ dbPath: ledgerDb, stderr: { write() {} } })
-  ledger.startSession({ ...session })
-  ledger.close()
-  const crewRoot = join(dir, 'crew')
-  writeCrewCandidate(crewRoot, 'repo', 'task.archive-latest', session.adw_id)
-  const feed = createLedgerFeed({ ledgerDb, triageDb: join(dir, 'triage.db'), crewRoot })
-  const row = feed.listRuns().runs.find((run) => run.adw_id === session.adw_id)
-  assert.equal(row.crew_state.archived, true)
-  assert.equal(row.crew_state.archived_at, null)
-  assert.equal(row.crew_state.archived_at_absent, 'this lane\'s task directory is archived, but WHEN was not measured: no archive directory carrying this run\'s marker has a parsable instant in its name')
-  feed.close()
-})
-
 test('the contradiction sentence says why the archive time is missing', () => {
   const reason = 'archive suffix was unparsable'
   const run = {
@@ -2478,47 +1453,6 @@ test('the contradiction sentence says why the archive time is missing', () => {
   }
   assert.equal(crewArchive(run).archived_at_absent, reason)
   assert.match(runActivity(run, Date.parse('2026-09-06T00:00:00.000Z')).why, new RegExp(reason))
-})
-
-test('the feed reads crew state only for rows the ledger still calls running', { skip: sqliteAvailable() ? false : 'node:sqlite unavailable' }, () => {
-  const dir = scratchDir('visualizer-crew-filter-')
-  const ledgerDb = join(dir, 'ledger.db')
-  const runningId = 'feed-running'
-  const settledId = 'feed-settled'
-  const ledger = openLedger({ dbPath: ledgerDb, stderr: { write() {} } })
-  ledger.startSession({ adw_id: runningId, repo_slug: 'repo', task_slug: 'running' })
-  ledger.startSession({ adw_id: settledId, repo_slug: 'repo', task_slug: 'settled' })
-  ledger.endSession({ adw_id: settledId, status: 'ok', ended_at: '2026-09-05T22:10:00.000Z' })
-  ledger.close()
-  const handed = []
-  const source = { readCrewStates(sessions) { handed.push(sessions.map((session) => session.adw_id)); return new Map(sessions.map((session) => [session.adw_id, { archived: false }])) } }
-  const feed = createLedgerFeed({ ledgerDb, triageDb: join(dir, 'triage.db'), crewStateSource: source })
-  const result = feed.listRuns()
-  assert.deepEqual(handed, [[runningId]])
-  assert.equal(result.runs.length, 2)
-  feed.close()
-})
-
-test('a settled row says its crew state was intentionally not read', { skip: sqliteAvailable() ? false : 'node:sqlite unavailable' }, () => {
-  const dir = scratchDir('visualizer-crew-settled-')
-  const ledgerDb = join(dir, 'ledger.db')
-  const settledId = 'feed-settled-reason'
-  const ledger = openLedger({ dbPath: ledgerDb, stderr: { write() {} } })
-  ledger.startSession({ adw_id: settledId, repo_slug: 'repo', task_slug: 'settled' })
-  ledger.endSession({ adw_id: settledId, status: 'ok', ended_at: '2026-09-05T22:10:00.000Z' })
-  ledger.close()
-  const handed = []
-  const source = { readCrewStates(sessions) { handed.push(sessions.map((session) => session.adw_id)); return new Map() } }
-  const feed = createLedgerFeed({ ledgerDb, triageDb: join(dir, 'triage.db'), crewRoot: join(dir, 'crew'), crewStateSource: source })
-  const settled = feed.listRuns().runs.find((run) => run.adw_id === settledId)
-  assert.deepEqual(handed, [[]])
-  assert.equal(settled.crew_state, null)
-  assert.match(settled.pending.crew_state, /already settled.*intentionally not read/i)
-  const withoutRootFeed = createLedgerFeed({ ledgerDb, triageDb: join(dir, 'triage-no-root.db') })
-  const withoutRoot = withoutRootFeed.listRuns().runs.find((run) => run.adw_id === settledId)
-  assert.notEqual(settled.pending.crew_state, withoutRoot.pending.crew_state)
-  withoutRootFeed.close()
-  feed.close()
 })
 
 test('a contradicted lane renders as an open record with no return, never in progress', () => {
@@ -2643,300 +1577,12 @@ test('G1: a key outside the attention vocabulary is not attention work', () => {
   assert.equal(needsAttention('outside-attention-vocabulary'), false)
 })
 
-test('G1 task list ships column and tab use only Tier-2 colour aliases', () => {
-  const taskList = readFileSync(join(ROOT, 'visualizer/web/src/lib/TaskList.svelte'), 'utf8')
-  const detail = readFileSync(join(ROOT, 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
-  assert.equal(shipStatus({ ship: { state: 'merged', reason: 'merged' } }).tone, 'ok')
-  assert.equal(shipStatus({ ship: { state: 'open', reason: 'open' } }).tone, 'busy')
-  assert.equal(shipStatus({ ship: { state: 'closed-unmerged', reason: 'closed' } }).tone, 'fail')
-  assert.equal(shipStatus({ ship: { state: 'unpublished', reason: 'unpublished' } }).tone, 'quiet')
-  assert.equal(shipStatus({ ship: { state: 'not-applicable', reason: 'not applicable' } }).tone, 'quiet')
-  assert.equal(shipStatus({ ship: { state: 'unmeasured', reason: 'unmeasured', stale: true } }).reason, 'unmeasured (cached ship state is stale.)')
-  assert.deepEqual(shipStatus({}), { key:'unmeasured', word:'not measured', tone:'quiet', reason:'ship state not measured' })
-  assert.match(taskList, /import \{[^}]*shipStatus[^}]*\} from '\.\/fleet\.js'/)
-  assert.match(taskList, /<th>Ship<\/th>/)
-  assert.match(taskList, /\['shipped',\s*'Shipped'\]/)
-  assert.match(taskList, /if \(state === 'shipped'\) return shipStatus\(run\)\.key === 'merged'/)
-  assert.match(taskList, /title=\{ship\.reason\}/)
-  assert.match(detail, /run\?\.ship\?\.pr_url/)
-  assert.match(detail, /target="_blank" rel="noreferrer"/)
-  assert.match(detail, /dateParts\(run\.ship\.merged_at\)/)
-  assert.match(detail, /run\.ship\.merge_commit_sha/)
-  const css = [...taskList.matchAll(/<style>([\s\S]*?)<\/style>/g), ...detail.matchAll(/<style>([\s\S]*?)<\/style>/g)].map((match) => match[1]).join('\\n')
-  const declarationValues = [...css.matchAll(/[^{};]+:\s*([^;{}]+)/g)].map((match) => match[1])
-  assert.ok(declarationValues.every((value) => !/#[0-9a-f]{3,8}|(?:rgba?|hsla?)\s*\(/i.test(value)))
-  const shipCss = [...css.matchAll(/(?:shipping|status)[^{}]*\{([^{}]*)\}/g)].map((match) => match[1]).join('\\n')
-  assert.doesNotMatch(shipCss, /\b(?:red|blue|green|orange|purple)\b/i)
-  assert.doesNotMatch(shipCss, /--(?:palette|tier-?1|raw)/i)
-})
-
-// A stand-in for @dagrejs/dagre with the surface layoutWorkflowGraph uses. The real
-// package is a vite build-time dependency; CI runs this suite with no node_modules.
-function fakeLayoutEngine() {
-  class Graph {
-    constructor() { this.nodes = new Map() }
-    setDefaultEdgeLabel() { return this }
-    setGraph() { return this }
-    setNode(id, value) { this.nodes.set(id, { ...value }) }
-    setEdge() {}
-    node(id) { return this.nodes.get(id) }
-  }
-  return { graphlib: { Graph }, layout: (g) => { let i = 0; for (const value of g.nodes.values()) { value.x = 100 + i * 200; value.y = 50; i += 1 } } }
-}
-
-// Mutation killed: re-adding a bare package import to the shaper makes this fail,
-// and the suite would otherwise break only in CI, where no node_modules exist.
-test('workflow-page:import-free shaper', () => {
-  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/workflows.js'), 'utf8')
-  const bare = [...source.matchAll(/^\s*import\s[^'"]*['"]([^'"]+)['"]/gm)].map((m) => m[1]).filter((spec) => !spec.startsWith('.') && !spec.startsWith('node:'))
-  assert.deepEqual(bare, [])
-})
-
-test('workflow-page:A1', () => {
-  for (const shape of Object.keys(VARIANTS)) {
-    const topology = executionTopology(shape, [])
-    const graph = shapeWorkflowGraph(shape, { observedLabels: [] })
-    assert.deepEqual(graph.nodes.map((node) => node.stage), topology.rows.map((row) => row.stage), shape)
-    assert.deepEqual(graph.stageOrder, topology.rows.map((row) => row.stage), shape)
-  }
-})
-
-test('D1 workflows page preserves every declared shape', () => {
-  const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
-  assert.match(page, /#each workflows as workflow/)
-  assert.doesNotMatch(page, /workflows\.(?:slice|filter)\(/)
-  assert.match(page, /workflowPresentation\(shape\)\.stages/)
-  assert.match(page, /#each stages as item,index/)
-})
-
-
-
-
-
-
-
-
-test('workflow-catalog:B1 declaration facts and profile inversion', () => {
-  for (const shape of Object.keys(VARIANTS)) {
-    const declaration = VARIANTS[shape]
-    const presentation = workflowPresentation(shape, { observedLabels: [] })
-    const expectedSeats = Array.isArray(declaration.required_seats) ? [...declaration.required_seats] : ['planner', 'builder', 'reviewer']
-    const expectedProfiles = Object.entries(TASK_PROFILES)
-      .filter(([, profile]) => profile.recommended_execution === shape)
-      .map(([key, profile]) => ({ key, name: profile.name }))
-    assert.deepEqual(presentation.seats.items, expectedSeats, `${shape} seats`)
-    assert.equal(presentation.writes.value, declaration.writes, `${shape} writes`)
-    assert.deepEqual(presentation.envelope_fields.items, declaration.envelope_fields, `${shape} envelope fields`)
-    assert.deepEqual(presentation.recommended_profiles.items, expectedProfiles, `${shape} recommending profiles`)
-    assert.notEqual(presentation.seats.items, declaration.required_seats, `${shape} seats are cloned`)
-    assert.notEqual(presentation.envelope_fields.items, declaration.envelope_fields, `${shape} envelope fields are cloned`)
-    if (declaration.envelope_fields[0]?.item_fields) assert.notEqual(presentation.envelope_fields.items[0].item_fields, declaration.envelope_fields[0].item_fields, `${shape} nested envelope metadata is cloned`)
-  }
-})
-
-test('workflow-catalog:C1 canonical topology contract and page dependency', () => {
-  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/workflows.js'), 'utf8')
-  const body = source.match(/export function workflowPresentation\([\s\S]*?\n\}/)?.[0] || ''
-  assert.match(body, /const canonicalTopology = executionTopology\(executionShape, observedLabels\)/)
-  assert.doesNotMatch(body, /(?:VARIANTS\[[^\]]+\]|declaration)\.stages/)
-  const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
-  assert.match(page, /import \{ workflowPresentation \} from '\.\/workflows\.js'/)
-  assert.match(page, /workflowPresentation\(shape\)/)
-})
-
-test('workflow-catalog:D1 empty facts explain their absence', () => {
-  for (const shape of Object.keys(VARIANTS)) {
-    const presentation = workflowPresentation(shape, { observedLabels: [] })
-    for (const key of ['seats', 'envelope_fields', 'recommended_profiles']) {
-      const fact = presentation[key]
-      if (fact.items.length === 0) assert.equal(typeof fact.absence_reason, 'string', `${shape}.${key} reason type`)
-      if (fact.items.length === 0) assert.ok(fact.absence_reason.trim(), `${shape}.${key} reason`)
-      if (fact.items.length > 0) assert.equal(fact.absence_reason, null, `${shape}.${key} present reason`)
-    }
-    if (presentation.writes.value == null) assert.ok(presentation.writes.absence_reason?.trim(), `${shape}.writes reason`)
-    else assert.equal(presentation.writes.absence_reason, null, `${shape}.writes present reason`)
-  }
-  assert.ok(workflowPresentation('full').envelope_fields.absence_reason)
-  for (const shape of ['repair', 'directed']) assert.ok(workflowPresentation(shape).recommended_profiles.absence_reason)
-  const unknown = workflowPresentation('not-declared')
-  for (const key of ['seats', 'envelope_fields', 'recommended_profiles']) assert.ok(unknown[key].absence_reason?.trim(), `unknown ${key} reason`)
-  assert.ok(unknown.writes.absence_reason?.trim())
-})
-
-test('A1 workflows page uses native assignment selectors and revision-checked saves', () => {
-  const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
-  assert.match(page, /getWorkflowEditor, saveWorkflow/)
-  assert.match(page, /expected_revision:editor.revision/)
-  assert.match(page, /policy_revision:editor.policy_revision/)
-  assert.match(page, /Execution harness<div class="select-shell"><select/)
-  assert.match(page, /Provider<div class="select-shell"><select/)
-  assert.match(page, /Model<div class="select-shell"><select/)
-  assert.match(page, /Reasoning effort<div class="select-shell"><select/)
-  assert.doesNotMatch(page, /Cell JSON|proposeWorkflowEdit/)
-})
-
-
-
-test('C1 workflows page has no execution action', () => {
-  const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
-  assert.match(page, /Save workflow/)
-  assert.match(page, /named workflow is selected/)
-  assert.doesNotMatch(page, /dispatchRun|bootRun|startRun/)
-  assert.match(page, /fixed order/)
-})
-
-
-
-test('workflow-page:A2', () => {
-  const graph = shapeWorkflowGraph('full', {
-    observedLabels: ['plan', 'gate', 'gate-repair:1', 'gate-reverify:1', 'review:r1', 'review:r2'],
-    workflow: { shape: 'full', seats: { planner: { agent: 'pi', provider: 'anthropic', id: 'planner', effort: 'high', skills: ['planning'], extensions: ['notes'] } } },
-  })
-  const laidOut = layoutWorkflowGraph(graph, { engine: fakeLayoutEngine() })
-  assert.ok(laidOut.nodes.every((node) => Number.isFinite(node.position.x) && Number.isFinite(node.position.y)))
-  assert.deepEqual(laidOut.layout, { measured: true, reason: null })
-  const unlaid = layoutWorkflowGraph(graph)
-  assert.ok(unlaid.nodes.every((node) => node.position === null))
-  assert.deepEqual(unlaid.layout, { measured: false, reason: 'layout-engine-absent' })
-  assert.deepEqual(graph.fixed_edges.map((edge) => [edge.source, edge.target]), graph.stageOrder.slice(1).map((stage, index) => [`stage:${graph.stageOrder[index]}`, `stage:${stage}`]))
-  assert.deepEqual(shapeWorkflowGraph('full', { observedLabels: [] }).loop_edges, [])
-  assert.ok(graph.loop_edges.some((edge) => edge.label === 'gate repair'))
-  assert.ok(graph.loop_edges.some((edge) => edge.label === 'gate reverify'))
-  assert.ok(graph.loop_edges.some((edge) => edge.label === 'review bounce'))
-  assert.equal(graph.nodes.find((node) => node.stage === 'plan').kind, 'universal')
-  assert.equal(graph.nodes.find((node) => node.stage === 'converge').kind, 'universal')
-  assert.equal(graph.nodes.find((node) => node.stage === 'scope-gate').kind, 'control')
-  const planner = graph.nodes.find((node) => node.stage === 'plan').seat
-  for (const field of ['agent', 'model', 'effort', 'skills', 'extensions']) assert.ok(field in planner)
-  assert.equal(planner.model, 'anthropic/planner')
-})
-
-test('workflow-page:B1', () => {
-  for (const shape of Object.keys(VARIANTS)) {
-    for (const stage of VARIANTS[shape].stages) {
-      const verdict = validateTopologyEdit(draftTopologyEdit({ shape, stage, action: 'remove' }))
-      const candidate = { ...VARIANTS[shape], stages: VARIANTS[shape].stages.filter((head) => head !== stage) }
-      const expected = shape === 'full' ? 'stage-reordered' : shapeValidationDefect(candidate, shape)?.defect ?? null
-      assert.equal(verdict.reason, expected, `${shape} minus ${stage}`)
-      if (expected) { assert.equal(verdict.status, 'refused'); assert.notEqual(verdict.tone, 'ok') }
-    }
-    const unchanged = validateTopologyEdit({ shape, stage: VARIANTS[shape].stages[0], action: 'add' })
-    assert.deepEqual([unchanged.status, unchanged.reason], ['unmeasured', 'edit-no-op'], `${shape} unchanged is measured as a no-op`)
-  }
-  const scout = validateTopologyEdit(draftTopologyEdit({ shape: 'scout', stage: 'scope-gate', action: 'remove' }))
-  assert.deepEqual([scout.status, scout.reason, scout.tone], ['refused', 'stage-missing', 'warning'])
-  assert.equal(validateTopologyEdit({ shape: 'no-such-shape', stage: 'plan', action: 'remove' }).reason, 'shape-undeclared')
-})
-
-// Citations name a call by callee, label and its occurrence among identical calls, never by line
-// number: a line number is a derived value that every edit above it in crew/drive.mjs invalidates,
-// and it turned an unrelated driver lane red (b768). The line is resolved against the live source.
 function resolveStageSite(site, scanned) {
   const matches = scanned.filter((call) => call.callee === (site.callee || 'stage') && call.label === site.label)
   return Number.isSafeInteger(site.occurrence) && site.occurrence >= 1 ? matches[site.occurrence - 1] || null : null
 }
 
 // Mutation killed: storing a line number again reintroduces the pin that broke b768.
-test('workflow-page:D1.no-stored-lines', () => {
-  const docs = JSON.parse(readFileSync(join(ROOT, 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
-  for (const [stage, doc] of Object.entries(docs)) {
-    for (const site of doc.source.sites) {
-      assert.equal(Object.prototype.hasOwnProperty.call(site, 'line'), false, `${stage} stores a line number`)
-      assert.ok(Number.isSafeInteger(site.occurrence) && site.occurrence >= 1, `${stage} site has no occurrence`)
-    }
-  }
-})
-
-test('workflow-page:D1', () => {
-  const drivePath = join(ROOT, 'crew/drive.mjs')
-  const drive = readFileSync(drivePath, 'utf8')
-  const docs = JSON.parse(readFileSync(join(ROOT, 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
-  const declared = new Set(Object.values(VARIANTS).flatMap((variant) => variant.stages))
-  for (const match of drive.matchAll(/stage\(\s*(['"`])(.*?)\1/g)) { const head = match[2].split(':')[0]; if (!head.startsWith('${')) declared.add(head) }
-  assert.deepEqual(Object.keys(docs).sort(), [...declared].sort())
-  for (const [stage, doc] of Object.entries(docs)) {
-    assert.equal(typeof doc.description, 'string')
-    assert.ok(doc.description.trim().length > 20)
-    assert.doesNotMatch(doc.description, /\n/)
-    assert.ok(Object.prototype.hasOwnProperty.call(doc, 'charter'))
-    assert.equal(doc.source.file, 'crew/drive.mjs')
-    assert.ok(Array.isArray(doc.source.sites))
-    if (!doc.source.sites.length) assert.ok(doc.source.reason, `${stage} has no sites and no reason`)
-    for (const site of doc.source.sites) {
-      assert.ok(resolveStageSite(site, scanStageSites(drive)), `${stage} cites occurrence ${site.occurrence} of ${site.callee}('${site.label}'), which is not a call in crew/drive.mjs`)
-    }
-  }
-  // Every executable stage() call is cited by some entry: a moved or added call reddens here.
-  const scanned = scanStageSites(drive)
-  const cited = new Set(Object.values(docs).flatMap((doc) => doc.source.sites.map((site) => resolveStageSite(site, scanned)?.line)))
-  drive.split('\n').forEach((line, index) => {
-    if (/^\s*\/\//.test(line)) return
-    if (/(?<![\w.])stage\(\s*['"`]/.test(line)) assert.ok(cited.has(index + 1), `crew/drive.mjs:${index + 1} stage() call is cited by no stage-docs entry`)
-  })
-})
-
-test('workflow-page:D2', () => {
-  const docs = JSON.parse(readFileSync(join(ROOT, 'visualizer/web/src/lib/stage-docs.json'), 'utf8'))
-  const graph = shapeWorkflowGraph('scout', { observedLabels: ['scout'], docs })
-  const newest = { run_id: 'newest', stages: [{ label: 'scout', duration_ms: 21, outcome: 'ok' }] }
-  const older = { run_id: 'older', stages: [{ label: 'scout', duration_ms: 8, outcome: 'failed' }] }
-  const result = inspectWorkflowNode(graph, 'stage:scout', { docs, recentRuns: [newest, older] })
-  assert.equal(result.declaration.stage, 'scout')
-  assert.equal(result.charter, docs.scout.charter)
-  assert.equal(result.docs.description, docs.scout.description)
-  assert.deepEqual(result.history.map((row) => [row.run_id, row.duration_ms, row.outcome]), [['newest', 21, 'ok'], ['older', 8, 'failed']])
-  assert.equal(result.history.length, 2)
-})
-
-test('workflow-page:D3', () => {
-  const assigned = { agent: 'pi', provider: 'openai', id: 'gpt', effort: 'high' }
-  assert.equal(compareSeat({ ...assigned }, { ...assigned }).status, 'equal')
-  const differs = compareSeat({ ...assigned, effort: 'low' }, assigned)
-  assert.equal(differs.status, 'differs-with-diff')
-  assert.equal(differs.diff.effort.boot, 'low')
-  const equalGraph = shapeWorkflowGraph('scout', { workflow: { seats: { planner: assigned } }, bootSeats: { planner: assigned } })
-  assert.equal(equalGraph.nodes.find((node) => node.stage === 'scout').enforcement.status, 'equal')
-  const differingGraph = shapeWorkflowGraph('scout', { workflow: { seats: { planner: assigned } }, bootSeats: { planner: { ...assigned, effort: 'low' } } })
-  assert.equal(differingGraph.nodes.find((node) => node.stage === 'scout').enforcement.status, 'differs-with-diff')
-  assert.equal(compareSeat(null, assigned).status, 'unmeasured')
-})
-
-test('workflow-page:E1', () => {
-  assert.deepEqual(VIEWS, ['fleet', 'ops', 'roster', 'agents', 'skills', 'prompts', 'workflows', 'assurances', 'run', 'phase'])
-  for (const hash of ['#/workflows', '#/ops', '#/roster', '#/skills', '#/prompts', '#/assurances', '#/adw-123', '#/adw-123/plan']) assert.equal(formatHash(parseHash(hash)), hash)
-  assert.deepEqual(parseHash('#/workflows/ignored'), { view: 'workflows', adw_id: null, phase: null })
-  const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
-  assert.match(app, /import WorkflowsPage from '\.\/lib\/WorkflowsPage\.svelte'/)
-  assert.match(app, /route\.view === 'workflows'/)
-  assert.match(app, /Workflows · Factory/)
-  assert.match(app, /<WorkflowsPage \/>/)
-  assert.match(app, />Workflows<\//)
-})
-
-test('workflow-page:F1', () => {
-  const aliases = /var\(--(?:bg|panel|panel-raised|line|muted|accent|accent-solid|accent-surface|on-accent|text|neutral|status-[a-z-]+|role-[a-z-]+)\)/
-  for (const relative of ['visualizer/web/src/lib/WorkflowsPage.svelte', 'visualizer/web/src/lib/WorkflowGraph.svelte']) {
-    const source = readFileSync(join(ROOT, relative), 'utf8')
-    for (const declaration of source.matchAll(/(?:^|[;{])\s*(?:color|background(?:-color)?|border(?:-color)?|box-shadow)\s*:[^;}]+/gm)) {
-      if (!/border\s*:\s*0$/.test(declaration[0])) assert.match(declaration[0], aliases, `${relative} has an unaliased painted declaration ${declaration[0]}`)
-      assert.doesNotMatch(declaration[0], /#|rgb\(|--ink|--paper|--spot|--serious/)
-    }
-  }
-})
-
-test('workflow-page:F2', () => {
-  const graph = readFileSync(join(ROOT, 'visualizer/web/src/lib/WorkflowGraph.svelte'), 'utf8')
-  assert.match(graph, /@xyflow\/svelte/)
-  assert.match(graph, /<SvelteFlow[\s\S]*\{nodes\}[\s\S]*\{edges\}/)
-  assert.match(graph, /class="graph-shell"/)
-  assert.match(graph, /width:100%;/)
-  assert.match(graph, /max-width:100%;/)
-  assert.match(graph, /overflow:auto;/)
-  assert.doesNotMatch(graph, /min-width:\\s*(?:4(?:0[1-9]|[1-9]\\d{2})|[5-9]\\d{2}|\\d{4,})px/)
-})
-
-
-
 const NO_CALL_REASONS = Object.freeze(['declared-without-executor-call'])
 function stripJavaScriptComments(source) {
   let output = ''
@@ -3085,32 +1731,6 @@ test('A1.swap-sites', () => {
       else assert.equal(Object.prototype.hasOwnProperty.call(site, 'bindings'), false)
     }
   }
-})
-
-test('C1.no-op', () => {
-  assert.deepEqual(validateTopologyEdit(draftTopologyEdit({ shape: 'scout', stage: 'undeclared', action: 'remove' })), { status: 'unmeasured', reason: 'edit-no-op', tone: 'warning' })
-  assert.deepEqual(validateTopologyEdit(draftTopologyEdit({ shape: 'full', stage: 'plan', action: 'move', value: -1 })), { status: 'unmeasured', reason: 'edit-no-op', tone: 'warning' })
-  assert.deepEqual(validateTopologyEdit(draftTopologyEdit({ shape: 'full', stage: 'plan', action: 'move', value: VARIANTS.full.stages.length })), { status: 'unmeasured', reason: 'edit-no-op', tone: 'warning' })
-})
-
-test('C1.full-reorder', () => {
-  const verdict = validateTopologyEdit(draftTopologyEdit({ shape: 'full', stage: 'plan', action: 'move', value: 1 }))
-  assert.deepEqual(verdict, { status: 'refused', reason: 'stage-reordered', tone: 'warning' })
-})
-
-test('RV1-3 final-index topology move is measured and refused', () => {
-  const destination = VARIANTS.full.stages.length - 1
-  const verdict = validateTopologyEdit(draftTopologyEdit({ shape: 'full', stage: VARIANTS.full.stages[0], action: 'move', value: destination }))
-  assert.deepEqual(verdict, { status: 'refused', reason: 'stage-reordered', tone: 'warning' })
-})
-
-test('RV1-4 workflow page states the proposal-only boundary', () => {
-  const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/WorkflowsPage.svelte'), 'utf8')
-  assert.match(page, /Changes apply only when this named workflow is selected/)
-  assert.match(page, /Running tasks keep their existing assignments/)
-  assert.match(page, /workflowPresentation/)
-  assert.match(page, /getWorkflowEditor/)
-  assert.doesNotMatch(page, /data-action\s*=/i)
 })
 
 import { PLAN_STEP_STATUSES, PLAN_STEP_REASONS, PLAN_ABSENCE_REASONS, planSteps } from '../visualizer/web/src/lib/plan-steps.js'
@@ -3348,198 +1968,6 @@ test('RV2-3 a reversed round window reports invalid timestamps for turns too', (
  assert.deepEqual([r.duration_reason,r.turns,r.turns_reason],['invalid-round-timestamps',null,'invalid-round-timestamps'])
 })
 
-test('operations summaries render absent inputs as unmeasured nulls, never clean', () => {
- const run = operationsRunSummary({ absent: 'ledger mirror unavailable', runs: null, settled: null })
- assert.equal(run.absent, 'ledger mirror unavailable')
- assert.equal(run.measured, false)
- assert.equal(run.unmeasured, 'Unmeasured — ledger mirror unavailable')
- assert.deepEqual([run.total, run.running, run.ok, run.fail, run.terminal, run.pass], [null, null, null, null, null, null])
- const tea = operationsTeardownSummary({ absent: 'teardown readout unavailable', measured: false, totals: { seats: null, proven: null, failed: null, unproven: null }, runs: [] })
- assert.equal(tea.measured, false)
- assert.equal(tea.unmeasured, 'Unmeasured — teardown readout unavailable')
- assert.deepEqual([tea.seats, tea.proven, tea.failed, tea.unproven, tea.measuredRuns, tea.totalRuns, tea.coverage, tea.clean], [null, null, null, null, null, null, null, null])
- const health = operationsHealthSummary({ absent: 'cell readout unavailable', cells: [] })
- assert.equal(health.measured, false)
- assert.equal(health.unmeasured, 'Unmeasured — cell readout unavailable')
- assert.deepEqual([health.cells, health.failures, health.affected], [null, null, null])
- assert.deepEqual(health.faultDomains, [])
- const posture = operationsPosture({ runSummary: run, teardownSummary: tea, healthSummary: health, brake: { state: 'clear' }, errors: [] })
- assert.equal(posture.tone, 'quiet')
- assert.equal(posture.label, 'Factory posture unmeasured')
- assert.match(posture.message, /Unmeasured — /)
- assert.doesNotMatch(posture.label, /operating cleanly/)
- const panel = cellHealthPanel({ absent: 'cell health unavailable reason', cells: [] })
- const totals = cellHealthTotals(panel)
- assert.deepEqual([totals.failures, totals.affected, totals.quiet], [null, null, null])
- assert.equal(totals.measured, false)
- assert.equal(totals.badge_label, 'Unmeasured — cell health unavailable reason')
- assert.equal(totals.badge_tone, 'unmeasured')
-})
-
-test('operations teardown summary explains the no-rows unmeasured case', () => {
- const tea = operationsTeardownSummary({absent: null, measured: false, totals: {seats: null, proven: null, failed: null, unproven: null}, runs: []})
- assert.match(tea.unmeasured, /^Unmeasured — /)
- assert.match(tea.unmeasured, /no seat_teardowns rows were recorded in the window/)
- assert.equal(tea.clean, null)
- const run = operationsRunSummary({runs: 1, settled: {running: 0, ok: 1, fail: 0, aborted: 0}})
- const health = operationsHealthSummary({cells: [{key: 'a', provider: 'p', model_id: 'm', agent: 'x', effort: 'high', failures: 0, roles: [], by_kind: []}]})
- const posture = operationsPosture({runSummary: run, teardownSummary: tea, healthSummary: health, brake: {state: 'clear'}, errors: []})
- assert.equal(posture.tone, 'quiet')
- assert.equal(posture.label, 'Factory posture unmeasured')
- assert.equal(typeof posture.message, 'string')
- assert.ok(posture.message.length > 0)
- assert.match(posture.message, /^Unmeasured — /)
- const withWhy = operationsTeardownSummary({absent: null, measured: false, totals: {seats: null, proven: null, failed: null, unproven: null}, runs: [{state: 'not-measured', not_measured_why: 'no seat_teardowns rows for this run — ledger example reason'}]})
- assert.match(withWhy.unmeasured, /ledger example reason/)
- assert.equal(withWhy.unmeasured, 'Unmeasured — no seat_teardowns rows for this run — ledger example reason')
- assert.equal(withWhy.clean, null)
-})
-
-test('operations summaries reach ok, clean and clear when all measured with zero failures', () => {
- const run = operationsRunSummary({ runs: 2, settled: { running: 0, ok: 2, fail: 0, aborted: 0 } })
- assert.deepEqual([run.total, run.running, run.ok, run.fail, run.terminal, run.pass], [2, 0, 2, 0, 2, 100])
- const tea = operationsTeardownSummary({ measured: true, totals: { seats: 2, proven: 2, failed: 0, unproven: 0 }, runs: [{ state: 'measured' }, { state: 'measured' }] })
- assert.equal(tea.clean, true)
- assert.equal(tea.measured, true)
- const health = operationsHealthSummary({ cells: [{ key: 'a', provider: 'p', model_id: 'm', agent: 'x', effort: 'high', failures: 0, roles: [], by_kind: [] }] })
- assert.deepEqual([health.cells, health.failures, health.affected], [1, 0, 0])
- const posture = operationsPosture({ runSummary: run, teardownSummary: tea, healthSummary: health, brake: { state: 'clear' }, errors: [] })
- assert.equal(posture.tone, 'ok')
- assert.equal(posture.label, 'Factory is operating cleanly')
- const totals = cellHealthTotals(cellHealthPanel({ cells: [{ key: 'a', state: 'silent', failures: 0, roles: [], tiers: [] }] }))
- assert.deepEqual([totals.failures, totals.affected, totals.quiet], [0, 0, 1])
- assert.equal(totals.badge_label, 'no failures')
- assert.equal(totals.badge_tone, 'clear')
-})
-
-test('operations summaries preserve measured failure arithmetic and reach watch', () => {
- const run = operationsRunSummary({ runs: 3, settled: { running: 0, ok: 1, fail: 1, aborted: 1 } })
- assert.equal(run.fail, 2)
- assert.equal(run.terminal, 3)
- assert.equal(run.pass, 33)
- const tea = operationsTeardownSummary({ measured: true, totals: { seats: 2, proven: 1, failed: 1, unproven: 0 }, runs: [{ state: 'measured' }] })
- assert.equal(tea.clean, false)
- const health = operationsHealthSummary({ cells: [{ key: 'b', provider: 'p', model_id: 'm', agent: 'x', effort: 'high', failures: 2, roles: ['builder'], by_kind: [{ kind: 'timeout' }] }] })
- assert.equal(health.failures, 2)
- assert.equal(health.affected, 1)
- assert.equal(health.faultDomains.length, 1)
- assert.equal(health.faultDomains[0].kind, 'timeout')
- const posture = operationsPosture({ runSummary: run, teardownSummary: tea, healthSummary: health, brake: { state: 'clear' }, errors: [] })
- assert.equal(posture.tone, 'watch')
- assert.equal(posture.label, 'Factory needs attention')
- const totals = cellHealthTotals(cellHealthPanel({ cells: [{ key: 'b', state: 'recorded', failures: 2, run_less: 0, in_run: 2, roles: ['builder'], tiers: ['build'], by_kind: [{ kind: 'timeout', failures: 2, run_less: 0, label: 'timeout ×2' }] }] }))
- assert.equal(totals.failures, 2)
- assert.equal(totals.badge_tone, 'watch')
- assert.equal(totals.badge_label, '2 failures')
-})
-
-test('OperationsOverview uses the absence-aware activity summary and keeps diagnostics separate', () => {
-  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/OperationsOverview.svelte'), 'utf8')
-  const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
-  assert.match(source, /activitySummary/)
-  assert.match(source, /summary\.unavailable/)
-  assert.match(source, /summary\.usage\.total == null/)
-  assert.match(source, /else if !degraded/)
-  assert.match(source, /Loading run activity/)
-  assert.doesNotMatch(source, /getCellHealth|getRunSet|getSeatTeardowns/)
-  for (const panel of ['CellHealthPanel', 'RunSetPanel', 'TeardownPanel', 'IntakePanel']) assert.ok(app.includes('<' + panel + ' />'))
-})
-
-
-test('CellHealthPanel binds the unmeasured-aware totals badge', () => {
- const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/CellHealthPanel.svelte'), 'utf8')
- assert.match(source, /import \{[^}]*cellHealthTotals[^}]*\} from '\.\/panels\.js'/)
- assert.match(source, /let totals = \$derived\(cellHealthTotals\(panel\)\)/)
- assert.match(source, /totals\.badge_tone/)
- assert.match(source, /totals\.badge_label/)
- assert.match(source, /totals\.affected \?\? '—'/)
- assert.match(source, /totals\.quiet \?\? '—'/)
- assert.match(source, /\.state-badge\.unmeasured/)
- assert.match(source, /Cell health unavailable/)
-})
-
-// MUTATION VL5: stub ledger.quickCheck() to ok in ledger-feed.mjs health() and /api/health reports a page-corrupt ledger clean again.
-test('VL5 feed health reports degraded on a page-corrupt-but-readable ledger and clean on a healthy one', { skip: sqliteAvailable() ? false : 'node:sqlite unavailable' }, async () => {
- const { DatabaseSync } = await import('node:sqlite')
- const corruptPage = (dbPath, table) => {
-  try { const db = new DatabaseSync(dbPath); db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); db.close() } catch {}
-  const db = new DatabaseSync(dbPath, { readOnly: true })
-  const row = db.prepare('SELECT rootpage FROM sqlite_master WHERE name = ?').get(table)
-  db.close()
-  assert.ok(row && row.rootpage && row.rootpage >= 2, `fixture: no corruptible rootpage for ${table}`)
-  const buf = readFileSync(dbPath)
-  const rawSize = buf.readUInt16BE(16)
-  const pageSize = rawSize === 1 ? 65536 : rawSize
-  const start = (row.rootpage - 1) * pageSize
-  for (let i = start; i < Math.min(start + pageSize, buf.length); i += 1) buf[i] = buf[i] ^ 0xff
-  writeFileSync(dbPath, buf)
- }
- const dir = scratchDir('vl5-feed-health-')
- const dbPath = join(dir, 'ledger.db')
- const ledger = openLedger({ dbPath, stderr: { write() {} } })
- ledger.startSession({ adw_id: 'vl5-1', repo_slug: 'r', task_slug: 't' })
- ledger.close()
- const setup = new DatabaseSync(dbPath)
- setup.exec('CREATE TABLE gate_extra (id INTEGER PRIMARY KEY, v TEXT)')
- const ins = setup.prepare('INSERT INTO gate_extra (v) VALUES (?)')
- for (let i = 0; i < 200; i += 1) ins.run('x'.repeat(200))
- setup.close()
- corruptPage(dbPath, 'gate_extra')
- const feed = createLedgerFeed({ ledgerDb: dbPath, triageDb: join(dir, 'viz.db'), crewRoot: join(dir, 'crew') })
- try {
-  const health = feed.health()
-  assert.equal(health.degraded, true, `expected feed health degraded:true on quick_check failure, found ${JSON.stringify(health.degraded)}`)
- } finally { feed.close() }
- const healthyDir = scratchDir('vl5-feed-healthy-')
- const healthyDb = join(healthyDir, 'ledger.db')
- const healthyLedger = openLedger({ dbPath: healthyDb, stderr: { write() {} } })
- healthyLedger.startSession({ adw_id: 'vl5-ok', repo_slug: 'r', task_slug: 't' })
- healthyLedger.close()
- const healthyFeed = createLedgerFeed({ ledgerDb: healthyDb, triageDb: join(healthyDir, 'viz.db'), crewRoot: join(healthyDir, 'crew') })
- try {
-  assert.equal(healthyFeed.health().degraded, false)
-  assert.equal(healthyFeed.health().quick_check_absent_reason, null)
- } finally { healthyFeed.close() }
- // MUTATION VL11: drop quick_check_absent_reason and a missing ledger's null quick_check carries no reason.
- const missingDir = scratchDir('vl11-feed-missing-')
- const missingFeed = createLedgerFeed({ ledgerDb: join(missingDir, 'absent.db'), triageDb: join(missingDir, 'viz.db'), crewRoot: join(missingDir, 'crew') })
- try {
-  const health = missingFeed.health()
-  assert.deepEqual([health.quick_check, health.quick_check_absent_reason], [null, 'ledger-unavailable'])
- } finally { missingFeed.close() }
-})
-
-// MUTATION VL7: remove the teardownSummary clean-false posture branch and teardown-only dirt reports ok again.
-test('VL7 teardown-only dirt reaches watch posture with teardown counts', () => {
- const run = operationsRunSummary({ runs: 2, settled: { running: 0, ok: 2, fail: 0, aborted: 0 } })
- const tea = operationsTeardownSummary({ measured: true, totals: { seats: 2, proven: 0, failed: 1, unproven: 1 }, runs: [{ state: 'measured' }, { state: 'measured' }] })
- assert.equal(tea.clean, false)
- const health = operationsHealthSummary({ cells: [{ key: 'a', provider: 'p', model_id: 'm', agent: 'x', effort: 'high', failures: 0, roles: [], by_kind: [] }] })
- const posture = operationsPosture({ runSummary: run, teardownSummary: tea, healthSummary: health, brake: { state: 'clear' }, errors: [] })
- assert.equal(posture.tone, 'watch')
- assert.equal(posture.label, 'Factory needs attention')
- assert.match(posture.message, /1 failed/)
- assert.match(posture.message, /1 unproven/)
-})
-
-// MUTATION VL8: drop the measuredRuns === totalRuns clean clause and a partly measured window reports clean again.
-test('VL8 partly measured teardown window is not clean and states runs measured', () => {
- const run = operationsRunSummary({ runs: 2, settled: { running: 0, ok: 2, fail: 0, aborted: 0 } })
- const health = operationsHealthSummary({ cells: [{ key: 'a', provider: 'p', model_id: 'm', agent: 'x', effort: 'high', failures: 0, roles: [], by_kind: [] }] })
- const partial = operationsTeardownSummary({ measured: true, totals: { seats: 2, proven: 2, failed: 0, unproven: 0 }, runs: [{ state: 'measured' }, { state: 'not-measured', not_measured_why: 'gate reason' }] })
- assert.equal(partial.clean, false)
- assert.equal(partial.measuredRuns, 1)
- assert.equal(partial.totalRuns, 2)
- const posture = operationsPosture({ runSummary: run, teardownSummary: partial, healthSummary: health, brake: { state: 'clear' }, errors: [] })
- assert.equal(posture.tone, 'watch')
- assert.match(posture.message, /1 of 2 runs/)
- const full = operationsTeardownSummary({ measured: true, totals: { seats: 2, proven: 2, failed: 0, unproven: 0 }, runs: [{ state: 'measured' }, { state: 'measured' }] })
- assert.equal(full.clean, true)
- const okPosture = operationsPosture({ runSummary: run, teardownSummary: full, healthSummary: health, brake: { state: 'clear' }, errors: [] })
- assert.equal(okPosture.tone, 'ok')
- assert.equal(okPosture.label, 'Factory is operating cleanly')
-})
-
 test('JR1 story kinds list journal filtering and counting', () => {
   assert.deepEqual(STORY_KINDS, ['stage', 'assign', 'envelope', 'plan_frozen', 'review_outcome', 'gate_discrimination', 'gate_check_discrimination', 'cold_suite', 'build_bounce', 'acceptance-coverage-bounce', 'step:bounce', 'decision', 'reseat', 'published', 'provider-retry', 'provider-retry-resumed', 'provider-retry-declined', 'seat-retrying', 'seat-substrate-down', 'seat-substrate-recovered'])
   assert.equal(Object.isFrozen(STORY_KINDS), true)
@@ -3751,16 +2179,6 @@ test('JR5 trajectory renders shaped journal with closed inspect', () => {
 })
 
 // MUTATION EL2: blank the ' (estimated)' suffix in price_label and the estimated row reads as measured.
-test('estimated cell prices label as estimated and chips render the flag', () => {
- const est = cellHealthPanel({ cells: [{ key: 'k', provider: 'meta', model_id: 'm', agent: 'pi', effort: 'high', state: 'silent', roles: [], tiers: [], failures: 0, run_less: 0, in_run: 0, by_kind: [], price: { cost_in_per_mtok: 4, cost_out_per_mtok: 20, rate_estimated: true }, price_pending: null }] }).rows[0]
- const meas = cellHealthPanel({ cells: [{ key: 'k2', provider: 'openai', model_id: 'm2', agent: 'pi', effort: 'high', state: 'silent', roles: [], tiers: [], failures: 0, run_less: 0, in_run: 0, by_kind: [], price: { cost_in_per_mtok: 2, cost_out_per_mtok: 12 }, price_pending: null }] }).rows[0]
- assert.equal(est.price_label, 'in $4/Mtok \u00b7 out $20/Mtok (estimated)')
- assert.doesNotMatch(meas.price_label, /estimated/)
- const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
- const line = source.split('\n').find((l) => l.includes('chip.cost_out_per_mtok'))
- assert.match(line, /chip\.rate_estimated \? ' · estimated'/)
-})
-
 const reasonCopyProbes = await import('../visualizer/web/src/lib/reason-copy.js').catch(() => null)
 const traceProbes = await import('../visualizer/web/src/lib/trace.js').catch(() => null)
 const fleetProbes = await import('../visualizer/web/src/lib/fleet.js').catch(() => null)
@@ -4211,22 +2629,6 @@ test('paused, hidden and disposed ledger refreshes do not restart themselves', a
   assert.equal(reads, 4)
 })
 
-test('failed ledger reads wait before retrying and collapsed diagnostics do not poll', async () => {
-  const { createRefreshLoop } = await import('../visualizer/web/src/lib/live.js')
-  let delay
-  const loop = createRefreshLoop(async () => { throw new Error('feed unavailable') }, {setTimeout: (fn, ms) => { delay = ms; return 1 }, clearTimeout() {}})
-  await assert.rejects(loop.refresh(), /feed unavailable/)
-  assert.equal(delay, 30000)
-  loop.stop()
-  const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
-  assert.doesNotMatch(app, /setInterval\(refresh|anyRunning/)
-  assert.match(app, /onMount\(\(\) => \{\s*refreshLoop = createRefreshLoop\(refresh/)
-  assert.match(app, /visible:\(\) => !document.hidden/)
-  assert.match(app, /bind:checked=\{autoRefresh\} onchange=\{\(event\) => refreshLoop\?\.setEnabled\(event.currentTarget.checked\)\}/)
-  assert.match(app, /\{#if showDiagnostics\}[\s\S]*<CellHealthPanel \/><RunSetPanel \/><TeardownPanel \/><IntakePanel \/>[\s\S]*\{\/if\}<\/details>/)
-})
-
-// Task summary evidence boundaries: a finished assignment is never task acceptance.
 test('task overview distinguishes reported work, review and final outcome', async () => {
   const { taskDetailSummary, verifiedTaskReturns } = await import('../visualizer/web/src/lib/task-detail.js')
   const run = { running:true, status:'running', phases:[{ name:'build' }], runtime:{ driver_state:'unknown' }, settlement:{state:'unsettled'} }
@@ -4290,85 +2692,63 @@ test('detail refresh includes final settlement and preserves successful partial 
 
 
 // Reversing an edit must remove the pending move, not keep a no-op ready to apply.
-test('roster draft replacements preserve other roles and remove a reverted edit', async () => {
-  const { replaceRosterMove, rosterChanges } = await import('../visualizer/web/src/lib/roster-draft.js')
-  const original = { provider:'openai', id:'original', agent:'pi', effort:'high', fallback:[{provider:'openai',id:'backup',agent:'pi',effort:'high'}] }
-  const base = [{tier:'build',seats:[{role:'builder',cell:original}]}]
-  const unrelated = {tier:'judge',role:'builder',cell:{...original,effort:'max'}}
-  const change = {tier:'build',role:'builder',cell:{...original,id:'replacement'}}
-  const moves = replaceRosterMove(base,[unrelated],change)
-  assert.deepEqual(moves,[unrelated,change])
-  assert.deepEqual(rosterChanges(base,moves)[1].before,original)
-  assert.equal(rosterChanges(base,moves)[1].afterKey,'openai/replacement')
-  assert.deepEqual(replaceRosterMove(base,moves,{...change,cell:original}),[unrelated])
-  assert.equal(original.id,'original')
-  const effortOnly = replaceRosterMove(base,[],{...change,cell:{...original,effort:'medium'}})
-  assert.deepEqual(effortOnly[0].cell.fallback,original.fallback)
-  assert.equal(effortOnly[0].cell.effort,'medium')
-  assert.equal(rosterChanges(base,[{tier:'build',role:'advisor',cell:null}])[0].before,null)
-})
-
-test('roster recommendation distinguishes missing evaluations from policy exclusions and unavailable reads', async () => {
-  const { rosterRecommendation, candidateExplanation } = await import('../visualizer/web/src/lib/roster-recommendation.js')
-  const missing = { outcome:'abstained', policy_candidates:[{ eligible:false, exclusion_reason:'measurement-absent' }], eval_cells:[] }
-  const view = rosterRecommendation(missing)
-  assert.equal(view.title, 'No recommendation yet')
-  assert.match(view.description, /no matching evaluation results for this role/)
-  assert.equal(view.suggested, false)
-  assert.match(candidateExplanation(missing.policy_candidates[0]), /role and configuration/)
-  for (const reason of ['cost-absent', 'band-below-floor', 'breaker-open']) {
-    const excluded = rosterRecommendation({ ...missing, policy_candidates:[{ exclusion_reason:reason }] })
-    assert.doesNotMatch(excluded.description, /no matching evaluation results/)
-    assert.equal(excluded.suggested, false)
+test('visualizer architecture keeps legacy Svelte syntax out of every component', () => {
+  const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => entry.isDirectory() ? (entry.name === 'node_modules' || entry.name === 'dist' ? [] : walk(join(dir, entry.name))) : [join(dir, entry.name)])
+  const files = walk(join(ROOT, 'visualizer'))
+  for (const file of files) {
+    const source = readFileSync(file, 'utf8')
+    const relative = file.replace(`${ROOT}/`, '')
+    if (file.endsWith('.svelte')) {
+      assert.doesNotMatch(source, /^\s*export\s+let\s/m, relative)
+      assert.doesNotMatch(source, /^\s*\$:\s/m, relative)
+    }
   }
-  assert.match(candidateExplanation({ exclusion_reason:'cost-absent' }), /Token usage or pricing is missing/)
-  assert.match(candidateExplanation({ exclusion_reason:'band-below-floor' }), /minimum capability/)
-  assert.match(candidateExplanation({ exclusion_reason:'breaker-open' }), /runtime health/)
-  assert.match(candidateExplanation({ exclusion_reason:'new-server-reason' }), /no recognized reason/)
-  assert.equal(rosterRecommendation({ ...missing, unavailable:'ledger offline' }).title, 'Recommendation unavailable')
-  assert.equal(rosterRecommendation(null).title, 'Recommendation unavailable')
+  assert.ok(files.some((file) => file.endsWith('.svelte')))
 })
 
-test('roster recommendation compares the complete assignment before offering a change preview', async () => {
-  const { rosterRecommendation } = await import('../visualizer/web/src/lib/roster-recommendation.js')
-  const cell = { provider:'openai', id:'test-model', agent:'pi', effort:'medium' }
-  const payload = { outcome:'chosen', chosen_cell:cell, current_cell:{ ...cell } }
-  const same = rosterRecommendation(payload)
-  assert.equal(same.title, 'Current assignment recommended')
-  assert.equal(same.suggested, false)
-  for (const key of ['provider', 'id', 'agent', 'effort']) {
-    const changed = rosterRecommendation({ ...payload, chosen_cell:{ ...cell, [key]:'different' } })
-    assert.equal(changed.title, 'Suggested assignment')
-    assert.equal(changed.suggested, true)
-    assert.match(changed.description, /does not change your roster/)
+test('theme role and lane aliases follow the ratified role order', () => {
+  const css = readFileSync(join(ROOT, 'visualizer/web/src/lib/theme.css'), 'utf8')
+  for (const [index, role] of ROLE_ORDER.entries()) {
+    assert.match(css, new RegExp(`--role-${role}\\s*:`))
+    assert.match(css, new RegExp(`--lane-${index}\\s*:\\s*var\\(\\s*--role-${role}\\s*\\)`))
   }
-  assert.equal(rosterRecommendation({ ...payload, chosen_cell:null }).suggested, false)
-  assert.equal(rosterRecommendation({ ...payload, chosen_cell:{ id:'partial' } }).suggested, false)
-  const panel = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
-  assert.match(panel, /\{#if pick.eval_cells\?\.length\}\s*<details class="pick-evidence">/)
-  assert.doesNotMatch(panel, /Recent model history:|Raw eval_cells evidence|Eligible survivor|Abstained/)
-  assert.match(panel, /Based on the saved roster. Your pending change has not been evaluated/)
 })
 
-test('candidate metrics preserve measured zero and hide absent or invalid numbers', async () => {
-  const { candidateMetrics } = await import('../visualizer/web/src/lib/roster-recommendation.js')
-  assert.deepEqual(candidateMetrics({ rate:{ value:0, numerator:0, denominator:12 }, cost:{ value:0 } }), ['Evaluation pass rate: 0% (0/12)', 'Estimated evaluation cost: $0'])
-  assert.deepEqual(candidateMetrics({ rate:{ value:null, numerator:null, denominator:null }, cost:{ value:null } }), [])
-  assert.deepEqual(candidateMetrics({ rate:{ value:0.5, numerator:1, denominator:2, reason:'rate-thin' }, cost:{ value:-1 } }), [])
-  assert.deepEqual(candidateMetrics({ rate:{ value:0.8, numerator:8, denominator:10 }, cost:{ value:0.000001 } }), ['Evaluation pass rate: 80% (8/10)', 'Estimated evaluation cost: <$0.0001'])
+test('theme gives component scrollbars a thin theme-aware treatment', () => {
+  const css = readFileSync(join(ROOT, 'visualizer/web/src/lib/theme.css'), 'utf8')
+  assert.match(css, /--scrollbar-track\s*:/)
+  assert.match(css, /--scrollbar-thumb\s*:/)
+  assert.match(css, /scrollbar-width:\s*thin/)
+  assert.match(css, /scrollbar-color:\s*var\(--scrollbar-thumb\) var\(--scrollbar-track\)/)
+  assert.match(css, /\*::\-webkit-scrollbar\s*\{[^}]*width:\s*\.625rem[^}]*height:\s*\.625rem/)
+  assert.match(css, /\*::\-webkit-scrollbar-thumb:hover\s*\{[^}]*var\(--scrollbar-thumb-hover\)/)
+  assert.match(css, /:root\[data-theme='ink'\]\s*\{\s*color-scheme:\s*dark/)
 })
 
-test('agents editor: api client posts the proposal and RosterPanel renders its diff', async () => {
-  const api = await import(pathToFileURL(join(ROOT, 'visualizer/web/src/lib/api.js')).href)
-  const calls = []
-  const original = globalThis.fetch
-  globalThis.fetch = async (path, options = {}) => { calls.push({ path: String(path), options }); return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } }) }
-  try { await api.proposeAgentEdit('planner', 'effort', 'max', 'judge') } finally { globalThis.fetch = original }
-  assert.equal(calls[0].path, '/api/roster/agent/propose')
-  assert.deepEqual(JSON.parse(calls[0].options.body), { role: 'planner', tier: 'judge', field: 'effort', value: 'max' })
-  const panel = readFileSync(join(ROOT, 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
-  assert.match(panel, /import \{[^}]*proposeAgentEdit[^}]*\} from '\.\/api\.js'/)
-  assert.match(panel, /await proposeAgentEdit\(/)
-  assert.match(panel, /<DiffBlock text=\{agentProposal\.diff\}/)
-  assert.match(panel, /agentProposal\.refusals/)
+test('the kept frontend imports nothing from crew/ or scripts/', () => {
+  const found = []
+  const walk = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const path = join(dir, name)
+      if (statSync(path).isDirectory()) { walk(path); continue }
+      if (!/\.(js|mjs|svelte)$/.test(name)) continue
+      const source = readFileSync(path, 'utf8')
+      for (const match of source.matchAll(/(?:from|import)\s*\(?\s*['"]([^'"]+)['"]/g)) {
+        if (!match[1].startsWith('.')) continue
+        const target = join(dir, match[1]).slice(ROOT.length + 1)
+        if (/^(crew|scripts)\//.test(target)) found.push(`${path.slice(ROOT.length + 1)} -> ${match[1]}`)
+      }
+    }
+  }
+  walk(join(ROOT, 'visualizer/web/src'))
+  assert.deepEqual(found, [])
+})
+
+// MUTATION: count shipped without the measured guard and a lean board reads "Shipped 0".
+test('the Shipped tab shows no count when no run has a measured ship state', () => {
+  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/TaskList.svelte'), 'utf8')
+  assert.match(source, /let shipMeasured = \$derived\(runs\.some\(\(run\) => shipStatus\(run\)\.key !== 'unmeasured'\)\)/)
+  assert.match(source, /shipped: shipMeasured \? runs\.filter\([^\n]*\)\.length : null,/)
+  assert.match(source, /\{counts\[tab\[0\]\] \?\? '—'\}/)
+  assert.match(source, /title=\{counts\[tab\[0\]\] == null \? 'ship state not measured' : undefined\}/)
 })

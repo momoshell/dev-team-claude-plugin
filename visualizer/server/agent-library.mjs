@@ -2,11 +2,11 @@ import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, 
 import { createHash, randomUUID } from 'node:crypto'
 import { delimiter, dirname, join, relative, resolve } from 'node:path'
 import { homedir } from 'node:os'
-import { loadCapabilities } from '../../crew/capabilities.mjs'
 import { AGENT_FILE_LIMIT, composeAgentFile, parseAgentFile, validateAgentFile } from '../web/src/lib/agent-files.js'
 
 const digest = (text) => createHash('sha256').update(text).digest('hex')
 const safeName = (name) => typeof name === 'string' && /^[a-z][a-z0-9._-]{0,79}$/.test(name)
+const TRANSPORTS = ['pane', 'headless-json', 'headless-rpc', 'acp'] // crew/capabilities.schema.json transports enum
 const problem = (error, status=400) => ({ ok:false, error, status })
 
 export function createAgentLibrary({ checkout=process.cwd(), home=homedir(), env=process.env, writable=true, capabilitiesPath=join(checkout,'crew/capabilities.json') } = {}) {
@@ -121,11 +121,14 @@ export function createAgentLibrary({ checkout=process.cwd(), home=homedir(), env
       if(lstatSync(target).isSymbolicLink() || realpathSync(target)!==target || !lstatSync(target).isFile()) return problem('Harness settings must be a regular file in the source checkout.',409)
       const before=readFileSync(target,'utf8')
       if(digest(before)!==expected_revision) return problem('Harness settings changed. Reload the page before saving your choice.',409)
-      const value=JSON.parse(before), entry=value.coding_agents?.[name]
-      if(!entry) return problem('This harness has no registered Crew integration.')
-      if(default_transport!==null && !entry.transports?.includes(default_transport)) return problem('Choose a mode supported by this harness.')
+      const value=JSON.parse(before)
+      if(!value || typeof value!=='object' || Array.isArray(value) || !value.coding_agents || typeof value.coding_agents!=='object' || Array.isArray(value.coding_agents)) return problem('The harness register is malformed: coding_agents must be an object.',400)
+      const entry=value.coding_agents[name]
+      if(!entry || typeof entry!=='object' || Array.isArray(entry)) return problem('This harness has no registered Crew integration.')
+      // The register's own shape is checked before either a save or a reset: a malformed entry is never rewritten.
+      if(!Array.isArray(entry.transports) || !entry.transports.length || !entry.transports.every(mode=>TRANSPORTS.includes(mode))) return problem(`The harness register is malformed: coding_agents.${name}.transports must be a non-empty list of ${TRANSPORTS.join(', ')}.`,400)
+      if(default_transport!==null && !entry.transports.includes(default_transport)) return problem('Choose a mode supported by this harness.')
       if(default_transport===null) delete entry.default_transport; else entry.default_transport=default_transport
-      loadCapabilities({register:value})
       const after=JSON.stringify(value,null,2)+'\n'
       temporary=join(dirname(target),`.harness-${randomUUID()}.tmp`)
       writeFileSync(temporary,after,{flag:'wx',mode:lstatSync(target).mode&0o777})

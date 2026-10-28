@@ -163,14 +163,6 @@ const LEDGER_DOORS = new Map([
     kind: 'home-default',
     why: 'ledger.mjs:3624 main calls defaultDbPath before dispatching the ledger CLI verb',
   }],
-  ['visualizer/server/server.mjs#parseCliArgs', {
-    kind: 'home-default',
-    why: 'server.mjs:51 parseCliArgs calls defaults, which computes the visualizer ledger path',
-  }],
-  ['visualizer/server/server.mjs#startServer', {
-    kind: 'home-default',
-    why: 'server.mjs:155 startServer calls defaults before constructing its default ledger feed',
-  }],
 ])
 
 // The mechanism is textual, but text is sufficient against these four tricks:
@@ -510,36 +502,6 @@ const LEDGER_SANDBOX_EXEMPT = new Map([
       return spans.length > 0 && spans.every((args) => /\bstateDir\b/.test(args))
     },
   }],
-  ['test/visualizer-server.test.mjs', {
-    why: 'visualizer-server.test.mjs:87 injects a feed into its only startServer call, so server.mjs:174 takes config.feed and never builds the default ledger feed; its 13 openLedger calls all name an explicit dbPath, and parseCliArgs only returns a config. The warranty reads doors and their call arguments, not the import list, so a newly imported door must prove its own containment.',
-    warranty: (source, dir) => {
-      // Per-door containment: an imported door with no entry here fails the warranty,
-      // so widening the import list cannot silently widen the exemption.
-      const contained = new Map([
-        ['visualizer/server/server.mjs#startServer', /\bfeed\b/],
-        ['visualizer/server/server.mjs#parseCliArgs', null],
-        ['scripts/factory/ledger.mjs#openLedger', /\bdbPath\b/],
-      ])
-      let homeDoors = 0
-      for (const { door, local } of importBindings(source, dir)) {
-        if (!contained.has(door)) return false
-        if (LEDGER_DOORS.get(door)?.kind === 'home-default') homeDoors += 1
-        const predicate = contained.get(door)
-        if (!predicate) continue
-        const spans = callArgs(source, local)
-        if (spans.length === 0 || !spans.every((args) => predicate.test(args))) return false
-      }
-      // No home-default door left means the exemption is spent, not warranted.
-      return homeDoors > 0
-    },
-  }],
-  ['test/visualizer-shape.test.mjs', {
-    why: 'visualizer-shape.test.mjs:470 supplies an explicit feed to every startServer call, so server.mjs:159 never creates the default ledger feed',
-    warranty: (source) => {
-      const spans = callArgs(source, 'startServer')
-      return spans.length > 0 && spans.every((args) => /\bfeed\b/.test(args))
-    },
-  }],
 ])
 const TRIPWIRE_SELF = 'test/factory-env.test.mjs'
 // These are exact Vite build entrypoints loaded only by Vite, not a prefix allowlist.
@@ -757,9 +719,10 @@ test('ledger sandbox tripwire — a real-ledger assignment beats a deliberate te
 })
 
 // MUTATION A5/A6: removing either indirect registry door blinds its production reach.
-test('ledger sandbox tripwire — registry doors include child and visualizer entrypoints', () => {
+test('ledger sandbox tripwire — registry doors include the child entrypoint', () => {
   assert.equal(LEDGER_DOORS.get('crew/child.mjs#runChild')?.kind, 'home-default')
-  assert.equal(LEDGER_DOORS.get('visualizer/server/server.mjs#startServer')?.kind, 'home-default')
+  // The visualizer server no longer reads or opens the ledger, so it is not a registry door.
+  assert.equal(LEDGER_DOORS.has('visualizer/server/server.mjs#startServer'), false)
 })
 
 // MUTATION A7: removing TEMP_MARKERS makes the genuine mkdtemp redirect cry wolf.
@@ -955,10 +918,7 @@ const RAW_TEMP_EXEMPT = new Map([
   ['test/factory-transcript.test.mjs', frozenTempSites(1)],
   ['test/fixtures.mjs', frozenTempSites(1)],
   ['test/visualizer-returns.test.mjs', frozenTempSites(1)],
-  ['test/visualizer-roster-edit.test.mjs', frozenTempSites(5)],
-  ['test/visualizer-server.test.mjs', frozenTempSites(45)],
-  ['test/visualizer-shape.test.mjs', frozenTempSites(1)],
-  ['test/visualizer-teardown.test.mjs', frozenTempSites(1)],
+  ['test/visualizer-server.test.mjs', frozenTempSites(7)],
 ])
 const TEMP_CONVERTED = [
   'crew/drive.test.mjs',
@@ -991,7 +951,7 @@ test('temp sandbox tripwire — every exemption has a live, load-bearing warrant
     assert.ok(exemption.sites > 0, `exemption ${file} is redundant`)
     total += exemption.sites
   }
-  assert.equal(total, 201)
+  assert.equal(total, 156)
 })
 
 test('temp sandbox tripwire — the detector flags a hand-rolled call and clears a helper call', () => {

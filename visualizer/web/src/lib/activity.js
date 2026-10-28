@@ -14,17 +14,15 @@ export const OUTCOMES = Object.freeze([
   { key: 'open', label: 'Open', tone: 'busy' },
   { key: 'unknown', label: 'Unknown', tone: 'quiet' },
 ])
-// Turns a /api/sessions response into the feed state: the feed is unavailable only when no source was readable.
+// Turns a /api/sessions response into the feed state: lean lanes are the only source, so the feed is unavailable
+// exactly when the lean read failed or the response states nothing about it (unreadable, never assumed readable).
 export function sessionsFeedState(result = {}) {
-  const pick = (name, fallback) => {
-    const entry = result?.sources?.[name]
-    if (entry && typeof entry === 'object') return { readable: entry.readable === true, runs: Number.isFinite(entry.runs) ? entry.runs : null, absent: typeof entry.absent === 'string' && entry.absent ? entry.absent : null }
-    return { readable: fallback, runs: null, absent: null }
-  }
-  const lean = pick('lean', false)
-  const ledger = pick('ledger', result?.degraded !== true)
-  const degraded = !(lean.readable || ledger.readable)
-  return { degraded, available: !degraded, sources: { lean, ledger } }
+  const entry = result?.sources?.lean
+  const lean = entry && typeof entry === 'object'
+    ? { readable: entry.readable === true, runs: Number.isFinite(entry.runs) ? entry.runs : null, absent: typeof entry.absent === 'string' && entry.absent ? entry.absent : null }
+    : { readable: false, runs: null, absent: null }
+  const degraded = !lean.readable
+  return { degraded, available: !degraded, sources: { lean } }
 }
 
 const terminal = new Set(['success', 'escalated', 'fail', 'aborted'])

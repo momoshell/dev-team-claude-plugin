@@ -92,7 +92,7 @@ lands in `journal.jsonl` and on the workspace's live `crew-stage` pill.
 | Harvest and arms | `crew/harvest.mjs`, `crew/arms.mjs` | - | - |
 | Memory | `crew/memory.mjs` | - | - |
 | Narration | `crew/drive.mjs` | - | [Model](#the-model) |
-| Visualizer | `visualizer/web/src/lib/AssurancePage.svelte` | - | [Visualizer](../visualizer/README.md) |
+| Visualizer | `visualizer/web/src/lib/LeanRunDetail.svelte` | - | [Visualizer](../visualizer/README.md) |
 | Pane transport | `crew/driver.mjs` | ADR-033 ([register](../docs/adr/README.md)) | [Adapters](#adapters-hot-seats) |
 | Headless daemon | `crew/daemon.mjs` | ADR-029 ([decision](../docs/adr/adr-029-headless-observability-interjection.md)) | [The daemon](#the-daemon) |
 | ACP | `crew/acp-client.mjs` | ADR-036 ([decision](../docs/adr/adr-036-acp-seat-transport.md)) | [ACP decision](../docs/adr/adr-036-acp-seat-transport.md) |

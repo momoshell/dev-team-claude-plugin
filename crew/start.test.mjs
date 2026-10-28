@@ -378,6 +378,16 @@ test('--loop lean detaches the bridge on a measured spec and boots nothing', asy
   assert.deepEqual(JSON.parse(written(unbound.calls, '/task/lean.json')[2]).closes, [])
 })
 
+// MUTATION: ignore fields.suite and a cargo brief runs npm test; always use it and a brief without suite gets no command.
+test('a brief suite line is the lean spec suite, split on whitespace; without one the suite is npm test (SB5, SB6)', async () => {
+  const cargo = fakes({ brief: BRIEF.replace('acceptance:', 'suite: cargo test -p power-api\nacceptance:') })
+  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps: cargo.deps })
+  assert.deepEqual(JSON.parse(written(cargo.calls, '/task/lean.json')[2]).suite, { command: 'cargo', args: ['test', '-p', 'power-api'], timeoutMs: 1800000 })
+  const plain = fakes()
+  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps: plain.deps })
+  assert.deepEqual(JSON.parse(written(plain.calls, '/task/lean.json')[2]).suite, { command: 'npm', args: ['test'], timeoutMs: 1800000 })
+})
+
 // MUTATION: ignore --loop in main and the flag starts the legacy run.
 test('main forwards --loop lean and refuses a missing, duplicate or unknown loop as usage', async () => {
   const lean = fakes()
@@ -1134,7 +1144,7 @@ test('a started lean spec reaches the PR with its exact P1 source and measured b
   assert.equal((await g.go()).status, 'done')
   assert.equal(seen.commit.subject, 'fix(crew): publish measured lane results')
   assert.equal(seen.publish.title, seen.commit.subject)
-  assert.equal(seen.publish.body, ['Source: "issue 1961"', '', '## Acceptance', '- RV1', '', '## Measurements', '- Baseline gate: red; failing ids: RV1.', '- Gate: green.', '- Mutations: 1/1 killed (RV1: killed).', '- Suite: green; exit 0.'].join('\n'))
+  assert.equal(seen.publish.body, ['Source: "issue 1961"', '', '## Acceptance', '- RV1: an edit that cannot boot is refused', '', '## Measurements', '- Baseline gate: red; failing ids: RV1.', '- Gate: green.', '- Mutations: 1/1 killed (RV1: killed).', '- Suite: green; exit 0.'].join('\n'))
   assert.equal(spec.source, 'issue 1961')
 })
 

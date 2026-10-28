@@ -4,7 +4,7 @@
 // one field per line, with JSON for objects and object lists. Import-free, so the new
 // path never loads the old one.
 
-export const BRIEF_FIELDS = Object.freeze(['source', 'closes', 'tier', 'shape', 'acceptance', 'out_of_scope'])
+export const BRIEF_FIELDS = Object.freeze(['source', 'closes', 'tier', 'shape', 'acceptance', 'out_of_scope', 'suite'])
 export const TIERS = Object.freeze(['mechanical', 'build', 'judge'])
 export const SHAPES = Object.freeze(['standard', 'stepped', 'finish'])
 export const AGENT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
@@ -34,7 +34,7 @@ function value(raw) {
 // The body's lines grouped by level-1 or level-2 heading, skipping fenced text: a
 // heading or item quoted inside a fence is an example, as the driver reads it.
 // A heading the body repeats is listed in `repeated`; the driver reads only the first.
-function sections(body) {
+export function sections(body) {
   const out = new Map()
   const repeated = []
   let current = null
@@ -69,13 +69,14 @@ export function parseBrief(text) {
     if (!BRIEF_FIELDS.includes(pair[1])) { defects.push(`unknown field ${pair[1]}; the fields are ${BRIEF_FIELDS.join(', ')}`); continue }
     fields[pair[1]] = value(pair[2])
   }
-  for (const key of BRIEF_FIELDS) if (!Object.hasOwn(fields, key)) defects.push(`missing field ${key}`)
+  for (const key of BRIEF_FIELDS) if (key !== 'suite' && !Object.hasOwn(fields, key)) defects.push(`missing field ${key}`)
   const body = lines.slice(end + 1).join('\n')
   if (typeof fields.source !== 'string' || !fields.source) defects.push('source names the issue or operator command the lane starts from')
   if (fields.closes !== null && !(Number.isSafeInteger(fields.closes) && fields.closes > 0)) defects.push('closes is null or one issue number')
   if (!TIERS.includes(fields.tier)) defects.push(`tier is one of ${TIERS.join(', ')}`)
   if (!SHAPES.includes(fields.shape)) defects.push(`shape is one of ${SHAPES.join(', ')}`)
   if (typeof fields.out_of_scope !== 'string' || !fields.out_of_scope) defects.push('out_of_scope says what the lane must not change')
+  if (Object.hasOwn(fields, 'suite') && (typeof fields.suite !== 'string' || fields.suite.trim() === '')) defects.push('suite is a command line (for example: suite: cargo test -p power-api)')
   const acceptance = Array.isArray(fields.acceptance) ? fields.acceptance : []
   if (acceptance.length === 0 || !acceptance.every((id) => typeof id === 'string' && ID.test(id))) defects.push('acceptance lists the gate ids, each a letter then letters, digits, . _ or -')
   else if (new Set(acceptance).size !== acceptance.length) defects.push('acceptance repeats an id')

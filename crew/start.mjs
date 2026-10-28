@@ -61,6 +61,12 @@ function git(d, checkout, args) {
   return result.status === 0 ? String(result.stdout).trim() : null
 }
 
+// A brief's `suite` line as a spec command: whitespace-split, no shell.
+function suiteSpec(suite) {
+  const [command, ...args] = suite.trim().split(/\s+/)
+  return { command, args, timeoutMs: 1800000 }
+}
+
 export async function startLane({ briefPath, checkout, check = false, loop, deps = {} }) {
   const d = { ...defaultDeps(), ...deps }
   if (loop !== undefined && loop !== 'lean') throw Object.assign(new StartRefusal(`--loop takes lean, got ${JSON.stringify(loop)}`), { exitCode: 2 })
@@ -142,7 +148,7 @@ export async function startLane({ briefPath, checkout, check = false, loop, deps
     const spec = {
       id: lane, cwd: worktree, taskDir, tier: fields.tier, shape: fields.shape, brief: run, acceptance: fields.acceptance,
       source: fields.source, branch: lane, base, closes: fields.closes === null ? [] : [fields.closes],
-      suite: { command: 'npm', args: ['test'], timeoutMs: 1800000 },
+      suite: fields.suite === undefined ? { command: 'npm', args: ['test'], timeoutMs: 1800000 } : suiteSpec(fields.suite),
     }
     try {
       d.mkdirSync(taskDir, { recursive: true })

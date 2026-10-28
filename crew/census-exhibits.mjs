@@ -22,6 +22,7 @@ export const CENSUS_EXHIBIT_REGISTER = Object.freeze([
   Object.freeze({ file: 'crew/acp-permission.test.mjs', kind: 'near-miss', reason: 'read-only command allowlist fixture: git ls-files is a command string, not a count census' }),
   Object.freeze({ file: 'test/factory-model-eval.test.mjs', kind: 'near-miss', reason: 'tracked bench judge.json discovery, not a count census' }),
   Object.freeze({ file: 'test/factory-make-brief.test.mjs', kind: 'near-miss', reason: 'slow-git PATH shim fixture: ls-files is a git verb the shim delays, not a count census' }),
+  Object.freeze({ file: 'crew/loop.test.mjs', kind: 'near-miss', reason: 'scratch-repo git ls-files proves the lane suite sees a new file, not a count census' }),
 ])
 
 export const CENSUS_MEASUREMENT_REASONS = Object.freeze([

@@ -9,7 +9,7 @@ import { resolveAgents } from './agents.mjs'
 import {
   CHECK_REASONS, checkBaseline, commitChanges, openPullRequest, proveMutations, rebaseBranch, runGate, runSuite,
 } from './checks.mjs'
-import { TIERS, validateEnvelope } from './protocols.mjs'
+import { TIERS, sections, validateEnvelope } from './protocols.mjs'
 import { proveRequiredSkills } from './skills-proof.mjs'
 
 export const DEFAULT_ROUNDS = 2
@@ -54,7 +54,10 @@ function suiteFailures(results) {
 
 // `git status --porcelain=v1 -z`: `XY path` records, a rename or copy (in either column) followed by its
 // source. Returns every path named, or null when the output is truncated, mis-framed or names an unsafe path.
-function parseChangedPaths(stdout) {
+// With `unstaged`, only the primary path of a record whose work-tree column differs from the index (and which is not
+// added-then-deleted, no change against HEAD) is returned: the entries a `git add` has something to stage, as
+// commitChanges stages them. A staged deletion or a rename source is in neither the tree nor the index and has no pathspec.
+function parseChangedPaths(stdout, unstaged = false) {
   const parts = stdout.split('\0')
   if (parts.pop() !== '') return null
   const paths = new Set()
@@ -66,10 +69,28 @@ function parseChangedPaths(stdout) {
     const named = [record.slice(3)]
     if ('RC'.includes(record[0]) || 'RC'.includes(record[1])) named.push(parts[++at])
     if (!named.every((path) => typeof path === 'string' && safe(path))) return null
-    for (const path of named) paths.add(path)
+    if (!unstaged) for (const path of named) paths.add(path)
+    else if (record[1] !== ' ' && !(record[0] === 'A' && record[1] === 'D')) paths.add(named[0])
   }
   return [...paths]
 }
+
+// The `## Acceptance` items of the brief as id -> text: `- (ID) text`, continuation lines (indented or lazy) joined, every line
+// break collapsed so brief prose cannot forge a line of the body. The section is the one parseBrief reads: the first,
+// outside fenced text.
+function acceptanceTexts(brief) {
+  const texts = new Map()
+  let current = null
+  for (const line of (sections(brief.replace(/\r\n?/g, '\n')).parts.get('## Acceptance') ?? [])) {
+    const item = /^\s*[-*]\s+\(([^)]+)\)\s*(.*)$/.exec(line)
+    if (item) { current = item[1]; if (!texts.has(current)) texts.set(current, item[2].trim()); else current = null; continue }
+    // Indented lines and unindented lazy paragraph continuations both belong to the item; a blank line or another list marker ends it.
+    if (current && /\S/.test(line) && (/^\s/.test(line) || !/^([-*+]|\d+[.)])\s/.test(line))) texts.set(current, `${texts.get(current)} ${line.trim()}`.trim())
+    else current = null
+  }
+  return texts
+}
+const oneLine = (v) => String(v ?? '').replace(/\s*[\r\n]+\s*/g, ' ').trim()
 
 export async function runLoop(spec, deps = {}) {
   // Nothing is read or run until every field and seam is sound.
@@ -114,6 +135,7 @@ export async function runLoop(spec, deps = {}) {
   let planPath = isFinish ? fin.planPath : null
   let gatePath = isFinish ? fin.gatePath : null
   let changedPaths = []
+  let stagePaths = []
 
   const emit = async (event, fields) => {
     const row = { event, lane: spec.id, stage: where, ...fields }
@@ -249,13 +271,17 @@ export async function runLoop(spec, deps = {}) {
       seats.reviewer = { ...seats.reviewer, rounds: FINISH_REVIEW_ROUNDS - (fin.priorReviewRounds ?? 0) }
     }
 
-    const measurements = []
+    // One line each, from the last round: a result never measured stays unmeasured in the body.
+    const baselineLines = []
+    let gateLine = '- Gate: unmeasured.'
+    let proofLine = '- Mutations: unmeasured.'
+    let suiteLine = '- Suite: unmeasured.'
     const finishReviews = []
     const baseline = isFinish ? null : await stage('baseline', () => callCheck('baseline', d.checkBaseline, { cwd, gatePath, timeoutMs }))
     if (!isFinish) {
       if (!baseline.accepted) return stop(baseline.reason, baseline)
       if (baseline.reason !== 'gate-failed' || baseline.result?.status !== 'red' || baseline.result.reason !== 'gate-failed' || !(baseline.result.failingIds?.length > 0)) return stop('runner-threw', baseline)
-      measurements.push(`- Baseline gate: ${baseline.result.status}; failing ids: ${baseline.result.failingIds.join(', ')}.`)
+      baselineLines.push(`- Baseline gate: ${baseline.result.status}; failing ids: ${baseline.result.failingIds.join(', ')}.`)
     }
 
     let feedback = isFinish ? [{ id: 'finish-stop', reason: fin.stop.reason, observation: fin.stop.observation }, ...(fin.guidance !== undefined ? [{ id: 'finish-return', guidance: fin.guidance }] : []), ...fin.findings, { id: 'finish-gate', summary: 'You may repair the lane gate at the Gate path; return replacement mutations for any check you change.' }] : []
@@ -282,7 +308,7 @@ export async function runLoop(spec, deps = {}) {
         reaiming = false
         const gate = await stage('gate', () => callCheck('gate', d.runGate, { cwd, gatePath, timeoutMs }, { command: true }))
         if (gate.status !== 'green') return stop(gate.reason, gate)
-        measurements.push(`- Gate: ${gate.status}.`)
+        gateLine = `- Gate: ${gate.status}.`
 
         const proof = await stage('mutations', () => callCheck('mutations', d.proveMutations, { cwd, gatePath, checks: acceptance, mutations, timeoutMs }))
         const rows = Array.isArray(proof.rows) ? proof.rows : []
@@ -306,12 +332,13 @@ export async function runLoop(spec, deps = {}) {
           }))
           continue
         }
-        measurements.push(`- Mutations: ${rows.filter((row) => row.outcome === 'killed').length}/${acceptance.length} killed (${rows.map((row) => `${row.check}: ${row.outcome}`).join(', ')}).`)
+        proofLine = `- Mutations: ${rows.filter((row) => row.outcome === 'killed').length}/${acceptance.length} killed (${rows.map((row) => `${row.check}: ${row.outcome}`).join(', ')}).`
 
         // The reviewer is told what git reports changed now, remeasured every round; an unreadable status stops the lane.
         const status = await stage('review-paths', () => callCheck('review-paths', d.run, { cwd, command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs }, { command: true }))
         changedPaths = status.status === 'green' && typeof status.stdout === 'string' ? parseChangedPaths(status.stdout) : null
         if (changedPaths === null) return stop('paths-unmeasured', status)
+        stagePaths = parseChangedPaths(status.stdout, true)
 
         // A finish review is capped outright: its bound ends the run, never a lead bounce into a fourth round.
         const reviewed = await stage('review', () => seatTurn('reviewer', [], { singleTurn: isFinish }))
@@ -328,14 +355,18 @@ export async function runLoop(spec, deps = {}) {
         break
       }
 
+      // The suite runs over the file set the commit will hold: the measured changed paths that need staging, and only those, are staged
+      // so a test that lists tracked files sees a file the lane created.
+      if (stagePaths.length > 0) {
+        const staged = await stage('suite-stage', () => callCheck('suite-stage', d.run, { cwd, command: 'git', args: ['--literal-pathspecs', 'add', '--', ...stagePaths], timeoutMs }, { command: true }))
+        if (staged.status !== 'green') return stop(staged.reason, staged)
+      }
       const runSuite = () => stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs ?? timeoutMs }, { command: true }))
       const suite = await runSuite()
       // Only a measured red is run once more; an unmeasured suite stops as it is, and the first red stays in the PR text.
       if (suite.status === 'red') {
-        measurements.push(`- Suite: ${suite.status}; exit ${suite.code}.`)
         const rerun = await runSuite()
         if (rerun.status === 'red') {
-          measurements.push(`- Suite re-run: ${rerun.status}; exit ${rerun.code}.`)
           if (repaired) return stop(suite.reason, rerun)
           // Two measured reds earn one builder turn and one review (beyond their rounds if spent), then the gate, proof, review and suite again.
           const failures = suiteFailures([suite, rerun])
@@ -354,14 +385,31 @@ export async function runLoop(spec, deps = {}) {
           continue
         }
         if (rerun.status !== 'green') return stop(rerun.reason, rerun)
-        measurements.push(`- Suite re-run: ${rerun.status}; exit ${rerun.code}.`)
+        suiteLine = `- Suite: green; exit ${rerun.code} (re-run after red; exit ${suite.code}).`
       } else {
         if (suite.status !== 'green') return stop(suite.reason, suite)
-        measurements.push(`- Suite: ${suite.status}; exit ${suite.code}.`)
+        suiteLine = `- Suite: green; exit ${suite.code}.`
       }
       break
     }
-    const body = [`Source: ${JSON.stringify(spec.source)}`, '', '## Acceptance', ...acceptance.map((id) => `- ${id}`), '', '## Measurements', ...measurements].join('\n')
+    const measurements = [...baselineLines, gateLine, proofLine, suiteLine]
+    const texts = acceptanceTexts(spec.brief)
+    const finishLines = !isFinish ? [] : [
+      '## Finish',
+      `- Stop: ${oneLine(fin.stop.reason)}${fin.stop.observation == null ? '' : `: ${oneLine(JSON.stringify(fin.stop.observation))}`}`,
+      ...(finishReviews.length === 0 ? ['- Reviews: unmeasured.'] : finishReviews.map((r, at) => {
+        const findings = Array.isArray(r.findings) && r.findings.length > 0
+          ? r.findings.map((f) => `${oneLine(f?.id)} (${oneLine(f?.severity)}) at ${oneLine(f?.location)}: ${oneLine(f?.summary)}`).join('; ')
+          : 'none'
+        return `- Review ${at + 1}: ${oneLine(r.verdict)}; findings: ${findings}`
+      })),
+      '',
+    ]
+    const body = [
+      `Source: ${JSON.stringify(spec.source)}`, '', '## Acceptance',
+      ...acceptance.map((id) => `- ${id}: ${texts.get(id) || 'unmeasured (the brief gives no text for this id)'}`),
+      '', ...finishLines, '## Measurements', ...measurements,
+    ].join('\n')
 
     // The commit names what git reports changed now, never a list the caller wrote before the build.
     const status = await stage('paths', () => callCheck('paths', d.run, { cwd, command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs }, { command: true }))

@@ -10,7 +10,7 @@ const brief = (overrides = {}, body = BODY) => {
 }
 
 test('P1 vocabularies are the ADR-052 fields, tiers and shapes', () => {
-  assert.deepEqual(BRIEF_FIELDS, ['source', 'closes', 'tier', 'shape', 'acceptance', 'out_of_scope'])
+  assert.deepEqual(BRIEF_FIELDS, ['source', 'closes', 'tier', 'shape', 'acceptance', 'out_of_scope', 'suite'])
   assert.deepEqual(TIERS, ['mechanical', 'build', 'judge'])
   assert.deepEqual(SHAPES, ['standard', 'stepped', 'finish'])
 })
@@ -23,6 +23,17 @@ test('a well-formed brief parses with no defects', () => {
   assert.equal(parseBrief(brief({ closes: 'null' })).fields.closes, null)
 })
 
+// MUTATION: require suite like the other fields and every brief without it is refused; skip its check and a list passes.
+test('suite is an optional command line: absent is defect-free, a string parses, an empty or list value is refused (SB5, SB6)', () => {
+  assert.equal(Object.hasOwn(parseBrief(brief()).fields, 'suite'), false)
+  const cargo = parseBrief(brief({ suite: 'cargo test -p power-api' }))
+  assert.deepEqual(cargo.defects, [])
+  assert.equal(cargo.fields.suite, 'cargo test -p power-api')
+  for (const suite of ['', '[cargo, test]']) {
+    assert.deepEqual(parseBrief(brief({ suite })).defects, ['suite is a command line (for example: suite: cargo test -p power-api)'])
+  }
+})
+
 // MUTATION: drop the frontmatter-open check and a plain markdown brief reaches field parsing.
 test('a brief without frontmatter is refused', () => {
   assert.deepEqual(parseBrief('# Ask\n').defects, ['the brief does not open with a --- frontmatter block'])
@@ -32,7 +43,7 @@ test('a brief without frontmatter is refused', () => {
 // MUTATION: skip the unknown-field check and a misspelt field is silently ignored.
 test('unknown and missing fields are refused by name', () => {
   const { defects } = parseBrief(brief({ tier: undefined, lane: 'b1' }))
-  assert.ok(defects.includes('unknown field lane; the fields are source, closes, tier, shape, acceptance, out_of_scope'))
+  assert.ok(defects.includes('unknown field lane; the fields are source, closes, tier, shape, acceptance, out_of_scope, suite'))
   assert.ok(defects.includes('missing field tier'))
 })
 

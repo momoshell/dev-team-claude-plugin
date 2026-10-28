@@ -9,7 +9,7 @@ import { main, showLane } from './show.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
 const SHOW = fileURLToPath(new URL('./show.mjs', import.meta.url))
-const CAPTURES = fileURLToPath(new URL('../tasks/headless-worker/captures/', import.meta.url))
+const CAPTURES = fileURLToPath(new URL('../test/fixtures/headless-worker/captures/', import.meta.url))
 const CLAUDE = readFileSync(join(CAPTURES, 'a-baseline.jsonl'), 'utf8')
 const PI = readFileSync(join(CAPTURES, 'pi-a1-json-baseline.jsonl'), 'utf8')
 const TAIL = `${CLAUDE.trimEnd().split('\n').slice(-2).join('\n')}\n`

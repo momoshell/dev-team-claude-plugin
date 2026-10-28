@@ -1,6 +1,6 @@
 # ADR-029: Headless observability and interjection — the pane-parity matrix for piped seats
 
-**Status:** RATIFIED 2026-08-13 (all seven §8 questions answered; see §9) · **Source:** issue #85 (epic #80) · **Evidence:** `tasks/headless-worker/spike-findings.md` (HW-1, claude), `tasks/headless-worker/pi-spike-findings.md` (HW-1b, pi)
+**Status:** superseded by ADR-052 (the lean runtime retired it) · was RATIFIED 2026-08-13 (all seven §8 questions answered; see §9) · **Source:** issue #85 (epic #80) · **Evidence:** `tasks/headless-worker/spike-findings.md` (HW-1, claude), `tasks/headless-worker/pi-spike-findings.md` (HW-1b, pi)
 
 ---
 

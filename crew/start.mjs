@@ -1,20 +1,22 @@
-// crew start <brief.md> [--check] [--checkout <dir>]
+// crew start <brief.md> [--check] [--checkout <dir>] [--loop lean|old]
 //
 // The lean entry (ADR-052 phase 1): one P1 brief in, one running lane out. It checks the
 // brief, creates the lane worktree and starts the run detached, handing the brief to the
 // planner as its whole input. No compile, no baseline, no gate. The lane name is the
 // brief's file name. --check validates the brief and needs no checkout.
 //
-// `--loop lean` stands on the brief parser and the agent definitions alone: it refuses
-// before any git call when the brief is not P1 or the definitions do not resolve, and it
-// never loads the old driver, roster or crew modules.
+// The lean loop is the default: a start with no `--loop` (or `--loop lean`) stands on the
+// brief parser and the agent definitions alone. It refuses before any git call when the
+// brief is not P1 or the definitions do not resolve, and it never loads the old driver,
+// roster or crew modules.
 //
-// Without `--loop lean` the lane runs on today's driver, so the brief the run reads carries
-// the driver's fixed header (`# Task`, then the bound-issue slot when `closes` is set) and
-// is checked with the driver's own parsers: the driver refuses to publish an issue-bound
-// lane whose plan declares no issue, and promotes the bound issue to a Closes trailer. The
-// crew boots the roster generated from the agent definitions, refused before any git call
-// if it cannot boot. Those old-path modules load by dynamic import on that path only.
+// `--loop old` runs the lane on the old driver until item 5.2 deletes it, so the brief the
+// run reads carries the driver's fixed header (`# Task`, then the bound-issue slot when
+// `closes` is set) and is checked with the driver's own parsers: the driver refuses to
+// publish an issue-bound lane whose plan declares no issue, and promotes the bound issue to
+// a Closes trailer. The crew boots the roster generated from the agent definitions, refused
+// before any git call if it cannot boot. Those old-path modules load by dynamic import on
+// that path only.
 import { spawn, spawnSync } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -69,7 +71,8 @@ function suiteSpec(suite) {
 
 export async function startLane({ briefPath, checkout, check = false, loop, deps = {} }) {
   const d = { ...defaultDeps(), ...deps }
-  if (loop !== undefined && loop !== 'lean') throw Object.assign(new StartRefusal(`--loop takes lean, got ${JSON.stringify(loop)}`), { exitCode: 2 })
+  if (loop !== undefined && loop !== 'lean' && loop !== 'old') throw Object.assign(new StartRefusal(`--loop takes lean or old, got ${JSON.stringify(loop)}`), { exitCode: 2 })
+  loop ??= 'lean'
   const lane = laneName(briefPath)
   const text = d.readFileSync(briefPath, 'utf8')
   const { fields, defects } = parseBrief(text)
@@ -186,15 +189,15 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   const flagAt = argv.indexOf('--loop')
   const valued = new Set([...(at >= 0 ? [at, at + 1] : []), ...(flagAt >= 0 ? [flagAt, flagAt + 1] : [])])
   const rest = argv.filter((arg, index) => arg !== '--check' && !valued.has(index))
-  const badLoop = flagAt >= 0 && (argv[flagAt + 1] !== 'lean' || argv.indexOf('--loop', flagAt + 1) >= 0)
+  const badLoop = flagAt >= 0 && (!['lean', 'old'].includes(argv[flagAt + 1]) || argv.indexOf('--loop', flagAt + 1) >= 0)
   if (rest.length !== 1 || rest[0].startsWith('--') || (at >= 0 && !argv[at + 1]) || badLoop) {
-    process.stderr.write('usage: crew start <brief.md> [--check] [--checkout <dir>] [--loop lean]\n')
+    process.stderr.write('usage: crew start <brief.md> [--check] [--checkout <dir>] [--loop lean|old]\n')
     return 2
   }
   // --check needs no checkout, and a real start finds one only after the roster passes.
   const checkout = at >= 0 ? resolve(argv[at + 1]) : null
   try {
-    await startLane({ briefPath: resolve(rest[0]), checkout, check, loop: flagAt >= 0 ? 'lean' : undefined, deps })
+    await startLane({ briefPath: resolve(rest[0]), checkout, check, loop: flagAt >= 0 ? argv[flagAt + 1] : undefined, deps })
     return 0
   } catch (error) {
     if (!(error instanceof StartRefusal)) throw error

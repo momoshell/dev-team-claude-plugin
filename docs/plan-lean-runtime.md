@@ -218,7 +218,7 @@ Sol review, because the current factory is what is being replaced. From phase 4,
 
 ### Phase 5: switch and delete
 
-- [ ] 5.1 Operator switches the default to the new path.
+- [x] 5.1 Operator switches the default to the new path. Operator decisions 2026-10-28: the other project keeps the old driver (decision D8, this repo only), and the stable checkout it runs from was frozen at commit f4ee75cf, the last main before the switch, and is not updated past it.
 - [ ] 5.2 Delete every S module above and the 85 test files filed under "delete at the switch" and "pin
       machinery", in the same PR. Close epic #1964 and issues #1960, #1962 and #1963 as subsumed.
 - [ ] 5.3 Skills rewritten per "Skills and agents"; README and `crew/README.md` rewritten; retired ADRs

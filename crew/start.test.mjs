@@ -75,13 +75,13 @@ test('the lane name is the brief file name and must be a slug', () => {
 // MUTATION: skip the brief check and a malformed brief boots a crew.
 test('a brief with defects is refused before any git or boot call', async () => {
   const { deps, calls } = fakes({ brief: BRIEF.replace('tier: build', 'tier: rigorous') })
-  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), /tier is one of mechanical, build, judge/)
+  await assert.rejects(startLane({ loop: 'old', briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), /tier is one of mechanical, build, judge/)
   assert.deepEqual(calls.filter(([kind]) => kind !== 'log'), [])
 })
 
 test('--check validates the brief and the generated roster and starts nothing', async () => {
   const { deps, calls } = fakes()
-  const result = await startLane({ briefPath: '/d/b1.md', checkout: null, check: true, deps })
+  const result = await startLane({ loop: 'old', briefPath: '/d/b1.md', checkout: null, check: true, deps })
   assert.equal(result.checked, true)
   assert.deepEqual(calls.filter(([kind]) => kind !== 'log'), [['validate', calls.find(([kind]) => kind === 'validate')[1]]])
   assert.deepEqual(effects(calls), [])
@@ -91,7 +91,7 @@ test('--check validates the brief and the generated roster and starts nothing', 
 // MUTATION: boot before the worktree, or run before boot, and the crew lands in the wrong checkout.
 test('a good brief makes the worktree from the default branch, boots headless at its tier, then runs detached on a snapshot', async () => {
   const { deps, calls } = fakes()
-  const result = await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
+  const result = await startLane({ loop: 'old', briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
   assert.equal(result.worktree, '/repo/dt-b1')
   assert.equal(result.pid, 4242)
   const order = calls.filter(([kind]) => kind === 'spawn' || kind === 'detached' || kind === 'write').map(([kind, file, args]) => kind === 'write' ? 'write' : `${kind}:${file === 'git' ? args[2] : args[1]}`)
@@ -116,40 +116,40 @@ test('a good brief makes the worktree from the default branch, boots headless at
 // MUTATION: drop the shape mapping and a stepped brief runs single-chunk.
 test('a stepped brief runs with --execution stepped; a finish brief is refused', async () => {
   const { deps, calls } = fakes({ brief: BRIEF.replace('shape: standard', 'shape: stepped') })
-  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
+  await startLane({ loop: 'old', briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
   assert.deepEqual(spawned(calls, 'run')[2].slice(-2), ['--execution', 'stepped'])
   const finish = fakes({ brief: BRIEF.replace('shape: standard', 'shape: finish') })
-  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: finish.deps }), /shape finish starts from an escalated lane/)
+  await assert.rejects(startLane({ loop: 'old', briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: finish.deps }), /shape finish starts from an escalated lane/)
 })
 
 test('without origin/HEAD the lane branches from main', async () => {
   const { deps, calls } = fakes({ originHead: null })
-  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
+  await startLane({ loop: 'old', briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
   assert.equal(spawned(calls, 'worktree')[2].at(-1), 'main')
 })
 
 // MUTATION: drop the exists check and git worktree add fails late, or a live lane is reused.
 test('an existing worktree, a failed worktree add or a refused boot stop the start and run nothing', async () => {
   const taken = fakes({ exists: (path) => path === '/repo/dt-b1' })
-  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: taken.deps }), /worktree \/repo\/dt-b1 already exists/)
+  await assert.rejects(startLane({ loop: 'old', briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: taken.deps }), /worktree \/repo\/dt-b1 already exists/)
   const broken = fakes({ worktreeStatus: 128 })
-  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: broken.deps }), /git worktree add -b b1 \/repo\/dt-b1 main failed/)
+  await assert.rejects(startLane({ loop: 'old', briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: broken.deps }), /git worktree add -b b1 \/repo\/dt-b1 main failed/)
   const refused = fakes({ bootStatus: 1 })
-  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: refused.deps }), /crew boot refused lane b1 \(exit 1\):\nseat-floor-conflict/)
+  await assert.rejects(startLane({ loop: 'old', briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: refused.deps }), /crew boot refused lane b1 \(exit 1\):\nseat-floor-conflict/)
   for (const { calls } of [taken, broken, refused]) assert.equal(calls.some(([kind]) => kind === 'detached'), false)
 })
 
 test('main reports usage, refusals and success as exit codes', async () => {
   assert.equal(await main([], fakes().deps), 2)
   assert.equal(await main(['a.md', 'b.md'], fakes().deps), 2)
-  assert.equal(await main(['/d/b1.md', '--check'], fakes().deps), 0)
-  assert.equal(await main(['/d/b1.md', '--checkout', '/repo/checkout'], fakes({ bootStatus: 1 }).deps), 1)
+  assert.equal(await main(['/d/b1.md', '--check', '--loop', 'old'], fakes().deps), 0)
+  assert.equal(await main(['/d/b1.md', '--checkout', '/repo/checkout', '--loop', 'old'], fakes({ bootStatus: 1 }).deps), 1)
 })
 
 // MUTATION: resolve the checkout before --check and a brief cannot be validated outside a repo.
 test('--check works outside a git checkout; a real start there is refused', async () => {
-  assert.equal(await main(['/d/b1.md', '--check'], fakes({ inGit: false }).deps), 0)
-  assert.equal(await main(['/d/b1.md'], fakes({ inGit: false }).deps), 2)
+  assert.equal(await main(['/d/b1.md', '--check', '--loop', 'old'], fakes({ inGit: false }).deps), 0)
+  assert.equal(await main(['/d/b1.md', '--loop', 'old'], fakes({ inGit: false }).deps), 2)
 })
 
 // MUTATION: drop the bound-issue slot and the driver publishes the lane with no Closes trailer.
@@ -165,7 +165,7 @@ test('the run brief carries the driver header, and the driver reads it as P1 say
 // MUTATION: skip the driver check and a brief the driver reads differently starts a lane.
 test('a brief the driver reads differently is refused before any git call', async () => {
   const { deps, calls } = fakes({ driverReads: () => ({ acceptance: null, bound: '1961' }) })
-  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check: true, deps }), /the driver reads brief \/d\/b1.md differently: acceptance null/)
+  await assert.rejects(startLane({ loop: 'old', briefPath: '/d/b1.md', checkout: '/repo/checkout', check: true, deps }), /the driver reads brief \/d\/b1.md differently: acceptance null/)
   assert.deepEqual(calls.filter(([kind]) => kind !== 'log'), [])
 })
 
@@ -191,7 +191,7 @@ const refusedAgents = () => privateAgents((text) => text.replace('advisor: null'
 test('boot reads the validated roster written beside the brief, and a definition edit changes the seat', async () => {
   const dir = privateAgents((text) => text.replace('effort: high', 'effort: medium'))
   const { deps, calls } = fakes({ resolve: (tier) => resolveAgents(tier, dir) })
-  const result = await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
+  const result = await startLane({ loop: 'old', briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
   const boot = spawned(calls, 'boot')[2]
   assert.equal(boot[boot.indexOf('--roster') + 1], '/home/.crew/briefs/started/b1.roster.json')
   const [, path, text] = written(calls, '.roster.json')
@@ -210,7 +210,7 @@ test('a v2 template generates a v2 roster that keeps its policy and boots the sa
   const policy = { transports: {} }
   const rosterText = serializeRosterV2({ ...normalizeRoster(TEMPLATE), policy })
   const { deps, calls } = fakes({ rosterText })
-  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
+  await startLane({ loop: 'old', briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
   const written = JSON.parse(calls.find(([kind, path]) => kind === 'write' && path.endsWith('.roster.json'))[2])
   assert.equal(written.schema_version, 2)
   assert.deepEqual(written.policy, policy)
@@ -221,7 +221,7 @@ test('a v2 template generates a v2 roster that keeps its policy and boots the sa
 // MUTATION: drop the null-key filling and mechanical loses its lead:null key.
 test('the committed definitions generate the committed roster tiers, schema_version and models', async () => {
   const { deps, calls } = fakes()
-  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
+  await startLane({ loop: 'old', briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
   const roster = JSON.parse(written(calls, '.roster.json')[2])
   assert.deepEqual(roster.tiers, TEMPLATE.tiers)
   assert.equal(roster.tiers.mechanical.lead, null)
@@ -239,7 +239,7 @@ test('definitions decide which roles are seated: a new seat is added, an unseate
     return { seats, advisor }
   }
   const { deps, calls } = fakes({ resolve })
-  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
+  await startLane({ loop: 'old', briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
   const { tiers } = JSON.parse(written(calls, '.roster.json')[2])
   assert.deepEqual(tiers.build['tech-lead'], seat)
   assert.equal(tiers.judge.reviewer, null)
@@ -255,7 +255,7 @@ test('actual boot refusals reach stderr one record per line and fail --check', a
   })) })))
   assert.equal(expected.length, 6)
   const { deps, calls } = fakes({ resolve: (tier) => resolveAgents(tier, dir), refusals: bootRefusals })
-  const { code, stderr } = await mainWithStderr(['/d/b1.md', '--check'], deps)
+  const { code, stderr } = await mainWithStderr(['/d/b1.md', '--check', '--loop', 'old'], deps)
   assert.notEqual(code, 0)
   const rows = stderr.split('\n').filter((line) => line.startsWith('{')).map((line) => JSON.parse(line))
   for (const wanted of expected) assert.ok(rows.some((row) => ['tier', 'transport', 'role', 'message'].every((key) => row[key] === wanted[key])), JSON.stringify(wanted))
@@ -268,7 +268,7 @@ test('every injected refusal record survives, including one with no role', async
     { code: 'boot_refused', reason: null, tier: 'judge', transport: 'headless-all', role: null, message: 'second' },
   ]
   const { deps } = fakes({ refusals: async () => records })
-  const { code, stderr } = await mainWithStderr(['/d/b1.md', '--check'], deps)
+  const { code, stderr } = await mainWithStderr(['/d/b1.md', '--check', '--loop', 'old'], deps)
   assert.equal(code, 1)
   assert.deepEqual(stderr.split('\n').filter((line) => line.startsWith('{')).map((line) => JSON.parse(line)), records)
 })
@@ -276,7 +276,7 @@ test('every injected refusal record survives, including one with no role', async
 // MUTATION: disable the refusal guard and git, boot and the snapshot run for a roster that cannot boot.
 test('a refused roster stops a real start before any git, boot, run or write, with an explicit or implicit checkout', async () => {
   const dir = refusedAgents()
-  for (const argv of [['/d/b1.md'], ['/d/b1.md', '--checkout', '/repo/checkout']]) {
+  for (const argv of [['/d/b1.md', '--loop', 'old'], ['/d/b1.md', '--checkout', '/repo/checkout', '--loop', 'old']]) {
     const { deps, calls } = fakes({ resolve: (tier) => resolveAgents(tier, dir), refusals: bootRefusals })
     const { code } = await mainWithStderr(argv, deps)
     assert.equal(code, 1, argv.join(' '))
@@ -287,7 +287,7 @@ test('a refused roster stops a real start before any git, boot, run or write, wi
 test('a refusal in a tier the brief does not select still refuses the start', async () => {
   const refusals = async (roster) => roster.tiers.judge.reviewer === null ? [] : [{ tier: 'judge', transport: 'default', role: 'reviewer', message: 'judge only' }]
   const { deps, calls } = fakes({ refusals })
-  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), /judge only/)
+  await assert.rejects(startLane({ loop: 'old', briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), /judge only/)
   assert.deepEqual(effects(calls), [])
 })
 
@@ -295,7 +295,7 @@ test('no effect happens while the validation is still pending', async () => {
   let release
   const gate = new Promise((resolve) => { release = resolve })
   const { deps, calls } = fakes({ refusals: () => gate })
-  const started = startLane({ briefPath: '/d/b1.md', checkout: null, deps })
+  const started = startLane({ loop: 'old', briefPath: '/d/b1.md', checkout: null, deps })
   await new Promise((resolve) => setImmediate(resolve))
   assert.deepEqual(effects(calls), [])
   release([{ tier: 'build', transport: 'default', role: null, message: 'late' }])
@@ -305,12 +305,12 @@ test('no effect happens while the validation is still pending', async () => {
 
 test('an implicit checkout is discovered after validation; outside git the start is refused with exit 2', async () => {
   const inside = fakes()
-  const { code } = await mainWithStderr(['/d/b1.md'], inside.deps)
+  const { code } = await mainWithStderr(['/d/b1.md', '--loop', 'old'], inside.deps)
   assert.equal(code, 0)
   const order = inside.calls.map(([kind, file, args]) => kind === 'spawn' ? `spawn:${args.includes('rev-parse') ? 'rev-parse' : ''}` : kind).filter((kind) => kind === 'validate' || kind === 'spawn:rev-parse')
   assert.deepEqual(order, ['validate', 'spawn:rev-parse'])
   const outside = fakes({ inGit: false })
-  const result = await mainWithStderr(['/d/b1.md'], outside.deps)
+  const result = await mainWithStderr(['/d/b1.md', '--loop', 'old'], outside.deps)
   assert.equal(result.code, 2)
   assert.match(result.stderr, /not inside a git checkout; pass --checkout <dir>/)
   assert.equal(outside.calls.some(([kind]) => kind === 'write' || kind === 'detached'), false)
@@ -328,10 +328,10 @@ test('unreadable, empty or malformed roster metadata and definitions, and a thro
   ]
   for (const [options, message] of cases) {
     const { deps, calls } = fakes(options)
-    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), (error) => error instanceof StartRefusal && message.test(error.message))
+    await assert.rejects(startLane({ loop: 'old', briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), (error) => error instanceof StartRefusal && message.test(error.message))
     assert.deepEqual(effects(calls), [], String(message))
   }
-  assert.equal(await main(['/d/b1.md', '--check'], fakes({ rosterText: '' }).deps), 1)
+  assert.equal(await main(['/d/b1.md', '--check', '--loop', 'old'], fakes({ rosterText: '' }).deps), 1)
 })
 
 // MUTATION: swallow the snapshot failure and boot runs against a roster that was never written.
@@ -342,7 +342,7 @@ test('a denied or partial snapshot write stops boot and run and names the left w
       const { deps, calls } = fakes({ write: (kind) => {
         if (kind === failing && (kind === 'mkdir' || ++writes === 2)) throw Object.assign(new Error(`${code} injected`), { code })
       } })
-      await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), (error) => error instanceof StartRefusal && error.message.includes(code) && /worktree \/repo\/dt-b1 and branch b1 are left for inspection/.test(error.message) && error.cause.code === code)
+      await assert.rejects(startLane({ loop: 'old', briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), (error) => error instanceof StartRefusal && error.message.includes(code) && /worktree \/repo\/dt-b1 and branch b1 are left for inspection/.test(error.message) && error.cause.code === code)
       assert.equal(spawned(calls, 'boot'), undefined)
       assert.equal(spawned(calls, 'run'), undefined)
     }
@@ -389,19 +389,76 @@ test('a brief suite line is the lean spec suite, split on whitespace; without on
 })
 
 // MUTATION: ignore --loop in main and the flag starts the legacy run.
-test('main forwards --loop lean and refuses a missing, duplicate or unknown loop as usage', async () => {
+test('main forwards --loop lean or old and refuses a missing, duplicate or unknown loop as usage', async () => {
   const lean = fakes()
   assert.equal(await main(['/d/b1.md', '--loop', 'lean', '--checkout', '/repo/checkout'], lean.deps), 0)
   assert.ok(leanLaunch(lean.calls))
-  for (const argv of [['/d/b1.md', '--loop'], ['/d/b1.md', '--loop', 'stepped'], ['/d/b1.md', '--loop', 'lean', '--loop', 'lean'], ['/d/b1.md', '--loop', '--check'], ['--loop', 'lean'], ['/d/b1.md', '--lean']]) {
+  for (const argv of [['/d/b1.md', '--loop'], ['/d/b1.md', '--loop', 'stepped'], ['/d/b1.md', '--loop', 'lean', '--loop', 'lean'], ['/d/b1.md', '--loop', 'old', '--loop', 'old'], ['/d/b1.md', '--loop', '--check'], ['--loop', 'old'], ['--loop', 'lean'], ['/d/b1.md', '--lean']]) {
     const refused = fakes()
     assert.equal((await mainWithStderr(argv, refused.deps)).code, 2, argv.join(' '))
     assert.deepEqual(effects(refused.calls), [], argv.join(' '))
   }
   const plain = fakes()
   await main(['/d/b1.md', '--checkout', '/repo/checkout'], plain.deps)
-  assert.equal(leanLaunch(plain.calls), undefined)
-  assert.ok(spawned(plain.calls, 'run'))
+  assert.ok(leanLaunch(plain.calls))
+  assert.equal(spawned(plain.calls, 'boot'), undefined)
+  const old = fakes()
+  assert.equal(await main(['/d/b1.md', '--checkout', '/repo/checkout', '--loop', 'old'], old.deps), 0)
+  assert.equal(leanLaunch(old.calls), undefined)
+  assert.ok(spawned(old.calls, 'run'))
+})
+
+// MUTATION: default `loop` to the old driver in startLane and a start with no --loop writes a roster and boots instead of detaching the lean bridge.
+test('(SW1) a start with no --loop, from startLane or main, runs the lean loop', async () => {
+  const viaLane = fakes()
+  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: viaLane.deps })
+  const viaMain = fakes()
+  assert.equal(await main(['/d/b1.md', '--checkout', '/repo/checkout'], viaMain.deps), 0)
+  for (const { calls } of [viaLane, viaMain]) {
+    const launch = leanLaunch(calls)
+    assert.ok(launch)
+    assert.ok(written(calls, '/lean.json'))
+    assert.equal(written(calls, '.roster.json'), undefined)
+    assert.equal(spawned(calls, 'boot'), undefined)
+    assert.equal(spawned(calls, 'run'), undefined)
+  }
+})
+
+// MUTATION: route --loop old to the lean branch and the roster is never written, boot never runs and the bridge is detached.
+test('(SW2) --loop old runs the old driver: roster written, crew booted, run detached, no lean bridge', async () => {
+  for (const start of [
+    (deps) => startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'old', deps }),
+    async (deps) => assert.equal(await main(['/d/b1.md', '--checkout', '/repo/checkout', '--loop', 'old'], deps), 0),
+  ]) {
+    const { deps, calls } = fakes()
+    await start(deps)
+    assert.ok(written(calls, '.roster.json'))
+    assert.ok(spawned(calls, 'boot'))
+    assert.ok(spawned(calls, 'run'))
+    assert.equal(leanLaunch(calls), undefined)
+  }
+})
+
+// MUTATION: accept any loop value and a typo such as --loop bogus starts a lane instead of being refused as usage.
+test('(SW3) a loop other than lean or old is usage: exit 2 from main, exitCode 2 from startLane, no effects', async () => {
+  const { deps, calls } = fakes()
+  const { code, stderr } = await mainWithStderr(['/d/b1.md', '--loop', 'bogus'], deps)
+  assert.equal(code, 2)
+  assert.match(stderr, /usage: crew start <brief\.md> \[--check\] \[--checkout <dir>\] \[--loop lean\|old\]/)
+  assert.deepEqual(effects(calls), [])
+  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'bogus', deps: fakes().deps }), (error) => error instanceof StartRefusal && error.exitCode === 2 && /--loop takes lean or old/.test(error.message))
+})
+
+// MUTATION: validate a no-loop --check with the old checks and a stepped brief, which only the old path can run, passes.
+test('(SW4) --check with no --loop refuses a brief the lean loop cannot run; --loop old --check still passes it', async () => {
+  const stepped = () => fakes({ brief: BRIEF.replace('shape: standard', 'shape: stepped') })
+  const lean = stepped()
+  const { code, stderr } = await mainWithStderr(['/d/b1.md', '--check'], lean.deps)
+  assert.equal(code, 1)
+  assert.match(stderr, /--loop lean runs the standard shape only/)
+  assert.deepEqual(effects(lean.calls), [])
+  const old = stepped()
+  assert.equal(await main(['/d/b1.md', '--check', '--loop', 'old'], old.deps), 0)
 })
 
 // MUTATION: drop the shape refusal and a stepped brief starts a lean lane that runs only the standard loop.
@@ -409,7 +466,7 @@ test('--loop lean refuses a non-standard shape before any git call', async () =>
   const { deps, calls } = fakes({ brief: BRIEF.replace('shape: standard', 'shape: stepped') })
   await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps }), /--loop lean runs the standard shape only/)
   assert.deepEqual(effects(calls), [])
-  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'other', deps: fakes().deps }), /--loop takes lean/)
+  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'other', deps: fakes().deps }), /--loop takes lean or old/)
 })
 
 // MUTATION: reach for the old driver or roster on a lean start and it fails when they are unreadable or unusable.

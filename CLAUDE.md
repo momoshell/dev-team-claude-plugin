@@ -76,8 +76,7 @@ enforced by tests, not just preferred:
 ## Working on a lane
 
 Lanes start from a brief, not from hand edits. `skills/lane-brief/SKILL.md` owns
-writing the brief and `skills/crew-dispatch/SKILL.md` the dispatch; `/dispatch`
-names it.
+writing the brief and starting the lane; `/dispatch` names it.
 
 - **Scope is context, not enforcement** (ADR-045). A lane may write any file;
   worktrees isolate lanes and `rebase` resolves them.
@@ -92,7 +91,7 @@ names it.
 | Architecture decisions | `docs/adr/` (register in `README.md`) |
 | Review rubric and findings shape | `skills/pr-review/` |
 | Writing a brief | `skills/lane-brief/` |
-| Dispatch and tiers | `skills/crew-dispatch/` |
+| Briefs, tiers and starting a lane | `skills/lane-brief/` |
 | Lane recovery and closeout | `skills/crew-recovery/` |
 | Worktrees, PRs, orphans | `skills/devops/` |
 | Test authoring | `skills/qa-test-writing/` |

@@ -37,7 +37,7 @@ function invoke(dir, verb, input = {}, env = {}, spawnCwd = dir) {
   delete childEnv.DEV_TEAM_SKILL_GATE
   Object.assign(childEnv, env)
   return spawnSync(process.execPath, [join(dir, SCRIPT), verb], {
-    cwd: spawnCwd, encoding: 'utf8', input: JSON.stringify({ session_id: 's1', cwd: dir, tool_input: { file_path: 'crew/drive.mjs' }, ...input }),
+    cwd: spawnCwd, encoding: 'utf8', input: JSON.stringify({ session_id: 's1', cwd: dir, tool_input: { file_path: 'crew/lean.mjs' }, ...input }),
     env: childEnv,
   })
 }
@@ -101,10 +101,10 @@ test('M2', () => {
   assert.equal(result.status, 1); assert.equal(result.stderr.trim(), 'skill-gate: map-schema'); assert.equal(result.stdout, '')
 })
 test('G1', () => {
-  assert.equal(matchGlob('crew/**/*.mjs', 'crew/drive.mjs'), true)
-  assert.equal(matchGlob('crew/**/*.mjs', 'crew/pi/extensions/x.mjs'), true)
+  assert.equal(matchGlob('crew/**/*.mjs', 'crew/lean.mjs'), true)
+  assert.equal(matchGlob('crew/**/*.mjs', 'crew/acp/seat.mjs'), true)
   assert.equal(matchGlob('crew/**/*.mjs', 'crewx/a.mjs'), false)
-  assert.equal(matchGlob('crew/**/*.mjs', 'crew/a.md'), false)
+  assert.equal(matchGlob('crew/**/*.mjs', 'crew/README.md'), false)
 })
 test('D1', () => {
   // MUTATION: restore role-scoped rules at the edit gate and the deny names dev-team:backend-node again.
@@ -122,7 +122,7 @@ test('RV2-1 post-skill records from unmapped cwd', () => {
 })
 test('D3', () => {
   // MUTATION: restore role-scoped rules at the edit gate and the deny names dev-team:qa-test-writing again.
-  const dir = fixture(); post(dir, ['dev-team:backend-node']); const r = invoke(dir, 'pre-edit', { agent_id: 'a', tool_input: { file_path: 'crew/x.test.mjs' } }); deny(r); assert.match(r.stdout, /dev-team:code-less/); assert.doesNotMatch(r.stdout, /dev-team:qa-test-writing/)
+  const dir = fixture(); post(dir, ['dev-team:backend-node']); const r = invoke(dir, 'pre-edit', { agent_id: 'a', tool_input: { file_path: 'crew/loop.test.mjs' } }); deny(r); assert.match(r.stdout, /dev-team:code-less/); assert.doesNotMatch(r.stdout, /dev-team:qa-test-writing/)
 })
 test('A1', () => { const dir = fixture(); post(dir, ['dev-team:code-less', 'dev-team:backend-node'], 'X'); deny(invoke(dir, 'pre-edit', { agent_id: 'Y' })); deny(invoke(dir, 'pre-edit', { agent_id: undefined })) })
 test('T1', () => {

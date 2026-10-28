@@ -13,7 +13,7 @@ const SKILLS = join(ROOT, 'skills')
 
 // command file -> the skills whose procedure it dispatches to
 const DISPATCHES_TO = {
-  'dispatch.md': ['crew-dispatch'],
+  'dispatch.md': ['lane-brief'],
   'close-out.md': ['crew-recovery'],
   'status.md': ['devops', 'crew-recovery'],
   'onboard.md': ['crew-onboard'],
@@ -24,15 +24,14 @@ const TAKES_ARGUMENT = ['dispatch.md', 'close-out.md', 'onboard.md', 'review.md'
 // Procedure content the skills own. A command repeating any of these has
 // stopped being thin, and a single edit no longer keeps both surfaces true.
 const PROCEDURE_TOKENS = [
-  '--fences',
-  '--tier',
-  '--validation-lane',
-  'KNOWN_FLAGS',
-  'crew.mjs teardown',
-  'cp -a',
-  '.archive-',
+  '--accept',
+  '--return',
+  '--abandon',
+  'crew closeout',
+  'crew record-pr',
   'git worktree remove',
   '--body-file',
+  'crew update',
 ]
 
 // Reporting is safe at any moment only while the status command authorizes no
@@ -133,13 +132,8 @@ test('no command body restates procedure content the skills own', () => {
 })
 
 test('the procedure tokens are content the skills actually own', () => {
-  const corpus = ['crew-dispatch', 'crew-recovery', 'devops']
-    .flatMap((skill) => [join(SKILLS, skill, 'SKILL.md')])
-    .map((path) => readFileSync(path, 'utf8'))
-    .concat(
-      ['crew-dispatch/references/flags.md', 'crew-recovery/references/closeout.md', 'devops/references/worktrees.md', 'devops/references/gh.md']
-        .map((rel) => readFileSync(join(SKILLS, rel), 'utf8')),
-    )
+  const corpus = ['crew-recovery', 'devops', 'crew-onboard', 'lane-brief']
+    .map((skill) => readFileSync(join(SKILLS, skill, 'SKILL.md'), 'utf8'))
     .join('\n')
   for (const token of PROCEDURE_TOKENS) {
     assert.ok(corpus.includes(token), `${token} must be skill-owned content, or it is a vacuous ban`)
@@ -154,4 +148,10 @@ test('the status command authorizes no mutation', () => {
     assert.doesNotMatch(text, new RegExp(`\\b${token}\\b`), `status.md must not authorize ${token}`)
   }
   assert.match(text, /read-only/, 'status.md must say it is read-only')
+})
+
+test('crew-recovery points at the lane journal under the lane task directory', () => {
+  const text = readFileSync(join(SKILLS, 'crew-recovery', 'SKILL.md'), 'utf8')
+  assert.ok(text.includes('~/.crew/dt-<lane>/<lane>/task/journal.jsonl'), 'journal path must include task/')
+  assert.ok(!text.includes('<lane>/journal.jsonl'), 'journal path must not omit task/')
 })

@@ -1,43 +1,60 @@
 ---
 name: crew-recovery
 description: >-
-  Load when recovering, proving, closing, or diagnosing a crew lane: preserve
-  its state, interpret liveness and escalation stages, run mutation proof,
-  publish the PR, and tear down only after closeout.
+  Load when a lean crew lane has stopped and you must read it, finish it, or
+  close it out: crew show, crew lanes, the lane journal, crew finish with
+  --accept, --return or --abandon, crew record-pr and crew closeout.
 ---
 
 # Crew recovery
 
-Recovery is evidence-preserving closeout, not cleanup by instinct. Keep the
-live state available until the built tree is committed, the gate mutations and
-suite have been proved, and the PR is published.
+A stopped lane keeps its worktree, branch and journal until you close it out.
+Read first, decide second, remove last.
 
-## Routing
+## Read a stopped lane
 
-| Doing… | Read | Rule |
-|---|---|---|
-| Closing a converged or escalated lane | `references/closeout.md` | Preserve, commit, prove, publish, then teardown last. |
-| Running per-check proof safely | `references/mutation-proof.md` | Read planner declarations and commit before any revert. |
-| Deciding whether a seat is idle or busy | `references/liveness.md` | Combine status, pane liveness, and both journal timestamp shapes. |
-| Re-deriving a surprising measurement | `references/instruments.md` | Check the known instrument failure modes before acting on a result. |
-| Interpreting an escalation | `references/escalations.md` | Match the exact emitted token, then take the first evidence-preserving move. |
-| Finishing an escalated lane by hand | `references/hand-finish.md` | Finish when the build exists and the blocker is outside the work; re-dispatch on a wrong premise or a plan-stage death. |
+- `crew lanes [--all] [--json]` lists lanes with status, latest stage, stop
+  reason and PR, all read from each lane journal (`crew/lanes.mjs`). It does not
+  say whether a process is alive.
+- `crew show <lane>` lists each seat and its recorded sessions;
+  `crew show <lane> <role>` prints that seat's session as text and `--json`
+  prints the recorded JSONL untouched (`crew/show.mjs`). Read-only.
+- The lane journal is `~/.crew/dt-<lane>/<lane>/task/journal.jsonl`: one JSON row per
+  event. The last rows say why the lane stopped. Never edit it by hand.
 
-## Critical rules
+## Finish it
 
-- Preserve a live state directory by copy before any recovery experiment; this is the preserve-by-copy rule (#512).
-- Teardown is last and belongs in the same turn as the push and PR, never before closeout (b150-permprobe).
-- Commit the built tree before a hand mutation proof or any `git checkout --` (b73-pane).
-- `status` answers alive, not busy; derive idle-alive versus busy-alive from journal recency (#387).
-- Read mutation declarations and scout findings from the per-seat return, not the roll-up field names (#330).
-- An escalated run remains the operator's escalation context until its evidence is preserved and a human chooses the next move (#500).
-- When a measurement surprises you, suspect the instrument first — re-derive it a second way before acting.
+`crew finish <lane>` re-enters a stopped lane in its own worktree, on its
+uncommitted build, and runs builder triage, gate, mutation proof, review, suite,
+commit and rebase. It publishes nothing (`crew/finish.mjs`). When that run is
+ready, decide once:
 
-## Key references
+- `crew finish <lane> --accept [--notes <file>]` publishes the PR the run
+  measured. Merging stays yours.
+- `crew finish <lane> --return <file>` runs one more finish pass with the file
+  as the builder's guidance; it counts against the three review rounds.
+- `crew finish <lane> --abandon` ends the lane unpublished.
 
-- [`references/closeout.md`](references/closeout.md) — closeout order, teardown output, and archive naming.
-- [`references/mutation-proof.md`](references/mutation-proof.md) — commit-first per-check mutation proof.
-- [`references/liveness.md`](references/liveness.md) — alive versus busy and envelope evidence.
-- [`references/instruments.md`](references/instruments.md) — measured instrument failure modes and second ways to check.
-- [`references/escalations.md`](references/escalations.md) — emitted escalation stages and first moves.
-- [`references/hand-finish.md`](references/hand-finish.md) — finish-or-re-dispatch, the hand-finish procedure, and guarded rebase rules.
+It refuses, writing nothing, when the worktree is gone, the lane never reached a
+build, a run is still active, the lane is already published or committed, or
+there is no accepted builder result. A decision is refused when the last run did
+not end ready, the lane already has one, or (for `--accept`) the checkout is no
+longer the head the run measured. Read the refusal; it names the cause.
+
+## Close it out
+
+- Finished by hand: in the lane worktree, commit every change the build made
+  (`git status --short` shows nothing left), fetch, and rebase onto the base the
+  lane recorded as `origin/<base>` (`base` in `task/lean.json`; a local `<base>` does not move on fetch). Then, on
+  that rebased tree, run the gate, prove each acceptance check's mutation turns it
+  red, run the suite, and push only if all three hold.
+  Then open the PR and run `crew record-pr <lane> --pr <url>`, which appends one
+  operator-marked `pr` row so the lane stops reading as stopped. `record-pr`
+  checks only that the lane is quiet and records no PR yet, not that the PR holds
+  the build (`crew/record-pr.mjs`).
+- After the PR merges: `crew closeout <lane>` removes the worktree (never
+  forced), deletes the lane branch and moves the lane directory to
+  `~/.crew-journal-archive/` (`crew/closeout.mjs`). It refuses unless the
+  recorded PR is merged with the lane branch tip as its head.
+
+Never close out before the merge: the worktree is the only copy of the build.

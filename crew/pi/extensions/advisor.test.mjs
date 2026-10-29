@@ -1822,6 +1822,21 @@ test('PR2 and PR3 a pi write or bash naming the return file is refused with the 
 })
 
 // MUTATION: match only the absolute return path and a builder that cds into the task dir returns unreviewed.
+// MUTATION: let a maybe-return spend the consult and the real return after it goes unreviewed.
+test('a return name the advisor cannot place is consulted on without spending the consult; the sure return after it is still held', async () => {
+  for (const command of ["printf '(no)' > lib/builder-1.json", 'pushd TASK; printf x > sub/../builder-1.json']) {
+    const s = triggerSeat()
+    try {
+      s.ground()
+      assert.equal((await s.a.onToolCall(call('m', 'bash', { command: command.replace('TASK', s.f.taskDir) }), {}))?.block, true, command)
+      assert.equal(s.a.exportState().pre_return_spent, false, command)
+      assert.equal((await s.a.onToolCall(call('r', 'bash', { command: `cat > ${s.ret} <<EOF\n{}\nEOF` }), {}))?.block, true, command)
+      assert.equal(s.spawned(), 2, command)
+      assert.equal(s.a.exportState().pre_return_spent, true, command)
+    } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+  }
+})
+
 test('a backup write beside the return file leaves the pre-return consult unspent for the real return', async () => {
   const s = triggerSeat()
   try {
@@ -1837,15 +1852,15 @@ test('a bash command names the return file by its absolute path, or by its bare 
     const s = triggerSeat()
     try {
       s.ground()
-      const verdict = await s.a.onToolCall(call('r1', 'bash', { command: command.replace('TASK', s.f.taskDir).replace('TREE', s.f.tree) }), {})
+      const verdict = await s.a.onToolCall(call('r1', 'bash', { command: command.replaceAll('TASK', s.f.taskDir).replaceAll('TREE', s.f.tree) }), {})
       assert.equal(verdict?.block, true, command)
     } finally { rmSync(s.f.root, { recursive: true, force: true }) }
   }
-  for (const command of ['cat old-builder-1.json', 'cat builder-1.json.bak', 'cat planner-1.json', 'tee builder-1.json < x', 'cd TREE && cat > lib/builder-1.json', 'cd TASK-evil; cat > builder-1.json', 'cat > TREE/lib/builder-1.json', 'cp x TASK/builder-1.json.bak', 'cd TASK && cat > sub/builder-1.json', "printf '(no)' > lib/builder-1.json", "(cd TREE; printf x > TREE/lib/builder-1.json)"]) {
+  for (const command of ['cat old-builder-1.json', 'cat builder-1.json.bak', 'cat planner-1.json', 'tee builder-1.json < x', 'cd TREE && cat > lib/builder-1.json', 'cd TASK-evil; cat > builder-1.json', 'cat > TREE/lib/builder-1.json', 'cp x TASK/builder-1.json.bak', 'cd TASK && cat > sub/builder-1.json', "(cd TREE; printf x > TREE/lib/builder-1.json)"]) {
     const s = triggerSeat()
     try {
       s.ground()
-      assert.equal(await s.a.onToolCall(call('x', 'bash', { command: command.replace('TASK', s.f.taskDir).replace('TREE', s.f.tree) }), {}), undefined, command)
+      assert.equal(await s.a.onToolCall(call('x', 'bash', { command: command.replaceAll('TASK', s.f.taskDir).replaceAll('TREE', s.f.tree) }), {}), undefined, command)
       assert.equal(s.spawned(), 0, command)
     } finally { rmSync(s.f.root, { recursive: true, force: true }) }
   }

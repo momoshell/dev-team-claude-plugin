@@ -1041,9 +1041,13 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     return { lines: Number(value.lines), entries: entries.filter(Boolean).slice(0, DELTA_ENTRIES) }
   }
 
-  // The seat's return file: `<taskDir>/<role>-<n>.json`, written by a Write/Edit to it or named by a Bash command.
-  function isReturnWrite(event) {
-    if (!taskDir || !role) return false
+  // Whether a call writes the seat's return file `<taskDir>/<role>-<n>.json`: 'sure', 'maybe', or null. A Write/Edit
+  // names it exactly. A Bash command names it through a path token ending in the return file's name, resolved against
+  // the last cd before it (itself resolved against the seat's cwd). When those cds cannot be followed (a subshell,
+  // pushd/popd, a quoted cd operand with whitespace), a token without an absolute path is 'maybe': it is consulted on,
+  // but it never spends the turn's pre-return consult, so a later sure return write is still reviewed.
+  function returnWrite(event) {
+    if (!taskDir || !role) return null
     const tool = String(event?.toolName || '')
     const input = event?.input || {}
     try {
@@ -1051,29 +1055,26 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       const name = new RegExp(`^${escapeRegExp(role)}-\\d+\\.json$`)
       if (tool === 'write' || tool === 'edit') {
         const raw = inputPath(input)
-        if (!raw) return false
+        if (!raw) return null
         const target = resolve(cwd, raw)
-        return resolve(target, '..') === root && name.test(relative(root, target))
+        return resolve(target, '..') === root && name.test(relative(root, target)) ? 'sure' : null
       }
-      // A Bash command names the file through a path token ending in the return file's name: resolved against the last
-      // cd before it (itself resolved against the seat's cwd), the token must land in the task dir. When the directory
-      // cannot be followed (a subshell, pushd/popd, a quoted cd operand with whitespace), a bare or ./ name counts; a
-      // token with an absolute path or another directory part is still resolved, so it never spends the consult.
       if (tool === 'bash') {
         const command = String(input.command ?? '')
         const cds = [...command.matchAll(/(?:^|[;&|(\s])cd\s+(['"]?)([^\s'";&|()]+)\1(?=$|[\s;&|)])/g)]
         const token = new RegExp(`(?:^|[\\s'"=<>])((?:[^\\s'"=<>;&|()]*/)?)(${escapeRegExp(role)}-\\d+\\.json)(?=$|[\\s'";&|)<>])`, 'g')
         const unfollowable = /[()]|\bpushd\b|\bpopd\b|\bcd\s+(['"])[^'"]*\s[^'"]*\1/.test(command)
+        let kind = null
         for (const match of command.matchAll(token)) {
-          if (unfollowable && (match[1] === '' || match[1] === './')) return true
+          if (unfollowable && !isAbsolute(match[1])) { kind = 'maybe'; continue }
           const before = cds.filter((cd) => cd.index < match.index)
           const dir = before.reduce((at, cd) => resolve(at, cd[2]), resolve(String(cwd)))
-          if (resolve(dir, match[1] || '.', match[2]) === join(root, match[2])) return true
+          if (resolve(dir, match[1] || '.', match[2]) === join(root, match[2])) return 'sure'
         }
-        return false
+        return kind
       }
     } catch { /* not a return write */ }
-    return false
+    return null
   }
 
   function growthCrossed(base, current) {
@@ -1561,12 +1562,12 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   // One consult on the whole working diff, awaited, before the seat's return file is written. Only an accepted
   // must-fix (high severity) finding refuses the write; a failed, timed-out or empty consult lets it through
   // (the consult's own journal rows say so) and never leaves the seat unable to return.
-  async function preReturnVerdict(event) {
+  async function preReturnVerdict(event, { spend }) {
     const id = String(event?.toolCallId || '')
     const measured = measureDiffLines()
     if (measured) for (const entry of measured.entries) appendDelta(entry)
     const result = await consult('pre-return', id, calls, { inline: true })
-    if (result?.ran) preReturnSpent = true
+    if (result?.ran && spend) preReturnSpent = true
     const judgment = result?.judgment
     if (result?.accepted && judgment?.severity === 'high') return { block: true, reason: judgment.claim }
     return undefined
@@ -1574,12 +1575,13 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
 
   async function onToolCall(event, ctx) {
     ensureContext()
-    if (isReturnWrite(event) && preReturnSpent) return undefined
+    const kind = returnWrite(event)
+    if (kind && preReturnSpent) return undefined
     calls += 1
     processCall(event)
     if (calls % CADENCE_CALLS === 0) queue(String(event?.toolCallId || ''), 'cadence')
-    if (isReturnWrite(event)) {
-      try { return await preReturnVerdict(event) } catch { return undefined }
+    if (kind) {
+      try { return await preReturnVerdict(event, { spend: kind === 'sure' }) } catch { return undefined }
     }
     return undefined
   }

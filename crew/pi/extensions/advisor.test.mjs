@@ -1730,10 +1730,14 @@ test('a parallel call\'s result does not dispatch a live call\'s queued trigger;
     clock += 11 * 60 * 1000
     second.onToolResult({ toolCallId: 'r3', toolName: 'read', input: readInput, content: [{ type: 'text', text: 'const widget = null' }] }, {})
     assert.equal(h.requests.length, 2)
-    // the same tool on the same input reported under another id is that call's result
+    // two live calls on the same input: the second's result never sends the first's trigger
     const third = advisor.createAdvisor({ env: h.envOf, deps })
-    third.onToolCall({ toolCallId: 'pre-id', toolName: 'write', input }, {})
-    third.onToolResult({ toolCallId: 'post-id', toolName: 'write', input, content: [{ type: 'text', text: 'ok' }] }, {})
+    third.onToolCall({ toolCallId: 'w1', toolName: 'write', input }, {})
+    third.onToolCall({ toolCallId: 'w2', toolName: 'write', input }, {})
+    third.onToolResult({ toolCallId: 'w2', toolName: 'write', input, content: [{ type: 'text', text: 'failed' }] }, {})
+    assert.equal(h.requests.length, 2, 'the other write\'s result leaves the live write\'s trigger queued')
+    assert.deepEqual(third.exportState().pending.map(([id]) => id), ['w1'])
+    third.onToolResult({ toolCallId: 'w1', toolName: 'write', input, content: [{ type: 'text', text: 'ok' }] }, {})
     assert.equal(h.requests.length, 3)
   } finally { rmSync(h.root, { recursive: true, force: true }) }
 })

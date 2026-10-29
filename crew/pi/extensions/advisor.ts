@@ -872,11 +872,6 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     return true
   }
 
-  // What identifies a call apart from its id: the same tool on the same input.
-  function callPrint(event) {
-    try { return `${String(event?.toolName ?? '')}\n${JSON.stringify(event?.input ?? null)}` } catch { return '' }
-  }
-
   function nowMs() {
     const parsed = Date.parse(String(atOf(now)))
     return Number.isFinite(parsed) ? parsed : Date.now()
@@ -1364,7 +1359,6 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     calls += 1
     processCall(event)
     if (calls % CADENCE_CALLS === 0) queue(String(event?.toolCallId || ''), 'cadence')
-    for (const entry of pending.get(String(event?.toolCallId || '')) || []) entry.print ??= callPrint(event)
     return undefined
   }
 
@@ -1374,13 +1368,11 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     dispatch(String(event?.toolCallId || ''))
     // A host that runs each hook as its own process (deferTier1Consult) can see a call's Pre without its Post
     // (a denied or interrupted call). Calls run in parallel, so another call's result does not end a live call:
-    // what a call queued waits for its own result. It is sent early only by a result of the same tool on the same
-    // input under another id (the call, retried or reported anew), else once older than ORPHAN_PENDING_MS.
+    // what a call queued waits for its own result, matched by call id alone, or is sent once older than ORPHAN_PENDING_MS.
     if (typeof deps.deferTier1Consult === 'function') {
       const cutoff = nowMs() - ORPHAN_PENDING_MS
-      const print = callPrint(event)
       for (const [orphan, triggers] of [...pending]) {
-        if (triggers.every((entry) => (entry.print && entry.print === print) || (Number.isFinite(entry.queued_at) && entry.queued_at <= cutoff))) dispatch(orphan)
+        if (triggers.every((entry) => Number.isFinite(entry.queued_at) && entry.queued_at <= cutoff)) dispatch(orphan)
       }
     }
     callOrdinals.delete(String(event?.toolCallId || ''))
@@ -1395,7 +1387,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       call_ordinals: [...callOrdinals], fired: [...fired], failure_counts: [...failureCounts],
       injected: [...injected], dedupe: [...dedupe],
       delta: delta.map((entry) => ({ text: entry.text, redactions: entry.redactions || {} })),
-      pending: [...pending].map(([id, triggers]) => [id, triggers.map((entry) => ({ trigger: entry.trigger, call_ordinal: entry.call_ordinal, queued_at: entry.queued_at, ...(entry.print ? { print: entry.print } : {}) }))]),
+      pending: [...pending].map(([id, triggers]) => [id, triggers.map((entry) => ({ trigger: entry.trigger, call_ordinal: entry.call_ordinal, queued_at: entry.queued_at }))]),
     }
   }
 
@@ -1414,11 +1406,11 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       && Object.values(entry.redactions).every((count) => Number.isSafeInteger(count) && count >= 0))) throw new Error('advisor state is malformed')
     const storedPending = state.pending === undefined ? [] : pairs(state.pending)
     if (!storedPending.every(([id, triggers]) => typeof id === 'string' && Array.isArray(triggers)
-      && triggers.every((entry) => entry && TRIGGERS.includes(entry.trigger) && Number.isSafeInteger(entry.call_ordinal) && (entry.queued_at === undefined || Number.isFinite(entry.queued_at)) && (entry.print === undefined || typeof entry.print === 'string')))) throw new Error('advisor state is malformed')
+      && triggers.every((entry) => entry && TRIGGERS.includes(entry.trigger) && Number.isSafeInteger(entry.call_ordinal) && (entry.queued_at === undefined || Number.isFinite(entry.queued_at))))) throw new Error('advisor state is malformed')
     contextEpoch = key(state.context_epoch); contextRowEpoch = key(state.context_row_epoch)
     delta = storedDelta.map((entry) => ({ ...entryFromText(entry.text), redactions: { ...entry.redactions } })).filter((entry) => entry.text)
     anchors = new Set(delta.flatMap((item) => item.anchors))
-    pending = new Map(storedPending.map(([id, triggers]) => [id, triggers.map((entry) => ({ trigger: entry.trigger, call_ordinal: entry.call_ordinal, queued_at: entry.queued_at ?? nowMs(), ...(entry.print ? { print: entry.print } : {}) }))]))
+    pending = new Map(storedPending.map(([id, triggers]) => [id, triggers.map((entry) => ({ trigger: entry.trigger, call_ordinal: entry.call_ordinal, queued_at: entry.queued_at ?? nowMs() }))]))
     calls = state.calls; consults = state.consults; growthBaseline = growth
     callOrdinals.clear(); for (const [id, ordinal] of ordinals) callOrdinals.set(id, ordinal)
     failureCounts = new Map(counts)

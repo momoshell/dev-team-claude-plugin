@@ -1842,8 +1842,9 @@ test('only one maybe-return per turn is consulted on, so the sure return still g
   const s = triggerSeat({ severity: 'medium' })
   try {
     s.ground()
-    for (let i = 0; i < advisor.TIER1_MAX_CONSULTS; i += 1) await s.a.onToolCall(call(`m${i}`, 'bash', { command: "printf '(no)' > lib/builder-1.json" }), {})
-    assert.equal(s.spawned(), 1, 'one maybe consult per turn')
+    const maybes = Array.from({ length: advisor.TIER1_MAX_CONSULTS }, (_, i) => s.a.onToolCall(call(`m${i}`, 'bash', { command: "printf '(no)' > lib/builder-1.json" }), {}))
+    await Promise.all(maybes)
+    assert.equal(s.spawned(), 1, 'one maybe consult per turn, even when the calls run in parallel')
     assert.equal(s.a.exportState().pre_return_maybe_spent, true)
     await s.a.onToolCall(call('r', 'write', { path: s.ret, content: '{}' }), {})
     assert.equal(s.spawned(), 2, 'the sure return is still consulted')

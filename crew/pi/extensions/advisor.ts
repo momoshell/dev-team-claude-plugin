@@ -1570,7 +1570,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     const measured = measureDiffLines()
     if (measured) for (const entry of measured.entries) appendDelta(entry)
     const result = await consult('pre-return', id, calls, { inline: true })
-    if (result?.ran) { if (spend) preReturnSpent = true; else preReturnMaybeSpent = true }
+    if (result?.ran && spend) preReturnSpent = true
     const judgment = result?.judgment
     if (result?.accepted && judgment?.severity === 'high') return { block: true, reason: judgment.claim }
     return undefined
@@ -1584,6 +1584,8 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     processCall(event)
     if (calls % CADENCE_CALLS === 0) queue(String(event?.toolCallId || ''), 'cadence')
     if (kind) {
+      // The maybe slot is claimed before the await, so parallel maybes cannot each pass the check.
+      if (kind === 'maybe') preReturnMaybeSpent = true
       try { return await preReturnVerdict(event, { spend: kind === 'sure' }) } catch { return undefined }
     }
     return undefined

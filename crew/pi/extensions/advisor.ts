@@ -890,6 +890,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   let growthBaseline = null
   let diffBaselineLines = null
   let preReturnSpent = false
+  let preReturnMaybeSpent = false
   let delta = []
   let anchors = new Set()
   let fired = new Set()
@@ -920,6 +921,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     growthBaseline = null
     diffBaselineLines = null
     preReturnSpent = false
+    preReturnMaybeSpent = false
     delta = []
     anchors = new Set()
     injected = new Set()
@@ -1045,7 +1047,8 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   // names it exactly. A Bash command names it through a path token ending in the return file's name, resolved against
   // the last cd before it (itself resolved against the seat's cwd). When those cds cannot be followed (a subshell,
   // pushd/popd, a quoted cd operand with whitespace), a token without an absolute path is 'maybe': it is consulted on,
-  // but it never spends the turn's pre-return consult, so a later sure return write is still reviewed.
+  // but it never spends the turn's pre-return consult, so a later sure return write is still reviewed. At most one
+  // maybe is consulted on per turn, so maybes cannot use up the consults a sure return needs.
   function returnWrite(event) {
     if (!taskDir || !role) return null
     const tool = String(event?.toolName || '')
@@ -1567,7 +1570,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     const measured = measureDiffLines()
     if (measured) for (const entry of measured.entries) appendDelta(entry)
     const result = await consult('pre-return', id, calls, { inline: true })
-    if (result?.ran && spend) preReturnSpent = true
+    if (result?.ran) { if (spend) preReturnSpent = true; else preReturnMaybeSpent = true }
     const judgment = result?.judgment
     if (result?.accepted && judgment?.severity === 'high') return { block: true, reason: judgment.claim }
     return undefined
@@ -1576,7 +1579,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   async function onToolCall(event, ctx) {
     ensureContext()
     const kind = returnWrite(event)
-    if (kind && preReturnSpent) return undefined
+    if (kind && (preReturnSpent || (kind === 'maybe' && preReturnMaybeSpent))) return undefined
     calls += 1
     processCall(event)
     if (calls % CADENCE_CALLS === 0) queue(String(event?.toolCallId || ''), 'cadence')
@@ -1608,7 +1611,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   function exportState() {
     return {
       context_epoch: contextEpoch, context_row_epoch: contextRowEpoch, calls, consults, growth_baseline: growthBaseline,
-      diff_baseline_lines: diffBaselineLines, pre_return_spent: preReturnSpent,
+      diff_baseline_lines: diffBaselineLines, pre_return_spent: preReturnSpent, pre_return_maybe_spent: preReturnMaybeSpent,
       call_ordinals: [...callOrdinals], fired: [...fired], failure_counts: [...failureCounts],
       injected: [...injected], dedupe: [...dedupe],
       delta: delta.map((entry) => ({ text: entry.text, redactions: entry.redactions || {} })),
@@ -1626,7 +1629,8 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     const diffBase = state.diff_baseline_lines === undefined ? null : state.diff_baseline_lines
     if (diffBase !== null && !(Number.isFinite(diffBase) && diffBase >= 0)) throw new Error('advisor state is malformed')
     const spent = state.pre_return_spent === undefined ? false : state.pre_return_spent
-    if (typeof spent !== 'boolean') throw new Error('advisor state is malformed')
+    const maybeSpent = state.pre_return_maybe_spent === undefined ? false : state.pre_return_maybe_spent
+    if (typeof spent !== 'boolean' || typeof maybeSpent !== 'boolean') throw new Error('advisor state is malformed')
     const ordinals = pairs(state.call_ordinals), counts = pairs(state.failure_counts)
     if (!ordinals.every(([id, ordinal]) => typeof id === 'string' && Number.isSafeInteger(ordinal)) || !counts.every(([id, count]) => typeof id === 'string' && Number.isSafeInteger(count))) throw new Error('advisor state is malformed')
     // The judgment channel's delta and the triggers queued for the next result ride along when the host stores them.
@@ -1641,7 +1645,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     anchors = new Set(delta.flatMap((item) => item.anchors))
     pending = new Map(storedPending.map(([id, triggers]) => [id, triggers.map((entry) => ({ trigger: entry.trigger, call_ordinal: entry.call_ordinal, queued_at: entry.queued_at ?? nowMs() }))]))
     calls = state.calls; consults = state.consults; growthBaseline = growth
-    diffBaselineLines = diffBase; preReturnSpent = spent
+    diffBaselineLines = diffBase; preReturnSpent = spent; preReturnMaybeSpent = maybeSpent
     callOrdinals.clear(); for (const [id, ordinal] of ordinals) callOrdinals.set(id, ordinal)
     failureCounts = new Map(counts)
     fired = new Set(strings(state.fired)); injected = new Set(strings(state.injected)); dedupe = new Set(strings(state.dedupe))

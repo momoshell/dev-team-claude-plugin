@@ -1837,6 +1837,19 @@ test('a return name the advisor cannot place is consulted on without spending th
   }
 })
 
+// MUTATION: consult on every maybe and twenty of them use up the cap before the sure return.
+test('only one maybe-return per turn is consulted on, so the sure return still gets its consult under the cap', async () => {
+  const s = triggerSeat({ severity: 'medium' })
+  try {
+    s.ground()
+    for (let i = 0; i < advisor.TIER1_MAX_CONSULTS; i += 1) await s.a.onToolCall(call(`m${i}`, 'bash', { command: "printf '(no)' > lib/builder-1.json" }), {})
+    assert.equal(s.spawned(), 1, 'one maybe consult per turn')
+    assert.equal(s.a.exportState().pre_return_maybe_spent, true)
+    await s.a.onToolCall(call('r', 'write', { path: s.ret, content: '{}' }), {})
+    assert.equal(s.spawned(), 2, 'the sure return is still consulted')
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
 test('a backup write beside the return file leaves the pre-return consult unspent for the real return', async () => {
   const s = triggerSeat()
   try {

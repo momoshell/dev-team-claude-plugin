@@ -604,30 +604,47 @@ export function gitDiffLines({ cwd, deps = {} } = {}) {
   let lines = 0
   const files = new Map()
   let current = null
+  let removed = null
   let newLine = 0
+  let oldLine = 0
+  const keep = (name, text) => {
+    if (!files.has(name)) files.set(name, [])
+    const kept = files.get(name)
+    if (kept.length < EXCERPT_LINES) kept.push(text)
+  }
   for (const row of diff.split('\n')) {
-    if (row.startsWith('diff --git ')) { current = null; continue }
+    if (row.startsWith('diff --git ')) { current = null; removed = null; continue }
     if (row.startsWith('+++ ')) {
       const name = row.slice(4).replace(/\t.*$/, '')
       if (name !== '/dev/null') { current = name.replace(/^b\//, ''); if (!files.has(current)) files.set(current, []) }
       continue
     }
-    if (row.startsWith('--- ')) continue
-    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(row)
-    if (hunk) { newLine = Number(hunk[1]); continue }
+    // A removed line is grounded at its old path and line, so a deletion-only change can still be reviewed.
+    if (row.startsWith('--- ')) {
+      const name = row.slice(4).replace(/\t.*$/, '')
+      removed = name === '/dev/null' ? null : name.replace(/^a\//, '')
+      continue
+    }
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(row)
+    if (hunk) { oldLine = Number(hunk[1]); newLine = Number(hunk[2]); continue }
     if (row.startsWith('+')) {
       lines += 1
       const kept = current === null ? null : files.get(current)
       if (kept && kept.length < EXCERPT_LINES) kept.push(`${current}:${newLine}: ${row.slice(1)}`)
       newLine += 1
-    } else if (row.startsWith('-')) lines += 1
+    } else if (row.startsWith('-')) {
+      lines += 1
+      if (removed !== null) keep(removed, `${removed}:${oldLine}: (removed) ${row.slice(1)}`)
+      oldLine += 1
+    }
   }
   const entries = [...files.values()].filter((kept) => kept.length).map((kept) => kept.join('\n'))
   try {
     for (const name of untracked.split('\0').filter(Boolean)) {
       const absolute = resolve(String(cwd), name)
       const size = Number(statSize(absolute)) || 0
-      if (size > UNTRACKED_READ_CAP_BYTES) { lines += Math.ceil(size / 40); continue }
+      // Over the read cap its lines are unmeasured: counted as none, never estimated from its size.
+      if (size > UNTRACKED_READ_CAP_BYTES) continue
       const buffer = read(absolute)
       const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(String(buffer ?? ''))
       if (bytes.includes(0)) continue
@@ -722,12 +739,14 @@ export function validateReply(value, options = {}) {
   if (!value.length) return { codes: ['no-finding'] }
   if (value.length > JUDGMENT_REPLY_MAX) return { codes: ['payload-not-an-object'] }
   const codes = []
+  let best = null
+  // The most severe valid finding is the one judged: a high finding after a medium one must not be lost.
   for (const element of value) {
     const verdict = validateJudgment(element, options)
-    if (verdict.judgment) return verdict
-    codes.push(...verdict.codes)
+    if (!verdict.judgment) { codes.push(...verdict.codes); continue }
+    if (!best || SEVERITIES.indexOf(verdict.judgment.severity) > SEVERITIES.indexOf(best.judgment.severity)) best = verdict
   }
-  return { codes: errorCodeSet(codes) }
+  return best ?? { codes: errorCodeSet(codes) }
 }
 
 export function validateJudgment(value, { anchors = new Set(), scopeFiles = [] } = {}) {
@@ -1165,8 +1184,11 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     const normalized = normalizeNote(text)
     let code
     if (isContentFree(normalized)) code = 'content-free'
-    else if (dedupe.has(normalized)) code = 'duplicate'
-    else if (acceptedEvents.has(eventId)) code = 'one-per-update'
+    // A must-fix pre-return finding blocks the return even if the same claim was delivered before.
+    else if (!(trigger === 'pre-return' && judgment.severity === 'high')) {
+      if (dedupe.has(normalized)) code = 'duplicate'
+      else if (acceptedEvents.has(eventId)) code = 'one-per-update'
+    }
     if (code) {
       const payload = {
         run_started_at: context?.run_started_at ?? null, tier: 1, trigger,

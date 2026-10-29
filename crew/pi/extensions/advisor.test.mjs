@@ -1857,6 +1857,41 @@ test('a pre-return consult stays inside TIER1_MAX_CONSULTS and lets the write th
   } finally { rmSync(s.f.root, { recursive: true, force: true }) }
 })
 
+// MUTATION: return the first valid member and a high finding after a medium one is lost, so the return write goes through.
+test('reply validation judges the most severe valid member; equal severities keep the first', () => {
+  const options = { anchors: new Set(['lib/widget.mjs:2']) }
+  const medium = { class: 'edge-path', severity: 'medium', claim: 'medium first', evidence: ['lib/widget.mjs:2'] }
+  assert.equal(advisor.validateReply([medium, { ...medium, severity: 'high', claim: 'high second' }], options).judgment.claim, 'high second')
+  assert.equal(advisor.validateReply([medium, { ...medium, claim: 'medium second' }], options).judgment.claim, 'medium first')
+})
+
+// MUTATION: ground only added lines and a deletion-only diff has nothing to consult on.
+test('a deletion-only diff is grounded at its old path and lines; an untracked file past the read cap is not estimated', () => {
+  const diff = ['diff --git a/lib/gone.mjs b/lib/gone.mjs', 'deleted file mode 100644', '--- a/lib/gone.mjs', '+++ /dev/null', '@@ -1,3 +0,0 @@', '-alpha', '-beta', '-gamma', ''].join('\n')
+  const exec = (_bin, args) => Buffer.from(args.includes('diff') ? diff : 'big.bin\0')
+  const measured = advisor.gitDiffLines({ cwd: '/repo', deps: { execFileSync: exec, fileSize: () => 1024 * 1024 + 1, readFileBytes: () => { throw new Error('must not read past the cap') } } })
+  assert.equal(measured.lines, 3, 'the oversized untracked file adds no estimated lines')
+  assert.equal(measured.entries.length, 1)
+  assert.match(measured.entries[0], /^lib\/gone\.mjs:1: \(removed\) alpha$/m)
+  assert.match(measured.entries[0], /^lib\/gone\.mjs:3: \(removed\) gamma$/m)
+})
+
+// MUTATION: let dedupe or one-per-update suppress a pre-return finding and an earlier warning lets the return through.
+test('a must-fix pre-return finding blocks even when diff growth already delivered the same claim', async () => {
+  const s = triggerSeat()
+  try {
+    s.ground()
+    s.diff.lines = 0; s.diff.entries = ['lib/widget.mjs:1: x']
+    const bash = async (id) => { await s.a.onToolCall(call(id, 'bash', { command: 'sed -i x' }), {}); s.a.onToolResult({ toolCallId: id, toolName: 'bash', input: { command: 'sed -i x' }, content: [{ type: 'text', text: 'ok' }] }, {}); await s.a.settled() }
+    await bash('b0')
+    s.diff.lines = advisor.DIFF_GROWTH_LINES
+    await bash('b1')
+    assert.ok(s.journal.rows.some((row) => row.advisor_note?.trigger === 'diff-growth' && row.advisor_note.outcome === 'injected'))
+    const verdict = await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
+    assert.deepEqual(verdict, { block: true, reason: 'must-fix: the empty path is unhandled' })
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
 test('the diff baseline and the pre-return flag survive exportState and importState; malformed values are refused', () => {
   const s = triggerSeat()
   try {

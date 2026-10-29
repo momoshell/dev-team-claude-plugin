@@ -705,3 +705,19 @@ test('CT7 two consults in flight for one update are judged against each other: o
   const context = lane.pre('d1', 'Bash', { command: 'echo ok' }).out?.additionalContext ?? ''
   assert.equal(context.split('tier one found').length - 1, 1)
 })
+
+test('AS2 a claude seat Write to the lane return file is never a scope breach; a Write outside scope and task dir still is', () => {
+  const sb = sandbox()
+  const launch = seat(sb, { advisor: ADVISOR })
+  const write = (id, file) => {
+    const pre = sb.frame('PreToolUse', 'Bash')
+    Object.assign(pre, { tool_name: 'Write', tool_use_id: id, tool_input: { file_path: file, content: '{}\n' } })
+    return contexts(fire(sb, launch, pre))
+  }
+  const breaches = () => readFileSync(sb.journal, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line)).filter((row) => row.advisor_note?.kind === 'scope-breach')
+  const returned = write('toolu_ret', join(sb.taskDir, 'builder-1.json'))
+  assert.doesNotMatch(returned, /outside the declared scope/)
+  assert.equal(breaches().length, 0)
+  write('toolu_out', join(sb.cwd, 'outside.mjs'))
+  assert.equal(breaches().length, 1, 'a write outside scope and task dir still breaches')
+})

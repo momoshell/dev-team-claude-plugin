@@ -1741,3 +1741,19 @@ test('a parallel call\'s result does not dispatch a live call\'s queued trigger;
     assert.equal(h.requests.length, 3)
   } finally { rmSync(h.root, { recursive: true, force: true }) }
 })
+
+test('AS1 a pi-seat write to the lane return file is never a scope breach; a write outside scope and task dir still is', () => {
+  const f = fixture(); const journal = sink()
+  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir }), deps: {
+    cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile,
+    readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
+  } })
+  const breaches = () => journal.rows.filter((row) => row.advisor_note?.kind === advisor.SCOPE_BREACH)
+  a.onToolCall(call('1', 'write', { path: join(f.taskDir, 'builder-1.json'), content: '{}\n' }), {})
+  assert.equal(breaches().length, 0)
+  a.onToolCall(call('2', 'write', { path: join(f.taskDir + '-evil', 'x.json'), content: '{}\n' }), {})
+  assert.equal(breaches().length, 1, 'a sibling of the task dir is not inside it')
+  a.onToolCall(call('3', 'write', { path: join(f.tree, 'outside.mjs'), content: 'a\n' }), {})
+  assert.equal(breaches().length, 2)
+  rmSync(f.root, { recursive: true, force: true })
+})

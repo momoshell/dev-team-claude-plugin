@@ -25,7 +25,7 @@ import { execFileSync, spawn as nodeSpawn } from 'node:child_process'
 import { appendFileSync, readFileSync, readdirSync, statSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { StringDecoder } from 'node:string_decoder'
-import { join, relative, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 import { journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../context-layout.mjs'
 import { resolvePiBinary, createStreamReducer, carriesOwnSpend, STREAM_CAP_BYTES } from './subagent.ts'
 
@@ -828,6 +828,15 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     return context || ensureContext()
   }
 
+  // A write inside the lane's task dir (e.g. the builder's return file) is never a scope breach.
+  function inTaskDir(rawPath) {
+    if (!taskDir || typeof rawPath !== 'string' || !rawPath) return false
+    try {
+      const rel = relative(resolve(String(taskDir)), resolve(cwd, rawPath))
+      return rel === '' || (rel !== '..' && !rel.startsWith('../') && !rel.startsWith('..\\') && !isAbsolute(rel))
+    } catch { return false }
+  }
+
   function targetForInput(input) {
     const raw = inputPath(input)
     return boundTarget(repoRelative(cwd, raw) || normalizePath(raw || ''))
@@ -976,7 +985,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       }
       const target = targetForInput(input)
       const matcher = scopeMatcher(current.files_in_scope)
-      if (target && current.scope_source !== 'absent' && !matcher(target)) {
+      if (target && current.scope_source !== 'absent' && !matcher(target) && !inTaskDir(inputPath(input))) {
         if (emitTier0({ kind: SCOPE_BREACH, target, targetKind: 'file' })) queue(id, 'tier0-note')
       }
       if (target && current.tripwires_source !== 'absent' && current.tripwires.includes(target)) {

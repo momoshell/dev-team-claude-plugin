@@ -60,6 +60,8 @@ export const GROWTH_DIVERGENCE_RATIO = 2
 export const GROWTH_FLOOR_BYTES = 120_000
 export const CADENCE_CALLS = 25
 export const TIER1_MAX_CONSULTS = 20
+// How long a trigger queued by a call's start waits for that call's own result before a later result sends it as orphaned.
+const ORPHAN_PENDING_MS = 10 * 60 * 1000
 export const DEDUPE_CAP = 256
 export const SIGNATURE_CAP_BYTES = 256
 export const NOTE_TEXT_CAP_BYTES = 4096
@@ -870,10 +872,15 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     return true
   }
 
+  function nowMs() {
+    const parsed = Date.parse(String(atOf(now)))
+    return Number.isFinite(parsed) ? parsed : Date.now()
+  }
+
   function queue(id, trigger, callOrdinal = calls) {
     if (!id || !TRIGGERS.includes(trigger)) return
     const list = pending.get(String(id)) || []
-    if (!list.some((entry) => entry.trigger === trigger)) list.push({ trigger, call_ordinal: callOrdinal })
+    if (!list.some((entry) => entry.trigger === trigger)) list.push({ trigger, call_ordinal: callOrdinal, queued_at: nowMs() })
     pending.set(String(id), list)
   }
 
@@ -1024,7 +1031,14 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     if (normalized) addFifo(injected, normalized, DEDUPE_CAP)
   }
 
-  function acceptTier1Note({ judgment, trigger, eventId, captured }) {
+  // A host whose consults run in separate processes serialises acceptance across them (exclusiveTier1Acceptance):
+  // inside it the host merges what the other consults accepted (mergeTier1Memory) before this one is judged.
+  function acceptTier1Note(args) {
+    if (typeof deps.exclusiveTier1Acceptance !== 'function') return acceptTier1NoteNow(args)
+    try { return deps.exclusiveTier1Acceptance(() => acceptTier1NoteNow(args)) === true } catch { return false }
+  }
+
+  function acceptTier1NoteNow({ judgment, trigger, eventId, captured }) {
     const text = boundText(judgment.claim, NOTE_TEXT_CAP_BYTES)
     const normalized = normalizeNote(text)
     let code
@@ -1082,12 +1096,28 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       const rebuilt = entryFromText(cleaned)
       return Object.freeze({ text: cleaned, anchors: Object.freeze(rebuilt.anchors) })
     }).filter((entry) => entry.text))
+    const consultId = randomUUID()
+    const redacted = redactionTally(delta)
+    // A host whose hooks are fresh short processes hands the prepared consult to a detached worker
+    // (runTier1Consult) instead of holding it open here. Nothing below this line is duplicated for it.
+    if (typeof deps.deferTier1Consult === 'function') {
+      try {
+        deps.deferTier1Consult({
+          trigger, eventId, callOrdinal, consultId, redacted, epoch: contextEpoch,
+          snapshot: snapshot.map((entry) => entry.text), injected: [...injected], dedupe: [...dedupe],
+        })
+      } catch { /* a consult that cannot start costs the seat nothing */ }
+      return
+    }
+    runConsult({ trigger, eventId, callOrdinal, snapshot, context, consultId, redacted })
+  }
+
+  function runConsult({ trigger, eventId, callOrdinal, snapshot, context, consultId, redacted }) {
     const captured = {
       epoch: contextEpoch, generation, snapshot, cell: context.cell, call_ordinal: callOrdinal,
       anchors: new Set(snapshot.flatMap((e) => e.anchors)), controller: new AbortController(),
     }
     const cell = captured.cell
-    const consultId = randomUUID()
     const tier1Stamp = { ...cellIdentity(cell), call_ordinal: captured.call_ordinal, consult_id: consultId }
     captured.tier1Stamp = tier1Stamp
     controllers.add(captured.controller)
@@ -1096,7 +1126,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     const consultPayload = { consult_id: consultId,
       run_started_at: context?.run_started_at ?? null, tier: 1, trigger, role,
       delta_entries: captured.snapshot.length,
-      redacted: redactionTally(delta),
+      redacted,
       model: captured.cell.model, model_id: captured.cell.id, provider: captured.cell.provider, agent: captured.cell.agent, effort: captured.cell.effort,
     }
     consultPayload.provider = cell.provider
@@ -1278,6 +1308,44 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     })()
     inFlight.add(request)
     request.finally(() => inFlight.delete(request)).catch(() => {})
+    return request
+  }
+
+  // The detached worker's entry: run a consult a hook prepared and deferred, through the same execution and
+  // acceptance code as the inline path. A request from another epoch, or one this advisor cannot trust, is dropped.
+  async function runTier1Consult(request) {
+    if (!request || typeof request !== 'object' || typeof request.consultId !== 'string' || typeof request.eventId !== 'string'
+      || !TRIGGERS.includes(request.trigger) || !Number.isSafeInteger(request.callOrdinal)
+      || !Array.isArray(request.snapshot) || !request.snapshot.every((text) => typeof text === 'string')
+      || !Array.isArray(request.injected) || !request.injected.every((text) => typeof text === 'string')
+      || !Array.isArray(request.dedupe) || !request.dedupe.every((text) => typeof text === 'string')
+      || !request.redacted || typeof request.redacted !== 'object' || typeof request.epoch !== 'string') return
+    if (epochKey(manifestEpoch({ taskDir, readFile })) !== request.epoch) return
+    contextEpoch = request.epoch
+    contextRowEpoch = request.epoch
+    const current = ensureContext()
+    if (!current?.cell || contextEpoch !== request.epoch) return
+    injected = new Set(request.injected)
+    dedupe = new Set(request.dedupe)
+    const snapshot = Object.freeze(request.snapshot.map((text) => {
+      const rebuilt = entryFromText(text)
+      return Object.freeze({ text: rebuilt.text, anchors: Object.freeze(rebuilt.anchors) })
+    }).filter((entry) => entry.text))
+    await runConsult({
+      trigger: request.trigger, eventId: request.eventId, callOrdinal: request.callOrdinal, snapshot,
+      context: current, consultId: request.consultId, redacted: request.redacted,
+    })
+  }
+
+  // What a detached consult learned by having its claim accepted: the dedupe and self-echo memory a host that
+  // keeps the advisor's state elsewhere merges back, so later consults see a delivered claim as the pi advisor does.
+  function tier1Memory() { return { dedupe: [...dedupe], injected: [...injected], events: [...acceptedEvents] } }
+
+  function mergeTier1Memory(memory) {
+    const strings = (value) => Array.isArray(value) && value.every((text) => typeof text === 'string') ? value : []
+    for (const text of strings(memory?.dedupe)) addFifo(dedupe, text, DEDUPE_CAP)
+    for (const text of strings(memory?.injected)) addFifo(injected, text, DEDUPE_CAP)
+    for (const text of strings(memory?.events)) addFifo(acceptedEvents, text, DEDUPE_CAP)
   }
 
   function dispatch(id) {
@@ -1298,6 +1366,15 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     ensureContext()
     processResult(event)
     dispatch(String(event?.toolCallId || ''))
+    // A host that runs each hook as its own process (deferTier1Consult) can see a call's Pre without its Post
+    // (a denied or interrupted call). Calls run in parallel, so another call's result does not end a live call:
+    // what a call queued waits for its own result, matched by call id alone, or is sent once older than ORPHAN_PENDING_MS.
+    if (typeof deps.deferTier1Consult === 'function') {
+      const cutoff = nowMs() - ORPHAN_PENDING_MS
+      for (const [orphan, triggers] of [...pending]) {
+        if (triggers.every((entry) => Number.isFinite(entry.queued_at) && entry.queued_at <= cutoff)) dispatch(orphan)
+      }
+    }
     callOrdinals.delete(String(event?.toolCallId || ''))
     return undefined
   }
@@ -1309,6 +1386,8 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       context_epoch: contextEpoch, context_row_epoch: contextRowEpoch, calls, consults, growth_baseline: growthBaseline,
       call_ordinals: [...callOrdinals], fired: [...fired], failure_counts: [...failureCounts],
       injected: [...injected], dedupe: [...dedupe],
+      delta: delta.map((entry) => ({ text: entry.text, redactions: entry.redactions || {} })),
+      pending: [...pending].map(([id, triggers]) => [id, triggers.map((entry) => ({ trigger: entry.trigger, call_ordinal: entry.call_ordinal, queued_at: entry.queued_at }))]),
     }
   }
 
@@ -1321,7 +1400,17 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     if (growth !== null && !(growth && Number.isFinite(growth.bytes) && typeof growth.truncated === 'boolean')) throw new Error('advisor state is malformed')
     const ordinals = pairs(state.call_ordinals), counts = pairs(state.failure_counts)
     if (!ordinals.every(([id, ordinal]) => typeof id === 'string' && Number.isSafeInteger(ordinal)) || !counts.every(([id, count]) => typeof id === 'string' && Number.isSafeInteger(count))) throw new Error('advisor state is malformed')
+    // The judgment channel's delta and the triggers queued for the next result ride along when the host stores them.
+    const storedDelta = state.delta === undefined ? [] : state.delta
+    if (!Array.isArray(storedDelta) || !storedDelta.every((entry) => entry && typeof entry.text === 'string' && entry.redactions && typeof entry.redactions === 'object' && !Array.isArray(entry.redactions)
+      && Object.values(entry.redactions).every((count) => Number.isSafeInteger(count) && count >= 0))) throw new Error('advisor state is malformed')
+    const storedPending = state.pending === undefined ? [] : pairs(state.pending)
+    if (!storedPending.every(([id, triggers]) => typeof id === 'string' && Array.isArray(triggers)
+      && triggers.every((entry) => entry && TRIGGERS.includes(entry.trigger) && Number.isSafeInteger(entry.call_ordinal) && (entry.queued_at === undefined || Number.isFinite(entry.queued_at))))) throw new Error('advisor state is malformed')
     contextEpoch = key(state.context_epoch); contextRowEpoch = key(state.context_row_epoch)
+    delta = storedDelta.map((entry) => ({ ...entryFromText(entry.text), redactions: { ...entry.redactions } })).filter((entry) => entry.text)
+    anchors = new Set(delta.flatMap((item) => item.anchors))
+    pending = new Map(storedPending.map(([id, triggers]) => [id, triggers.map((entry) => ({ trigger: entry.trigger, call_ordinal: entry.call_ordinal, queued_at: entry.queued_at ?? nowMs() }))]))
     calls = state.calls; consults = state.consults; growthBaseline = growth
     callOrdinals.clear(); for (const [id, ordinal] of ordinals) callOrdinals.set(id, ordinal)
     failureCounts = new Map(counts)
@@ -1329,7 +1418,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   }
 
   return {
-    onToolCall, onToolResult, exportState, importState,
+    onToolCall, onToolResult, exportState, importState, runTier1Consult, tier1Memory, mergeTier1Memory,
     notes: () => [...notes],
     settled: async () => { await Promise.allSettled([...inFlight]) },
   }

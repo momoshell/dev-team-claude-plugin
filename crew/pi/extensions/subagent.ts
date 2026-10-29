@@ -971,8 +971,10 @@ export function createAgentTool(deps: any = {}) {
 
 // The scout nudge: advice from what the seat actually does. It counts read-type
 // calls since the last write or scout call; past the threshold across several
-// directories it steers the seat once per turn. It never blocks or alters a
-// call, and a journal failure never reaches the seat.
+// directories it steers the seat once per session. Each seat assignment runs in a
+// fresh session, so that is once per assignment; pi's turn_start fires on every
+// model step and must not reset it. It never blocks or alters a call, and a journal
+// failure never reaches the seat.
 export const SCOUT_NUDGE_READ_THRESHOLD = 8
 export const SCOUT_NUDGE_MIN_DIRECTORIES = 3
 export const SCOUT_NUDGE_MESSAGE_TYPE = 'crew-scout-nudge'
@@ -982,7 +984,7 @@ export function createScoutNudge(deps: any = {}): any {
   const { env = process.env, send, appendFile = appendFileSync, now = () => new Date().toISOString() } = deps
   let count = 0
   const dirs = new Set<string>()
-  let nudgedThisTurn = false
+  let nudged = false
   return {
     onToolCall(event: any) {
       try {
@@ -996,8 +998,8 @@ export function createScoutNudge(deps: any = {}): any {
         const path = event?.input?.path
         count += 1
         dirs.add(tool === 'read' ? dirname(String(path ?? '')) : String(path || '.'))
-        if (count >= SCOUT_NUDGE_READ_THRESHOLD && dirs.size >= SCOUT_NUDGE_MIN_DIRECTORIES && !nudgedThisTurn) {
-          nudgedThisTurn = true
+        if (count >= SCOUT_NUDGE_READ_THRESHOLD && dirs.size >= SCOUT_NUDGE_MIN_DIRECTORIES && !nudged) {
+          nudged = true
           try {
             send({ customType: SCOUT_NUDGE_MESSAGE_TYPE, content: SCOUT_NUDGE_TEXT, display: true }, { deliverAs: 'steer' })
           } catch { /* advice only */ }
@@ -1011,10 +1013,6 @@ export function createScoutNudge(deps: any = {}): any {
           }
         }
       } catch { /* never throws into the seat */ }
-      return undefined
-    },
-    onTurnStart() {
-      nudgedThisTurn = false
       return undefined
     },
   }
@@ -1032,6 +1030,5 @@ export default function subagentExtension(pi: any) {
   if (parseAgentAllowlist(process.env[AGENTS_ENV]).length > 0 && typeof pi.sendMessage === 'function') {
     const nudge = createScoutNudge({ send: (message: any, options: any) => pi.sendMessage(message, options) })
     pi.on('tool_call', nudge.onToolCall)
-    pi.on('turn_start', nudge.onTurnStart)
   }
 }

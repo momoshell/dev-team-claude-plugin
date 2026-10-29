@@ -1270,7 +1270,7 @@ const refusedBeforeClient = (arms, lane, options = {}) => {
 }
 
 test('a lean pi builder declaring advisor, edit assist, builderloop and skeletonread launches with all four on the lane layout', () => {
-  const probe = armLaunch('pi', 'builder', contextArms, { briefText: 'Tripwire tests:\n- a.test.mjs · tripwire\nBroad keys\n' })
+  const probe = armLaunch('pi', 'builder', contextArms, { briefText: 'Tripwire tests:\n- a.test.mjs · tripwire\nBroad keys\n## Acceptance\n- (A1) first item\nnot an item\n- (A2) second item\n## Next\n- (A3) outside\n' })
   const anchor = Date.now() - 60_000
   leanLane(probe.taskDir, { anchor })
   probe.run()
@@ -1285,6 +1285,7 @@ test('a lean pi builder declaring advisor, edit assist, builderloop and skeleton
   assert.equal(manifest.schema_version, 1)
   assert.equal(manifest.run_started_at, anchor, 'the manifest is dated by the lane start, never the seat start')
   assert.deepEqual(manifest.tripwires, ['a.test.mjs'])
+  assert.deepEqual(manifest.acceptance_items, ['(A1) first item', '(A2) second item'])
   assert.deepEqual(manifest.cell, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'high', model: 'openai/gpt-6.1-sol' })
   assert.equal(existsSync(join(probe.taskDir, 'advisor-manifest.json.tmp')), false)
 })

@@ -100,6 +100,13 @@ export const TARGET_CAP_BYTES = 256
 export const DELTA_ENTRIES = 12
 export const DELTA_ENTRY_CAP_BYTES = 512
 export const EXCERPT_LINES = 12
+// The pre-return consult's own, larger view: the whole working diff, bounded by bytes rather than by entries.
+export const PRE_RETURN_DIFF_BUDGET_BYTES = 48 * 1024
+// The omitted_files entries that say the window is incomplete in a way names cannot (not file paths).
+export const PRE_RETURN_INCOMPLETE = '(working diff over the git output limit: list may be incomplete)'
+export const PRE_RETURN_UNAVAILABLE = '(working diff unavailable: git could not read it)'
+const ACCEPTANCE_ITEMS_MAX = 32
+const ACCEPTANCE_ITEM_CAP_BYTES = 512
 export const READ_CAP_BYTES = 65_536
 export const RESPONSE_CAP_BYTES = 65_536
 export const CLAIM_CAP_BYTES = 500
@@ -226,9 +233,11 @@ function manifestText({ taskDir, readFile }) {
     const cell = rawCell && typeof rawCell === 'object' && !Array.isArray(rawCell)
       && rawCell.agent === 'pi' && cellKeys.every((key) => typeof rawCell[key] === 'string' && SAFE_MODEL.test(rawCell[key]))
       ? Object.fromEntries(cellKeys.map((key) => [key, rawCell[key]])) : null
+    const acceptance = Array.isArray(value.acceptance_items) && value.acceptance_items.every((item) => typeof item === 'string')
+      ? value.acceptance_items.map((item) => item.trim()).filter(Boolean).slice(0, ACCEPTANCE_ITEMS_MAX).map((item) => boundText(item, ACCEPTANCE_ITEM_CAP_BYTES)) : []
     return {
       schema_version: value.schema_version, run_started_at: value.run_started_at,
-      tripwires: value.tripwires.map((item) => boundTarget(item)), cell,
+      tripwires: value.tripwires.map((item) => boundTarget(item)), acceptance_items: acceptance, cell,
       // A present cell that fails the allowlist is NOT a null (tier-0-only) cell.
       cell_invalid: rawCell != null && cell === null,
     }
@@ -310,7 +319,7 @@ export function loadContext({ taskDir, deps = {}, env = process.env } = {}) {
   if (!manifest) {
     return {
       files_in_scope: [], validation_lane: null, scope_source: 'absent',
-      tripwires: [], tripwires_source: 'absent', run_started_at: null, cell: null,
+      tripwires: [], tripwires_source: 'absent', acceptance_items: [], run_started_at: null, cell: null,
     }
   }
   const planner = plannerReturn({ taskDir, manifest, deps, env })
@@ -319,7 +328,7 @@ export function loadContext({ taskDir, deps = {}, env = process.env } = {}) {
     validation_lane: planner.validation_lane,
     scope_source: planner.source,
     tripwires: manifest.tripwires,
-    tripwires_source: 'manifest',
+    tripwires_source: 'manifest', acceptance_items: manifest.acceptance_items,
     run_started_at: manifest.run_started_at, cell: manifest.cell,
   }
 }
@@ -457,8 +466,8 @@ export function stripAdvisorNotes(text, injected) {
   return cleaned.trim() ? cleaned : ''
 }
 
-function entryFromText(text) {
-  const bounded = boundText(text, DELTA_ENTRY_CAP_BYTES)
+function entryFromText(text, cap = DELTA_ENTRY_CAP_BYTES) {
+  const bounded = cap === null ? String(text ?? '') : boundText(text, cap)
   const anchors = new Set()
   for (const line of bounded.split('\n')) {
     const anchor = anchorFromLine(line)
@@ -630,11 +639,20 @@ export function gitDiffLines({ cwd, deps = {} } = {}) {
   })
   const asText = (value) => Buffer.isBuffer(value) ? value.toString('utf8') : String(value ?? '')
   let diff, untracked
+  // Past the output cap the hunks are not read at all; the changed names (a far smaller listing) still say which
+  // files the consult could not see. A listing that fails too is an empty list, never a guess.
+  const overflowShape = () => {
+    const names = []
+    for (const args of [['-c', 'core.quotepath=off', '--no-pager', 'diff', '--name-only', '-z', 'HEAD'], ['ls-files', '--others', '--exclude-standard', '-z']]) {
+      try { for (const name of asText(run(args)).split('\0').filter(Boolean)) if (!names.includes(name)) names.push(name) } catch { /* unnamed */ }
+    }
+    return { lines: DIFF_MAX_BUFFER_BYTES, text: '', entries: [], files: [], truncated: true, unread_files: names }
+  }
   try { diff = asText(run(['-c', 'core.quotepath=off', '--no-pager', 'diff', '--no-color', '--no-ext-diff', '-U0', 'HEAD'])) } catch (err) {
-    return gitOverflow(err) ? { lines: DIFF_MAX_BUFFER_BYTES, text: '', entries: [], truncated: true } : null
+    return gitOverflow(err) ? overflowShape() : null
   }
   try { untracked = asText(run(['ls-files', '--others', '--exclude-standard', '-z'])) } catch (err) {
-    return gitOverflow(err) ? { lines: DIFF_MAX_BUFFER_BYTES, text: '', entries: [], truncated: true } : null
+    return gitOverflow(err) ? overflowShape() : null
   }
   let lines = 0
   const files = new Map()
@@ -645,8 +663,7 @@ export function gitDiffLines({ cwd, deps = {} } = {}) {
   let oldLine = 0
   const keep = (name, text) => {
     if (!files.has(name)) files.set(name, [])
-    const kept = files.get(name)
-    if (kept.length < EXCERPT_LINES) kept.push(text)
+    files.get(name).push(text)
   }
   for (const row of diff.split('\n')) {
     // '--- ' and '+++ ' are file headers only before a file's first hunk; inside a hunk they are content.
@@ -668,7 +685,7 @@ export function gitDiffLines({ cwd, deps = {} } = {}) {
     if (row.startsWith('+')) {
       lines += 1
       const kept = current === null ? null : files.get(current)
-      if (kept && kept.length < EXCERPT_LINES) kept.push(`${current}:${newLine}: ${row.slice(1)}`)
+      if (kept) kept.push(`${current}:${newLine}: ${row.slice(1)}`)
       newLine += 1
     } else if (row.startsWith('-')) {
       lines += 1
@@ -676,8 +693,12 @@ export function gitDiffLines({ cwd, deps = {} } = {}) {
       oldLine += 1
     }
   }
-  const entries = [...files.values()].filter((kept) => kept.length).map((kept) => kept.join('\n'))
+  // Every grounded line is kept per file; the small excerpt window below takes the first EXCERPT_LINES of each, and
+  // the pre-return consult packs the rest by bytes.
+  const allFiles = [...files].filter(([, kept]) => kept.length).map(([path, kept]) => ({ path, lines: kept }))
+  const entries = allFiles.map(({ lines: kept }) => kept.slice(0, EXCERPT_LINES).join('\n'))
   let unknown = false
+  const partialFiles = []
   try {
     for (const name of untracked.split('\0').filter(Boolean)) {
       const absolute = resolve(String(cwd), name)
@@ -690,15 +711,66 @@ export function gitDiffLines({ cwd, deps = {} } = {}) {
       if (bytes.includes(0)) continue
       const text = bytes.toString('utf8')
       if (!text) continue
+      if (large) partialFiles.push(name)
       const rows = text.endsWith('\n') ? text.slice(0, -1).split('\n') : text.split('\n')
       const counted = large ? countLines(absolute, UNTRACKED_COUNT_CAP_BYTES) : rows.length
       if (counted === null) unknown = true
       else lines += counted
-      entries.push(rows.slice(0, EXCERPT_LINES).map((item, index) => `${name}:${index + 1}: ${item}`).join('\n'))
+      const grounded = rows.map((item, index) => `${name}:${index + 1}: ${item}`)
+      allFiles.push({ path: name, lines: grounded })
+      entries.push(grounded.slice(0, EXCERPT_LINES).join('\n'))
     }
   } catch { return null }
-  if (unknown) return { lines: DIFF_MAX_BUFFER_BYTES, text: entries.join('\n'), entries, truncated: true }
-  return { lines, text: entries.join('\n'), entries, truncated: false }
+  if (unknown) return { lines: DIFF_MAX_BUFFER_BYTES, text: entries.join('\n'), entries, files: allFiles, partial_files: partialFiles, truncated: true }
+  return { lines, text: entries.join('\n'), entries, files: allFiles, partial_files: partialFiles, truncated: false }
+}
+
+// The pre-return consult's view of the working diff: every grounded line in order, packed into `budgetBytes`
+// (UTF-8 bytes of the entries joined by newlines). A file with any line left out is named once in `omitted_files`,
+// a partly shown file included, so the consult is told what it did not see. Null when git cannot say.
+export function preReturnDiff({ cwd, deps = {}, budgetBytes = PRE_RETURN_DIFF_BUDGET_BYTES, scrub = null } = {}) {
+  const diff = (deps.diffLines || ((path) => gitDiffLines({ cwd: path, deps })))(cwd)
+  if (!diff || typeof diff !== 'object') return null
+  let files
+  if (Array.isArray(diff.files)) files = diff.files.map((file) => ({ path: String(file?.path ?? ''), lines: (file?.lines || []).map(String) }))
+  else {
+    const entries = Array.isArray(diff.entries) ? diff.entries.map(String) : [String(diff.text ?? '')]
+    files = entries.filter(Boolean).map((entry) => {
+      const lines = entry.split('\n')
+      return { path: /^(.+?):\d+: /.exec(lines[0])?.[1] ?? '', lines }
+    })
+  }
+  const entries = []
+  const omittedFiles = []
+  const redactions = {}
+  let bytes = 0
+  let count = 0
+  // A file git could not give hunks for (output over the cap) or gave only the head of is left out, by name.
+  for (const name of [...(Array.isArray(diff.unread_files) ? diff.unread_files : []), ...(Array.isArray(diff.partial_files) ? diff.partial_files : [])]) {
+    if (!omittedFiles.includes(String(name))) omittedFiles.push(String(name))
+  }
+  // An incomplete read is stated, never passed off as a whole diff, even when no file could be named.
+  if (diff.truncated === true) omittedFiles.push(PRE_RETURN_INCOMPLETE)
+  for (const file of files) {
+    const taken = []
+    let omitted = false
+    let fileLines = file.lines
+    // `scrub` runs before the budget is spent, so the bytes counted are the bytes sent: a redaction that expands text
+    // cannot push the window past the budget.
+    if (scrub && fileLines.length) {
+      const scrubbed = scrub(fileLines.join('\n'))
+      fileLines = scrubbed.text ? scrubbed.text.split('\n') : []
+      for (const [kind, n] of Object.entries(scrubbed.counts || {})) redactions[kind] = (redactions[kind] || 0) + n
+    }
+    for (const line of fileLines) {
+      const cost = byteLength(line) + (count ? 1 : 0)
+      if (bytes + cost > budgetBytes) { omitted = true; break }
+      bytes += cost; count += 1; taken.push(line)
+    }
+    if (taken.length) entries.push(taken.join('\n'))
+    if (omitted && !omittedFiles.includes(file.path)) omittedFiles.push(file.path)
+  }
+  return { entries, bytes, omitted_files: omittedFiles, lines: count, redactions }
 }
 
 export async function probeEndpoint(url, { fetchFn = fetch, timeoutMs = PROBE_TIMEOUT_MS } = {}) {
@@ -828,8 +900,13 @@ const REPLY_CONTRACT = `Return JSON alone: one object or an array of 1 to ${JUDG
 export const BUILDER_SYSTEM_PROMPT = `Review the builder delta for exactly two judgment classes: edge-path (checklist B1: answer EPERM, unknown, interrupted, and empty paths) and over-claim (checklist B2: record no verdict stronger than what was measured). ${REPLY_CONTRACT}`
 export const PLANNER_SYSTEM_PROMPT = `Review the planner delta for exactly two judgment classes: edge-path (a plan or gate omits or mishandles a required boundary, failure case, or acceptance path) and over-claim (a Ground truth citation that does not hold at the ref where the plan was written). ${REPLY_CONTRACT}`
 
-function systemPrompt(role) {
-  return role === 'planner' ? PLANNER_SYSTEM_PROMPT : BUILDER_SYSTEM_PROMPT
+// Said only to the pre-return consult, whose input also carries the brief's acceptance items and the files its
+// diff window left out.
+const PRE_RETURN_NOTE = ' This is the final review before the return: the delta is the whole working diff (removed lines are marked (removed)), acceptance_items are what the brief asked for, and omitted_files are changed files the delta does not show in full (an entry in parentheses says the diff itself could not be read in full); check the change against the acceptance items, and treat an omitted file as unreviewed rather than as clean.'
+
+function systemPrompt(role, trigger) {
+  const base = role === 'planner' ? PLANNER_SYSTEM_PROMPT : BUILDER_SYSTEM_PROMPT
+  return trigger === 'pre-return' ? base + PRE_RETURN_NOTE : base
 }
 
 function noteTextForTier0(kind, target, signature, role) {
@@ -1042,6 +1119,21 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     if (!value || typeof value !== 'object' || !Number.isFinite(value.lines) || value.lines < 0) return null
     const entries = Array.isArray(value.entries) ? value.entries.map(String) : [String(value.text ?? '')]
     return { lines: Number(value.lines), entries: entries.filter(Boolean).slice(0, DELTA_ENTRIES) }
+  }
+
+  // The whole working diff for the pre-return consult, scrubbed. Null when git cannot say: the consult then runs on
+  // the session delta alone, as a failed measurement never holds the return.
+  function packPreReturnDiff() {
+    let packed
+    try { packed = preReturnDiff({ cwd, deps: { ...deps, diffLines }, scrub: redactDelta }) } catch { packed = null }
+    if (!packed) return null
+    return { entries: packed.entries, redactions: packed.redactions, omitted_files: packed.omitted_files }
+  }
+
+  // The pre-return payload is chosen by the trigger: a diff git could not read still carries the acceptance items and
+  // a stated gap, and the consult runs on the session's grounding.
+  function preReturnWindow() {
+    return packPreReturnDiff() ?? { entries: [], redactions: {}, omitted_files: [PRE_RETURN_UNAVAILABLE] }
   }
 
   // Whether a call writes the seat's return file `<taskDir>/<role>-<n>.json`: 'sure', 'maybe', or null. A Write/Edit
@@ -1282,13 +1374,17 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     return true
   }
 
-  async function consult(trigger, eventId, callOrdinal, { inline = false } = {}) {
+  async function consult(trigger, eventId, callOrdinal, { inline = false, preReturn = null } = {}) {
     // A host whose hooks are fresh processes (the claude seat plugin) cannot hold a consult open: tier 0 only.
     if (deps.tier1 === false) return
     const context = currentContext()
     if (!context?.cell) return
     if (consults >= TIER1_MAX_CONSULTS) return
-    if (!anchors.size) {
+    // The pre-return window: the whole working diff, scrubbed, beside the session's own delta. The session delta
+    // keeps its small caps; these entries are never stored in it.
+    const wholeDiff = preReturn ? preReturn.entries.map((text) => ({ text, ...entryFromText(text, null) })) : []
+    const wholeAnchors = new Set(wholeDiff.flatMap((entry) => entry.anchors))
+    if (!anchors.size && !wholeAnchors.size) {
       const payload = {
         run_started_at: context?.run_started_at ?? null, tier: 1, trigger, call_ordinal: callOrdinal,
         kind: TIER1_FINDING, target: '', target_kind: 'assertion', role,
@@ -1304,8 +1400,15 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       const rebuilt = entryFromText(cleaned)
       return Object.freeze({ text: cleaned, anchors: Object.freeze(rebuilt.anchors) })
     }).filter((entry) => entry.text))
+    const sessionTexts = new Set(snapshot.map((entry) => entry.text))
+    const effective = Object.freeze([...snapshot, ...wholeDiff.filter((entry) => !sessionTexts.has(entry.text))
+      .map((entry) => Object.freeze({ text: entry.text, anchors: Object.freeze(entry.anchors) }))])
     const consultId = randomUUID()
-    const redacted = redactionTally(delta)
+    const redacted = redactionTally([...delta, ...(preReturn ? [{ redactions: preReturn.redactions }] : [])])
+    const window = preReturn ? {
+      window_bytes: byteLength(wholeDiff.map((entry) => entry.text).join('\n')),
+      window_entries: wholeDiff.length, omitted_files: preReturn.omitted_files,
+    } : null
     // A host whose hooks are fresh short processes hands the prepared consult to a detached worker
     // (runTier1Consult) instead of holding it open here. Nothing below this line is duplicated for it.
     if (!inline && typeof deps.deferTier1Consult === 'function') {
@@ -1317,10 +1420,10 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       } catch { /* a consult that cannot start costs the seat nothing */ }
       return
     }
-    return runConsult({ trigger, eventId, callOrdinal, snapshot, context, consultId, redacted })
+    return runConsult({ trigger, eventId, callOrdinal, snapshot: effective, context, consultId, redacted, window })
   }
 
-  function runConsult({ trigger, eventId, callOrdinal, snapshot, context, consultId, redacted }) {
+  function runConsult({ trigger, eventId, callOrdinal, snapshot, context, consultId, redacted, window = null }) {
     const captured = {
       epoch: contextEpoch, generation, snapshot, cell: context.cell, call_ordinal: callOrdinal,
       anchors: new Set(snapshot.flatMap((e) => e.anchors)), controller: new AbortController(),
@@ -1338,6 +1441,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       model: captured.cell.model, model_id: captured.cell.id, provider: captured.cell.provider, agent: captured.cell.agent, effort: captured.cell.effort,
     }
     consultPayload.provider = cell.provider
+    if (window) Object.assign(consultPayload, window)
     const request = (async () => {
       let codes = []
       let judgment = null
@@ -1365,7 +1469,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
           const dir = mkdtempSync(join(tmpdir(), 'crew-advisor-'))
           const promptFile = join(dir, 'system-prompt.txt')
           try {
-            writeFileSync(promptFile, systemPrompt(role), { mode: 0o600 })
+            writeFileSync(promptFile, systemPrompt(role, trigger), { mode: 0o600 })
             const childArgs = ['-p','--mode','json','--no-session','--model',consultModel(cell),'--thinking',cell.effort,'--no-tools','--no-context-files','--no-extensions','--no-skills','--append-system-prompt',promptFile]
             const child = spawn(binary, [...prefix, ...childArgs], { cwd, stdio: ['pipe','pipe','pipe'] })
             const reducer = createStreamReducer()
@@ -1448,7 +1552,9 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
               // ASYNCHRONOUSLY on the stream; unhandled, that 'error' event kills
               // the seat. It takes the consult's failure path instead.
               if (typeof child.stdin?.on === 'function') child.stdin.on('error', () => fail(new Error('stdin failed')))
-              try { child.stdin.end(JSON.stringify({ trigger, delta: captured.snapshot })) } catch { consultFailed = true; settle(new Error('stdin failed')) }
+              try { child.stdin.end(JSON.stringify(window
+                ? { trigger, delta: captured.snapshot, acceptance_items: context?.acceptance_items ?? [], omitted_files: window.omitted_files }
+                : { trigger, delta: captured.snapshot })) } catch { consultFailed = true; settle(new Error('stdin failed')) }
             })
             foldedUsage = childResult.usage
             const content = childResult.text
@@ -1568,9 +1674,8 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   // (the consult's own journal rows say so) and never leaves the seat unable to return.
   async function preReturnVerdict(event, { spend, claim = null }) {
     const id = String(event?.toolCallId || '')
-    const measured = measureDiffLines()
-    if (measured) for (const entry of measured.entries) appendDelta(entry)
-    const result = await consult('pre-return', id, calls, { inline: true })
+    const preReturn = preReturnWindow()
+    const result = await consult('pre-return', id, calls, { inline: true, preReturn })
     if (result?.ran && spend) preReturnSpent = true
     // A maybe whose consult never ran (no grounded delta, no cell, the cap) gives its slot back, if it still holds it.
     if (!result?.ran && claim && preReturnMaybeSpent === claim) preReturnMaybeSpent = false

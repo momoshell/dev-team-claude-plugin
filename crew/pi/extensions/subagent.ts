@@ -969,6 +969,57 @@ export function createAgentTool(deps: any = {}) {
   }
 }
 
+// The scout nudge: advice from what the seat actually does. It counts read-type
+// calls since the last write or scout call; past the threshold across several
+// directories it steers the seat once per turn. It never blocks or alters a
+// call, and a journal failure never reaches the seat.
+export const SCOUT_NUDGE_READ_THRESHOLD = 8
+export const SCOUT_NUDGE_MIN_DIRECTORIES = 3
+export const SCOUT_NUDGE_MESSAGE_TYPE = 'crew-scout-nudge'
+export const SCOUT_NUDGE_TEXT = 'You have made many read-type calls across several directories since your last write or scout call. Consider asking a scout that question instead, then read only what its findings cite.'
+
+export function createScoutNudge(deps: any = {}): any {
+  const { env = process.env, send, appendFile = appendFileSync, now = () => new Date().toISOString() } = deps
+  let count = 0
+  const dirs = new Set<string>()
+  let nudgedThisTurn = false
+  return {
+    onToolCall(event: any) {
+      try {
+        const tool = String(event?.toolName ?? '')
+        if (tool === 'edit' || tool === 'write' || tool === 'agent') {
+          count = 0
+          dirs.clear()
+          return undefined
+        }
+        if (tool !== 'read' && tool !== 'grep' && tool !== 'find' && tool !== 'ls') return undefined
+        const path = event?.input?.path
+        count += 1
+        dirs.add(tool === 'read' ? dirname(String(path ?? '')) : String(path || '.'))
+        if (count >= SCOUT_NUDGE_READ_THRESHOLD && dirs.size >= SCOUT_NUDGE_MIN_DIRECTORIES && !nudgedThisTurn) {
+          nudgedThisTurn = true
+          try {
+            send({ customType: SCOUT_NUDGE_MESSAGE_TYPE, content: SCOUT_NUDGE_TEXT, display: true }, { deliverAs: 'steer' })
+          } catch { /* advice only */ }
+          const taskDir = env.CREW_TASK_DIR
+          if (taskDir) {
+            try {
+              appendFile(journalPathFrom(taskDir, env), `${JSON.stringify({
+                at: now(), scout_nudge: { reads: count, directories: dirs.size }, role: String(env.CREW_ROLE || 'unknown'),
+              })}\n`)
+            } catch { /* the journal never throws into the seat */ }
+          }
+        }
+      } catch { /* never throws into the seat */ }
+      return undefined
+    },
+    onTurnStart() {
+      nudgedThisTurn = false
+      return undefined
+    },
+  }
+}
+
 // pi calls the default export with its api object: jiti.import at
 // dist/core/extensions/loader.js:368, then `await factory(api)` at :409 after
 // refusing anything that is not a function (:404-406, :370-372). Exactly
@@ -977,4 +1028,10 @@ export function createAgentTool(deps: any = {}) {
 export default function subagentExtension(pi: any) {
   pi.registerTool(createAgentTool())
   pi.on('tool_result', (event: any) => toolResultPatch(event))
+  // The tool that provides scouts is the home of the nudge: no grant, no nudge.
+  if (parseAgentAllowlist(process.env[AGENTS_ENV]).length > 0 && typeof pi.sendMessage === 'function') {
+    const nudge = createScoutNudge({ send: (message: any, options: any) => pi.sendMessage(message, options) })
+    pi.on('tool_call', nudge.onToolCall)
+    pi.on('turn_start', nudge.onTurnStart)
+  }
 }

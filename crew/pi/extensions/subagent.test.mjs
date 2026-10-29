@@ -844,3 +844,88 @@ test('the old layout keeps its counter and journal beside the task dir without a
   assert.equal(mod.reserveSpawn({ taskDir: lane.taskDir, env: {}, readFile: readFileSync, writeFile: writeFileSync }).count, 1)
   assert.equal(existsSync(join(lane.taskDir, 'subagent-spawns.json')), false)
 })
+
+// --- scout nudge ---------------------------------------------------------
+function nudgeFixture(overrides = {}) {
+  const taskDir = join(scratchDir('scout-nudge-'), 'task')
+  const env = { CREW_ROLE: 'planner', CREW_TASK_DIR: taskDir }
+  const sends = []
+  const nudge = mod.createScoutNudge({ env, send: (message, options) => sends.push({ message, options }), now: () => '2026-10-29T00:00:00.000Z', ...overrides })
+  const journal = mod.journalPathFrom(taskDir, env)
+  const rows = () => (existsSync(journal) ? readFileSync(journal, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((r) => r.scout_nudge) : [])
+  return { nudge, sends, rows, journal }
+}
+const DIRS = ['a', 'b', 'c']
+function readRun(nudge, n, dirs = DIRS) {
+  for (let i = 0; i < n; i += 1) {
+    assert.equal(nudge.onToolCall({ toolName: 'read', input: { path: `${dirs[i % dirs.length]}/f${i}.mjs` } }), undefined)
+  }
+}
+
+test('SN3: one nudge after the read threshold across several directories', () => {
+  const { nudge, sends, rows } = nudgeFixture()
+  readRun(nudge, mod.SCOUT_NUDGE_READ_THRESHOLD - 1)
+  assert.equal(sends.length, 0)
+  readRun(nudge, 1)
+  assert.equal(sends.length, 1)
+  assert.equal(sends[0].message.customType, mod.SCOUT_NUDGE_MESSAGE_TYPE)
+  assert.match(sends[0].message.content, /scout/)
+  assert.deepEqual(sends[0].options, { deliverAs: 'steer' })
+  assert.equal(rows().length, 1)
+  assert.deepEqual(rows()[0].scout_nudge, { reads: 8, directories: 3 })
+  assert.equal(rows()[0].role, 'planner')
+})
+
+test('SN3: reads confined to one or two directories send nothing; grep/find/ls count', () => {
+  const narrow = nudgeFixture()
+  readRun(narrow.nudge, 12, ['x', 'y'])
+  assert.equal(narrow.sends.length, 0)
+  const mixed = nudgeFixture()
+  for (const [toolName, path] of [['grep', 'a'], ['find', 'b'], ['ls', 'c'], ['grep'], ['read', 'a/x'], ['read', 'b/x'], ['find', 'c'], ['ls', 'a']]) {
+    assert.equal(mixed.nudge.onToolCall({ toolName, input: { path } }), undefined)
+  }
+  assert.equal(mixed.sends.length, 1)
+})
+
+test('SN4: no second nudge in the same turn after an agent, edit or write reset; the next turn nudges again', () => {
+  const { nudge, sends, rows } = nudgeFixture()
+  readRun(nudge, 8)
+  assert.equal(sends.length, 1)
+  for (const toolName of ['agent', 'edit', 'write']) {
+    assert.equal(nudge.onToolCall({ toolName, input: {} }), undefined)
+    readRun(nudge, 8)
+    assert.equal(sends.length, 1, toolName)
+    assert.equal(rows().length, 1, toolName)
+  }
+  assert.equal(nudge.onTurnStart(), undefined)
+  readRun(nudge, 8)
+  assert.equal(sends.length, 2)
+  assert.equal(rows().length, 2)
+})
+
+test('the scout nudge never throws into the seat: a failing journal or send still behaves', () => {
+  const journalFails = nudgeFixture({ appendFile: () => { throw new Error('disk full') } })
+  readRun(journalFails.nudge, 8)
+  assert.equal(journalFails.sends.length, 1)
+  const sendFails = nudgeFixture({ send: () => { throw new Error('gone') } })
+  readRun(sendFails.nudge, 8)
+  assert.equal(sendFails.rows().length, 1)
+  assert.equal(sendFails.nudge.onToolCall(null), undefined)
+})
+
+test('the nudge handlers register only when the agent tool is granted', () => {
+  const saved = process.env[mod.AGENTS_ENV]
+  const register = () => {
+    const events = []
+    mod.default({ registerTool: () => {}, on: (event) => events.push(event), sendMessage: () => {} })
+    return events
+  }
+  try {
+    delete process.env[mod.AGENTS_ENV]
+    assert.deepEqual(register(), ['tool_result'])
+    process.env[mod.AGENTS_ENV] = JSON.stringify([{ name: 'scout', def: join(ROOT, 'crew/pi/agents/scout.json') }])
+    assert.deepEqual(register(), ['tool_result', 'tool_call', 'turn_start'])
+  } finally {
+    if (saved === undefined) delete process.env[mod.AGENTS_ENV]; else process.env[mod.AGENTS_ENV] = saved
+  }
+})

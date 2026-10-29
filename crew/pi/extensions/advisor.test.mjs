@@ -336,7 +336,7 @@ test('E1 advisor module is node-only, erasable, and exposes no callable registra
   const source = readFileSync(new URL('./advisor.ts', import.meta.url), 'utf8')
   const imports = [...source.matchAll(/^import[\s\S]*?from\s+["']([^"']+)["']/gm)].map((match) => match[1])
   assert.ok(imports.length > 0)
-  assert.ok(imports.every((specifier) => specifier.startsWith('node:') || ['./subagent.ts', '../context-layout.mjs'].includes(specifier)))
+  assert.ok(imports.every((specifier) => specifier.startsWith('node:') || ['./subagent.ts', '../context-layout.mjs', '../../adapters/adapter-pi.mjs'].includes(specifier)))
   assert.doesNotMatch(source, /registerTool/)
   assert.doesNotMatch(source, /^\s*(enum|namespace)\s/m)
 })
@@ -1819,6 +1819,98 @@ test('PR2 and PR3 a pi write or bash naming the return file is refused with the 
     const verdict = await b.a.onToolCall(call('r1', 'bash', { command: `cat > ${b.ret} <<EOF\n{}\nEOF` }), {})
     assert.equal(verdict?.block, true)
   } finally { rmSync(b.f.root, { recursive: true, force: true }) }
+})
+
+// MUTATION: match only the absolute return path and a builder that cds into the task dir returns unreviewed.
+// MUTATION: let a maybe-return spend the consult and the real return after it goes unreviewed.
+test('a return name the advisor cannot place is consulted on without spending the consult; the sure return after it is still held', async () => {
+  for (const command of ["printf '(no)' > lib/builder-1.json", 'pushd TASK; printf x > sub/../builder-1.json']) {
+    const s = triggerSeat()
+    try {
+      s.ground()
+      assert.equal((await s.a.onToolCall(call('m', 'bash', { command: command.replace('TASK', s.f.taskDir) }), {}))?.block, true, command)
+      assert.equal(s.a.exportState().pre_return_spent, false, command)
+      assert.equal((await s.a.onToolCall(call('r', 'bash', { command: `cat > ${s.ret} <<EOF\n{}\nEOF` }), {}))?.block, true, command)
+      assert.equal(s.spawned(), 2, command)
+      assert.equal(s.a.exportState().pre_return_spent, true, command)
+    } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+  }
+})
+
+// MUTATION: consult on every maybe and twenty of them use up the cap before the sure return.
+test('only one maybe-return per turn is consulted on, so the sure return still gets its consult under the cap', async () => {
+  const s = triggerSeat({ severity: 'medium' })
+  try {
+    s.ground()
+    const maybes = Array.from({ length: advisor.TIER1_MAX_CONSULTS }, (_, i) => s.a.onToolCall(call(`m${i}`, 'bash', { command: "printf '(no)' > lib/builder-1.json" }), {}))
+    await Promise.all(maybes)
+    assert.equal(s.spawned(), 1, 'one maybe consult per turn, even when the calls run in parallel')
+    assert.equal(s.a.exportState().pre_return_maybe_spent, true)
+    await s.a.onToolCall(call('r', 'write', { path: s.ret, content: '{}' }), {})
+    assert.equal(s.spawned(), 2, 'the sure return is still consulted')
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
+// MUTATION: keep the maybe slot when its consult never ran and a later maybe-return goes unreviewed.
+test('a maybe-return whose consult never ran gives the maybe slot back', async () => {
+  const s = triggerSeat()
+  try {
+    await s.a.onToolCall(call('m0', 'bash', { command: "printf '(no)' > lib/builder-1.json" }), {})
+    assert.equal(s.spawned(), 0, 'nothing grounded yet, so no consult ran')
+    assert.equal(s.a.exportState().pre_return_maybe_spent, false)
+    s.ground()
+    assert.equal((await s.a.onToolCall(call('m1', 'bash', { command: `pushd ${s.f.taskDir}; printf x > builder-1.json` }), {}))?.block, true)
+    assert.equal(s.spawned(), 1)
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
+test('a backup write beside the return file leaves the pre-return consult unspent for the real return', async () => {
+  const s = triggerSeat()
+  try {
+    s.ground()
+    assert.equal(await s.a.onToolCall(call('b', 'bash', { command: `cp x ${s.ret}.bak` }), {}), undefined)
+    assert.equal(s.spawned(), 0)
+    assert.equal((await s.a.onToolCall(call('r', 'bash', { command: `cat > ${s.ret} <<EOF\n{}\nEOF` }), {}))?.block, true)
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
+test('a bash command names the return file by its absolute path, or by its bare name after a cd into the task dir; nothing else is a return write', async () => {
+  for (const command of ['cd TASK; cat > builder-1.json <<EOF\n{}\nEOF', "cd TASK && printf '{}' >builder-1.json", 'cd "TASK" && tee "builder-1.json" < x', 'cat > TASK/builder-1.json <<EOF\n{}\nEOF', 'cd TASK && cat > ./builder-1.json', 'cd TREE; cat > ../task/builder-1.json <<EOF\n{}\nEOF', "cd TASK; (cd TREE; true); printf '{}' > builder-1.json", "cd '/a dir/with space'; printf '{}' > builder-1.json", 'pushd TASK; cat > builder-1.json']) {
+    const s = triggerSeat()
+    try {
+      s.ground()
+      const verdict = await s.a.onToolCall(call('r1', 'bash', { command: command.replaceAll('TASK', s.f.taskDir).replaceAll('TREE', s.f.tree) }), {})
+      assert.equal(verdict?.block, true, command)
+    } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+  }
+  for (const command of ['cat old-builder-1.json', 'cat builder-1.json.bak', 'cat planner-1.json', 'tee builder-1.json < x', 'cd TREE && cat > lib/builder-1.json', 'cd TASK-evil; cat > builder-1.json', 'cat > TREE/lib/builder-1.json', 'cp x TASK/builder-1.json.bak', 'cd TASK && cat > sub/builder-1.json', "(cd TREE; printf x > TREE/lib/builder-1.json)"]) {
+    const s = triggerSeat()
+    try {
+      s.ground()
+      assert.equal(await s.a.onToolCall(call('x', 'bash', { command: command.replaceAll('TASK', s.f.taskDir).replaceAll('TREE', s.f.tree) }), {}), undefined, command)
+      assert.equal(s.spawned(), 0, command)
+    } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+  }
+})
+
+// MUTATION: pass the raw cell model and openai/... resolves through openrouter instead of the openai-codex login.
+test('a consult spells the cell model as pi seats do', async () => {
+  let args = null
+  const s = triggerSeat({ extraDeps: { spawn: (_bin, argv) => {
+    args = argv
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => true
+    child.stdin = { end() { setImmediate(() => child.emit('close', 0)) } }
+    return child
+  } } })
+  try {
+    const manifest = join(s.f.taskDir, advisor.TRIPWIRE_MANIFEST_FILE)
+    const written = JSON.parse(readFileSync(manifest, 'utf8'))
+    writeFileSync(manifest, JSON.stringify({ ...written, cell: { provider: 'openai', id: 'gpt-6.1-terra', agent: 'pi', effort: 'medium', model: 'openai/gpt-6.1-terra' } }))
+    s.ground()
+    await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}' }), {})
+    assert.ok(args, 'the consult spawned')
+    assert.equal(args[args.indexOf('--model') + 1], 'openai-codex/gpt-6.1-terra')
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
 })
 
 test('a pre-return consult never fires for other paths, and a non-high finding lets the write through', async () => {

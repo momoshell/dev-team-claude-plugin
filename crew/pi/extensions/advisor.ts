@@ -28,6 +28,7 @@ import { StringDecoder } from 'node:string_decoder'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../context-layout.mjs'
 import { resolvePiBinary, createStreamReducer, carriesOwnSpend, STREAM_CAP_BYTES } from './subagent.ts'
+import { modelString } from '../../adapters/adapter-pi.mjs'
 
 export const ADVISOR_CONFIG_VERSION = 1
 export const ADVISOR_GRANT_ENV = 'CREW_ADVISOR'
@@ -414,6 +415,12 @@ export function isSelfEcho(text, injected) {
     if (note && normalized === String(note)) return true
   }
   return false
+}
+
+// pi resolves a provider it has no login for by fuzzy match (openai/... reached openrouter), so a roster provider is
+// spelled as pi seats spell it; a cell outside the roster's providers passes through as written, as it always has.
+function consultModel(cell) {
+  try { return modelString({ provider: cell.provider, id: cell.id }) } catch { return String(cell.model) }
 }
 
 function cellIdentity(cell) { return { provider: cell.provider, model_id: cell.id, agent: cell.agent, effort: cell.effort, model: cell.model } }
@@ -883,6 +890,8 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   let growthBaseline = null
   let diffBaselineLines = null
   let preReturnSpent = false
+  // false, or the token of the maybe-return call that holds the turn's one maybe consult.
+  let preReturnMaybeSpent = false
   let delta = []
   let anchors = new Set()
   let fired = new Set()
@@ -913,6 +922,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     growthBaseline = null
     diffBaselineLines = null
     preReturnSpent = false
+    preReturnMaybeSpent = false
     delta = []
     anchors = new Set()
     injected = new Set()
@@ -1034,9 +1044,14 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     return { lines: Number(value.lines), entries: entries.filter(Boolean).slice(0, DELTA_ENTRIES) }
   }
 
-  // The seat's return file: `<taskDir>/<role>-<n>.json`, written by a Write/Edit to it or named by a Bash command.
-  function isReturnWrite(event) {
-    if (!taskDir || !role) return false
+  // Whether a call writes the seat's return file `<taskDir>/<role>-<n>.json`: 'sure', 'maybe', or null. A Write/Edit
+  // names it exactly. A Bash command names it through a path token ending in the return file's name, resolved against
+  // the last cd before it (itself resolved against the seat's cwd). When those cds cannot be followed (a subshell,
+  // pushd/popd, a quoted cd operand with whitespace), a token without an absolute path is 'maybe': it is consulted on,
+  // but it never spends the turn's pre-return consult, so a later sure return write is still reviewed. At most one
+  // maybe is consulted on per turn, so maybes cannot use up the consults a sure return needs.
+  function returnWrite(event) {
+    if (!taskDir || !role) return null
     const tool = String(event?.toolName || '')
     const input = event?.input || {}
     try {
@@ -1044,15 +1059,26 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       const name = new RegExp(`^${escapeRegExp(role)}-\\d+\\.json$`)
       if (tool === 'write' || tool === 'edit') {
         const raw = inputPath(input)
-        if (!raw) return false
+        if (!raw) return null
         const target = resolve(cwd, raw)
-        return resolve(target, '..') === root && name.test(relative(root, target))
+        return resolve(target, '..') === root && name.test(relative(root, target)) ? 'sure' : null
       }
       if (tool === 'bash') {
-        return new RegExp(`${escapeRegExp(join(root, role))}-\\d+\\.json`).test(String(input.command ?? ''))
+        const command = String(input.command ?? '')
+        const cds = [...command.matchAll(/(?:^|[;&|(\s])cd\s+(['"]?)([^\s'";&|()]+)\1(?=$|[\s;&|)])/g)]
+        const token = new RegExp(`(?:^|[\\s'"=<>])((?:[^\\s'"=<>;&|()]*/)?)(${escapeRegExp(role)}-\\d+\\.json)(?=$|[\\s'";&|)<>])`, 'g')
+        const unfollowable = /[()]|\bpushd\b|\bpopd\b|\bcd\s+(['"])[^'"]*\s[^'"]*\1/.test(command)
+        let kind = null
+        for (const match of command.matchAll(token)) {
+          if (unfollowable && !isAbsolute(match[1])) { kind = 'maybe'; continue }
+          const before = cds.filter((cd) => cd.index < match.index)
+          const dir = before.reduce((at, cd) => resolve(at, cd[2]), resolve(String(cwd)))
+          if (resolve(dir, match[1] || '.', match[2]) === join(root, match[2])) return 'sure'
+        }
+        return kind
       }
     } catch { /* not a return write */ }
-    return false
+    return null
   }
 
   function growthCrossed(base, current) {
@@ -1340,7 +1366,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
           const promptFile = join(dir, 'system-prompt.txt')
           try {
             writeFileSync(promptFile, systemPrompt(role), { mode: 0o600 })
-            const childArgs = ['-p','--mode','json','--no-session','--model',String(cell.model),'--thinking',cell.effort,'--no-tools','--no-context-files','--no-extensions','--no-skills','--append-system-prompt',promptFile]
+            const childArgs = ['-p','--mode','json','--no-session','--model',consultModel(cell),'--thinking',cell.effort,'--no-tools','--no-context-files','--no-extensions','--no-skills','--append-system-prompt',promptFile]
             const child = spawn(binary, [...prefix, ...childArgs], { cwd, stdio: ['pipe','pipe','pipe'] })
             const reducer = createStreamReducer()
             const pushFrame = (frame: any) => {
@@ -1540,12 +1566,14 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   // One consult on the whole working diff, awaited, before the seat's return file is written. Only an accepted
   // must-fix (high severity) finding refuses the write; a failed, timed-out or empty consult lets it through
   // (the consult's own journal rows say so) and never leaves the seat unable to return.
-  async function preReturnVerdict(event) {
+  async function preReturnVerdict(event, { spend, claim = null }) {
     const id = String(event?.toolCallId || '')
     const measured = measureDiffLines()
     if (measured) for (const entry of measured.entries) appendDelta(entry)
     const result = await consult('pre-return', id, calls, { inline: true })
-    if (result?.ran) preReturnSpent = true
+    if (result?.ran && spend) preReturnSpent = true
+    // A maybe whose consult never ran (no grounded delta, no cell, the cap) gives its slot back, if it still holds it.
+    if (!result?.ran && claim && preReturnMaybeSpent === claim) preReturnMaybeSpent = false
     const judgment = result?.judgment
     if (result?.accepted && judgment?.severity === 'high') return { block: true, reason: judgment.claim }
     return undefined
@@ -1553,12 +1581,16 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
 
   async function onToolCall(event, ctx) {
     ensureContext()
-    if (isReturnWrite(event) && preReturnSpent) return undefined
+    const kind = returnWrite(event)
+    if (kind && (preReturnSpent || (kind === 'maybe' && preReturnMaybeSpent))) return undefined
     calls += 1
     processCall(event)
     if (calls % CADENCE_CALLS === 0) queue(String(event?.toolCallId || ''), 'cadence')
-    if (isReturnWrite(event)) {
-      try { return await preReturnVerdict(event) } catch { return undefined }
+    if (kind) {
+      // The maybe slot is claimed before the await, so parallel maybes cannot each pass the check.
+      const claim = kind === 'maybe' ? {} : null
+      if (claim) preReturnMaybeSpent = claim
+      try { return await preReturnVerdict(event, { spend: kind === 'sure', claim }) } catch { if (claim && preReturnMaybeSpent === claim) preReturnMaybeSpent = false; return undefined }
     }
     return undefined
   }
@@ -1585,7 +1617,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   function exportState() {
     return {
       context_epoch: contextEpoch, context_row_epoch: contextRowEpoch, calls, consults, growth_baseline: growthBaseline,
-      diff_baseline_lines: diffBaselineLines, pre_return_spent: preReturnSpent,
+      diff_baseline_lines: diffBaselineLines, pre_return_spent: preReturnSpent, pre_return_maybe_spent: preReturnMaybeSpent !== false,
       call_ordinals: [...callOrdinals], fired: [...fired], failure_counts: [...failureCounts],
       injected: [...injected], dedupe: [...dedupe],
       delta: delta.map((entry) => ({ text: entry.text, redactions: entry.redactions || {} })),
@@ -1603,7 +1635,8 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     const diffBase = state.diff_baseline_lines === undefined ? null : state.diff_baseline_lines
     if (diffBase !== null && !(Number.isFinite(diffBase) && diffBase >= 0)) throw new Error('advisor state is malformed')
     const spent = state.pre_return_spent === undefined ? false : state.pre_return_spent
-    if (typeof spent !== 'boolean') throw new Error('advisor state is malformed')
+    const maybeSpent = state.pre_return_maybe_spent === undefined ? false : state.pre_return_maybe_spent
+    if (typeof spent !== 'boolean' || typeof maybeSpent !== 'boolean') throw new Error('advisor state is malformed')
     const ordinals = pairs(state.call_ordinals), counts = pairs(state.failure_counts)
     if (!ordinals.every(([id, ordinal]) => typeof id === 'string' && Number.isSafeInteger(ordinal)) || !counts.every(([id, count]) => typeof id === 'string' && Number.isSafeInteger(count))) throw new Error('advisor state is malformed')
     // The judgment channel's delta and the triggers queued for the next result ride along when the host stores them.
@@ -1618,7 +1651,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     anchors = new Set(delta.flatMap((item) => item.anchors))
     pending = new Map(storedPending.map(([id, triggers]) => [id, triggers.map((entry) => ({ trigger: entry.trigger, call_ordinal: entry.call_ordinal, queued_at: entry.queued_at ?? nowMs() }))]))
     calls = state.calls; consults = state.consults; growthBaseline = growth
-    diffBaselineLines = diffBase; preReturnSpent = spent
+    diffBaselineLines = diffBase; preReturnSpent = spent; preReturnMaybeSpent = maybeSpent ? {} : false
     callOrdinals.clear(); for (const [id, ordinal] of ordinals) callOrdinals.set(id, ordinal)
     failureCounts = new Map(counts)
     fired = new Set(strings(state.fired)); injected = new Set(strings(state.injected)); dedupe = new Set(strings(state.dedupe))

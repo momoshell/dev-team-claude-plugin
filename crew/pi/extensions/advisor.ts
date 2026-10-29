@@ -1055,13 +1055,18 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
         const target = resolve(cwd, raw)
         return resolve(target, '..') === root && name.test(relative(root, target))
       }
-      // A Bash command names the file by its absolute path or, after a cd into the task dir, by its bare name.
+      // A Bash command names the file through a path token ending in the return file's name: resolved against the last
+      // cd before it (itself resolved against the seat's cwd), the token must land in the task dir.
       if (tool === 'bash') {
         const command = String(input.command ?? '')
-        if (new RegExp(`${escapeRegExp(join(root, role))}-\\d+\\.json`).test(command)) return true
-        const bare = new RegExp(`(?:^|[\\s'"=<>])${escapeRegExp(role)}-\\d+\\.json(?![\\w./-])`)
-        const intoTask = new RegExp(`(?:^|[;&|(\\s])cd\\s+(['"]?)${escapeRegExp(root)}/?\\1(?=$|[\\s;&|)])`)
-        return bare.test(command) && intoTask.test(command)
+        const cds = [...command.matchAll(/(?:^|[;&|(\s])cd\s+(['"]?)([^\s'";&|()]+)\1(?=$|[\s;&|)])/g)]
+        const token = new RegExp(`(?:^|[\\s'"=<>])((?:[^\\s'"=<>;&|()]*/)?)(${escapeRegExp(role)}-\\d+\\.json)(?=$|[\\s'";&|)<>])`, 'g')
+        for (const match of command.matchAll(token)) {
+          const before = cds.filter((cd) => cd.index < match.index)
+          const dir = before.reduce((at, cd) => resolve(at, cd[2]), resolve(String(cwd)))
+          if (resolve(dir, match[1] || '.', match[2]) === join(root, match[2])) return true
+        }
+        return false
       }
     } catch { /* not a return write */ }
     return false

@@ -1822,16 +1822,26 @@ test('PR2 and PR3 a pi write or bash naming the return file is refused with the 
 })
 
 // MUTATION: match only the absolute return path and a builder that cds into the task dir returns unreviewed.
+test('a backup write beside the return file leaves the pre-return consult unspent for the real return', async () => {
+  const s = triggerSeat()
+  try {
+    s.ground()
+    assert.equal(await s.a.onToolCall(call('b', 'bash', { command: `cp x ${s.ret}.bak` }), {}), undefined)
+    assert.equal(s.spawned(), 0)
+    assert.equal((await s.a.onToolCall(call('r', 'bash', { command: `cat > ${s.ret} <<EOF\n{}\nEOF` }), {}))?.block, true)
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
 test('a bash command names the return file by its absolute path, or by its bare name after a cd into the task dir; nothing else is a return write', async () => {
-  for (const command of ['cd TASK; cat > builder-1.json <<EOF\n{}\nEOF', "cd TASK && printf '{}' >builder-1.json", 'cd "TASK" && tee "builder-1.json" < x', 'cat > TASK/builder-1.json <<EOF\n{}\nEOF']) {
+  for (const command of ['cd TASK; cat > builder-1.json <<EOF\n{}\nEOF', "cd TASK && printf '{}' >builder-1.json", 'cd "TASK" && tee "builder-1.json" < x', 'cat > TASK/builder-1.json <<EOF\n{}\nEOF', 'cd TASK && cat > ./builder-1.json', 'cd TREE; cat > ../task/builder-1.json <<EOF\n{}\nEOF']) {
     const s = triggerSeat()
     try {
       s.ground()
-      const verdict = await s.a.onToolCall(call('r1', 'bash', { command: command.replace('TASK', s.f.taskDir) }), {})
+      const verdict = await s.a.onToolCall(call('r1', 'bash', { command: command.replace('TASK', s.f.taskDir).replace('TREE', s.f.tree) }), {})
       assert.equal(verdict?.block, true, command)
     } finally { rmSync(s.f.root, { recursive: true, force: true }) }
   }
-  for (const command of ['cat old-builder-1.json', 'cat builder-1.json.bak', 'cat planner-1.json', 'tee builder-1.json < x', 'cd TREE && cat > lib/builder-1.json', 'cd TASK-evil; cat > builder-1.json', 'cat > TREE/lib/builder-1.json']) {
+  for (const command of ['cat old-builder-1.json', 'cat builder-1.json.bak', 'cat planner-1.json', 'tee builder-1.json < x', 'cd TREE && cat > lib/builder-1.json', 'cd TASK-evil; cat > builder-1.json', 'cat > TREE/lib/builder-1.json', 'cp x TASK/builder-1.json.bak', 'cd TASK && cat > sub/builder-1.json']) {
     const s = triggerSeat()
     try {
       s.ground()

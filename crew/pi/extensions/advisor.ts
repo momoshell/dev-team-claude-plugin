@@ -675,26 +675,18 @@ export function gitDiffLines({ cwd, deps = {} } = {}) {
     for (const name of untracked.split('\0').filter(Boolean)) {
       const absolute = resolve(String(cwd), name)
       const size = Number(statSize(absolute)) || 0
-      // Past the read cap the lines are counted by streaming and the head is grounded; past the count cap they are
+      // Past the read cap only the head is read and the lines are counted by streaming; past the count cap they are
       // unknown, reported as the overflow shape, never as zero and never estimated.
-      if (size > UNTRACKED_READ_CAP_BYTES) {
-        const start = head(absolute, UNTRACKED_HEAD_BYTES)
-        const startBytes = Buffer.isBuffer(start) ? start : Buffer.from(String(start ?? ''))
-        if (startBytes.includes(0)) continue
-        const counted = countLines(absolute, UNTRACKED_COUNT_CAP_BYTES)
-        if (counted === null) unknown = true
-        else lines += counted
-        const rows = startBytes.toString('utf8').split('\n').slice(0, EXCERPT_LINES)
-        entries.push(rows.map((item, index) => `${name}:${index + 1}: ${item}`).join('\n'))
-        continue
-      }
-      const buffer = read(absolute)
+      const large = size > UNTRACKED_READ_CAP_BYTES
+      const buffer = large ? head(absolute, UNTRACKED_HEAD_BYTES) : read(absolute)
       const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(String(buffer ?? ''))
       if (bytes.includes(0)) continue
       const text = bytes.toString('utf8')
       if (!text) continue
       const rows = text.endsWith('\n') ? text.slice(0, -1).split('\n') : text.split('\n')
-      lines += rows.length
+      const counted = large ? countLines(absolute, UNTRACKED_COUNT_CAP_BYTES) : rows.length
+      if (counted === null) unknown = true
+      else lines += counted
       entries.push(rows.slice(0, EXCERPT_LINES).map((item, index) => `${name}:${index + 1}: ${item}`).join('\n'))
     }
   } catch { return null }

@@ -1833,7 +1833,7 @@ test('a backup write beside the return file leaves the pre-return consult unspen
 })
 
 test('a bash command names the return file by its absolute path, or by its bare name after a cd into the task dir; nothing else is a return write', async () => {
-  for (const command of ['cd TASK; cat > builder-1.json <<EOF\n{}\nEOF', "cd TASK && printf '{}' >builder-1.json", 'cd "TASK" && tee "builder-1.json" < x', 'cat > TASK/builder-1.json <<EOF\n{}\nEOF', 'cd TASK && cat > ./builder-1.json', 'cd TREE; cat > ../task/builder-1.json <<EOF\n{}\nEOF']) {
+  for (const command of ['cd TASK; cat > builder-1.json <<EOF\n{}\nEOF', "cd TASK && printf '{}' >builder-1.json", 'cd "TASK" && tee "builder-1.json" < x', 'cat > TASK/builder-1.json <<EOF\n{}\nEOF', 'cd TASK && cat > ./builder-1.json', 'cd TREE; cat > ../task/builder-1.json <<EOF\n{}\nEOF', "cd TASK; (cd TREE; true); printf '{}' > builder-1.json", "cd '/a dir/with space'; printf '{}' > builder-1.json", 'pushd TASK; cat > builder-1.json']) {
     const s = triggerSeat()
     try {
       s.ground()

@@ -1851,6 +1851,19 @@ test('only one maybe-return per turn is consulted on, so the sure return still g
   } finally { rmSync(s.f.root, { recursive: true, force: true }) }
 })
 
+// MUTATION: keep the maybe slot when its consult never ran and a later maybe-return goes unreviewed.
+test('a maybe-return whose consult never ran gives the maybe slot back', async () => {
+  const s = triggerSeat()
+  try {
+    await s.a.onToolCall(call('m0', 'bash', { command: "printf '(no)' > lib/builder-1.json" }), {})
+    assert.equal(s.spawned(), 0, 'nothing grounded yet, so no consult ran')
+    assert.equal(s.a.exportState().pre_return_maybe_spent, false)
+    s.ground()
+    assert.equal((await s.a.onToolCall(call('m1', 'bash', { command: `pushd ${s.f.taskDir}; printf x > builder-1.json` }), {}))?.block, true)
+    assert.equal(s.spawned(), 1)
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
 test('a backup write beside the return file leaves the pre-return consult unspent for the real return', async () => {
   const s = triggerSeat()
   try {

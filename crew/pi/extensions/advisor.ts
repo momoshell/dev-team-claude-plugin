@@ -1571,6 +1571,8 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     if (measured) for (const entry of measured.entries) appendDelta(entry)
     const result = await consult('pre-return', id, calls, { inline: true })
     if (result?.ran && spend) preReturnSpent = true
+    // A maybe whose consult never ran (no grounded delta, no cell, the cap) gives its slot back.
+    if (!result?.ran && !spend) preReturnMaybeSpent = false
     const judgment = result?.judgment
     if (result?.accepted && judgment?.severity === 'high') return { block: true, reason: judgment.claim }
     return undefined
@@ -1586,7 +1588,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     if (kind) {
       // The maybe slot is claimed before the await, so parallel maybes cannot each pass the check.
       if (kind === 'maybe') preReturnMaybeSpent = true
-      try { return await preReturnVerdict(event, { spend: kind === 'sure' }) } catch { return undefined }
+      try { return await preReturnVerdict(event, { spend: kind === 'sure' }) } catch { if (kind === 'maybe') preReturnMaybeSpent = false; return undefined }
     }
     return undefined
   }

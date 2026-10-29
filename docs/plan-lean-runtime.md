@@ -223,9 +223,13 @@ Sol review, because the current factory is what is being replaced. From phase 4,
       machinery", in the same PR. Close epic #1964 and issues #1960, #1962 and #1963 as subsumed.
       Measured after deletion: crew/ + scripts/ = 40,132 lines, 16,484 of them non-test `.mjs` and `.ts` (the kept
       arms included), from about 103,500.
-- [ ] 5.3 Skills rewritten per "Skills and agents"; README and `crew/README.md` rewritten; retired ADRs
-      marked superseded.
+- [x] 5.3 Skills rewritten per "Skills and agents"; README and `crew/README.md` rewritten; retired ADRs
+      marked superseded. Shipped in PRs 2034 (READMEs and docs), 2035 (seat skills) and 2036 (operator skills and
+      commands); the register marks ADR-029, 035, 040, 042, 044 and 046 superseded by ADR-052.
 - Done means: `npm test` green; core at or under 10,000 lines.
+  Measured 2026-10-29 at commit 116476c2: `npm test` 1,781 tests, 0 fail; crew/ + scripts/ non-test code 16,491 lines,
+  of which the kept arms are 7,815 (pi extensions 6,841, `crew/memory*.mjs` 481, `crew/adapters/claude-arms.mjs` 407,
+  `crew/mcp/lab-server.mjs` 86), so the core is 8,676.
 
 ### Later: the arms
 

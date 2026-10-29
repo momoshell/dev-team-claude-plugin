@@ -7,6 +7,7 @@ import {
   grantsFor, loadCapabilities, mergeMcpServers, pathExists, pathMessage, refuse, resolveVendorExtension,
   resolvedGrantPath, validateCapabilities, vendorRoots,
 } from './grants.mjs'
+import { parseAgent } from '../protocols.mjs'
 import { BriefUsageError, exportEntries } from './export-entries.mjs'
 import { parseAssignment } from './assignment.mjs'
 import { scratchDir } from '../../test/helpers.mjs'
@@ -129,6 +130,16 @@ test('armGrants arms native extensions, fff and lab, and refuses what it cannot 
     () => armGrants({ role: 'builder', agent: 'pi', extensions: ['subagent'] }, { root, exists, register: { roles: { builder: role() } } }),
     (err) => err.reason === 'unknown-grant' && /declares no agent definition/.test(err.message),
   )
+})
+
+test('the committed planner and reviewer definitions grant subagent with scout', () => {
+  for (const role of ['planner', 'reviewer']) {
+    const { fields, defects } = parseAgent(readFileSync(new URL(`../agents/${role}.md`, import.meta.url), 'utf8'))
+    assert.deepEqual(defects, [], role)
+    const grants = armGrants({ role, agent: fields.agent, extensions: fields.extensions ?? [] })
+    assert.ok(grants.extensions.some((path) => path.replaceAll('\\', '/').endsWith(SUBAGENT_EXTENSION)), role)
+    assert.ok(grants.agents.some((agent) => agent.name === 'scout'), role)
+  }
 })
 
 test('exportEntries scans exports with lines, spans and signatures', () => {

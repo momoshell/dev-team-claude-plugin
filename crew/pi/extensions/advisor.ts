@@ -1048,8 +1048,9 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
         const target = resolve(cwd, raw)
         return resolve(target, '..') === root && name.test(relative(root, target))
       }
+      // A Bash command names the file by its absolute path or, after a cd into the task dir, by its bare name.
       if (tool === 'bash') {
-        return new RegExp(`${escapeRegExp(join(root, role))}-\\d+\\.json`).test(String(input.command ?? ''))
+        return new RegExp(`(?:^|[\\s'"=<>/])${escapeRegExp(role)}-\\d+\\.json(?![\\w.-])`).test(String(input.command ?? ''))
       }
     } catch { /* not a return write */ }
     return false

@@ -1821,6 +1821,26 @@ test('PR2 and PR3 a pi write or bash naming the return file is refused with the 
   } finally { rmSync(b.f.root, { recursive: true, force: true }) }
 })
 
+// MUTATION: match only the absolute return path and a builder that cds into the task dir returns unreviewed.
+test('a bash command that names the return file by its bare name after a cd is a return write; other names are not', async () => {
+  for (const command of ['cd TASK; cat > builder-1.json <<EOF\n{}\nEOF', "cd TASK && printf '{}' >builder-1.json", 'tee "builder-1.json" < x']) {
+    const s = triggerSeat()
+    try {
+      s.ground()
+      const verdict = await s.a.onToolCall(call('r1', 'bash', { command: command.replace('TASK', s.f.taskDir) }), {})
+      assert.equal(verdict?.block, true, command)
+    } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+  }
+  for (const command of ['cat old-builder-1.json', 'cat builder-1.json.bak', 'cat planner-1.json']) {
+    const s = triggerSeat()
+    try {
+      s.ground()
+      assert.equal(await s.a.onToolCall(call('x', 'bash', { command }), {}), undefined, command)
+      assert.equal(s.spawned(), 0, command)
+    } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+  }
+})
+
 test('a pre-return consult never fires for other paths, and a non-high finding lets the write through', async () => {
   const s = triggerSeat({ severity: 'medium' })
   try {

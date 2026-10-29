@@ -53,13 +53,17 @@ export const GROWTH_DIVERGENCE = 'growth-divergence'
 export const TIER0_KINDS = Object.freeze([SCOPE_BREACH, TRIPWIRE_TOUCH, REPEATED_FAILURE, GROWTH_DIVERGENCE])
 // Separate from the four mechanical kinds: a model finding is not a predicate.
 export const TIER1_FINDING = 'tier1-finding'
-export const TRIGGERS = Object.freeze(['tier0-note', 'cadence'])
+export const TRIGGERS = Object.freeze(['tier0-note', 'cadence', 'diff-growth', 'pre-return'])
 
 export const REPEAT_FAILURE_THRESHOLD = 2
 export const GROWTH_DIVERGENCE_RATIO = 2
 export const GROWTH_FLOOR_BYTES = 120_000
 export const CADENCE_CALLS = 25
 export const TIER1_MAX_CONSULTS = 20
+// Lines added plus removed against HEAD (untracked files counted) that the working diff must grow by, since the last consult, to queue one.
+export const DIFF_GROWTH_LINES = 200
+// An untracked file past this size is counted by an estimate rather than read.
+const UNTRACKED_READ_CAP_BYTES = 1024 * 1024
 // How long a trigger queued by a call's start waits for that call's own result before a later result sends it as orphaned.
 const ORPHAN_PENDING_MS = 10 * 60 * 1000
 export const DEDUPE_CAP = 256
@@ -575,6 +579,68 @@ export function gitDiffSize({ cwd, deps = {} } = {}) {
   return { bytes, truncated: false }
 }
 
+function escapeRegExp(text) { return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }
+
+// The lane checkout's working diff against HEAD, untracked files included, as a line count (added plus removed)
+// and as grounded `path:line: text` entries (one per changed file) the consult's delta can anchor to.
+// null when git cannot say: the seat is unaffected.
+export function gitDiffLines({ cwd, deps = {} } = {}) {
+  if (typeof cwd !== 'string' || !cwd) return null
+  const exec = deps.execFileSync || execFileSync
+  const read = deps.readFileBytes || ((path) => readFileSync(path))
+  const statSize = deps.fileSize || ((path) => statSync(path).size)
+  const run = (args) => exec('git', args, {
+    cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: DIFF_MAX_BUFFER_BYTES, encoding: null,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  })
+  const asText = (value) => Buffer.isBuffer(value) ? value.toString('utf8') : String(value ?? '')
+  let diff, untracked
+  try { diff = asText(run(['-c', 'core.quotepath=off', '--no-pager', 'diff', '--no-color', '--no-ext-diff', '-U0', 'HEAD'])) } catch (err) {
+    return gitOverflow(err) ? { lines: DIFF_MAX_BUFFER_BYTES, text: '', entries: [], truncated: true } : null
+  }
+  try { untracked = asText(run(['ls-files', '--others', '--exclude-standard', '-z'])) } catch (err) {
+    return gitOverflow(err) ? { lines: DIFF_MAX_BUFFER_BYTES, text: '', entries: [], truncated: true } : null
+  }
+  let lines = 0
+  const files = new Map()
+  let current = null
+  let newLine = 0
+  for (const row of diff.split('\n')) {
+    if (row.startsWith('diff --git ')) { current = null; continue }
+    if (row.startsWith('+++ ')) {
+      const name = row.slice(4).replace(/\t.*$/, '')
+      if (name !== '/dev/null') { current = name.replace(/^b\//, ''); if (!files.has(current)) files.set(current, []) }
+      continue
+    }
+    if (row.startsWith('--- ')) continue
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(row)
+    if (hunk) { newLine = Number(hunk[1]); continue }
+    if (row.startsWith('+')) {
+      lines += 1
+      const kept = current === null ? null : files.get(current)
+      if (kept && kept.length < EXCERPT_LINES) kept.push(`${current}:${newLine}: ${row.slice(1)}`)
+      newLine += 1
+    } else if (row.startsWith('-')) lines += 1
+  }
+  const entries = [...files.values()].filter((kept) => kept.length).map((kept) => kept.join('\n'))
+  try {
+    for (const name of untracked.split('\0').filter(Boolean)) {
+      const absolute = resolve(String(cwd), name)
+      const size = Number(statSize(absolute)) || 0
+      if (size > UNTRACKED_READ_CAP_BYTES) { lines += Math.ceil(size / 40); continue }
+      const buffer = read(absolute)
+      const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(String(buffer ?? ''))
+      if (bytes.includes(0)) continue
+      const text = bytes.toString('utf8')
+      if (!text) continue
+      const rows = text.endsWith('\n') ? text.slice(0, -1).split('\n') : text.split('\n')
+      lines += rows.length
+      entries.push(rows.slice(0, EXCERPT_LINES).map((item, index) => `${name}:${index + 1}: ${item}`).join('\n'))
+    }
+  } catch { return null }
+  return { lines, text: entries.join('\n'), entries, truncated: false }
+}
+
 export async function probeEndpoint(url, { fetchFn = fetch, timeoutMs = PROBE_TIMEOUT_MS } = {}) {
   try {
     const response = await fetchFn(url, { signal: AbortSignal.timeout(timeoutMs) })
@@ -735,6 +801,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   const cancelTimeout = deps.clearTimeout || clearTimeout
   const send = deps.send || null
   const diffSize = deps.diffSize || ((path) => gitDiffSize({ cwd: path, deps }))
+  const diffLines = deps.diffLines || ((path) => gitDiffLines({ cwd: path, deps }))
   const journalPath = journalPathFrom(taskDir, env)
 
   function replyRecord(replyText, codes) {
@@ -759,6 +826,8 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   const callOrdinals = new Map()
   let consults = 0
   let growthBaseline = null
+  let diffBaselineLines = null
+  let preReturnSpent = false
   let delta = []
   let anchors = new Set()
   let fired = new Set()
@@ -787,6 +856,8 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     fired = new Set()
     failureCounts = new Map()
     growthBaseline = null
+    diffBaselineLines = null
+    preReturnSpent = false
     delta = []
     anchors = new Set()
     injected = new Set()
@@ -900,6 +971,35 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     return { bytes: Number(value.bytes), truncated: value.truncated === true }
   }
 
+  function measureDiffLines() {
+    let value
+    try { value = diffLines(cwd) } catch { value = null }
+    if (!value || typeof value !== 'object' || !Number.isFinite(value.lines) || value.lines < 0) return null
+    const entries = Array.isArray(value.entries) ? value.entries.map(String) : [String(value.text ?? '')]
+    return { lines: Number(value.lines), entries: entries.filter(Boolean).slice(0, DELTA_ENTRIES) }
+  }
+
+  // The seat's return file: `<taskDir>/<role>-<n>.json`, written by a Write/Edit to it or named by a Bash command.
+  function isReturnWrite(event) {
+    if (!taskDir || !role) return false
+    const tool = String(event?.toolName || '')
+    const input = event?.input || {}
+    try {
+      const root = resolve(String(taskDir))
+      const name = new RegExp(`^${escapeRegExp(role)}-\\d+\\.json$`)
+      if (tool === 'write' || tool === 'edit') {
+        const raw = inputPath(input)
+        if (!raw) return false
+        const target = resolve(cwd, raw)
+        return resolve(target, '..') === root && name.test(relative(root, target))
+      }
+      if (tool === 'bash') {
+        return new RegExp(`${escapeRegExp(join(root, role))}-\\d+\\.json`).test(String(input.command ?? ''))
+      }
+    } catch { /* not a return write */ }
+    return false
+  }
+
   function growthCrossed(base, current) {
     if (!base || base.truncated || !current) return false
     const threshold = base.bytes === 0 ? GROWTH_FLOOR_BYTES : GROWTH_DIVERGENCE_RATIO * base.bytes
@@ -973,6 +1073,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     const id = String(event?.toolCallId || '')
     const callOrdinal = calls
     if (id) callOrdinals.set(id, callOrdinal)
+    if (diffBaselineLines === null) diffBaselineLines = measureDiffLines()?.lines ?? null
     if (tool === 'write' || tool === 'edit') {
       if (growthBaseline === null) {
         growthBaseline = measureDiff()
@@ -997,12 +1098,24 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     }
   }
 
+  // Any tool: when the working diff has grown by DIFF_GROWTH_LINES since the last consult, ground the delta and queue one.
+  function processDiffGrowth(id) {
+    const measured = measureDiffLines()
+    if (!measured) return
+    if (diffBaselineLines === null) { diffBaselineLines = measured.lines; return }
+    if (measured.lines - diffBaselineLines < DIFF_GROWTH_LINES) return
+    for (const entry of measured.entries) appendDelta(entry)
+    diffBaselineLines = measured.lines
+    queue(id, 'diff-growth', callOrdinals.get(id) ?? calls)
+  }
+
   function processResult(event) {
     const current = currentContext()
     const tool = String(event?.toolName || '')
     const input = event?.input || {}
     const id = String(event?.toolCallId || '')
     const text = contentOf(event)
+    processDiffGrowth(id)
     if ((tool === 'write' || tool === 'edit') && !event?.isError) {
       appendDelta(tool === 'edit' ? editDelta(input) : writeDelta(input))
       let measured = measureDiff()
@@ -1076,6 +1189,8 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     addFifo(dedupe, normalized, DEDUPE_CAP)
     acceptedEvents.add(eventId)
     rememberInjected(normalized)
+    // A must-fix pre-return finding reaches the seat as the refusal's reason; sending it too would say it twice.
+    if (trigger === 'pre-return' && judgment.severity === 'high') return true
     try {
       const delivered = send?.({ customType: ADVISOR_MESSAGE_TYPE, content: text, display: true, details: payload }, { deliverAs: 'steer' })
       delivered?.catch?.(() => {})
@@ -1083,7 +1198,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     return true
   }
 
-  async function consult(trigger, eventId, callOrdinal) {
+  async function consult(trigger, eventId, callOrdinal, { inline = false } = {}) {
     // A host whose hooks are fresh processes (the claude seat plugin) cannot hold a consult open: tier 0 only.
     if (deps.tier1 === false) return
     const context = currentContext()
@@ -1109,7 +1224,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     const redacted = redactionTally(delta)
     // A host whose hooks are fresh short processes hands the prepared consult to a detached worker
     // (runTier1Consult) instead of holding it open here. Nothing below this line is duplicated for it.
-    if (typeof deps.deferTier1Consult === 'function') {
+    if (!inline && typeof deps.deferTier1Consult === 'function') {
       try {
         deps.deferTier1Consult({
           trigger, eventId, callOrdinal, consultId, redacted, epoch: contextEpoch,
@@ -1118,7 +1233,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       } catch { /* a consult that cannot start costs the seat nothing */ }
       return
     }
-    runConsult({ trigger, eventId, callOrdinal, snapshot, context, consultId, redacted })
+    return runConsult({ trigger, eventId, callOrdinal, snapshot, context, consultId, redacted })
   }
 
   function runConsult({ trigger, eventId, callOrdinal, snapshot, context, consultId, redacted }) {
@@ -1301,7 +1416,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
           usage_reason: spendMeasured ? null : ownSpendFrames === 0 ? 'usage-unavailable' : 'usage-incomplete',
         }; usagePayload.provider = cell.provider; appendAdvisorRow('advisor_usage', usagePayload)
       }
-      if (!liveGeneration(captured)) return
+      if (!liveGeneration(captured)) return { ran: true, accepted: false, judgment: null, codes }
       if (codes.length || !judgment) {
         const payload = {
           run_started_at: context?.run_started_at ?? null, tier: 1, trigger,
@@ -1311,9 +1426,10 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
             ? { reply_excerpt: boundText(redactDelta(replyText).text, REPLY_EXCERPT_CAP_BYTES) } : {}),
         }
         if (appendAdvisorRow('advisor_note', payload)) notes.push(payload)
-        return
+        return { ran: true, accepted: false, judgment: null, codes }
       }
-      acceptTier1Note({ judgment, trigger, eventId, captured })
+      const accepted = acceptTier1Note({ judgment, trigger, eventId, captured })
+      return { ran: true, accepted, judgment, codes }
     })()
     inFlight.add(request)
     request.finally(() => inFlight.delete(request)).catch(() => {})
@@ -1363,11 +1479,29 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     for (const captured of triggers) void consult(captured.trigger, String(id), captured.call_ordinal)
   }
 
-  function onToolCall(event, ctx) {
+  // One consult on the whole working diff, awaited, before the seat's return file is written. Only an accepted
+  // must-fix (high severity) finding refuses the write; a failed, timed-out or empty consult lets it through
+  // (the consult's own journal rows say so) and never leaves the seat unable to return.
+  async function preReturnVerdict(event) {
+    const id = String(event?.toolCallId || '')
+    const measured = measureDiffLines()
+    if (measured) for (const entry of measured.entries) appendDelta(entry)
+    const result = await consult('pre-return', id, calls, { inline: true })
+    if (result?.ran) preReturnSpent = true
+    const judgment = result?.judgment
+    if (result?.accepted && judgment?.severity === 'high') return { block: true, reason: judgment.claim }
+    return undefined
+  }
+
+  async function onToolCall(event, ctx) {
     ensureContext()
+    if (isReturnWrite(event) && preReturnSpent) return undefined
     calls += 1
     processCall(event)
     if (calls % CADENCE_CALLS === 0) queue(String(event?.toolCallId || ''), 'cadence')
+    if (isReturnWrite(event)) {
+      try { return await preReturnVerdict(event) } catch { return undefined }
+    }
     return undefined
   }
 
@@ -1393,6 +1527,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   function exportState() {
     return {
       context_epoch: contextEpoch, context_row_epoch: contextRowEpoch, calls, consults, growth_baseline: growthBaseline,
+      diff_baseline_lines: diffBaselineLines, pre_return_spent: preReturnSpent,
       call_ordinals: [...callOrdinals], fired: [...fired], failure_counts: [...failureCounts],
       injected: [...injected], dedupe: [...dedupe],
       delta: delta.map((entry) => ({ text: entry.text, redactions: entry.redactions || {} })),
@@ -1407,6 +1542,10 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     if (!state || typeof state !== 'object' || !Number.isSafeInteger(state.calls) || state.calls < 0 || !Number.isSafeInteger(state.consults) || state.consults < 0) throw new Error('advisor state is malformed')
     const growth = state.growth_baseline
     if (growth !== null && !(growth && Number.isFinite(growth.bytes) && typeof growth.truncated === 'boolean')) throw new Error('advisor state is malformed')
+    const diffBase = state.diff_baseline_lines === undefined ? null : state.diff_baseline_lines
+    if (diffBase !== null && !(Number.isFinite(diffBase) && diffBase >= 0)) throw new Error('advisor state is malformed')
+    const spent = state.pre_return_spent === undefined ? false : state.pre_return_spent
+    if (typeof spent !== 'boolean') throw new Error('advisor state is malformed')
     const ordinals = pairs(state.call_ordinals), counts = pairs(state.failure_counts)
     if (!ordinals.every(([id, ordinal]) => typeof id === 'string' && Number.isSafeInteger(ordinal)) || !counts.every(([id, count]) => typeof id === 'string' && Number.isSafeInteger(count))) throw new Error('advisor state is malformed')
     // The judgment channel's delta and the triggers queued for the next result ride along when the host stores them.
@@ -1421,6 +1560,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     anchors = new Set(delta.flatMap((item) => item.anchors))
     pending = new Map(storedPending.map(([id, triggers]) => [id, triggers.map((entry) => ({ trigger: entry.trigger, call_ordinal: entry.call_ordinal, queued_at: entry.queued_at ?? nowMs() }))]))
     calls = state.calls; consults = state.consults; growthBaseline = growth
+    diffBaselineLines = diffBase; preReturnSpent = spent
     callOrdinals.clear(); for (const [id, ordinal] of ordinals) callOrdinals.set(id, ordinal)
     failureCounts = new Map(counts)
     fired = new Set(strings(state.fired)); injected = new Set(strings(state.injected)); dedupe = new Set(strings(state.dedupe))

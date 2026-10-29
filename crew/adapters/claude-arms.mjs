@@ -35,7 +35,8 @@ const EVENTS_OF = Object.freeze({
   builderloop: ['PreToolUse', 'PostToolUse', 'PostToolUseFailure'],
   advisor: ['PreToolUse', 'PostToolUse', 'PostToolUseFailure'],
 })
-const HOOK_TIMEOUT_S = 30
+// Must outlive an inline pre-return consult: its 20s bound, the child kill graces, and the journal writes.
+const HOOK_TIMEOUT_S = 45
 const LOCK_WAIT_MS = 10_000
 const LOCK_STALE_MS = 30_000
 const TRANSCRIPT_WINDOW_BYTES = 8 * 1024 * 1024
@@ -320,7 +321,7 @@ async function instantiate(name, env, cwd, outbox, launches) {
   if (name === 'reminders') return (await import('../pi/extensions/reminders.ts')).createReminders({ env })
   if (name === 'builderloop') return (await import('../pi/extensions/builderloop.ts')).createBuilderLoop({ env, cwd })
   // Tier 1 asks a model and outlives a hook: the hook only starts the consult (a detached worker) and a later hook delivers its note.
-  if (name === 'advisor') return (await import('../pi/extensions/advisor.ts')).createAdvisor({ env, deps: { cwd, deferTier1Consult: (request) => { launches.push(request) }, send: (message) => { outbox.push(`Advisor note: ${String(message?.content ?? '')}`) } } })
+  if (name === 'advisor') return (await import('../pi/extensions/advisor.ts')).createAdvisor({ env, deps: { cwd, resolveBinary: () => resolveConsultBinary(env), deferTier1Consult: (request) => { launches.push(request) }, send: (message) => { outbox.push(`Advisor note: ${String(message?.content ?? '')}`) } } })
   throw new Error(`unknown arm ${name}`)
 }
 

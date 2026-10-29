@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { join, dirname } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
@@ -1756,4 +1757,139 @@ test('AS1 a pi-seat write to the lane return file is never a scope breach; a wri
   a.onToolCall(call('3', 'write', { path: join(f.tree, 'outside.mjs'), content: 'a\n' }), {})
   assert.equal(breaches().length, 2)
   rmSync(f.root, { recursive: true, force: true })
+})
+
+// ---- diff-growth and pre-return triggers -------------------------------------------------------------------------
+function triggerSeat({ severity = 'high', claim = 'must-fix: the empty path is unhandled', hang = false, extraDeps = {} } = {}) {
+  const f = fixture(); const journal = sink(); const diff = { lines: 0, entries: [] }; let spawned = 0
+  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir }), deps: {
+    cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile, readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
+    diffSize: () => null, diffLines: () => ({ lines: diff.lines, entries: diff.entries, text: diff.entries.join('\n') }),
+    resolveBinary: () => ({ command: '/fake/pi', args: [] }),
+    spawn: () => {
+      spawned += 1
+      const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => true
+      child.stdin = { end() { if (hang) return; setImmediate(() => {
+        child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: JSON.stringify({ class: 'edge-path', severity, claim, evidence: ['lib/widget.mjs:1'] }), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } } }) + '\n')
+        child.emit('close', 0)
+      }) } }
+      return child
+    }, ...extraDeps,
+  } })
+  const ground = () => a.onToolResult({ toolCallId: 'g', toolName: 'read', input: { path: join(f.tree, 'lib/widget.mjs') }, content: [{ type: 'text', text: 'a' }] }, {})
+  return { f, journal, diff, a, ground, spawned: () => spawned, ret: join(f.taskDir, 'builder-1.json') }
+}
+
+test('DT2 a pi bash call that grows the working diff by the threshold queues one tier-1 diff-growth consult; growth below it does not', async () => {
+  const s = triggerSeat({ severity: 'medium', claim: 'the diff leaves an edge unanswered' })
+  try {
+    s.ground()
+    const bash = async (id) => { await s.a.onToolCall(call(id, 'bash', { command: 'sed -i x' }), {}); s.a.onToolResult({ toolCallId: id, toolName: 'bash', input: { command: 'sed -i x' }, content: [{ type: 'text', text: 'ok' }] }, {}); await s.a.settled() }
+    s.diff.lines = advisor.DIFF_GROWTH_LINES - 1; s.diff.entries = ['lib/widget.mjs:1: x']
+    await bash('b1')
+    assert.equal(s.spawned(), 0)
+    s.diff.lines = advisor.DIFF_GROWTH_LINES
+    await bash('b2')
+    assert.equal(s.spawned(), 1)
+    assert.ok(s.journal.rows.some((row) => row.advisor_consult?.trigger === 'diff-growth'))
+    assert.ok(s.journal.rows.some((row) => row.advisor_note?.trigger === 'diff-growth' && row.advisor_note.tier === 1))
+    s.diff.lines += advisor.DIFF_GROWTH_LINES - 1
+    await bash('b3')
+    assert.equal(s.spawned(), 1, 'growth is measured since the last consult')
+    assert.equal(s.a.exportState().diff_baseline_lines, advisor.DIFF_GROWTH_LINES)
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
+test('PR2 and PR3 a pi write or bash naming the return file is refused with the must-fix finding once; the next goes through unheld', async () => {
+  const s = triggerSeat()
+  try {
+    s.ground()
+    const first = await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
+    assert.deepEqual(first, { block: true, reason: 'must-fix: the empty path is unhandled' })
+    assert.ok(s.journal.rows.some((row) => row.advisor_consult?.trigger === 'pre-return'))
+    assert.equal(s.spawned(), 1)
+    assert.equal(await s.a.onToolCall(call('r2', 'write', { path: s.ret, content: '{}\n' }), {}), undefined)
+    assert.equal(await s.a.onToolCall(call('r3', 'bash', { command: `echo '{}' > ${s.ret}` }), {}), undefined)
+    assert.equal(s.spawned(), 1)
+    assert.equal(s.a.exportState().pre_return_spent, true)
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+  const b = triggerSeat()
+  try {
+    b.ground()
+    const verdict = await b.a.onToolCall(call('r1', 'bash', { command: `cat > ${b.ret} <<EOF\n{}\nEOF` }), {})
+    assert.equal(verdict?.block, true)
+  } finally { rmSync(b.f.root, { recursive: true, force: true }) }
+})
+
+test('a pre-return consult never fires for other paths, and a non-high finding lets the write through', async () => {
+  const s = triggerSeat({ severity: 'medium' })
+  try {
+    s.ground()
+    assert.equal(await s.a.onToolCall(call('w1', 'write', { path: join(s.f.tree, 'lib/widget.mjs'), content: 'x' }), {}), undefined)
+    assert.equal(await s.a.onToolCall(call('w2', 'write', { path: join(s.f.taskDir, 'sub', 'builder-1.json'), content: 'x' }), {}), undefined)
+    assert.equal(await s.a.onToolCall(call('w3', 'write', { path: join(s.f.taskDir, 'planner-1.json'), content: 'x' }), {}), undefined)
+    assert.equal(s.spawned(), 0)
+    assert.equal(await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}' }), {}), undefined)
+    assert.equal(s.spawned(), 1)
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
+test('PR4 a pre-return consult past its time bound lets the return write through and journals the timeout', async () => {
+  const s = triggerSeat({ hang: true, extraDeps: { consultTimeoutMs: 25, childKillGraceMs: 5 } })
+  try {
+    s.ground()
+    assert.equal(await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}' }), {}), undefined)
+    assert.ok(s.journal.rows.some((row) => row.advisor_cell_failure?.kind === 'timeout'))
+    assert.ok(s.journal.rows.some((row) => row.advisor_note?.trigger === 'pre-return' && row.advisor_note.codes?.includes('timeout')))
+    assert.equal(await s.a.onToolCall(call('r2', 'write', { path: s.ret, content: '{}' }), {}), undefined)
+    assert.equal(s.spawned(), 1)
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
+test('a pre-return consult stays inside TIER1_MAX_CONSULTS and lets the write through at the cap', async () => {
+  const s = triggerSeat()
+  try {
+    s.ground()
+    const state = s.a.exportState(); state.consults = advisor.TIER1_MAX_CONSULTS
+    s.a.importState(state)
+    assert.equal(await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}' }), {}), undefined)
+    assert.equal(s.spawned(), 0)
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
+test('the diff baseline and the pre-return flag survive exportState and importState; malformed values are refused', () => {
+  const s = triggerSeat()
+  try {
+    s.diff.lines = 7; s.a.onToolResult({ toolCallId: 'g', toolName: 'read', input: {}, content: [] }, {})
+    const state = JSON.parse(JSON.stringify({ ...s.a.exportState(), pre_return_spent: true }))
+    assert.equal(state.diff_baseline_lines, 7)
+    const fresh = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: s.f.taskDir }), deps: { cwd: s.f.tree, taskDir: s.f.taskDir, appendFile: () => {}, readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2 } })
+    fresh.importState(state)
+    assert.deepEqual([fresh.exportState().diff_baseline_lines, fresh.exportState().pre_return_spent], [7, true])
+    assert.throws(() => fresh.importState({ ...state, pre_return_spent: 'yes' }), /malformed/)
+    assert.throws(() => fresh.importState({ ...state, diff_baseline_lines: -1 }), /malformed/)
+    const { diff_baseline_lines, pre_return_spent, ...old } = state
+    fresh.importState(old)
+    assert.deepEqual([fresh.exportState().diff_baseline_lines, fresh.exportState().pre_return_spent], [null, false])
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
+test('gitDiffLines counts added plus removed lines against HEAD, untracked files included, and grounds an entry per file', () => {
+  const root = scratchDir('advisor-difflines-')
+  const run = (...args) => execFileSync('git', ['-c', 'user.email=t@example.invalid', '-c', 'user.name=t', ...args], { cwd: root, stdio: 'ignore' })
+  try {
+    writeFileSync(join(root, 'a.txt'), 'one\ntwo\nthree\n')
+    writeFileSync(join(root, 'bin.dat'), Buffer.from([0, 1, 2]))
+    run('init', '-q'); run('add', '.'); run('commit', '-qm', 'base')
+    assert.equal(advisor.gitDiffLines({ cwd: root }).lines, 0)
+    writeFileSync(join(root, 'a.txt'), 'one\nTWO\nthree\nfour\n') // +2 -1
+    writeFileSync(join(root, 'bin.dat'), Buffer.from([0, 9, 9, 9]))
+    writeFileSync(join(root, 'new.txt'), 'x\ny\nz')
+    writeFileSync(join(root, 'new.bin'), Buffer.from([0, 1]))
+    const result = advisor.gitDiffLines({ cwd: root })
+    assert.equal(result.lines, 3 + 3)
+    assert.ok(result.text.includes('a.txt:2: TWO'))
+    assert.ok(result.text.includes('new.txt:1: x'))
+    assert.equal(advisor.gitDiffLines({ cwd: join(root, 'missing') }), null)
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })

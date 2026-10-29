@@ -1894,6 +1894,21 @@ test('an untracked file past the read cap is counted by streaming and grounded; 
   assert.equal(binary.lines, 0)
 })
 
+// MUTATION: make the real streaming counter return zero and a real untracked file past the read cap counts as no lines.
+test('a real untracked text file past the read cap is counted exactly by the streaming counter', () => {
+  const root = join(process.env.TMPDIR || '/tmp', `advisor-big-${process.pid}-${Date.now()}`)
+  mkdirSync(root, { recursive: true })
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: root })
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'i'], { cwd: root })
+    writeFileSync(join(root, 'big.txt'), `${'y'.repeat(1023)}\n`.repeat(2048) + 'tail')
+    const measured = advisor.gitDiffLines({ cwd: root })
+    assert.equal(measured.truncated, false)
+    assert.equal(measured.lines, 2049, '2,048 terminated lines plus the unterminated tail')
+    assert.match(measured.text, /^big\.txt:1: y+$/m)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 // MUTATION: let dedupe or one-per-update suppress a pre-return finding and an earlier warning lets the return through.
 test('a must-fix pre-return finding blocks even when diff growth already delivered the same claim', async () => {
   const s = triggerSeat()

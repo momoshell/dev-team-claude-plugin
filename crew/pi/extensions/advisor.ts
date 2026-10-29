@@ -28,6 +28,7 @@ import { StringDecoder } from 'node:string_decoder'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../context-layout.mjs'
 import { resolvePiBinary, createStreamReducer, carriesOwnSpend, STREAM_CAP_BYTES } from './subagent.ts'
+import { modelString } from '../../adapters/adapter-pi.mjs'
 
 export const ADVISOR_CONFIG_VERSION = 1
 export const ADVISOR_GRANT_ENV = 'CREW_ADVISOR'
@@ -414,6 +415,12 @@ export function isSelfEcho(text, injected) {
     if (note && normalized === String(note)) return true
   }
   return false
+}
+
+// pi resolves a provider it has no login for by fuzzy match (openai/... reached openrouter), so a roster provider is
+// spelled as pi seats spell it; a cell outside the roster's providers passes through as written, as it always has.
+function consultModel(cell) {
+  try { return modelString({ provider: cell.provider, id: cell.id }) } catch { return String(cell.model) }
 }
 
 function cellIdentity(cell) { return { provider: cell.provider, model_id: cell.id, agent: cell.agent, effort: cell.effort, model: cell.model } }
@@ -1050,7 +1057,11 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       }
       // A Bash command names the file by its absolute path or, after a cd into the task dir, by its bare name.
       if (tool === 'bash') {
-        return new RegExp(`(?:^|[\\s'"=<>/])${escapeRegExp(role)}-\\d+\\.json(?![\\w.-])`).test(String(input.command ?? ''))
+        const command = String(input.command ?? '')
+        if (new RegExp(`${escapeRegExp(join(root, role))}-\\d+\\.json`).test(command)) return true
+        const bare = new RegExp(`(?:^|[\\s'"=<>])${escapeRegExp(role)}-\\d+\\.json(?![\\w./-])`)
+        const intoTask = new RegExp(`(?:^|[;&|(\\s])cd\\s+(['"]?)${escapeRegExp(root)}/?\\1(?=$|[\\s;&|)])`)
+        return bare.test(command) && intoTask.test(command)
       }
     } catch { /* not a return write */ }
     return false
@@ -1341,7 +1352,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
           const promptFile = join(dir, 'system-prompt.txt')
           try {
             writeFileSync(promptFile, systemPrompt(role), { mode: 0o600 })
-            const childArgs = ['-p','--mode','json','--no-session','--model',String(cell.model),'--thinking',cell.effort,'--no-tools','--no-context-files','--no-extensions','--no-skills','--append-system-prompt',promptFile]
+            const childArgs = ['-p','--mode','json','--no-session','--model',consultModel(cell),'--thinking',cell.effort,'--no-tools','--no-context-files','--no-extensions','--no-skills','--append-system-prompt',promptFile]
             const child = spawn(binary, [...prefix, ...childArgs], { cwd, stdio: ['pipe','pipe','pipe'] })
             const reducer = createStreamReducer()
             const pushFrame = (frame: any) => {

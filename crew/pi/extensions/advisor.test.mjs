@@ -336,7 +336,7 @@ test('E1 advisor module is node-only, erasable, and exposes no callable registra
   const source = readFileSync(new URL('./advisor.ts', import.meta.url), 'utf8')
   const imports = [...source.matchAll(/^import[\s\S]*?from\s+["']([^"']+)["']/gm)].map((match) => match[1])
   assert.ok(imports.length > 0)
-  assert.ok(imports.every((specifier) => specifier.startsWith('node:') || ['./subagent.ts', '../context-layout.mjs'].includes(specifier)))
+  assert.ok(imports.every((specifier) => specifier.startsWith('node:') || ['./subagent.ts', '../context-layout.mjs', '../../adapters/adapter-pi.mjs'].includes(specifier)))
   assert.doesNotMatch(source, /registerTool/)
   assert.doesNotMatch(source, /^\s*(enum|namespace)\s/m)
 })
@@ -1822,8 +1822,8 @@ test('PR2 and PR3 a pi write or bash naming the return file is refused with the 
 })
 
 // MUTATION: match only the absolute return path and a builder that cds into the task dir returns unreviewed.
-test('a bash command that names the return file by its bare name after a cd is a return write; other names are not', async () => {
-  for (const command of ['cd TASK; cat > builder-1.json <<EOF\n{}\nEOF', "cd TASK && printf '{}' >builder-1.json", 'tee "builder-1.json" < x']) {
+test('a bash command names the return file by its absolute path, or by its bare name after a cd into the task dir; nothing else is a return write', async () => {
+  for (const command of ['cd TASK; cat > builder-1.json <<EOF\n{}\nEOF', "cd TASK && printf '{}' >builder-1.json", 'cd "TASK" && tee "builder-1.json" < x', 'cat > TASK/builder-1.json <<EOF\n{}\nEOF']) {
     const s = triggerSeat()
     try {
       s.ground()
@@ -1831,14 +1831,34 @@ test('a bash command that names the return file by its bare name after a cd is a
       assert.equal(verdict?.block, true, command)
     } finally { rmSync(s.f.root, { recursive: true, force: true }) }
   }
-  for (const command of ['cat old-builder-1.json', 'cat builder-1.json.bak', 'cat planner-1.json']) {
+  for (const command of ['cat old-builder-1.json', 'cat builder-1.json.bak', 'cat planner-1.json', 'tee builder-1.json < x', 'cd TREE && cat > lib/builder-1.json', 'cd TASK-evil; cat > builder-1.json', 'cat > TREE/lib/builder-1.json']) {
     const s = triggerSeat()
     try {
       s.ground()
-      assert.equal(await s.a.onToolCall(call('x', 'bash', { command }), {}), undefined, command)
+      assert.equal(await s.a.onToolCall(call('x', 'bash', { command: command.replace('TASK', s.f.taskDir).replace('TREE', s.f.tree) }), {}), undefined, command)
       assert.equal(s.spawned(), 0, command)
     } finally { rmSync(s.f.root, { recursive: true, force: true }) }
   }
+})
+
+// MUTATION: pass the raw cell model and openai/... resolves through openrouter instead of the openai-codex login.
+test('a consult spells the cell model as pi seats do', async () => {
+  let args = null
+  const s = triggerSeat({ extraDeps: { spawn: (_bin, argv) => {
+    args = argv
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => true
+    child.stdin = { end() { setImmediate(() => child.emit('close', 0)) } }
+    return child
+  } } })
+  try {
+    const manifest = join(s.f.taskDir, advisor.TRIPWIRE_MANIFEST_FILE)
+    const written = JSON.parse(readFileSync(manifest, 'utf8'))
+    writeFileSync(manifest, JSON.stringify({ ...written, cell: { provider: 'openai', id: 'gpt-6.1-terra', agent: 'pi', effort: 'medium', model: 'openai/gpt-6.1-terra' } }))
+    s.ground()
+    await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}' }), {})
+    assert.ok(args, 'the consult spawned')
+    assert.equal(args[args.indexOf('--model') + 1], 'openai-codex/gpt-6.1-terra')
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
 })
 
 test('a pre-return consult never fires for other paths, and a non-high finding lets the write through', async () => {

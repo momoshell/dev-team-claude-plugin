@@ -13,8 +13,9 @@
 // Claude validates an Edit's input before any hook fires, so a failed Edit has no hook. Edit assist reads the session
 // transcript on the next PreToolUse instead and hands the hint over one tool call late.
 import { createHash } from 'node:crypto'
-import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join } from 'node:path'
+import { spawn } from 'node:child_process'
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { basename, delimiter, dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CONTEXT_LAYOUT_ENV, LEAN_LAYOUT, journalPathOf } from '../pi/context-layout.mjs'
 
@@ -230,8 +231,8 @@ function laneRunStart(config) {
 
 function sleep(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }
 
-// Concurrent hooks (parallel tool calls) read-modify-write one file, so they take turns.
-async function withLock(lock, fn) {
+// Take the lock directory (blocking, bounded); the returned function releases it.
+function acquireLock(lock) {
   const deadline = Date.now() + LOCK_WAIT_MS
   for (;;) {
     try { mkdirSync(lock); break } catch (error) {
@@ -241,7 +242,13 @@ async function withLock(lock, fn) {
       sleep(25)
     }
   }
-  try { return await fn() } finally { try { rmdirSync(lock) } catch { /* already gone */ } }
+  return () => { try { rmdirSync(lock) } catch { /* already gone */ } }
+}
+
+// Concurrent hooks (parallel tool calls) read-modify-write one file, so they take turns.
+async function withLock(lock, fn) {
+  const release = acquireLock(lock)
+  try { return await fn() } finally { release() }
 }
 
 const MALFORMED = Symbol('malformed')
@@ -268,13 +275,52 @@ function saveState(path, state, before) {
 
 // ---- the hook --------------------------------------------------------------------------------------------------
 
-async function instantiate(name, env, cwd, outbox) {
+const ADVISOR_REQUESTS_DIR = 'advisor-requests'
+const ADVISOR_NOTES_DIR = 'advisor-notes'
+const ADVISOR_ACCEPTED_DIR = 'advisor-accepted'
+
+// Write-then-rename: a reader never sees half a file.
+function writeAtomic(path, text) {
+  mkdirSync(dirname(path), { recursive: true })
+  const tmp = `${path}.${process.pid}.tmp`
+  writeFileSync(tmp, text)
+  renameSync(tmp, path)
+}
+
+// A tier-1 consult outlives the hook that asked for it: hand it to a detached worker and return at once.
+// Nothing here may throw into the hook; a consult that could not start costs the seat nothing.
+function startConsultWorker(config, env, request) {
+  try {
+    const pluginRoot = config.plugin_root
+    const requestPath = join(config.state_dir, ADVISOR_REQUESTS_DIR, `${request.consultId}.json`)
+    // The seat session and run that asked: the note it earns is only ever delivered back to them.
+    writeAtomic(requestPath, JSON.stringify({ ...request, hook: config.hook_identity }))
+    const cwd = config.cwd
+    const worker = spawn(process.execPath, [SELF, 'advisor-consult', pluginRoot, requestPath], { cwd, env, detached: true, stdio: 'ignore' })
+    worker.on('error', () => {})
+    worker.unref()
+  } catch (error) { process.stderr.write(`crew advisor consult not started: ${String(error?.message ?? error).slice(0, 300)}\n`) }
+}
+
+// CREW_PI_BIN when it names an absolute file, else the first absolute PATH entry holding a pi.
+function resolveConsultBinary(env) {
+  const named = env.CREW_PI_BIN
+  if (typeof named === 'string' && isAbsolute(named) && existsSync(named)) return { command: named, args: [] }
+  for (const dir of String(env.PATH ?? '').split(delimiter)) {
+    if (!dir || !isAbsolute(dir)) continue
+    const candidate = join(dir, 'pi')
+    if (existsSync(candidate)) return { command: candidate, args: [] }
+  }
+  return { error: 'the pi executable could not be resolved to an absolute path' }
+}
+
+async function instantiate(name, env, cwd, outbox, launches) {
   if (name === 'readgate') return (await import('../pi/extensions/readgate.ts')).createReadGate({ env, cwd })
   if (name === 'skeletonread') return (await import('../pi/extensions/skeletonread.ts')).createSkeletonRead({ env, cwd })
   if (name === 'reminders') return (await import('../pi/extensions/reminders.ts')).createReminders({ env })
   if (name === 'builderloop') return (await import('../pi/extensions/builderloop.ts')).createBuilderLoop({ env, cwd })
-  // Tier 1 asks a model and outlives a hook, so the advisor runs its mechanical predicates only.
-  if (name === 'advisor') return (await import('../pi/extensions/advisor.ts')).createAdvisor({ env, deps: { cwd, tier1: false, send: (message) => { outbox.push(`Advisor note: ${String(message?.content ?? '')}`) } } })
+  // Tier 1 asks a model and outlives a hook: the hook only starts the consult (a detached worker) and a later hook delivers its note.
+  if (name === 'advisor') return (await import('../pi/extensions/advisor.ts')).createAdvisor({ env, deps: { cwd, deferTier1Consult: (request) => { launches.push(request) }, send: (message) => { outbox.push(`Advisor note: ${String(message?.content ?? '')}`) } } })
   throw new Error(`unknown arm ${name}`)
 }
 
@@ -358,14 +404,45 @@ async function dispatch(config, payload, arms, state, outbox) {
   return out.updatedToolOutput !== undefined || context ? out : null
 }
 
+// Finished consults' notes for this seat session and run, claimed under the state lock before they join the outbox:
+// a note leaves the disk exactly when it is handed to this call's added context, so no later call sees it again.
+// Another session's note stays for its owner; a note from an earlier run of this session is stale and dropped.
+// Returns what was claimed, so a call that cannot hand its context over can put the notes back.
+function deliverAdvisorNotes(config, outbox, advisor, identity) {
+  const claimed = []
+  try {
+    const dir = join(config.state_dir, ADVISOR_NOTES_DIR)
+    for (const name of readdirSync(dir).filter((entry) => entry.endsWith('.json')).sort()) {
+      try {
+        const file = join(dir, name)
+        const raw = readFileSync(file, 'utf8')
+        const stored = JSON.parse(raw)
+        if (!isObject(stored) || stored.session !== identity.session) continue
+        const note = stored.note
+        if (stored.run_start !== identity.run_start || typeof note !== 'string' || !note) { rmSync(file, { force: true }); continue }
+        unlinkSync(file);
+        claimed.push({ file, raw })
+        advisor.mergeTier1Memory(stored.memory)
+        outbox.push(`Advisor note: ${note}`)
+      } catch { /* an unreadable note is skipped, never thrown into the hook */ }
+    }
+  } catch { /* no notes yet */ }
+  return claimed
+}
+
+function restoreAdvisorNotes(claimed) {
+  for (const { file, raw } of claimed) { try { writeAtomic(file, raw) } catch { /* the note is lost with the store */ } }
+}
+
 // One hook call: the output to print, or null. Throws are the caller's no-op.
 export async function runHook(pluginRoot, raw) {
-  const config = readConfig(pluginRoot)
+  const config = { ...readConfig(pluginRoot), plugin_root: pluginRoot }
   const payload = JSON.parse(raw)
   if (!isObject(payload) || typeof payload.session_id !== 'string' || !payload.session_id || !['SessionStart', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure'].includes(payload.hook_event_name)) return null
   try { process.chdir(config.cwd) } catch { /* the arms resolve against config.cwd themselves */ }
   const env = armEnv(config)
   const identity = { version: STATE_VERSION, seat: config.seat, session: payload.session_id, run_start: laneRunStart(config) }
+  config.hook_identity = { session: identity.session, run_start: identity.run_start }
   const file = join(config.state_dir, `${createHash('sha256').update(payload.session_id).digest('hex').slice(0, 24)}.json`)
   mkdirSync(config.state_dir, { recursive: true })
   return withLock(`${file}.lock`, async () => {
@@ -374,9 +451,11 @@ export async function runHook(pluginRoot, raw) {
     const before = JSON.stringify(state)
     const outbox = []
     const arms = {}
+    // Consults this call asked for start only once the count that pays for them is saved: a call that cannot save starts none.
+    const launches = []
     for (const name of config.arms) {
       try {
-        arms[name] = await instantiate(name, env, config.cwd, outbox)
+        arms[name] = await instantiate(name, env, config.cwd, outbox, launches)
         if (state.arms[name] !== undefined && typeof arms[name].importState === 'function') arms[name].importState(state.arms[name])
       } catch (error) {
         // An arm that cannot start, or whose stored state is not its own, is not run (and starts fresh next time); the others are.
@@ -385,15 +464,57 @@ export async function runHook(pluginRoot, raw) {
         delete state.arms[name]
       }
     }
-    const output = await dispatch(config, payload, arms, state, outbox)
-    for (const [name, arm] of Object.entries(arms)) if (typeof arm.exportState === 'function') state.arms[name] = arm.exportState()
-    saveState(file, state, before)
-    return output
+    const claimed = arms.advisor && payload.hook_event_name === 'PreToolUse' ? deliverAdvisorNotes(config, outbox, arms.advisor, config.hook_identity) : []
+    try {
+      const output = await dispatch(config, payload, arms, state, outbox)
+      for (const [name, arm] of Object.entries(arms)) if (typeof arm.exportState === 'function') state.arms[name] = arm.exportState()
+      saveState(file, state, before)
+      for (const request of launches) startConsultWorker(config, env, request)
+      return output
+    } catch (error) { restoreAdvisorNotes(claimed); throw error }
   })
 }
 
+// The detached worker: run one deferred consult to the end. A note it earns is written for a later hook to deliver.
+async function runConsultWorker(pluginRoot, requestPath) {
+  const config = readConfig(pluginRoot)
+  const request = JSON.parse(readFileSync(requestPath, 'utf8'))
+  try { process.chdir(config.cwd) } catch { /* the advisor resolves against config.cwd itself */ }
+  const env = armEnv(config)
+  const hook = isObject(request.hook) ? request.hook : {}
+  let advisor
+  const send = (message) => {
+    // The claim and the dedupe memory it earned travel together, bound to the session and run that asked.
+    try { writeAtomic(join(config.state_dir, ADVISOR_NOTES_DIR, `${request.consultId}.json`), JSON.stringify({ session: hook.session, run_start: hook.run_start ?? null, note: String(message?.content ?? ''), memory: advisor?.tier1Memory() })) } catch { /* the journal row stands; the seat just never hears it */ }
+  }
+  // Consults in flight together are judged one at a time against what the others already had accepted, as the pi
+  // advisor judges its own: the accepted claims and updates are kept per session and run, under their own lock.
+  const ledger = join(config.state_dir, ADVISOR_ACCEPTED_DIR, `${createHash('sha256').update(String(hook.session)).digest('hex').slice(0, 24)}.json`)
+  const exclusiveTier1Acceptance = (fn) => {
+    mkdirSync(dirname(ledger), { recursive: true })
+    const release = acquireLock(`${ledger}.lock`)
+    try {
+      try {
+        const stored = JSON.parse(readFileSync(ledger, 'utf8'))
+        if (isObject(stored) && stored.session === hook.session && stored.run_start === (hook.run_start ?? null)) advisor.mergeTier1Memory(stored.memory)
+      } catch { /* no ledger yet */ }
+      const accepted = fn()
+      if (accepted) { try { writeAtomic(ledger, JSON.stringify({ session: hook.session, run_start: hook.run_start ?? null, memory: advisor.tier1Memory() })) } catch { /* the note stands */ } }
+      return accepted
+    } finally { release() }
+  }
+  advisor = (await import('../pi/extensions/advisor.ts')).createAdvisor({ env, deps: { cwd: config.cwd, send, exclusiveTier1Acceptance, resolveBinary: () => resolveConsultBinary(env) } })
+  try { await advisor.runTier1Consult(request) } finally { try { rmSync(requestPath, { force: true }) } catch { /* left behind */ } }
+}
+
 async function main() {
-  const [command, pluginRoot] = process.argv.slice(2)
+  const [command, pluginRoot, requestPath] = process.argv.slice(2)
+  if (command === 'advisor-consult' && pluginRoot && requestPath) {
+    try { await runConsultWorker(pluginRoot, requestPath) } catch (error) {
+      process.stderr.write(`crew advisor consult failed: ${String(error?.message ?? error).slice(0, 300)}\n`)
+    }
+    process.exit(0)
+  }
   if (command !== 'hook' || !pluginRoot) return
   let output = null
   try { output = await runHook(pluginRoot, readFileSync(0, 'utf8')) } catch (error) {

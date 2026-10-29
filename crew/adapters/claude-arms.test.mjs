@@ -1,12 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, unlinkSync, appendFileSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, appendFileSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { ROOT, git, scratchDir } from '../../test/helpers.mjs'
 import { runAcpSeat } from '../acp/seat.mjs'
 import { acpLaunch, headlessCommand, seatCommand, writeSeatArms } from './adapter-claude.mjs'
-import { CLAUDE_ARMS, armsPluginDir, claudeArmsOf, failedEdits, writeArmsPlugin } from './claude-arms.mjs'
+import { CLAUDE_ARMS, armsPluginDir, claudeArmsOf, failedEdits, runHook, writeArmsPlugin } from './claude-arms.mjs'
 
 // Every frame below is a recorded Claude Code hook input (or the session transcript) cloned with only scenario data
 // changed: paths, tool ids, sizes and failure output. The hooks run as the real commands the plugin names, one process each.
@@ -521,4 +521,187 @@ test('the hook command survives a plugin path with spaces and quotes', () => {
   assert.throws(() => writeArmsPlugin({ taskDir, role: 'builder', arms: ['subagent'], cwd: taskDir }), /arms must be a nonempty list/)
   assert.throws(() => writeArmsPlugin({ taskDir, role: 'builder', arms: [], cwd: taskDir }), /arms must be a nonempty list/)
   assert.throws(() => writeArmsPlugin({ taskDir: 'relative', role: 'builder', arms: ['readgate'], cwd: taskDir }), /ABSOLUTE/)
+})
+
+// ---- advisor tier 1: a detached consult, delivered by a later hook -------------------------------------------------
+// Real hook processes and a real detached worker; the only fake is the `pi` executable the consult spawns.
+async function tier1Lane(mode) {
+  const { delimiter } = await import('node:path')
+  const root = scratchDir('claude-tier1-')
+  const cwd = join(root, 'checkout'), lane = join(root, 'lane'), runtime = join(root, 'runtime'), fake = join(root, 'fakebin')
+  for (const dir of [join(cwd, 'lib'), lane, runtime, fake]) mkdirSync(dir, { recursive: true })
+  writeFileSync(join(cwd, 'lib', 'widget.mjs'), 'alpha\nbeta\n')
+  const anchor = Date.now() - 60_000
+  writeFileSync(join(lane, 'journal.jsonl'), `${JSON.stringify({ event: 'run-start', at: anchor })}\n`)
+  writeFileSync(join(lane, 'advisor-manifest.json'), JSON.stringify({ schema_version: 1, run_started_at: anchor, tripwires: [], cell: { provider: 'local', id: 'advisor-v1', agent: 'pi', effort: 'medium', model: 'local/advisor-v1' } }))
+  const planner = join(lane, 'planner-1.json')
+  writeFileSync(planner, JSON.stringify({ role: 'planner', id: 'p.planner.1', status: 'done', summary: 's', details: { files_in_scope: ['lib/'], validation_lane: 'node --test x.test.mjs' } }))
+  utimesSync(planner, (anchor + 5000) / 1000, (anchor + 5000) / 1000)
+  const countFile = join(root, 'pi-count'), pidFile = join(root, 'pi-pid')
+  writeFileSync(countFile, '')
+  const pi = join(fake, 'pi')
+  writeFileSync(pi, `#!/usr/bin/env node
+const fs = require('node:fs')
+fs.appendFileSync(process.env.PI_COUNT, 'x\\n')
+if (process.env.PI_MODE === 'hang') { fs.writeFileSync(process.env.PI_PID, String(process.pid)); setInterval(() => {}, 1000) }
+else {
+  process.stdin.resume(); process.stdin.on('end', () => {
+    const judgment = { class: 'edge-path', severity: 'medium', claim: 'tier one found the grounded edge', evidence: ['lib/widget.mjs:1'] }
+    process.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: JSON.stringify(judgment), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } } }) + '\\n')
+  })
+}
+`)
+  chmodSync(pi, 0o755)
+  const plugin = writeArmsPlugin({ taskDir: runtime, role: 'builder', arms: ['advisor'], cwd, laneTaskDir: lane, layout: 'lean' })
+  const command = JSON.parse(readFileSync(join(plugin, 'hooks', 'hooks.json'), 'utf8')).hooks.PreToolUse[0].hooks[0].command
+  const env = { ...process.env, PATH: `${fake}${delimiter}${process.env.PATH}`, CREW_PI_BIN: pi, PI_MODE: mode, PI_COUNT: countFile, PI_PID: pidFile }
+  const base = { session_id: 's1', cwd, transcript_path: join(root, 't.jsonl') }
+  const fire = (event) => {
+    const started = Date.now()
+    const r = spawnSync('/bin/sh', ['-c', command], { cwd, env, input: JSON.stringify(event), encoding: 'utf8', timeout: 20_000 })
+    let out = null
+    try { out = JSON.parse(r.stdout).hookSpecificOutput } catch { /* no output */ }
+    return { status: r.status, out, elapsed: Date.now() - started }
+  }
+  const pre = (id, tool, input) => fire({ ...base, hook_event_name: 'PreToolUse', tool_name: tool, tool_use_id: id, tool_input: input })
+  const triggerWrite = (name) => {
+    const input = { file_path: join(cwd, name), content: 'const x = 1\n' }
+    fire({ ...base, hook_event_name: 'PostToolUse', tool_name: 'Read', tool_use_id: `${name}-r`, tool_input: { file_path: join(cwd, 'lib/widget.mjs') }, tool_response: { type: 'text', file: { content: 'alpha\nbeta\n', filePath: join(cwd, 'lib/widget.mjs') } } })
+    pre(`${name}-w`, 'Write', input)
+    return fire({ ...base, hook_event_name: 'PostToolUse', tool_name: 'Write', tool_use_id: `${name}-w`, tool_input: input, tool_response: {} })
+  }
+  const rows = () => readFileSync(join(lane, 'journal.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+  const stateFile = () => { const dir = join(lane, 'claude-arms', 'runtime'); return join(dir, readdirSync(dir).find((n) => n.endsWith('.json'))) }
+  const stop = () => { try { process.kill(Number(readFileSync(pidFile, 'utf8')), 'SIGKILL') } catch { /* none */ } }
+  const noteDir = join(lane, 'claude-arms', 'runtime', 'advisor-notes')
+  return { env, fire, pre, base, plugin, lane, noteDir, triggerWrite, rows, stateFile, countFile, stop }
+}
+const until = async (check, ms) => { const end = Date.now() + ms; while (Date.now() < end) { if (check()) return true; await new Promise((r) => setTimeout(r, 100)) } return check() }
+
+test('CT1 a hook that triggers a tier-1 consult returns while the consult never finishes', async () => {
+  const lane = await tier1Lane('hang')
+  try {
+    const r = lane.triggerWrite('outside.mjs')
+    assert.equal(r.status, 0)
+    assert.ok(r.elapsed < 10_000, `hook took ${r.elapsed}ms`)
+    assert.ok(await until(() => readFileSync(lane.countFile, 'utf8').length > 0, 10_000), 'the consult worker started the pi child')
+  } finally { lane.stop() }
+})
+
+test('CT2 a finished consult is delivered once on a later hook, journaled like the pi advisor, and the count persists', async () => {
+  const lane = await tier1Lane('ok')
+  lane.triggerWrite('outside.mjs')
+  assert.ok(await until(() => lane.rows().some((row) => row.advisor_note?.tier === 1 && row.advisor_note.outcome === 'injected'), 20_000), 'tier-1 note journaled')
+  await new Promise((r) => setTimeout(r, 500))
+  const bash = (id) => lane.pre(id, 'Bash', { command: 'echo ok' })
+  const first = bash('b1')
+  assert.match(first.out?.additionalContext ?? '', /tier one found the grounded edge/)
+  assert.doesNotMatch(bash('b2').out?.additionalContext ?? '', /tier one found/)
+  const note = lane.rows().find((row) => row.advisor_note?.tier === 1 && row.advisor_note.outcome === 'injected').advisor_note
+  const usage = lane.rows().find((row) => row.advisor_usage).advisor_usage
+  assert.equal(note.consult_id, usage.consult_id)
+  assert.deepEqual(Object.keys(note).sort(), ['agent', 'call_ordinal', 'claim', 'consult_id', 'content_excerpt', 'content_sha256', 'effort', 'evidence', 'judgment_class', 'kind', 'model', 'model_id', 'outcome', 'provider', 'role', 'run_started_at', 'severity', 'target', 'target_kind', 'tier', 'trigger'])
+  // the bound holds in a fresh process: a persisted count at the maximum starts no consult
+  const state = JSON.parse(readFileSync(lane.stateFile(), 'utf8'))
+  assert.equal(state.arms.advisor.consults, 1)
+  state.arms.advisor.consults = 20
+  writeFileSync(lane.stateFile(), JSON.stringify(state))
+  writeFileSync(lane.countFile, '')
+  lane.triggerWrite('outside2.mjs')
+  await new Promise((r) => setTimeout(r, 2500))
+  assert.equal(readFileSync(lane.countFile, 'utf8'), '')
+})
+
+const landed = (lane, count = 1) => until(() => lane.rows().filter((row) => row.advisor_note?.tier === 1).length >= count && existsSync(lane.noteDir) && readdirSync(lane.noteDir).filter((n) => n.endsWith('.json')).length >= 1, 20_000)
+
+test('CT3 a finished consult\'s note goes to the session and run that asked, and to no other', async () => {
+  const lane = await tier1Lane('ok')
+  lane.triggerWrite('outside.mjs')
+  assert.ok(await landed(lane), 'note landed')
+  await new Promise((r) => setTimeout(r, 300))
+  const bash = (id, session) => lane.fire({ ...lane.base, session_id: session, hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: id, tool_input: { command: 'echo ok' } })
+  assert.doesNotMatch(bash('o1', 'other-session').out?.additionalContext ?? '', /tier one found/)
+  assert.equal(readdirSync(lane.noteDir).filter((n) => n.endsWith('.json')).length, 1, 'another session leaves the note where it is')
+  assert.match(bash('o2', 's1').out?.additionalContext ?? '', /tier one found/)
+})
+
+test('CT3 a note queued before a new run starts is dropped, not delivered into the new run', async () => {
+  const lane = await tier1Lane('ok')
+  lane.triggerWrite('outside.mjs')
+  assert.ok(await landed(lane), 'note landed')
+  await new Promise((r) => setTimeout(r, 300))
+  appendFileSync(join(lane.lane, 'journal.jsonl'), `${JSON.stringify({ event: 'run-start', at: Date.now() + 1000 })}\n`)
+  assert.doesNotMatch(lane.pre('n1', 'Bash', { command: 'echo ok' }).out?.additionalContext ?? '', /tier one found/)
+  assert.deepEqual(readdirSync(lane.noteDir).filter((n) => n.endsWith('.json')), [])
+})
+
+test('CT4 a note claimed by a call that then cannot save its state is put back and delivered by the next call', async () => {
+  const lane = await tier1Lane('ok')
+  lane.triggerWrite('outside.mjs')
+  assert.ok(await landed(lane), 'note landed')
+  await new Promise((r) => setTimeout(r, 300))
+  // the state file's temp name is taken by a directory, so the hook's write fails after it has claimed the note
+  const blocker = `${lane.stateFile()}.${process.pid}.tmp`
+  mkdirSync(blocker)
+  const cwd = process.cwd()
+  const keep = { ...process.env }
+  try {
+    await assert.rejects(runHook(lane.plugin, JSON.stringify({ ...lane.base, hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: 'f1', tool_input: { command: 'echo ok' } })))
+  } finally { process.chdir(cwd); for (const key of Object.keys(process.env)) if (!(key in keep)) delete process.env[key]; Object.assign(process.env, keep); rmSync(blocker, { recursive: true, force: true }) }
+  assert.equal(readdirSync(lane.noteDir).filter((n) => n.endsWith('.json')).length, 1, 'the note is back')
+  assert.match(lane.pre('f2', 'Bash', { command: 'echo ok' }).out?.additionalContext ?? '', /tier one found/)
+})
+
+test('CT5 a delivered claim is remembered, so a later consult returning it is suppressed and not delivered again', async () => {
+  const lane = await tier1Lane('ok')
+  lane.triggerWrite('outside.mjs')
+  assert.ok(await landed(lane), 'first note landed')
+  await new Promise((r) => setTimeout(r, 300))
+  assert.match(lane.pre('d1', 'Bash', { command: 'echo ok' }).out?.additionalContext ?? '', /tier one found/)
+  const memory = JSON.parse(readFileSync(lane.stateFile(), 'utf8')).arms.advisor
+  assert.ok(memory.dedupe.includes('tier one found the grounded edge'))
+  assert.ok(memory.injected.includes('tier one found the grounded edge'))
+  lane.triggerWrite('outside2.mjs')
+  assert.ok(await until(() => lane.rows().some((row) => row.advisor_note?.tier === 1 && row.advisor_note.outcome === 'suppressed' && row.advisor_note.codes?.includes('duplicate')), 20_000), 'the repeat is suppressed')
+  await new Promise((r) => setTimeout(r, 300))
+  assert.doesNotMatch(lane.pre('d2', 'Bash', { command: 'echo ok' }).out?.additionalContext ?? '', /tier one found/)
+})
+
+test('CT6 a triggering call that cannot save its state starts no consult, so the persisted count still bounds them', async () => {
+  const lane = await tier1Lane('ok')
+  const widget = join(lane.base.cwd, 'lib/widget.mjs')
+  lane.fire({ ...lane.base, hook_event_name: 'PostToolUse', tool_name: 'Read', tool_use_id: 'r0', tool_input: { file_path: widget }, tool_response: { type: 'text', file: { content: 'alpha\nbeta\n', filePath: widget } } })
+  const state = JSON.parse(readFileSync(lane.stateFile(), 'utf8'))
+  state.arms.advisor.consults = 19
+  writeFileSync(lane.stateFile(), JSON.stringify(state))
+  const cwd = process.cwd()
+  const keep = { ...process.env }
+  Object.assign(process.env, lane.env) // a consult started by this process would find the fake pi
+  const blocker = `${lane.stateFile()}.${process.pid}.tmp`
+  const file = join(lane.base.cwd, 'outside.mjs'), input = { file_path: file, content: 'const x = 1\n' }
+  const frame = (event, extra) => JSON.stringify({ ...lane.base, hook_event_name: event, tool_name: 'Write', tool_use_id: 'w1', tool_input: input, ...extra })
+  try {
+    await runHook(lane.plugin, frame('PreToolUse'))
+    mkdirSync(blocker)
+    await assert.rejects(runHook(lane.plugin, frame('PostToolUse', { tool_response: {} })))
+  } finally { process.chdir(cwd); for (const key of Object.keys(process.env)) if (!(key in keep)) delete process.env[key]; Object.assign(process.env, keep); rmSync(blocker, { recursive: true, force: true }) }
+  await new Promise((r) => setTimeout(r, 2500))
+  assert.equal(readFileSync(lane.countFile, 'utf8'), '', 'no consult was started')
+  assert.equal(JSON.parse(readFileSync(lane.stateFile(), 'utf8')).arms.advisor.consults, 19, 'the count was not spent')
+})
+
+test('CT7 two consults in flight for one update are judged against each other: one claim is delivered, the other suppressed', async () => {
+  const lane = await tier1Lane('ok')
+  lane.pre('s0', 'Bash', { command: 'echo ok' })
+  const state = JSON.parse(readFileSync(lane.stateFile(), 'utf8'))
+  state.arms.advisor.calls = 24
+  writeFileSync(lane.stateFile(), JSON.stringify(state))
+  lane.triggerWrite('outside.mjs')
+  const notes = () => lane.rows().filter((row) => row.advisor_note?.tier === 1).map((row) => row.advisor_note)
+  assert.ok(await until(() => notes().length >= 2, 30_000), 'both consults ended')
+  await new Promise((r) => setTimeout(r, 500))
+  assert.deepEqual(notes().map((n) => n.outcome).sort(), ['injected', 'suppressed'])
+  assert.equal(readdirSync(lane.noteDir).filter((n) => n.endsWith('.json')).length, 1)
+  const context = lane.pre('d1', 'Bash', { command: 'echo ok' }).out?.additionalContext ?? ''
+  assert.equal(context.split('tier one found').length - 1, 1)
 })

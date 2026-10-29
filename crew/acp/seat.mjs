@@ -180,6 +180,20 @@ function briefTripwires(briefText) {
   return tripwires
 }
 
+// The brief's `## Acceptance` items (`- (ID) text`), id kept, so the pre-return consult can check the change against them.
+function briefAcceptanceItems(briefText) {
+  const lines = String(briefText ?? '').split(/\r?\n/)
+  const start = lines.findIndex((line) => /^##\s+acceptance\s*$/i.test(line.trim()))
+  const items = []
+  if (start >= 0) for (let i = start + 1; i < lines.length; i += 1) {
+    const line = lines[i].trim()
+    if (/^##\s/.test(line)) break
+    const match = /^-\s+(\(.+?\).*)$/.exec(line)
+    if (match) items.push(match[1].trim())
+  }
+  return items
+}
+
 // A cell the manifest reader would accept, from the definition's advisor entry; anything else is no cell.
 function advisorCellOf(advisor) {
   const model = advisor?.model
@@ -231,7 +245,7 @@ function laneContext({ arms, role, laneTaskDir, workdir, definition, briefText, 
   if (!arms.includes('advisor')) return
   const cell = advisorCellOf(definition.advisor)
   if (!cell) return refusal('the advisor cell is not a pi provider/id with an effort')
-  const manifest = { schema_version: ADVISOR_MANIFEST_VERSION, generated_at: new Date().toISOString(), task: basename(dirname(laneTaskDir)), run_started_at: anchor, tripwires: briefTripwires(briefText), cell }
+  const manifest = { schema_version: ADVISOR_MANIFEST_VERSION, generated_at: new Date().toISOString(), task: basename(dirname(laneTaskDir)), run_started_at: anchor, tripwires: briefTripwires(briefText), acceptance_items: briefAcceptanceItems(briefText), cell }
   const target = join(laneTaskDir, ADVISOR_MANIFEST)
   try {
     ;(deps.writeFileSync ?? writeFileSync)(`${target}.tmp`, JSON.stringify(manifest))

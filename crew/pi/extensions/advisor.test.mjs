@@ -1760,8 +1760,9 @@ test('AS1 a pi-seat write to the lane return file is never a scope breach; a wri
 })
 
 // ---- diff-growth and pre-return triggers -------------------------------------------------------------------------
-function triggerSeat({ severity = 'high', claim = 'must-fix: the empty path is unhandled', hang = false, extraDeps = {} } = {}) {
-  const f = fixture(); const journal = sink(); const diff = { lines: 0, entries: [] }; let spawned = 0
+function triggerSeat({ severity = 'high', claim = 'must-fix: the empty path is unhandled', evidence = ['lib/widget.mjs:1'], hang = false, extraDeps = {}, manifest = null } = {}) {
+  const f = fixture(); const journal = sink(); const diff = { lines: 0, entries: [] }; let spawned = 0; const payloads = []
+  if (manifest) writeFileSync(join(f.taskDir, advisor.TRIPWIRE_MANIFEST_FILE), JSON.stringify({ schema_version: 1, run_started_at: 1, tripwires: [], cell: { provider: 'provider', id: 'model', agent: 'pi', effort: 'medium', model: 'provider/model' }, ...manifest }))
   const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir }), deps: {
     cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile, readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
     diffSize: () => null, diffLines: () => ({ lines: diff.lines, entries: diff.entries, text: diff.entries.join('\n') }),
@@ -1769,15 +1770,15 @@ function triggerSeat({ severity = 'high', claim = 'must-fix: the empty path is u
     spawn: () => {
       spawned += 1
       const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => true
-      child.stdin = { end() { if (hang) return; setImmediate(() => {
-        child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: JSON.stringify({ class: 'edge-path', severity, claim, evidence: ['lib/widget.mjs:1'] }), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } } }) + '\n')
+      child.stdin = { end(value) { payloads.push(JSON.parse(value)); if (hang) return; setImmediate(() => {
+        child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: JSON.stringify({ class: 'edge-path', severity, claim, evidence }), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } } }) + '\n')
         child.emit('close', 0)
       }) } }
       return child
     }, ...extraDeps,
   } })
   const ground = () => a.onToolResult({ toolCallId: 'g', toolName: 'read', input: { path: join(f.tree, 'lib/widget.mjs') }, content: [{ type: 'text', text: 'a' }] }, {})
-  return { f, journal, diff, a, ground, spawned: () => spawned, ret: join(f.taskDir, 'builder-1.json') }
+  return { f, journal, diff, a, ground, payloads, spawned: () => spawned, ret: join(f.taskDir, 'builder-1.json') }
 }
 
 test('DT2 a pi bash call that grows the working diff by the threshold queues one tier-1 diff-growth consult; growth below it does not', async () => {
@@ -2052,4 +2053,164 @@ test('gitDiffLines counts added plus removed lines against HEAD, untracked files
     assert.ok(result.text.includes('new.txt:1: x'))
     assert.equal(advisor.gitDiffLines({ cwd: join(root, 'missing') }), null)
   } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+// ---- pre-return whole-diff window --------------------------------------------------------------------------------
+const deltaOf = (payload) => payload.delta.map((entry) => entry.text).join('\n')
+const consultRow = (s) => s.journal.rows.find((row) => row.advisor_consult?.trigger === 'pre-return').advisor_consult
+
+test('PW1 a pre-return consult carries a change on line 200 of a committed file, with no prior grounding', async () => {
+  const s = triggerSeat({ severity: 'medium', extraDeps: { diffLines: (cwd) => advisor.gitDiffLines({ cwd }) } })
+  try {
+    const repo = s.f.tree; const git = (...args) => execFileSync('git', ['-c', 'user.email=t@e.invalid', '-c', 'user.name=t', ...args], { cwd: repo, stdio: 'ignore' })
+    const lines = Array.from({ length: 250 }, (_, i) => `const v${i + 1} = ${i + 1}`)
+    writeFileSync(join(repo, 'lib/big.mjs'), lines.join('\n') + '\n'); git('init', '-q'); git('add', '.'); git('commit', '-qm', 'base')
+    lines[199] = 'const v200 = "changed"'; writeFileSync(join(repo, 'lib/big.mjs'), lines.join('\n') + '\n')
+    await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
+    assert.equal(s.payloads.length, 1)
+    assert.equal(s.payloads[0].trigger, 'pre-return')
+    assert.ok(deltaOf(s.payloads[0]).includes('lib/big.mjs:200: const v200 = "changed"'))
+    assert.ok(!deltaOf(s.payloads[0]).includes('lib/big.mjs:1:'), 'only changed lines are grounded')
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
+test('PW1 the pre-return window grounds removed lines at their old path and line, and keeps anchors past the entry cap', () => {
+  const files = [{ path: 'a.mjs', lines: ['a.mjs:7: (removed) gone', `a.mjs:300: ${'x'.repeat(2000)}`] }]
+  const packed = advisor.preReturnDiff({ cwd: '/x', deps: { diffLines: () => ({ lines: 2, entries: [], files }) } })
+  assert.deepEqual(packed.omitted_files, [])
+  assert.ok(packed.entries[0].includes('a.mjs:7: (removed) gone'))
+  assert.ok(packed.entries[0].includes('a.mjs:300: '))
+})
+
+test('PW2 a pre-return consult carries the brief acceptance items; an invalid list is dropped and the consult still runs', async () => {
+  const items = ['(PW1) first', '(PW2) second']
+  const s = triggerSeat({ manifest: { acceptance_items: [...items, ' '] } })
+  try {
+    s.ground()
+    await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
+    assert.deepEqual(s.payloads[0].acceptance_items, items)
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+  const bad = triggerSeat({ manifest: { acceptance_items: [1, 'x'] } })
+  try {
+    bad.ground()
+    await bad.a.onToolCall(call('r1', 'write', { path: bad.ret, content: '{}\n' }), {})
+    assert.deepEqual(bad.payloads[0].acceptance_items, [])
+  } finally { rmSync(bad.f.root, { recursive: true, force: true }) }
+})
+
+test('PW3 a pre-return diff over the byte budget is packed within it, names the files left out, and records its window', async () => {
+  const files = Array.from({ length: 16 }, (_, f) => ({ path: `f${f}.txt`, lines: Array.from({ length: 300 }, (_, i) => `f${f}.txt:${i + 1}: OMIT${f} line ${i} xxxxxxxx`) }))
+  const s = triggerSeat({ extraDeps: { diffLines: () => ({ lines: 4800, entries: files.map((file) => file.lines.slice(0, 12).join('\n')), files }) } })
+  try {
+    await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
+    const payload = s.payloads[0]; const bytes = Buffer.byteLength(deltaOf(payload), 'utf8')
+    assert.ok(bytes <= advisor.PRE_RETURN_DIFF_BUDGET_BYTES, `${bytes} bytes`)
+    assert.ok(payload.omitted_files.includes('f15.txt'))
+    assert.ok(!deltaOf(payload).includes('OMIT15 '))
+    assert.equal(new Set(payload.omitted_files).size, payload.omitted_files.length)
+    const row = consultRow(s)
+    assert.deepEqual(row.omitted_files, payload.omitted_files)
+    assert.equal(row.window_bytes, bytes); assert.equal(row.window_entries, payload.delta.length)
+    assert.equal(row.delta_entries, payload.delta.length)
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
+test('PW3 the byte budget holds after redaction expands the packed text', async () => {
+  const files = [{ path: 'big.txt', lines: Array.from({ length: 3000 }, (_, i) => `big.txt:${i + 1}: Authorization: x`) }]
+  const s = triggerSeat({ extraDeps: { diffLines: () => ({ lines: 3000, entries: [files[0].lines.slice(0, 12).join('\n')], files }) } })
+  try {
+    await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
+    const payload = s.payloads[0]; const bytes = Buffer.byteLength(deltaOf(payload), 'utf8')
+    assert.ok(deltaOf(payload).includes('<redacted:authorization>'))
+    assert.ok(bytes <= advisor.PRE_RETURN_DIFF_BUDGET_BYTES, `${bytes} bytes`)
+    assert.ok(payload.omitted_files.includes('big.txt'))
+    assert.equal(consultRow(s).window_bytes, bytes)
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
+test('PW3 preReturnDiff never exceeds a small budget and names a partly shown file once', () => {
+  const files = [{ path: 'a', lines: ['a:1: aaaa', 'a:2: bbbb', 'a:3: cccc'] }, { path: 'b', lines: ['b:1: zzzzzzzzzzzzzzzzzzzz'] }]
+  const packed = advisor.preReturnDiff({ cwd: '/x', budgetBytes: 20, deps: { diffLines: () => ({ lines: 4, entries: [], files }) } })
+  assert.equal(packed.bytes, Buffer.byteLength(packed.entries.join('\n'), 'utf8'))
+  assert.ok(packed.bytes <= 20)
+  assert.deepEqual(packed.omitted_files, ['a', 'b'])
+  assert.equal(packed.entries.length, 1)
+})
+
+test('PW4 a diff-growth consult keeps the small window: at most DELTA_ENTRIES entries of DELTA_ENTRY_CAP_BYTES', async () => {
+  const s = triggerSeat({ severity: 'medium' })
+  try {
+    s.ground()
+    s.diff.lines = advisor.DIFF_GROWTH_LINES
+    s.diff.entries = Array.from({ length: 20 }, () => Array.from({ length: 20 }, (_, i) => `lib/widget.mjs:${i + 1}: ${'x'.repeat(80)}`).join('\n'))
+    await s.a.onToolCall(call('b1', 'bash', { command: 'true' }), {})
+    s.a.onToolResult({ toolCallId: 'b1', toolName: 'bash', input: { command: 'true' }, content: [{ type: 'text', text: 'ok' }] }, {})
+    await s.a.settled()
+    const payload = s.payloads.find((p) => p.trigger === 'diff-growth')
+    assert.ok(payload)
+    assert.ok(payload.delta.length <= advisor.DELTA_ENTRIES)
+    assert.ok(payload.delta.every((entry) => Buffer.byteLength(entry.text, 'utf8') <= advisor.DELTA_ENTRY_CAP_BYTES))
+    assert.equal('acceptance_items' in payload, false)
+    assert.equal('window_bytes' in s.journal.rows.find((row) => row.advisor_consult?.trigger === 'diff-growth').advisor_consult, false)
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
+test('PW1 a later changed line beyond the old 12-line and 512-byte caps reaches the pre-return payload and can be cited', async () => {
+  const s = triggerSeat({ severity: 'medium', evidence: ['lib/big.mjs:140'], extraDeps: { diffLines: (cwd) => advisor.gitDiffLines({ cwd }) } })
+  try {
+    const repo = s.f.tree; const git = (...args) => execFileSync('git', ['-c', 'user.email=t@e.invalid', '-c', 'user.name=t', ...args], { cwd: repo, stdio: 'ignore' })
+    const lines = Array.from({ length: 250 }, (_, i) => `const v${i + 1} = ${i + 1}`)
+    writeFileSync(join(repo, 'lib/big.mjs'), lines.join('\n') + '\n'); git('init', '-q'); git('add', '.'); git('commit', '-qm', 'base')
+    for (let i = 99; i < 140; i += 1) lines[i] = `const v${i + 1} = "${'y'.repeat(60)}${i + 1}"`
+    writeFileSync(join(repo, 'lib/big.mjs'), lines.join('\n') + '\n')
+    await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
+    const text = deltaOf(s.payloads[0])
+    assert.ok(text.includes(`lib/big.mjs:140: const v140 = "${'y'.repeat(60)}140"`))
+    assert.ok(s.payloads[0].delta.some((entry) => Buffer.byteLength(entry.text, 'utf8') > advisor.DELTA_ENTRY_CAP_BYTES))
+    const note = s.journal.rows.find((row) => row.advisor_note?.trigger === 'pre-return' && row.advisor_note.outcome === 'injected')
+    assert.ok(note, 'a finding citing the late line is accepted')
+    assert.deepEqual(note.advisor_note.evidence, ['lib/big.mjs:140'])
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
+test('PW3 git output over the cap is stated as an incomplete window and names the files it could not read', async () => {
+  const overflow = Object.assign(new Error('spawnSync git ENOBUFS'), { code: 'ENOBUFS' })
+  const exec = (cmd, args) => { if (args.includes('--name-only') || args.includes('--others')) return Buffer.from(args.includes('--others') ? 'new.txt\0' : 'a.txt\0b.txt\0'); throw overflow }
+  const packed = advisor.preReturnDiff({ cwd: '/x', deps: { execFileSync: exec } })
+  assert.deepEqual(packed.entries, [])
+  assert.deepEqual(packed.omitted_files, ['a.txt', 'b.txt', 'new.txt', advisor.PRE_RETURN_INCOMPLETE])
+  const s = triggerSeat({ extraDeps: { diffLines: (cwd) => advisor.gitDiffLines({ cwd, deps: { execFileSync: exec } }) } })
+  try {
+    s.ground()
+    await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
+    assert.deepEqual(s.payloads[0].omitted_files, packed.omitted_files)
+    assert.deepEqual(consultRow(s).omitted_files, packed.omitted_files)
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
+test('PW2 and PW3 a diff git cannot read still gives the pre-return consult its acceptance items, a stated gap and a window row', async () => {
+  const items = ['(PW1) first']
+  const s = triggerSeat({ manifest: { acceptance_items: items }, extraDeps: { diffLines: () => null } })
+  try {
+    s.ground()
+    await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
+    assert.deepEqual(s.payloads[0].acceptance_items, items)
+    assert.deepEqual(s.payloads[0].omitted_files, [advisor.PRE_RETURN_UNAVAILABLE])
+    const row = consultRow(s)
+    assert.equal(row.window_bytes, 0); assert.equal(row.window_entries, 0)
+    assert.deepEqual(row.omitted_files, [advisor.PRE_RETURN_UNAVAILABLE])
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
+test('PW3 the recorded window counts a packed diff entry that the session delta already holds', async () => {
+  const text = 'lib/widget.mjs:1: a'
+  const files = [{ path: 'lib/widget.mjs', lines: [text] }]
+  const s = triggerSeat({ extraDeps: { diffLines: () => ({ lines: 1, entries: [text], files }) } })
+  try {
+    s.ground()
+    await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
+    const row = consultRow(s)
+    assert.equal(s.payloads[0].delta.length, 1)
+    assert.equal(row.window_entries, 1); assert.equal(row.window_bytes, Buffer.byteLength(text, 'utf8'))
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
 })

@@ -65,7 +65,10 @@ function fakes(options = {}) {
     runSuite: measured('suite', options.suite ?? green()),
     commitChanges: measured('commit', options.commit ?? { status: 'green', reason: null, head: 'a'.repeat(40), files: ['lib.mjs'] }),
     // the status probe right after a suite measures the commit's paths, any other measures the reviewer's
-    run: (input) => input.args.includes('add') ? measured('suite-stage', options.stageResult ?? green())(input) : input.args.includes('status')
+    run: (input) => input.args.includes('add') ? measured('suite-stage', options.stageResult ?? green())(input)
+      : input.args.includes('rev-parse') ? measured('post-rebase-head', () => ({ ...green(), stdout: options.cleanHead ?? `${(options.rebase ?? {}).head ?? 'a'.repeat(40)}\n` }))(input)
+      : input.args.includes('status') && calls.includes('rebase') ? measured('post-rebase-clean', () => ({ ...green(), stdout: options.cleanStatus ?? '' }))(input)
+      : input.args.includes('status')
       ? (calls.at(-1) === 'suite'
         ? measured('paths', options.pathsResult ?? (() => ({ ...green(), stdout: options.paths ?? ' M lib.mjs\0' })))
         : measured('review-paths', options.reviewResult ?? (() => ({ ...green(), stdout: [options.reviewPaths].flat()[Math.min(reviewReads++, [options.reviewPaths].flat().length - 1)] ?? ' M lib.mjs\0' }))))(input)
@@ -1265,7 +1268,7 @@ test('a rebase that moves the head reruns the gate then the suite on the rebased
   const f = moved()
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
   const tail = f.calls.slice(f.calls.indexOf('rebase'))
-  assert.deepEqual(tail, ['rebase', 'gate', 'suite', 'publish'])
+  assert.deepEqual(tail, ['rebase', 'gate', 'suite', 'post-rebase-clean', 'post-rebase-head', 'publish'])
   assert.equal(f.calls.filter((c) => c === 'gate').length, 2)
   assert.equal(f.calls.filter((c) => c === 'suite').length, 2)
   assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 5000 })
@@ -1276,7 +1279,7 @@ test('a rebase that moves the head reruns the gate then the suite on the rebased
 test('a finish run whose rebase moves the head reruns the gate and suite before the report and finish-ready (RB1)', async () => {
   const f = moved({ spec: finishSpec(), unseated: ['planner'] })
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: null })
-  assert.deepEqual(f.calls.slice(f.calls.indexOf('rebase')), ['rebase', 'gate', 'suite'])
+  assert.deepEqual(f.calls.slice(f.calls.indexOf('rebase')), ['rebase', 'gate', 'suite', 'post-rebase-clean', 'post-rebase-head'])
   const ready = f.rows.findIndex((r) => r.event === 'finish-ready')
   const lastSuite = f.rows.findLastIndex((r) => r.stage === 'suite')
   assert.equal(ready > lastSuite && lastSuite > f.rows.findLastIndex((r) => r.stage === 'rebase'), true)
@@ -1302,6 +1305,26 @@ test('a red gate after a rebase that moved the head stops with the gate reason, 
   assert.deepEqual(await f.go(), stopped('gate-failed'))
   assert.equal(f.calls.filter((c) => c === 'suite').length, 1)
   assert.equal(f.calls.includes('publish'), false)
+})
+
+// MUTATION: drop the post-rebase clean-tree check and a gate or suite that edits the tree publishes bytes no commit holds.
+test('a post-rebase check that dirties the tree or moves HEAD stops a standard lane before it publishes (PT1)', async () => {
+  for (const options of [{ cleanStatus: ' M lib.mjs\0' }, { cleanStatus: '?? extra.mjs\0' }, { cleanHead: 'c'.repeat(40) }]) {
+    const f = moved(options)
+    assert.deepEqual(await f.go(), stopped('dirty-worktree'))
+    assert.equal(f.calls.includes('publish'), false)
+  }
+  assert.deepEqual(await moved({ cleanStatus: 'garbage' }).go(), stopped('paths-unmeasured'))
+})
+
+// MUTATION: drop the post-rebase clean-tree check and a finish run reports ready on a tree that differs from its head.
+test('a post-rebase check that dirties the tree or moves HEAD stops a finish run before finish-ready (PT2)', async () => {
+  for (const options of [{ cleanStatus: ' M lib.mjs\0' }, { cleanHead: 'c'.repeat(40) }]) {
+    const f = moved({ spec: finishSpec(), unseated: ['planner'], ...options })
+    assert.deepEqual(await f.go(), stopped('dirty-worktree'))
+    assert.equal(f.writes.size, 0)
+    assert.equal(f.rows.some((r) => r.event === 'finish-ready'), false)
+  }
 })
 
 // MUTATION: rerun after every rebase and an unchanged head pays an extra gate and suite run.

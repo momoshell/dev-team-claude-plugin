@@ -33,7 +33,7 @@ const roster = {
       }
     },
     "build": {
-      "advisor": null,
+      "advisor": {"provider": "openai", "id": "gpt-6.1-terra", "agent": "pi", "effort": "medium"},
       "lead": {
         "provider": "openai",
         "id": "gpt-6-astra",
@@ -68,7 +68,7 @@ const roster = {
       }
     },
     "judge": {
-      "advisor": null,
+      "advisor": {"provider": "openai", "id": "gpt-6.1-terra", "agent": "pi", "effort": "medium"},
       "lead": {
         "provider": "openai",
         "id": "gpt-6-astra",
@@ -202,7 +202,7 @@ test('every tier resolves to exactly the roster cells, null roles unseated', () 
 
 // MUTATION: hardcode the roster cells and an edited definition no longer changes the resolution.
 test('an edited definition changes the resolved cell, and only in the tier it overrides', () => withScratch((dir) => {
-  edit(dir, 'builder', (text) => text.replace('tiers: {"judge":{"effort":"xhigh"}}', 'tiers: {"judge":{"model":"openai/changed","agent":"pi","effort":"max","fallback":[{"agent":"pi","model":"openai/spare"}]}}'))
+  edit(dir, 'builder', (text) => text.replace('"judge":{"effort":"xhigh"}', '"judge":{"model":"openai/changed","agent":"pi","effort":"max","fallback":[{"agent":"pi","model":"openai/spare"}]}'))
   assert.deepEqual(resolveAgents('judge', dir).seats.builder, {
     provider: 'openai', id: 'changed', agent: 'pi', effort: 'max',
     fallback: [{ provider: 'openai', id: 'spare', agent: 'pi', effort: 'max' }],
@@ -252,6 +252,7 @@ test('a declared rounds bound reaches the seat, a tier override replaces it, and
 // MUTATION: ignore a role's advisor and a declared advisor never reaches the tier.
 test('a declared advisor is normalized; null elsewhere does not erase it and a clash refuses', () => withScratch((dir) => {
   const advisor = (model, effort) => `advisor: {"agent":"pi","model":"${model}","effort":"${effort}"}`
+  edit(dir, 'builder', (text) => text.replace(/advisor: .*\n/, 'advisor: null\n'))
   edit(dir, 'reviewer', (text) => text.replace('advisor: null', advisor('openai/gpt-6-luna', 'medium')))
   assert.deepEqual(resolveAgents('build', dir).advisor, { provider: 'openai', id: 'gpt-6-luna', agent: 'pi', effort: 'medium' })
   edit(dir, 'planner', (text) => text.replace('advisor: null', advisor('openai/gpt-6-luna', 'medium')))

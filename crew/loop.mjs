@@ -432,6 +432,14 @@ export async function runLoop(spec, deps = {}) {
       if (postGate.status !== 'green') return stop(postGate.reason, postGate)
       const postSuite = await stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs ?? timeoutMs }, { command: true }))
       if (postSuite.status !== 'green') return stop(postSuite.reason, postSuite)
+      // The tree the checks passed on must be the commit that is published or reported ready.
+      const cleanStatus = await stage('post-rebase-clean', () => callCheck('post-rebase-clean', d.run, { cwd, command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs }, { command: true }))
+      const cleanPaths = cleanStatus.status === 'green' && typeof cleanStatus.stdout === 'string' ? parseChangedPaths(cleanStatus.stdout) : null
+      if (cleanPaths === null) return stop('paths-unmeasured', cleanStatus)
+      if (cleanPaths.length > 0) return stop('dirty-worktree', cleanStatus)
+      const cleanHead = await stage('post-rebase-clean', () => callCheck('post-rebase-clean', d.run, { cwd, command: 'git', args: ['rev-parse', 'HEAD'], timeoutMs }, { command: true }))
+      if (cleanHead.status !== 'green') return stop(cleanHead.reason, cleanHead)
+      if (typeof cleanHead.stdout !== 'string' || cleanHead.stdout.trim() !== rebased.head) return stop('dirty-worktree', cleanHead)
     }
 
     if (isFinish) {

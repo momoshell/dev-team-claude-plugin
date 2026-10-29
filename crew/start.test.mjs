@@ -291,7 +291,7 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
   }
   mkdirSync(spec.cwd, { recursive: true })
   const requests = [], logs = [], reviews = answers.reviews ?? ['pass']
-  let review = 0, reads = 0
+  let review = 0, reads = 0, rebasedHead = null
   const envelope = (role, id) => {
     const n = Number(id.split('.').at(-1))
     const own = answers[`${role}.${n}`]
@@ -323,11 +323,15 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
       commitChanges: async () => ({ status: 'green', reason: null, head: 'a'.repeat(40) }),
       rebaseBranch: async () => ({ status: 'green', reason: null, head: 'b'.repeat(40) }),
       openPullRequest: async () => ({ status: 'green', reason: null, pr: { number: 7, url: 'https://example.test/7' } }),
-      run: async (input) => input.args.includes('status') ? { ...GREEN, stdout: [status].flat()[Math.min(reads++, [status].flat().length - 1)] } : GREEN,
+      // After the rebase the tree is the rebased head and clean; before it, status reads the scripted paths.
+      run: async (input) => input.args.includes('rev-parse') ? { ...GREEN, stdout: `${rebasedHead}\n` }
+        : input.args.includes('status') ? { ...GREEN, stdout: rebasedHead ? '' : [status].flat()[Math.min(reads++, [status].flat().length - 1)] } : GREEN,
       ...loopDeps,
     },
     ...deps,
   }
+  const rebase = options.loopDeps.rebaseBranch
+  options.loopDeps.rebaseBranch = async (input) => { const result = await rebase(input); if (result.status === 'green') rebasedHead = result.head; return result }
   const sessionOf = (role, n) => join(spec.taskDir, 'lean', role, `lane.${role}.${n}.jsonl`)
   return { spec, requests, logs, go: () => runLean(spec, options), sessionOf, options }
 }

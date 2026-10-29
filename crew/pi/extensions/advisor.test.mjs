@@ -1841,7 +1841,7 @@ test('a bash command names the return file by its absolute path, or by its bare 
       assert.equal(verdict?.block, true, command)
     } finally { rmSync(s.f.root, { recursive: true, force: true }) }
   }
-  for (const command of ['cat old-builder-1.json', 'cat builder-1.json.bak', 'cat planner-1.json', 'tee builder-1.json < x', 'cd TREE && cat > lib/builder-1.json', 'cd TASK-evil; cat > builder-1.json', 'cat > TREE/lib/builder-1.json', 'cp x TASK/builder-1.json.bak', 'cd TASK && cat > sub/builder-1.json']) {
+  for (const command of ['cat old-builder-1.json', 'cat builder-1.json.bak', 'cat planner-1.json', 'tee builder-1.json < x', 'cd TREE && cat > lib/builder-1.json', 'cd TASK-evil; cat > builder-1.json', 'cat > TREE/lib/builder-1.json', 'cp x TASK/builder-1.json.bak', 'cd TASK && cat > sub/builder-1.json', "printf '(no)' > lib/builder-1.json", "(cd TREE; printf x > TREE/lib/builder-1.json)"]) {
     const s = triggerSeat()
     try {
       s.ground()

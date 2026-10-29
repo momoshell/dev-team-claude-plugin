@@ -1057,14 +1057,15 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       }
       // A Bash command names the file through a path token ending in the return file's name: resolved against the last
       // cd before it (itself resolved against the seat's cwd), the token must land in the task dir. When the directory
-      // cannot be followed (a subshell, pushd/popd, a quoted cd operand with whitespace), any such token counts.
+      // cannot be followed (a subshell, pushd/popd, a quoted cd operand with whitespace), a bare or ./ name counts; a
+      // token with an absolute path or another directory part is still resolved, so it never spends the consult.
       if (tool === 'bash') {
         const command = String(input.command ?? '')
         const cds = [...command.matchAll(/(?:^|[;&|(\s])cd\s+(['"]?)([^\s'";&|()]+)\1(?=$|[\s;&|)])/g)]
         const token = new RegExp(`(?:^|[\\s'"=<>])((?:[^\\s'"=<>;&|()]*/)?)(${escapeRegExp(role)}-\\d+\\.json)(?=$|[\\s'";&|)<>])`, 'g')
         const unfollowable = /[()]|\bpushd\b|\bpopd\b|\bcd\s+(['"])[^'"]*\s[^'"]*\1/.test(command)
         for (const match of command.matchAll(token)) {
-          if (unfollowable) return true
+          if (unfollowable && (match[1] === '' || match[1] === './')) return true
           const before = cds.filter((cd) => cd.index < match.index)
           const dir = before.reduce((at, cd) => resolve(at, cd[2]), resolve(String(cwd)))
           if (resolve(dir, match[1] || '.', match[2]) === join(root, match[2])) return true

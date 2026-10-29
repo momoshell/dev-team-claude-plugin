@@ -887,7 +887,7 @@ test('SN3: reads confined to one or two directories send nothing; grep/find/ls c
   assert.equal(mixed.sends.length, 1)
 })
 
-test('SN4: no second nudge in the same turn after an agent, edit or write reset; the next turn nudges again', () => {
+test('SN4: no second nudge in the same session after an agent, edit or write reset, however many model steps pass', () => {
   const { nudge, sends, rows } = nudgeFixture()
   readRun(nudge, 8)
   assert.equal(sends.length, 1)
@@ -897,10 +897,10 @@ test('SN4: no second nudge in the same turn after an agent, edit or write reset;
     assert.equal(sends.length, 1, toolName)
     assert.equal(rows().length, 1, toolName)
   }
-  assert.equal(nudge.onTurnStart(), undefined)
+  assert.equal(nudge.onTurnStart, undefined, 'no handler resets the nudge between model steps')
   readRun(nudge, 8)
-  assert.equal(sends.length, 2)
-  assert.equal(rows().length, 2)
+  assert.equal(sends.length, 1)
+  assert.equal(rows().length, 1)
 })
 
 test('the scout nudge never throws into the seat: a failing journal or send still behaves', () => {
@@ -924,7 +924,7 @@ test('the nudge handlers register only when the agent tool is granted', () => {
     delete process.env[mod.AGENTS_ENV]
     assert.deepEqual(register(), ['tool_result'])
     process.env[mod.AGENTS_ENV] = JSON.stringify([{ name: 'scout', def: join(ROOT, 'crew/pi/agents/scout.json') }])
-    assert.deepEqual(register(), ['tool_result', 'tool_call', 'turn_start'])
+    assert.deepEqual(register(), ['tool_result', 'tool_call'])
   } finally {
     if (saved === undefined) delete process.env[mod.AGENTS_ENV]; else process.env[mod.AGENTS_ENV] = saved
   }

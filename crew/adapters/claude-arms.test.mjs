@@ -546,7 +546,7 @@ fs.appendFileSync(process.env.PI_COUNT, 'x\\n')
 if (process.env.PI_MODE === 'hang') { fs.writeFileSync(process.env.PI_PID, String(process.pid)); setInterval(() => {}, 1000) }
 else {
   process.stdin.resume(); process.stdin.on('end', () => {
-    const judgment = { class: 'edge-path', severity: 'medium', claim: 'tier one found the grounded edge', evidence: ['lib/widget.mjs:1'] }
+    const judgment = { class: 'edge-path', severity: process.env.PI_SEVERITY || 'medium', claim: process.env.PI_CLAIM || 'tier one found the grounded edge', evidence: ['lib/widget.mjs:1'] }
     process.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: JSON.stringify(judgment), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } } }) + '\\n')
   })
 }
@@ -720,4 +720,59 @@ test('AS2 a claude seat Write to the lane return file is never a scope breach; a
   assert.equal(breaches().length, 0)
   write('toolu_out', join(sb.cwd, 'outside.mjs'))
   assert.equal(breaches().length, 1, 'a write outside scope and task dir still breaches')
+})
+
+// ---- advisor diff-growth and pre-return triggers --------------------------------------------------------------------
+const committed = async (mode) => {
+  const lane = await tier1Lane(mode)
+  git(lane.base.cwd, 'init', '-q'); git(lane.base.cwd, 'add', '.'); git(lane.base.cwd, 'commit', '-qm', 'base')
+  return lane
+}
+const readWidget = (lane) => lane.fire({ ...lane.base, hook_event_name: 'PostToolUse', tool_name: 'Read', tool_use_id: 'rg', tool_input: { file_path: join(lane.base.cwd, 'lib/widget.mjs') }, tool_response: { type: 'text', file: { content: 'alpha\nbeta\n', filePath: join(lane.base.cwd, 'lib/widget.mjs') } } })
+
+test('DT1 a claude Bash call that grows the working diff past the threshold queues a tier-1 diff-growth consult; a small change does not', async () => {
+  const lane = await committed('ok')
+  readWidget(lane)
+  const bash = (id, after) => {
+    lane.pre(id, 'Bash', { command: 'apply' })
+    after()
+    return lane.fire({ ...lane.base, hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: id, tool_input: { command: 'apply' }, tool_response: { stdout: 'ok\n', stderr: '', exitCode: 0 } })
+  }
+  bash('b0', () => appendFileSync(join(lane.base.cwd, 'lib/widget.mjs'), '// small\n'))
+  await new Promise((r) => setTimeout(r, 1500))
+  assert.equal(readFileSync(lane.countFile, 'utf8'), '', 'a small change consults nothing')
+  bash('b1', () => appendFileSync(join(lane.base.cwd, 'lib/widget.mjs'), Array.from({ length: 250 }, (_, i) => `// change ${i}`).join('\n') + '\n'))
+  assert.ok(await until(() => lane.rows().some((row) => row.advisor_note?.tier === 1 && row.advisor_note.trigger === 'diff-growth' && row.advisor_note.outcome === 'injected'), 20_000), 'a diff-growth note landed')
+  assert.ok(lane.rows().some((row) => row.advisor_consult?.trigger === 'diff-growth'))
+  await new Promise((r) => setTimeout(r, 300))
+  assert.match(lane.pre('b2', 'Bash', { command: 'echo ok' }).out?.additionalContext ?? '', /tier one found/, 'delivered a call later')
+})
+
+test('PR1 and PR3 a claude Write of the return file is refused with the must-fix finding once; the next write goes through unheld', async () => {
+  const lane = await committed('ok')
+  lane.env.PI_SEVERITY = 'high'; lane.env.PI_CLAIM = 'must-fix: the empty path is unhandled'
+  readWidget(lane)
+  const input = { file_path: join(lane.lane, 'builder-1.json'), content: '{}\n' }
+  const first = lane.pre('r1', 'Write', input)
+  assert.equal(first.out?.permissionDecision, 'deny')
+  assert.match(first.out?.permissionDecisionReason ?? '', /must-fix: the empty path is unhandled/)
+  assert.ok(first.elapsed < 40_000)
+  const spawned = readFileSync(lane.countFile, 'utf8')
+  assert.equal(spawned, 'x\n', 'one consult')
+  assert.ok(lane.rows().some((row) => row.advisor_note?.trigger === 'pre-return' && row.advisor_note.severity === 'high'))
+  const second = lane.pre('r2', 'Write', input)
+  assert.notEqual(second.out?.permissionDecision, 'deny')
+  assert.equal(readFileSync(lane.countFile, 'utf8'), spawned, 'no second consult')
+  assert.equal(JSON.parse(readFileSync(lane.stateFile(), 'utf8')).arms.advisor.pre_return_spent, true)
+  // a Bash command naming the path is the same call to the advisor
+  const other = lane.pre('x1', 'Bash', { command: `echo '{}' > ${join(lane.lane, 'builder-2.json')}` })
+  assert.notEqual(other.out?.permissionDecision, 'deny')
+})
+
+test('the arms hook outlives a pre-return consult', async () => {
+  const lane = await tier1Lane('ok')
+  const timeout = JSON.parse(readFileSync(join(lane.plugin, 'hooks', 'hooks.json'), 'utf8')).hooks.PreToolUse[0].hooks[0].timeout
+  assert.equal(timeout, 45)
+  const { CONSULT_TIMEOUT_MS, CHILD_KILL_GRACE_MS } = await import('../pi/extensions/advisor.ts')
+  assert.ok(timeout * 1000 > CONSULT_TIMEOUT_MS + 2 * CHILD_KILL_GRACE_MS)
 })

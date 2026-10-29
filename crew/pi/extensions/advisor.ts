@@ -22,7 +22,7 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { execFileSync, spawn as nodeSpawn } from 'node:child_process'
-import { appendFileSync, readFileSync, readdirSync, statSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { appendFileSync, closeSync, openSync, readFileSync, readSync, readdirSync, statSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { StringDecoder } from 'node:string_decoder'
 import { isAbsolute, join, relative, resolve } from 'node:path'
@@ -64,6 +64,32 @@ export const TIER1_MAX_CONSULTS = 20
 export const DIFF_GROWTH_LINES = 200
 // An untracked file past this size is counted by an estimate rather than read.
 const UNTRACKED_READ_CAP_BYTES = 1024 * 1024
+// Past the read cap an untracked file's lines are counted by streaming up to this size; beyond it they are unknown.
+const UNTRACKED_COUNT_CAP_BYTES = 64 * 1024 * 1024
+const UNTRACKED_HEAD_BYTES = 64 * 1024
+
+function readFileHead(path, bytes) {
+  const fd = openSync(path, 'r')
+  try { const buffer = Buffer.alloc(bytes); return buffer.subarray(0, readSync(fd, buffer, 0, bytes, 0)) } finally { closeSync(fd) }
+}
+
+// Newlines in the file plus a last unterminated line, or null past the cap.
+function countFileLines(path, cap) {
+  const fd = openSync(path, 'r')
+  try {
+    const buffer = Buffer.alloc(1024 * 1024)
+    let total = 0, count = 0, last = 10
+    for (;;) {
+      const got = readSync(fd, buffer, 0, buffer.length, null)
+      if (!got) break
+      total += got
+      if (total > cap) return null
+      for (let i = 0; i < got; i += 1) if (buffer[i] === 10) count += 1
+      last = buffer[got - 1]
+    }
+    return total === 0 ? 0 : count + (last === 10 ? 0 : 1)
+  } finally { closeSync(fd) }
+}
 // How long a trigger queued by a call's start waits for that call's own result before a later result sends it as orphaned.
 const ORPHAN_PENDING_MS = 10 * 60 * 1000
 export const DEDUPE_CAP = 256
@@ -589,6 +615,8 @@ export function gitDiffLines({ cwd, deps = {} } = {}) {
   const exec = deps.execFileSync || execFileSync
   const read = deps.readFileBytes || ((path) => readFileSync(path))
   const statSize = deps.fileSize || ((path) => statSync(path).size)
+  const head = deps.readFileHead || readFileHead
+  const countLines = deps.countFileLines || countFileLines
   const run = (args) => exec('git', args, {
     cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: DIFF_MAX_BUFFER_BYTES, encoding: null,
     stdio: ['ignore', 'pipe', 'ignore'],
@@ -605,6 +633,7 @@ export function gitDiffLines({ cwd, deps = {} } = {}) {
   const files = new Map()
   let current = null
   let removed = null
+  let header = false
   let newLine = 0
   let oldLine = 0
   const keep = (name, text) => {
@@ -613,20 +642,22 @@ export function gitDiffLines({ cwd, deps = {} } = {}) {
     if (kept.length < EXCERPT_LINES) kept.push(text)
   }
   for (const row of diff.split('\n')) {
-    if (row.startsWith('diff --git ')) { current = null; removed = null; continue }
-    if (row.startsWith('+++ ')) {
+    // '--- ' and '+++ ' are file headers only before a file's first hunk; inside a hunk they are content.
+    if (row.startsWith('diff --git ')) { current = null; removed = null; header = true; continue }
+    if (header && row.startsWith('+++ ')) {
       const name = row.slice(4).replace(/\t.*$/, '')
       if (name !== '/dev/null') { current = name.replace(/^b\//, ''); if (!files.has(current)) files.set(current, []) }
       continue
     }
     // A removed line is grounded at its old path and line, so a deletion-only change can still be reviewed.
-    if (row.startsWith('--- ')) {
+    if (header && row.startsWith('--- ')) {
       const name = row.slice(4).replace(/\t.*$/, '')
       removed = name === '/dev/null' ? null : name.replace(/^a\//, '')
       continue
     }
     const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(row)
-    if (hunk) { oldLine = Number(hunk[1]); newLine = Number(hunk[2]); continue }
+    if (hunk) { header = false; oldLine = Number(hunk[1]); newLine = Number(hunk[2]); continue }
+    if (header) continue
     if (row.startsWith('+')) {
       lines += 1
       const kept = current === null ? null : files.get(current)
@@ -639,12 +670,24 @@ export function gitDiffLines({ cwd, deps = {} } = {}) {
     }
   }
   const entries = [...files.values()].filter((kept) => kept.length).map((kept) => kept.join('\n'))
+  let unknown = false
   try {
     for (const name of untracked.split('\0').filter(Boolean)) {
       const absolute = resolve(String(cwd), name)
       const size = Number(statSize(absolute)) || 0
-      // Over the read cap its lines are unmeasured: counted as none, never estimated from its size.
-      if (size > UNTRACKED_READ_CAP_BYTES) continue
+      // Past the read cap the lines are counted by streaming and the head is grounded; past the count cap they are
+      // unknown, reported as the overflow shape, never as zero and never estimated.
+      if (size > UNTRACKED_READ_CAP_BYTES) {
+        const start = head(absolute, UNTRACKED_HEAD_BYTES)
+        const startBytes = Buffer.isBuffer(start) ? start : Buffer.from(String(start ?? ''))
+        if (startBytes.includes(0)) continue
+        const counted = countLines(absolute, UNTRACKED_COUNT_CAP_BYTES)
+        if (counted === null) unknown = true
+        else lines += counted
+        const rows = startBytes.toString('utf8').split('\n').slice(0, EXCERPT_LINES)
+        entries.push(rows.map((item, index) => `${name}:${index + 1}: ${item}`).join('\n'))
+        continue
+      }
       const buffer = read(absolute)
       const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(String(buffer ?? ''))
       if (bytes.includes(0)) continue
@@ -655,6 +698,7 @@ export function gitDiffLines({ cwd, deps = {} } = {}) {
       entries.push(rows.slice(0, EXCERPT_LINES).map((item, index) => `${name}:${index + 1}: ${item}`).join('\n'))
     }
   } catch { return null }
+  if (unknown) return { lines: DIFF_MAX_BUFFER_BYTES, text: entries.join('\n'), entries, truncated: true }
   return { lines, text: entries.join('\n'), entries, truncated: false }
 }
 

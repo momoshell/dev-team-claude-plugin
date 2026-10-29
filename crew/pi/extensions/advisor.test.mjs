@@ -1866,14 +1866,32 @@ test('reply validation judges the most severe valid member; equal severities kee
 })
 
 // MUTATION: ground only added lines and a deletion-only diff has nothing to consult on.
-test('a deletion-only diff is grounded at its old path and lines; an untracked file past the read cap is not estimated', () => {
-  const diff = ['diff --git a/lib/gone.mjs b/lib/gone.mjs', 'deleted file mode 100644', '--- a/lib/gone.mjs', '+++ /dev/null', '@@ -1,3 +0,0 @@', '-alpha', '-beta', '-gamma', ''].join('\n')
-  const exec = (_bin, args) => Buffer.from(args.includes('diff') ? diff : 'big.bin\0')
-  const measured = advisor.gitDiffLines({ cwd: '/repo', deps: { execFileSync: exec, fileSize: () => 1024 * 1024 + 1, readFileBytes: () => { throw new Error('must not read past the cap') } } })
-  assert.equal(measured.lines, 3, 'the oversized untracked file adds no estimated lines')
-  assert.equal(measured.entries.length, 1)
-  assert.match(measured.entries[0], /^lib\/gone\.mjs:1: \(removed\) alpha$/m)
-  assert.match(measured.entries[0], /^lib\/gone\.mjs:3: \(removed\) gamma$/m)
+test('a deletion-only diff is grounded at its old path and lines, and a removed line starting "-- " is content', () => {
+  const diff = ['diff --git a/lib/gone.mjs b/lib/gone.mjs', 'deleted file mode 100644', '--- a/lib/gone.mjs', '+++ /dev/null', '@@ -1,3 +0,0 @@', '-alpha', '-beta', '-gamma',
+    'diff --git a/a.txt b/a.txt', '--- a/a.txt', '+++ b/a.txt', '@@ -1,2 +0,0 @@', '--- important', '-BUG: severe', ''].join('\n')
+  const exec = (_bin, args) => Buffer.from(args.includes('diff') ? diff : '')
+  const measured = advisor.gitDiffLines({ cwd: '/repo', deps: { execFileSync: exec } })
+  assert.equal(measured.lines, 5)
+  assert.match(measured.text, /^lib\/gone\.mjs:1: \(removed\) alpha$/m)
+  assert.match(measured.text, /^lib\/gone\.mjs:3: \(removed\) gamma$/m)
+  assert.match(measured.text, /^a\.txt:1: \(removed\) -- important$/m)
+  assert.match(measured.text, /^a\.txt:2: \(removed\) BUG: severe$/m)
+  assert.doesNotMatch(measured.text, /^important:/m)
+})
+
+// MUTATION: count an untracked file past the read cap as zero lines and a lane that only adds it never consults.
+test('an untracked file past the read cap is counted by streaming and grounded; past the count cap its lines are unknown', () => {
+  const exec = (_bin, args) => Buffer.from(args.includes('diff') ? '' : 'big.txt\0')
+  const base = { execFileSync: exec, fileSize: () => 1024 * 1024 + 1, readFileBytes: () => { throw new Error('must not read whole past the cap') }, readFileHead: () => Buffer.from('first\nsecond\n') }
+  const counted = advisor.gitDiffLines({ cwd: '/repo', deps: { ...base, countFileLines: () => 26 } })
+  assert.equal(counted.lines, 26)
+  assert.equal(counted.truncated, false)
+  assert.match(counted.text, /^big\.txt:1: first$/m)
+  const unknown = advisor.gitDiffLines({ cwd: '/repo', deps: { ...base, countFileLines: () => null } })
+  assert.equal(unknown.truncated, true, 'an unknown count is the overflow shape, never zero')
+  assert.ok(unknown.lines >= advisor.DIFF_GROWTH_LINES)
+  const binary = advisor.gitDiffLines({ cwd: '/repo', deps: { ...base, readFileHead: () => Buffer.from([1, 0, 2]), countFileLines: () => { throw new Error('binary is not counted') } } })
+  assert.equal(binary.lines, 0)
 })
 
 // MUTATION: let dedupe or one-per-update suppress a pre-return finding and an earlier warning lets the return through.

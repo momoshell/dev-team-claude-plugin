@@ -2,7 +2,7 @@
 // standard loop (crew/loop.mjs) with each seat turn played over ACP (crew/acp/seat.mjs), records
 // every turn under <taskDir>/lean/<role>/<id>.jsonl, and ends with one terminal row in the run log.
 // Import-safe: importing this module launches nothing; every effect crosses an injected seam.
-import { appendFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runAcpSeat } from './acp/seat.mjs'
@@ -116,7 +116,7 @@ function promptFor({ request, spec, source, charters, body }) {
 
 export async function runLean(spec, deps = {}) {
   const d = {
-    runAcpSeat, readFileSync, mkdirSync, writeFileSync, appendFileSync,
+    runAcpSeat, readFileSync, mkdirSync, writeFileSync, appendFileSync, rmSync,
     now: Date.now,
     sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
     log: (line) => process.stdout.write(`${line}\n`),
@@ -165,6 +165,8 @@ export async function runLean(spec, deps = {}) {
         // The wait actually taken counts, never less than the one intended; an oversleep that crosses the bound buys no replacement.
         waitedMs += Math.max(decision.wait_ms, d.now() - at)
         if (waitedMs > PROVIDER_RETRY_TOTAL_WAIT_MS) throw failure
+        // The refused attempt's envelope was never earned: the replacement must write its own or leave none.
+        if (request.returnPath) d.rmSync(request.returnPath, { force: true })
         attempts += 1
         continue
       }

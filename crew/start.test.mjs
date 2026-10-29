@@ -710,6 +710,29 @@ test('a retry never runs past the total wait: a reset beyond it, repeated resets
   assert.deepEqual([overslept.sleeps.length, overslept.sessions.length], [1, 1])
 })
 
+// MUTATION: neutralise the rmSync of the issued return path before a provider retry and the refused attempt's envelope is accepted.
+test("a refused attempt's envelope is not accepted when its retry writes none", async () => {
+  const sessions = []
+  const f = leanFixture({
+    acp: async (input) => {
+      sessions.push(input.sessionFile)
+      const path = /^Return path: (.+)$/m.exec(input.prompt)[1]
+      const id = /^Envelope id: (.+)$/m.exec(input.prompt)[1]
+      if (sessions.length === 1) {
+        mkdirSync(f.spec.taskDir, { recursive: true })
+        const details = { subject: 'fix(crew): publish measured lane results', plan_path: 'p', gate_path: 'g', acceptance: ['RV1'], mutations: [LEAN_MUTATION] }
+        writeFileSync(path, JSON.stringify({ role: 'planner', id, status: 'done', summary: 'stale', details }))
+        return { stopReason: null, usage: null, refusal: { code: -32000, errorKind: 'overloaded', message: 'overloaded' } }
+      }
+      return { stopReason: 'end_turn', usage: { input_tokens: 1 }, refusal: null }
+    },
+    deps: { sleep: async () => {} },
+  })
+  const result = await f.go()
+  assert.equal(sessions.length, 2)
+  assert.deepEqual(result, { status: 'stopped', reason: 'seat-unmeasured', pr: null })
+})
+
 // MUTATION: route an authentication failure as a server error and it is retried.
 test('an authentication failure, even with a parseable reset, stops the lane without a retry', async () => {
   const at = Date.parse('2026-10-26T00:00:00Z')

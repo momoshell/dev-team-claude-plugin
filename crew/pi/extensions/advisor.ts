@@ -890,6 +890,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   let growthBaseline = null
   let diffBaselineLines = null
   let preReturnSpent = false
+  // false, or the token of the maybe-return call that holds the turn's one maybe consult.
   let preReturnMaybeSpent = false
   let delta = []
   let anchors = new Set()
@@ -1565,14 +1566,14 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   // One consult on the whole working diff, awaited, before the seat's return file is written. Only an accepted
   // must-fix (high severity) finding refuses the write; a failed, timed-out or empty consult lets it through
   // (the consult's own journal rows say so) and never leaves the seat unable to return.
-  async function preReturnVerdict(event, { spend }) {
+  async function preReturnVerdict(event, { spend, claim = null }) {
     const id = String(event?.toolCallId || '')
     const measured = measureDiffLines()
     if (measured) for (const entry of measured.entries) appendDelta(entry)
     const result = await consult('pre-return', id, calls, { inline: true })
     if (result?.ran && spend) preReturnSpent = true
-    // A maybe whose consult never ran (no grounded delta, no cell, the cap) gives its slot back.
-    if (!result?.ran && !spend) preReturnMaybeSpent = false
+    // A maybe whose consult never ran (no grounded delta, no cell, the cap) gives its slot back, if it still holds it.
+    if (!result?.ran && claim && preReturnMaybeSpent === claim) preReturnMaybeSpent = false
     const judgment = result?.judgment
     if (result?.accepted && judgment?.severity === 'high') return { block: true, reason: judgment.claim }
     return undefined
@@ -1587,8 +1588,9 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     if (calls % CADENCE_CALLS === 0) queue(String(event?.toolCallId || ''), 'cadence')
     if (kind) {
       // The maybe slot is claimed before the await, so parallel maybes cannot each pass the check.
-      if (kind === 'maybe') preReturnMaybeSpent = true
-      try { return await preReturnVerdict(event, { spend: kind === 'sure' }) } catch { if (kind === 'maybe') preReturnMaybeSpent = false; return undefined }
+      const claim = kind === 'maybe' ? {} : null
+      if (claim) preReturnMaybeSpent = claim
+      try { return await preReturnVerdict(event, { spend: kind === 'sure', claim }) } catch { if (claim && preReturnMaybeSpent === claim) preReturnMaybeSpent = false; return undefined }
     }
     return undefined
   }
@@ -1615,7 +1617,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   function exportState() {
     return {
       context_epoch: contextEpoch, context_row_epoch: contextRowEpoch, calls, consults, growth_baseline: growthBaseline,
-      diff_baseline_lines: diffBaselineLines, pre_return_spent: preReturnSpent, pre_return_maybe_spent: preReturnMaybeSpent,
+      diff_baseline_lines: diffBaselineLines, pre_return_spent: preReturnSpent, pre_return_maybe_spent: preReturnMaybeSpent !== false,
       call_ordinals: [...callOrdinals], fired: [...fired], failure_counts: [...failureCounts],
       injected: [...injected], dedupe: [...dedupe],
       delta: delta.map((entry) => ({ text: entry.text, redactions: entry.redactions || {} })),
@@ -1649,7 +1651,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     anchors = new Set(delta.flatMap((item) => item.anchors))
     pending = new Map(storedPending.map(([id, triggers]) => [id, triggers.map((entry) => ({ trigger: entry.trigger, call_ordinal: entry.call_ordinal, queued_at: entry.queued_at ?? nowMs() }))]))
     calls = state.calls; consults = state.consults; growthBaseline = growth
-    diffBaselineLines = diffBase; preReturnSpent = spent; preReturnMaybeSpent = maybeSpent
+    diffBaselineLines = diffBase; preReturnSpent = spent; preReturnMaybeSpent = maybeSpent ? {} : false
     callOrdinals.clear(); for (const [id, ordinal] of ordinals) callOrdinals.set(id, ordinal)
     failureCounts = new Map(counts)
     fired = new Set(strings(state.fired)); injected = new Set(strings(state.injected)); dedupe = new Set(strings(state.dedupe))

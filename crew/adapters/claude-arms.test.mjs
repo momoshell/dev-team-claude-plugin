@@ -236,12 +236,11 @@ test('Bash file segments are steered only for reading arms', () => {
   const commands = [
     'cd T; sed -n 95,125p crew/loop.mjs', 'cat task/plan.md; ls task',
     'head -n 2 "a; b" && ls', 'ls || tail -20 file', 'echo ok\nnl -ba file',
-    'cat a.txt | head -n 2 other.mjs', "printf '%s' x; sed -n -e '1,2p' file",
-    "sed -n -e'l' crew/loop.mjs", 'sed -nel crew/loop.mjs', 'sed -ne l crew/loop.mjs',
+    'cat a.txt | head -n 2 other.mjs', "printf '%s' x; sed -n '1,2p' file", 'sed -n 5p f; sed -n \'$p\' f',
     'echo ok; cat -- "a|b"', 'head -n 2 - < input; tail file',
     'cat a\\;b', "cat <<'EOF'\ndata\nEOF\nhead file",
     'cd T; (sed -n 95,125p crew/loop.mjs)', 'LC_ALL=C cat task/plan.md; ls task',
-    '(LC_ALL=C head -qn 2 file)', 'cat "123"> output', 'cat \\123> output',
+    '(LC_ALL=C head -qn 2 file)', 'cat f 2> errors',
     'cd T; { cat task/plan.md; }', '{ { head file; }; }',
     'if true; then cat crew/loop.mjs; fi', 'if cat first; then echo ok; elif head second; then tail third; else nl fourth; fi',
     'while true; do sed -n 1p file; done',
@@ -255,7 +254,11 @@ test('Bash file segments are steered only for reading arms', () => {
     'printf x | head -qn 2', 'printf x | tail -qn 2',
     'printf x | head -qc 2', 'printf x | tail -qc 2',
     'echo "{ cat secret; }"', 'echo { cat secret; }', 'echo \\{; echo cat',
-    'cat 123> output',
+    'cat 123> output', 'cat "123"> output', 'cat \\123> output',
+    // Fails open: output sent to a file, non-printing or -e/-f sed scripts and zero counts are not reads.
+    'cat source.txt > copy.txt', 'cat a >> b', 'cat a 1> b', 'cat f &> out', "sed -n 'd' source.txt",
+    "sed -n -e '1,2p' file", "sed -n -e'l' crew/loop.mjs", 'sed -nel crew/loop.mjs', 'sed -ne l crew/loop.mjs',
+    'tail -n 0 source.txt', 'head -n0 f', 'head --lines=0 f', 'tail -c 0 f',
     "printf 'x\\n' | sed -n -l 80 '1p'", "printf 'x\\n' | sed -n --line-length 80 '1p'",
     "printf 'x\\n' | sed -nl 80 '1p'", "echo 'then cat file'", "'then' cat file", 'echo then cat file',
   ]

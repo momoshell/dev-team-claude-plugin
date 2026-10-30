@@ -171,10 +171,11 @@ function bashRead(command) {
 }
 
 // Tokenize command boundaries without treating quoted text or heredoc bodies as shell commands.
+// A nudge, not a boundary: it fails open. Only a segment certain to print a file counts; uncommon shell forms may pass.
 function bashFileRead(command) {
   if (typeof command !== 'string') return false
   const segments = [], words = [], heredocs = []
-  let word = '', active = false, quote = '', redirect = null, quoted = false
+  let word = '', active = false, quote = '', redirect = null, quoted = false, stdoutToFile = false
   const flush = () => {
     if (!active) return
     if (redirect) {
@@ -183,7 +184,7 @@ function bashFileRead(command) {
     } else if (words.length || quoted || !['if', 'then', 'elif', 'else', 'while', 'until', 'do', '!'].includes(word)) words.push(word)
     word = ''; active = false; quoted = false
   }
-  const segment = () => { flush(); if (words.length) segments.push(words.splice(0)) }
+  const segment = () => { flush(); if (words.length) segments.push({ args: words.splice(0), stdoutToFile }); stdoutToFile = false }
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]
     if (quote === "'") { if (ch === "'") quote = ''; else word += ch; continue }
@@ -208,9 +209,12 @@ function bashFileRead(command) {
       continue
     }
     if (/\s/.test(ch)) { flush(); continue }
-    if (ch === '<' || ch === '>') {
+    if (ch === '<' || ch === '>' || (ch === '&' && command[i + 1] === '>')) {
       // An adjacent numeric word is a file descriptor, not an operand.
-      if (active && !quoted && /^\d+$/.test(word)) { word = ''; active = false } else flush()
+      let fd = ''
+      if (ch === '&') { fd = '&'; i++ }
+      else if (active && !quoted && /^\d+$/.test(word)) { fd = word; word = ''; active = false } else flush()
+      const start = i
       let op = ch
       while (i + 1 < command.length && (command[i + 1] === ch || (ch === '<' && op === '<<' && command[i + 1] === '-'))) op += command[++i]
       if (command[i + 1] === '&') {
@@ -219,6 +223,8 @@ function bashFileRead(command) {
         else redirect = op
       }
       else redirect = op
+      // Output sent to a file is not printed; the segment is not a read.
+      if (redirect && command[start] === '>' && (fd === '' || fd === '1' || fd === '&')) stdoutToFile = true
       continue
     }
     if (';|&'.includes(ch)) { segment(); if (command[i + 1] === ch) i++; continue }
@@ -229,11 +235,12 @@ function bashFileRead(command) {
     word += ch; active = true
   }
   segment()
-  return segments.some((args) => {
+  return segments.some(({ args, stdoutToFile }) => {
+    if (stdoutToFile) return false
     while (args.length && /^[a-zA-Z_][a-zA-Z0-9_]*=/.test(args[0])) args.shift()
     const program = basename(args[0] ?? '')
     if (!['cat', 'head', 'tail', 'nl', 'sed'].includes(program)) return false
-    let options = true, sedQuiet = false, sedScript = false
+    let options = true, sedQuiet = false, sedScript = false, zeroCount = false
     const operands = []
     for (let i = 1; i < args.length; i++) {
       const arg = args[i]
@@ -247,16 +254,18 @@ function bashFileRead(command) {
           : program === 'head' || program === 'tail' ? ['-n', '-c', '--lines', '--bytes', '-s', '--sleep-interval', '--pid']
             : program === 'nl' ? ['-b', '-d', '-f', '-h', '-i', '-l', '-n', '-s', '-v', '-w', '--body-numbering', '--section-delimiter', '--footer-numbering', '--header-numbering', '--line-increment', '--join-blank-lines', '--number-format', '--number-separator', '--starting-line-number', '--number-width'] : []
         if (program === 'sed' && ((sedShort && 'ef'.includes(sedShort[2])) || /^--(?:expression|file)(?:=|$)/.test(arg))) sedScript = true
+        // A zero line or byte count prints nothing.
+        if ((program === 'head' || program === 'tail') && (/^0+$/.test(/^-[^-]*[nc]$/.test(arg) || ['--lines', '--bytes'].includes(arg) ? args[i + 1] ?? '' : '') ||
+            /^(?:-[^-]*[nc]|--(?:lines|bytes)=)0+$/.test(arg))) zeroCount = true
         if (values.includes(arg) || (sedShort && sedShort[3] === '') ||
             ((program === 'head' || program === 'tail') && /^-[^-]*[ncs]$/.test(arg))) i++
         continue
       }
       operands.push(arg)
     }
-    if (program === 'sed') {
-      if (!sedQuiet) return false
-      if (!sedScript) operands.shift()
-    }
+    if (zeroCount) return false
+    // Fail open: sed counts only for the measured print scripts (`Np`, `A,Bp`), never for -e/-f scripts.
+    if (program === 'sed' && (!sedQuiet || sedScript || !/^(?:\d+|\$)(?:,(?:\d+|\$))?p$/.test(operands.shift() ?? ''))) return false
     return operands.some((arg) => arg !== '-' && arg !== '')
   })
 }

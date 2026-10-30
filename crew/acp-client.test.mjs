@@ -86,6 +86,10 @@ function replay(name, options = {}) {
       const record = records[cursor++]
       if (record.dir !== 'agent->client' || !record.frame) continue
       const frame = JSON.parse(JSON.stringify(record.frame))
+      if (frame.error && Object.hasOwn(options, 'refusalData')) {
+        if (options.refusalData === undefined) delete frame.error.data
+        else frame.error.data = options.refusalData
+      }
       if (Object.hasOwn(frame, 'id') && !frame.method && responseIds.has(frame.id)) frame.id = responseIds.get(frame.id)
       appendFileSync(streamPath, `${JSON.stringify(frame)}\n`)
     }
@@ -335,6 +339,39 @@ test('refusal responses retain their recorded error kinds and null stop reasons'
       assert.equal(run.outcome.usage, null, name)
       assert.equal(run.outcome.refusal.errorKind, errorKind, name)
     })
+  }
+})
+
+test('prompt refusals preserve only string error messages in outcomes and journal', () => {
+  const cases = [
+    { data: { errorKind: 'rate_limit', errorMessage: 'provider unavailable' }, message: 'provider unavailable' },
+    { data: { errorKind: 'rate_limit', errorMessage: '' }, message: '' },
+    { data: { errorKind: 'rate_limit', errorMessage: '原因\n💥' }, message: '原因\n💥' },
+    { data: undefined },
+    { data: { errorKind: 'rate_limit' } },
+    ...[null, 42, false, {}].map((value) => ({ data: { errorKind: 'rate_limit', errorMessage: value } })),
+  ]
+  for (const nonblocking of [false, true]) {
+    for (const example of cases) {
+      runWithCleanup('claude-refusal-ratelimit.ndjson', { nonblocking, refusalData: example.data }, (run) => {
+        assert.deepEqual(run.mismatches, [])
+        assert.equal(run.promptError, undefined)
+        assert.equal(run.outcome.stopReason, null)
+        assert.equal(run.outcome.usage, null)
+        const recordedError = run.records.find((record) => record.frame?.error)?.frame.error
+        const journal = run.journal.filter((row) => row.acp_turn_refused)
+        assert.equal(journal.length, 1)
+        for (const refusal of [run.outcome.refusal, journal[0].acp_turn_refused]) {
+          assert.equal(refusal.code, recordedError.code)
+          assert.equal(refusal.message, recordedError.message)
+          assert.equal(refusal.errorKind, example.data?.errorKind ?? null)
+          for (const value of [refusal, JSON.parse(JSON.stringify(refusal))]) {
+            assert.equal(Object.hasOwn(value, 'errorMessage'), Object.hasOwn(example, 'message'))
+            if (Object.hasOwn(example, 'message')) assert.equal(value.errorMessage, example.message)
+          }
+        }
+      })
+    }
   }
 })
 

@@ -15,6 +15,9 @@ const PREFIX = 'lean:'
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 const nonEmpty = (value) => typeof value === 'string' && value.trim() !== ''
 
+// A row time is an epoch-ms number inside the Date range (past it, toISOString throws); anything else is unknown.
+const rowTime = (value) => (Number.isFinite(value) && !Number.isNaN(new Date(value).getTime()) ? new Date(value).toISOString() : null)
+
 export const leanIdentity = (lane) => `${PREFIX}${lane}`
 export const isLeanIdentity = (id) => typeof id === 'string' && id.startsWith(PREFIX)
 export const isLeanSlug = (slug) => typeof slug === 'string' && slug.startsWith('dt-')
@@ -149,26 +152,26 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
     const { rows, skipped_malformed, error } = readJournalRows(found)
     const phases = []
     let latest_stage = null, status = 'unknown', reason = null, pr = null, running = false, started_at = null
-    let hand_finished = false, pr_actor = null
+    let hand_finished = false, pr_actor = null, lastAt = null
     for (const row of rows) {
-      // A number past the Date range makes an Invalid Date, whose toISOString throws.
-      if (row.event === 'run-start') started_at = Number.isFinite(row.at) && !Number.isNaN(new Date(row.at).getTime()) ? new Date(row.at).toISOString() : null
+      const at = rowTime(row.at)
+      if (row.event === 'run-start') started_at = at
+      else if (at !== null) lastAt = at
       const stage = nonEmpty(row.stage) ? row.stage : null
       if (stage) latest_stage = stage
-      if (row.event === 'stage-start' && stage) phases.push({ id: phases.length + 1, name: stage, status: 'running', checks: [] })
+      if (row.event === 'stage-start' && stage) phases.push({ id: phases.length + 1, name: stage, status: 'running', checks: [], started_at: at, ended_at: null })
       else if (row.event === 'stage-end' && stage) {
         const phase = phases.findLast((entry) => entry.name === stage && entry.status === 'running')
         const code = row.outcome?.code
         const outcome = nonEmpty(row.outcome?.status) ? row.outcome.status : (typeof code === 'number' && code !== 0 ? 'failed' : 'done')
-        if (phase) phase.status = outcome
-        else phases.push({ id: phases.length + 1, name: stage, status: outcome, checks: [] })
+        if (phase) { phase.status = outcome; phase.ended_at = at } else phases.push({ id: phases.length + 1, name: stage, status: outcome, checks: [], started_at: null, ended_at: at })
       } else if (row.event === 'check' && stage) {
         const phase = phases.findLast((entry) => entry.name === stage)
         const check = { check: row.check ?? null, result: row.result ?? null }
         if (phase) phase.checks.push(check)
-        else phases.push({ id: phases.length + 1, name: stage, status: 'running', checks: [check] })
+        else phases.push({ id: phases.length + 1, name: stage, status: 'running', checks: [check], started_at: null, ended_at: null })
       } else if (row.event === VERDICT_EVENT && stage && !phases.some((entry) => entry.name === stage)) {
-        phases.push({ id: phases.length + 1, name: stage, status: nonEmpty(row.status) ? row.status : 'unknown', checks: [] })
+        phases.push({ id: phases.length + 1, name: stage, status: nonEmpty(row.status) ? row.status : 'unknown', checks: [], started_at: null, ended_at: null })
       }
     }
     // A stop inside a stage is followed by that stage's (and any enclosing stage's) stage-end row, so the
@@ -195,6 +198,13 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
     } else {
       status = 'running'; running = true
     }
+    let ended_at = null, duration_ms = null
+    if (!running && lastAt !== null) ended_at = lastAt
+    if (started_at !== null && ended_at !== null) duration_ms = Date.parse(ended_at) - Date.parse(started_at)
+    const pending = { ...pendingReasons }
+    if (ended_at !== null) delete pending.ended_at
+    if (duration_ms !== null) delete pending.duration_ms
+    if (started_at === null) pending.started_at = 'the lane journal records no valid run-start time'
     const seats = Object.entries(found.members).map(([role, member]) => ({
       role, agent: nonEmpty(member.agent) ? member.agent : null, model: nonEmpty(member.model) ? member.model : null,
       transport: nonEmpty(member.transport) ? member.transport : null,
@@ -204,8 +214,8 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
       latest_stage, status, reason, running, phases, seats, pr, hand_finished, pr_actor,
       archived: found.archived, journal_rows: rows.length, journal_skipped_malformed: skipped_malformed, journal_error: error ?? null,
       tier: nonEmpty(found.spec.tier) ? found.spec.tier : null, shape: nonEmpty(found.spec.shape) ? found.spec.shape : null,
-      mode: null, started_at, ended_at: null, duration_ms: null, last_heartbeat_at: null,
-      pending: { ...pendingReasons, ...(started_at ? {} : { started_at: 'the lane journal records no valid run-start time' }) },
+      mode: null, started_at, ended_at, duration_ms, last_heartbeat_at: null,
+      pending,
       ship: { state: 'unmeasured', reason: pr ? 'pull request recorded; merge state is not recorded in the lane' : 'lean lanes record no ship state', stale: false },
     }
   }

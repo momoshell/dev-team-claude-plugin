@@ -1334,3 +1334,18 @@ test('a rebase that leaves the head unchanged runs the gate and the suite once (
   assert.equal(f.calls.filter((c) => c === 'suite').length, 1)
   assert.equal(f.calls.filter((c) => c === 'gate').length, 1)
 })
+
+// MUTATION: drop `at` from emit and journal rows carry no time, so the lean source cannot draw a waterfall.
+test('every journaled row carries one read of the injected clock, and a throwing clock never reaches the loop', async () => {
+  let ticks = 0
+  const f = fakes({ deps: { now: () => 1_700_000_000_000 + ticks++ } })
+  await f.go()
+  assert.ok(f.rows.length > 8)
+  assert.deepEqual(f.rows.map((r) => r.at), f.rows.map((_, i) => 1_700_000_000_000 + i))
+  assert.equal(f.rows.filter((r) => r.event === 'run-start').length, 1)
+  const plain = fakes()
+  await plain.go()
+  assert.ok(plain.rows.every((r) => Number.isFinite(r.at)))
+  const broken = fakes({ deps: { now: () => { throw new Error('clock') } } })
+  await assert.doesNotReject(broken.go())
+})

@@ -29,6 +29,7 @@
 
 import net from 'node:net'
 import { unlinkSync } from 'node:fs'
+import { readOnlyCommandResult } from '../../acp-permission.mjs'
 import { ACP_PROTOCOL_VERSION, ACP_STOP_REASONS, ACP_UPDATE_KINDS } from '../../acp-client.mjs'
 
 export const SOCKET_ENV = 'CREW_ACP_SOCKET'
@@ -110,6 +111,8 @@ export default function acpServerExtension(pi: any) {
   const socketPath = process.env.CREW_ACP_SOCKET
   const gated = gatedToolsFrom(process.env[GATED_TOOLS_ENV])
   const permissionTimeoutMs = permissionTimeoutFrom(process.env[PERMISSION_TIMEOUT_ENV])
+  // Fixed at launch: only a read-only seat has its refused commands explained.
+  const readOnlySeat = process.env.CREW_READ_ONLY === '1'
 
   let ctx: any = null
   let server: any = null
@@ -286,6 +289,10 @@ export default function acpServerExtension(pi: any) {
     // Availability first: a cached allow never outlives the client that gave it.
     if (!client || client.destroyed) return { block: true, reason: 'ACP client unavailable' }
     if (!sessionId) return { block: true, reason: 'ACP session not established' }
+    if (readOnlySeat && toolKindFor(event.toolName) === 'execute') {
+      const verdict = readOnlyCommandResult(event.input?.command)
+      if (!verdict.allowed) return { block: true, reason: verdict.reason }
+    }
     const cached = decisions.get(event.toolName)
     if (cached === 'allow_always') return undefined
     if (cached === 'reject_always') return { block: true, reason: 'ACP permission rejected (always)' }

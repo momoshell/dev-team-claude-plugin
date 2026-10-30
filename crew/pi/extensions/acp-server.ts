@@ -143,11 +143,11 @@ export default function acpServerExtension(pi: any) {
   // One pending session/prompt, answered exactly once.
   function finishPrompt(stopReason: any) {
     if (!prompt) return undefined
-    const { id, messages, outcome, lastStopReason } = prompt
+    const { id, messages, outcome, lastStopReason, lastErrorMessage } = prompt
     prompt = null
     const usage = usageFrom(messages)
     const reason = stopReason ?? stopReasonFor(outcome, lastStopReason)
-    if (reason === null) return fail(id, INTERNAL_ERROR, `pi agent run ended with outcome ${JSON.stringify(outcome)}`, { errorKind: 'pi-agent-error' })
+    if (reason === null) return fail(id, INTERNAL_ERROR, `pi agent run ended with outcome ${JSON.stringify(outcome)}`, { errorKind: 'pi-agent-error', ...(typeof lastErrorMessage === 'string' ? { errorMessage: lastErrorMessage } : {}) })
     return reply(id, { stopReason: reason, ...(usage ? { usage } : {}) })
   }
   function settlePrompt() {
@@ -211,7 +211,7 @@ export default function acpServerExtension(pi: any) {
       const blocks = Array.isArray(params.prompt) ? params.prompt : []
       const text = blocks.filter((block: any) => block?.type === 'text' && typeof block.text === 'string').map((block: any) => ({ type: 'text', text: block.text }))
       if (!text.length) return fail(id, INVALID_PARAMS, 'session/prompt carried no text block')
-      prompt = { id, messages: [], outcome: null, lastStopReason: null }
+      prompt = { id, messages: [], outcome: null, lastStopReason: null, lastErrorMessage: undefined }
       pi.sendUserMessage(text)
       return undefined
     }
@@ -347,7 +347,10 @@ export default function acpServerExtension(pi: any) {
     if (!prompt || !Array.isArray(event?.messages)) return
     prompt.messages.push(...event.messages)
     const last = [...event.messages].reverse().find((message: any) => message?.role === 'assistant')
-    if (last) prompt.lastStopReason = last.stopReason ?? null
+    if (last) {
+      prompt.lastStopReason = last.stopReason ?? null
+      prompt.lastErrorMessage = last.errorMessage
+    }
   })
   pi.on('agent_before_settle', (event: any, handlerCtx: any) => {
     remember(handlerCtx)

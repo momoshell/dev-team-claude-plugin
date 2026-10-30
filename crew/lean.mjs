@@ -156,7 +156,7 @@ export async function runLean(spec, deps = {}) {
       if (turn?.refusal || !turn?.stopReason) {
         const failure = Object.assign(new Error(turn?.refusal?.message ?? 'ACP seat turn returned no stop reason'), { code: turn?.refusal?.code ?? null, errorKind: turn?.refusal?.errorKind ?? null })
         if (!turn?.refusal) throw failure
-        const kind = acpProviderFailureKind(turn?.refusal?.errorKind)
+        const kind = acpProviderFailureKind(turn?.refusal?.errorKind, turn?.refusal?.errorMessage)
         const at = d.now()
         const reset = kind === 'rate_limit' ? acpTextReset(turn.refusal.message, at) : null
         const decision = providerRetryDecision({ kind, reset, attempts, waitedMs, at })

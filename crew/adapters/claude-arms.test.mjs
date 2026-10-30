@@ -347,7 +347,7 @@ test('CH5 a claude seat granted reminders gets the role\'s table at session star
   const table = JSON.parse(readFileSync(join(ROOT, 'crew', 'pi', 'extensions', 'reminders.json'), 'utf8'))
   const launch = seat(sb, { extensions: ['reminders'] })
   const start = contexts(fire(sb, launch, sb.frame('SessionStart')))
-  const forBuilder = table.rules.filter((rule) => rule.roles.includes('builder'))
+  const forBuilder = table.rules.filter((rule) => rule.roles.includes('builder') && !rule.requires_fff)
   assert.ok(forBuilder.length > 0)
   for (const rule of forBuilder) assert.ok(start.includes(rule.reminder), rule.id)
   for (const rule of table.rules.filter((candidate) => !candidate.roles.includes('builder'))) assert.ok(!start.includes(rule.reminder), `${rule.id} is not the builder's`)
@@ -366,6 +366,33 @@ test('CH5 a claude seat granted reminders gets the role\'s table at session star
   const foreign = sandbox({ links: false })
   assertNoEffect(fire(foreign, seat(foreign, { extensions: ['reminders'] }), foreign.frame('SessionStart')))
   assertNoEffect(fire(sb, launch, sb.frame('SessionStart'), { raw: '{malformed' }))
+})
+
+test('RF1 and RF2 Claude hooks use resolved grants rather than ambient flags', async () => {
+  const saved = process.env.CREW_FFF
+  try {
+    for (const granted of [false, true]) {
+      const sb = sandbox()
+      const grants = { extensions: [join(ROOT, 'crew/pi/extensions/reminders.ts')], mcp_servers: granted ? [{ name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] } }] : [] }
+      process.env.CREW_FFF = granted ? '0' : '1'
+      writeSeatArms({ taskDir: sb.runtimeRoot, role: 'builder', grants, cwd: sb.cwd, env: { CREW_FFF: process.env.CREW_FFF } })
+      const plugin = armsPluginDir({ taskDir: sb.runtimeRoot, role: 'builder' })
+      assert.equal(JSON.parse(readFileSync(join(plugin, 'config.json'), 'utf8')).fff, granted)
+      const frame = { session_id: 'rf', hook_event_name: 'SessionStart', cwd: sb.cwd }
+      const start = await runHook(plugin, JSON.stringify(frame))
+      assert.equal(start.additionalContext.includes('reminder (fff-search-evasion):'), granted)
+      assert.match(start.additionalContext, /reminder \(test-name-pattern\):/)
+      const post = { ...frame, hook_event_name: 'PostToolUse', tool_use_id: 'grep', tool_name: 'Bash', tool_input: { command: 'grep -n foo file | head' }, tool_response: { stdout: 'original', stderr: '', exitCode: 0 } }
+      const result = await runHook(plugin, JSON.stringify(post))
+      assert.equal(Boolean(result?.additionalContext?.includes('reminder (fff-search-evasion):')), granted)
+      const other = await runHook(plugin, JSON.stringify({ ...post, tool_use_id: 'other', tool_input: { command: 'node --test --test-name-pattern=foo file' } }))
+      assert.match(other.additionalContext, /reminder \(test-name-pattern\):/)
+    }
+  } finally {
+    if (saved === undefined) delete process.env.CREW_FFF
+    else process.env.CREW_FFF = saved
+    process.chdir(ROOT)
+  }
 })
 
 test('CH6 a claude seat granted subagent or codemode refuses before a client, however it is mixed with arms it can run', () => {

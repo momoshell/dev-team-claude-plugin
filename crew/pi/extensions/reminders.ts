@@ -20,7 +20,8 @@ function validate(table, read) {
   const ids = new Set()
   let absent = false
   for (const rule of table.rules) {
-    if (!sameKeys(rule, RULE_KEYS, ['path_pattern'])) return 'schema'
+    if (!sameKeys(rule, RULE_KEYS, ['path_pattern', 'requires_fff'])) return 'schema'
+    if (Object.hasOwn(rule, 'requires_fff') && typeof rule.requires_fff !== 'boolean') return 'schema'
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(rule.id) || ids.has(rule.id)) return 'schema'
     ids.add(rule.id)
     if (!Array.isArray(rule.roles) || !rule.roles.length || rule.roles.some((role) => !ROLES.includes(role))) return 'schema'
@@ -69,10 +70,11 @@ export function createReminders({ env = process.env, deps = {} } = {}) {
     if (assignment && assignment.id !== currentId) fired.clear()
     if (assignment) currentId = assignment.id
   }
+  const eligible = (rule) => rule.roles.includes(env.CREW_ROLE) && (rule.requires_fff !== true || env.CREW_FFF === '1')
   // A host with a session-start channel (the claude seat plugin) shows the role's table at the start.
   function sessionStart() {
     if (!usable) return undefined
-    const rules = table.rules.filter((rule) => rule.roles.includes(env.CREW_ROLE))
+    const rules = table.rules.filter(eligible)
     for (const rule of rules) record({ event: 'rule_reminder', rule_reminder: { rule: rule.id, role: env.CREW_ROLE, tool: 'session-start', assignment_id: currentId } })
     return rules.length ? rules.map((rule) => `reminder (${rule.id}): ${rule.reminder}`).join('\n') : undefined
   }
@@ -90,7 +92,7 @@ export function createReminders({ env = process.env, deps = {} } = {}) {
     let value
     for (const rule of table.rules) {
       if (fired.has(rule.id)) continue
-      if (!rule.roles.includes(env.CREW_ROLE)) continue
+      if (!eligible(rule)) continue
       if (!rule.tools.includes(event.toolName)) continue
       if (rule.path_pattern && !new RegExp(rule.path_pattern).test(event.input.path)) continue
       if (rule.field === 'command') value = event.input.command

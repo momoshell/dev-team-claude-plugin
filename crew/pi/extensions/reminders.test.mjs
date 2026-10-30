@@ -7,10 +7,10 @@ import { createReminders, attachReminders } from './reminders.ts'
 
 const ids = ['S1','S2','S3','S4','S5','P1','P2','P3','P4','E1','R1','O1','O2','J1','U1','T1','FA6','FA6-grep','FA7']
 const shipped = JSON.parse(readFileSync(new URL('./reminders.json', import.meta.url), 'utf8'))
-function setup({ table = shipped, role = 'builder', task = true } = {}) {
+function setup({ table = shipped, role = 'builder', task = true, fff } = {}) {
   const root = scratchDir('reminders-')
   const rows = []
-  const env = { CREW_ROLE: role, ...(task ? { CREW_TASK_DIR: join(root, 'task') } : {}) }
+  const env = { CREW_ROLE: role, ...(fff === undefined ? {} : { CREW_FFF: fff }), ...(task ? { CREW_TASK_DIR: join(root, 'task') } : {}) }
   const hooks = createReminders({ env, deps: { tablePath: join(root, 'table.json'), readFileSync(path) { if (path.endsWith('table.json')) return JSON.stringify(table); return readFileSync(path, 'utf8') }, append(path, row) { rows.push({ path, ...row }) } } })
   return { hooks, rows, env }
 }
@@ -19,7 +19,7 @@ const assignment = (id) => `ASSIGNMENT ${id}: read your brief at /tmp/brief.md. 
 
 test('S1 shipped table has exactly three expected rules', () => { assert.equal(shipped.rules.length, 3); assert.deepEqual(shipped.rules.map((r) => r.id), ['raw-temp-call', 'test-name-pattern', 'fff-search-evasion']); assert.equal(setup().hooks.usable, true) })
 test('S2 rejects unknown keys, invalid regex, duplicate ids, bad source and top-level keys', () => {
-  for (const mutate of [t => { t.rules[0].extra = true }, t => { t.rules[0].pattern = '[' }, t => { t.rules[1].id = t.rules[0].id }, t => { t.rules[0].source.quote = 'definitely-not-a-source-quote-zzq' }, t => { t.extra = true }]) { const t = structuredClone(shipped); mutate(t); const f = setup({ table: t }); assert.equal(f.hooks.usable, false); assert.equal(f.hooks.reason, 'schema') }
+  for (const mutate of [t => { t.rules[2].requires_fff = 'true' }, t => { t.rules[0].extra = true }, t => { t.rules[0].pattern = '[' }, t => { t.rules[1].id = t.rules[0].id }, t => { t.rules[0].source.quote = 'definitely-not-a-source-quote-zzq' }, t => { t.extra = true }]) { const t = structuredClone(shipped); mutate(t); const f = setup({ table: t }); assert.equal(f.hooks.usable, false); assert.equal(f.hooks.reason, 'schema') }
 })
 test('S3 each shipped source quote occurs literally', () => { for (const r of shipped.rules) assert.ok(readFileSync(join(ROOT, r.source.path), 'utf8').includes(r.source.quote)) })
 test('S4 a source file absent from the checkout journals source-absent and never fires', () => {
@@ -58,9 +58,26 @@ test('RV1-1 corrupt table assignment hook does not throw', () => {
   assert.doesNotThrow(() => hooks.beforeAgentStart({ prompt: assignment('rv1-1') }))
 })
 test('T1 test IDs are exactly the complete set and gate runs this file', () => { const source = readFileSync(new URL(import.meta.url), 'utf8'); const found = [...source.matchAll(/^test\('(S1|S2|S3|S4|S5|P1|P2|P3|P4|E1|R1|O1|O2|J1|U1|T1|FA6|FA6-grep|FA7) /gm)].map(m => m[1]); assert.deepEqual(found.sort(), [...ids].sort()); assert.match(source, /test\('O2 /) })
+test('RF1 and RF2 grant controls both channels and journal rows', () => {
+  for (const flag of [undefined, '0', 'true', '01', '1']) {
+    const f = setup({ fff: flag })
+    const granted = flag === '1'
+    const start = f.hooks.sessionStart()
+    assert.equal(start.includes('reminder (fff-search-evasion):'), granted)
+    assert.ok(start.includes('reminder (test-name-pattern):'))
+    const result = f.hooks.toolResult(bash('grep -n foo file | head'))
+    assert.equal(Boolean(result), granted)
+    assert.equal(f.rows.filter(row => row.rule_reminder?.rule === 'fff-search-evasion').length, granted ? 2 : 0)
+    assert.ok(f.hooks.toolResult(bash('node --test --test-name-pattern=foo file')))
+  }
+  const table = structuredClone(shipped)
+  table.rules[2].requires_fff = false
+  assert.ok(setup({ table }).hooks.toolResult(bash('grep -n foo file | head')))
+})
+
 test('FA6 builder piped grep and node -e scans fire fff-search-evasion', () => {
   // MUTATION: change indexOf|matchAll to matchAll and the brief's node -e indexOf command no longer fires fff-search-evasion.
-  const f = setup()
+  const f = setup({ fff: '1' })
   f.hooks.beforeAgentStart({ prompt: assignment('fa6-a') })
   const grep = f.hooks.toolResult(bash('grep -n "TO3" test/factory-prove-mutations.test.mjs | head -100'))
   assert.ok(grep)
@@ -76,7 +93,7 @@ test('FA6 builder piped grep and node -e scans fire fff-search-evasion', () => {
 
 test('FA6-grep the piped grep command alone fires fff-search-evasion', () => {
   // MUTATION: rename (?:grep|rg) to (?:ripgrep) and the brief's piped grep command no longer fires fff-search-evasion.
-  const f = setup()
+  const f = setup({ fff: '1' })
   f.hooks.beforeAgentStart({ prompt: assignment('fa6-grep-a') })
   const result = f.hooks.toolResult(bash('grep -n "TO3" test/factory-prove-mutations.test.mjs | head -100'))
   assert.ok(result)
@@ -86,7 +103,7 @@ test('FA6-grep the piped grep command alone fires fff-search-evasion', () => {
 test('FA7 plain test, node and sed commands never fire the search rule', () => {
   // MUTATION: prefix the pattern with .| and the rule fires on npm test, node --test and sed commands it must not fire on.
   for (const [index, command] of ['npm test', 'node --test crew/loop.test.mjs', 'sed -n 1,40p crew/loop.mjs'].entries()) {
-    const f = setup()
+    const f = setup({ fff: '1' })
     f.hooks.beforeAgentStart({ prompt: assignment('fa7-' + index) })
     assert.equal(f.hooks.toolResult(bash(command)), undefined, command)
     assert.deepEqual(f.rows, [], command)

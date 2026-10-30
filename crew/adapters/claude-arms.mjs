@@ -75,14 +75,14 @@ const shellQuote = (value) => `'${String(value).replaceAll("'", `'"'"'`)}'`
 
 // The plugin a seat with these arms loads: a manifest, one command hook per event the arms use, and the launch
 // configuration the hook reads. taskDir is the per-seat runtime; the seat's lasting state goes under laneTaskDir.
-export function writeArmsPlugin({ taskDir, role, arms, cwd, editAssist = null, laneTaskDir = null, layout = null, nodeBin = process.execPath } = {}, deps = {}) {
+export function writeArmsPlugin({ taskDir, role, arms, cwd, editAssist = null, fff = false, laneTaskDir = null, layout = null, nodeBin = process.execPath } = {}, deps = {}) {
   requireDir(taskDir, role, 'writeArmsPlugin')
   if (!Array.isArray(arms) || arms.length === 0 || !arms.every((arm) => CLAUDE_ARMS.includes(arm))) throw new Error(`adapter-claude.writeArmsPlugin: arms must be a nonempty list of ${CLAUDE_ARMS.join(', ')}`)
   if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw new Error(`adapter-claude.writeArmsPlugin: cwd must be an ABSOLUTE path, got ${JSON.stringify(cwd)}`)
   const root = armsPluginDir({ taskDir, role })
   const seat = basename(taskDir)
   const config = {
-    version: CONFIG_VERSION, role, seat, cwd, arms: [...arms],
+    version: CONFIG_VERSION, role, seat, cwd, arms: [...arms], fff,
     edit_assist: editAssist === 'on' || editAssist === 'off' ? editAssist : null,
     lane_task_dir: laneTaskDir || null, layout: laneTaskDir && layout === LEAN_LAYOUT ? LEAN_LAYOUT : null,
     state_dir: join(laneTaskDir || root, 'claude-arms', seat),
@@ -326,7 +326,7 @@ async function instantiate(name, env, cwd, outbox, launches) {
 }
 
 function armEnv(config) {
-  const env = { ...process.env, CREW_ROLE: config.role }
+  const env = { ...process.env, CREW_ROLE: config.role, CREW_FFF: config.fff === true ? '1' : '0' }
   // The grants are the launch configuration, not whatever flags the process inherited.
   delete env.CREW_ADVISOR
   delete env.CREW_EDIT_ASSIST
@@ -342,6 +342,7 @@ function armEnv(config) {
 function readConfig(pluginRoot) {
   const config = JSON.parse(readFileSync(join(pluginRoot, ARMS_CONFIG_FILE), 'utf8'))
   if (!isObject(config) || config.version !== CONFIG_VERSION || typeof config.role !== 'string' || typeof config.seat !== 'string' || typeof config.cwd !== 'string' || typeof config.state_dir !== 'string'
+    || (own(config, 'fff') && typeof config.fff !== 'boolean')
     || !Array.isArray(config.arms) || !config.arms.every((arm) => CLAUDE_ARMS.includes(arm))) throw new Error('arms config is malformed')
   return config
 }

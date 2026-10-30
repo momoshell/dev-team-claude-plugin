@@ -122,54 +122,6 @@ function piInput(tool, raw) {
   return input
 }
 
-// Parse only literal shell words; never evaluate shell syntax or promote composed commands.
-function bashRead(command) {
-  if (typeof command !== 'string' || /[\n\r]/.test(command)) return null
-  const words = []
-  let word = '', quote = '', active = false
-  for (let i = 0; i < command.length; i++) {
-    const ch = command[i]
-    if (quote === "'") { if (ch === "'") quote = ''; else word += ch; continue }
-    if (ch === '\\') {
-      if (++i >= command.length) return null
-      if (quote === '"' && !'\\"$`'.includes(command[i])) word += '\\'
-      word += command[i]; active = true; continue
-    }
-    if (quote === '"') {
-      if (ch === '"') quote = ''
-      else if (ch === '$' || ch === '`') return null
-      else word += ch
-      continue
-    }
-    if (ch === "'" || ch === '"') { quote = ch; active = true; continue }
-    if (/\s/.test(ch)) { if (active) { words.push(word); word = ''; active = false } continue }
-    if (/[|;&<>$`*?\[\]{}()~#]/.test(ch)) return null
-    word += ch; active = true
-  }
-  if (quote) return null
-  if (active) words.push(word)
-  const positive = (s) => /^\d+$/.test(s ?? '') && Number.isSafeInteger(Number(s)) && Number(s) > 0 ? Number(s) : null
-  let path, offset, limit
-  if (words[0] === 'cat') {
-    if (words[1] === '--') words.splice(1, 1)
-    if (words.length !== 2) return null
-    path = words[1]
-  } else if (words[0] === 'head') {
-    let count = 10
-    if (words[1] === '-n') { count = positive(words[2]); words.splice(1, 2) }
-    else if (words[1]?.startsWith('-n')) { count = positive(words[1].slice(2)); words.splice(1, 1) }
-    if (!count || words.length !== 2) return null
-    path = words[1]; offset = 1; limit = count
-  } else if (words[0] === 'sed' && words.length === 4 && words[1] === '-n') {
-    const match = /^(\d+)(?:,(\d+))?p$/.exec(words[2])
-    const start = positive(match?.[1]), end = positive(match?.[2] ?? match?.[1])
-    if (!start || !end || end < start || !Number.isSafeInteger(end - start + 1)) return null
-    path = words[3]; offset = start; limit = end - start + 1
-  } else return null
-  if (!path || path === '-' || path.startsWith('-')) return null
-  return { path, ...(offset === undefined ? {} : { offset, limit }) }
-}
-
 // Tokenize command boundaries without treating quoted text or heredoc bodies as shell commands.
 // A nudge, not a boundary: it fails open. Only a segment certain to print a file counts; uncommon shell forms may pass.
 function bashFileRead(command) {
@@ -533,15 +485,8 @@ async function dispatch(config, payload, arms, state, outbox) {
     }
     const event = { toolName: tool, toolCallId: String(payload.tool_use_id ?? ''), input: piInput(tool, payload.tool_input) }
     let reason = null
-    const readInput = tool === 'bash' ? bashRead(payload.tool_input?.command) : null
     for (const arm of config.arms) {
-      // Preserve the existing raw cat byte cap before consulting the equivalent read.
-      if (arm === 'readgate' && readInput && !own(readInput, 'offset')) {
-        const rawVerdict = await guard(arm, () => arms[arm]?.onToolCall?.(event, ctx))
-        if (rawVerdict?.block === true && rawVerdict.reason) { reason = rawVerdict.reason; break }
-      }
-      const view = readInput && (arm === 'readgate' || arm === 'skeletonread') ? { ...event, toolName: 'read', input: readInput } : event
-      const verdict = await guard(arm, () => arms[arm]?.onToolCall?.(view, ctx))
+      const verdict = await guard(arm, () => arms[arm]?.onToolCall?.(event, ctx))
       if (verdict?.block === true && typeof verdict.reason === 'string' && verdict.reason) { reason = verdict.reason; break }
     }
     extras.push(...outbox)
@@ -555,16 +500,11 @@ async function dispatch(config, payload, arms, state, outbox) {
   const event = resultEvent(payload, failed)
   if (event === null) return null
   const original = event.content
-  const readInput = tool === 'bash' ? bashRead(payload.tool_input?.command) : null
-  const response = payload.tool_response
-  const unsafeRead = failed || event.isError || response?.interrupted === true || (typeof response?.stderr === 'string' && response.stderr !== '')
   for (const arm of config.arms) {
     // builderloop's lane run after a successful edit is not carried; edit assist rides on PreToolUse instead.
     if (arm === 'builderloop' && (tool === 'edit' || tool === 'write')) continue
-    const view = readInput && (arm === 'readgate' || arm === 'skeletonread')
-      ? { ...event, toolName: 'read', input: readInput, isError: Boolean(unsafeRead) } : event
-    const result = await guard(arm, () => (arms[arm]?.onToolResult ?? arms[arm]?.toolResult)?.(view, ctx))
-    if (Array.isArray(result?.content) && !(view !== event && unsafeRead)) event.content = result.content
+    const result = await guard(arm, () => (arms[arm]?.onToolResult ?? arms[arm]?.toolResult)?.(event, ctx))
+    if (Array.isArray(result?.content)) event.content = result.content
   }
   const added = event.content.filter((part) => !original.includes(part)).map(partText)
   const rewritten = event.content.filter((part) => original.includes(part)).length !== original.length

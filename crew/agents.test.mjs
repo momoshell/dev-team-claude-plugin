@@ -33,7 +33,7 @@ const roster = {
       }
     },
     "build": {
-      "advisor": {"provider": "openai", "id": "gpt-6.1-terra", "agent": "pi", "effort": "medium"},
+      "advisor": {"provider": "openai", "id": "gpt-6.1-sol", "agent": "pi", "effort": "medium"},
       "lead": {
         "provider": "openai",
         "id": "gpt-6-astra",
@@ -68,7 +68,7 @@ const roster = {
       }
     },
     "judge": {
-      "advisor": {"provider": "openai", "id": "gpt-6.1-terra", "agent": "pi", "effort": "medium"},
+      "advisor": {"provider": "openai", "id": "gpt-6.1-sol", "agent": "pi", "effort": "medium"},
       "lead": {
         "provider": "openai",
         "id": "gpt-6-astra",

@@ -1333,13 +1333,18 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     try { return deps.exclusiveTier1Acceptance(() => acceptTier1NoteNow(args)) === true } catch { return false }
   }
 
+  // A pre-return finding of medium or high severity refuses the return write.
+  function blocksReturn(trigger, judgment) {
+    return trigger === 'pre-return' && (judgment?.severity === 'medium' || judgment?.severity === 'high')
+  }
+
   function acceptTier1NoteNow({ judgment, trigger, eventId, captured }) {
     const text = boundText(judgment.claim, NOTE_TEXT_CAP_BYTES)
     const normalized = normalizeNote(text)
     let code
     if (isContentFree(normalized)) code = 'content-free'
-    // A must-fix pre-return finding blocks the return even if the same claim was delivered before.
-    else if (!(trigger === 'pre-return' && judgment.severity === 'high')) {
+    // A medium or high pre-return finding blocks the return even if the same claim was delivered before.
+    else if (!blocksReturn(trigger, judgment)) {
       if (dedupe.has(normalized)) code = 'duplicate'
       else if (acceptedEvents.has(eventId)) code = 'one-per-update'
     }
@@ -1365,8 +1370,8 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     addFifo(dedupe, normalized, DEDUPE_CAP)
     acceptedEvents.add(eventId)
     rememberInjected(normalized)
-    // A must-fix pre-return finding reaches the seat as the refusal's reason; sending it too would say it twice.
-    if (trigger === 'pre-return' && judgment.severity === 'high') return true
+    // A medium or high pre-return finding reaches the seat as the refusal's reason; sending it too would say it twice.
+    if (blocksReturn(trigger, judgment)) return true
     try {
       const delivered = send?.({ customType: ADVISOR_MESSAGE_TYPE, content: text, display: true, details: payload }, { deliverAs: 'steer' })
       delivered?.catch?.(() => {})
@@ -1674,7 +1679,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   }
 
   // One consult on the whole working diff, awaited, before the seat's return file is written. Only an accepted
-  // must-fix (high severity) finding refuses the write; a failed, timed-out or empty consult lets it through
+  // medium or high severity finding refuses the write; a failed, timed-out or empty consult lets it through
   // (the consult's own journal rows say so) and never leaves the seat unable to return.
   async function preReturnVerdict(event, { spend, claim = null }) {
     const id = String(event?.toolCallId || '')
@@ -1684,7 +1689,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     // A maybe whose consult never ran (no grounded delta, no cell, the cap) gives its slot back, if it still holds it.
     if (!result?.ran && claim && preReturnMaybeSpent === claim) preReturnMaybeSpent = false
     const judgment = result?.judgment
-    if (result?.accepted && judgment?.severity === 'high') return { block: true, reason: judgment.claim }
+    if (result?.accepted && blocksReturn('pre-return', judgment)) return { block: true, reason: judgment.claim }
     return undefined
   }
 

@@ -506,6 +506,21 @@ function decide(tree, writes, requests, { name = 'pi-turn', ...options } = {}) {
   } finally { run.cleanup() }
 }
 
+test('read-only seat launches carry a launch-authoritative flag, repo seats disable it, and chains are decided per segment', () => {
+  withPermissionTree((tree) => {
+    const commands = ['git status --short && git diff --stat', 'git status && git push']
+    const requests = commands.map((command) => ({ kind: 'execute', title: 'shell', rawInput: { command } }))
+    for (const name of ['pi-turn', 'claude-turn']) for (const writes of ['none', 'task-dir', 'repo']) {
+      const { verdicts, run } = decide(tree, writes, requests, { name })
+      assert.deepEqual(verdicts, writes === 'repo' ? ['allow', 'allow'] : ['allow', 'reject'], `${name}/${writes}`)
+      const env = run.launches[0][2].env
+      assert.equal(env.CREW_READ_ONLY, writes === 'repo' ? '0' : '1', `${name}/${writes}`)
+      assert.equal(env.CREW_READ_ONLY_NODE, process.execPath)
+      assert.ok(env.CREW_READ_ONLY_HOOK.endsWith('crew/adapters/claude-readonly.mjs'))
+    }
+  })
+})
+
 test('task-dir seats write the lane task directory, new and nested files included, never the worktree (Pi path and Claude file_path)', () => {
   withPermissionTree((tree) => {
     for (const [name, key] of [['pi-turn', 'path'], ['claude-turn', 'file_path']]) {

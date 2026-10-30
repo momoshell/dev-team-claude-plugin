@@ -687,3 +687,28 @@ test('end to end: the unchanged acp-client drives the bridge and the real extens
     killRecorded(recordPath)
   }
 })
+
+test('a read-only Pi seat blocks a refused command with a reason naming its first non-read-only segment, before any ACP request', async () => {
+  const h = await withSession({ env: { CREW_READ_ONLY: '1' } })
+  try {
+    const result = await h.emit('tool_call', bashCall('ro-1', 'git status && git reset --hard && rm -rf never'))
+    assert.equal(result.block, true)
+    assert.ok(result.reason.includes('git reset --hard'), result.reason)
+    assert.ok(!result.reason.includes('rm -rf never'), result.reason)
+    assert.equal(h.permissionRequests().length, 0)
+    const safe = h.emit('tool_call', bashCall('ro-2', 'git status && git diff'))
+    const req = await h.wait((f) => f.method === 'session/request_permission', 'permission request')
+    h.answer(req, 'reject_once')
+    assert.equal((await safe).reason, 'ACP permission rejected')
+  } finally { h.close() }
+})
+
+test('a repo-writing Pi seat keeps the generic ACP gate for refused commands', async () => {
+  const h = await withSession({ env: { CREW_READ_ONLY: '0' } })
+  try {
+    const pending = h.emit('tool_call', bashCall('rw-1', 'git push'))
+    const req = await h.wait((f) => f.method === 'session/request_permission', 'permission request')
+    h.answer(req, 'reject_once')
+    assert.equal((await pending).reason, 'ACP permission rejected')
+  } finally { h.close() }
+})

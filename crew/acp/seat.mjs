@@ -26,6 +26,7 @@ const DEFAULT_TOOLS = Object.freeze({
 const UNASKED_TOOLS = Object.freeze(['Write', 'Edit', 'NotebookEdit', 'Bash'])
 const EFFORTS =Object.freeze(['low', 'medium', 'high', 'xhigh', 'max'])
 const MODEL = /^[a-z0-9-]+\/[A-Za-z0-9._-]+$/
+const READ_ONLY_HOOK = fileURLToPath(new URL('../adapters/claude-readonly.mjs', import.meta.url))
 const SKILLS_ROOT = fileURLToPath(new URL('../../skills', import.meta.url))
 // A plain string replaces claude-agent-acp's claude_code preset; the role prompt arrives in the turn itself.
 const LEAN_CLAUDE_SYSTEM_PROMPT = 'You are a coding agent. Work in the current directory with the tools you have. Prefer short command output: use quiet or dot reporters and tail long logs. Be concise.'
@@ -368,7 +369,11 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, briefText, sessio
     // taskDir stays the per-seat runtime, where materialised resources live; the lane's task dir reaches the seat through its environment.
     const spec = {
       role, cwd: workdir, effort: definition.effort, promptFile, taskDir: runtime, grants, tools, deny, writableDirs, editAssist,
-      env: laneTaskDir ? { CREW_ROLE: role, CREW_TASK_DIR: laneTaskDir, [CONTEXT_LAYOUT_ENV]: LEAN_LAYOUT } : { CREW_ROLE: role },
+      env: {
+        ...(laneTaskDir ? { CREW_ROLE: role, CREW_TASK_DIR: laneTaskDir, [CONTEXT_LAYOUT_ENV]: LEAN_LAYOUT } : { CREW_ROLE: role }),
+        // Launch-authoritative: an inherited value never decides whether the seat's refusals carry a reason.
+        CREW_READ_ONLY: writes === 'repo' ? '0' : '1', CREW_READ_ONLY_NODE: process.execPath, CREW_READ_ONLY_HOOK: READ_ONLY_HOOK,
+      },
     }
     let launch
     if (isClaude) {

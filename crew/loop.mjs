@@ -114,10 +114,11 @@ export async function runLoop(spec, deps = {}) {
   const d = {
     resolveAgents, mkdir, readFile, writeFile, checkBaseline, runGate, proveMutations, runSuite, commitChanges, rebaseBranch, openPullRequest,
     run: runSuite,
+    now: Date.now,
     journal: async (row) => appendFile(join(spec.taskDir, 'journal.jsonl'), `${JSON.stringify(row)}\n`),
     ...deps,
   }
-  const seams = ['runSeat', 'resolveAgents', 'mkdir', 'readFile', 'writeFile', 'journal', 'checkBaseline', 'runGate', 'proveMutations', 'runSuite', 'commitChanges', 'rebaseBranch', 'openPullRequest', 'run']
+  const seams = ['runSeat', 'resolveAgents', 'mkdir', 'readFile', 'writeFile', 'journal', 'checkBaseline', 'runGate', 'proveMutations', 'runSuite', 'commitChanges', 'rebaseBranch', 'openPullRequest', 'run', 'now']
   if (!seams.every((name) => typeof d[name] === 'function')) return refusal('invalid-input')
   let resolved
   try { resolved = d.resolveAgents(spec.tier) } catch { return refusal('seat-unmeasured') }
@@ -138,8 +139,7 @@ export async function runLoop(spec, deps = {}) {
   let stagePaths = []
 
   const emit = async (event, fields) => {
-    const row = { event, lane: spec.id, stage: where, ...fields }
-    try { await journal(row) } catch {}
+    try { await journal({ event, lane: spec.id, stage: where, ...fields, at: d.now() }) } catch {}
   }
   const stop = async (reason, observation) => {
     const closed = LOOP_REASONS.includes(reason) ? reason : 'runner-threw'
@@ -255,7 +255,7 @@ export async function runLoop(spec, deps = {}) {
     try { await d.mkdir(spec.taskDir, { recursive: true }) } catch (error) { return await stop('runner-threw', { mkdir: describe(error) }) }
     // The lane's own start, written once: the arms of every seat (and every retry) date the planner's return against it.
     // A finish run appends none: the original row stays the anchor the arms date the accepted plan against.
-    if (!isFinish) await emit('run-start', { at: Date.now(), run_id: spec.id })
+    if (!isFinish) await emit('run-start', { run_id: spec.id })
 
     const planned = isFinish ? null : await stage('plan', () => seatTurn('planner'))
     if (planned?.halt) return planned.halt

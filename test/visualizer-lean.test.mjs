@@ -286,3 +286,28 @@ test('LP1 LP2 a lane that ends pr then finish-decision is done with that pr; a t
     }
   })
 })
+
+test('lean phases and the run take their times from timestamped journal rows; undated journals stay unknown', async () => {
+  const B = 1_700_000_000_000, iso = (at) => new Date(at).toISOString()
+  const begin = (stage, at) => ({ event: 'stage-start', stage, at })
+  const end = (stage, at) => ({ event: 'stage-end', stage, outcome: { status: 'done' }, at })
+  await withServer(async ({ crewRoot, get }) => {
+    lane(crewRoot, 'timed', [{ event: 'run-start', at: B }, begin('build', B + 10), { event: 'verdict', stage: 'build', status: 'stopped', reason: 'gate-failed', at: B + 20 }, end('build', B + 35), { event: 'stage-end', stage: 'plan', at: 'bad' }])
+    lane(crewRoot, 'legacy', [{ event: 'run-start', at: B }, { event: 'stage-start', stage: 'build' }, { event: 'verdict', stage: 'build', status: 'stopped', reason: 'gate-failed' }, { event: 'stage-end', stage: 'build', outcome: { status: 'done' } }])
+    lane(crewRoot, 'open', [{ event: 'run-start', at: B }, begin('build', B + 5)])
+    const runs = (await get('/api/sessions')).body.runs
+    const by = (name) => runs.find((r) => r.task_slug === name)
+    const timed = by('timed')
+    assert.deepEqual([timed.phases[0].started_at, timed.phases[0].ended_at], [iso(B + 10), iso(B + 35)])
+    assert.equal(timed.ended_at, iso(B + 35))
+    assert.equal(timed.duration_ms, 35)
+    assert.ok(!('ended_at' in timed.pending) && !('duration_ms' in timed.pending))
+    const legacy = by('legacy')
+    assert.deepEqual([legacy.phases[0].started_at, legacy.phases[0].ended_at, legacy.ended_at, legacy.duration_ms], [null, null, null, null])
+    assert.match(legacy.pending.ended_at, /carry no timestamps/)
+    assert.match(legacy.pending.duration_ms, /carry no timestamps/)
+    const open = by('open')
+    assert.equal(open.running, true)
+    assert.deepEqual([open.ended_at, open.duration_ms], [null, null])
+  })
+})

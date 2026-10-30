@@ -210,14 +210,13 @@ test('Bash literal reads share readgate coverage and skeletonread preserves Bash
   const gate = seat(sb, { extensions: ['readgate'] })
   const input = { command: "sed -n '1,2p' large.mjs" }
   const pre = sb.frame('PreToolUse', 'Bash', 'bash-range'); pre.tool_input = input; pre.tool_use_id = 'range'
-  assertNoEffect(fire(sb, gate, pre))
+  assert.match(denial(fire(sb, gate, pre)).permissionDecisionReason, /Read tool/)
+  assert.match(denial(fire(sb, gate, pre)).permissionDecisionReason, /Read tool/)
+  // Synthetic post remains supported for compatibility with previously executed calls.
   const post = sb.frame('PostToolUse', 'Bash', 'bash-range'); post.tool_input = input; post.tool_use_id = 'range'; post.tool_response.stdout = 'one\ntwo\n'; post.tool_response.stderr = ''
   assertNoEffect(fire(sb, gate, post))
-  assert.match(denial(fire(sb, gate, pre)).permissionDecisionReason, /Refusing repeated read/)
-  const native = sb.frame('PreToolUse', 'Read', 'bash-range'); Object.assign(native.tool_input, { offset: 1, limit: 2 })
-  assert.match(denial(fire(sb, gate, native)).permissionDecisionReason, /Refusing repeated read/)
   for (const command of ["sed -n '1,2p' large.mjs | cat", 'head -n2 large.mjs | cat', 'cat large.mjs | cat']) {
-    pre.tool_input = { command }; assertNoEffect(fire(sb, gate, pre))
+    pre.tool_input = { command }; assert.match(denial(fire(sb, gate, pre)).permissionDecisionReason, /Read tool/)
   }
   const skeleton = seat(sb, { extensions: ['skeletonread'] })
   const bash = sb.frame('PostToolUse', 'Bash'); bash.tool_input.command = 'cat large.mjs'; bash.tool_response.stdout = sb.large; bash.tool_response.stderr = ''
@@ -230,6 +229,51 @@ test('Bash literal reads share readgate coverage and skeletonread preserves Bash
   }
   bash.tool_input.command = 'cat large.mjs'; bash.tool_response.stderr = 'diagnostic'
   assert.equal(replacement(fire(sb, skeleton, bash)), undefined)
+})
+
+test('Bash file segments are steered only for reading arms', () => {
+  const sb = sandbox()
+  const commands = [
+    'cd T; sed -n 95,125p crew/loop.mjs', 'cat task/plan.md; ls task',
+    'head -n 2 "a; b" && ls', 'ls || tail -20 file', 'echo ok\nnl -ba file',
+    'cat a.txt | head -n 2 other.mjs', "printf '%s' x; sed -n -e '1,2p' file",
+    "sed -n -e'l' crew/loop.mjs", 'sed -nel crew/loop.mjs', 'sed -ne l crew/loop.mjs',
+    'echo ok; cat -- "a|b"', 'head -n 2 - < input; tail file',
+    'cat a\\;b', "cat <<'EOF'\ndata\nEOF\nhead file",
+    'cd T; (sed -n 95,125p crew/loop.mjs)', 'LC_ALL=C cat task/plan.md; ls task',
+    '(LC_ALL=C head -qn 2 file)', 'cat "123"> output', 'cat \\123> output',
+    'cd T; { cat task/plan.md; }', '{ { head file; }; }',
+    'if true; then cat crew/loop.mjs; fi', 'if cat first; then echo ok; elif head second; then tail third; else nl fourth; fi',
+    'while true; do sed -n 1p file; done',
+  ]
+  const safe = [
+    'node ../task/gate.mjs 2>&1 | tail -20', "cat > task/builder-2.json <<'EOF'\ncat secret\nsed -n 1p file\nEOF",
+    'echo "cat file; sed -n 1p file"', 'echo ok # ; cat secret',
+    'echo x | cat | head -n 2 | tail -20 | sed -n 1p | nl -ba',
+    'cat < input', 'head --lines 2 < input', 'sed -n -e 1p < input', 'nl -w 2 < input',
+    'tail -20 2>&10', 'echo cat\\;file',
+    'printf x | head -qn 2', 'printf x | tail -qn 2',
+    'printf x | head -qc 2', 'printf x | tail -qc 2',
+    'echo "{ cat secret; }"', 'echo { cat secret; }', 'echo \\{; echo cat',
+    'cat 123> output',
+    "printf 'x\\n' | sed -n -l 80 '1p'", "printf 'x\\n' | sed -n --line-length 80 '1p'",
+    "printf 'x\\n' | sed -nl 80 '1p'", "echo 'then cat file'", "'then' cat file", 'echo then cat file',
+  ]
+  for (const arm of ['readgate', 'skeletonread']) {
+    const launch = seat(sb, { extensions: [arm] })
+    assert.equal(commandsFor(launch, 'PreToolUse').length, 1)
+    const pre = sb.frame('PreToolUse', 'Bash', `segments-${arm}`)
+    for (const command of commands) {
+      pre.tool_input.command = command
+      assert.match(denial(fire(sb, launch, pre))?.permissionDecisionReason ?? '', /Read tool.*offset.*limit/, command)
+    }
+    for (const command of safe) { pre.tool_input.command = command; assertNoEffect(fire(sb, launch, pre)) }
+  }
+  for (const grants of [{}, { extensions: ['builderloop'] }]) {
+    const launch = seat(sb, grants)
+    const pre = sb.frame('PreToolUse', 'Bash'); pre.tool_input.command = commands[0]
+    assert.equal(denial(fire(sb, launch, pre)), undefined)
+  }
 })
 
 test('CH2 a result-transforming arm keeps Bash\'s own output shape', () => {
@@ -463,7 +507,7 @@ test('the arms plugin sits beside the skills plugin and registers only the event
   assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(plugins[1].path, 'hooks', 'hooks.json'), 'utf8')).hooks).sort(), ['PostToolUse', 'PostToolUseFailure', 'SessionStart'])
   assert.equal(JSON.parse(readFileSync(join(plugins[1].path, '.claude-plugin', 'plugin.json'), 'utf8')).name, 'crew-arms-builder')
   const skeleton = seat(sandbox(), { extensions: ['skeletonread'] })
-  assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(pluginsOf(skeleton)[0].path, 'hooks', 'hooks.json'), 'utf8')).hooks), ['PostToolUse'])
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(pluginsOf(skeleton)[0].path, 'hooks', 'hooks.json'), 'utf8')).hooks), ['PreToolUse', 'PostToolUse'])
   const config = JSON.parse(readFileSync(join(plugins[1].path, 'config.json'), 'utf8'))
   assert.deepEqual({ role: config.role, arms: config.arms, lane: config.lane_task_dir, layout: config.layout }, { role: 'builder', arms: ['reminders'], lane: sb.taskDir, layout: 'lean' })
   assert.ok(config.state_dir.startsWith(join(sb.taskDir, 'claude-arms') + '/'), 'the state outlives the disposable runtime')

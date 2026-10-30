@@ -30,7 +30,7 @@ export const CLAUDE_ARMS = Object.freeze([...CLAUDE_EXTENSION_ARMS, 'advisor'])
 export const CLAUDE_ADVISED_ROLES = Object.freeze(['builder', 'planner'])
 const EVENTS_OF = Object.freeze({
   readgate: ['PreToolUse', 'PostToolUse', 'PostToolUseFailure'],
-  skeletonread: ['PostToolUse'],
+  skeletonread: ['PreToolUse', 'PostToolUse'],
   reminders: ['SessionStart', 'PostToolUse', 'PostToolUseFailure'],
   builderloop: ['PreToolUse', 'PostToolUse', 'PostToolUseFailure'],
   advisor: ['PreToolUse', 'PostToolUse', 'PostToolUseFailure'],
@@ -168,6 +168,97 @@ function bashRead(command) {
   } else return null
   if (!path || path === '-' || path.startsWith('-')) return null
   return { path, ...(offset === undefined ? {} : { offset, limit }) }
+}
+
+// Tokenize command boundaries without treating quoted text or heredoc bodies as shell commands.
+function bashFileRead(command) {
+  if (typeof command !== 'string') return false
+  const segments = [], words = [], heredocs = []
+  let word = '', active = false, quote = '', redirect = null, quoted = false
+  const flush = () => {
+    if (!active) return
+    if (redirect) {
+      if (redirect.startsWith('<<') && redirect !== '<<<') heredocs.push({ delimiter: word, tabs: redirect === '<<-' })
+      redirect = null
+    } else if (words.length || quoted || !['if', 'then', 'elif', 'else', 'while', 'until', 'do', '!'].includes(word)) words.push(word)
+    word = ''; active = false; quoted = false
+  }
+  const segment = () => { flush(); if (words.length) segments.push(words.splice(0)) }
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]
+    if (quote === "'") { if (ch === "'") quote = ''; else word += ch; continue }
+    if (ch === '\\') { if (i + 1 < command.length) { if (command[i + 1] !== '\n') { word += command[i + 1]; active = true; quoted = true } i++ } continue }
+    if (quote === '"') { if (ch === '"') quote = ''; else word += ch; continue }
+    if (ch === "'" || ch === '"') { quote = ch; active = true; quoted = true; continue }
+    // A comment starts only at a word boundary; its contents are not shell commands.
+    if (ch === '#' && !active) {
+      const end = command.indexOf('\n', i)
+      if (end < 0) break
+      i = end - 1; continue
+    }
+    if (ch === '\n') {
+      segment()
+      while (heredocs.length && i + 1 < command.length) {
+        const end = command.indexOf('\n', i + 1)
+        const lineEnd = end < 0 ? command.length : end
+        const line = command.slice(i + 1, lineEnd)
+        i = lineEnd
+        if ((heredocs[0].tabs ? line.replace(/^\t+/, '') : line) === heredocs[0].delimiter) heredocs.shift()
+      }
+      continue
+    }
+    if (/\s/.test(ch)) { flush(); continue }
+    if (ch === '<' || ch === '>') {
+      // An adjacent numeric word is a file descriptor, not an operand.
+      if (active && !quoted && /^\d+$/.test(word)) { word = ''; active = false } else flush()
+      let op = ch
+      while (i + 1 < command.length && (command[i + 1] === ch || (ch === '<' && op === '<<' && command[i + 1] === '-'))) op += command[++i]
+      if (command[i + 1] === '&') {
+        i++
+        if (/[0-9-]/.test(command[i + 1] ?? '')) while (/[0-9-]/.test(command[i + 1] ?? '')) i++
+        else redirect = op
+      }
+      else redirect = op
+      continue
+    }
+    if (';|&'.includes(ch)) { segment(); if (command[i + 1] === ch) i++; continue }
+    if (ch === '(' || ch === ')') { segment(); continue }
+    // Braces are reserved words only at a command boundary and when delimited.
+    if ((ch === '{' || ch === '}') && !active && !words.length && !redirect &&
+        (i + 1 === command.length || /[\s;|&()<>]/.test(command[i + 1]))) { segment(); continue }
+    word += ch; active = true
+  }
+  segment()
+  return segments.some((args) => {
+    while (args.length && /^[a-zA-Z_][a-zA-Z0-9_]*=/.test(args[0])) args.shift()
+    const program = basename(args[0] ?? '')
+    if (!['cat', 'head', 'tail', 'nl', 'sed'].includes(program)) return false
+    let options = true, sedQuiet = false, sedScript = false
+    const operands = []
+    for (let i = 1; i < args.length; i++) {
+      const arg = args[i]
+      if (options && arg === '--') { options = false; continue }
+      if (options && arg.startsWith('-') && arg !== '-') {
+        // Short sed options after e/f/l belong to that option's argument, not the option cluster.
+        const sedShort = program === 'sed' && /^-([^-efl]*)([efl])(.*)$/.exec(arg)
+        if (program === 'sed' && (arg === '--quiet' || arg === '--silent' ||
+            (sedShort ? sedShort[1].includes('n') : /^-[^-]*n/.test(arg)))) sedQuiet = true
+        const values = program === 'sed' ? ['-e', '--expression', '-f', '--file', '-l', '--line-length']
+          : program === 'head' || program === 'tail' ? ['-n', '-c', '--lines', '--bytes', '-s', '--sleep-interval', '--pid']
+            : program === 'nl' ? ['-b', '-d', '-f', '-h', '-i', '-l', '-n', '-s', '-v', '-w', '--body-numbering', '--section-delimiter', '--footer-numbering', '--header-numbering', '--line-increment', '--join-blank-lines', '--number-format', '--number-separator', '--starting-line-number', '--number-width'] : []
+        if (program === 'sed' && ((sedShort && 'ef'.includes(sedShort[2])) || /^--(?:expression|file)(?:=|$)/.test(arg))) sedScript = true
+        if (values.includes(arg) || (sedShort && sedShort[3] === '') ||
+            ((program === 'head' || program === 'tail') && /^-[^-]*[ncs]$/.test(arg))) i++
+        continue
+      }
+      operands.push(arg)
+    }
+    if (program === 'sed') {
+      if (!sedQuiet) return false
+      if (!sedScript) operands.shift()
+    }
+    return operands.some((arg) => arg !== '-' && arg !== '')
+  })
 }
 
 function textParts(response) {
@@ -406,6 +497,9 @@ async function dispatch(config, payload, arms, state, outbox) {
   }
   const tool = toolOf(payload.tool_name)
   if (name === 'PreToolUse') {
+    if (tool === 'bash' && config.arms.some((arm) => arm === 'readgate' || arm === 'skeletonread') && bashFileRead(payload.tool_input?.command)) {
+      return { hookEventName: name, permissionDecision: 'deny', permissionDecisionReason: 'Refusing Bash file read. Use the Read tool (file_path, offset, limit); use offset and limit for a range.' }
+    }
     const extras = []
     if (arms.builderloop && config.role === 'builder') {
       // The hint for the Edit that failed since the last call: Claude fires no hook for it.

@@ -14,8 +14,8 @@ const roster = {
       "advisor": null,
       "lead": null,
       "planner": {
-        "provider": "meta",
-        "id": "muse-wonder-1.0-contributor",
+        "provider": "openai",
+        "id": "gpt-6.1-sol",
         "agent": "pi",
         "effort": "medium"
       },
@@ -49,8 +49,8 @@ const roster = {
         ]
       },
       "planner": {
-        "provider": "meta",
-        "id": "muse-wonder-1.0-contributor",
+        "provider": "openai",
+        "id": "gpt-6.1-sol",
         "agent": "pi",
         "effort": "high"
       },
@@ -84,10 +84,10 @@ const roster = {
         ]
       },
       "planner": {
-        "provider": "meta",
-        "id": "muse-wonder-full-1.0-contributor",
+        "provider": "openai",
+        "id": "gpt-6.1-sol",
         "agent": "pi",
-        "effort": "high"
+        "effort": "xhigh"
       },
       "builder": {
         "provider": "anthropic",

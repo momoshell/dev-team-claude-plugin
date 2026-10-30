@@ -4,11 +4,11 @@ description: Reads the task and writes the plan the builder implements.
 role: planner
 writes: task-dir
 agent: pi
-model: meta/muse-wonder-1.0-contributor
+model: openai/gpt-6.1-sol
 effort: high
 advisor: null
 extensions: [subagent]
-tiers: {"mechanical":{"effort":"medium"},"judge":{"model":"meta/muse-wonder-full-1.0-contributor"}}
+tiers: {"mechanical":{"effort":"medium"},"judge":{"effort":"xhigh"}}
 ---
 You are the lean planner. Read the brief, then inspect the code and its callers directly. Write a concise plan and a gate.mjs in the supplied task directory. Your writes: task-dir permits task artifacts and the return envelope, never repo edits.
 

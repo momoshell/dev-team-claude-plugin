@@ -141,6 +141,11 @@ const worktrees = (repo) => sh(repo, 'worktree', 'list').split('\n').length
 
 test('builder replay: prompt rewrite, backfills, checks, diff with additions and cleanup', async () => {
   const fx = fixture()
+  writeFileSync(join(fx.repo, 'old.test.mjs'), '// tracked test to delete\n')
+  sh(fx.repo, 'add', 'old.test.mjs')
+  sh(fx.repo, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-q', '-m', 'tracked test')
+  const manifestPath = join(fx.corpusDir, 'b1380', 'manifest.json')
+  writeFileSync(manifestPath, JSON.stringify({ ...json(manifestPath), base: sh(fx.repo, 'rev-parse', 'HEAD') }, null, 2))
   const before = readdirSync(join(fx.corpusDir, 'b1380')).map((f) => [f, readFileSync(join(fx.corpusDir, 'b1380', f), 'utf8')])
   const seen = {}
   const out = fresh('build')
@@ -150,6 +155,7 @@ test('builder replay: prompt rewrite, backfills, checks, diff with additions and
       Object.assign(seen, call)
       writeFileSync(join(call.cwd, 'a.mjs'), 'export const a = 2\n')
       writeFileSync(join(call.cwd, 'new.test.mjs'), "import test from 'node:test'\ntest('ok', () => {})\n")
+      rmSync(join(call.cwd, 'old.test.mjs'))
       writeFileSync(join(call.taskDir, 'builder-2.json'), JSON.stringify({ status: 'done', summary: 'built' }))
       return { stopReason: 'end_turn', usage: { in: 1 } }
     },
@@ -166,11 +172,12 @@ test('builder replay: prompt rewrite, backfills, checks, diff with additions and
   assert.equal(ret.details.gate_cmd, `node ${join(out, 'task', 'gate.mjs')}`)
   assert(!readFileSync(join(out, 'task', 'plan.md'), 'utf8').includes('/orig/'))
   assert.equal(result.mutations.killed, 1)
-  assert.deepEqual(result.changed.sort(), ['a.mjs', 'new.test.mjs'])
-  assert.equal(result.targeted.pass, 1)
+  assert.deepEqual(result.changed.sort(), ['a.mjs', 'new.test.mjs', 'old.test.mjs'])
+  assert.deepEqual(result.targeted, { files: 1, pass: 1, fail: 0, status: 0 })
   assert.equal(result.envelope.summary, 'built')
   const diff = readFileSync(join(out, 'diff.patch'), 'utf8')
   assert(diff.includes('+export const a = 2') && diff.includes('new.test.mjs'))
+  assert.match(diff, /diff --git a\/old\.test\.mjs b\/old\.test\.mjs\ndeleted file mode/)
   assert(!existsSync(join(out, 'tree')))
   assert.equal(worktrees(fx.repo), 1)
   assert.deepEqual(readdirSync(join(fx.corpusDir, 'b1380')).map((f) => [f, readFileSync(join(fx.corpusDir, 'b1380', f), 'utf8')]), before)

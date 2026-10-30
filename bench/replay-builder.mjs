@@ -4,6 +4,7 @@
 //   node bench/replay-builder.mjs --lane b1380 --cell cell.json --arms fff,readgate --out /absolute/new-run
 // Writes result.json, diff.patch and session.jsonl into --out (a new directory). See bench/README.md.
 import { spawnSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { advisorRows, callSeat, checkDiagnostics, dirtyFiles, errText, loadChecks, parseCli, prepareLane, loadEnvelope, readCellFile, readJournal, rowKinds, runReplay, seatDefinition, sleepMs, unmeasuredError, validateArms, validateCell, writeDiff } from './replay-common.mjs'
@@ -41,7 +42,7 @@ export async function runBuilder(options, deps = {}) {
       const proofIssue = proof === undefined || proof === null ? null : unmeasuredError('mutations', proof)
       if (proofIssue) errors.push(proofIssue)
       const changed = (await step('status', () => dirtyFiles(tree))) ?? []
-      const tests = changed.filter((f) => f.endsWith('.test.mjs'))
+      const tests = changed.filter((f) => f.endsWith('.test.mjs') && existsSync(join(tree, f)))
       const targeted = tests.length ? await step('tests', () => {
         const { NODE_TEST_CONTEXT, ...env } = process.env // a parent test runner would switch the child to its machine format
         const r = spawnSync(process.execPath, ['--test', ...tests], { cwd: tree, env, encoding: 'utf8', timeout: 900_000 })

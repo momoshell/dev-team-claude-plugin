@@ -308,6 +308,8 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
     // The real seat swallows a failed append and never tells its caller.
     try { input.deps.appendFileSync(input.sessionFile, `${JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `chunk-${id}` } } })}\n`, 'utf8') } catch {}
     mkdirSync(spec.taskDir, { recursive: true })
+    // the planner's artifacts exist in the task dir, as the loop requires of its two paths
+    if (input.definition.role === 'planner') for (const name of ['plan.md', 'gate.mjs']) writeFileSync(join(spec.taskDir, name), '')
     writeFileSync(path, JSON.stringify(envelope(input.definition.role, id)))
     return { stopReason: 'end_turn', usage: null, refusal: null }
   })
@@ -660,7 +662,8 @@ async function retryRun(refusals, { oversleep = 0 } = {}) {
       const refusal = typeof wanted === 'function' ? wanted(clock) : wanted
       if (refusal) return { stopReason: null, usage: null, refusal }
       mkdirSync(f.spec.taskDir, { recursive: true })
-      const details = input.definition.role === 'planner' ? { subject: 'fix(crew): publish measured lane results', plan_path: 'p', gate_path: 'g', acceptance: ['RV1'], mutations: [LEAN_MUTATION] }
+      if (input.definition.role === 'planner') for (const name of ['plan.md', 'gate.mjs']) writeFileSync(join(f.spec.taskDir, name), '')
+      const details = input.definition.role === 'planner' ? { subject: 'fix(crew): publish measured lane results', plan_path: 'plan.md', gate_path: 'gate.mjs', acceptance: ['RV1'], mutations: [LEAN_MUTATION] }
         : input.definition.role === 'builder' ? { summary: 'built' } : { verdict: 'pass', findings: [] }
       writeFileSync(path, JSON.stringify({ role: input.definition.role, id, status: 'done', summary: 'x', details }))
       return { stopReason: 'end_turn', usage: { input_tokens: 1 }, refusal: null }
@@ -772,6 +775,8 @@ test('a schema-refused builder envelope gets one fresh repair-only turn at the s
     const id = /^Envelope id: (.+)$/m.exec(input.prompt)[1]
     const path = /^Return path: (.+)$/m.exec(input.prompt)[1]
     const n = turns[role] = (turns[role] ?? 0) + 1
+    mkdirSync(f.spec.taskDir, { recursive: true })
+    if (role === 'planner') for (const name of ['plan.md', 'gate.mjs']) writeFileSync(join(f.spec.taskDir, name), '')
     const value = { role, id, status: 'done', summary: 'fixture', details: role === 'planner' ? { subject: 'fix(crew): publish measured lane results', plan_path: join(f.spec.taskDir, 'plan.md'), gate_path: join(f.spec.taskDir, 'gate.mjs'), acceptance: ['RV1'], mutations: [LEAN_MUTATION] } : role === 'builder' ? { summary: 'built', ...(n === 1 ? { gaps: [] } : {}) } : { verdict: 'pass', findings: [] } }
     mkdirSync(f.spec.taskDir, { recursive: true })
     writeFileSync(path, JSON.stringify(value))

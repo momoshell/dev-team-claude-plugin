@@ -3,8 +3,8 @@
 // check, git, journal) crosses an injected seam, and nothing here is wired to the boot path yet.
 // A seat's return is never trusted from the callback: the envelope is read back from the path
 // the loop issued, parsed and validated as P2, and must carry the id the loop issued.
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { appendFile, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { resolveAgents } from './agents.mjs'
 import {
   CHECK_REASONS, checkBaseline, commitChanges, openPullRequest, proveMutations, rebaseBranch, runGate, runSuite,
@@ -112,13 +112,13 @@ export async function runLoop(spec, deps = {}) {
     && (fin.guidance === undefined || typeof fin.guidance === 'string')
     && (fin.priorReviewRounds === undefined || (Number.isSafeInteger(fin.priorReviewRounds) && fin.priorReviewRounds >= 0)))) return refusal('invalid-input')
   const d = {
-    resolveAgents, mkdir, readFile, writeFile, checkBaseline, runGate, proveMutations, runSuite, commitChanges, rebaseBranch, openPullRequest,
+    resolveAgents, mkdir, readFile, stat, realpath, writeFile, checkBaseline, runGate, proveMutations, runSuite, commitChanges, rebaseBranch, openPullRequest,
     run: runSuite,
     now: Date.now,
     journal: async (row) => appendFile(join(spec.taskDir, 'journal.jsonl'), `${JSON.stringify(row)}\n`),
     ...deps,
   }
-  const seams = ['runSeat', 'resolveAgents', 'mkdir', 'readFile', 'writeFile', 'journal', 'checkBaseline', 'runGate', 'proveMutations', 'runSuite', 'commitChanges', 'rebaseBranch', 'openPullRequest', 'run', 'now']
+  const seams = ['runSeat', 'resolveAgents', 'mkdir', 'readFile', 'stat', 'realpath', 'writeFile', 'journal', 'checkBaseline', 'runGate', 'proveMutations', 'runSuite', 'commitChanges', 'rebaseBranch', 'openPullRequest', 'run', 'now']
   if (!seams.every((name) => typeof d[name] === 'function')) return refusal('invalid-input')
   let resolved
   try { resolved = d.resolveAgents(spec.tier) } catch { return refusal('seat-unmeasured') }
@@ -137,6 +137,28 @@ export async function runLoop(spec, deps = {}) {
   let gatePath = isFinish ? fin.gatePath : null
   let changedPaths = []
   let stagePaths = []
+
+  // A planner's plan_path and gate_path must each name an existing regular file inside the task dir (a relative
+  // path is read against it), the way the context arms resolve them; anything else is a defect for the planner to repair.
+  const within = (root, target) => {
+    const rel = relative(root, target)
+    return rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)
+  }
+  const artifactDefects = async (details) => {
+    const defects = []
+    let root = null
+    try { root = await d.realpath(resolve(spec.taskDir)) } catch (error) { return [`details.plan_path and details.gate_path cannot be checked: the task dir is unreadable (${describe(error).message})`] }
+    for (const key of ['plan_path', 'gate_path']) {
+      const target = resolve(spec.taskDir, details[key])
+      if (/:\d+(-\d+)?$/.test(details[key])) { defects.push(`details.${key} must be a bare file path, without a line-range suffix: ${details[key]}`); continue }
+      if (!within(resolve(spec.taskDir), target)) { defects.push(`details.${key} must be a file inside the task dir ${spec.taskDir}`); continue }
+      try {
+        if (!(await d.stat(target)).isFile()) { defects.push(`details.${key} must be an existing regular file inside the task dir, not ${details[key]}`); continue }
+        if (!within(root, await d.realpath(target))) defects.push(`details.${key} must be a file inside the task dir ${spec.taskDir}`)
+      } catch (error) { defects.push(`details.${key} must be an existing regular file inside the task dir: ${describe(error).message}`) }
+    }
+    return defects
+  }
 
   const emit = async (event, fields) => {
     try { await journal({ event, lane: spec.id, stage: where, ...fields, at: d.now() }) } catch {}
@@ -199,6 +221,7 @@ export async function runLoop(spec, deps = {}) {
             try { parsed = JSON.parse(raw) } catch (error) { failure = { reason: 'envelope-refused', error: describe(error) } }
           }
           const checked = failure ? { envelope: null, defects: [] } : validateEnvelope(role, parsed)
+          if (role === 'planner' && checked.envelope && checked.defects.length === 0) checked.defects.push(...await artifactDefects(checked.envelope.details))
           return { failure, parsed, recording, checked }
         }
         const observe = (a) => emit('envelope', { role, id, returnPath, parsed: a.parsed, defects: a.checked.defects, error: a.failure?.error ?? null })
@@ -263,8 +286,8 @@ export async function runLoop(spec, deps = {}) {
     const subject = isFinish ? fin.subject : planned.envelope.details.subject
     let mutations = isFinish ? [...fin.mutations] : planned.envelope.details.mutations
     if (!isFinish) {
-      planPath = planned.envelope.details.plan_path
-      gatePath = planned.envelope.details.gate_path
+      planPath = resolve(spec.taskDir, planned.envelope.details.plan_path)
+      gatePath = resolve(spec.taskDir, planned.envelope.details.gate_path)
       if (acceptance.length !== spec.acceptance.length || !acceptance.every((id) => spec.acceptance.includes(id))) return await stop('envelope-refused', { acceptance })
     } else {
       // A --return pass counts the reviews the finish run already spent: it never grants new rounds.

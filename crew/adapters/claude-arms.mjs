@@ -175,7 +175,7 @@ function bashRead(command) {
 function bashFileRead(command) {
   if (typeof command !== 'string') return false
   const segments = [], words = [], heredocs = []
-  let word = '', active = false, quote = '', redirect = null, quoted = false, stdoutToFile = false
+  let word = '', active = false, quote = '', redirect = null, quoted = false, outputElsewhere = false
   const flush = () => {
     if (!active) return
     if (redirect) {
@@ -184,7 +184,7 @@ function bashFileRead(command) {
     } else if (words.length || quoted || !['if', 'then', 'elif', 'else', 'while', 'until', 'do', '!'].includes(word)) words.push(word)
     word = ''; active = false; quoted = false
   }
-  const segment = () => { flush(); if (words.length) segments.push({ args: words.splice(0), stdoutToFile }); stdoutToFile = false }
+  const segment = () => { flush(); if (words.length) segments.push({ args: words.splice(0), outputElsewhere }); outputElsewhere = false }
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]
     if (quote === "'") { if (ch === "'") quote = ''; else word += ch; continue }
@@ -224,9 +224,11 @@ function bashFileRead(command) {
       }
       else redirect = op
       // Output sent to a file is not printed; the segment is not a read.
-      if (redirect && command[start] === '>' && (fd === '' || fd === '1' || fd === '&')) stdoutToFile = true
+      if (redirect && command[start] === '>' && (fd === '' || fd === '1' || fd === '&')) outputElsewhere = true
       continue
     }
+    // A segment piped onward may print only what the filter keeps (`cat f | wc -l`); it is not a read.
+    if (ch === '|' && command[i + 1] !== '|') outputElsewhere = true
     if (';|&'.includes(ch)) { segment(); if (command[i + 1] === ch) i++; continue }
     if (ch === '(' || ch === ')') { segment(); continue }
     // Braces are reserved words only at a command boundary and when delimited.
@@ -235,8 +237,8 @@ function bashFileRead(command) {
     word += ch; active = true
   }
   segment()
-  return segments.some(({ args, stdoutToFile }) => {
-    if (stdoutToFile) return false
+  return segments.some(({ args, outputElsewhere }) => {
+    if (outputElsewhere) return false
     while (args.length && /^[a-zA-Z_][a-zA-Z0-9_]*=/.test(args[0])) args.shift()
     const program = basename(args[0] ?? '')
     if (!['cat', 'head', 'tail', 'nl', 'sed'].includes(program)) return false
@@ -506,7 +508,8 @@ async function dispatch(config, payload, arms, state, outbox) {
   }
   const tool = toolOf(payload.tool_name)
   if (name === 'PreToolUse') {
-    if (tool === 'bash' && config.arms.some((arm) => arm === 'readgate' || arm === 'skeletonread') && bashFileRead(payload.tool_input?.command)) {
+    // Only an arm that actually started may steer, and a parser failure fails open.
+    if (tool === 'bash' && (arms.readgate || arms.skeletonread) && await guard('readgate', () => bashFileRead(payload.tool_input?.command))) {
       return { hookEventName: name, permissionDecision: 'deny', permissionDecisionReason: 'Refusing Bash file read. Use the Read tool (file_path, offset, limit); use offset and limit for a range.' }
     }
     const extras = []

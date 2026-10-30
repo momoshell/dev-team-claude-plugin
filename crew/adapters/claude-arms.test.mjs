@@ -216,7 +216,7 @@ test('Bash literal reads share readgate coverage and skeletonread preserves Bash
   const post = sb.frame('PostToolUse', 'Bash', 'bash-range'); post.tool_input = input; post.tool_use_id = 'range'; post.tool_response.stdout = 'one\ntwo\n'; post.tool_response.stderr = ''
   assertNoEffect(fire(sb, gate, post))
   for (const command of ["sed -n '1,2p' large.mjs | cat", 'head -n2 large.mjs | cat', 'cat large.mjs | cat']) {
-    pre.tool_input = { command }; assert.match(denial(fire(sb, gate, pre)).permissionDecisionReason, /Read tool/)
+    pre.tool_input = { command }; assertNoEffect(fire(sb, gate, pre))
   }
   const skeleton = seat(sb, { extensions: ['skeletonread'] })
   const bash = sb.frame('PostToolUse', 'Bash'); bash.tool_input.command = 'cat large.mjs'; bash.tool_response.stdout = sb.large; bash.tool_response.stderr = ''
@@ -256,7 +256,7 @@ test('Bash file segments are steered only for reading arms', () => {
     'echo "{ cat secret; }"', 'echo { cat secret; }', 'echo \\{; echo cat',
     'cat 123> output', 'cat "123"> output', 'cat \\123> output',
     // Fails open: output sent to a file, non-printing or -e/-f sed scripts and zero counts are not reads.
-    'cat source.txt > copy.txt', 'cat a >> b', 'cat a 1> b', 'cat f &> out', "sed -n 'd' source.txt",
+    'cat f | wc -l', 'cat f |& wc -l', 'head -n 5 f | grep x', 'cat source.txt > copy.txt', 'cat a >> b', 'cat a 1> b', 'cat f &> out', "sed -n 'd' source.txt",
     "sed -n -e '1,2p' file", "sed -n -e'l' crew/loop.mjs", 'sed -nel crew/loop.mjs', 'sed -ne l crew/loop.mjs',
     'tail -n 0 source.txt', 'head -n0 f', 'head --lines=0 f', 'tail -c 0 f',
     "printf 'x\\n' | sed -n -l 80 '1p'", "printf 'x\\n' | sed -n --line-length 80 '1p'",
@@ -562,6 +562,18 @@ test('hook state is kept per seat session and run, survives restarts, and a bad 
   writeFileSync(store, JSON.stringify(stored))
   assert.equal(fail('a7', 'session-a'), '')
   assert.doesNotMatch(fail('a8', 'session-a'), repeated)
+})
+
+test('a reading arm left out by malformed state does not steer Bash reads', () => {
+  const sb = sandbox()
+  const launch = seat(sb, { extensions: ['readgate'] })
+  const pre = sb.frame('PreToolUse', 'Bash', 'unstarted'); pre.tool_input.command = 'cat f'
+  assert.ok(denial(fire(sb, launch, pre)))
+  const store = sb.stateFiles()[0]
+  const stored = JSON.parse(readFileSync(store, 'utf8'))
+  stored.arms.readgate = 'malformed'
+  writeFileSync(store, JSON.stringify(stored))
+  assertNoEffect(fire(sb, launch, pre))
 })
 
 test('a store that cannot be written changes nothing', { skip: process.getuid?.() === 0 }, () => {

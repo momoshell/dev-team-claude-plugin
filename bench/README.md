@@ -3,7 +3,7 @@
 Reusable replays for choosing seat models and arms. A replay reruns a recorded lean lane's first
 builder or planner turn at the lane's base commit with a seat you name; a blind review then scores
 the results without knowing which seat made which. Nothing here records results: output dirs are
-yours, outside the repo.
+yours, outside the repo. What past runs decided is under "Results so far" below.
 
 - `corpus/<lane>/` — frozen inputs for six lanes (b1380, b1381, b1402, b1408, b1416, b1417):
   `plan.md`, `gate.mjs`, `planner-1.json`, `lean.json`, `brief.md`, `planner-prompt.txt`,
@@ -99,3 +99,41 @@ cite those paths will not apply after scrubbing and shows as an error row, not a
 only under it (seat runtime in `<out>/seat-runtime`). A cell file that is missing or malformed, a seat
 turn that returns a refusal or no stop reason, a missing or malformed return envelope, a planner that wrote no plan.md or gate.mjs, and an unknown arm are all recorded in `result.json.error`
 and exit nonzero.
+
+## Results so far
+
+What the benches decided, so the next model choice starts from it. Raw runs live outside the repo
+under `~/.crew/ab/` (`adv`, `arms`, `arms2`, `lab`); none of it is measured again here.
+
+**Builder, 2026-10-30.** Six lanes × 3 per arm, one shuffled blind batch of 108 diff reviews. Every
+arm had 18/18 green gates and 60/60 mutations killed, so the blind review is the only signal.
+
+| Builder | Blind pass | Must-fix | Tokens | Median wall |
+|---|---|---|---|---|
+| sonnet, Claude Code | 11/18 | 7 | 3.24M | 59s |
+| sonnet, pi bridge | 9/18 | 8 | 3.36M | 58s |
+| sonnet, pi bridge + fff, readgate, skeletonread | 9/18 | 9 | 3.86M | 61s |
+| terra, pi | 12/18 | 6 | 3.35M | 36s |
+| terra, pi + fff, readgate, skeletonread | 12/18 | 6 | 2.48M | 39s |
+| terra, pi + fff, readgate, skeletonread + sol advisor (medium) | 15/18 | 3 | 2.83M | 52s |
+
+The last row is the seated builder (PR 2062). For the same model the adapter made no measurable
+difference (Claude Code vs the pi bridge). The read arms cut terra's tokens by 26% but added 15% on
+sonnet, so measure each arm per model. N is 18 per arm; differences of one or two passes are noise.
+
+**Single arms on a pi terra builder** (18 each, blind): none 12/18, readgate 12/18, skeletonread
+13/18, fff 13/18, builderloop 11/18. builderloop never fired: no edit failed in any run.
+
+**Arms on a Claude builder.** It made 440 of 454 tool calls through Bash, so readgate, skeletonread
+and builderloop had nothing to act on (0 interventions in 24 runs). fff 10/18 and fff + reminders
+9/18 against none 11/17, tokens unchanged. reminders told seats without an fff grant to use fff
+(4 of 6 runs).
+
+**Advisor on a Claude sonnet builder** (6 lanes × 3): none 12/18, terra 10/18, sol 8/18, at +12% and
++27% tokens. In 33 of 36 advisor runs it said nothing, so the pass gap is noise. When made blocking
+on medium findings (PR 2059), each of the 3 runs in 12 where it raised a real finding passed blind
+review. Recall, not precision, is its limit.
+
+**Planner, pi sol high** (18 each, strict blind plan review): plain 3/18 (12 must-fix, 4.90M tokens),
+readgate 6/18 (11, 5.46M), fff 4/18 (10, 5.06M). The lab arm was granted and never called, at +31%
+tokens. A sol advisor on the planner injected 0 notes in 21 consults (blind 4/18 vs 5/18), so it is off.

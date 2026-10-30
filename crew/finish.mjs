@@ -8,7 +8,7 @@
 // `--abandon` ends the lane unpublished. Each appends a `finish-decision` row; a lane takes one decision per ready.
 // Refused, with nothing written: `finish-worktree` (the worktree is gone), `finish-premise` (the lane never reached
 // a build), `finish-running` (a run re-entered or claimed the lane after its stop), `finish-published` and
-// `finish-committed` (nothing uncommitted is left), `finish-no-build` (no accepted builder envelope in the journal).
+// `finish-committed` (nothing uncommitted is left), `finish-no-build` (no schema-valid done or insufficient builder envelope in the journal).
 // The PR carries the measured subject and body, and the notes, exactly (the lane's issues ride on trailer lines); gh pr edit
 // restores that text where opening rewrote issue tokens or the PR was already open. A decision is refused as `finish-not-ready`
 // (the last run did not end finish-ready), `finish-decided` (it already has one), `finish-head-moved` (accept: the checkout is
@@ -154,7 +154,7 @@ export function finishLane({ lane, root, deps = {} }) {
   if (rows.some((row) => row.event === 'pr')) throw new FinishRefusal('finish-published', `lane ${lane} already has a recorded PR`)
   if (rows.some((row) => row.event === 'commit')) throw new FinishRefusal('finish-committed', `lane ${lane} already committed its build`)
 
-  if (!rows.some((row) => row.event === 'envelope' && row.role === 'builder' && Array.isArray(row.defects) && row.defects.length === 0 && row.parsed?.status === 'done')) throw new FinishRefusal('finish-no-build', `lane ${lane} has no accepted builder envelope in its journal`)
+  if (!rows.some((row) => row.event === 'envelope' && row.role === 'builder' && Array.isArray(row.defects) && row.defects.length === 0 && ['done', 'insufficient'].includes(row.parsed?.status))) throw new FinishRefusal('finish-no-build', `lane ${lane} has no schema-valid done or insufficient builder envelope in its journal`)
 
   const finish = finishFor(rows, stopped, stopAt, loadPlan(d, lane, taskDir))
   const claim = claimStop(d, lane, taskDir, stopAt)

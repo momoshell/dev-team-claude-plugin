@@ -37,7 +37,8 @@ ready, decide once:
 
 It refuses, writing nothing, when the worktree is gone, the lane never reached a
 build, a run is still active, the lane is already published or committed, or
-there is no accepted builder result. A decision is refused when the last run did
+there is no schema-valid done or insufficient builder result (including absent or
+defective returns). A decision is refused when the last run did
 not end ready, the lane already has one, or (for `--accept`) the checkout is no
 longer the head the run measured. Read the refusal; it names the cause.
 

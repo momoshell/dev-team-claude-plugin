@@ -14,7 +14,8 @@ const PLANNER = {
   role: 'planner', id: 'lane9.planner.1', status: 'done', summary: 'planned',
   details: { subject: 'fix(crew): planned lane', plan_path: '/t/plan.md', gate_path: '/t/gate.mjs', acceptance: ['A1'], mutations: [MUTATION] },
 }
-const builderRow = { event: 'envelope', role: 'builder', id: 'lane9.builder.2', parsed: { status: 'done' }, defects: [], error: null }
+const BUILDER = { role: 'builder', id: 'lane9.builder.2', status: 'done', summary: 'built', details: { summary: 'built the change' } }
+const builderRow = { event: 'envelope', role: 'builder', id: BUILDER.id, parsed: BUILDER, defects: [], error: null }
 
 // A temp crew root holding one stopped lane; nothing is spawned and the worktree is a temp directory.
 function fixture({ stage = 'mutations', builder = true, worktree = true, review = 'changes-needed', rows = null } = {}) {
@@ -46,16 +47,32 @@ const refusal = (f) => { try { run(f).go() } catch (e) { return e } return null 
 const cleanup = (f) => rmSync(f.base, { recursive: true, force: true })
 
 // MUTATION: skip the build check and a lane with no accepted builder envelope is finished anyway.
-test('a lane with no accepted builder envelope is refused as finish-no-build, and a malformed or non-done one does not count', () => {
+test('a lane with no qualifying builder envelope is refused as finish-no-build', () => {
   const f = fixture({ builder: false })
   try {
     const error = refusal(f)
     assert.ok(error instanceof FinishRefusal)
     assert.equal(error.reason, 'finish-no-build')
   } finally { cleanup(f) }
-  for (const row of [{ ...builderRow, defects: ['x'] }, { ...builderRow, parsed: { status: 'insufficient' } }, { ...builderRow, role: 'reviewer' }]) {
+  for (const row of [
+    { ...builderRow, defects: ['x'] },
+    { ...builderRow, parsed: { ...BUILDER, status: 'insufficient' }, defects: ['x'] },
+    { ...builderRow, parsed: { ...BUILDER, status: 'escalate' } },
+    { ...builderRow, role: 'reviewer' },
+    { ...builderRow, parsed: null },
+    { ...builderRow, parsed: {} },
+    { ...builderRow, defects: null },
+    { ...builderRow, defects: undefined },
+  ]) {
     const g = fixture({ rows: [{ event: 'run-start' }, row, { event: 'verdict', stage: 'review', status: 'stopped', reason: 'round-bound' }] })
-    try { assert.equal(refusal(g)?.reason, 'finish-no-build') } finally { cleanup(g) }
+    try {
+      const r = run(g)
+      const before = readFileSync(join(g.taskDir, 'journal.jsonl'), 'utf8')
+      assert.throws(r.go, (e) => e instanceof FinishRefusal && e.reason === 'finish-no-build')
+      assert.deepEqual(r.spawned, [])
+      assert.equal(existsSync(join(g.taskDir, 'finish.json')), false)
+      assert.equal(readFileSync(join(g.taskDir, 'journal.jsonl'), 'utf8'), before)
+    } finally { cleanup(g) }
   }
 })
 
@@ -122,6 +139,28 @@ test('a stopped lane with a build is finished: finish.json carries the stop, fin
     assert.equal(r.spawned[0].opts.log, join(f.root, 'briefs', 'started', 'lane9.run.log'))
     assert.equal(r.spawned[0].opts.env.CREW_SUITE_SLOTS, '0')
     assert.deepEqual(out, { lane: 'lane9', worktree: f.cwd, specPath: join(f.taskDir, 'finish.json'), pid: 4242 })
+  } finally { cleanup(f) }
+})
+
+test('a schema-valid insufficient build stopped after build can be finished', () => {
+  const f = fixture({ rows: [
+    { event: 'run-start', stage: null },
+    { event: 'stage-start', stage: 'build' },
+    { ...builderRow, parsed: { ...BUILDER, status: 'insufficient' } },
+    { event: 'stage-end', stage: 'build' },
+    { event: 'verdict', stage: null, status: 'stopped', reason: 'lead-escalated' },
+  ] })
+  try {
+    const change = join(f.cwd, 'change.txt')
+    writeFileSync(change, 'uncommitted build')
+    const before = readFileSync(join(f.taskDir, 'lean.json'), 'utf8')
+    const r = run(f)
+    r.go()
+    assert.equal(readFileSync(join(f.taskDir, 'lean.json'), 'utf8'), before)
+    assert.equal(readFileSync(change, 'utf8'), 'uncommitted build')
+    assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.stop.reason, 'lead-escalated')
+    assert.equal(r.spawned.length, 1)
+    assert.equal(r.spawned[0].opts.cwd, f.cwd)
   } finally { cleanup(f) }
 })
 

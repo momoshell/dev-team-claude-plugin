@@ -45,6 +45,12 @@ function fakes(options = {}) {
       if (options.readError) throw Object.assign(new Error('denied'), { code: options.readError })
       return returns.get(path) ?? ''
     },
+    // the planner's two artifacts exist as virtual regular files inside the virtual task dir
+    stat: async (path) => {
+      if (!['/virtual/task/plan.md', '/virtual/task/gate.mjs'].includes(path)) throw Object.assign(new Error(`no ${path}`), { code: 'ENOENT' })
+      return { isFile: () => true }
+    },
+    realpath: async (path) => path,
     writeFile: async (path, content) => { if (options.writeError) throw Object.assign(new Error('denied'), { code: options.writeError }); writes.set(path, String(content)) },
     journal: options.journal ?? (async (row) => { rows.push(structuredClone(row)) }),
     runSeat: async (request) => {
@@ -1348,4 +1354,55 @@ test('every journaled row carries one read of the injected clock, and a throwing
   assert.ok(plain.rows.every((r) => Number.isFinite(r.at)))
   const broken = fakes({ deps: { now: () => { throw new Error('clock') } } })
   await assert.doesNotReject(broken.go())
+})
+
+// A planner's plan_path and gate_path must name existing regular files inside the task dir.
+const pathed = (details) => (v) => (v.role === 'planner' ? { ...v, details: { ...v.details, ...details } } : v)
+const regular = async (path) => {
+  if (!['/virtual/task/plan.md', '/virtual/task/gate.mjs', '/virtual/outside.mjs', '/virtual/task-sibling/gate.mjs', '/virtual/task/link.mjs'].includes(path)) {
+    if (path === '/virtual/task' || path === '/virtual/task/dir') return { isFile: () => false }
+    throw Object.assign(new Error(`no ${path}`), { code: 'ENOENT' })
+  }
+  return { isFile: () => true }
+}
+
+// MUTATION: drop plan_path from the artifact iteration and a line-range suffix is accepted.
+test('a planner return whose plan_path is missing, a directory or carries a line-range suffix is refused naming plan_path (PP1)', async () => {
+  for (const plan_path of ['/virtual/task/plan.md:1-42', 'plan.md:1-42', '/virtual/task/missing.md', '/virtual/task/dir']) {
+    const f = fakes({ edit: pathed({ plan_path }), deps: { stat: regular } })
+    assert.deepEqual(await f.go(), stopped('envelope-refused'), plan_path)
+    assert.equal(count(f, 'planner'), 2)
+    assert.ok(f.requests[1].repair.defects.some((d) => d.includes('plan_path')))
+    assert.ok(!f.calls.includes('baseline') && !f.calls.includes('seat:builder'))
+  }
+  // a file that really carries the suffix in its name is still a citation, not a path
+  const named = fakes({ edit: pathed({ plan_path: '/virtual/task/plan.md:1-42' }), deps: { stat: async () => ({ isFile: () => true }) } })
+  assert.equal((await named.go()).reason, 'envelope-refused')
+  assert.ok(named.requests[1].repair.defects.some((d) => d.includes('plan_path') && d.includes('line-range')))
+  const denied = fakes({ deps: { stat: async () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }) } } })
+  assert.equal((await denied.go()).reason, 'envelope-refused')
+  assert.ok(denied.requests[1].repair.defects.some((d) => d.includes('plan_path') && d.includes('denied')))
+})
+
+// MUTATION: drop gate_path from the artifact iteration and a gate outside the task dir is accepted.
+test('a planner return whose gate_path leaves the task dir is refused naming gate_path (PP2)', async () => {
+  for (const gate_path of ['/virtual/outside.mjs', '../outside.mjs', '/virtual/task-sibling/gate.mjs', '/virtual/task', 'link.mjs']) {
+    const f = fakes({ edit: pathed({ gate_path }), deps: { stat: regular, realpath: async (p) => (p === '/virtual/task/link.mjs' ? '/virtual/outside.mjs' : p) } })
+    assert.deepEqual(await f.go(), stopped('envelope-refused'), gate_path)
+    assert.ok(f.requests[1].repair.defects.some((d) => d.includes('gate_path')))
+    assert.ok(!f.calls.includes('baseline'))
+  }
+})
+
+// MUTATION: force the validity predicate false and an accepted return is refused.
+test('a planner return naming existing task-dir files is accepted, a relative path is read against the task dir, and a repair costs no round (PP3)', async () => {
+  const f = fakes({ edit: pathed({ plan_path: 'plan.md', gate_path: './gate.mjs' }), deps: { stat: regular } })
+  assert.equal((await f.go()).status, 'done')
+  assert.equal(count(f, 'planner'), 1)
+  assert.equal(f.seen.baseline.gatePath, '/virtual/task/gate.mjs')
+  const repaired = fakes({ edit: (v, r) => pathed({ plan_path: r.repair ? '/virtual/task/plan.md' : '/virtual/task/plan.md:1-42' })(v), deps: { stat: regular } })
+  assert.equal((await repaired.go()).status, 'done')
+  assert.equal(count(repaired, 'planner'), 2)
+  assert.equal(repaired.requests[1].id, repaired.requests[0].id)
+  assert.equal(repaired.requests[1].returnPath, repaired.requests[0].returnPath)
 })

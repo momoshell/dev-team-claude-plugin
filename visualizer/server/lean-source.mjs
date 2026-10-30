@@ -148,6 +148,16 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
     mode: 'lean lanes record no mode',
   }
 
+  function summarizeCheckResult(result) {
+    if (!isObject(result)) return null
+    return {
+      accepted: result.accepted,
+      status: result.status,
+      code: result.code,
+      ...(isObject(result.result) ? { result: { status: result.result.status } } : {}),
+    }
+  }
+
   function summarize(found) {
     const { rows, skipped_malformed, error } = readJournalRows(found)
     const phases = []
@@ -167,7 +177,7 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
         if (phase) { phase.status = outcome; phase.ended_at = at } else phases.push({ id: phases.length + 1, name: stage, status: outcome, checks: [], started_at: null, ended_at: at })
       } else if (row.event === 'check' && stage) {
         const phase = phases.findLast((entry) => entry.name === stage)
-        const check = { check: row.check ?? null, result: row.result ?? null }
+        const check = { check: row.check ?? null, result: summarizeCheckResult(row.result) }
         if (phase) phase.checks.push(check)
         else phases.push({ id: phases.length + 1, name: stage, status: 'running', checks: [check], started_at: null, ended_at: null })
       } else if (row.event === VERDICT_EVENT && stage && !phases.some((entry) => entry.name === stage)) {

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { appendFileSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { startServer } from '../visualizer/server/server.mjs'
+import { leanCheckStatus } from '../visualizer/web/src/lib/lean.js'
 import { scratchDir } from './helpers.mjs'
 
 const jsonl = (rows) => rows.map((row) => JSON.stringify(row)).join('\n') + '\n'
@@ -52,6 +53,57 @@ test('LV1 lists live, archived and sibling-archive lanes with their latest stage
     assert.equal((await get('/api/sessions')).body.runs.find((run) => run.adw_id === 'lean:a-open').latest_stage, 'again')
     assert.ok((await get('/api/sessions?mode=x')).body.runs.every((run) => run.source !== 'lean'))
     assert.ok((await get('/api/sessions?since=2026-01-01T00%3A00%3A00.000Z')).body.runs.every((run) => run.source !== 'lean'))
+  })
+})
+
+test('VS1 sessions whitelist check results while journal retains full evidence', async () => {
+  await withServer(async ({ crewRoot, get }) => {
+    const payload = { stdout: 'OUT'.repeat(1000), stderr: 'ERR'.repeat(1000), mutations: [{ secret: 'MUTATION' }], metadata: 'EXTRA' }
+    const result = { ...payload, accepted: true, status: 'failed', code: 7, result: { ...payload, status: 'green' } }
+    const rows = [
+      { event: 'check', stage: 'early', check: 'before', result },
+      { event: 'stage-start', stage: 'build' },
+      { event: 'check', stage: 'build', check: 'inside', result },
+    ]
+    lane(crewRoot, 'slim', rows)
+    const run = (await get('/api/sessions')).body.runs.find((r) => r.goal === 'slim')
+    const checks = run.phases.flatMap((phase) => phase.checks)
+    assert.deepEqual(checks.map((check) => check.check), ['before', 'inside'])
+    for (const check of checks) assert.deepEqual(check.result, { accepted: true, status: 'failed', code: 7, result: { status: 'green' } })
+    assert.doesNotMatch(JSON.stringify(checks), /OUT|ERR|MUTATION|EXTRA|stdout|stderr|mutations|metadata/)
+    const journal = (await get(`/api/journal?${q('slim')}`)).body
+    assert.deepEqual(journal.rows.filter((row) => row.event === 'check').map((row) => row.result), [result, result])
+  })
+})
+
+test('VS2 listed check statuses match full journal rows', async () => {
+  await withServer(async ({ crewRoot, get }) => {
+    const cases = [
+      [{ accepted: true, result: { status: 'red' } }, 'Baseline accepted · checks failed', 'attention'],
+      [{ accepted: true, result: { status: 'green' } }, 'Baseline accepted · checks passed', 'ok'],
+      [{ accepted: true }, 'Baseline accepted · outcome not recorded', 'quiet'],
+      [{ accepted: false, status: 'green', code: 0 }, 'Baseline rejected', 'fail'],
+      ...[['green', 'Checks passed', 'ok'], ['red', 'Checks failed', 'fail'], ['done', 'Stage ended', 'ok'],
+        ...['ok', 'pass', 'passed', 'completed', 'success', 'reviewed'].map((s) => [s, s, 'ok']),
+        ...['failed', 'fail', 'error'].map((s) => [s, s, 'fail']),
+        ...['stopped', 'blocked', 'escalated', 'changes-needed'].map((s) => [s, s.replaceAll('-', ' '), 'attention']),
+        ['running', 'No stage-end record', 'quiet'], ['skipped', 'Skipped', 'quiet'], ['mystery', 'mystery', 'quiet']
+      ].map(([status, label, tone]) => [{ status, code: 9 }, label, tone]),
+      [{ code: 0 }, 'Exit code 0 recorded', 'quiet'],
+      [{ code: 3 }, 'Exit code 3 recorded', 'fail'],
+      [{ code: -1 }, 'Exit code -1 recorded', 'fail'],
+      ...[{ code: '0' }, null, 'text', 4, [], {}].map((result) => [result, 'Outcome not recorded', 'quiet']),
+      [undefined, 'Outcome not recorded', 'quiet'],
+    ]
+    const rows = cases.map(([result], i) => ({ event: 'check', stage: 'build', ...(i ? { check: `check-${i}` } : {}), result }))
+    lane(crewRoot, 'statuses', [{ event: 'stage-start', stage: 'build' }, ...rows])
+    const checks = (await get('/api/sessions')).body.runs.find((r) => r.goal === 'statuses').phases[0].checks
+    assert.equal(checks[0].check, null)
+    assert.equal(checks.length, rows.length)
+    cases.forEach(([, label, tone], i) => {
+      assert.deepEqual(leanCheckStatus(rows[i]), { label, tone })
+      assert.deepEqual(leanCheckStatus(checks[i]), { label, tone })
+    })
   })
 })
 

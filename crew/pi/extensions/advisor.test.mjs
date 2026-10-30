@@ -1781,6 +1781,22 @@ function triggerSeat({ severity = 'high', claim = 'must-fix: the empty path is u
   return { f, journal, diff, a, ground, payloads, spawned: () => spawned, ret: join(f.taskDir, 'builder-1.json') }
 }
 
+for (const severity of ['medium', 'high']) test(`a ${severity} diff-growth finding is delivered and never refuses the call it rides on or a later write`, async () => {
+  const sent = []
+  const s = triggerSeat({ severity, claim: 'the diff leaves an edge unanswered', extraDeps: { send: (message) => { sent.push(message) } } })
+  try {
+    s.ground()
+    s.diff.lines = 0; s.diff.entries = ['lib/widget.mjs:1: x']
+    const run = async (id) => { const verdict = await s.a.onToolCall(call(id, 'bash', { command: 'sed -i x' }), {}); s.a.onToolResult({ toolCallId: id, toolName: 'bash', input: { command: 'sed -i x' }, content: [{ type: 'text', text: 'ok' }] }, {}); await s.a.settled(); return verdict }
+    assert.equal(await run('b0'), undefined)
+    s.diff.lines = advisor.DIFF_GROWTH_LINES
+    assert.equal(await run('b1'), undefined)
+    assert.equal(s.spawned(), 1)
+    assert.equal(sent.length, 1)
+    assert.equal(await s.a.onToolCall(call('w', 'write', { path: join(s.f.tree, 'lib/widget.mjs'), content: 'x' }), {}), undefined)
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
 test('DT2 a pi bash call that grows the working diff by the threshold queues one tier-1 diff-growth consult; growth below it does not', async () => {
   const s = triggerSeat({ severity: 'medium', claim: 'the diff leaves an edge unanswered' })
   try {
@@ -1914,8 +1930,9 @@ test('a consult spells the cell model as pi seats do', async () => {
   } finally { rmSync(s.f.root, { recursive: true, force: true }) }
 })
 
-test('a pre-return consult never fires for other paths, and a non-high finding lets the write through', async () => {
-  const s = triggerSeat({ severity: 'medium' })
+test('a pre-return consult never fires for other paths, and a low finding lets the write through and is steered', async () => {
+  const sent = []
+  const s = triggerSeat({ severity: 'low', extraDeps: { send: (message) => { sent.push(message) } } })
   try {
     s.ground()
     assert.equal(await s.a.onToolCall(call('w1', 'write', { path: join(s.f.tree, 'lib/widget.mjs'), content: 'x' }), {}), undefined)
@@ -1924,8 +1941,28 @@ test('a pre-return consult never fires for other paths, and a non-high finding l
     assert.equal(s.spawned(), 0)
     assert.equal(await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}' }), {}), undefined)
     assert.equal(s.spawned(), 1)
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].content, 'must-fix: the empty path is unhandled')
   } finally { rmSync(s.f.root, { recursive: true, force: true }) }
 })
+
+for (const severity of ['medium', 'high']) {
+  test(`a ${severity} pre-return finding refuses the write and bash return with its claim, once, and is not also steered`, async () => {
+    const sent = []
+    const s = triggerSeat({ severity, extraDeps: { send: (message) => { sent.push(message) } } })
+    try {
+      s.ground()
+      const claim = 'must-fix: the empty path is unhandled'
+      assert.deepEqual(await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}' }), {}), { block: true, reason: claim })
+      assert.equal(s.spawned(), 1)
+      assert.equal(s.a.exportState().pre_return_spent, true)
+      assert.equal(sent.length, 0)
+      assert.equal(await s.a.onToolCall(call('r2', 'write', { path: s.ret, content: '{}' }), {}), undefined)
+      assert.equal(await s.a.onToolCall(call('r3', 'bash', { command: `cat > ${s.ret} <<EOF\n{}\nEOF` }), {}), undefined)
+      assert.equal(s.spawned(), 1)
+    } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+  })
+}
 
 test('PR4 a pre-return consult past its time bound lets the return write through and journals the timeout', async () => {
   const s = triggerSeat({ hang: true, extraDeps: { consultTimeoutMs: 25, childKillGraceMs: 5 } })
@@ -2003,8 +2040,8 @@ test('a real untracked text file past the read cap is counted exactly by the str
 })
 
 // MUTATION: let dedupe or one-per-update suppress a pre-return finding and an earlier warning lets the return through.
-test('a must-fix pre-return finding blocks even when diff growth already delivered the same claim', async () => {
-  const s = triggerSeat()
+for (const severity of ['medium', 'high']) test(`a ${severity} pre-return finding blocks even when diff growth already delivered the same claim`, async () => {
+  const s = triggerSeat({ severity })
   try {
     s.ground()
     s.diff.lines = 0; s.diff.entries = ['lib/widget.mjs:1: x']

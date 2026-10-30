@@ -219,6 +219,8 @@ function bashFileRead(command) {
       while (i + 1 < command.length && (command[i + 1] === ch || (ch === '<' && op === '<<' && command[i + 1] === '-'))) op += command[++i]
       if (command[i + 1] === '&') {
         i++
+        // `>&-` closes stdout: nothing is printed.
+        if (command[i + 1] === '-' && command[start] === '>' && (fd === '' || fd === '1')) outputElsewhere = true
         if (/[0-9-]/.test(command[i + 1] ?? '')) while (/[0-9-]/.test(command[i + 1] ?? '')) i++
         else redirect = op
       }
@@ -248,6 +250,12 @@ function bashFileRead(command) {
       const arg = args[i]
       if (options && arg === '--') { options = false; continue }
       if (options && arg.startsWith('-') && arg !== '-') {
+        // Fail open on any option whose printing behaviour is not known (`cat --help f`, `cat -Z f`).
+        const known = program === 'cat' ? false
+          : program === 'head' || program === 'tail' ? /^(?:-\d+|-[qv]*(?:[nc]\d*)?|--(?:lines|bytes)(?:=.*)?|--(?:quiet|silent|verbose))$/.test(arg)
+            : program === 'sed' ? /^(?:-[ne]+|-[n]*[ef].*|--quiet|--silent|--(?:expression|file)(?:=.*)?)$/.test(arg)
+              : /^(?:-[bdfhilnsvw].*|--[a-z-]+(?:=.*)?)$/.test(arg)
+        if (!known) return false
         // Short sed options after e/f/l belong to that option's argument, not the option cluster.
         const sedShort = program === 'sed' && /^-([^-efl]*)([efl])(.*)$/.exec(arg)
         if (program === 'sed' && (arg === '--quiet' || arg === '--silent' ||

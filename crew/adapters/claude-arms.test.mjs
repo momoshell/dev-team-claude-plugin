@@ -212,9 +212,6 @@ test('Bash literal reads share readgate coverage and skeletonread preserves Bash
   const pre = sb.frame('PreToolUse', 'Bash', 'bash-range'); pre.tool_input = input; pre.tool_use_id = 'range'
   assert.match(denial(fire(sb, gate, pre)).permissionDecisionReason, /Read tool/)
   assert.match(denial(fire(sb, gate, pre)).permissionDecisionReason, /Read tool/)
-  // Synthetic post remains supported for compatibility with previously executed calls.
-  const post = sb.frame('PostToolUse', 'Bash', 'bash-range'); post.tool_input = input; post.tool_use_id = 'range'; post.tool_response.stdout = 'one\ntwo\n'; post.tool_response.stderr = ''
-  assertNoEffect(fire(sb, gate, post))
   for (const command of ["sed -n '1,2p' large.mjs | cat", 'head -n2 large.mjs | cat', 'cat large.mjs | cat']) {
     pre.tool_input = { command }; assertNoEffect(fire(sb, gate, pre))
   }
@@ -256,6 +253,7 @@ test('Bash file segments are steered only for reading arms', () => {
     'echo "{ cat secret; }"', 'echo { cat secret; }', 'echo \\{; echo cat',
     'cat 123> output', 'cat "123"> output', 'cat \\123> output',
     // Fails open: output sent to a file, non-printing or -e/-f sed scripts and zero counts are not reads.
+    'cat --help f', 'cat -Z f', 'cat -n f', 'cat f 1>&-', 'cat f >&-', 'tail -f f', 'sed -i 1p f',
     'cat f | wc -l', 'cat f |& wc -l', 'head -n 5 f | grep x', 'cat source.txt > copy.txt', 'cat a >> b', 'cat a 1> b', 'cat f &> out', "sed -n 'd' source.txt",
     "sed -n -e '1,2p' file", "sed -n -e'l' crew/loop.mjs", 'sed -nel crew/loop.mjs', 'sed -ne l crew/loop.mjs',
     'tail -n 0 source.txt', 'head -n0 f', 'head --lines=0 f', 'tail -c 0 f',

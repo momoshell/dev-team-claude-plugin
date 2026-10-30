@@ -145,6 +145,48 @@ test('execution applies the coded change, runs the reviewer, cleans up and keeps
   assert(reveal({ out, keyPath }).every((r) => r.verdict === 'pass'))
 })
 
+test('diff and plan commits bypass inherited refusing hooks only in disposable worktrees', async () => {
+  const { repo, base } = reviewRepo()
+  const hooks = fresh('hooks'), sentinel = fresh('hook-ran')
+  mkdirSync(hooks)
+  const hook = join(hooks, 'pre-commit')
+  const hookText = `#!/bin/sh\necho ran > '${sentinel}'\nexit 1\n`
+  put(hook, hookText); chmodSync(hook, 0o755)
+  const git = (...args) => spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8' })
+  assert.equal(git('config', 'core.hooksPath', hooks).status, 0)
+  const probe = git('-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '--allow-empty', '-m', 'probe')
+  assert.notEqual(probe.status, 0)
+  assert(existsSync(sentinel))
+  rmSync(sentinel)
+  const status = git('status', '--porcelain').stdout
+  const runs = makeRuns(1)
+  put(join(runs[0], 'diff.patch'), 'diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n')
+  for (const kind of ['diff', 'plan']) {
+    const out = fresh('reviews')
+    const jobs = (await prepareReviews({ runs, kind, out, keyPath: fresh('k') + '/key.json' })).map((j) => ({ ...j, base }))
+    const reviewer = fresh('reviewer') + '.sh'
+    const contentCheck = kind === 'diff'
+      ? '[ "$(git -C "$R" show HEAD:x)" = b ]'
+      : '[ "$(git -C "$R" show HEAD:lane/plan.md)" = "$(cat "$R/lane/plan.md")" ] && git -C "$R" cat-file -e HEAD:lane/gate.mjs'
+    put(reviewer, `#!/bin/sh\nwhile [ $# -gt 0 ]; do case $1 in --repo) R=$2;; --base) B=$2;; esac; shift; done\n[ "$R" != '${repo}' ] && [ "$(git -C "$R" rev-parse HEAD^)" = "$B" ] && [ "$(git -C "$R" log -1 --format='%an <%ae>')" = 'bench <bench@example.invalid>' ] && ${contentCheck} && echo 'REVIEW-VERDICT: pass'\n`)
+    chmodSync(reviewer, 0o755)
+    const [result] = await runReviews({ jobs, out, reviewer, repo, home: fakeHome() })
+    assert.equal(result.status, 'ok', result.error)
+    assert.equal(result.verdict, 'pass')
+    assert.deepEqual(json(join(out, `result-${result.code}.json`)), result)
+    assert.deepEqual(json(join(out, 'results.json')), [result])
+    assert(!existsSync(sentinel))
+    assert.equal(git('rev-parse', 'HEAD').stdout.trim(), base)
+    assert.equal(git('status', '--porcelain').stdout, status)
+    assert.equal(readFileSync(join(repo, 'x'), 'utf8'), 'a\n')
+    assert(!existsSync(join(repo, 'lane')))
+    assert.equal(readFileSync(hook, 'utf8'), hookText)
+    assert.equal(git('config', 'core.hooksPath').stdout.trim(), hooks)
+    assert.equal(git('worktree', 'list', '--porcelain').stdout.match(/^worktree /gm).length, 1)
+    assert.equal(git('branch', '--list', 'rv-*').stdout.trim(), '')
+  }
+})
+
 test('a failed worktree cleanup turns an otherwise good review into an error result', async () => {
   const { repo, base } = reviewRepo()
   const runs = makeRuns(1)

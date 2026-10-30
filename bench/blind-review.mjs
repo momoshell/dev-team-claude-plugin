@@ -146,7 +146,7 @@ function runReviewer(reviewer, args, outFile, home) {
   })
 }
 
-const GIT_ID = ['-c', 'user.name=bench', '-c', 'user.email=bench@example.invalid', '-c', 'commit.gpgsign=false']
+const GIT_ID = ['-c', 'user.name=bench', '-c', 'user.email=bench@example.invalid', '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null']
 
 async function reviewOne(job, { out, repo, reviewer, home, homeError }) {
   const code = job.code

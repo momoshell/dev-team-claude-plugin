@@ -406,7 +406,7 @@ export function writeSeatArms({ taskDir, role, grants, cwd, editAssist = null, e
   const arms = acpArms(grants, role, editAssist)
   if (arms.length === 0) return
   assertInsideTaskDir(armsPluginDir({ taskDir, role }), taskDir, deps)
-  writeArmsPlugin({ taskDir, role, arms, cwd, editAssist, laneTaskDir: env.CREW_TASK_DIR, layout: env.CREW_CONTEXT_LAYOUT }, deps)
+  writeArmsPlugin({ taskDir, role, arms, cwd, editAssist, fff: hasFffGrant(grants), laneTaskDir: env.CREW_TASK_DIR, layout: env.CREW_CONTEXT_LAYOUT }, deps)
 }
 
 function assertArmsMaterialised({ taskDir, role, arms }) {

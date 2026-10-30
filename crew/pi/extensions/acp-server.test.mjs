@@ -409,6 +409,34 @@ test('the stop-reason map is closed over ACP_STOP_REASONS and an errored run ans
     const reply = await h.wait((f) => f.id === 7, 'errored prompt response')
     assert.equal(reply.result, undefined)
     assert.equal(reply.error.data.errorKind, 'pi-agent-error')
+    assert.equal(reply.error.data.errorMessage, 'provider down')
+
+    const run = async (id, batches) => {
+      const count = h.prompts.length
+      h.send({ jsonrpc: '2.0', id, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'x' }] } })
+      for (let i = 0; i < 100 && h.prompts.length === count; i += 1) await sleep(5)
+      assert.equal(h.prompts.length, count + 1)
+      for (const messages of batches) h.emit('agent_end', { messages })
+      h.emit('agent_before_settle', { outcome: 'error' })
+      h.emit('agent_settled')
+      const response = await h.wait((f) => f.id === id, 'errored prompt response')
+      assert.equal(response.result, undefined)
+      assert.equal(response.error.code, -32603)
+      assert.equal(response.error.data.errorKind, 'pi-agent-error')
+      return response.error.data
+    }
+    const assistant = (fields = {}) => ({ role: 'assistant', stopReason: 'error', ...fields })
+    assert.equal((await run(8, [
+      [assistant({ errorMessage: 'older event' })],
+      [assistant({ errorMessage: 'older assistant' }), assistant({ errorMessage: 'last detail' }), { role: 'toolResult', errorMessage: 'ignored' }],
+    ])).errorMessage, 'last detail')
+    assert.equal((await run(9, [[assistant({ errorMessage: '' })]])).errorMessage, '')
+    const missing = await run(10, [
+      [assistant({ errorMessage: 'older event' })],
+      [assistant({ errorMessage: 'older assistant' }), assistant(), { role: 'user', errorMessage: 'ignored' }],
+    ])
+    assert.equal(Object.hasOwn(missing, 'errorMessage'), false)
+    assert.equal(Object.hasOwn(await run(11, [[assistant()]]), 'errorMessage'), false)
   } finally { h.close() }
 })
 

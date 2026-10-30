@@ -271,7 +271,7 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     if (session.cancelled) throw acpRefuse('acp-session-cancelled', `acp session ${session.id} was cancelled and accepts no further prompt`)
     const frame = request('session/prompt', { sessionId: session.id, prompt: blocks })
     if (frame.error) {
-      const refusal = { code: frame.error.code ?? null, message: frame.error.message ?? null, errorKind: frame.error?.data?.errorKind ?? null }
+      const refusal = { code: frame.error.code ?? null, message: frame.error.message ?? null, errorKind: frame.error?.data?.errorKind ?? null, ...(typeof frame.error?.data?.errorMessage === 'string' ? { errorMessage: frame.error.data.errorMessage } : {}) }
       log({ at: now(), acp_turn_refused: { role, ...refusal } })
       return { stopReason: null, usage: null, refusal }
     }
@@ -306,7 +306,7 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     const frame = responses.get(id)
     responses.delete(id)
     if (frame.error) {
-      const refusal = { code: frame.error.code ?? null, message: frame.error.message ?? null, errorKind: frame.error?.data?.errorKind ?? null }
+      const refusal = { code: frame.error.code ?? null, message: frame.error.message ?? null, errorKind: frame.error?.data?.errorKind ?? null, ...(typeof frame.error?.data?.errorMessage === 'string' ? { errorMessage: frame.error.data.errorMessage } : {}) }
       log({ at: now(), acp_turn_refused: { role, ...refusal } })
       return { stopReason: null, usage: null, refusal }
     }

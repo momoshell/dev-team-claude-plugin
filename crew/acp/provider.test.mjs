@@ -13,6 +13,24 @@ test('acpProviderFailureKind maps the ACP error kinds onto the provider failure 
   for (const kind of ['', 'other', null, undefined]) assert.equal(acpProviderFailureKind(kind), null)
 })
 
+test('pi provider messages classify only measured failures and retain retry policy', () => {
+  const overload = 'Codex error: Our servers are currently overloaded. Please try again later.'
+  const limit = 'Codex error: The usage limit has been reached'
+  const serverKind = acpProviderFailureKind('pi-agent-error', overload)
+  const limitKind = acpProviderFailureKind('pi-agent-error', limit)
+  assert.equal(serverKind, PROVIDER_FAILURE_KINDS.SERVER_ERROR)
+  assert.equal(limitKind, PROVIDER_FAILURE_KINDS.RATE_LIMIT)
+  assert.equal(providerRetryDecision({ kind: serverKind }).action, 'backoff')
+  assert.equal(providerRetryDecision({ kind: serverKind }).retry, true)
+  assert.equal(providerRetryDecision({ kind: limitKind }).action, 'park')
+  assert.equal(providerRetryDecision({ kind: limitKind }).retry, false)
+  for (const message of ['WebSocket error', 'unrecognised', undefined, null, 42, {}, `${overload} `]) assert.equal(acpProviderFailureKind('pi-agent-error', message), null)
+  for (const message of [overload, limit]) assert.equal(acpProviderFailureKind('other', message), null)
+  assert.equal(acpProviderFailureKind('rate_limit', overload), PROVIDER_FAILURE_KINDS.RATE_LIMIT)
+  assert.equal(acpProviderFailureKind('overloaded', limit), PROVIDER_FAILURE_KINDS.SERVER_ERROR)
+  assert.equal(acpProviderFailureKind('authentication_failed', overload), PROVIDER_FAILURE_KINDS.AUTHENTICATION_FAILED)
+})
+
 test('ACP text reset resolves strict wall-clock rollover and DST instants', () => {
   const rows = [
     ['resets 11pm (Europe/Belgrade)', '2026-10-10T20:28:54Z', '2026-10-10T21:00:00Z'],

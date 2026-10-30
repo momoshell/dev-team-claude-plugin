@@ -1,0 +1,42 @@
+{
+  "role": "planner",
+  "id": "b1416-loop-checks-after-rebase.planner.1",
+  "status": "done",
+  "summary": "Plan and behavioural gate for rerunning gate+suite after a head-moving rebase, before publish/finish-ready, with no rerun on an unchanged head.",
+  "details": {
+    "subject": "fix(crew): publish measured lane results",
+    "plan_path": "/Users/momoshell/.crew/dt-b1416-loop-checks-after-rebase/b1416-loop-checks-after-rebase/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1416-loop-checks-after-rebase/b1416-loop-checks-after-rebase/task/gate.mjs",
+    "acceptance": [
+      "RB1",
+      "RB2",
+      "RB3"
+    ],
+    "mutations": [
+      {
+        "check": "RB1",
+        "file": "crew/loop.mjs",
+        "find": "if (rebased.head !== committed.head) {",
+        "replace": "if (false) {"
+      },
+      {
+        "check": "RB2",
+        "file": "crew/loop.mjs",
+        "find": "if (postSuite.status !== 'green') return stop(postSuite.reason, postSuite)",
+        "replace": "if (false) return stop(postSuite.reason, postSuite)"
+      },
+      {
+        "check": "RB3",
+        "file": "crew/loop.mjs",
+        "find": "if (rebased.head !== committed.head) {",
+        "replace": "if (true) {"
+      }
+    ],
+    "files_in_scope": [
+      "crew/loop.mjs",
+      "crew/loop.test.mjs"
+    ],
+    "validation_lane": "node --test crew/loop.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1416-loop-checks-after-rebase/b1416-loop-checks-after-rebase/task/gate.mjs"
+  }
+}

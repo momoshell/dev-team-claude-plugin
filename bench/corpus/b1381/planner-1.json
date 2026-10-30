@@ -1,0 +1,32 @@
+{
+  "role": "planner",
+  "id": "b1381-lean-provider-retry.planner.1",
+  "status": "done",
+  "summary": "Authored the minimal retry/usage plan and PR1–PR3 behavioral gate; execution remains with the loop.",
+  "details": {
+    "subject": "fix(crew): retry lean provider failures and record turn usage",
+    "plan_path": "/Users/momoshell/.crew/dt-b1381-lean-provider-retry/b1381-lean-provider-retry/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1381-lean-provider-retry/b1381-lean-provider-retry/task/gate.mjs",
+    "acceptance": ["PR1", "PR2", "PR3"],
+    "mutations": [
+      {
+        "check": "PR1",
+        "file": "crew/lean.mjs",
+        "find": "const kind = acpProviderFailureKind(turn?.refusal?.errorKind)",
+        "replace": "const kind = null"
+      },
+      {
+        "check": "PR2",
+        "file": "crew/lean.mjs",
+        "find": "const kind = acpProviderFailureKind(turn?.refusal?.errorKind)",
+        "replace": "const kind = acpProviderFailureKind('server_error')"
+      },
+      {
+        "check": "PR3",
+        "file": "crew/lean.mjs",
+        "find": "usage: turn?.usage ?? null",
+        "replace": "usage: null"
+      }
+    ]
+  }
+}

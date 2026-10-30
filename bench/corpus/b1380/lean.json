@@ -1,0 +1,23 @@
+{
+  "id": "b1380-lean-suite-rerun",
+  "cwd": "/Users/momoshell/Dev/dt-b1380-lean-suite-rerun",
+  "taskDir": "/Users/momoshell/.crew/dt-b1380-lean-suite-rerun/b1380-lean-suite-rerun/task",
+  "tier": "build",
+  "shape": "standard",
+  "brief": "# Task\n\n---\nsource: operator decision 2026-10-26 (lean loop re-runs a red full suite once)\ncloses: null\ntier: build\nshape: standard\nacceptance: [SR1, SR2]\nout_of_scope: crew/drive.mjs, crew/crew.mjs, crew/lean.mjs, crew/acp/, the gate and mutation-proof stages, the old headless and pane paths\n---\n## The ask\n\nIn the lean loop, a red full suite stops the lane at once (`crew/loop.mjs`, the `suite` stage near line 221).\nA flaky suite has cost hand-finishes. The operator decided: when the suite is red, run it exactly once more. Green\non the re-run lets the lane continue to commit, and the PR measurements record both runs, so the first red is\nnever hidden. Red on the re-run stops the lane with the same reason it uses today. An unmeasured suite\n(`runner-threw`, a timeout) is not re-run; it stops as today.\n\nThe invariants: at most two suite runs per lane; a re-run never turns an unmeasured result into green; the PR\ntext names the first red run when the re-run passes.\n\n## Context\n\n- `crew/loop.mjs` `runLoop`: the `suite` stage, `callCheck`, `stop`, and the `measurements` lines that go into\n  the PR text.\n- `crew/checks.mjs` `runSuite`: the result shape (`status`, `reason`, `code`), read only.\n- `crew/loop.test.mjs`: the loop tests with injected `runSuite`; the suite-red case there pins today's stop.\n\n## Acceptance\n\n- (SR1) a suite that is red then green on its one re-run reaches commit with both runs in the PR measurements\n- (SR2) a suite that is red on both runs stops the lane with the first run's reason after exactly two runs\n",
+  "acceptance": [
+    "SR1",
+    "SR2"
+  ],
+  "source": "operator decision 2026-10-26 (lean loop re-runs a red full suite once)",
+  "branch": "b1380-lean-suite-rerun",
+  "base": "main",
+  "closes": [],
+  "suite": {
+    "command": "npm",
+    "args": [
+      "test"
+    ],
+    "timeoutMs": 1800000
+  }
+}

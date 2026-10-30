@@ -1,0 +1,36 @@
+{
+  "role": "planner",
+  "id": "b1417-lanes-show-finish-pr.planner.1",
+  "status": "done",
+  "summary": "Plan and gate target lean-source state derivation so a pr row after finish-ready reads done with its PR while finish-ready alone stays running.",
+  "details": {
+    "subject": "fix(crew): show finish-accepted lanes as done with PR",
+    "plan_path": "/Users/momoshell/.crew/dt-b1417-lanes-show-finish-pr/b1417-lanes-show-finish-pr/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1417-lanes-show-finish-pr/b1417-lanes-show-finish-pr/task/gate.mjs",
+    "acceptance": [
+      "LP1",
+      "LP2"
+    ],
+    "mutations": [
+      {
+        "check": "LP1",
+        "file": "visualizer/server/lean-source.mjs",
+        "find": "status = 'done'; pr = last.pr",
+        "replace": "status = 'running'; pr = last.pr"
+      },
+      {
+        "check": "LP2",
+        "file": "visualizer/server/lean-source.mjs",
+        "find": "status = 'running'; running = true",
+        "replace": "status = 'done'; running = true"
+      }
+    ],
+    "files_in_scope": [
+      "visualizer/server/lean-source.mjs",
+      "test/visualizer-lean.test.mjs",
+      "crew/lanes.test.mjs"
+    ],
+    "validation_lane": "node --test test/visualizer-lean.test.mjs crew/lanes.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1417-lanes-show-finish-pr/b1417-lanes-show-finish-pr/task/gate.mjs /Users/momoshell/Dev/dt-b1417-lanes-show-finish-pr"
+  }
+}

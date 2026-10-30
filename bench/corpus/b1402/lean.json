@@ -1,0 +1,26 @@
+{
+  "id": "b1402-lean-reaim-unbound-mutations",
+  "cwd": "/Users/momoshell/Dev/dt-b1402-lean-reaim-unbound-mutations",
+  "taskDir": "/Users/momoshell/.crew/dt-b1402-lean-reaim-unbound-mutations/b1402-lean-reaim-unbound-mutations/task",
+  "tier": "build",
+  "shape": "standard",
+  "brief": "# Task\n\n---\nsource: operator request (lean lanes b1396 and b1401 stopped on planner mutations that never bound)\ncloses: null\ntier: build\nshape: standard\nacceptance: [RA1, RA2, RA3, RA4, RA5]\nout_of_scope: crew/checks.mjs, crew/finish.mjs, the finish shape's behaviour, and any change to how a survived mutation is handled\n---\n## The ask\n\nA planner writes its mutation declarations before the code exists, so a `find` text often names code the builder\nwrote differently, and the proof reports it `unmeasured` with reason `bind-fail` (the text occurs zero times or more\nthan once). Today that stops a standard lane as `mutation-unmeasured` even when the gate is green. It stopped\nb1396 (one declaration) and b1401 (four), and each needed a hand-finish.\n\nIn the standard shape, when every row of the proof that did not kill is a `bind-fail`, give the builder exactly one\nturn to re-aim those declarations, then run the gate and the proof again. The finish shape already lets a builder\nreturn replacement declarations (`details.mutations`); reuse that field.\n\nInvariants:\n- Only a `bind-fail` earns the re-aim turn. A survived mutation, a timeout or any other unmeasured row stops the\n  lane as today: re-aiming a mutation the gate did not catch would let the builder pick an easier target.\n- In the re-aim turn a builder may replace only the declarations that failed to bind.\n- One re-aim turn per lane. A proof that still has a `bind-fail` after it stops as `mutation-unmeasured`.\n- The finish shape behaves exactly as today.\n\n## Context\n\n- `crew/loop.mjs`: builder replacements are read at lines 264-269; the proof and its stop are at 274-278 and refused\n  outside the finish shape. The suite-repair path (around line 300-320) is the existing pattern for one extra builder\n  turn with targeted feedback and a raised round bound.\n- `crew/checks.mjs:286`: a declaration whose `find` occurs other than once becomes `outcome: 'unmeasured'`,\n  `reason: 'bind-fail'`, with `occurrences`.\n- `crew/agents/builder.md:26` describes `details.mutations` for finish runs only; it should also cover the re-aim turn.\n- `crew/loop.test.mjs` `fakes()` and the finish tests at its end show how to drive a run and edit the builder's\n  envelope.\n\n## Acceptance\n\n- (RA1) a standard run whose proof has a `bind-fail` row gives the builder one more turn whose feedback names that acceptance id.\n- (RA2) a replacement declaration the builder returns in that turn is the declaration the next proof runs for that id.\n- (RA3) a replacement in that turn for an id whose declaration bound stops the lane as `envelope-refused`.\n- (RA4) a proof that still has a `bind-fail` after the re-aim turn stops the lane as `mutation-unmeasured`.\n- (RA5) a proof with a survived row stops the lane as `mutations-survived` without another builder turn.\n",
+  "acceptance": [
+    "RA1",
+    "RA2",
+    "RA3",
+    "RA4",
+    "RA5"
+  ],
+  "source": "operator request (lean lanes b1396 and b1401 stopped on planner mutations that never bound)",
+  "branch": "b1402-lean-reaim-unbound-mutations",
+  "base": "main",
+  "closes": [],
+  "suite": {
+    "command": "npm",
+    "args": [
+      "test"
+    ],
+    "timeoutMs": 1800000
+  }
+}

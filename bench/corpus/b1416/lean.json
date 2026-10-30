@@ -1,0 +1,26 @@
+{
+  "id": "b1416-loop-checks-after-rebase",
+  "cwd": "/Users/momoshell/Dev/dt-b1416-loop-checks-after-rebase",
+  "taskDir": "/Users/momoshell/.crew/dt-b1416-loop-checks-after-rebase/b1416-loop-checks-after-rebase/task",
+  "tier": "build",
+  "shape": "standard",
+  "brief": "# Task\n<!-- crew:bound-issue #2037 -->\n\n---\nsource: issue 2037\ncloses: 2037\ntier: build\nshape: standard\nacceptance: [RB1, RB2, RB3]\nout_of_scope: crew/finish.mjs's decision rules, crew/checks.mjs's runners, the visualizer, skills and docs\n---\n## The ask\n\nThe lean loop runs the gate, mutation proof and suite on the lane's commit, then fetches and rebases onto the base and\npublishes the rebased head (`crew/loop.mjs`: suite around line 363, fetch and rebase around line 427). A\nconflict-free rebase can still change behaviour, so the published tree may be one no check ran on. Make the published\nhead a tree the gate and suite last passed on: when the rebase moves the branch, rerun the gate and the suite on the\nrebased tree before publishing (and before writing `finish-ready` in a finish run). A rebase that moves nothing needs\nno rerun.\n\nInvariants:\n- A red gate or suite after the rebase stops the lane with that stage's reason; nothing is published.\n- A rebase that leaves the head unchanged costs no extra suite run.\n\n## Context\n\n- `crew/loop.mjs`: the stages after review (suite, commit, fetch, rebase, finish report, publish).\n- `crew/checks.mjs` `rebaseBranch` (returns the new head) and `runSuite`, `runGate`.\n- `crew/loop.test.mjs` `fakes()` and the existing rebase and publish tests.\n\n## Acceptance\n\n- (RB1) a run whose rebase moves the head runs the suite again on the rebased head before it publishes.\n- (RB2) a run whose suite is red after a rebase that moved the head stops without publishing.\n- (RB3) a run whose rebase leaves the head unchanged runs the suite once.\n",
+  "acceptance": [
+    "RB1",
+    "RB2",
+    "RB3"
+  ],
+  "source": "issue 2037",
+  "branch": "b1416-loop-checks-after-rebase",
+  "base": "main",
+  "closes": [
+    2037
+  ],
+  "suite": {
+    "command": "npm",
+    "args": [
+      "test"
+    ],
+    "timeoutMs": 1800000
+  }
+}

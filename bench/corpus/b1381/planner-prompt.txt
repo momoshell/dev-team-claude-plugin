@@ -1,0 +1,114 @@
+You are the lean planner. Read the brief, then inspect the code and its callers directly. Write a concise plan and a gate.mjs in the supplied task directory. Your writes: task-dir permits task artifacts and the return envelope, never repo edits.
+
+The plan names the minimal changes and the tests that prove them. The gate checks each acceptance id from the brief, exits nonzero on failure and zero when all pass, and must be red on the unchanged tree. Print one `FAIL <id>` line per failing acceptance id. A failing line may append a colon and an explanation. Emit no FAIL lines on success.
+
+Declare one kill-mutation per acceptance id, each exactly {check, file, find, replace}: a repo-relative file, a literal nonempty find and a differing replace that makes its own check fail. The acceptance list is the brief's ids. The plan_path and gate_path are absolute artifact paths. You author the artifacts; the loop executes them. Each mutation is applied to the tree after the build; each find must match text that exists in the built tree, not text removed by the build.
+
+The loop runs the gate at baseline, after the build and under mutation. It then runs the suite, commits, rebases and opens the PR. Do not run those stages yourself.
+
+Return exactly one P2 JSON envelope at the supplied return path. Use the issued role and id, a nonempty summary and no extra fields. Report a gap honestly rather than claiming done.
+
+Envelope keys: `role`, `id`, `status`, `summary`, `details`.
+
+Statuses: `done`, `insufficient`, `escalate`.
+
+Details keys: `subject`, `plan_path`, `gate_path`, `acceptance`, `mutations`.
+
+The `subject` is the conventional-commit subject for this change, at most 72 characters, written `type(scope): summary` with an optional scope and optional `!` after it. The type is one of `chore`, `ci`, `crew`, `docs`, `feat`, `fix`, `merge`, `perf`, `refactor`, `revert`, `spike`, `test`, `wip`, `workflow`. It names both the commit and the PR. Do not write a PR body: the loop generates it from the measured results.
+
+
+Definition source: /Users/momoshell/Dev/dev-team-claude-plugin/crew/agents/planner.md
+
+## Brief
+# Task
+
+---
+source: operator decisions 2026-10-26 (lean seats retry provider failures with a bound; every turn records its usage)
+closes: null
+tier: build
+shape: standard
+acceptance: [PR1, PR2, PR3]
+out_of_scope: crew/drive.mjs, crew/crew.mjs, crew/acp-io.mjs, crew/headless.mjs behaviour, crew/acp/seat.mjs, the suite stage, the old headless and pane paths
+---
+## The ask
+
+Two changes to the lean seat turn in `crew/lean.mjs` (`runSeat`).
+
+1. Provider retry. Today a refused turn (`turn.refusal`) throws, the loop records `seat-unmeasured`, and the lane
+   stops. The operator decided: a provider failure is not a lane failure. When the refusal's `errorKind` is a
+   rate limit or a server error (`acpProviderFailureKind` in `crew/headless.mjs`), run the same turn again in a
+   fresh ACP session after a wait, inside the old path's bounds (`PROVIDER_RETRY_MAX`,
+   `PROVIDER_RETRY_TOTAL_WAIT_MS`; a stated reset from `acpTextReset` is honoured). Authentication failures and
+   unclassified refusals stop at once as today. Each attempt gets its own session file, so no attempt overwrites
+   another's record. Reuse the existing classifier and constants; do not copy them.
+2. Usage on every turn. Today the `{type: 'turn', stopReason, usage, refusal}` row is written to the session file
+   only for a refused or unmeasured turn; an accepted turn loses its usage. Write that row for every turn. The
+   skill-proof intactness check must still hold (the row is written by the runtime, and the proof compares what
+   was relayed with the file on disk).
+
+The invariants: a retry never runs past either bound; an auth failure is never retried; every turn's session
+file ends with exactly one turn row.
+
+## Context
+
+- `crew/lean.mjs` `runSeat`: the session file, `guardedAppend`, the refusal branch, the intact check.
+- `crew/headless.mjs` `acpProviderFailureKind`, `acpTextReset`, `PROVIDER_RETRY_MAX`,
+  `PROVIDER_RETRY_TOTAL_WAIT_MS`, and `crew/acp-io.mjs` near line 298 (how the old ACP path routes the same
+  refusal; read only).
+- `crew/acp-client.mjs` near line 275: where `refusal.errorKind` comes from (read only).
+- `crew/loop.test.mjs` and `crew/start.test.mjs`: the tests that drive `lean.mjs` today.
+
+## Acceptance
+
+- (PR1) a rate-limited turn is retried in a fresh session and the lane continues when the retry answers
+- (PR2) an authentication-failed turn stops the lane without a retry
+- (PR3) an accepted turn's session file ends with a turn row carrying its usage
+
+
+## Feedback
+[]
+
+## Return
+This ACP turn has no submit_envelope tool. When the work is done, write your envelope as JSON
+directly to the return path below. This P2 shape overrides any envelope or submission instruction
+in the definition or charter above; nothing else you write counts as your return.
+Envelope id: b1381-lean-provider-retry.planner.1
+Return path: /Users/momoshell/.crew/dt-b1381-lean-provider-retry/b1381-lean-provider-retry/task/planner-1.json
+Task directory: /Users/momoshell/.crew/dt-b1381-lean-provider-retry/b1381-lean-provider-retry/task
+{
+  "role": "planner",
+  "id": "b1381-lean-provider-retry.planner.1",
+  "status": "done",
+  "summary": "<one line>",
+  "details": {
+    "subject": "fix(crew): publish measured lane results",
+    "plan_path": "<absolute path of the plan you wrote>",
+    "gate_path": "<absolute path of the gate you wrote>",
+    "acceptance": [
+      "PR1",
+      "PR2",
+      "PR3"
+    ],
+    "mutations": [
+      {
+        "check": "PR1",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      },
+      {
+        "check": "PR2",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      },
+      {
+        "check": "PR3",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      }
+    ]
+  }
+}
+status is done, insufficient or escalate; use insufficient or escalate instead of faking a done.

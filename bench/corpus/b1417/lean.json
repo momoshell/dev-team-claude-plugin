@@ -1,0 +1,25 @@
+{
+  "id": "b1417-lanes-show-finish-pr",
+  "cwd": "/Users/momoshell/Dev/dt-b1417-lanes-show-finish-pr",
+  "taskDir": "/Users/momoshell/.crew/dt-b1417-lanes-show-finish-pr/b1417-lanes-show-finish-pr/task",
+  "tier": "build",
+  "shape": "standard",
+  "brief": "# Task\n<!-- crew:bound-issue #2038 -->\n\n---\nsource: issue 2038\ncloses: 2038\ntier: build\nshape: standard\nacceptance: [LP1, LP2]\nout_of_scope: crew/finish.mjs and the journal rows it writes; crew/loop.mjs; the visualizer web app\n---\n## The ask\n\n`crew finish --accept` appends a `pr` row and then a `finish-decision` row (`crew/finish.mjs` around line 231).\n`visualizer/server/lean-source.mjs` reads a lane's state from its last row that is not a `stage-end` (around line 176),\nwhich is then `finish-decision`, so the lane reads as running and its PR is hidden from `crew lanes` and the\nvisualizer. A lane whose journal has a `pr` row after its last `finish-ready` row is done, with that PR.\n\nInvariant: a lane with a `finish-ready` row and no later decision still reads as waiting for the operator, as today.\n\n## Context\n\n- `visualizer/server/lean-source.mjs` (the state derivation) and `crew/lanes.mjs`, which reads it.\n- `test/visualizer-lean.test.mjs` and `crew/lanes.test.mjs` build journals by hand.\n\n## Acceptance\n\n- (LP1) a lane whose journal ends with a `pr` row then a `finish-decision` row reads as done with that PR.\n- (LP2) a lane whose journal ends with `finish-ready` reads as it does today.\n",
+  "acceptance": [
+    "LP1",
+    "LP2"
+  ],
+  "source": "issue 2038",
+  "branch": "b1417-lanes-show-finish-pr",
+  "base": "main",
+  "closes": [
+    2038
+  ],
+  "suite": {
+    "command": "npm",
+    "args": [
+      "test"
+    ],
+    "timeoutMs": 1800000
+  }
+}

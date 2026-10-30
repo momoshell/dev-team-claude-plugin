@@ -1,0 +1,26 @@
+{
+  "role": "planner",
+  "id": "b1380-lean-suite-rerun.planner.1",
+  "status": "done",
+  "summary": "Authored a minimal suite re-run plan and behavioral gate for SR1/SR2 with post-build kill-mutations; no repository edits or loop stages executed.",
+  "details": {
+    "subject": "fix(crew): rerun a red lean suite exactly once",
+    "plan_path": "/Users/momoshell/.crew/dt-b1380-lean-suite-rerun/b1380-lean-suite-rerun/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1380-lean-suite-rerun/b1380-lean-suite-rerun/task/gate.mjs",
+    "acceptance": ["SR1", "SR2"],
+    "mutations": [
+      {
+        "check": "SR1",
+        "file": "crew/loop.mjs",
+        "find": "if (suite.status === 'red') {",
+        "replace": "if (false) {"
+      },
+      {
+        "check": "SR2",
+        "file": "crew/loop.mjs",
+        "find": "rerun.status === 'red' ? suite.reason : rerun.reason",
+        "replace": "rerun.reason"
+      }
+    ]
+  }
+}

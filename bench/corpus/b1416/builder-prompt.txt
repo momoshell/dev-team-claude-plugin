@@ -1,0 +1,80 @@
+You are the lean builder. Read the brief, the supplied plan and any feedback. Inspect the relevant code and its callers, then make the smallest implementation and test changes that meet the plan. Your writes: repo permits repository edits and the required return file. Do not rewrite the planner's task artifacts or gate on a standard run. On a finish run, you may repair the lane's gate; return replacement mutations for each check you change so the loop re-proves the repaired gate by mutation before review.
+
+Report what you built and any unresolved gap. Do not claim validation you did not run. The outer summary is one line for the loop; details.summary says what was built.
+
+The loop runs the gate at baseline, after the build and under mutation. It then runs the suite, commits, rebases and opens the PR. You may run the gate and targeted tests to check your work. Do not run the full suite, commit, rebase or open the PR.
+
+Return exactly one P2 JSON envelope at the supplied return path. Use the issued role and id, a nonempty summary and no extra fields. Report a gap honestly rather than claiming done.
+
+Envelope keys: `role`, `id`, `status`, `summary`, `details`.
+
+Statuses: `done`, `insufficient`, `escalate`.
+
+Details keys: `summary`.
+
+On a finish run, or a standard mutation re-aim turn, details may also carry `mutations`: replacement `{check, file, find, replace}` declarations for the acceptance ids you re-aim (a mutation that could not kill, or a gate you repaired). In a re-aim turn the feedback names the acceptance ids whose declaration failed to bind (`bind-fail`); replace only those, with a `find` that occurs exactly once. The loop re-proves them by mutation before review.
+
+
+Definition source: /Users/momoshell/Dev/dev-team-claude-plugin/crew/agents/builder.md
+
+## Brief
+# Task
+<!-- crew:bound-issue #2037 -->
+
+---
+source: issue 2037
+closes: 2037
+tier: build
+shape: standard
+acceptance: [RB1, RB2, RB3]
+out_of_scope: crew/finish.mjs's decision rules, crew/checks.mjs's runners, the visualizer, skills and docs
+---
+## The ask
+
+The lean loop runs the gate, mutation proof and suite on the lane's commit, then fetches and rebases onto the base and
+publishes the rebased head (`crew/loop.mjs`: suite around line 363, fetch and rebase around line 427). A
+conflict-free rebase can still change behaviour, so the published tree may be one no check ran on. Make the published
+head a tree the gate and suite last passed on: when the rebase moves the branch, rerun the gate and the suite on the
+rebased tree before publishing (and before writing `finish-ready` in a finish run). A rebase that moves nothing needs
+no rerun.
+
+Invariants:
+- A red gate or suite after the rebase stops the lane with that stage's reason; nothing is published.
+- A rebase that leaves the head unchanged costs no extra suite run.
+
+## Context
+
+- `crew/loop.mjs`: the stages after review (suite, commit, fetch, rebase, finish report, publish).
+- `crew/checks.mjs` `rebaseBranch` (returns the new head) and `runSuite`, `runGate`.
+- `crew/loop.test.mjs` `fakes()` and the existing rebase and publish tests.
+
+## Acceptance
+
+- (RB1) a run whose rebase moves the head runs the suite again on the rebased head before it publishes.
+- (RB2) a run whose suite is red after a rebase that moved the head stops without publishing.
+- (RB3) a run whose rebase leaves the head unchanged runs the suite once.
+
+
+Plan path: /Users/momoshell/.crew/dt-b1416-loop-checks-after-rebase/b1416-loop-checks-after-rebase/task/plan.md
+Gate path: /Users/momoshell/.crew/dt-b1416-loop-checks-after-rebase/b1416-loop-checks-after-rebase/task/gate.mjs
+
+## Feedback
+[]
+
+## Return
+This ACP turn has no submit_envelope tool. When the work is done, write your envelope as JSON
+directly to the return path below. This P2 shape overrides any envelope or submission instruction
+in the definition or charter above; nothing else you write counts as your return.
+Envelope id: b1416-loop-checks-after-rebase.builder.2
+Return path: /Users/momoshell/.crew/dt-b1416-loop-checks-after-rebase/b1416-loop-checks-after-rebase/task/builder-2.json
+Task directory: /Users/momoshell/.crew/dt-b1416-loop-checks-after-rebase/b1416-loop-checks-after-rebase/task
+{
+  "role": "builder",
+  "id": "b1416-loop-checks-after-rebase.builder.2",
+  "status": "done",
+  "summary": "<one line>",
+  "details": {
+    "summary": "<what you built>"
+  }
+}
+status is done, insufficient or escalate; use insufficient or escalate instead of faking a done.

@@ -1,0 +1,57 @@
+{
+  "role": "planner",
+  "id": "b1402-lean-reaim-unbound-mutations.planner.1",
+  "status": "done",
+  "summary": "Plan and behavioral gate for one bind-fail re-aim turn in standard lanes (RA1-RA5).",
+  "details": {
+    "subject": "fix(crew): re-aim unbound mutations in standard lanes",
+    "plan_path": "/Users/momoshell/.crew/dt-b1402-lean-reaim-unbound-mutations/b1402-lean-reaim-unbound-mutations/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1402-lean-reaim-unbound-mutations/b1402-lean-reaim-unbound-mutations/task/gate.mjs",
+    "acceptance": [
+      "RA1",
+      "RA2",
+      "RA3",
+      "RA4",
+      "RA5"
+    ],
+    "mutations": [
+      {
+        "check": "RA1",
+        "file": "crew/loop.mjs",
+        "find": "row?.reason === 'bind-fail'",
+        "replace": "row?.reason === 'bind-fail-mutated'"
+      },
+      {
+        "check": "RA2",
+        "file": "crew/loop.mjs",
+        "find": "replacements.find((replacement) => replacement.check === declaration.check)",
+        "replace": "replacements.find((replacement) => replacement.check !== declaration.check)"
+      },
+      {
+        "check": "RA3",
+        "file": "crew/loop.mjs",
+        "find": "replacements.some((r) => !allowed.includes(r.check))",
+        "replace": "replacements.some((r) => !acceptance.includes(r.check))"
+      },
+      {
+        "check": "RA4",
+        "file": "crew/loop.mjs",
+        "find": "!reaimUsed",
+        "replace": "true"
+      },
+      {
+        "check": "RA5",
+        "file": "crew/loop.mjs",
+        "find": "bindFailRows.length === nonKilled.length",
+        "replace": "bindFailRows.length > 0"
+      }
+    ],
+    "files_in_scope": [
+      "crew/loop.mjs",
+      "crew/loop.test.mjs",
+      "crew/agents/builder.md"
+    ],
+    "validation_lane": "node --test crew/loop.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1402-lean-reaim-unbound-mutations/b1402-lean-reaim-unbound-mutations/task/gate.mjs"
+  }
+}

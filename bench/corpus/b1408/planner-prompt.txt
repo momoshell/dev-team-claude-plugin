@@ -1,0 +1,134 @@
+You are the lean planner. Read the brief, then inspect the code and its callers directly. Write a concise plan and a gate.mjs in the supplied task directory. Your writes: task-dir permits task artifacts and the return envelope, never repo edits.
+
+The plan names the minimal changes and the tests that prove them. The gate checks each acceptance id from the brief, exits nonzero on failure and zero when all pass, and must be red on the unchanged tree. Print one `FAIL <id>` line per failing acceptance id. A failing line may append a colon and an explanation. Emit no FAIL lines on success.
+
+Declare one kill-mutation per acceptance id, each exactly {check, file, find, replace}: a repo-relative file, a literal nonempty find and a differing replace that makes its own check fail. The acceptance list is the brief's ids. The plan_path and gate_path are absolute artifact paths. You author the artifacts; the loop executes them. Each mutation is applied to the tree after the build; each find must match text that exists in the built tree, not text removed by the build.
+
+The loop runs the gate at baseline, after the build and under mutation. It then runs the suite, commits, rebases and opens the PR. Do not run those stages yourself.
+
+Return exactly one P2 JSON envelope at the supplied return path. Use the issued role and id, a nonempty summary and no extra fields. Report a gap honestly rather than claiming done.
+
+Envelope keys: `role`, `id`, `status`, `summary`, `details`.
+
+Statuses: `done`, `insufficient`, `escalate`.
+
+Details keys: `subject`, `plan_path`, `gate_path`, `acceptance`, `mutations`.
+
+Also give `files_in_scope` (the repo-relative files the builder may edit, tests included), `validation_lane` (the `node --test` command that checks the change) and `gate_cmd` (the command that runs your gate). The builder's context arms read them, and a builder that declares those arms is refused without them. Cite plan lines as `file:start-end` inside `plan_path`.
+
+The `subject` is the conventional-commit subject for this change, at most 72 characters, written `type(scope): summary` with an optional scope and optional `!` after it. The type is one of `chore`, `ci`, `crew`, `docs`, `feat`, `fix`, `merge`, `perf`, `refactor`, `revert`, `spike`, `test`, `wip`, `workflow`. It names both the commit and the PR. Do not write a PR body: the loop generates it from the measured results.
+
+
+Definition source: /Users/momoshell/Dev/dev-team-claude-plugin/crew/agents/planner.md
+
+## Brief
+# Task
+
+---
+source: operator request (lean lanes b1405 and b1407 stopped as mutation-unmeasured after a review fix moved a mutation target; two should-fix findings left on PRs 2026 and 2027)
+closes: null
+tier: build
+shape: standard
+acceptance: [RB1, RB2, RB3, RB4, RB5]
+out_of_scope: crew/finish.mjs, crew/checks.mjs, crew/drive.mjs, crew/crew.mjs, docs/adr/, how a survived or timed-out mutation is handled, and the roster.json editor
+---
+## The ask
+
+1. A run gets one mutation re-aim turn in total (`reaimUsed` in `crew/loop.mjs`, around line 293). A builder turn that
+   fixes a review finding can move the text a declaration targets, so the next proof has a `bind-fail` row and the
+   lane stops as `mutation-unmeasured`, though the gate is green. b1405 stopped this way twice and b1407 once; each
+   needed a `crew finish` run. Give one re-aim turn after each builder turn instead of one per run.
+2. `GET /api/events` for a lean lane (`adw_id=lean:<lane>`) accepts and validates `phase_id`
+   (`visualizer/server/server.mjs` around line 763) but the lean branch ignores it and returns every journal row.
+   Apply it, or refuse it for lean lanes with a reason; never return unfiltered rows for a filtered request.
+3. The agents-editor route treats a request with no `value` as a clear of the tier override. Only an explicit
+   `value: null` clears; a missing `value` is refused.
+
+Invariants:
+- Only a proof whose every non-killed row is a `bind-fail` earns a re-aim turn, in either shape.
+- A re-aim turn never earns another re-aim turn: a `bind-fail` in the proof right after a re-aim stops the lane as
+  `mutation-unmeasured`.
+- A re-aim turn may replace only the declarations that failed to bind.
+
+## Context
+
+- `crew/loop.mjs`: the build loop and re-aim block (around lines 288-334); the suite-repair path beside it.
+- `crew/loop.test.mjs`: the re-aim tests from PRs 2023 and 2025, and `fakes()` to drive builder, review and proof turns.
+- `visualizer/server/server.mjs` `/api/events` (around line 760) and its lean branch; `visualizer/server/lean-source.mjs`.
+- `visualizer/server/agents-edit.mjs` `proposeAgentEdit` and the server route that calls it; `test/visualizer-agents-edit.test.mjs`.
+
+## Acceptance
+
+- (RB1) a run whose proof after a review-fix build turn has only `bind-fail` rows gives the builder a re-aim turn, even when an earlier re-aim turn was used.
+- (RB2) a proof with a `bind-fail` row directly after a re-aim turn stops the lane as `mutation-unmeasured`.
+- (RB3) a run never takes two re-aim turns in a row.
+- (RB4) `GET /api/events` for a lean lane with `phase_id` never returns a journal row outside that phase.
+- (RB5) the agents-editor route refuses a tier-override request with no `value` field.
+
+
+## Feedback
+[]
+
+## Return
+This ACP turn has no submit_envelope tool. When the work is done, write your envelope as JSON
+directly to the return path below. This P2 shape overrides any envelope or submission instruction
+in the definition or charter above; nothing else you write counts as your return.
+Envelope id: b1408-lean-reaim-per-build.planner.1
+Return path: /Users/momoshell/.crew/dt-b1408-lean-reaim-per-build/b1408-lean-reaim-per-build/task/planner-1.json
+Task directory: /Users/momoshell/.crew/dt-b1408-lean-reaim-per-build/b1408-lean-reaim-per-build/task
+{
+  "role": "planner",
+  "id": "b1408-lean-reaim-per-build.planner.1",
+  "status": "done",
+  "summary": "<one line>",
+  "details": {
+    "subject": "fix(crew): publish measured lane results",
+    "plan_path": "<absolute path of the plan you wrote>",
+    "gate_path": "<absolute path of the gate you wrote>",
+    "acceptance": [
+      "RB1",
+      "RB2",
+      "RB3",
+      "RB4",
+      "RB5"
+    ],
+    "mutations": [
+      {
+        "check": "RB1",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      },
+      {
+        "check": "RB2",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      },
+      {
+        "check": "RB3",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      },
+      {
+        "check": "RB4",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      },
+      {
+        "check": "RB5",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      }
+    ],
+    "files_in_scope": [
+      "<repo-relative file the builder may edit>"
+    ],
+    "validation_lane": "<the node --test command that checks the change>",
+    "gate_cmd": "<the command that runs your gate>"
+  }
+}
+status is done, insufficient or escalate; use insufficient or escalate instead of faking a done.

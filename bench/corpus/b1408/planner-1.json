@@ -1,0 +1,60 @@
+{
+  "role": "planner",
+  "id": "b1408-lean-reaim-per-build.planner.1",
+  "status": "done",
+  "summary": "Planned per-build re-aim, lean phase_id refusal, and missing-value refusal with a behavioral gate for RB1-RB5.",
+  "details": {
+    "subject": "fix(crew): per-build re-aim and lean request guards",
+    "plan_path": "/Users/momoshell/.crew/dt-b1408-lean-reaim-per-build/b1408-lean-reaim-per-build/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1408-lean-reaim-per-build/b1408-lean-reaim-per-build/task/gate.mjs",
+    "acceptance": [
+      "RB1",
+      "RB2",
+      "RB3",
+      "RB4",
+      "RB5"
+    ],
+    "mutations": [
+      {
+        "check": "RB1",
+        "file": "crew/loop.mjs",
+        "find": "const canReaim = !wasReaimTurn",
+        "replace": "const canReaim = false && !wasReaimTurn"
+      },
+      {
+        "check": "RB2",
+        "file": "crew/loop.mjs",
+        "find": "const canReaim = !wasReaimTurn",
+        "replace": "const canReaim = true"
+      },
+      {
+        "check": "RB3",
+        "file": "crew/loop.mjs",
+        "find": "const canReaim = !wasReaimTurn",
+        "replace": "const canReaim = true || !wasReaimTurn"
+      },
+      {
+        "check": "RB4",
+        "file": "visualizer/server/server.mjs",
+        "find": "if (phase_id !== undefined) return json(res, 400",
+        "replace": "if (phase_id === undefined) return json(res, 400"
+      },
+      {
+        "check": "RB5",
+        "file": "visualizer/server/server.mjs",
+        "find": "if (!Object.hasOwn(input, 'value')) return json(res, 400",
+        "replace": "if (Object.hasOwn(input, 'value')) return json(res, 400"
+      }
+    ],
+    "files_in_scope": [
+      "crew/loop.mjs",
+      "crew/loop.test.mjs",
+      "visualizer/server/server.mjs",
+      "test/visualizer-lean.test.mjs",
+      "test/visualizer-server.test.mjs",
+      "test/visualizer-agents-edit.test.mjs"
+    ],
+    "validation_lane": "node --test crew/loop.test.mjs test/visualizer-lean.test.mjs test/visualizer-server.test.mjs test/visualizer-agents-edit.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1408-lean-reaim-per-build/b1408-lean-reaim-per-build/task/gate.mjs"
+  }
+}

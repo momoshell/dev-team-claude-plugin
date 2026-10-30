@@ -205,6 +205,33 @@ test('CH2 a claude seat granted skeletonread gets the skeleton in Read\'s own ou
   assert.equal(replacement(fire(planner, seat(planner, { extensions: ['skeletonread'] }, { role: 'planner' }), planner.frame('PostToolUse', 'Read'))), undefined)
 })
 
+test('Bash literal reads share readgate coverage and skeletonread preserves Bash output', () => {
+  const sb = sandbox()
+  const gate = seat(sb, { extensions: ['readgate'] })
+  const input = { command: "sed -n '1,2p' large.mjs" }
+  const pre = sb.frame('PreToolUse', 'Bash', 'bash-range'); pre.tool_input = input; pre.tool_use_id = 'range'
+  assertNoEffect(fire(sb, gate, pre))
+  const post = sb.frame('PostToolUse', 'Bash', 'bash-range'); post.tool_input = input; post.tool_use_id = 'range'; post.tool_response.stdout = 'one\ntwo\n'; post.tool_response.stderr = ''
+  assertNoEffect(fire(sb, gate, post))
+  assert.match(denial(fire(sb, gate, pre)).permissionDecisionReason, /Refusing repeated read/)
+  const native = sb.frame('PreToolUse', 'Read', 'bash-range'); Object.assign(native.tool_input, { offset: 1, limit: 2 })
+  assert.match(denial(fire(sb, gate, native)).permissionDecisionReason, /Refusing repeated read/)
+  for (const command of ["sed -n '1,2p' large.mjs | cat", 'head -n2 large.mjs | cat', 'cat large.mjs | cat']) {
+    pre.tool_input = { command }; assertNoEffect(fire(sb, gate, pre))
+  }
+  const skeleton = seat(sb, { extensions: ['skeletonread'] })
+  const bash = sb.frame('PostToolUse', 'Bash'); bash.tool_input.command = 'cat large.mjs'; bash.tool_response.stdout = sb.large; bash.tool_response.stderr = ''
+  const rewritten = replacement(fire(sb, skeleton, bash))
+  assert.deepEqual(Object.keys(rewritten), Object.keys(bash.tool_response))
+  assert.match(rewritten.stdout, /^Skeleton read: large\.mjs/m)
+  assert.match(rewritten.stdout, /this seat has no retrieve tool/)
+  for (const command of ['cat large.mjs | cat', 'cat large.mjs other.mjs', 'cat $(echo large.mjs)', 'head large.mjs']) {
+    bash.tool_input.command = command; assert.equal(replacement(fire(sb, skeleton, bash)), undefined)
+  }
+  bash.tool_input.command = 'cat large.mjs'; bash.tool_response.stderr = 'diagnostic'
+  assert.equal(replacement(fire(sb, skeleton, bash)), undefined)
+})
+
 test('CH2 a result-transforming arm keeps Bash\'s own output shape', () => {
   const sb = sandbox()
   const launch = seat(sb, { extensions: ['builderloop'] })

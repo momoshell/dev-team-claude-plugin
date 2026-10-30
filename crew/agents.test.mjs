@@ -20,9 +20,9 @@ const roster = {
         "effort": "medium"
       },
       "builder": {
-        "provider": "anthropic",
-        "id": "claude-sonnet-5-5",
-        "agent": "claude",
+        "provider": "openai",
+        "id": "gpt-6.1-terra",
+        "agent": "pi",
         "effort": "high"
       },
       "reviewer": {
@@ -55,9 +55,9 @@ const roster = {
         "effort": "high"
       },
       "builder": {
-        "provider": "anthropic",
-        "id": "claude-sonnet-5-5",
-        "agent": "claude",
+        "provider": "openai",
+        "id": "gpt-6.1-terra",
+        "agent": "pi",
         "effort": "high"
       },
       "reviewer": {
@@ -90,9 +90,9 @@ const roster = {
         "effort": "xhigh"
       },
       "builder": {
-        "provider": "anthropic",
-        "id": "claude-sonnet-5-5",
-        "agent": "claude",
+        "provider": "openai",
+        "id": "gpt-6.1-terra",
+        "agent": "pi",
         "effort": "xhigh"
       },
       "reviewer": {

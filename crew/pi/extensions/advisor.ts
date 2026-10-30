@@ -1382,7 +1382,11 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     if (consults >= TIER1_MAX_CONSULTS) return
     // The pre-return window: the whole working diff, scrubbed, beside the session's own delta. The session delta
     // keeps its small caps; these entries are never stored in it.
-    const wholeDiff = preReturn ? preReturn.entries.map((text) => ({ text, ...entryFromText(text, null) })) : []
+    // Injected advisor notes are stripped here exactly as from the session snapshot, so a note the builder copied
+    // into a file is not handed back; anchors come from the cleaned text and an emptied entry is dropped.
+    const wholeDiff = preReturn
+      ? preReturn.entries.map((text) => entryFromText(stripAdvisorNotes(text, injected), null)).filter((entry) => entry.text)
+      : []
     const wholeAnchors = new Set(wholeDiff.flatMap((entry) => entry.anchors))
     if (!anchors.size && !wholeAnchors.size) {
       const payload = {

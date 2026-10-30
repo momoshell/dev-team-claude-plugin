@@ -2214,3 +2214,26 @@ test('PW3 the recorded window counts a packed diff entry that the session delta 
     assert.equal(row.window_entries, 1); assert.equal(row.window_bytes, Buffer.byteLength(text, 'utf8'))
   } finally { rmSync(s.f.root, { recursive: true, force: true }) }
 })
+
+test('PS1 PS2 a pre-return consult drops an injected advisor note from the working diff and keeps grounded evidence', async () => {
+  const phrase = 'guard misses the null path entirely'
+  const grounded = 'lib/copied.mjs:4: const grounded = keepThisLine()'
+  const files = [
+    { path: 'lib/copied.mjs', lines: [`lib/copied.mjs:3: ${phrase}`, grounded] },
+    { path: 'lib/noteonly.mjs', lines: [phrase] },
+  ]
+  const s = triggerSeat({ severity: 'medium', evidence: ['lib/copied.mjs:4'], extraDeps: { diffLines: () => ({ lines: 3, entries: files.map((file) => file.lines.join('\n')), files }) } })
+  try {
+    const state = s.a.exportState(); state.injected = [advisor.normalizeNote(phrase)]
+    s.a.importState(state)
+    await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
+    const payload = s.payloads[0]
+    assert.equal(payload.trigger, 'pre-return')
+    assert.ok(!deltaOf(payload).includes(phrase), 'the injected note is not handed back')
+    assert.ok(payload.delta.every((entry) => entry.text.trim()), 'a note-only entry is dropped, not sent empty')
+    assert.equal(payload.delta.length, 1)
+    assert.ok(deltaOf(payload).includes(grounded), 'grounded non-note evidence keeps its anchor')
+    const note = s.journal.rows.find((row) => row.advisor_note?.trigger === 'pre-return' && row.advisor_note.outcome === 'injected')
+    assert.ok(note, 'a finding citing the kept line is accepted')
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})

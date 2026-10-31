@@ -223,3 +223,16 @@ blind diff review). On the doc lanes b1457, b1458 and b1459 (3 each): 8/9 vs 9/9
 tokens, and the skill was read in 9 of 9 runs. On the 8 new code lanes (3 each): 18/24 vs 18/24 pass, the same
 lanes failing in both arms, 3.68M vs 3.40M tokens, and the skill was read in 3 of 24 runs. The builder seat
 grants it since PR 2096. Must-fix counts are not given: the reviews state them in at least four formats.
+
+**A planner charter paragraph, 2026-11-01** (pi sol high with `subagent`, 14 code lanes × 3 per arm, `--charter`,
+one blind plan batch). Both arms used main's `crew/agents/planner.md`; the trial arm added one paragraph after
+the gate rules telling the planner to try to break its own gate (test input edges, drive the caller the brief
+names, cover retries and later turns, run the code its claims rest on, make sure a correct build can go green).
+
+| Planner charter | Blind pass | Tokens | Median wall |
+|---|---|---|---|
+| main | 8/42 | 10.64M | 137s |
+| main + the paragraph | 9/42 | 17.87M (+68%) | 210s |
+
+The lanes' recurring holes stayed: b1441, b1442 and b1444 drew the same must-fix in 3 of 3 runs in both arms.
+Not shipped. With `qa-test-writing` and fff above, three planner levers left the pass rate where it was.

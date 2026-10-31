@@ -155,7 +155,16 @@ file once and whole. On terra the same arms cut tokens by 26%. Keep them off Cla
 | Write tool | 18 | 0 |
 
 Every failed `sed -i` was a GNU-style script under BSD sed. All 48 were chained after `cd T;`, and 46 reported
-exit 0. builderloop now hints once on that failure (PR 2080); the hint itself is not yet benched.
+exit 0. builderloop now hints once on that failure (PR 2080).
+
+**sed hint on a Claude sonnet builder, 2026-10-31** (builderloop off vs on, 6 lanes × 3, blind diff review).
+none: 12/18 pass, 3.28M tokens, median 43s. builderloop: 11/18 pass, 3.51M tokens (+7%), median 45s. A
+`sed -i` failed in 4 runs without the hint and 6 with it, and the hint reached all 6 (the arm's saved
+`sedHinted` state; it arrives as added context, so the session transcript never shows it). After that first
+failure neither arm failed `sed -i` again (0 of 1 later calls without the hint, 0 of 4 with it). With the hint,
+4 of 6 runs switched to `sed -i ''`; without it, 1 of 4 did. The hint changes the edit method and prevents no
+failure, because it can only follow the first one. Must-fix counts are not given: 7 of the 13 `changes`
+reviews have no `Must-fix (N)` header.
 
 **Planner memory, 2026-10-31** (pi sol high with `subagent`, 6 lanes × 3, `--memory` with a fresh 6-entry store
 rendering 4,072 bytes, strict blind plan review). none: 4/18 pass, 17 must-fix, 5.07M tokens, median 153s.

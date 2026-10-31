@@ -34,7 +34,7 @@ operator runs on main before tagging; it is never a lane's done-means.
 `$CLAUDE_PLUGIN_ROOT`.** The installed plugin cache is version-pinned and can
 sit dozens of versions behind `main`. This is not hypothetical: a stale cache
 once reproduced a false positive that HEAD had already fixed, 31 versions of
-skew. Prefer `node scripts/<name>.mjs` from the repo root, and treat any
+skew. Prefer `node bin/crew.mjs <verb>` from the repo root, and treat any
 finding from a cache-path invocation as unverified until cross-checked against
 HEAD. (`docs/conventions.md`, entry 2026-08-08.)
 
@@ -52,8 +52,7 @@ resolves to nothing is a real defect.
 **The runtime ships zero dependencies; the visualizer may take build-time ones.** `package.json` has no
 `dependencies` key at all and `crew/acp-client.test.mjs` refuses one: nothing under `crew/` or `scripts/`
 may import a package. `devDependencies` exist only for the visualizer, which vite bundles into `dist/`
-(svelte, vite, `@xyflow/svelte` + `@dagrejs/dagre` for the workflow graph, `codemirror` for
-prompt/JSON editing, `lucide-svelte` for icons — ratified by the operator 2026-09-15). A visualizer
+(`svelte`, `vite`, `@sveltejs/vite-plugin-svelte` and `lucide-svelte` for icons). A visualizer
 dependency is still a decision: name it in `docs/conventions.md` with the page that needs it. `jq` is
 not available either — use `node -p` for JSON in shell recipes.
 
@@ -90,8 +89,7 @@ writing the brief and starting the lane; `/dispatch` names it.
 | Cross-cutting conventions | `docs/conventions.md` |
 | Architecture decisions | `docs/adr/` (register in `README.md`) |
 | Review rubric and findings shape | `skills/pr-review/` |
-| Writing a brief | `skills/lane-brief/` |
-| Briefs, tiers and starting a lane | `skills/lane-brief/` |
+| Writing briefs, tiers and starting a lane | `skills/lane-brief/` |
 | Lane recovery and closeout | `skills/crew-recovery/` |
 | Worktrees, PRs, orphans | `skills/devops/` |
 | Test authoring | `skills/qa-test-writing/` |

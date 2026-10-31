@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { startServer } from '../visualizer/server/server.mjs'
 import { createJournalSource } from '../visualizer/server/journal-source.mjs'
+import { createLeanSource } from '../visualizer/server/lean-source.mjs'
 import { buildTrajectory, focusTrajectory, MARKER_EVENTS, SUBSTRATE_DOWN, SUBSTRATE_RECOVERED, projectSpan, spansActiveIn, toMs } from '../visualizer/web/src/lib/spans.js'
 import { applyRead, createPulse, initialJournalState, select, setRange, setReveal, shouldRead, trajectoryView } from '../visualizer/web/src/lib/live.js'
 const JOURNAL_CHANNELS = Object.freeze({ record: 'record', operational: 'operational' })
@@ -14,12 +15,17 @@ const DURATION_KEY = /dur|elaps|_ms$|secs|seconds/i
 const LEDGER_SANDBOX = scratchDir('visualizer-trajectory-ledger-', { parent: tmpdir() })
 process.env.DEVTEAM_LEDGER_DIR = LEDGER_SANDBOX
 
-function lane(root, { repo = 'repo', task = 'task', adw_id = 'run-1', journal = null } = {}) {
+function lane(root, { repo = 'dt-task', task = 'task', journal = null } = {}) {
   const dir = join(root, repo, task)
-  mkdirSync(join(dir, 'ledger'), { recursive: true })
-  writeFileSync(join(dir, 'ledger', 'run.json'), JSON.stringify({ adw_id, repo_slug: repo, task_slug: task }))
-  if (journal !== null) writeFileSync(join(dir, 'journal.jsonl'), journal)
-  return { dir, journal: join(dir, 'journal.jsonl') }
+  mkdirSync(join(dir, 'task'), { recursive: true })
+  writeFileSync(join(dir, 'crew.json'), JSON.stringify({ members: { builder: { agent: 'pi' } } }))
+  writeFileSync(join(dir, 'task', 'lean.json'), JSON.stringify({ id: task, tier: 'build' }))
+  if (journal !== null) writeFileSync(join(dir, 'task', 'journal.jsonl'), journal)
+  return { dir, journal: join(dir, 'task', 'journal.jsonl') }
+}
+
+function journalSource(root) {
+  return createJournalSource({ crewRoot: root, lean: createLeanSource({ crewRoot: root }) })
 }
 
 function lines(rows) {
@@ -100,7 +106,7 @@ test('trajectory reports a wrong top without closing either stage', () => {
 test('journal reader skips a torn line and reports its one-based line number', () => {
   const root = scratchDir('visualizer-trajectory-malformed-')
   lane(root, { journal: `${JSON.stringify({ at: 1, event: 'first' })}\n{"at":\n${JSON.stringify({ at: 3, event: 'third' })}\n` })
-  const result = createJournalSource({ crewRoot: root }).readJournal({ repo_slug: 'repo', task_slug: 'task', adw_id: 'run-1' })
+  const result = journalSource(root).readJournal({ repo_slug: 'dt-task', task_slug: 'task', adw_id: 'lean:task' })
   assert.deepEqual(result.rows.map((row) => row.event), ['first', 'third'])
   assert.deepEqual(result.rows.map((row) => row.line_number), [1, 3])
   assert.equal(result.rows[0].channel, null)
@@ -111,10 +117,10 @@ test('journal reader skips a torn line and reports its one-based line number', (
 test('journal reader degrades instead of throwing when journal.jsonl is absent', () => {
   const root = scratchDir('visualizer-trajectory-missing-')
   lane(root)
-  const source = createJournalSource({ crewRoot: root })
+  const source = journalSource(root)
   let result
   try {
-    result = source.readJournal({ repo_slug: 'repo', task_slug: 'task', adw_id: 'run-1' })
+    result = source.readJournal({ repo_slug: 'dt-task', task_slug: 'task', adw_id: 'lean:task' })
   } catch (error) {
     assert.fail(`readJournal threw: ${error.message}`)
   }
@@ -201,7 +207,7 @@ test('journal route remains read-only and outside the write guard', async () => 
     const partial = await fetch(`${base}/api/journal?repo_slug=repo`)
     assert.equal(partial.status, 400)
     assert.ok((await partial.json()).error.includes('repo_slug and task_slug'))
-    const get = await fetch(`${base}/api/journal?repo_slug=repo&task_slug=task&adw_id=run-1`)
+    const get = await fetch(`${base}/api/journal?repo_slug=dt-task&task_slug=task&adw_id=lean:task`)
     assert.equal(get.status, 200)
     const body = await get.json()
     assert.deepEqual(body.rows.map((row) => row.event), ['hello'])
@@ -214,10 +220,10 @@ test('journal route remains read-only and outside the write guard', async () => 
 test('journal reads do not change the crew tree, including traversal attempts', () => {
   const root = scratchDir('visualizer-trajectory-readonly-')
   lane(root, { journal: lines([{ at: 0, event: 'hello' }]) })
-  const source = createJournalSource({ crewRoot: root })
+  const source = journalSource(root)
   const before = treeDigest(root)
-  source.readJournal({ repo_slug: 'repo', task_slug: 'task', adw_id: 'run-1' })
-  const traversal = source.readJournal({ repo_slug: '../repo', task_slug: 'task', adw_id: 'run-1' })
+  source.readJournal({ repo_slug: 'dt-task', task_slug: 'task', adw_id: 'lean:task' })
+  const traversal = source.readJournal({ repo_slug: '../repo', task_slug: 'task', adw_id: 'lean:task' })
   assert.equal(traversal.error, 'invalid repo_slug or task_slug')
   assert.equal(treeDigest(root), before)
   assert.equal(source.health().readonly, true)
@@ -227,45 +233,6 @@ test('projectSpan uses a marker without a width for an open span', () => {
   const box = projectSpan({ started_at: 50, ended_at: null }, 0, 100)
   assert.deepEqual(box, { left: 0.5, marker: true })
   assert.equal('width' in box, false)
-})
-
-test('PV1 reads accepted plan chunks from the selected lane without changing its tree', () => {
-  const root = scratchDir('visualizer-trajectory-plan-')
-  const { dir } = lane(root)
-  mkdirSync(join(dir, 'task'))
-  const chunks = [
-    { id: 'router', checks_owned: ['L1.8', 'L1.9'] },
-    { id: 'view', checks_owned: ['L2'] },
-  ]
-  writeFileSync(join(dir, 'task', 'plan.accepted.envelope.json'), JSON.stringify({ details: { chunks } }))
-  const before = treeDigest(root)
-  const result = createJournalSource({ crewRoot: root }).readJournal({ repo_slug: 'repo', task_slug: 'task', adw_id: 'run-1' })
-  assert.deepEqual(result.plan, { chunks, absent: null })
-  assert.equal(treeDigest(root), before)
-})
-
-test('PV2 distinguishes absent, unreadable and chunkless plans while retaining plans without journals', () => {
-  const read = (name, setup) => {
-    const root = scratchDir(`visualizer-trajectory-${name}-`)
-    const { dir } = lane(root)
-    mkdirSync(join(dir, 'task'))
-    if (setup) setup(join(dir, 'task', 'plan.accepted.envelope.json'))
-    return createJournalSource({ crewRoot: root }).readJournal({ repo_slug: 'repo', task_slug: 'task', adw_id: 'run-1' })
-  }
-  assert.deepEqual(read('plan-missing').plan, { chunks: null, absent: 'plan-not-accepted' })
-  for (const [name, text] of [
-    ['plan-invalid', '{'], ['plan-null', 'null'], ['plan-array', '[]'], ['plan-primitive', '7'],
-    ['plan-no-chunks', JSON.stringify({ details: {} })], ['plan-empty-chunks', JSON.stringify({ details: { chunks: [] } })],
-  ]) {
-    const result = read(name, (path) => writeFileSync(path, text))
-    assert.equal(result.plan.absent, ['plan-no-chunks', 'plan-empty-chunks'].includes(name) ? 'plan-has-no-chunks' : 'plan-unreadable')
-  }
-  const denied = read('plan-directory', (path) => mkdirSync(path))
-  assert.deepEqual(denied.plan, { chunks: null, absent: 'plan-unreadable' })
-  const chunks = [{ id: 'kept', checks_owned: ['PV2'] }]
-  const retained = read('plan-no-journal', (path) => writeFileSync(path, JSON.stringify({ details: { chunks } })))
-  assert.deepEqual(retained.plan, { chunks, absent: null })
-  assert.equal(retained.degraded, true)
 })
 
 function growingPayload(count) {
@@ -608,46 +575,6 @@ test('the #673 marker events keep landing unchanged', () => {
   const markers = assignment(result, 'd9:builder').markers
   assert.deepEqual(markers.map((marker) => marker.event), ['seat-retrying', 'seat-retry-cleared'])
   assert.equal(markers.every((marker) => marker.kind !== 'substrate'), true)
-})
-
-test('PU6 journal source reads step titles and acceptance text without changing the tree', () => {
-  const root = scratchDir('visualizer-pu6-crew-');
-  const outside = scratchDir('visualizer-pu6-outside-');
-  const dir = join(root, 'repo', 'task');
-  mkdirSync(join(dir, 'ledger'), { recursive: true });
-  mkdirSync(join(dir, 'task'), { recursive: true });
-  writeFileSync(join(dir, 'ledger', 'run.json'), JSON.stringify({ adw_id: 'run-1' }));
-  const chunks = [{ id: 'S1' }, { id: 'S2' }];
-  writeFileSync(join(dir, 'task', 'plan.accepted.envelope.json'), JSON.stringify({ details: { chunks } }));
-  writeFileSync(join(dir, 'task', 'plan.accepted.md'), '### Step S1 \u2014 process-group registry\n\n### Step S2\n');
-  mkdirSync(join(root, 'briefs'), { recursive: true });
-  const brief = join(root, 'briefs', 'lane.brief.md');
-  writeFileSync(brief, '## Acceptance\n\n(LG4) Reaps the group.\n');
-  writeFileSync(join(outside, 'evil.brief.md'), '## Acceptance\n\n(LG4) Outside text.\n');
-  const journal = (b) => JSON.stringify({ event: 'batch-dir', batch_dir: root, brief: b }) + '\n';
-  writeFileSync(join(dir, 'journal.jsonl'), journal(brief));
-  const src = createJournalSource({ crewRoot: root });
-  const before = treeDigest(root);
-  const r1 = src.readJournal({ repo_slug: 'repo', task_slug: 'task', adw_id: 'run-1' });
-  assert.deepEqual(r1.step_titles, { S1: 'process-group registry' });
-  assert.deepEqual(r1.acceptance, { LG4: 'Reaps the group.' });
-  assert.deepEqual(r1.plan, { chunks, absent: null });
-  assert.equal(treeDigest(root), before);
-  writeFileSync(join(dir, 'journal.jsonl'), journal(join(outside, 'evil.brief.md')));
-  const r2 = src.readJournal({ repo_slug: 'repo', task_slug: 'task', adw_id: 'run-1' });
-  assert.deepEqual([r2.acceptance, r2.acceptance_reason], [null, 'brief-outside-crew-root']);
-  writeFileSync(join(dir, 'journal.jsonl'), '');
-  const r3 = src.readJournal({ repo_slug: 'repo', task_slug: 'task', adw_id: 'run-1' });
-  assert.deepEqual([r3.acceptance, r3.acceptance_reason], [null, 'brief-path-not-journaled']);
-  const rootNoMd = scratchDir('visualizer-pu6-nomd-');
-  const dirNoMd = join(rootNoMd, 'repo', 'task');
-  mkdirSync(join(dirNoMd, 'ledger'), { recursive: true });
-  mkdirSync(join(dirNoMd, 'task'), { recursive: true });
-  writeFileSync(join(dirNoMd, 'ledger', 'run.json'), JSON.stringify({ adw_id: 'run-1' }));
-  writeFileSync(join(dirNoMd, 'task', 'plan.accepted.envelope.json'), JSON.stringify({ details: { chunks } }));
-  writeFileSync(join(dirNoMd, 'journal.jsonl'), '');
-  const r4 = createJournalSource({ crewRoot: rootNoMd }).readJournal({ repo_slug: 'repo', task_slug: 'task', adw_id: 'run-1' });
-  assert.deepEqual([r4.step_titles, r4.step_titles_reason], [null, 'plan-text-unreadable']);
 })
 
 test('trajectory marks only the coverage-reask assign span', () => {

@@ -1106,7 +1106,7 @@ test('LH4', () => {
 })
 
 // ---- b1410: the visualizer no longer reads the ledger or any old-path module ----
-const DROPPED_ROUTES = ['/api/roster', '/api/roster/pick', '/api/roster/propose', '/api/roster/agent/propose', '/api/roster/ladder', '/api/roster/ladder/stage', '/api/roster/ladder/compose', '/api/roster/ladder/apply',
+const DROPPED_ROUTES = ['/api/returns', '/api/roster', '/api/roster/pick', '/api/roster/propose', '/api/roster/agent/propose', '/api/roster/ladder', '/api/roster/ladder/stage', '/api/roster/ladder/compose', '/api/roster/ladder/apply',
   '/api/workflows', '/api/workflows/propose', '/api/workflows/editor', '/api/workflows/save', '/api/workflows/library', '/api/workflows/preview', '/api/prepared-tasks', '/api/assurances', '/api/assurances/preview', '/api/assurances/propose',
   '/api/prompt-library', '/api/prompt-library/preview', '/api/prompt-library/save', '/api/cell-health', '/api/run-set', '/api/intake', '/api/intake/brake', '/api/seat-teardowns', '/api/cell-attribution', '/api/triage']
 
@@ -1120,7 +1120,7 @@ function leanLane(crewRoot, id) {
 
 test('VC2 the route table holds no ledger ops-pane, roster, ladder, workflow, prepared-task, assurance or prompt-library route', () => {
   for (const route of DROPPED_ROUTES) assert.equal(Object.hasOwn(ROUTE_PARAMS, route), false, `${route} must not be in ROUTE_PARAMS`)
-  for (const route of ['/api/sessions', '/api/events', '/api/returns', '/api/journal', '/api/seat-sessions', '/api/agents', '/api/agents/propose', '/api/agent-library', '/api/skill-library', '/api/model-catalog', '/api/health', '/api/plugin-write-mode']) assert.ok(Object.hasOwn(ROUTE_PARAMS, route), `${route} stays`)
+  for (const route of ['/api/sessions', '/api/events', '/api/journal', '/api/seat-sessions', '/api/agents', '/api/agents/propose', '/api/agent-library', '/api/skill-library', '/api/model-catalog', '/api/health', '/api/plugin-write-mode']) assert.ok(Object.hasOwn(ROUTE_PARAMS, route), `${route} stays`)
 })
 
 test('VC2 a dropped route answers 404 on GET and 405 on POST, never a handler', async () => {
@@ -1128,6 +1128,8 @@ test('VC2 a dropped route answers 404 on GET and 405 on POST, never a handler', 
   let started
   try {
     started = await startInProcess({}, { crewRoot })
+    const returnsWithIdentity = await json(started.base, '/api/returns?repo_slug=repo&task_slug=task&adw_id=old')
+    assert.equal(returnsWithIdentity.status, 404)
     for (const route of DROPPED_ROUTES) {
       const get = await json(started.base, route)
       assert.equal(get.status, 404, `GET ${route}`)
@@ -1219,7 +1221,7 @@ test('/api/health reports the removed ledger as unreadable with a reason, not a 
     assert.equal(response.status, 200)
     assert.equal(response.json.ledger.readable, false)
     assert.match(response.json.ledger.absent, /ledger source removed/)
-    assert.equal(response.json.returns_readonly, true)
+    assert.equal(Object.hasOwn(response.json, 'returns_readonly'), false)
   } finally {
     await stopInProcess(started?.server)
   }

@@ -5,7 +5,6 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'n
 import { resolve, join, dirname, sep, relative } from 'node:path'
 import { homedir, networkInterfaces } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { createReturnsSource } from './returns-source.mjs'
 import { createJournalSource } from './journal-source.mjs'
 import { createLeanSource } from './lean-source.mjs'
 import { createAgentsSource } from './agents-source.mjs'
@@ -15,7 +14,7 @@ import { createAgentLibrary } from './agent-library.mjs'
 import { createSkillLibrary } from './skill-library.mjs'
 import { createArtificialAnalysisCatalog } from './model-catalog.mjs'
 import { createOpenRouterCatalog } from './openrouter-catalog.mjs'
-import { mergeModelDirectory } from '../web/src/lib/model-directory.js'
+import { mergeModelDirectory } from './model-directory.mjs'
 import { saveArtificialAnalysisKey } from './local-env.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -67,7 +66,6 @@ const CLI_FLAGS = Object.freeze({
 export const ROUTE_PARAMS = Object.freeze({
   '/api/sessions': ['mode', 'status', 'since', 'until'],
   '/api/events': ['adw_id', 'after', 'limit', 'type', 'role', 'phase_id'],
-  '/api/returns': ['repo_slug', 'task_slug', 'adw_id'],
   '/api/journal': ['repo_slug', 'task_slug', 'adw_id'],
   '/api/seat-sessions': ['repo_slug', 'task_slug', 'adw_id', 'role'],
   '/api/plugin-write-mode': [],
@@ -341,7 +339,6 @@ export function startServer(options = {}) {
   const pluginWriteRefusal = { schema, error:PLUGIN_WRITE_NOTICE, reason:writeMode.reason, basis:writeMode.basis, plugin_root:writeMode.plugin_root }
   config.envFile = resolve(config.envFile || join(PROJECT_ROOT, '.env.local'))
   const env = config.env ?? process.env
-  const returns = config.returns || createReturnsSource({ crewRoot: config.crewRoot })
   const lean = config.lean || createLeanSource({ crewRoot: config.crewRoot, archiveRoot: config.leanArchiveRoot })
   const journal = config.journal || createJournalSource({ crewRoot: config.crewRoot, lean })
   const modelCatalog = config.modelCatalog || createArtificialAnalysisCatalog({ apiKey: env.ARTIFICIAL_ANALYSIS_API_KEY, fetchImpl: config.fetchImpl })
@@ -425,13 +422,6 @@ export function startServer(options = {}) {
         }
         // The ledger event source is gone: a non-lean lane answers null-with-reason, never a measured zero.
         return json(res, 200, { schema, events: [], cursor: after, degraded: true, absent: 'ledger event source removed: only lean lanes (adw_id lean:<id>) have events' })
-      }
-      if (url.pathname === '/api/returns') {
-        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
-        const repo_slug = url.searchParams.get('repo_slug'), task_slug = url.searchParams.get('task_slug')
-        if (!repo_slug || !task_slug) return json(res, 400, { schema, error: 'repo_slug and task_slug are required' })
-        const result = returns.listEnvelopes({ repo_slug, task_slug, adw_id: url.searchParams.get('adw_id') || '' })
-        return json(res, 200, { schema, ...result })
       }
       if (url.pathname === '/api/journal') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
@@ -578,7 +568,7 @@ export function startServer(options = {}) {
       }
       if (url.pathname === '/api/health') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
-        return json(res, 200, { schema, ...returns.health(), ledger: { readable: false, absent: 'ledger source removed: the visualizer no longer reads the ledger' }, returns_readonly: true })
+        return json(res, 200, { schema, ...journal.health(), ledger: { readable: false, absent: 'ledger source removed: the visualizer no longer reads the ledger' } })
       }
       if (url.pathname.startsWith('/api/')) return method === 'GET' ? json(res, 404, { schema, error: 'not found' }) : json(res, 405, { schema, error: 'not found' }, { allow: 'GET' })
       if (method !== 'GET' && method !== 'HEAD') return res.writeHead(405, { allow: 'GET, HEAD' }).end()
@@ -591,7 +581,7 @@ export function startServer(options = {}) {
   process.once('SIGTERM', close); process.once('SIGINT', close)
   server.listen(config.port, config.host, () => {
     const address = server.address()
-    process.stdout.write(`${JSON.stringify({ listening: true, port: address.port, crew_root: config.crewRoot, returns_readonly: true, readonly: false, writes: ['project agent definition files when Save agent is explicitly requested', 'harness execution preferences when Save harness settings is explicitly requested', 'skill definitions and selection rules when explicitly saved', 'Artificial Analysis key in the project .env.local when explicitly requested'] })}\n`)
+    process.stdout.write(`${JSON.stringify({ listening: true, port: address.port, crew_root: config.crewRoot, readonly: false, writes: ['project agent definition files when Save agent is explicitly requested', 'harness execution preferences when Save harness settings is explicitly requested', 'skill definitions and selection rules when explicitly saved', 'Artificial Analysis key in the project .env.local when explicitly requested'] })}\n`)
   })
   return { server, agents }
 }

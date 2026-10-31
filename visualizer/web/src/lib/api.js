@@ -11,7 +11,6 @@ export const getEvents = (adwId, after = 0, limit, filters = {}, options) => {
   for (const key of ['type', 'role', 'phase_id']) if (filters[key] !== undefined && filters[key] !== '' && filters[key] !== null) params.set(key, filters[key])
   return request(`/api/events?${params}`, options)
 }
-export const getReturns = (repoSlug, taskSlug, adwId, options) => request(`/api/returns?${new URLSearchParams({ repo_slug: repoSlug, task_slug: taskSlug, adw_id: adwId })}`, options)
 export const getJournal = (repoSlug, taskSlug, adwId, options) => request(`/api/journal?${new URLSearchParams({ repo_slug: repoSlug, task_slug: taskSlug, adw_id: adwId })}`, options)
 export const getSeatSessions = (repoSlug, taskSlug, adwId, role, options) => request(`/api/seat-sessions?${new URLSearchParams({ repo_slug: repoSlug, task_slug: taskSlug, adw_id: adwId, role })}`, options)
 export const getAgents = () => request('/api/agents')

@@ -95,6 +95,12 @@ test('sed in-place diagnostic hint is conservative and scoped to assignment and 
   // The measured shape: a chained command whose last step succeeded, so the call reports no error.
   const chained = { ...failure, isError: false, input: { command: "cd T; sed -i 's/a/b/' f; node --test f.test.mjs" }, content: [{ type: 'text', text: 'sed: 1: "f": command c expects \\ followed by text\nℹ pass 1' }] }
   assert.match(appendedText(await loopFor(f).onToolResult(chained, {})), /sed -i '' .*Edit tool/)
+  // A chained test run is still filtered, with the hint after it.
+  const noisy = { ...chained, input: { command: "cd T; sed -i 's/a/b/' f; node --test f.test.mjs" }, content: [{ type: 'text', text: 'sed: 1: "f": command c expects \\ followed by text\n' + '✔ passing case (1ms)\n'.repeat(50) + 'ℹ tests 50\nℹ pass 50\n' }] }
+  const filtered = await loopFor(f).onToolResult(noisy, {})
+  assert.doesNotMatch(filtered.content[0].text, /✔ passing case/)
+  assert.match(filtered.content.at(-1).text, /sed -i '' .*Edit tool/)
+  for (const command of ["  sed -i 's/a/b/' f", "echo ok\nsed -i 's/a/b/' f"]) assert.match(appendedText(await loopFor(f).onToolResult({ ...chained, input: { command } }, {})), /Edit tool/, command)
   const result = await run(failure)
   assert.equal(result.content[0], failure.content[0])
   assert.match(appendedText(result), /sed -i '' .*Edit tool/)

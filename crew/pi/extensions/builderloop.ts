@@ -786,7 +786,7 @@ function eligibleTestWords(words, current) {
 // exit status or a lone command. A hint is a nudge: a misfire costs one line, a miss costs the seat a retry.
 function failedSedInPlace(event) {
   const command = event?.input?.command
-  if (typeof command !== 'string' || !/(?:^|[;&|(]\s*)sed\s+-i\b/.test(command)) return false
+  if (typeof command !== 'string' || !/(?:^|[;&|(\n])\s*sed\s+-i\b/.test(command)) return false
   if (!Array.isArray(event?.content)) return false
   return event.content.some((part) => part?.type === 'text' && typeof part.text === 'string' && /^sed: \d+: /m.test(part.text))
 }
@@ -882,10 +882,9 @@ export function createBuilderLoop(value = {}) {
   async function onToolResult(event, ctx) {
     if (role === 'builder' && event?.toolName === 'bash') {
       saveCorpus(event)
-      if (!sedHinted && failedSedInPlace(event)) {
-        sedHinted = true
-        return { content: [...event.content, { type: 'text', text: "Use sed -i '' for BSD in-place editing, or use the Edit tool." }] }
-      }
+      // The hint rides on whatever the result becomes, so a chained test run is still filtered.
+      const hint = !sedHinted && failedSedInPlace(event) ? { type: 'text', text: "Use sed -i '' for BSD in-place editing, or use the Edit tool." } : null
+      if (hint) sedHinted = true
       const command = typeof event?.input?.command === 'string' ? event.input.command : ''
       const content = event?.content
       if (Array.isArray(content) && content.length === 1 && content[0]?.type === 'text' && typeof content[0].text === 'string') {
@@ -912,12 +911,12 @@ export function createBuilderLoop(value = {}) {
           const passingCount = ansi.split(/\r?\n/).filter((line) => /^\s*(?:✔ |ok \d+(?:\s|$))/.test(line)).length
           const notice = `[test output filtered: dropped ${passingCount} passing-test lines, ${bytes(source) - bytes(filtered)} bytes]`
           const text = `${filtered}\n${notice}`
-          const patch = { content: [{ type: 'text', text }] }
+          const patch = { content: [{ type: 'text', text }, ...(hint ? [hint] : [])] }
           if (event.structuredContent !== undefined) patch.structuredContent = { ...event.structuredContent, output: text }
           return patch
         }
       }
-      return undefined
+      return hint ? { content: [...event.content, hint] } : undefined
     }
     if (role !== 'builder' || event?.toolName !== 'edit' || !event?.isError) {
       saveCorpus(event)

@@ -190,3 +190,24 @@ review. Recall, not precision, is its limit.
 **Planner, pi sol high** (18 each, strict blind plan review): plain 3/18 (12 must-fix, 4.90M tokens),
 readgate 6/18 (11, 5.46M), fff 4/18 (10, 5.06M). The lab arm was granted and never called, at +31%
 tokens. A sol advisor on the planner injected 0 notes in 21 consults (blind 4/18 vs 5/18), so it is off.
+
+**Skill grants and fff on the planner, 2026-10-31 and 11-01** (pi sol high with `subagent`, 14 code lanes × 3
+per arm, strict blind plan review). The first batch ran on 6 lanes and the second on the 8 lanes added in PR
+2097; the second put all three arms in one shuffled batch.
+
+| Planner | 6 lanes | 8 new lanes | Pooled | Tokens, pooled |
+|---|---|---|---|---|
+| no skills | 3/18 | 5/24 | 8/42 | 10.45M |
+| + `qa-test-writing` | 6/18 | 3/24 | 9/42 | 15.19M (+45%) |
+| + fff | 6/18 | 3/24 | 9/42 | 11.38M (+9%) |
+
+The granted planner read `qa-test-writing/SKILL.md` in 42 of 42 runs, so a grant is delivered and read; it
+just did not move the score. The lane decides it: b1440 passed in 8 of 9 runs, and 7 of the 8 new lanes passed
+in 3 of 63. The fff arm made 104 fff calls and no calls to the native grep tool, which the control used
+instead; it still ran `rg` or `grep` through Bash 8 times. Neither is granted.
+
+**`prose-plain` on a pi terra builder** (`code-less` alone vs `code-less` + `prose-plain`, sol advisor,
+blind diff review). On the doc lanes b1457, b1458 and b1459 (3 each): 8/9 vs 9/9 pass, 5.36M vs 5.23M
+tokens, and the skill was read in 9 of 9 runs. On the 8 new code lanes (3 each): 18/24 vs 18/24 pass, the same
+lanes failing in both arms, 3.68M vs 3.40M tokens, and the skill was read in 3 of 24 runs. The builder seat
+grants it since PR 2096. Must-fix counts are not given: the reviews state them in at least four formats.

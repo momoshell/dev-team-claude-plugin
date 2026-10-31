@@ -175,6 +175,9 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
         const code = row.outcome?.code
         const outcome = nonEmpty(row.outcome?.status) ? row.outcome.status : (typeof code === 'number' && code !== 0 ? 'failed' : 'done')
         if (phase) { phase.status = outcome; phase.ended_at = at } else phases.push({ id: phases.length + 1, name: stage, status: outcome, checks: [], started_at: null, ended_at: at })
+      } else if (row.event === 'envelope' && stage && nonEmpty(row.role)) {
+        const phase = phases.findLast((entry) => entry.name === stage)
+        if (phase) phase.role = row.role
       } else if (row.event === 'check' && stage) {
         const phase = phases.findLast((entry) => entry.name === stage)
         const check = { check: row.check ?? null, result: summarizeCheckResult(row.result) }

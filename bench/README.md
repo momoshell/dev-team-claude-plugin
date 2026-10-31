@@ -137,7 +137,32 @@ sonnet, so measure each arm per model. N is 18 per arm; differences of one or tw
 **Arms on a Claude builder.** It made 440 of 454 tool calls through Bash, so readgate, skeletonread
 and builderloop had nothing to act on (0 interventions in 24 runs). fff 10/18 and fff + reminders
 9/18 against none 11/17, tokens unchanged. reminders told seats without an fff grant to use fff
-(4 of 6 runs).
+(4 of 6 runs); PR 2070 fixed that.
+
+**Read arms on a Claude builder, 2026-10-30, after the Read-tool steer** (PR 2075; 6 lanes × 3, blind diff
+review). none: 11/18 pass, 13 must-fix, 3.11M tokens, median wall 39s. readgate + skeletonread: 9/18 pass,
+13 must-fix, 4.10M tokens (+32%), median wall 48s. The steer worked: 42 Bash reads were refused and the seat
+made 117 Read calls. But neither arm then acted: 0 range refusals and 0 skeletons, because Claude reads each
+file once and whole. On terra the same arms cut tokens by 26%. Keep them off Claude seats.
+
+**How a Claude builder edits** (209 sessions from the benches above):
+
+| Method | Edits | Failed |
+|---|---|---|
+| Bash python heredoc | 393 | 1 |
+| Bash `sed -i` | 82 | 48 |
+| Edit tool | 60 | 0 |
+| Write tool | 18 | 0 |
+
+Every failed `sed -i` was a GNU-style script under BSD sed. All 48 were chained after `cd T;`, and 46 reported
+exit 0. builderloop now hints once on that failure (PR 2080); the hint itself is not yet benched.
+
+**Planner memory, 2026-10-31** (pi sol high with `subagent`, 6 lanes × 3, `--memory` with a fresh 6-entry store
+rendering 4,072 bytes, strict blind plan review). none: 4/18 pass, 17 must-fix, 5.07M tokens, median 153s.
+memory: 6/18 pass, 11 must-fix, 6.12M tokens (+21%), median 168s. The planner followed the store: all 18
+memory gates carried `// MUTATION:` comments, against 0 of 18 without it. Per run, cached prompt re-reads
+grew by 56k tokens, uncached input by 1.5k and output by 1k, so the cost is the roughly 1k-token section
+re-read on each of about 50 calls. It scales with store size. The planner seat declares `memory: true`.
 
 **Advisor on a Claude sonnet builder** (6 lanes × 3): none 12/18, terra 10/18, sol 8/18, at +12% and
 +27% tokens. In 33 of 36 advisor runs it said nothing, so the pass gap is noise. When made blocking

@@ -1,0 +1,27 @@
+{
+  "id": "b1459-skills-live-exhibits",
+  "cwd": "/Users/momoshell/Dev/dt-b1459-skills-live-exhibits",
+  "taskDir": "/Users/momoshell/.crew/dt-b1459-skills-live-exhibits/b1459-skills-live-exhibits/task",
+  "tier": "build",
+  "shape": "standard",
+  "brief": "# Task\n\n---\nsource: operator request (Momo, 2026-10-31: prose audit — skills citing deleted code, and two upstream KiroCrew review rules)\ncloses: null\ntier: build\nshape: standard\nacceptance: [SX1, SX2, SX3, SX4, SX5, SX6]\nout_of_scope: skills/frontend-svelte, skills/ui-design, skills/ux, skills/code-less and skills/lane-brief (other lanes); crew/ code\n---\n## The ask\n\nThree skills teach from deleted code, and the review rules have two upstream improvements worth taking.\n\n- `skills/qa-test-writing` still frames work as \"declaring tripwires\" (ADR-052 removed tripwire lists from briefs\n  and plans) and has a `directed` variant section where the orchestrator authors the gate (the planner authors\n  it now). Its exhibits name deleted symbols: `guardedKill`, `MODIFIER_KINDS`, `openRun`, `foldRpcUsage`,\n  `SHADOW_ABSENT`, `USAGE_ABSENT_CAUSES`, `CREW_BREAKER_THRESHOLD`, `KNOWN_FLAGS`, and its capture recipe\n  describes the headless `stream.jsonl` layout. Keep the lessons; re-point exhibits to live code\n  (`proveMutations`, `runGate`, `CHECK_REASONS` in `crew/checks.mjs`; `usage: null` in\n  `crew/pi/extensions/subagent.ts`; lean session files `task/lean/<role>/<id>.jsonl`, see `crew/show.mjs`) or\n  say \"no live exhibit\".\n- `skills/backend-node/references/*.md` cite about 40 line numbers that have drifted. Cite path plus symbol or\n  test name instead.\n- `skills/pr-review/references/falsification.md` points to a recipe `sol-reviews-hand-written-diffs` that\n  exists nowhere in the repo.\n- From kirodotdev/KiroCrew `.github/review-prompts/` at 4a03632 (MIT/Apache attribution already in\n  `THIRD-PARTY-NOTICES.md`): add an impact floor to `falsification.md` — a finding's outcome must reach a user,\n  an operator, data or a security boundary; a preference, wording or style point is not a finding. And in its\n  rulings section: a variant that a recorded ruling's rationale already covers is not reported. Keep this repo's\n  must-fix / should-fix / consider scale; do not copy upstream's PASS/BLOCK collapse.\n\nInvariant: every symbol or path these skills offer as an exhibit exists on main.\n\n## Context\n\n- `skills/qa-test-writing/SKILL.md` and `references/` (vacuity, captures, absence, affordances, gates, tripwires).\n- `skills/backend-node/references/` (erasable-ts, evidence, usage-records, import-firewall).\n- `test/` may pin some of this prose; keep pins passing or update them with the text.\n\n## Acceptance\n\n- (SX1) `skills/qa-test-writing` asks no seat to declare tripwires and describes no orchestrator-authored gate\n- (SX2) no deleted symbol listed in the ask appears in `skills/qa-test-writing`\n- (SX3) `skills/backend-node` cites no `path:line` location\n- (SX4) `skills/pr-review` cites no recipe or file that does not exist in the repo\n- (SX5) `falsification.md` states the impact floor for findings\n- (SX6) `falsification.md` says a variant covered by a recorded ruling is not reported\n",
+  "acceptance": [
+    "SX1",
+    "SX2",
+    "SX3",
+    "SX4",
+    "SX5",
+    "SX6"
+  ],
+  "source": "operator request (Momo, 2026-10-31: prose audit — skills citing deleted code, and two upstream KiroCrew review rules)",
+  "branch": "b1459-skills-live-exhibits",
+  "base": "main",
+  "closes": [],
+  "suite": {
+    "command": "npm",
+    "args": [
+      "test"
+    ],
+    "timeoutMs": 1800000
+  }
+}

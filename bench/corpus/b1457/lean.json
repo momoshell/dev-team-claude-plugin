@@ -1,0 +1,28 @@
+{
+  "id": "b1457-docs-manifests-current",
+  "cwd": "/Users/momoshell/Dev/dt-b1457-docs-manifests-current",
+  "taskDir": "/Users/momoshell/.crew/dt-b1457-docs-manifests-current/b1457-docs-manifests-current/task",
+  "tier": "judge",
+  "shape": "standard",
+  "brief": "# Task\n\n---\nsource: operator request (Momo, 2026-10-31: prose audit — docs, manifests, unused visualizer dependencies)\ncloses: null\ntier: judge\nshape: standard\nacceptance: [DM1, DM2, DM3, DM4, DM5, DM6, DM7]\nout_of_scope: crew/agents/, crew/roles/, crew/guidelines/ and skills/ (other lanes); ADR bodies beyond status lines; docs/archive/ and docs/audits/\n---\n## The ask\n\nDocs and manifests still describe the deleted runtime and dependencies nothing uses. Bring them in line with\nthe lean runtime (ADR-052) and the tree on main.\n\n- `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` descriptions say \"interactive cmux panes,\n  or headless workers owned by a daemon and driven from factoryctl\". Keep the two in step\n  (`test/version-agreement.test.mjs` checks versions only).\n- `@xyflow/svelte`, `@dagrejs/dagre`, `codemirror`, `@codemirror/lang-json` and `@codemirror/lang-markdown` are\n  imported nowhere under `visualizer/`. The operator approved removing them (2026-10-31). Update\n  `package.json`, `package-lock.json`, the dependency paragraph in `CLAUDE.md` and the 2026-09-15 entry in\n  `docs/conventions.md`.\n- `docs/adr/README.md`: the intro cites deleted files (`scripts/factory/emit.mjs`, `crew/drive.mjs`,\n  `crew/headless.mjs`); index rows for 029, 035, 040, 042, 044 and 046 say \"ratified\" while their files say\n  superseded by ADR-052; the \"Note on scope\" calls the ledger ADRs live; ADR-041's file says \"proposed\" while\n  the register says withdrawn.\n- `visualizer/README.md` mentions a returns source and its route list omits `/api/prompts/propose`.\n- Also fix, where the claim is checkable on main: `docs/conventions.md` header (the NUL entry is dated\n  2026-08-02, not 08-03); `crew/README.md` (state lives under `~/.crew/dt-<lane>/<lane>/`; `hooks/skill-gate.mjs`\n  is the skill-map selector, not a registered hook; name `LeanWaterfall.svelte`); `CLAUDE.md` (the\n  `node scripts/<name>.mjs` line, the duplicated lane-brief rows); `test/fixtures/acp/README.md` and\n  `docs/decisions-needed.md` read as current but describe deleted code — mark them historical.\n\nInvariant: a live doc states nothing about files, routes, packages or ADR statuses that main contradicts.\n\n## Context\n\n- `visualizer/server/server.mjs` `ROUTE_PARAMS`: the registered routes.\n- ADR status lines are the `**Status:**` line near each file's top.\n- CI has no node_modules; the node suite must not import a visualizer dependency.\n\n## Acceptance\n\n- (DM1) neither plugin manifest description names cmux, a daemon or factoryctl\n- (DM2) every `devDependencies` entry is imported under `visualizer/` or used by the vite build config\n- (DM3) `CLAUDE.md` names no visualizer dependency that `package.json` does not declare\n- (DM4) every ADR whose file says superseded is listed as superseded in the register index\n- (DM5) ADR-041's status line agrees with its register entry\n- (DM6) the ADR register intro cites only files that exist\n- (DM7) `visualizer/README.md` lists exactly the routes the server registers\n",
+  "acceptance": [
+    "DM1",
+    "DM2",
+    "DM3",
+    "DM4",
+    "DM5",
+    "DM6",
+    "DM7"
+  ],
+  "source": "operator request (Momo, 2026-10-31: prose audit — docs, manifests, unused visualizer dependencies)",
+  "branch": "b1457-docs-manifests-current",
+  "base": "main",
+  "closes": [],
+  "suite": {
+    "command": "npm",
+    "args": [
+      "test"
+    ],
+    "timeoutMs": 1800000
+  }
+}

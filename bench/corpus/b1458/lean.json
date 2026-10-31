@@ -1,0 +1,24 @@
+{
+  "id": "b1458-viz-skills-remeasure",
+  "cwd": "/Users/momoshell/Dev/dt-b1458-viz-skills-remeasure",
+  "taskDir": "/Users/momoshell/.crew/dt-b1458-viz-skills-remeasure/b1458-viz-skills-remeasure/task",
+  "tier": "build",
+  "shape": "standard",
+  "brief": "# Task\n\n---\nsource: operator request (Momo, 2026-10-31: prose audit — visualizer skills cite deleted components)\ncloses: null\ntier: build\nshape: standard\nacceptance: [VS1, VS2, VS3]\nout_of_scope: the visualizer code itself; other skills\n---\n## The ask\n\n`skills/frontend-svelte`, `skills/ui-design` and `skills/ux` call themselves this checkout's measured\nboundary, but most of their exhibits and counts come from components deleted on 2026-10-31 (RunDetail,\nRunCard, FleetTable, PhaseGantt, PhasePanel, PlanSteps, EventStream, PhaseDots, RoleTag, GateChips,\nAcceptPanel, Filters, MarkdownView, EnvelopeInspector and lib/trace.js, drain.js, envelope-diff.js and others).\n`visualizer/web/src` now has 11 `.svelte` files (App plus 10 in lib), not 27 or 39.\n\nRe-measure each rule against the live tree. Keep a rule whose live exhibit exists and re-point it (live\ncandidates: `LeanRunDetail.svelte`, `LeanWaterfall.svelte`, `TaskList.svelte`, `App.svelte`,\n`AgentsPage.svelte`, `SkillsPage.svelte`, `SkillDelivery.svelte`, `Dropdown.svelte`, `Pagination.svelte`,\n`theme.css`, `fleet.js`, `agents.js`). A rule with no live exhibit says so plainly (\"no live exhibit\") rather\nthan citing a deleted file; a finding about deleted code (the hex-leak inventory, PhaseDots motion) is removed.\nRecount every census number you keep.\n\nInvariant: these skills cite no file that does not exist and state no count main contradicts.\n\n## Context\n\n- `skills/ux/SKILL.md` says \"39 visualizer components\"; its references say 27. `skills/ux/references/motion.md`'s\n  only animation exhibit is gone, and `theme.css` has the global `prefers-reduced-motion` rule.\n- `skills/frontend-svelte/references/structure.md` lists deleted plain modules and old line ranges.\n- `skills/ui-design/references/state-colour.md` is exhibited almost entirely on deleted components.\n- Prefer citing a path and symbol over a line number (`skills/qa-test-writing/references/citations.md`).\n\n## Acceptance\n\n- (VS1) no file under `skills/frontend-svelte`, `skills/ui-design` or `skills/ux` cites a visualizer file that does not exist\n- (VS2) every count of visualizer components those skills state equals the number of `.svelte` files under `visualizer/web/src`\n- (VS3) the ux motion rule describes the reduced-motion handling in `theme.css` as the live state\n",
+  "acceptance": [
+    "VS1",
+    "VS2",
+    "VS3"
+  ],
+  "source": "operator request (Momo, 2026-10-31: prose audit — visualizer skills cite deleted components)",
+  "branch": "b1458-viz-skills-remeasure",
+  "base": "main",
+  "closes": [],
+  "suite": {
+    "command": "npm",
+    "args": [
+      "test"
+    ],
+    "timeoutMs": 1800000
+  }
+}

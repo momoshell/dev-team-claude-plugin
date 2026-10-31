@@ -1,0 +1,67 @@
+{
+  "role": "planner",
+  "id": "b1459-skills-live-exhibits.planner.1",
+  "status": "done",
+  "summary": "Authored the scoped prose-repair plan, six-check gate and independent kill mutations; execution is left to the loop.",
+  "details": {
+    "subject": "fix(skills): refresh exhibits and tighten review findings",
+    "plan_path": "/Users/momoshell/.crew/dt-b1459-skills-live-exhibits/b1459-skills-live-exhibits/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1459-skills-live-exhibits/b1459-skills-live-exhibits/task/gate.mjs",
+    "acceptance": ["SX1", "SX2", "SX3", "SX4", "SX5", "SX6"],
+    "mutations": [
+      {
+        "check": "SX1",
+        "file": "skills/qa-test-writing/references/tripwires.md",
+        "find": "# Tripwires and scope",
+        "replace": "# Tripwires and scope\n\nThe planner must declare tripwires in the plan."
+      },
+      {
+        "check": "SX2",
+        "file": "skills/qa-test-writing/references/affordances.md",
+        "find": "# Test affordances",
+        "replace": "# Test affordances\n\nUse `KNOWN_FLAGS` as the exhibit."
+      },
+      {
+        "check": "SX3",
+        "file": "skills/backend-node/references/evidence.md",
+        "find": "# Evidence register",
+        "replace": "# Evidence register\n\nExhibit: `crew/pi/extensions/subagent.ts:472`."
+      },
+      {
+        "check": "SX4",
+        "file": "skills/pr-review/references/falsification.md",
+        "find": "# Falsification and adjudication",
+        "replace": "# Falsification and adjudication\n\nFollow `references/nonexistent-review-recipe.md`."
+      },
+      {
+        "check": "SX5",
+        "file": "skills/pr-review/references/falsification.md",
+        "find": "Report a finding only when its wrong outcome reaches a user, an operator, data, or a security boundary.",
+        "replace": "Report a finding whenever a reviewer prefers different wording or style."
+      },
+      {
+        "check": "SX6",
+        "file": "skills/pr-review/references/falsification.md",
+        "find": "Do not report a variant that a recorded ruling's rationale already covers.",
+        "replace": "Report a variant even when a recorded ruling's rationale already covers it."
+      }
+    ],
+    "files_in_scope": [
+      "skills/qa-test-writing/SKILL.md",
+      "skills/qa-test-writing/references/tripwires.md",
+      "skills/qa-test-writing/references/gates.md",
+      "skills/qa-test-writing/references/vacuity.md",
+      "skills/qa-test-writing/references/captures.md",
+      "skills/qa-test-writing/references/absence.md",
+      "skills/qa-test-writing/references/affordances.md",
+      "skills/backend-node/references/erasable-ts.md",
+      "skills/backend-node/references/evidence.md",
+      "skills/backend-node/references/usage-records.md",
+      "skills/pr-review/references/falsification.md",
+      "skills/pr-review/references/evidence.md",
+      "test/skills-live-exhibits.test.mjs"
+    ],
+    "validation_lane": "node --test test/skills-live-exhibits.test.mjs test/review-procedure-loader.test.mjs skills/pr-review/findings-shape.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1459-skills-live-exhibits/b1459-skills-live-exhibits/task/gate.mjs"
+  }
+}

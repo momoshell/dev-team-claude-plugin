@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -9,7 +9,7 @@ import { openMemory, renderSection } from '../crew/memory.mjs'
 import { runBuilder } from './replay-builder.mjs'
 import { runPlanner } from './replay-planner.mjs'
 
-const LANES = { b1380: '1d282ec7', b1381: '1d282ec7', b1402: '2966b484', b1408: 'fbc9ad2a', b1416: 'abe2d073', b1417: 'abe2d073' }
+const LANES = { b1380: '1d282ec7', b1381: '1d282ec7', b1402: '2966b484', b1408: 'fbc9ad2a', b1416: 'abe2d073', b1417: 'abe2d073', b1457: '0d08adff4f5ccc8c2f0b94327b4a9e47ed5ff598', b1458: '0d08adff4f5ccc8c2f0b94327b4a9e47ed5ff598', b1459: '0d08adff4f5ccc8c2f0b94327b4a9e47ed5ff598' }
 const CELL = { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' }
 const json = (p) => JSON.parse(readFileSync(p, 'utf8'))
 const scratch = mkdtempSync(join(tmpdir(), 'seat-bench-test-'))
@@ -18,7 +18,7 @@ let n = 0
 const fresh = (label = 'run') => join(scratch, `${label}-${n++}`)
 const sh = (cwd, ...args) => { const r = spawnSync('git', args, { cwd, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim() }
 
-test('the corpus carries every replay input for the six lanes', () => {
+test('the corpus carries every replay input for the nine lanes', () => {
   for (const [lane, base] of Object.entries(LANES)) {
     const dir = join(CORPUS_DIR, lane)
     for (const name of ['plan.md', 'gate.mjs', 'planner-1.json', 'lean.json', 'brief.md', 'planner-prompt.txt', 'builder-prompt.txt', 'manifest.json']) {
@@ -31,12 +31,98 @@ test('the corpus carries every replay input for the six lanes', () => {
     assert.equal(manifest.base, base)
     assert.equal(manifest.originalTask, lean.taskDir)
     assert.equal(manifest.originalTree, lean.cwd)
+    if (['b1457', 'b1458', 'b1459'].includes(lane)) {
+      assert.equal(readFileSync(join(dir, 'brief.md'), 'utf8'), lean.brief)
+      assert(manifest.source.includes(`dt-${lane}-`))
+      assert.equal(manifest.id, lean.id)
+    }
     for (const role of ['planner', 'builder']) {
       const prompt = readFileSync(join(dir, `${role}-prompt.txt`), 'utf8')
       assert(prompt.startsWith(`You are the lean ${role}.`))
       assert(prompt.includes(manifest.originalTask))
       assert(/Return path: .*(planner|builder)-\d+\.json/.test(prompt))
     }
+  }
+})
+
+// MUTATION: SK1 drops the cell skills from the seat definition.
+test('SK1 forwards explicit skills to both seats unchanged', async () => {
+  for (const run of [runBuilder, runPlanner]) for (const skills of [['zeta', 'alpha', 'zeta'], []]) {
+    const fx = fixture()
+    let seen
+    await run({ lane: 'b1380', cell: { ...CELL, skills }, arms: [], out: fresh() }, {
+      ...fx.deps, runAcpSeat: (call) => { seen = call.definition.skills; return { stopReason: 'end_turn' } },
+      runGate: async () => ({ status: 'red' }), proveMutations: async () => ({}),
+    })
+    assert.deepEqual(seen, skills)
+  }
+})
+
+// MUTATION: SK2 removes skill shape validation.
+test('SK2 rejects malformed skills before preparation in both replays', async () => {
+  for (const run of [runBuilder, runPlanner]) for (const skills of [null, 'x', {}, [1], ['x', null], [''], ['  ']]) {
+    let calls = 0
+    const out = fresh()
+    const result = await run({ lane: 'b1380', cell: { ...CELL, skills }, arms: [], out }, { prepareRun: () => { calls++ }, runAcpSeat: () => { calls++ } })
+    assert.equal(calls, 0)
+    assert.match(result.error, /cell\.skills/)
+    assert.equal(json(join(out, 'result.json')).error, result.error)
+  }
+})
+
+// MUTATION: SK3 injects an unrequested default skill.
+test('SK3 omitted skills grants nothing in both replays', async () => {
+  for (const run of [runBuilder, runPlanner]) {
+    const fx = fixture()
+    let seen
+    await run({ lane: 'b1380', cell: CELL, arms: [], out: fresh() }, { ...fx.deps, runAcpSeat: (call) => { seen = call.definition.skills; return { stopReason: 'end_turn' } }, runGate: async () => ({ status: 'red' }), proveMutations: async () => ({}) })
+    assert.deepEqual(seen, [])
+  }
+})
+
+// MUTATION: SK4 prevents the new lanes from loading for builders.
+test('SK4 new corpus prepares builder replays and cleans up', async () => {
+  for (const lane of ['b1457', 'b1458', 'b1459']) {
+    const fx = fixture(lane)
+    const dir = join(fx.corpusDir, lane)
+    cpSync(join(CORPUS_DIR, lane), dir, { recursive: true })
+    const manifestPath = join(dir, 'manifest.json')
+    const manifest = json(manifestPath)
+    assert.equal(manifest.base, LANES[lane])
+    writeFileSync(manifestPath, JSON.stringify({ ...manifest, base: fx.base }))
+    const out = fresh()
+    let seen = false
+    const result = await runBuilder({ lane, cell: CELL, arms: [], out }, { ...fx.deps, runAcpSeat: (call) => {
+      seen = true
+      assert(call.prompt.includes(join(out, 'task')))
+      assert(!call.prompt.includes(manifest.originalTask))
+      assert(existsSync(join(call.taskDir, 'plan.md')) && existsSync(join(call.taskDir, 'gate.mjs')) && existsSync(join(call.taskDir, 'planner-1.json')))
+      writeFileSync(join(call.taskDir, 'builder-2.json'), JSON.stringify({ status: 'done', summary: 'ok' }))
+      return { stopReason: 'end_turn' }
+    }, runGate: async () => ({ status: 'red' }), proveMutations: async () => ({}) })
+    assert(seen)
+    assert.equal(result.error, null)
+    assert(!existsSync(join(out, 'tree')))
+    assert.equal(worktrees(fx.repo), 1)
+  }
+})
+
+test('missing planner prompts refuse early without blocking builders', async () => {
+  for (const reason of ['archive has no session', null]) {
+    const fx = fixture()
+    const dir = join(fx.corpusDir, 'b1380')
+    if (reason) writeFileSync(join(dir, 'manifest.json'), JSON.stringify({ ...json(join(dir, 'manifest.json')), plannerPromptMissing: reason }))
+    else rmSync(join(dir, 'planner-prompt.txt'))
+    let calls = 0
+    const out = fresh()
+    const result = await runPlanner({ lane: 'b1380', cell: CELL, arms: [], out }, { ...fx.deps, runAcpSeat: () => { calls++ } })
+    assert.match(result.error, reason ? /archive has no session/ : /missing first planner prompt/)
+    assert.equal(calls, 0)
+    assert(!existsSync(join(out, 'tree')))
+    const builder = await runBuilder({ lane: 'b1380', cell: CELL, arms: [], out: fresh() }, { ...fx.deps, runAcpSeat: (call) => { calls++; writeFileSync(join(call.taskDir, 'builder-2.json'), JSON.stringify({ status: 'done', summary: 'ok' })); return { stopReason: 'end_turn' } }, runGate: async () => ({ status: 'red' }), proveMutations: async () => ({}) })
+    assert.equal(builder.error, null)
+    assert.equal(calls, 1)
+    assert.equal(worktrees(fx.repo), 1)
   }
 })
 
@@ -164,7 +250,7 @@ test('builder replay: prompt rewrite, backfills, checks, diff with additions and
     proveMutations: async ({ checks, mutations }) => { assert.deepEqual(checks, ['X1']); assert.equal(mutations.length, 1); return { status: 'ok', rows: [{ check: 'X1', outcome: 'killed' }] } },
   })
   assert.equal(result.error, null)
-  assert.deepEqual(seen.definition, { role: 'builder', ...CELL, writes: 'repo', wait_s: 60, advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'medium' }, extensions: ['fff', 'readgate'] })
+  assert.deepEqual(seen.definition, { role: 'builder', ...CELL, writes: 'repo', wait_s: 60, advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'medium' }, skills: [], extensions: ['fff', 'readgate'] })
   assert(!seen.prompt.includes('/orig/'))
   assert(seen.prompt.includes(join(out, 'task', 'builder-2.json')) && seen.prompt.includes(join(out, 'tree')))
   const ret = json(join(out, 'task', 'planner-1.json'))

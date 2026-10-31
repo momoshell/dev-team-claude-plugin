@@ -24,11 +24,41 @@ test('pi provider messages classify only measured failures and retain retry poli
   assert.equal(providerRetryDecision({ kind: serverKind }).retry, true)
   assert.equal(providerRetryDecision({ kind: limitKind }).action, 'park')
   assert.equal(providerRetryDecision({ kind: limitKind }).retry, false)
-  for (const message of ['WebSocket error', 'unrecognised', undefined, null, 42, {}, `${overload} `]) assert.equal(acpProviderFailureKind('pi-agent-error', message), null)
+  for (const message of ['unrecognised', undefined, null, 42, {}, `${overload} `]) assert.equal(acpProviderFailureKind('pi-agent-error', message), null)
   for (const message of [overload, limit]) assert.equal(acpProviderFailureKind('other', message), null)
   assert.equal(acpProviderFailureKind('rate_limit', overload), PROVIDER_FAILURE_KINDS.RATE_LIMIT)
   assert.equal(acpProviderFailureKind('overloaded', limit), PROVIDER_FAILURE_KINDS.SERVER_ERROR)
   assert.equal(acpProviderFailureKind('authentication_failed', overload), PROVIDER_FAILURE_KINDS.AUTHENTICATION_FAILED)
+})
+
+test('WS1: exact pi WebSocket transport failures back off', () => {
+  // MUTATION: disabling the exact WebSocket error predicate must fail WS1.
+  const messages = ['WebSocket error', ...[1, 300000, 600000].map((ms) => `WebSocket idle timeout after ${ms}ms`)]
+  for (const message of messages) {
+    const kind = acpProviderFailureKind('pi-agent-error', message)
+    assert.equal(kind, PROVIDER_FAILURE_KINDS.SERVER_ERROR)
+    const decision = providerRetryDecision({ kind })
+    assert.equal(decision.retry, true)
+    assert.equal(decision.action, 'backoff')
+    for (const otherKind of ['other', '', null, undefined]) assert.equal(acpProviderFailureKind(otherKind, message), null)
+  }
+  for (const message of [
+    ' WebSocket error', 'WebSocket error ', 'WebSocket error\n', 'websocket error',
+    'prefix WebSocket error', 'WebSocket error: detail',
+    'WebSocket idle timeout after ms', 'WebSocket idle timeout after -1ms',
+    'WebSocket idle timeout after 1.5ms', 'WebSocket idle timeout after Nms',
+    'WebSocket idle timeout after 300000ms ', 'WebSocket idle timeout after 300000ms\n',
+    'prefix WebSocket idle timeout after 300000ms',
+  ]) assert.equal(acpProviderFailureKind('pi-agent-error', message), null)
+})
+
+test('WS2: deliberate pi stop messages remain unclassified and do not retry', () => {
+  // MUTATION: classifying Operation aborted as server_error must fail WS2.
+  for (const message of ['Operation aborted', 'terminated', 'WebSocket closed 1000']) {
+    const kind = acpProviderFailureKind('pi-agent-error', message)
+    assert.equal(kind, null)
+    assert.equal(providerRetryDecision({ kind }).retry, false)
+  }
 })
 
 test('ACP text reset resolves strict wall-clock rollover and DST instants', () => {

@@ -416,7 +416,8 @@ test('the writes a seat receives are the effective definition writes, tier overr
 
 const memoryDefinition = (line) => (path, ...args) => {
   const text = readFileSync(path, ...args)
-  return path === join(AGENTS, 'planner.md') ? text.replace(/tiers: .*/, line) : text
+  // The shipped definition's own memory field is removed first, so each case states the whole effective value.
+  return path === join(AGENTS, 'planner.md') ? text.replace(/^memory: .*\n/m, '').replace(/tiers: .*/, line) : text
 }
 const populateMemory = (dir, body) => {
   mkdirSync(dir, { recursive: true })
@@ -442,6 +443,21 @@ test('effective memory injects lane or override context into the recorded planne
     assert.equal((await f.go()).status, 'done')
     assert.match(f.requests[0].prompt, /override judgment/)
     assert.doesNotMatch(f.requests[0].prompt, /lane judgment/)
+  } finally {
+    if (previous === undefined) delete process.env.CREW_MEMORY_DIR
+    else process.env.CREW_MEMORY_DIR = previous
+  }
+})
+
+// MUTATION: drop `memory: true` from crew/agents/planner.md and the shipped planner boots without team memory.
+test('the shipped planner definition injects the lane checkout memory', async () => {
+  const previous = process.env.CREW_MEMORY_DIR
+  try {
+    delete process.env.CREW_MEMORY_DIR
+    const f = leanFixture()
+    populateMemory(join(f.spec.cwd, '.claude/dev-team/memory'), 'shipped judgment')
+    assert.equal((await f.go()).status, 'done')
+    assert.match(f.requests[0].prompt, /## Team memory[\s\S]*shipped judgment/)
   } finally {
     if (previous === undefined) delete process.env.CREW_MEMORY_DIR
     else process.env.CREW_MEMORY_DIR = previous

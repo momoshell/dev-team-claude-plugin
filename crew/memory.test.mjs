@@ -415,3 +415,14 @@ test('P5 emitted queries resolve to the lean crew CLI and its show and lanes ver
   assert.equal(copiedCli, realpathSync(join(copied, 'bin/crew.mjs')))
   assert.equal(existsSync(copiedCli), true)
 })
+
+// MUTATION: delete .claude/dev-team/memory/MEMORY.md or unlink an entry and the planner boots with less or no team memory.
+test('the shipped team memory store renders every indexed entry within the default budget', () => {
+  const dir = fileURLToPath(new URL('../.claude/dev-team/memory/', import.meta.url))
+  const extract = memory.openMemory({ dir }).context({ task: 'shipped', role: 'planner' })
+  assert.equal(extract.reason, null)
+  assert.deepEqual(extract.dropped, [])
+  assert.ok(extract.included.length >= 2, 'the index and at least one entry')
+  assert.equal(extract.included[0].path, 'MEMORY.md')
+  assert.ok(extract.bytes <= memory.DEFAULT_BUDGET_BYTES)
+})

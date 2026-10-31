@@ -1,57 +1,27 @@
 ---
 name: ui-design
 description: >-
-  Load before designing or reviewing a Svelte component, choosing a colour, adding
-  a panel, or deciding how state, role, lane, and unmeasured values should appear.
-  Constrains new visualizer UI to the measured design boundary: theme-paired chrome,
-  Tier-2 alias tokens, explicit status and identity colour routing, panel and spacing
-  idioms, honest absence marks, and known contrast and enforcement limits. It records
-  this checkout's evidence rather than inventing a generic design system.
+  Load before designing or reviewing visualizer UI, choosing colours, panels,
+  state presentation, or theme tokens. Records live design evidence and limits.
 ---
 
-This is the boundary an agent designs inside. The visualizer's system is real in exactly one dimension—surface and chrome—and absent in another—state colour. Treat `visualizer/web/src/lib/theme.css` and this skill's four `references/*.md` files as evidence: extend the chrome discipline to a new component without pretending that the existing state-colour leaks are a design rule.
+Measured boundary: 11 `.svelte` files under `visualizer/web/src`.
+
+Design against `visualizer/web/src/lib/theme.css` and the live component exhibits, not a historical inventory. Follow the broader rules below even where the checkout has no live exhibit or mechanical enforcement.
 
 ## Routing
 
-| Doing… | Rule that governs it | Details |
-|---|---|---|
-| Choosing a raw or component-facing token | Use the two-tier vocabulary and measured cascade | `references/tokens.md` |
-| Checking whether a component obeys the theme contract | Apply T1–T4 and distinguish enforced tests from stated rules; consult the tabular-numerals register for measured figures | `references/contract.md` |
-| Choosing status, role, lane, or absence colour | Route state through tones and aliases; inspect the leak inventory and divergences | `references/state-colour.md` |
-| Assessing contrast or what this lane cannot establish | Preserve the measured limits and absences, including the per-rule hover-contrast register | `references/limits.md` |
-| Checking colour choices before finishing | Route state through tones and aliases; check the measured colour mistakes | `references/colour-checklist.md` |
-| Provenance for cited rule sources | Verify canonical URL, commit, digest, and license without vendoring | `references/sources.md` |
+- Token vocabulary and cascade: `references/tokens.md`.
+- Theme ownership, tokens, and test limits: `references/contract.md`.
+- Status and identity colour: `references/state-colour.md`.
+- Contrast and other evidence limits: `references/limits.md`.
+- Before finishing: `references/colour-checklist.md`.
+- Source provenance: `references/sources.md`.
 
-## Critical rules
+## Rules
 
-Every colour a component paints resolves to a Tier-2 alias token; a component never names a raw token, and never names a colour.
+Use component-facing semantic aliases rather than raw palette names or literal colours for new painted UI. Route status through a shaper and map its tone to aliases in CSS; make missing tones and fallbacks explicit. Do not claim the existing code universally enforces this rule.
 
-Both ramps are positionally parallel five-step scales: ground -> panel -> hairline -> text -> muted.
+Use panel and recessed surface tokens consistently: `visualizer/web/src/lib/LeanWaterfall.svelte` pairs its `.waterfall` panel with a `.track` recessed on `--bg`, and divides rows with `--line`. Preserve readable spacing and check contrast in both themes. Render missing measurements honestly rather than as a measured zero; `visualizer/web/src/lib/TaskList.svelte` marks an unmeasured shipped count with a dash and explanatory title.
 
-T1 (name only Tier-2 aliases) is obeyed except where the register says otherwise; T2 (every painted colour comes from a token) is violated in 4 of 27 components, 22 times.
-
-The leak boundary is exactly state-vs-chrome: 20 background:var(--panel) sites and 47 var(--line) sites, zero hard-coded surfaces or separators.
-
-A component never decides colour: a shaper returns a tone and CSS maps class -> token; no component reads run.status to pick a colour.
-
-Role and lane isolation is a hand-maintained six-filename allowlist and does not generalise to a component written tomorrow.
-
-- Build content regions on the measured panel chassis: `background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem;`. The chassis appears in 13 components and its surface pairing appears at 20 panel-background sites and 47 separator sites (`visualizer/web/src/lib/theme.css` and the C1 inventory in the register).
-- Use `var(--bg)` for a surface recessed inside a panel and `var(--panel)` for a raised surface. The recessed exhibit is the `.factory-steps` rule in PhaseGantt at `visualizer/web/src/lib/PhaseGantt.svelte:267`, which mixes `var(--bg)` over the panel; do not reverse the C2 roles.
-- Divide sibling rows with `border-top:1px solid var(--line)`, not an empty gap. The register counts 52 one-pixel hairlines across the named panel rows; exhibit `visualizer/web/src/lib/RunCard.svelte:70` and `visualizer/web/src/lib/FleetTable.svelte:32`.
-- Use `rem` for gaps, padding, and margins. Permit `1px` only for hairlines, `999px` for the measured pill idiom, `720px`/`640px`/`1200px` for measured layout bounds, and the `18px`/`5px` SVG user-unit exception at `visualizer/web/src/lib/PhaseGantt.svelte:257`; do not turn the exception into CSS spacing.
-- Render unmeasured data as the honest-blank idiom: a muted em-dash or reasoned unavailable sentence, a `title` carrying why, and a dashed underline for inline marks. The source exhibits are `visualizer/web/src/lib/RunCard.svelte:52`, the `{@render mark(...)}` rows at `visualizer/web/src/lib/FleetTable.svelte:15-21` ending at `visualizer/web/src/lib/FleetTable.svelte:21`, and `visualizer/web/src/lib/AcceptPanel.svelte:23`; the ratified boundary is ADR-029 section 2 at `docs/adr/adr-029-headless-observability-interjection.md:23`.
-- Keep `:global` for descendants produced by markdown rendering, which a component cannot scope. The measured uses are `.evidence :global(.markdown-document)` at `visualizer/web/src/lib/AcceptPanel.svelte:23` and `visualizer/web/src/lib/PhasePanel.svelte:99`; the scoped App workspace layout at `visualizer/web/src/App.svelte:172` keeps layout local; the reset remains in theme.css.
-- Keep theme selection in the existing owner: `visualizer/web/src/App.svelte:18`, `visualizer/web/src/App.svelte:19`, `visualizer/web/src/App.svelte:56`, `visualizer/web/src/App.svelte:57`, and `visualizer/web/src/App.svelte:128` own the `os`/`paper`/`ink` choice, while `visualizer/web/src/lib/theme.css:44`, `visualizer/web/src/lib/theme.css:71`, `visualizer/web/src/lib/theme.css:98`, and `visualizer/web/src/lib/theme.css:99` own the cascade. A component consumes aliases and does not write `data-theme`.
-- Keep role and lane selection in the R2/R3 indirection patterns at `visualizer/web/src/lib/RoleTag.svelte:4`, `visualizer/web/src/lib/RoleTag.svelte:9`, `visualizer/web/src/lib/PhaseDots.svelte:5`, `visualizer/web/src/lib/PhaseDots.svelte:8`, `visualizer/web/src/lib/PhaseGantt.svelte:144`, and `visualizer/web/src/lib/PhaseGantt.svelte:147`; account for missing role suffixes and lanes beyond the declared range.
-
-The counts in this file are reproducible with `grep` over `visualizer/web/src`, and the gate does so; read the references before adding a rule that the suite does not enforce.
-
-## Key references
-
-- `references/tokens.md` — Tier 1 raw tokens, Tier 2 aliases, cascade, and legitimate locals
-- `references/contract.md` — T1–T4, switch ownership, and the mechanical test floor
-- `references/state-colour.md` — R1–R5, leak inventory, and divergences
-- `references/limits.md` — contrast, hover states, vacuous coverage, and recon limits
-- `references/colour-checklist.md` — measured colour mistakes to check before finishing
-- `references/sources.md` — provenance for the two cited rule sources; record URL, commit, digest, and license without vendoring either source
+Keep theme choice in `visualizer/web/src/App.svelte`. For role and lane component colour indirection there is no live exhibit; theme aliases alone do not establish a consumer pattern.

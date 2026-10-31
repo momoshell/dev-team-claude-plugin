@@ -1,34 +1,14 @@
 # Visualizer structure
 
-The app is a small Svelte shell over plain JavaScript shaping modules. These facts are measured on this checkout; the per-module `lib/*.js:1–N` exhibits are carried in the table below.
+`visualizer/web/src/main.js` imports the theme and mounts `visualizer/web/src/App.svelte`. App owns hash navigation, theme selection and the session refresh loop; it composes TaskList, LeanRunDetail, AgentsPage, SkillsPage and Dropdown. TaskList binds Dropdown and Pagination; LeanRunDetail renders LeanWaterfall. Keep route and theme ownership in the shell.
 
-## Shell and ownership
+## Plain modules
 
-`visualizer/web/src/main.js` imports the token sheet and mounts `App` into `#app`. `App.svelte` owns hash route state (`visualizer/web/src/App.svelte:17`), the `os`/`paper`/`ink` theme choice (`visualizer/web/src/App.svelte:56`), and the fleet/envelope fetch loop (`visualizer/web/src/App.svelte:69`), and composes the top-level views (`visualizer/web/src/App.svelte:152`, `visualizer/web/src/App.svelte:160`). It passes shaped rows and callbacks into the components under `visualizer/web/src/lib/`; a child does not take over route or theme ownership.
+- `visualizer/web/src/lib/api.js` wraps requests and exposes endpoints.
+- `visualizer/web/src/lib/route.js` parses and formats hash routes.
+- `visualizer/web/src/lib/fleet.js` shapes run status and task-list data.
+- `visualizer/web/src/lib/agents.js` shapes agent data.
+- `visualizer/web/src/lib/timeline.js` lays out the intervals rendered by LeanWaterfall.
+- `visualizer/web/src/lib/live.js` supplies the refresh loop and journal pulse.
 
-main.js is the only importer of theme.css.
-
-The stylesheet is loaded before the mount call in `visualizer/web/src/main.js:1-5`. `visualizer/web/src/App.svelte:56` applies the selected `data-theme` after the component starts; a new component consumes aliases and does not import or re-select the sheet.
-
-There are 27 `.svelte` components under `visualizer/web/src/lib/` (tracked files: `git ls-files 'visualizer/web/src/lib/*.svelte'`). The shell composes them for fleet, agents, skills, run, and phase views. A panel's placement matters for spacing: `visualizer/web/src/App.svelte:152`, `visualizer/web/src/App.svelte:160` mounts panels directly under `.page`, while `visualizer/web/src/lib/RunDetail.svelte:332` owns a grid gap for its children.
-
-## Plain module split
-
-Keep data acquisition, route parsing, drains, shaping, envelope diffing, layout, and trace interpretation in the eight existing plain modules:
-
-| Module | Local responsibility | Exhibit |
-|---|---|---|
-| `api.js` | one `request` wrapper plus endpoint thunks for sessions, events, returns, journals, agents, skills, and the model catalog | `visualizer/web/src/lib/api.js:1-33` |
-| `envelope-diff.js` | compare two envelopes field-by-field over `['status','summary','artifacts','details']` | `visualizer/web/src/lib/envelope-diff.js:1-42` |
-| `route.js` | parse and format hash views and subscribe to hash changes | `visualizer/web/src/lib/route.js:1-39` |
-| `drain.js` | page event streams by cursor and coalesce a final drain behind an in-flight periodic drain | `visualizer/web/src/lib/drain.js:1-48` |
-| `fleet.js` | derive status tones and shape run cells, absence marks, filters, and fleet metrics | `visualizer/web/src/lib/fleet.js:1-177` |
-| `panels.js` | shape panel payloads, freshness, fleet metrics, and panel read loops | `visualizer/web/src/lib/panels.js:1-244` |
-| `timeline.js` | turn timed phases and events into gantt lanes and blocks | `visualizer/web/src/lib/timeline.js:1-83` |
-| `trace.js` | own `ROLE_ORDER`, lane rows, gate markers, markdown shaping, and phase panels | `visualizer/web/src/lib/trace.js:1-546` |
-
-The data flow is server -> `api.js` -> a plain-module shaper (`fleet.js`, `panels.js`, `timeline.js`, or `trace.js`) -> a Svelte component. `visualizer/web/src/App.svelte:21-69` demonstrates the fetch-to-derived-view hop; `visualizer/web/src/lib/FleetTable.svelte:2` demonstrates the component boundary.
-
-## Adding a feature
-
-Put a new request thunk beside the existing wrapper in `api.js`, put deterministic transformation in the relevant plain module, and give a component only the shaped data and `on<verb>` callbacks. If the behaviour needs DOM rendering to be asserted, read `references/testing.md` first: this repo pins component source rather than mounting it.
+Put deterministic transformations in the relevant plain module and pass shaped data and callbacks to components. Check the current imports before adding another responsibility. The stylesheet `visualizer/web/src/lib/theme.css` defines the shared theme; the App theme effect selects it.

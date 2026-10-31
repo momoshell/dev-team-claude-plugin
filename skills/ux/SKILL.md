@@ -1,34 +1,26 @@
 ---
 name: ux
 description: >-
-  Load before rendering a null, adding a loading or empty branch, adding a custom
-  control, or adding motion to a Svelte component. Records the current visualizer's
-  measured UX boundary: one honest null-with-reason phrase, explicit loading/empty/error
-  states, native-first keyboard operability with visible focus, and reduced-motion
-  handling for the counted animations. It records this checkout's evidence rather
-  than generic UX advice.
+  Load before rendering a null, adding loading or empty states, a custom control,
+  or motion to a visualizer component. Records live UX evidence and limits.
 ---
 
-This is the measured UX boundary an agent works inside. The counts below describe the current checkout's 39 visualizer components, not a generic design system: extend the discipline to a new component without inventing rules the exhibits do not support.
+Measured boundary: 11 `.svelte` files under `visualizer/web/src`.
+
+These rules guide new work; an exhibit demonstrates a local practice, not universal compliance.
 
 ## Routing
 
-| Doing… | Rule that governs it | Details |
-|---|---|---|
-| Absence and null-with-reason | Render null as one honest phrase with its closed reason | `references/absence.md` |
-| Showing loading, empty, or error | Keep loading explicit, empty states actionable, errors announced | `references/states.md` |
-| Adding keyboard behavior or focus style | Stay native-first, operable, and visibly focused | `references/keyboard-focus.md` |
-| Adding or keeping animation | Honor reduced motion for every animation | `references/motion.md` |
-| Checking a component before finishing | Check the measured accessibility mistakes before finishing | `references/accessibility-checklist.md` |
-| Provenance for cited rule sources | Verify canonical URL, commit, digest, and license without vendoring | `references/sources.md` |
+- Honest absence and reasons: `references/absence.md`.
+- Loading, empty and error states: `references/states.md`.
+- Keyboard operability and focus: `references/keyboard-focus.md`.
+- Reduced motion: `references/motion.md`.
+- Before finishing: `references/accessibility-checklist.md`.
+- Source provenance: `references/sources.md`.
 
 ## Critical rules
 
-- **A1.** A null carrying a closed reason renders as one honest phrase, never as zero and never as a bare dash.
-- **S1–S3.** Loading is explicit and stable; empty states explain the result and name a next action; errors are visible, announced, and recoverable.
-- **K1–K2.** Native controls first with keyboard-operable custom behavior; every interactive control shows a visible focus treatment.
-- **M1.** Every animation honors reduced motion; the current animations do not yet, which the reference records as a counted gap.
-
-The numbers in this skill re-derive from the component tree with plain text search; read the references before adding a rule the exhibit suite does not enforce.
-
-- Provenance for the two cited rule sources lives in the sources reference: record URL, commit, digest, and license without vendoring either source.
+- **A1:** Explain unmeasured values honestly, never as a measured zero or unexplained dash.
+- **S1–S3:** Make loading explicit, empty states actionable, and errors visible, announced and recoverable.
+- **K1–K2:** Prefer native controls; custom behaviour must be keyboard operable and interactive controls need visible focus.
+- **M1:** Honor reduced motion. The shared theme provides a global override; inspect the motion reference for its scope and the separate scrolling behaviour.

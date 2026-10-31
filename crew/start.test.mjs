@@ -449,6 +449,21 @@ test('effective memory injects lane or override context into the recorded planne
   }
 })
 
+// MUTATION: drop `memory: true` from crew/agents/planner.md and the shipped planner boots without team memory.
+test('the shipped planner definition injects the lane checkout memory', async () => {
+  const previous = process.env.CREW_MEMORY_DIR
+  try {
+    delete process.env.CREW_MEMORY_DIR
+    const f = leanFixture()
+    populateMemory(join(f.spec.cwd, '.claude/dev-team/memory'), 'shipped judgment')
+    assert.equal((await f.go()).status, 'done')
+    assert.match(f.requests[0].prompt, /## Team memory[\s\S]*shipped judgment/)
+  } finally {
+    if (previous === undefined) delete process.env.CREW_MEMORY_DIR
+    else process.env.CREW_MEMORY_DIR = previous
+  }
+})
+
 test('missing memory boots and journals the backend reason without fallback', async () => {
   const previous = process.env.CREW_MEMORY_DIR
   try {

@@ -40,14 +40,14 @@
 // realpath-walking a scratch tree, which is a larger surface than one lane.
 
 import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from 'node:child_process'
-import { appendFileSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 export const LAB_TOOL_NAME = 'lab'
-export const LAB_API = Object.freeze(['scratchCheckout', 'read', 'grep', 'mutate', 'runSuite', 'ledger'])
+export const LAB_API = Object.freeze(['scratchCheckout', 'read', 'grep', 'mutate', 'write', 'runSuite', 'ledger'])
 export const LAB_PERMISSION_FLAG = '--permission'
 export const LAB_ORIGIN_HEAD_REF = 'refs/remotes/origin/HEAD'
 // Two audit layers, deliberately not one. The per-path probe is defence in depth
@@ -118,6 +118,7 @@ export interface LabGrepHit { file: string; line: number; text: string }
 export interface LabGrepOptions { ignoreCase?: boolean; fixedString?: boolean; maxHits?: number; pathspec?: string[] }
 export interface LabGrepResult { pattern: string; hits: LabGrepHit[]; truncated: boolean }
 export interface LabMutateResult { file: string; count: number }
+export interface LabWriteResult { file: string; bytes: number }
 // BLOB and non-finite cells are unsupported: ledger rows carry only text, finite number and null scalars.
 export type LabLedgerValue = string | number | null
 export interface LabLedgerResult { columns: string[]; rows: LabLedgerValue[][]; row_count: number; truncated: boolean }
@@ -130,6 +131,7 @@ export interface LabApi {
   read(file: string): Promise<LabReadResult>
   grep(pattern: string, opts?: LabGrepOptions): Promise<LabGrepResult>
   mutate(file: string, find: string, replace: string): Promise<LabMutateResult>
+  write(file: string, text: string): Promise<LabWriteResult>
   runSuite(paths?: string[]): Promise<LabSuiteResult>
   ledger(sql: string, params?: Array<null | number | string>): Promise<LabLedgerResult>
 }
@@ -139,7 +141,7 @@ export const LAB_PARAMS = {
   additionalProperties: true,
   properties: {
     program: {
-      description: 'A seat-authored program using scratchCheckout(ref?), read, grep, mutate, runSuite and ledger against a clone of the committed HEAD. It returns its value with export default <value>; console.log output is not the result. runSuite reports named TAP leaf failures. runSuite is the declared host authority carve-out: its suite child runs with host authority after mutate().',
+      description: 'A seat-authored program using scratchCheckout(ref?), read, grep, mutate, write (create or replace files and parent directories), runSuite and ledger against a clone of the committed HEAD. It returns its value with export default <value>; console.log output is not the result. runSuite reports named TAP leaf failures. runSuite is the declared host authority carve-out: its suite child runs with host authority after mutate().',
     },
     skill: {
       description: 'Optional repo-relative skill identity in the form skills/<name>; its grants.json restricts lab operations.',
@@ -217,6 +219,33 @@ export function validateScratchPath(scratchReal: string, raw: any, deps: any = {
   if (!LAB_PATH_RE.test(raw)) return { refused: 'path-not-relative' }
   for (const segment of raw.split('/')) {
     if (segment === '.' || segment === '..') return { refused: 'path-traversal' }
+  }
+  if (deps.allowMissing) {
+    let current = scratchReal
+    const parts = raw.split('/')
+    for (let i = 0; i < parts.length; i++) {
+      const candidate = join(current, parts[i])
+      try {
+        const info = (deps.lstat || lstatSync)(candidate)
+        current = (deps.realpath || realpathSync)(candidate)
+        if (!containsScratch(scratchReal, current)) return { refused: 'path-escapes-scratch' }
+        if (i < parts.length - 1 && !info.isDirectory() && !info.isSymbolicLink()) return { refused: 'file-missing' }
+        if (i < parts.length - 1 && !(deps.stat || statSync)(current).isDirectory()) return { refused: 'file-missing' }
+      } catch (err: any) {
+        if (err?.code === 'ENOENT') {
+          // lstat distinguishes an absent entry from an unresolved symlink.
+          try { (deps.lstat || lstatSync)(candidate) } catch (missing: any) {
+            if (missing?.code === 'ENOENT') return { path: join(candidate, ...parts.slice(i + 1)) }
+            if (missing?.code === 'ENOTDIR' || missing?.code === 'ELOOP') return { refused: 'file-missing' }
+            throw missing
+          }
+          return { refused: 'file-missing' }
+        }
+        if (err?.code === 'ENOTDIR' || err?.code === 'ELOOP') return { refused: 'file-missing' }
+        throw err
+      }
+    }
+    return { path: current }
   }
   // ONLY resolution ABSENCE becomes file-missing. An unqualified catch would
   // launder an injected realpath bug, EACCES or another unexpected exception
@@ -684,7 +713,7 @@ const main = async () => {
   if (!audit.net_enforceable) { emit({ done: true, refused: 'net-unenforceable', audit }); return }
   if (!audit.ok) { emit({ done: true, refused: 'child-denied', audit }); return }
   const lab = {}
-  for (const name of ['scratchCheckout', 'read', 'grep', 'mutate', 'runSuite', 'ledger']) lab[name] = (...args) => rpc(name, args)
+  for (const name of ['scratchCheckout', 'read', 'grep', 'mutate', 'write', 'runSuite', 'ledger']) lab[name] = (...args) => rpc(name, args)
   globalThis.lab = Object.freeze(lab)
   try {
     const imported = await import(programUrl)
@@ -1125,7 +1154,7 @@ export function createLabTool(deps: any = {}) {
   return {
     name: LAB_TOOL_NAME,
     label: 'Lab',
-    description: 'Run a seat-authored PROGRAM in a node --permission child against a clone of the committed HEAD. A program returns its value with export default <value> (top-level await works); console.log output is not the result, and a program that exports nothing is refused program-returned-nothing with its stdout. scratchCheckout(ref?) checks out HEAD or the named commit or branch; runSuite reports named failures with scratch-relative file and line. The six lab.* operations are scratchCheckout, read, grep, mutate, runSuite and ledger; runSuite is the declared host authority carve-out and its suite child runs with host authority. The lab refuses with net-unenforceable on a runtime that cannot enforce the network boundary.',
+    description: 'Run a seat-authored PROGRAM in a node --permission child against a clone of the committed HEAD. A program returns its value with export default <value> (top-level await works); console.log output is not the result, and a program that exports nothing is refused program-returned-nothing with its stdout. scratchCheckout(ref?) checks out HEAD or the named commit or branch; runSuite reports named failures with scratch-relative file and line. The seven lab.* operations are scratchCheckout, read, grep, mutate, write (create or replace files and parent directories), runSuite and ledger; runSuite is the declared host authority carve-out and its suite child runs with host authority. The lab refuses with net-unenforceable on a runtime that cannot enforce the network boundary.',
     parameters: LAB_PARAMS,
     executionMode: 'sequential',
     async execute(_toolCallId: string, params: any, signal: any, _onUpdate: any, ctx: any) {
@@ -1310,6 +1339,17 @@ export function createLabTool(deps: any = {}) {
           const count = before.split(find).length - 1
           writeFile(checked.path, before.split(find).join(replace))
           return { file: raw, count }
+        }
+        if (op === 'write') {
+          if (args.length !== 2 || typeof args[0] !== 'string' || typeof args[1] !== 'string') throw refusalError('op-args-invalid', 'write arguments are invalid')
+          const [raw, text] = args
+          let checked = validateScratchPath(scratch.path, raw, { realpath, allowMissing: true })
+          if (checked.refused) throw refusalError(checked.refused, checked.refused)
+          ;(deps.mkdir || mkdirSync)(dirname(checked.path), { recursive: true })
+          checked = validateScratchPath(scratch.path, raw, { realpath, allowMissing: true })
+          if (checked.refused) throw refusalError(checked.refused, checked.refused)
+          writeFile(checked.path, text, 'utf8')
+          return { file: raw, bytes: Buffer.byteLength(text, 'utf8') }
         }
         if (op === 'runSuite') {
           hostAuthority = true

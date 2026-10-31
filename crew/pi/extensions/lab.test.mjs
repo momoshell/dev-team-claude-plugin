@@ -274,6 +274,91 @@ async function realTool(program, root = ROOT, deps = {}, skill) {
   return mod.createLabTool({ env, ...deps }).execute('test-call', paramsFor(program, skill), null, null, { cwd: root })
 }
 
+// MUTATION: disable the write dispatch branch.
+test('LW1', async () => {
+  const tool = mod.createLabTool()
+  assert.match(tool.description, /mutate.*write/)
+  assert.match(mod.LAB_PARAMS.properties.program.description, /mutate.*write/)
+  const replies = []
+  await createLabServer({ tool, write: (reply) => replies.push(reply) })({ jsonrpc: '2.0', id: 1, method: 'tools/list' })
+  assert.match(replies[0].result.tools[0].description, /write/)
+  assert.deepEqual(mod.loadSkillLabGrant(grantFixture(skillGrant(['scratchCheckout', 'write']))).ops, ['scratchCheckout', 'write'])
+  assertGrantInvalid(grantFixture(skillGrant(['write'])))
+  const denied = scriptedHarness({ requests: [{ id: 1, op: 'write', args: ['x', 'y'] }], skill: 'skills/qa-test-writing' })
+  await denied.tool.execute('x', paramsFor('export default 1', denied.skill), null, null, { cwd: ROOT })
+  assert.equal(denied.program.responses[0].refused, 'op-ungranted')
+  const r = await realTool(`
+    const attempt = async (...args) => { try { return await lab.write(...args) } catch (e) { return e.labRefusal } }
+    const before = await attempt('x', 'y'); await lab.scratchCheckout()
+    const invalid = []; for (const args of [[], ['x'], ['x', 3], [null, 'x'], ['x', 'y', 'z']]) invalid.push(await attempt(...args))
+    const first = await lab.write('a/b/file', 'π🙂'); const read = await lab.read('a/b/file')
+    const replacement = await lab.write('a/b/file', ''); const empty = await lab.read('a/b/file')
+    export default { before, invalid, first, read, replacement, empty }
+  `, ROOT, { spawnSync: fakeGitSpawnSync() })
+  assert.equal(r.details.outcome, 'ok', JSON.stringify(r.details))
+  const v = r.details.result
+  assert.equal(v.before, 'no-scratch')
+  assert.deepEqual(v.invalid, Array(5).fill('op-args-invalid'))
+  assert.deepEqual(v.first, { file: 'a/b/file', bytes: Buffer.byteLength('π🙂') })
+  assert.equal(v.read.text, 'π🙂')
+  assert.deepEqual(v.replacement, { file: 'a/b/file', bytes: 0 })
+  assert.equal(v.empty.text, '')
+})
+
+// MUTATION: make containsScratch always return true.
+test('LW2', async () => {
+  const holder = temp('lab-write-escape-')
+  const outside = join(holder, 'outside'); mkdirSync(outside)
+  writeFileSync(join(outside, 'sentinel'), 'original')
+  const git = fakeGitSpawnSync()
+  const spawnSync = (command, args, options) => {
+    const result = git(command, args, options)
+    if (command === 'git' && args[0] === 'clone') {
+      const dest = args[4]
+      symlinkSync(outside, join(dest, 'escape'))
+      symlinkSync(join(outside, 'sentinel'), join(dest, 'file-link'))
+      symlinkSync(join(outside, 'absent'), join(dest, 'dangling'))
+      mkdirSync(dest + '-extra'); symlinkSync(dest + '-extra', join(dest, 'prefix'))
+      mkdirSync(join(dest, 'inside')); symlinkSync(join(dest, 'inside'), join(dest, 'inside-link'))
+    }
+    return result
+  }
+  try {
+    const paths = ['../outside/new', join(outside, 'new'), 'file-link', 'escape/new', 'escape/deep/new', 'dangling/new', 'prefix/new']
+    const r = await realTool(`
+      await lab.scratchCheckout(); const answers = []
+      for (const path of ${JSON.stringify(paths)}) { try { await lab.write(path, 'bad'); answers.push(null) } catch (e) { answers.push(e.labRefusal) } }
+      await lab.write('inside-link/deep/file', 'safe'); export default { answers, safe: await lab.read('inside/deep/file') }
+    `, ROOT, { spawnSync })
+    assert.equal(r.details.outcome, 'ok', JSON.stringify(r.details))
+    assert.deepEqual(r.details.result.answers.slice(2, 5), Array(3).fill('path-escapes-scratch'))
+    assert.equal(r.details.result.answers[6], 'path-escapes-scratch')
+    assert.ok(r.details.result.answers.every(Boolean))
+    assert.equal(r.details.result.safe.text, 'safe')
+    assert.equal(readFileSync(join(outside, 'sentinel'), 'utf8'), 'original')
+    assert.deepEqual((await import('node:fs')).readdirSync(outside), ['sentinel'])
+  } finally { rmSync(holder, { recursive: true, force: true }) }
+})
+
+// MUTATION: replace runSuiteProcess dispatch with a fabricated empty result.
+test('LW3', async () => {
+  const good = "import { test } from 'node:test'; test('written-pass', () => {})"
+  const bad = "import { test } from 'node:test'; test('written-fail', () => { throw Error('bad') })"
+  const r = await realTool(`
+    await lab.scratchCheckout(); await lab.write('checks/generated.test.mjs', ${JSON.stringify(good)})
+    const good = await lab.runSuite(['checks/generated.test.mjs'])
+    await lab.write('checks/generated.test.mjs', ${JSON.stringify(bad)})
+    const bad = await lab.runSuite(['checks/generated.test.mjs']); export default { good, bad }
+  `, ROOT, { spawnSync: fakeGitSpawnSync(), env: gapsEnv() })
+  assert.equal(r.details.outcome, 'ok', JSON.stringify(r.details))
+  const { good: g, bad: b } = r.details.result
+  assert.deepEqual([g.pass, g.fail, g.exit_code, g.host_authority], [1, 0, 0, true])
+  assert.deepEqual([b.pass, b.fail, b.host_authority], [0, 1, true])
+  assert.notEqual(b.exit_code, 0)
+  assert.ok(b.failures.some((failure) => failure.test === 'written-fail'))
+  assert.equal(r.details.host_authority, true)
+})
+
 test('the module is zero-dep and erasable', () => {
   const source = readFileSync(new URL('./lab.ts', import.meta.url), 'utf8')
   const imports = [...source.matchAll(/^import[\s\S]*?from\s+["']([^"']+)["']/gm)].map((one) => one[1])
@@ -646,8 +731,8 @@ test('LM4', () => {
   assert.deepEqual(grantsDocument.lab.host_authority, [])
 })
 
-test('the exported API has exactly six operation names', () => {
-  assert.deepEqual([...mod.LAB_API], ['scratchCheckout', 'read', 'grep', 'mutate', 'runSuite', 'ledger'])
+test('the exported API has exactly seven operation names', () => {
+  assert.deepEqual([...mod.LAB_API], ['scratchCheckout', 'read', 'grep', 'mutate', 'write', 'runSuite', 'ledger'])
   assert.equal(mod.LAB_TOOL_NAME, 'lab')
 })
 
@@ -1569,8 +1654,8 @@ test('ledger L6 (reports ledger-absent for a missing file without creating it)',
   assert.equal(run.syncCalls.length, 0)
 })
 
-test('ledger A1 (pins the six-name API and grants ledger beside scratchCheckout)', () => {
-  assert.deepEqual([...mod.LAB_API], ['scratchCheckout', 'read', 'grep', 'mutate', 'runSuite', 'ledger'])
+test('ledger A1 (pins the seven-name API and grants ledger beside scratchCheckout)', () => {
+  assert.deepEqual([...mod.LAB_API], ['scratchCheckout', 'read', 'grep', 'mutate', 'write', 'runSuite', 'ledger'])
   const dir = grantFixture(skillGrant(['scratchCheckout', 'ledger']), 'lab-grant-ledger-')
   const loaded = mod.loadSkillLabGrant(dir)
   assert.deepEqual(loaded.ops, ['scratchCheckout', 'ledger'])

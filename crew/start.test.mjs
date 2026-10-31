@@ -414,41 +414,79 @@ test('the writes a seat receives are the effective definition writes, tier overr
   assert.equal(tiered.requests[0].definition.role, 'planner')
 })
 
-// MUTATION: skip the effective memory check and a lean seat boots without the memory its definition declares.
-test('a lean seat whose effective definition declares memory: true is refused before ACP, naming memory', async () => {
-  const edit = (role, line) => (path, ...args) => {
-    const text = readFileSync(path, ...args)
-    return path === join(AGENTS, `${role}.md`) ? text.replace(/tiers: .*/, line) : text
-  }
-  const cases = [
-    ['planner', 'memory: true\ntiers: {}', []],
-    ['planner', 'tiers: {"build":{"memory":true}}', []],
-    ['planner', 'memory: false\ntiers: {"build":{"memory":true}}', []],
-    ['builder', 'memory: true\ntiers: {}', ['planner']],
-  ]
-  for (const [role, line, booted] of cases) {
-    const rows = []
-    const f = leanFixture({ deps: { readFileSync: edit(role, line) }, loopDeps: { journal: async (row) => { rows.push(row) } } })
-    const result = await f.go()
-    assert.deepEqual(result, { status: 'stopped', reason: 'seat-unmeasured', pr: null }, line)
-    assert.deepEqual(f.requests.map((r) => r.definition.role), booted, line)
-    const verdict = rows.find((row) => row.event === 'verdict')
-    assert.match(verdict.observation.error.message, /lean seat .* declares memory: true.*\[grant-unsupported\]/, line)
-    assert.ok(verdict.observation.error.message.includes(`lean seat ${role} `), line)
+const memoryDefinition = (line) => (path, ...args) => {
+  const text = readFileSync(path, ...args)
+  return path === join(AGENTS, 'planner.md') ? text.replace(/tiers: .*/, line) : text
+}
+const populateMemory = (dir, body) => {
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'MEMORY.md'), '- [entry](entry.md)\n')
+  writeFileSync(join(dir, 'entry.md'), body)
+}
+
+test('effective memory injects lane or override context into the recorded planner prompt', async () => {
+  const previous = process.env.CREW_MEMORY_DIR
+  try {
+    for (const line of ['memory: true\ntiers: {}', 'tiers: {"build":{"memory":true}}', 'memory: false\ntiers: {"build":{"memory":true}}']) {
+      delete process.env.CREW_MEMORY_DIR
+      const f = leanFixture({ deps: { readFileSync: memoryDefinition(line) } })
+      populateMemory(join(f.spec.cwd, '.claude/dev-team/memory'), 'lane judgment')
+      assert.equal((await f.go()).status, 'done')
+      assert.match(f.requests[0].prompt, /## Team memory[\s\S]*lane judgment/)
+      assert.equal(JSON.parse(readFileSync(f.sessionOf('planner', 1), 'utf8').split('\n')[0]).text, f.requests[0].prompt)
+    }
+    const f = leanFixture({ deps: { readFileSync: memoryDefinition('memory: true\ntiers: {}') } })
+    populateMemory(join(f.spec.cwd, '.claude/dev-team/memory'), 'lane judgment')
+    process.env.CREW_MEMORY_DIR = join(f.spec.taskDir, 'override')
+    populateMemory(process.env.CREW_MEMORY_DIR, 'override judgment')
+    assert.equal((await f.go()).status, 'done')
+    assert.match(f.requests[0].prompt, /override judgment/)
+    assert.doesNotMatch(f.requests[0].prompt, /lane judgment/)
+  } finally {
+    if (previous === undefined) delete process.env.CREW_MEMORY_DIR
+    else process.env.CREW_MEMORY_DIR = previous
   }
 })
 
-// MUTATION: refuse on any memory field, or on the base field before the tier override, and a permitted definition fails to boot.
-test('a lean seat whose effective memory is false or absent boots, an overriding false cancels a true base, an unselected tier is ignored', async () => {
-  const planner = join(AGENTS, 'planner.md')
-  const edit = (line) => (path, ...args) => {
-    const text = readFileSync(path, ...args)
-    return path === planner ? text.replace(/tiers: .*/, line) : text
+test('missing memory boots and journals the backend reason without fallback', async () => {
+  const previous = process.env.CREW_MEMORY_DIR
+  try {
+    for (const reason of ['no-dir', 'no-index']) {
+      const rows = []
+      const f = leanFixture({ deps: { readFileSync: memoryDefinition('memory: true\ntiers: {}') }, loopDeps: reason === 'no-dir' ? { journal: async (row) => rows.push(row) } : { journal: undefined } })
+      if (reason === 'no-index') delete f.options.loopDeps.journal
+      populateMemory(join(f.spec.cwd, '.claude/dev-team/memory'), 'must not fall back')
+      process.env.CREW_MEMORY_DIR = join(f.spec.cwd, 'missing-override')
+      if (reason === 'no-index') mkdirSync(process.env.CREW_MEMORY_DIR)
+      assert.equal((await f.go()).status, 'done')
+      assert.doesNotMatch(f.requests[0].prompt, /## Team memory/)
+      const journal = reason === 'no-dir' ? rows : readFileSync(join(f.spec.taskDir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+      const event = journal.find((row) => row.event === 'memory-empty')
+      assert.equal(event.reason, reason)
+      assert.equal(event.role, 'planner')
+      assert.equal(event.id, 'lane.planner.1')
+    }
+  } finally {
+    if (previous === undefined) delete process.env.CREW_MEMORY_DIR
+    else process.env.CREW_MEMORY_DIR = previous
   }
-  for (const line of ['tiers: {}', 'memory: false\ntiers: {}', 'memory: true\ntiers: {"build":{"memory":false}}', 'tiers: {"build":{"memory":false}}', 'tiers: {"judge":{"memory":true}}']) {
-    const f = leanFixture({ deps: { readFileSync: edit(line) } })
-    assert.equal((await f.go()).status, 'done', line)
-    assert.deepEqual(f.requests.map((r) => r.definition.role), ['planner', 'builder', 'reviewer'], line)
+})
+
+test('false or absent effective memory neither injects nor journals memory', async () => {
+  const previous = process.env.CREW_MEMORY_DIR
+  try {
+    for (const line of ['tiers: {}', 'memory: false\ntiers: {}', 'memory: true\ntiers: {"build":{"memory":false}}', 'tiers: {"build":{"memory":false}}', 'tiers: {"judge":{"memory":true}}']) {
+      const rows = []
+      const f = leanFixture({ deps: { readFileSync: memoryDefinition(line) }, loopDeps: { journal: async (row) => rows.push(row) } })
+      process.env.CREW_MEMORY_DIR = join(f.spec.cwd, 'override')
+      populateMemory(process.env.CREW_MEMORY_DIR, 'secret judgment')
+      assert.equal((await f.go()).status, 'done', line)
+      assert.doesNotMatch(f.requests[0].prompt, /## Team memory/)
+      assert.equal(rows.some((row) => row.event === 'memory-empty'), false)
+    }
+  } finally {
+    if (previous === undefined) delete process.env.CREW_MEMORY_DIR
+    else process.env.CREW_MEMORY_DIR = previous
   }
 })
 

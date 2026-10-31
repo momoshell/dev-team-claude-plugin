@@ -94,7 +94,7 @@ before its first lane.
   below).
 - **`docs/`** — the live design record: [`docs/adr/`](docs/adr/) is the
   architecture decision register (**grep it before minting an ADR number**);
-  [`docs/decisions-needed.md`](docs/decisions-needed.md) is the open
+  [`docs/decisions-needed.md`](docs/decisions-needed.md) is the historical
   owner-decision register; [`docs/conventions.md`](docs/conventions.md) the
   cross-cutting conventions. `docs/archive/` holds design records of the
   retired driver.

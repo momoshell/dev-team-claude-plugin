@@ -1,6 +1,6 @@
 # ADR-041 — Claims at plan-accept: the accepted plan's scope is the write claim
 
-**Status:** proposed 2026-09-06 · **Issue:** #970 · **Owner:** operator
+**Status:** withdrawn 2026-09-12 by ADR-043 · was proposed 2026-09-06 · **Issue:** #970 · **Owner:** operator
 
 ## Decision
 

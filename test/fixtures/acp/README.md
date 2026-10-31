@@ -1,16 +1,14 @@
 # ACP Wave 0 fixtures (#793)
 
-**Status: #804 is PARKED — see "Why this is parked" below. These fixtures are
-kept as the EVIDENCE for that decision, not as inputs to any shipped test.**
+**Historical measurements:** recorded 2026-08-31 against live ACP servers for
+#804. ADR-052 replaced the runtime and the parked/bespoke-transport conclusions
+below are historical, not current instructions. Recorded fixtures are still
+replayed by current `crew/acp-client.test.mjs` tests.
 
-Recorded 2026-08-31 against live ACP servers. Every ACP test replays these;
-no test spawns an adapter (TRD `docs/trd-acp-adoption.md` §8).
+`fake-upstream.mjs` was moved to `test/fake-upstream.mjs`; the old
+`crew/headless.mjs` caller has since been deleted.
 
-`fake-upstream.mjs` was moved to `test/fake-upstream.mjs`: it is
-transport-neutral and is now cited by `crew/headless.mjs`, so it must not live
-under a parked epic's fixtures.
-
-## Why this is parked
+## Why this was parked (historical)
 
 `pi-acp` spawns `pi --mode rpc --no-themes` — it is a WRAPPER over the
 transport `crew/headless-rpc.mjs` already speaks natively, and it does not
@@ -146,9 +144,9 @@ Read `data.errorKind`, not the text. This is strictly better than the CLI path:
 failure — the §8 kill-mutation "recording `refusal` as `transport`" becomes
 mechanically checkable.
 
-## Head-to-head against today's transports
+## Head-to-head against the transports at the time
 
-Same probe, run through the transports the crew uses now.
+Same probe, run through the transports the crew used then.
 
 **Claude — `headless-json` `result` frame:** `total_cost_usd` (0.0898625),
 `usage` with `cache_creation_input_tokens` / `cache_read_input_tokens` /
@@ -179,7 +177,7 @@ pi-acp has no equivalent. A pi ACP seat has **no usage and no cost**, where
 `--mode json` gives both today. That is a real regression and it is the open
 question for #798, not a detail.
 
-## Open gaps for ADR-036 (#792 is CLOSED and needs reopening)
+## Gaps recorded for ADR-036 at the time (#792 was closed)
 
 - **effort** — the adapter reads `getSettings().effortLevel` with
   `settingSources: ["user","project","local"]`; not probed end to end. The CLI

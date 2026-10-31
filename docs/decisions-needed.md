@@ -1,6 +1,6 @@
 # Decisions needed
 
-This is the open owner-decision register. Decisions close only through an ADR link or a dated closure line. Entries are never deleted; history remains here. Currency is the operator's responsibility at closeout.
+**Historical register:** these decisions and measurements describe the retired driver, not current open work or runtime instructions. ADR-052 replaced that runtime. The original records and their closure wording are preserved below. The register's original rule was: "Decisions close only through an ADR link or a dated closure line. Entries are never deleted; history remains here. Currency is the operator's responsibility at closeout."
 
 Line counts here use `split("\n").length`, which is one greater than `wc -l` for a newline-terminated file.
 

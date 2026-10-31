@@ -1,0 +1,29 @@
+{
+  "role": "planner",
+  "id": "b1440-acp-client-error-message.planner.1",
+  "status": "done",
+  "summary": "Planned conditional refusal errorMessage propagation in both prompt paths, with regression tests and a cwd-based behavioral gate.",
+  "details": {
+    "subject": "fix(crew): preserve ACP refusal error messages",
+    "plan_path": "/Users/momoshell/.crew/dt-b1440-acp-client-error-message/b1440-acp-client-error-message/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1440-acp-client-error-message/b1440-acp-client-error-message/task/gate.mjs",
+    "acceptance": ["CE1", "CE2"],
+    "mutations": [
+      {
+        "check": "CE1",
+        "file": "crew/acp-client.mjs",
+        "find": "typeof frame.error?.data?.errorMessage === 'string'",
+        "replace": "typeof frame.error?.data?.errorMessage === 'number'"
+      },
+      {
+        "check": "CE2",
+        "file": "crew/acp-client.mjs",
+        "find": "? { errorMessage: frame.error.data.errorMessage } : {})",
+        "replace": "? { errorMessage: frame.error.data.errorMessage } : { errorMessage: null })"
+      }
+    ],
+    "files_in_scope": ["crew/acp-client.mjs", "crew/acp-client.test.mjs"],
+    "validation_lane": "node --test crew/acp-client.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1440-acp-client-error-message/b1440-acp-client-error-message/task/gate.mjs"
+  }
+}

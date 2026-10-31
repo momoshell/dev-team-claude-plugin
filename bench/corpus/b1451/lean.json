@@ -1,0 +1,23 @@
+{
+  "id": "b1451-pi-websocket-error-retry",
+  "cwd": "/Users/momoshell/Dev/dt-b1451-pi-websocket-error-retry",
+  "taskDir": "/Users/momoshell/.crew/dt-b1451-pi-websocket-error-retry/b1451-pi-websocket-error-retry/task",
+  "tier": "build",
+  "shape": "standard",
+  "brief": "# Task\n\n---\nsource: operator request (Momo approved retrying pi WebSocket errors, 2026-10-31)\ncloses: null\ntier: build\nshape: standard\nacceptance: [WS1, WS2]\nout_of_scope: the retry bounds and waits, claude provider kinds, the ACP server and client\n---\n## The ask\n\nPR 2072 made pi refusals with the Codex overloaded and usage-limit texts retryable. The second most common pi error\nis still never retried. Measured 2026-10-30 over `~/.pi/agent/sessions`:\n- `WebSocket error` (16)\n- `terminated` (8)\n- `Operation aborted` (5)\n- `WebSocket closed 1000` (3)\n- `WebSocket idle timeout after 300000ms` (2)\n- `Codex SSE response headers timed out after 300000ms` (2)\n\nThe operator chose to retry the WebSocket transport failures. Invariant: a pi refusal whose `errorMessage` is\nexactly `WebSocket error`, or `WebSocket idle timeout after <N>ms`, is classified `server_error`, so it gets the\nbounded retry. Texts that can also mean a deliberate stop (`Operation aborted`, `terminated`, `WebSocket closed 1000`)\nstay unclassified. Matching stays exact, as in PR 2072.\n\n## Context\n\n- `crew/acp/provider.mjs` `acpProviderFailureKind`: the two exact Codex texts from PR 2072.\n- `crew/acp/provider.test.mjs`: the pi classification tests to extend.\n\n## Acceptance\n\n- (WS1) a pi refusal whose `errorMessage` is `WebSocket error` is classified `server_error`\n- (WS2) a pi refusal whose `errorMessage` is `Operation aborted` is classified null\n",
+  "acceptance": [
+    "WS1",
+    "WS2"
+  ],
+  "source": "operator request (Momo approved retrying pi WebSocket errors, 2026-10-31)",
+  "branch": "b1451-pi-websocket-error-retry",
+  "base": "main",
+  "closes": [],
+  "suite": {
+    "command": "npm",
+    "args": [
+      "test"
+    ],
+    "timeoutMs": 1800000
+  }
+}

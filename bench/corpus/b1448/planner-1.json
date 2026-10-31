@@ -1,0 +1,35 @@
+{
+  "role": "planner",
+  "id": "b1448-lean-memory-injection.planner.1",
+  "status": "done",
+  "summary": "Planned effective-memory prompt injection and journal evidence; authored an independent LM1–LM3 gate. See /Users/momoshell/.crew/dt-b1448-lean-memory-injection/b1448-lean-memory-injection/task/plan.md:3-20. Execution is reserved for the loop.",
+  "details": {
+    "subject": "fix(crew): inject declared memory into lean seat prompts",
+    "plan_path": "/Users/momoshell/.crew/dt-b1448-lean-memory-injection/b1448-lean-memory-injection/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1448-lean-memory-injection/b1448-lean-memory-injection/task/gate.mjs",
+    "acceptance": ["LM1", "LM2", "LM3"],
+    "mutations": [
+      {
+        "check": "LM1",
+        "file": "crew/lean.mjs",
+        "find": "const section = renderSection(extract)",
+        "replace": "const section = ''"
+      },
+      {
+        "check": "LM2",
+        "file": "crew/lean.mjs",
+        "find": "await emit('memory-empty', { role, id, reason: extract.reason ?? 'empty' })",
+        "replace": "await emit('memory-empty', { role, id, reason: 'lost-reason' })"
+      },
+      {
+        "check": "LM3",
+        "file": "crew/lean.mjs",
+        "find": "if (memory === true)",
+        "replace": "if (true)"
+      }
+    ],
+    "files_in_scope": ["crew/lean.mjs", "crew/loop.mjs", "crew/start.test.mjs"],
+    "validation_lane": "node --test crew/start.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1448-lean-memory-injection/b1448-lean-memory-injection/task/gate.mjs"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "role": "planner",
+  "id": "b1450-start-log-never-throws.planner.1",
+  "status": "done",
+  "summary": "Authored the scoped plan and cwd-bound SE1/SE2 gate; execution is left to the loop.",
+  "details": {
+    "subject": "fix(crew): keep start logging failures from changing exit status",
+    "plan_path": "/Users/momoshell/.crew/dt-b1450-start-log-never-throws/b1450-start-log-never-throws/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1450-start-log-never-throws/b1450-start-log-never-throws/task/gate.mjs",
+    "acceptance": ["SE1", "SE2"],
+    "mutations": [
+      {
+        "check": "SE1",
+        "file": "crew/start.mjs",
+        "find": "    return 0\n  } catch (error) {",
+        "replace": "    return 1\n  } catch (error) {"
+      },
+      {
+        "check": "SE2",
+        "file": "crew/start.mjs",
+        "find": "    return error.exitCode ?? 1",
+        "replace": "    return 0"
+      }
+    ],
+    "files_in_scope": ["crew/start.mjs", "crew/start.test.mjs"],
+    "validation_lane": "node --test crew/start.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1450-start-log-never-throws/b1450-start-log-never-throws/task/gate.mjs"
+  }
+}

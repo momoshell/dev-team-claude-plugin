@@ -1,0 +1,39 @@
+{
+  "role": "planner",
+  "id": "b1454-waterfall-polish.planner.1",
+  "status": "done",
+  "summary": "Authored a scoped waterfall plan and cwd-based acceptance gate with three kill mutations; execution remains with the loop.",
+  "details": {
+    "subject": "fix(visualizer): clarify open stages and waterfall timing",
+    "plan_path": "/Users/momoshell/.crew/dt-b1454-waterfall-polish/b1454-waterfall-polish/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1454-waterfall-polish/b1454-waterfall-polish/task/gate.mjs",
+    "acceptance": ["WP1", "WP2", "WP3"],
+    "mutations": [
+      {
+        "check": "WP1",
+        "file": "visualizer/web/src/lib/timeline.js",
+        "find": "phase.status === 'running' && phase.ended_at == null && start != null",
+        "replace": "false && phase.ended_at == null && start != null"
+      },
+      {
+        "check": "WP2",
+        "file": "visualizer/web/src/lib/timeline.js",
+        "find": "Math.max(MIN_WIDTH, span ? (end - start) / span : 0)",
+        "replace": "(span ? (end - start) / span : 0)"
+      },
+      {
+        "check": "WP3",
+        "file": "visualizer/web/src/lib/timeline.js",
+        "find": "const seconds = ms / 1000",
+        "replace": "const seconds = ms"
+      }
+    ],
+    "files_in_scope": [
+      "visualizer/web/src/lib/timeline.js",
+      "visualizer/web/src/lib/LeanWaterfall.svelte",
+      "test/visualizer-lean-waterfall.test.mjs"
+    ],
+    "validation_lane": "node --test test/visualizer-lean-waterfall.test.mjs test/visualizer-lean-web.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1454-waterfall-polish/b1454-waterfall-polish/task/gate.mjs"
+  }
+}

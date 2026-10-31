@@ -1,0 +1,23 @@
+{
+  "id": "b1440-acp-client-error-message",
+  "cwd": "/Users/momoshell/Dev/dt-b1440-acp-client-error-message",
+  "taskDir": "/Users/momoshell/.crew/dt-b1440-acp-client-error-message/b1440-acp-client-error-message/task",
+  "tier": "build",
+  "shape": "standard",
+  "brief": "# Task\n\n---\nsource: operator request (follow-up to PR 2068)\ncloses: null\ntier: build\nshape: standard\nacceptance: [CE1, CE2]\nout_of_scope: the ACP server, provider-failure classification and rate-limit reset parsing\n---\n## The ask\n\nPR 2068 makes the pi ACP server put pi's `errorMessage` in a refused prompt's `error.data`. The client drops\nit: a refused `session/prompt` keeps only `code`, `message` and `data.errorKind`, so the cause pi gave still\nnever reaches the lane journal or the seat session file. Invariant: a refusal carries `data.errorMessage`\nwhen the server sent a string there, and has no such key when it did not.\n\n## Context\n\n- `crew/acp-client.mjs`: both `refusal` objects built from `frame.error` (the `session/prompt` paths) and the `acp_turn_refused` log row.\n- `crew/lean.mjs` `runSeat`: writes `turn.refusal` into the seat session file.\n- `crew/acp-client.test.mjs`: the refusal tests to extend.\n\n## Acceptance\n\n- (CE1) a refused prompt whose error data has an `errorMessage` string returns a refusal carrying that string\n- (CE2) a refused prompt whose error data has no `errorMessage` returns a refusal with no `errorMessage` key\n",
+  "acceptance": [
+    "CE1",
+    "CE2"
+  ],
+  "source": "operator request (follow-up to PR 2068)",
+  "branch": "b1440-acp-client-error-message",
+  "base": "main",
+  "closes": [],
+  "suite": {
+    "command": "npm",
+    "args": [
+      "test"
+    ],
+    "timeoutMs": 1800000
+  }
+}

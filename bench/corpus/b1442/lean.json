@@ -1,0 +1,23 @@
+{
+  "id": "b1442-finish-insufficient-build",
+  "cwd": "/Users/momoshell/Dev/dt-b1442-finish-insufficient-build",
+  "taskDir": "/Users/momoshell/.crew/dt-b1442-finish-insufficient-build/b1442-finish-insufficient-build/task",
+  "tier": "build",
+  "shape": "standard",
+  "brief": "# Task\n\n---\nsource: operator request (b1440 hand finish, 2026-10-30)\ncloses: null\ntier: build\nshape: standard\nacceptance: [FI1, FI2]\nout_of_scope: the loop's lead decisions, the finish decisions (accept, return, abandon) and the gate itself\n---\n## The ask\n\nLane b1440 stopped `lead-escalated`. Its builder had made the whole change but returned `insufficient`,\nbecause the planner's gate threw before exercising any check. A finish run is the path that may repair a\nlane's gate, yet `crew finish` refused with `finish-no-build`: it counts only a builder envelope with\nstatus `done`. So the lane had to be finished by hand. Invariant: finish re-enters a stopped lane whose\nlast builder returned a schema-valid `insufficient` envelope and left an uncommitted build. A lane with no\nschema-valid builder envelope is still refused.\n\n## Context\n\n- `crew/finish.mjs`: the `finish-no-build` refusal and its header comment.\n- `skills/crew-recovery/SKILL.md` \"Finish it\": the refusal list it states.\n- `crew/finish.test.mjs`: the refusal tests.\n\n## Acceptance\n\n- (FI1) `crew finish` on a stopped lane whose builder envelope is schema-valid `insufficient` does not refuse with `finish-no-build`\n- (FI2) `crew finish` on a stopped lane whose only builder envelope has defects still refuses with `finish-no-build`\n",
+  "acceptance": [
+    "FI1",
+    "FI2"
+  ],
+  "source": "operator request (b1440 hand finish, 2026-10-30)",
+  "branch": "b1442-finish-insufficient-build",
+  "base": "main",
+  "closes": [],
+  "suite": {
+    "command": "npm",
+    "args": [
+      "test"
+    ],
+    "timeoutMs": 1800000
+  }
+}

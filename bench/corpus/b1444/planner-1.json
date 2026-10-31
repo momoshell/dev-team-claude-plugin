@@ -1,0 +1,50 @@
+{
+  "role": "planner",
+  "id": "b1444-claude-reads-use-read-tool.planner.1",
+  "status": "done",
+  "summary": "Planned Claude Bash-read steering with a cwd-relative behavioral gate and five kill mutations; execution is left to the loop.",
+  "details": {
+    "subject": "fix(crew): steer Claude Bash file reads to the Read tool",
+    "plan_path": "/Users/momoshell/.crew/dt-b1444-claude-reads-use-read-tool/b1444-claude-reads-use-read-tool/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1444-claude-reads-use-read-tool/b1444-claude-reads-use-read-tool/task/gate.mjs",
+    "acceptance": ["SR1", "SR2", "SR3", "SR4", "SR5"],
+    "mutations": [
+      {
+        "check": "SR1",
+        "file": "crew/adapters/claude-arms.mjs",
+        "find": "  const tool = toolOf(payload.tool_name)\n",
+        "replace": "  const tool = toolOf(payload.tool_name)\n  if (name === 'PreToolUse' && payload.tool_input?.command?.includes('sed -n 95,125p')) return null\n"
+      },
+      {
+        "check": "SR2",
+        "file": "crew/adapters/claude-arms.mjs",
+        "find": "  const tool = toolOf(payload.tool_name)\n",
+        "replace": "  const tool = toolOf(payload.tool_name)\n  if (name === 'PreToolUse' && payload.tool_input?.command?.includes('cat task/plan.md; ls task')) return null\n"
+      },
+      {
+        "check": "SR3",
+        "file": "crew/adapters/claude-arms.mjs",
+        "find": "  const tool = toolOf(payload.tool_name)\n",
+        "replace": "  const tool = toolOf(payload.tool_name)\n  if (name === 'PreToolUse' && payload.tool_input?.command?.includes('| tail -20')) return { hookEventName: name, permissionDecision: 'deny', permissionDecisionReason: 'Refusing stdin filter' }\n"
+      },
+      {
+        "check": "SR4",
+        "file": "crew/adapters/claude-arms.mjs",
+        "find": "  const tool = toolOf(payload.tool_name)\n",
+        "replace": "  const tool = toolOf(payload.tool_name)\n  if (name === 'PreToolUse' && payload.tool_input?.command?.includes('cat > task/builder-2.json')) return { hookEventName: name, permissionDecision: 'deny', permissionDecisionReason: 'Refusing heredoc writer' }\n"
+      },
+      {
+        "check": "SR5",
+        "file": "crew/adapters/claude-arms.mjs",
+        "find": "  const tool = toolOf(payload.tool_name)\n",
+        "replace": "  const tool = toolOf(payload.tool_name)\n  if (name === 'PreToolUse' && !config.arms.some((arm) => arm === 'readgate' || arm === 'skeletonread') && payload.tool_input?.command?.includes('sed -n 95,125p')) return { hookEventName: name, permissionDecision: 'deny', permissionDecisionReason: 'Use the Read tool without a grant' }\n"
+      }
+    ],
+    "files_in_scope": [
+      "crew/adapters/claude-arms.mjs",
+      "crew/adapters/claude-arms.test.mjs"
+    ],
+    "validation_lane": "node --test crew/adapters/claude-arms.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1444-claude-reads-use-read-tool/b1444-claude-reads-use-read-tool/task/gate.mjs"
+  }
+}

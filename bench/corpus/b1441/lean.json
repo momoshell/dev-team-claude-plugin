@@ -1,0 +1,24 @@
+{
+  "id": "b1441-pi-provider-failure-kind",
+  "cwd": "/Users/momoshell/Dev/dt-b1441-pi-provider-failure-kind",
+  "taskDir": "/Users/momoshell/.crew/dt-b1441-pi-provider-failure-kind/b1441-pi-provider-failure-kind/task",
+  "tier": "build",
+  "shape": "standard",
+  "brief": "# Task\n\n---\nsource: operator request (10-30 follow-up to PRs 2068 and 2071)\ncloses: null\ntier: build\nshape: standard\nacceptance: [PK1, PK2, PK3]\nout_of_scope: the retry bounds and waits, claude provider kinds, the ACP server and client\n---\n## The ask\n\nA pi seat's provider failure is never retried. The pi ACP server answers every errored run with\n`errorKind: 'pi-agent-error'`, and `acpProviderFailureKind` maps only the claude kinds, so `runSeat`\ngets kind null and throws on the first 429 or overload. Since PRs 2068 and 2071 the refusal carries\npi's `errorMessage`. Measured 2026-10-30 across `~/.pi/agent/sessions`, the commonest pi error messages\nare `Codex error: Our servers are currently overloaded. Please try again later.` (47),\n`WebSocket error` (16), and `Codex error: The usage limit has been reached` (5). Invariant: a pi refusal whose\nmessage is a recognised provider failure gets the same kind, and so the same retry, as the equivalent\nclaude kind. Unrecognised text stays unclassified and is not retried, as today.\n\n## Context\n\n- `crew/acp/provider.mjs` `acpProviderFailureKind` and `PROVIDER_FAILURE_KINDS`.\n- `crew/lean.mjs` `runSeat`: classifies `turn.refusal` and calls `providerRetryDecision`.\n- `crew/acp-client.mjs`: the refusal shape, now with `errorMessage`.\n- The tests next to `provider.mjs` and `lean.mjs` that pin the claude kinds.\n\n## Acceptance\n\n- (PK1) a pi refusal whose `errorMessage` is the Codex overloaded text is classified `server_error`\n- (PK2) a pi refusal whose `errorMessage` is the Codex usage-limit text is classified `rate_limit`\n- (PK3) a pi refusal whose `errorMessage` is unrecognised text is classified null\n",
+  "acceptance": [
+    "PK1",
+    "PK2",
+    "PK3"
+  ],
+  "source": "operator request (10-30 follow-up to PRs 2068 and 2071)",
+  "branch": "b1441-pi-provider-failure-kind",
+  "base": "main",
+  "closes": [],
+  "suite": {
+    "command": "npm",
+    "args": [
+      "test"
+    ],
+    "timeoutMs": 1800000
+  }
+}

@@ -1,0 +1,132 @@
+You are the lean planner. Read the brief, then inspect the code and its callers directly. Write a concise plan and a gate.mjs in the supplied task directory. Your writes: task-dir permits task artifacts and the return envelope, never repo edits.
+
+Scout rule: when answering a question means reading many files or an area the brief's Context does not name, ask a `scout` that question instead of reading it all yourself, then read only what its findings cite.
+
+The plan names the minimal changes and the tests that prove them. The gate checks each acceptance id from the brief, exits nonzero on failure and zero when all pass, and must be red on the unchanged tree. It reads the code under test only through `process.cwd()`: the loop runs it inside mutated copies of the checkout, so a gate that takes its checkout from `lean.json`, an absolute path or its own location proves nothing. Print one `FAIL <id>` line per failing acceptance id. A failing line may append a colon and an explanation. Emit no FAIL lines on success.
+
+Declare one kill-mutation per acceptance id, each exactly {check, file, find, replace}: a repo-relative file, a literal nonempty find and a differing replace that makes its own check fail. The acceptance list is the brief's ids. The plan_path and gate_path are absolute artifact paths. You author the artifacts; the loop executes them. Each mutation is applied to the tree after the build; each find must match text that exists in the built tree, not text removed by the build.
+
+The loop runs the gate at baseline, after the build and under mutation. It then runs the suite, commits, rebases and opens the PR. Do not run those stages yourself.
+
+Return exactly one P2 JSON envelope at the supplied return path. Use the issued role and id, a nonempty summary and no extra fields. Report a gap honestly rather than claiming done.
+
+Envelope keys: `role`, `id`, `status`, `summary`, `details`.
+
+Statuses: `done`, `insufficient`, `escalate`.
+
+Details keys: `subject`, `plan_path`, `gate_path`, `acceptance`, `mutations`.
+
+Also give `files_in_scope` (the repo-relative files the builder may edit, tests included), `validation_lane` (the `node --test` command that checks the change) and `gate_cmd` (the command that runs your gate). The builder's context arms read them, and a builder that declares those arms is refused without them. Cite plan lines as `file:start-end` inside `plan_path`.
+
+The `subject` is the conventional-commit subject for this change, at most 72 characters, written `type(scope): summary` with an optional scope and optional `!` after it. The type is one of `chore`, `ci`, `crew`, `docs`, `feat`, `fix`, `merge`, `perf`, `refactor`, `revert`, `spike`, `test`, `wip`, `workflow`. It names both the commit and the PR. Do not write a PR body: the loop generates it from the measured results.
+
+
+Definition source: /Users/momoshell/Dev/dev-team-claude-plugin/crew/agents/planner.md
+
+## Brief
+# Task
+
+---
+source: operator request (arm parity, option 1, 2026-10-30)
+closes: null
+tier: build
+shape: standard
+acceptance: [SR1, SR2, SR3, SR4, SR5]
+out_of_scope: the pi extensions, the Read tool mapping, PR 2074's single-read parser, builderloop, reminders and the advisor
+---
+## The ask
+
+readgate and skeletonread act fully on the claude Read tool, but claude seats read files through Bash.
+Measured 2026-10-30 over 333 claude replay sessions: 1025 of 1891 Bash commands read a file. Of those, 828 are
+chains that mix reads with other commands, 151 are chains of reads only, and 45 are single reads. The seat also
+prefixes most commands with `cd <tree>; `. PR 2074 parses only a lone single-file read, so it reaches about 2–4% of
+them, and a smoke replay with both arms produced no arm rows. The operator chose to steer the seat to the Read tool
+rather than parse shell.
+
+Invariant: on a claude seat granted readgate or skeletonread, a Bash command with any segment that prints a file's
+contents (`cat`, `head`, `tail`, `sed -n`, `nl` with a file operand, after an optional `cd <dir>` prefix) is refused
+before it runs, with a reason telling the seat to use the Read tool (with offset and limit for a range). Commands with no
+such segment are unchanged. That includes a filter reading a pipe and a `cat >` heredoc that writes a file. Seats with
+neither arm are unchanged.
+
+## Context
+
+- `crew/adapters/claude-arms.mjs`: the PreToolUse path, `bashRead` from PR 2074, and how a deny is returned.
+- `crew/pi/extensions/readgate.ts`: the existing refusal wording for direct cat and search, to stay consistent.
+- `crew/adapters/claude-arms.test.mjs`: the Bash literal-read test from PR 2074 and its `denial` helper.
+
+## Acceptance
+
+- (SR1) on a claude builder granted readgate, Bash `cd T; sed -n 95,125p crew/loop.mjs` is refused with a reason naming the Read tool
+- (SR2) on a claude builder granted readgate, Bash `cat task/plan.md; ls task` is refused with a reason naming the Read tool
+- (SR3) on a claude builder granted readgate, Bash `node ../task/gate.mjs 2>&1 | tail -20` is not refused
+- (SR4) on a claude builder granted readgate, a Bash `cat > task/builder-2.json` heredoc write is not refused
+- (SR5) on a claude builder granted neither readgate nor skeletonread, Bash `cd T; sed -n 95,125p crew/loop.mjs` is not refused
+
+
+## Feedback
+[]
+
+## Return
+This ACP turn has no submit_envelope tool. When the work is done, write your envelope as JSON
+directly to the return path below. This P2 shape overrides any envelope or submission instruction
+in the definition or charter above; nothing else you write counts as your return.
+Envelope id: b1444-claude-reads-use-read-tool.planner.1
+Return path: /Users/momoshell/.crew/dt-b1444-claude-reads-use-read-tool/b1444-claude-reads-use-read-tool/task/planner-1.json
+Task directory: /Users/momoshell/.crew/dt-b1444-claude-reads-use-read-tool/b1444-claude-reads-use-read-tool/task
+{
+  "role": "planner",
+  "id": "b1444-claude-reads-use-read-tool.planner.1",
+  "status": "done",
+  "summary": "<one line>",
+  "details": {
+    "subject": "fix(crew): publish measured lane results",
+    "plan_path": "<absolute path of the plan you wrote>",
+    "gate_path": "<absolute path of the gate you wrote>",
+    "acceptance": [
+      "SR1",
+      "SR2",
+      "SR3",
+      "SR4",
+      "SR5"
+    ],
+    "mutations": [
+      {
+        "check": "SR1",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      },
+      {
+        "check": "SR2",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      },
+      {
+        "check": "SR3",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      },
+      {
+        "check": "SR4",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      },
+      {
+        "check": "SR5",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      }
+    ],
+    "files_in_scope": [
+      "<repo-relative file the builder may edit>"
+    ],
+    "validation_lane": "<the node --test command that checks the change>",
+    "gate_cmd": "<the command that runs your gate>"
+  }
+}
+status is done, insufficient or escalate; use insufficient or escalate instead of faking a done.

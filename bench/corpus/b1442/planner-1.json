@@ -1,0 +1,33 @@
+{
+  "role": "planner",
+  "id": "b1442-finish-insufficient-build.planner.1",
+  "status": "done",
+  "summary": "Planned the minimal finish eligibility fix with independent FI1/FI2 behavioral checks and kill mutations.",
+  "details": {
+    "subject": "fix(crew): allow finishing schema-valid insufficient builds",
+    "plan_path": "/Users/momoshell/.crew/dt-b1442-finish-insufficient-build/b1442-finish-insufficient-build/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1442-finish-insufficient-build/b1442-finish-insufficient-build/task/gate.mjs",
+    "acceptance": ["FI1", "FI2"],
+    "mutations": [
+      {
+        "check": "FI1",
+        "file": "crew/finish.mjs",
+        "find": "['done', 'insufficient'].includes(row.parsed?.status)",
+        "replace": "row.parsed?.status === 'done'"
+      },
+      {
+        "check": "FI2",
+        "file": "crew/finish.mjs",
+        "find": "Array.isArray(row.defects) && row.defects.length === 0",
+        "replace": "Array.isArray(row.defects)"
+      }
+    ],
+    "files_in_scope": [
+      "crew/finish.mjs",
+      "crew/finish.test.mjs",
+      "skills/crew-recovery/SKILL.md"
+    ],
+    "validation_lane": "node --test crew/finish.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1442-finish-insufficient-build/b1442-finish-insufficient-build/task/gate.mjs"
+  }
+}

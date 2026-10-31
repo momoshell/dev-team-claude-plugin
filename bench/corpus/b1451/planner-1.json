@@ -1,0 +1,29 @@
+{
+  "role": "planner",
+  "id": "b1451-pi-websocket-error-retry.planner.1",
+  "status": "done",
+  "summary": "Planned exact pi WebSocket transport classification with a cwd-bound gate and one kill-mutation per acceptance id; execution is delegated to the loop.",
+  "details": {
+    "subject": "fix(crew): retry exact pi WebSocket transport errors",
+    "plan_path": "/Users/momoshell/.crew/dt-b1451-pi-websocket-error-retry/b1451-pi-websocket-error-retry/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1451-pi-websocket-error-retry/b1451-pi-websocket-error-retry/task/gate.mjs",
+    "acceptance": ["WS1", "WS2"],
+    "mutations": [
+      {
+        "check": "WS1",
+        "file": "crew/acp/provider.mjs",
+        "find": "errorMessage === 'WebSocket error'",
+        "replace": "errorMessage === 'WebSocket error (disabled)'"
+      },
+      {
+        "check": "WS2",
+        "file": "crew/acp/provider.mjs",
+        "find": "if (errorKind === 'pi-agent-error') {",
+        "replace": "if (errorKind === 'pi-agent-error') {\n    if (errorMessage === 'Operation aborted') return PROVIDER_FAILURE_KINDS.SERVER_ERROR"
+      }
+    ],
+    "files_in_scope": ["crew/acp/provider.mjs", "crew/acp/provider.test.mjs"],
+    "validation_lane": "node --test crew/acp/provider.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1451-pi-websocket-error-retry/b1451-pi-websocket-error-retry/task/gate.mjs"
+  }
+}

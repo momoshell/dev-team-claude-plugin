@@ -3,10 +3,11 @@
 //   node bench/replay-planner.mjs --lane b1380 --cell cell.json --arms subagent,fff --out /absolute/new-run
 // The planner starts from a fresh task dir (no recorded plan). Its own gate is run once on the unchanged
 // tree to see which acceptance ids go red; its mutations are not proved. See bench/README.md.
-import { existsSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openMemory, renderSection } from '../crew/memory.mjs'
+import { parseAgent } from '../crew/protocols.mjs'
 import { advisorRows, callSeat, checkDiagnostics, dirtyFiles, errText, loadChecks, parseCli, prepareLane, loadEnvelope, readCellFile, readJournal, rowKinds, runReplay, seatDefinition, sleepMs, unmeasuredError, validateArms, validateCell, writeDiff } from './replay-common.mjs'
 
 // The planner names its gate; only a file inside the replay's task dir is run.
@@ -18,16 +19,23 @@ function gateFile(task, details) {
 
 const nonEmptyFile = (f) => { try { return statSync(f).isFile() && statSync(f).size > 0 } catch { return false } }
 
-// options: { lane, cell | cellFile, arms, out, memory? } (cell already parsed, or a path read inside the recorded run); deps (test seams): prepareRun, runAcpSeat, runGate, corpusDir, repoDir, home, sleepMs.
+// options: { lane, cell | cellFile, arms, out, memory?, charter? } (cell already parsed, or a path read inside the recorded run); deps (test seams): prepareRun, runAcpSeat, runGate, corpusDir, repoDir, home, sleepMs.
 export async function runPlanner(options, deps = {}) {
   const { lane, arms } = options ?? {}
   return runReplay({
     kind: 'planner', options, deps,
     async body({ outDir, step, errors, onCleanup, result }) {
+      result.charter = options.charter ?? null
       validateArms(arms)
       const cell = validateCell(options.cell ?? readCellFile(options.cellFile)) // a bad cell file is a recorded failure, not a crash
       result.cell = cell
-      const prep = await (deps.prepareRun ?? ((ctx) => prepareLane({ role: 'planner', ...ctx })))({ lane, cell, arms, outDir, onCleanup, deps })
+      let charterBody
+      if (options.charter !== undefined) {
+        const parsed = parseAgent(readFileSync(options.charter, 'utf8'))
+        if (parsed.defects.length) throw new Error(`invalid charter ${options.charter}: ${parsed.defects.join('; ')}`)
+        charterBody = parsed.body
+      }
+      const prep = await (deps.prepareRun ?? ((ctx) => prepareLane({ role: 'planner', ...ctx })))({ lane, cell, arms, outDir, onCleanup, charterBody, deps })
       if (options.memory !== undefined) {
         const extract = openMemory({ dir: options.memory }).context({ task: prep.briefText, role: 'planner' })
         const section = renderSection(extract)
@@ -70,8 +78,8 @@ export async function runPlanner(options, deps = {}) {
 async function main(argv) {
   let result
   try {
-    const { lane, cellFile, arms, out, memory } = parseCli(argv, { allowMemory: true })
-    result = await runPlanner({ lane, cellFile, arms, out, ...(memory !== undefined ? { memory } : {}) })
+    const { lane, cellFile, arms, out, memory, charter } = parseCli(argv, { allowMemory: true, allowCharter: true })
+    result = await runPlanner({ lane, cellFile, arms, out, ...(memory !== undefined ? { memory } : {}), ...(charter !== undefined ? { charter } : {}) })
   } catch (e) {
     process.stderr.write(`replay-planner: ${errText(e)}\n`)
     process.exitCode = 2

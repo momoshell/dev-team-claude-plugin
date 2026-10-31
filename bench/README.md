@@ -74,13 +74,25 @@ and `gate.failing` should list every acceptance id (`envelope.acceptance`). `rep
 files the planner wrote into the checkout (should be 0); `envelope.mutations` counts declared
 mutations (not proved here); `kinds`, `scouts`, `lab_runs`, `advisor` summarize the journal.
 
+To replay with a different planner charter:
+
+```
+node bench/replay-planner.mjs --lane b1380 --cell cell.json --arms "" --out /abs/new/dir --charter crew/agents/planner.md
+```
+
+`--charter` replaces the recorded prompt before its first `Definition source:` line with the named
+agent definition's body, without its frontmatter. The source line and suffix stay unchanged except
+for the usual task and tree path rebasing. A missing source line or a definition refused by
+`parseAgent` stops the replay before worktree or seat creation. Without the option, the recorded
+prompt is used as before. `result.json.charter` records the supplied filename, or null.
+
 To include team memory in a planner replay:
 
 ```
 node bench/replay-planner.mjs --lane b1380 --cell cell.json --arms "" --out /abs/new/dir --memory /abs/store
 ```
 
-The rendered section is appended to the recorded prompt; `result.json.memory` records the directory,
+The rendered section is appended to the prompt after any charter substitution; `result.json.memory` records the directory,
 included and dropped entries, bytes and reason. Without `--memory` the prompt is unchanged. A store
 that renders nothing is recorded as an error and no seat is called. This option is planner-only.
 

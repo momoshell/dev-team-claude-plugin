@@ -1,8 +1,9 @@
 # Absent is not zero
 
 A zero is a measurement; absence means no measurement was obtained. Never
-fabricate zero for an unknown value. Record a reason where the contract carries
-one, but do not invent a reason field.
+fabricate zero for an unknown value. An unmeasured value is `null` with one
+closed reason (CLAUDE.md, honesty doctrine). Where a contract has no reason
+field yet, as the subagent usage below, say so; do not treat that as the rule.
 
 ## Live usage contract
 

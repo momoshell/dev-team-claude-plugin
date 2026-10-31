@@ -31,7 +31,7 @@ can trust.
 | Testing a reducer over a vendor's stream | Recorded captures, never hand-built frames | `references/captures.md` |
 | Identifying affected tests | A change that moves code or changes a detector owns what it newly flags | `references/tripwires.md` |
 | Parsing a suite summary in a script | Strip ANSI; `FORCE_COLOR=0` | `references/tooling.md` |
-| Asserting on a value nobody measured | Absent, never zero; retain a reason where available | `references/absence.md` |
+| Asserting on a value nobody measured | Absent with one closed reason, never zero | `references/absence.md` |
 | Writing a test for a malformed or hostile input | If you cannot express the malformed input, you have not tested the guard | `references/affordances.md` |
 | Citing a file from prose or from a comment | Cite a path or a symbol, never a line; every cited path must exist | `references/citations.md` |
 | Pinning a universal claim about a pure function (a tokenizer, classifier, normaliser) | Generate the inputs from every production of the grammar the claim is about — `forAll` in `test/helpers.mjs`, seeded, the failing input printed — with an oracle the generator carries itself, never one rediscovered from the serialized input; keep one example test for the shape | this table |

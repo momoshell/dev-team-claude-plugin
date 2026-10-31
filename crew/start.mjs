@@ -32,6 +32,15 @@ export function runBrief(text, closes) {
   return `# Task\n${closes ? `<!-- crew:bound-issue #${closes} -->\n` : ''}\n${text}`
 }
 
+// Keep the handler installed for errors emitted after the write (or main) returns.
+const ignoreStdoutError = () => {}
+function logStdout(line) {
+  try {
+    if (!process.stdout.listeners('error').includes(ignoreStdoutError)) process.stdout.on('error', ignoreStdoutError)
+    process.stdout.write(`${line}\n`)
+  } catch { /* Printing is best-effort. */ }
+}
+
 const defaultDeps = () => ({
   readFileSync, existsSync, mkdirSync, writeFileSync, openSync, closeSync, resolveAgents,
   spawnSync: (file, args, options) => spawnSync(file, args, { encoding: 'utf8', ...options }),
@@ -44,7 +53,7 @@ const defaultDeps = () => ({
     } finally { closeSync(out) }
   },
   crewRoot: join(homedir(), '.crew'),
-  log: (line) => process.stdout.write(`${line}\n`),
+  log: logStdout,
 })
 
 function git(d, checkout, args) {
@@ -60,6 +69,7 @@ function suiteSpec(suite) {
 
 export async function startLane({ briefPath, checkout, check = false, loop, deps = {} }) {
   const d = { ...defaultDeps(), ...deps }
+  const logLine = (line) => { try { d.log(line) } catch { /* Instrumentation must not affect the start. */ } }
   if (loop !== undefined && loop !== 'lean') throw Object.assign(new StartRefusal(`--loop takes lean, got ${JSON.stringify(loop)}`), { exitCode: 2 })
   const lane = laneName(briefPath)
   const text = d.readFileSync(briefPath, 'utf8')
@@ -70,7 +80,7 @@ export async function startLane({ briefPath, checkout, check = false, loop, deps
   if (fields.shape !== 'standard') throw new StartRefusal(`--loop lean runs the standard shape only; brief ${briefPath} declares shape ${fields.shape}`)
   let resolved
   try { resolved = d.resolveAgents(fields.tier) } catch (cause) { throw new StartRefusal(`cannot resolve the agent definitions: ${cause.message}`, { cause }) }
-  if (check) { d.log(`crew start: brief ok lane=${lane} tier=${fields.tier} shape=${fields.shape} closes=${fields.closes ?? 'none'}`); return { lane, fields, checked: true } }
+  if (check) { logLine(`crew start: brief ok lane=${lane} tier=${fields.tier} shape=${fields.shape} closes=${fields.closes ?? 'none'}`); return { lane, fields, checked: true } }
 
   checkout ??= git(d, process.cwd(), ['rev-parse', '--show-toplevel'])
   if (!checkout) throw Object.assign(new StartRefusal('not inside a git checkout; pass --checkout <dir>'), { exitCode: 2 })
@@ -115,12 +125,12 @@ export async function startLane({ briefPath, checkout, check = false, loop, deps
     throw new StartRefusal(`cannot record lean lane ${lane} in ${crewDir}: ${cause.code ?? cause.message}; the worktree ${worktree} and branch ${lane} are left for inspection`, { cause })
   }
   const pid = d.spawnDetached(process.execPath, [LEAN, specPath], { cwd: worktree, log, env })
-  d.log(`crew start: lane=${lane} loop=lean tier=${fields.tier} shape=${fields.shape} closes=${fields.closes ?? 'none'} pid=${pid}`)
-  d.log(`  worktree ${worktree}`)
-  d.log(`  brief    ${brief}`)
-  d.log(`  log      ${log}`)
-  d.log(`  spec     ${specPath}`)
-  d.log(`  sessions node ${join(HOME, 'bin', 'crew.mjs')} show ${lane} [<role>]`)
+  logLine(`crew start: lane=${lane} loop=lean tier=${fields.tier} shape=${fields.shape} closes=${fields.closes ?? 'none'} pid=${pid}`)
+  logLine(`  worktree ${worktree}`)
+  logLine(`  brief    ${brief}`)
+  logLine(`  log      ${log}`)
+  logLine(`  spec     ${specPath}`)
+  logLine(`  sessions node ${join(HOME, 'bin', 'crew.mjs')} show ${lane} [<role>]`)
   return { lane, fields, worktree, brief, log, pid, specPath }
 }
 

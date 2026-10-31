@@ -223,3 +223,20 @@ blind diff review). On the doc lanes b1457, b1458 and b1459 (3 each): 8/9 vs 9/9
 tokens, and the skill was read in 9 of 9 runs. On the 8 new code lanes (3 each): 18/24 vs 18/24 pass, the same
 lanes failing in both arms, 3.68M vs 3.40M tokens, and the skill was read in 3 of 24 runs. The builder seat
 grants it since PR 2096. Must-fix counts are not given: the reviews state them in at least four formats.
+
+**A planner charter paragraph, 2026-11-01** (pi sol high with `subagent`, 14 code lanes × 3 per arm, `--charter`,
+one blind plan batch). Both arms used main's `crew/agents/planner.md`; the trial arm added one paragraph after
+the gate rules telling the planner to try to break its own gate (test input edges, drive the caller the brief
+names, cover retries and later turns, run the code its claims rest on, make sure a correct build can go green).
+
+| Planner charter | First return `done` | Blind pass | Tokens | Median wall |
+|---|---|---|---|---|
+| main | 42/42 | 8/42 | 10.64M | 137s |
+| main + the paragraph | 0/42 | 9/42 | 17.87M (+68%) | 210s |
+
+Every trial planner's first, unvalidated return was `insufficient`: the paragraph asks it to run code, the
+planner seat refuses Node commands, and it reported the verification it could not do. What a lane would then
+do (repair turns, the lead) was not replayed. The blind review sees only `plan.md` and `gate.mjs`, never the
+return status, so its 9/42 says nothing about usable returns; read a plan bench with its status counts. b1441,
+b1442 and b1444 drew a must-fix in 3 of 3 runs in both arms. Not shipped. Return status in the benches above:
+`qa-test-writing` 42/42 `done`, fff 40/42 (2 `insufficient` on 11-01).

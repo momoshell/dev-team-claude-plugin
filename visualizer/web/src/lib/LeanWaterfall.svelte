@@ -1,23 +1,30 @@
 <script>
-  import { layoutTimeline } from './timeline.js'
+  import { layoutTimeline, formatLeanDuration } from './timeline.js'
   let { run } = $props()
   let timeline = $derived(layoutTimeline(run))
 </script>
 
 <section class="waterfall" aria-labelledby="waterfall-heading">
   <h2 id="waterfall-heading">Execution waterfall</h2>
-  <p>Recorded stage intervals share a time scale; missing boundaries are listed below.</p>
+  <p>Recorded stage intervals share a time scale; open stages and missing boundaries are listed below.</p>
   {#if timeline.blocks.length}
     <ol class="rows">
       {#each timeline.blocks as block (block.phase_id)}
         <li>
-          <div class="label"><strong>{block.name || 'Stage not recorded'}</strong><span>{block.role || 'Seat role not recorded'}</span><span>{block.duration_ms} ms</span></div>
+          <div class="label"><strong>{block.name || 'Stage not recorded'}</strong><span>{block.role || 'Seat role not recorded'}</span><span>{formatLeanDuration(block.duration_ms)}</span></div>
           <div class="track" aria-hidden="true"><span class="bar" style={`left:${block.x * 100}%;width:${block.width * 100}%`}></span></div>
         </li>
       {/each}
     </ol>
   {:else}
-    <p>No complete stage intervals recorded. Inspect the journal below for boundary evidence.</p>
+    <p>No complete stage intervals recorded. Open stages and boundary evidence appear below.</p>
+  {/if}
+  {#if timeline.open.length}
+    <ul class="absent">
+      {#each timeline.open as entry (entry.id)}
+        <li><strong>{entry.name || 'Stage not recorded'}</strong> · {entry.role || 'Seat role not recorded'} · Open — no stage-end record</li>
+      {/each}
+    </ul>
   {/if}
   {#if timeline.unrecorded.length}
     <ul class="absent">

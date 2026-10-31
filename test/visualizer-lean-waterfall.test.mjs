@@ -3,12 +3,64 @@ import assert from 'node:assert/strict'
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { layoutTimeline } from '../visualizer/web/src/lib/timeline.js'
+import { layoutTimeline, formatLeanDuration, MIN_WIDTH } from '../visualizer/web/src/lib/timeline.js'
 import { createLeanSource } from '../visualizer/server/lean-source.mjs'
 
 const source = (name) => readFileSync(new URL(`../visualizer/web/src/lib/${name}`, import.meta.url), 'utf8')
 const base = 1700000000000
 const phase = (id, start, end) => ({ id, name: `stage-${id}`, started_at: start == null ? null : base + start, ended_at: end == null ? null : base + end })
+
+test('WP1', () => {
+  // MUTATION: disable the running, absent-end classification.
+  const iso = n => new Date(base + n).toISOString()
+  const open = { id: 2, name: 'open', role: 'builder', status: 'running', started_at: iso(20000), ended_at: null }
+  const complete = { ...phase(1, 0, 10000), status: 'done' }
+  const bad = [
+    { ...open, id: 3, started_at: null }, { ...open, id: 4, started_at: 'invalid' },
+    { ...open, id: 5, ended_at: 'invalid' }, { ...open, id: 6, status: 'done' }, phase(7, 5000, 4000),
+  ]
+  const run = { source: 'lean', phases: [complete, open, ...bad] }, original = structuredClone(run)
+  const result = layoutTimeline(run, [], { now: base + 100000 })
+  assert.deepEqual(result.open, [{ ...open, x: null, width: null, duration_ms: null }])
+  assert.deepEqual(result.blocks.map(p => p.id), [1]); assert.deepEqual(result.unrecorded.map(p => p.id), [3, 4, 5, 6, 7])
+  assert.equal(result.origin_at, iso(0)); assert.equal(result.span_ms, 10000)
+  assert.deepEqual(result, layoutTimeline(run, [], { now: base + 900000 })); assert.deepEqual(run, original)
+  const only = layoutTimeline({ source: 'lean', phases: [open] })
+  assert.equal(only.open.length, 1); assert.deepEqual(only.blocks, []); assert.deepEqual(only.unrecorded, [])
+  assert.equal(only.origin_at, null); assert.equal(only.span_ms, null)
+  assert.deepEqual(layoutTimeline({ source: 'lean', phases: [] }).open, [])
+  const markup = source('LeanWaterfall.svelte')
+  const rows = markup.match(/\{#each\s+timeline\.open\s+as\s+entry\b[\s\S]*?\{\/each\}/)?.[0]
+  assert.ok(rows); assert.match(rows, /Open — no stage-end record/); assert.match(rows, /entry\.name/); assert.match(rows, /entry\.role/)
+  assert.doesNotMatch(rows, /\brunning\b|\blive\b|in.flight|duration_ms|class="bar"/i)
+  assert.match(markup, /timeline\.unrecorded as entry/); assert.match(markup, /Not recorded — \{entry.reason\}/)
+})
+
+test('WP2', () => {
+  // MUTATION: remove the Math.max minimum-width floor.
+  const run = { source: 'lean', phases: [phase(1, 0, 1000000), phase(2, 0, 1), phase(3, 200000, 200123), phase(4, 500000, 500000), phase(5, 999999, 1000000)] }
+  const original = structuredClone(run), result = layoutTimeline(run)
+  assert.equal(MIN_WIDTH, 0.02); assert.equal(result.origin_at, new Date(base).toISOString()); assert.equal(result.span_ms, 1000000)
+  assert.equal(result.blocks.length, 5)
+  for (const [i, block] of result.blocks.entries()) {
+    const p = run.phases[i], duration = p.ended_at - p.started_at
+    assert.equal(block.id, p.id); assert.equal(block.width, Math.max(0.02, duration / 1000000))
+    assert.equal(block.duration_ms, duration); assert.equal(block.x, (p.started_at - base) / 1000000)
+  }
+  assert.deepEqual(run, original)
+  const zero = layoutTimeline({ source: 'lean', phases: [phase(10, 500, 500)] })
+  assert.equal(zero.span_ms, 0); assert.equal(zero.blocks[0].width, 0.02); assert.equal(zero.blocks[0].duration_ms, 0); assert.equal(zero.blocks[0].x, 0)
+  assert.match(source('LeanWaterfall.svelte'), /block\.width \* 100/)
+})
+
+test('WP3', () => {
+  // MUTATION: replace the seconds conversion with raw milliseconds.
+  for (const [ms, expected] of [[0, '0s'], [1, '0.001s'], [123, '0.123s'], [1500, '1.5s'], [60000, '1m 0s'], [165213, '2m 45.213s'], [664000, '11m 4s']]) assert.equal(formatLeanDuration(ms), expected)
+  for (const value of [null, undefined, NaN, Infinity, -Infinity, -1, '1000']) assert.equal(formatLeanDuration(value), null)
+  const markup = source('LeanWaterfall.svelte')
+  assert.match(markup, /import\s*\{[^}]*\bformatLeanDuration\b[^}]*\}\s*from\s*['"]\.\/timeline\.js['"]/)
+  assert.match(markup, /\{formatLeanDuration\(block\.duration_ms\)\}/); assert.doesNotMatch(markup, /\{block\.duration_ms\}\s*ms\b/)
+})
 
 test('WF1', () => {
   // MUTATION: removing the LeanWaterfall mount must fail this test.

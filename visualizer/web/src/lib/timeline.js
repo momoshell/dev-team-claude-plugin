@@ -9,13 +9,23 @@ function time(value) {
   return Number.isFinite(parsed) ? parsed : null
 }
 
+export function formatLeanDuration(ms) {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return null
+  const seconds = ms / 1000
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${(ms % 60000) / 1000}s`
+}
+
 export function layoutTimeline(run = {}, events = [], { now = Date.now() } = {}) {
   const phases = Array.isArray(run.phases) ? run.phases : []
   const recordedOnly = run.source === 'lean'
   if (recordedOnly) {
-    const complete = [], unrecorded = []
+    const complete = [], unrecorded = [], open = []
     for (const phase of phases) {
       const start = time(phase.started_at), end = time(phase.ended_at)
+      if (phase.status === 'running' && phase.ended_at == null && start != null) {
+        open.push({ ...phase, x: null, width: null, duration_ms: null })
+        continue
+      }
       const reason = start == null ? 'Start time missing or invalid' : end == null ? 'End time missing or invalid' : end < start ? 'Interval ends before it starts' : null
       if (reason) unrecorded.push({ ...phase, x: null, width: null, duration_ms: null, reason })
       else complete.push({ phase, start, end })
@@ -25,9 +35,9 @@ export function layoutTimeline(run = {}, events = [], { now = Date.now() } = {})
     const span = origin == null ? null : finish - origin
     const blocks = complete.map(({ phase, start, end }) => ({
       ...phase, phase_id: phase.id ?? null, duration_ms: end - start,
-      x: span ? (start - origin) / span : 0, width: span ? (end - start) / span : 0,
+      x: span ? (start - origin) / span : 0, width: Math.max(MIN_WIDTH, span ? (end - start) / span : 0),
     }))
-    return { request: null, origin_at: origin == null ? null : new Date(origin).toISOString(), span_ms: span, blocks, queued: [], unrecorded, marks: [], lanes: [] }
+    return { request: null, origin_at: origin == null ? null : new Date(origin).toISOString(), span_ms: span, blocks, queued: [], unrecorded, open, marks: [], lanes: [] }
   }
   const timed = phases.filter((phase) => phase.started_at != null).sort((a, b) => (time(a.started_at) - time(b.started_at)) || ((a.seq ?? 0) - (b.seq ?? 0)))
   const queued = phases.filter((phase) => phase.started_at == null).sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))

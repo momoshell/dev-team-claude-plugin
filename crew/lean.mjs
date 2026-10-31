@@ -6,7 +6,7 @@ import { appendFileSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFil
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runAcpSeat } from './acp/seat.mjs'
-import { refuse } from './acp/grants.mjs'
+import { openMemory, renderSection } from './memory.mjs'
 import { acpProviderFailureKind, acpTextReset, providerRetryDecision, PROVIDER_RETRY_TOTAL_WAIT_MS } from './acp/provider.mjs'
 import { runLoop } from './loop.mjs'
 import { AGENT_ROLES, parseAgent } from './protocols.mjs'
@@ -50,7 +50,6 @@ function definitionFor({ role, seat }, tier, d) {
   const override = fields.tiers?.[tier]
   if (override === null) throw new Error(`role ${role} is unseated at tier ${tier}`)
   const effective = { ...fields, ...override }
-  if (effective.memory === true) throw refuse('grant-unsupported', `lean seat ${role} declares memory: true, which lean cannot honour — refusing to boot a silently weaker seat`)
   const charters = [...body.matchAll(CHARTER_LINK)].map((link) => resolve(dirname(source), link[1]))
   return {
     definition: { role, agent: seat.agent, model: `${seat.provider}/${seat.id}`, effort: seat.effort, writes: effective.writes ?? 'none', skills: effective.skills ?? [], requires: effective.requires ?? [],
@@ -58,7 +57,7 @@ function definitionFor({ role, seat }, tier, d) {
       extensions: effective.extensions, advisor: effective.advisor, edit_assist: effective.edit_assist, codemode: effective.codemode,
       wait_s: effective.wait_s,
       body },
-    source, charters,
+    source, charters, memory: effective.memory,
   }
 }
 
@@ -83,7 +82,7 @@ function repairPromptFor({ request, spec }) {
   ].join('\n')
 }
 
-function promptFor({ request, spec, source, charters, body }) {
+function promptFor({ request, spec, source, charters, body, section }) {
   const { role, id, returnPath, brief, planPath, gatePath, feedback } = request
   const lines = [
     body,
@@ -96,6 +95,7 @@ function promptFor({ request, spec, source, charters, body }) {
     ...(planPath ? ['', `Plan path: ${planPath}`] : []),
     ...(gatePath ? [`Gate path: ${gatePath}`] : []),
     ...(role === 'reviewer' ? ['', '## Changed paths', ...request.changedPaths.map((path) => `- ${JSON.stringify(path)}`)] : []),
+    ...(section ? ['', section] : []),
     '',
     '## Feedback',
     JSON.stringify(feedback ?? []),
@@ -124,10 +124,20 @@ export async function runLean(spec, deps = {}) {
     ...deps,
   }
 
-  const runSeat = async (request) => {
-    const { definition, source, charters } = definitionFor(request, spec.tier, d)
+  const runSeat = async (request, { emit }) => {
+    const { definition, source, charters, memory } = definitionFor(request, spec.tier, d)
     const { role, id } = request
-    const prompt = request.repair ? repairPromptFor({ request, spec }) : promptFor({ request, spec, source, charters, body: definition.body })
+    let sectionText = ''
+    if (!request.repair) {
+      if (memory === true) {
+        const dir = process.env.CREW_MEMORY_DIR || join(spec.cwd, '.claude', 'dev-team', 'memory')
+        const extract = openMemory({ dir }).context({ task: request.brief, role })
+        const section = renderSection(extract)
+        if (!section) await emit('memory-empty', { role, id, reason: extract.reason ?? 'empty' })
+        else sectionText = section
+      }
+    }
+    const prompt = request.repair ? repairPromptFor({ request, spec }) : promptFor({ request, spec, source, charters, body: definition.body, section: sectionText })
     d.mkdirSync(join(spec.taskDir, 'lean', role), { recursive: true })
     const stem = request.repair ? `${id}.repair` : id
     // A provider failure is retried in a fresh ACP session inside the shared bounds. The issued id,

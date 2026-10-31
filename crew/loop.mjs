@@ -211,7 +211,7 @@ export async function runLoop(spec, deps = {}) {
           let failure = null
           let parsed = null
           let recording = null
-          try { recording = await d.runSeat(asked) } catch (error) { failure = { reason: 'seat-unmeasured', error: describe(error) } }
+          try { recording = await d.runSeat(asked, { emit }) } catch (error) { failure = { reason: 'seat-unmeasured', error: describe(error) } }
           let raw = null
           if (!failure) {
             try { raw = await d.readFile(returnPath, 'utf8') } catch (error) { failure = { reason: 'seat-unmeasured', error: describe(error) } }

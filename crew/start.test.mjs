@@ -757,15 +757,17 @@ test('a server error is retried up to the shared attempt bound, then the lane st
   assert.equal(spent.sleeps.length, PROVIDER_RETRY_MAX)
 })
 
-test('pi overload retries in a fresh session; unknown and resetless usage limit do not retry', async () => {
+test('pi overload and WebSocket failures retry in a fresh session; unknown and resetless usage limit do not retry', async () => {
   const refusal = (errorMessage) => ({ code: -32000, errorKind: 'pi-agent-error', message: 'pi agent run failed', errorMessage })
-  const run = await retryRun([refusal('Codex error: Our servers are currently overloaded. Please try again later.')])
-  assert.equal(run.result.status, 'done')
-  assert.deepEqual(run.sleeps, [60_000])
-  assert.equal(run.sessions.length, 4)
-  assert.equal(new Set(run.sessions).size, 4)
-  assert.equal(run.sessions[1], run.f.sessionOf('planner', 1).replace('.jsonl', '.retry-1.jsonl'))
-  for (const message of ['WebSocket error', 'Codex error: The usage limit has been reached']) {
+  for (const message of ['Codex error: Our servers are currently overloaded. Please try again later.', 'WebSocket error', 'WebSocket idle timeout after 300000ms']) {
+    const run = await retryRun([refusal(message)])
+    assert.equal(run.result.status, 'done')
+    assert.deepEqual(run.sleeps, [60_000])
+    assert.equal(run.sessions.length, 4)
+    assert.equal(new Set(run.sessions).size, 4)
+    assert.equal(run.sessions[1], run.f.sessionOf('planner', 1).replace('.jsonl', '.retry-1.jsonl'))
+  }
+  for (const message of ['Operation aborted', 'unrecognised', 'Codex error: The usage limit has been reached']) {
     const stopped = await retryRun([refusal(message)])
     assert.deepEqual(stopped.result, { status: 'stopped', reason: 'seat-unmeasured', pr: null })
     assert.deepEqual([stopped.sleeps.length, stopped.sessions.length], [0, 1])

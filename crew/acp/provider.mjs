@@ -32,6 +32,7 @@ export const PROVIDER_FAILURE_KINDS = Object.freeze({
 
 export function acpProviderFailureKind(errorKind, errorMessage) {
   if (errorKind === 'pi-agent-error') {
+    if (errorMessage === 'WebSocket error' || (typeof errorMessage === 'string' && /^WebSocket idle timeout after [0-9]+ms(?![\s\S])/.test(errorMessage))) return PROVIDER_FAILURE_KINDS.SERVER_ERROR
     if (errorMessage === 'Codex error: Our servers are currently overloaded. Please try again later.') return PROVIDER_FAILURE_KINDS.SERVER_ERROR
     if (errorMessage === 'Codex error: The usage limit has been reached') return PROVIDER_FAILURE_KINDS.RATE_LIMIT
   }

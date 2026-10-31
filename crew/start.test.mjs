@@ -416,7 +416,8 @@ test('the writes a seat receives are the effective definition writes, tier overr
 
 const memoryDefinition = (line) => (path, ...args) => {
   const text = readFileSync(path, ...args)
-  return path === join(AGENTS, 'planner.md') ? text.replace(/tiers: .*/, line) : text
+  // The shipped definition's own memory field is removed first, so each case states the whole effective value.
+  return path === join(AGENTS, 'planner.md') ? text.replace(/^memory: .*\n/m, '').replace(/tiers: .*/, line) : text
 }
 const populateMemory = (dir, body) => {
   mkdirSync(dir, { recursive: true })

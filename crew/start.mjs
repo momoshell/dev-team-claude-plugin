@@ -76,7 +76,7 @@ export async function startLane({ briefPath, checkout, check = false, loop, deps
   const { fields, defects } = parseBrief(text)
   if (defects.length) throw new StartRefusal(`brief ${briefPath} is not a P1 brief:\n- ${defects.join('\n- ')}`)
   const run = runBrief(text, fields.closes)
-  if (fields.shape === 'finish') throw new StartRefusal('shape finish starts from an escalated lane, not a new brief; crew start runs standard and stepped')
+  if (fields.shape === 'finish') throw new StartRefusal('shape finish starts from an escalated lane, not a new brief; crew start runs standard only')
   if (fields.shape !== 'standard') throw new StartRefusal(`--loop lean runs the standard shape only; brief ${briefPath} declares shape ${fields.shape}`)
   let resolved
   try { resolved = d.resolveAgents(fields.tier) } catch (cause) { throw new StartRefusal(`cannot resolve the agent definitions: ${cause.message}`, { cause }) }

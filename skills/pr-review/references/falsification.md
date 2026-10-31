@@ -51,7 +51,7 @@ An advisory finding — `should-fix` or `consider` — whose remedy is NEW
 MACHINERY (a new function, module, abstraction, configuration knob, retention
 or backup mechanism) for a defect outside the changed behaviour is dropped.
 Proposing more machinery is the failure mode, not the fix; the ladder in
-`crew/roles/_shared.md` and `skills/code-less` apply to the reviewer's remedy
+`skills/code-less/SKILL.md` applies to the reviewer's remedy
 as much as to the builder's code. The test is whether the defect belongs to the
 behaviour this change touched — not whether its correction happens to land on
 an already-modified line. Two classes are never subject to the bar:

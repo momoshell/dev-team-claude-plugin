@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { ARMS, CHECKOUT, CORPUS_DIR, createOutDir, parseCli, validateArms, writeDiff } from './replay-common.mjs'
 import { openMemory, renderSection } from '../crew/memory.mjs'
+import { parseAgent } from '../crew/protocols.mjs'
 import { runBuilder } from './replay-builder.mjs'
 import { runPlanner } from './replay-planner.mjs'
 
@@ -584,6 +585,94 @@ test('planner memory appends the rendered section and persists accounting; empty
   assert.equal(seats, 0)
   assert(!existsSync(join(out, 'tree')))
   assert.equal(worktrees(fx.repo), 1)
+})
+
+const charterDefinition = '---\nname: test-planner\ndescription: fixture\nrole: planner\nagent: claude\nmodel: example/model\neffort: low\n---\n\nReplacement Ω\n  \n'
+const recordedSuffix = 'Definition source: /old/planner.md\r\n\r\n## Brief\nLane Ω\nDefinition source: later\nReturn path: /orig/crew/b1380/task/planner-1.json\nCheckout: /orig/dev/b1380\n  \n'
+
+function charterFixture() {
+  const fx = fixture()
+  const charter = fresh('charter')
+  writeFileSync(charter, charterDefinition)
+  writeFileSync(join(fx.corpusDir, 'b1380', 'planner-prompt.txt'), 'Old charter\n\n' + recordedSuffix)
+  return { ...fx, charter }
+}
+
+async function captureCharter(fx, options = {}) {
+  const out = fresh('charter-run')
+  let call
+  const result = await runPlanner({ lane: 'b1380', cell: CELL, arms: [], out, ...options }, {
+    ...fx.deps,
+    runAcpSeat(c) {
+      call = c
+      writeFileSync(join(c.taskDir, 'plan.md'), '# plan\n')
+      writeFileSync(join(c.taskDir, 'gate.mjs'), 'x\n')
+      writeFileSync(join(c.taskDir, 'planner-1.json'), JSON.stringify({ status: 'done', summary: 'ok' }))
+      return { stopReason: 'end_turn' }
+    },
+    runGate: async () => ({ status: 'red' }),
+  })
+  return { out, result, call }
+}
+
+// MUTATION: CS1 replaces the charter body with a wrong charter.
+test('CS1 planner charter body, CLI, validation and memory', async () => {
+  const fx = charterFixture()
+  const args = ['--lane', 'b1380', '--cell', 'cell.json', '--arms', '', '--out', '/tmp/out']
+  assert.equal(parseCli([...args, '--charter', fx.charter], { allowCharter: true }).charter, fx.charter)
+  for (const value of [[], ['--lane'], ['-x'], ['']]) assert.throws(() => parseCli([...args, '--charter', ...value], { allowCharter: true }), /needs a value/)
+  assert.throws(() => parseCli([...args, '--charter', fx.charter]), /unknown argument/)
+  const cellFile = fresh('cell'); writeFileSync(cellFile, JSON.stringify(CELL))
+  const cliOut = fresh('cli-charter')
+  const cli = spawnSync(process.execPath, [join(CHECKOUT, 'bench/replay-planner.mjs'), '--lane', 'b1380', '--cell', cellFile, '--arms', 'bad', '--out', cliOut, '--charter', fx.charter], { encoding: 'utf8' })
+  assert.equal(cli.status, 1)
+  assert.equal(json(join(cliOut, 'result.json')).charter, fx.charter)
+  const builder = spawnSync(process.execPath, [join(CHECKOUT, 'bench/replay-builder.mjs'), ...args, '--charter', fx.charter], { encoding: 'utf8' })
+  assert.equal(builder.status, 2)
+  assert.match(builder.stderr, /unknown argument --charter/)
+  const memory = fresh('charter-memory'); mkdirSync(memory)
+  writeFileSync(join(memory, 'MEMORY.md'), '- [alpha](alpha.md)\n')
+  writeFileSync(join(memory, 'alpha.md'), 'Team judgment\n')
+  const { out, result, call } = await captureCharter(fx, { charter: fx.charter, memory })
+  assert.equal(result.error, null)
+  assert.equal(json(join(out, 'result.json')).charter, fx.charter)
+  assert(call.prompt.startsWith(parseAgent(charterDefinition).body + '\n\nDefinition source:'))
+  assert(!call.prompt.includes('Old charter') && !call.prompt.includes('name: test-planner'))
+  assert.equal(call.definition.model, CELL.model)
+  assert.equal(call.definition.agent, CELL.agent)
+  assert(call.prompt.endsWith('\n\n' + renderSection(openMemory({ dir: memory }).context({ task: '# brief\n', role: 'planner' }))))
+  const ordinary = await captureCharter(fx)
+  assert.equal(ordinary.result.error, null)
+  assert.equal(json(join(ordinary.out, 'result.json')).charter, null)
+  assert(ordinary.call.prompt.startsWith('Old charter\n\n'))
+  for (const content of [null, 'bad definition', charterDefinition.replace('effort: low', 'effort: impossible')]) {
+    const file = fresh('invalid-charter')
+    if (content !== null) writeFileSync(file, content)
+    const rejected = await runPlanner({ lane: 'b1380', cell: CELL, arms: [], out: fresh(), charter: file }, { ...fx.deps, repoDir: '/no/such/repo', runAcpSeat: () => assert.fail('seat called') })
+    assert.match(rejected.error, content === null ? /ENOENT/ : /invalid charter/)
+  }
+})
+
+// MUTATION: CS2 trims the recorded suffix.
+test('CS2 preserves the complete recorded suffix apart from path rebasing', async () => {
+  const fx = charterFixture()
+  const { out, result, call } = await captureCharter(fx, { charter: fx.charter })
+  assert.equal(result.error, null)
+  const prefix = parseAgent(charterDefinition).body + '\n\n'
+  assert(call.prompt.startsWith(prefix))
+  assert.equal(call.prompt.slice(prefix.length), recordedSuffix.replaceAll('/orig/crew/b1380/task', join(out, 'task')).replaceAll('/orig/dev/b1380', join(out, 'tree')))
+})
+
+// MUTATION: CS3 disables the missing-marker refusal.
+test('CS3 refuses a missing source line before worktree creation', async () => {
+  const fx = charterFixture()
+  writeFileSync(join(fx.corpusDir, 'b1380', 'planner-prompt.txt'), 'No marker\nReturn path: planner-1.json\n')
+  const out = fresh()
+  let seats = 0
+  const result = await runPlanner({ lane: 'b1380', cell: CELL, arms: [], out, charter: fx.charter }, { ...fx.deps, repoDir: '/no/such/repo', runAcpSeat: () => { seats++ } })
+  assert.match(result.error, /no Definition source: line/)
+  assert.equal(seats, 0)
+  assert(!existsSync(join(out, 'task')))
 })
 
 test('memory CLI option is planner-only and requires a value', () => {

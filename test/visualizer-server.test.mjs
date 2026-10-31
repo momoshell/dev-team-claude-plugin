@@ -134,7 +134,7 @@ function serverRosterFixture() {
 function agentsFixture(prefix = 'visualizer-agents-') {
   const dir = scratchDir(prefix)
   const checkout = join(dir, 'checkout'), crewRoot = join(dir, 'crew-root')
-  mkdirSync(join(checkout, 'crew', 'roles'), { recursive: true })
+  mkdirSync(join(checkout, 'crew', 'agents'), { recursive: true })
   mkdirSync(join(checkout, 'skills'), { recursive: true })
   const capabilities = {
     schema_version: 1,
@@ -156,7 +156,7 @@ function agentsFixture(prefix = 'visualizer-agents-') {
   writeFileSync(capabilitiesPath, JSON.stringify(capabilities, null, 2) + '\n')
   const skillNames = ['backend-node', 'crew-dispatch', 'crew-onboard', 'crew-recovery', 'devops', 'frontend-svelte', 'pr-review', 'qa-test-writing', 'ui-design']
   for (const name of skillNames) { mkdirSync(join(checkout, 'skills', name), { recursive: true }); writeFileSync(join(checkout, 'skills', name, 'SKILL.md'), `---\nname: ${name}\ndescription: Fixture description for ${name}.\n---\n\n# ${name}\n`) }
-  for (const role of ['_shared', 'lead', 'planner', 'builder', 'reviewer', 'tech-lead']) writeFileSync(join(checkout, 'crew', 'roles', `${role}.md`), `# ${role}\nFixture charter for ${role}.\n`)
+  for (const role of ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']) writeFileSync(join(checkout, 'crew', 'agents', `${role}.md`), `# ${role}\nFixture charter for ${role}.\n`)
   const lane = join(crewRoot, 'dt-agents-fixture', 'fixture-task'), task = join(lane, 'task')
   mkdirSync(join(task, 'headless', 'builder'), { recursive: true })
   mkdirSync(join(task, 'headless-rpc', 'builder'), { recursive: true })
@@ -335,7 +335,7 @@ test('B1 agents page proposal endpoints are diff-only', async () => {
     assert.equal(view.json.agents.find((agent) => agent.name === 'pi').install_hint.value, 'Install Pi.')
     assert.equal(view.json.skills.length, 9)
     assert.equal(view.json.roles.length, 5)
-    assert.equal(view.json.prompts.length, 6)
+    assert.equal(view.json.prompts.length, 5)
     assert.equal(view.json.roles.find((row) => row.role === 'builder').cells['frontend-svelte'].last_seat_delivery, true)
     const post = (path, body) => json(server.base, path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
     const agent = await post('/api/agents/propose', { name: 'future-agent', entry: { providers: ['openai'], transports: ['pane'], adapter: 'crew/adapters/adapter-future-agent.mjs', refuses: [], availability: 'proposal-stub' } })
@@ -427,9 +427,11 @@ test('prompts-page:C1', async () => {
     server = await startInProcess({}, { checkout: fixture.checkout, crewRoot: fixture.crewRoot, agents: source, ledgerDb: join(fixture.dir, 'ledger.db'), triageDb: join(fixture.dir, 'triage.db') })
     const view = await json(server.base, '/api/agents')
     assert.equal(view.status, 200)
-    assert.deepEqual(view.json.prompts.map((prompt) => prompt.role), ['_shared', 'lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
-    assert.equal(view.json.prompts.length, 6)
+    assert.deepEqual(view.json.prompts.map((prompt) => prompt.role), ['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
+    assert.equal(view.json.prompts.length, 5)
     for (const prompt of view.json.prompts) {
+      assert.equal(prompt.path, `crew/agents/${prompt.role}.md`)
+      assert.equal(prompt.text, readFileSync(join(fixture.checkout, prompt.path), 'utf8'))
       if (prompt.recipients === null) {
         assert.equal(typeof prompt.recipients_reason, 'string')
         assert.ok(prompt.recipients_reason.trim().length > 0)
@@ -672,7 +674,8 @@ test('V1 agents resources come from the plugin root for a foreign checkout', asy
     assert.ok(agents.json.skills.some((skill) => skill.path === 'skills/code-less/SKILL.md'))
     assert.equal(agents.json.plugin_root, ROOT)
     assert.equal(agents.json.checkout, root)
-    assert.equal(agents.json.prompts.find((prompt) => prompt.role === 'builder')?.path, 'crew/roles/builder.md')
+    assert.equal(agents.json.prompts.find((prompt) => prompt.role === 'builder')?.path, 'crew/agents/builder.md')
+    assert.equal(agents.json.prompts.find((prompt) => prompt.role === 'builder')?.text, readFileSync(join(ROOT, 'crew/agents/builder.md'), 'utf8'))
     assert.equal(agents.json.reasons.some((reason) => reason.includes(root)), false)
   } finally {
     if (server) await stopInProcess(server)
@@ -688,9 +691,10 @@ test('agents source separates plugin reads from target proposals compatibly', ()
     const checkoutOnly = createAgentsSource({ checkout: target.checkout, crewRoot: target.crewRoot }).read()
     assert.equal(checkoutOnly.plugin_root, path.resolve(target.checkout))
     assert.equal(checkoutOnly.checkout, path.resolve(target.checkout))
+    assert.equal(checkoutOnly.prompts.find((row) => row.role === 'builder').path, 'crew/agents/builder.md')
     assert.equal(checkoutOnly.prompts.find((row) => row.role === 'builder').text, '# builder\nFixture charter for builder.\n')
 
-    writeFileSync(join(plugin.checkout, 'crew', 'roles', 'builder.md'), '# PLUGIN-ONLY builder charter\n')
+    writeFileSync(join(plugin.checkout, 'crew', 'agents', 'builder.md'), '# PLUGIN-ONLY builder charter\n')
     const pluginCapabilities = JSON.parse(readFileSync(join(plugin.checkout, 'crew', 'capabilities.json'), 'utf8'))
     pluginCapabilities.coding_agents.pi.adapter = 'crew/adapters/PLUGIN-ONLY-pi.mjs'
     writeFileSync(join(plugin.checkout, 'crew', 'capabilities.json'), `${JSON.stringify(pluginCapabilities, null, 2)}\n`)
@@ -701,7 +705,7 @@ test('agents source separates plugin reads from target proposals compatibly', ()
     assert.equal(read.agents.find((agent) => agent.name === 'pi').adapter, 'crew/adapters/PLUGIN-ONLY-pi.mjs')
     assert.ok(read.skills.some((skill) => skill.path === 'skills/plugin-only-skill/SKILL.md' && skill.content.includes('PLUGIN-ONLY skill body')))
     assert.equal(read.prompts.find((row) => row.role === 'builder').text, '# PLUGIN-ONLY builder charter\n')
-    assert.equal(read.prompts.find((row) => row.role === 'builder').path, 'crew/roles/builder.md')
+    assert.equal(read.prompts.find((row) => row.role === 'builder').path, 'crew/agents/builder.md')
     assert.equal(read.checkout, path.resolve(target.checkout))
     assert.equal(read.plugin_root, path.resolve(plugin.checkout))
     assert.equal(read.crew_root, path.resolve(target.crewRoot))

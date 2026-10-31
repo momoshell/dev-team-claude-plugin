@@ -85,7 +85,7 @@ test('the body names no issue or PR number; closes is the only binding', () => {
 
 // P5, the agent definition.
 const BASE = { name: 'planner', description: 'Plan one lane.', role: 'planner', agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' }
-const agent = (fields = {}, body = 'Read [the charter](../roles/planner.md).\n') => {
+const agent = (fields = {}, body = 'Read [the notes](../notes/planner.md).\n') => {
   const front = Object.entries({ ...BASE, ...fields }).filter(([, v]) => v !== undefined).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n')
   return `---\n${front}\n---\n${body}`
 }
@@ -108,7 +108,7 @@ test('every P5 field decodes to its own type', () => {
   const { fields, body, defects } = parseAgent(agent(full))
   assert.deepEqual(defects, [])
   assert.deepEqual(fields, { ...BASE, ...full })
-  assert.equal(body, 'Read [the charter](../roles/planner.md).\n')
+  assert.equal(body, 'Read [the notes](../notes/planner.md).\n')
   assert.deepEqual(parseAgent(agent({ advisor: null, skills: [], fallback: [] })).fields.advisor, null)
 })
 

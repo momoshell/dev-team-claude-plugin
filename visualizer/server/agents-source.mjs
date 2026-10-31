@@ -4,7 +4,6 @@ import { unifiedDiff } from './diff.mjs'
 
 export const AGENT_REFUSALS = Object.freeze(['extensions', 'skills', 'mcp_servers', 'local_provider'])
 export const AGENT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
-export const CHARTER_ROLES = Object.freeze(['_shared', ...AGENT_ROLES])
 export const DELIVERY_STORES = Object.freeze(['headless', 'headless-json', 'headless-rpc', 'pane'])
 export const AVAILABILITY_REASON = 'availability-pending-1289'
 export const PROMPT_LABEL = 'protected: prompt-surface'
@@ -358,14 +357,14 @@ function matrixRows({ skills, register, deliveries }) {
 function promptRows({ read, checkout, deliveries }) {
   const prompts = []
   const reasons = []
-  for (const role of CHARTER_ROLES) {
-    const path = join(checkout, 'crew', 'roles', `${role}.md`)
+  for (const role of AGENT_ROLES) {
+    const path = join(checkout, 'crew', 'agents', `${role}.md`)
     const source = safeRead(read, path, path)
     const sourceBytes = source.text === null ? marked(null, source.reason || DEFAULT_REASONS.prompt) : marked(Buffer.byteLength(source.text, 'utf8'), null)
     if (!source.text) reasons.push(source.reason || `${path} is unavailable`)
-    const delivery = role === '_shared' ? null : deliveries[role]
-    const charterBytes = delivery?.charter_bytes || marked(null, 'shared charter has no role-keyed boot measurement')
-    const arm = delivery?.arm || marked(null, 'shared charter arm is not role-keyed')
+    const delivery = deliveries[role]
+    const charterBytes = delivery.charter_bytes
+    const arm = delivery.arm
     prompts.push({
       role,
       path: relative(checkout, path).replaceAll('\\', '/'),

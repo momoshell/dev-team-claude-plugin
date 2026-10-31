@@ -64,12 +64,12 @@ test('HTTP local save validates origin, fields, revisions and large definition b
 })
 test('copying a role definition preserves its linked charter destination and opaque settings',t=>{
  const {root,library}=fixture(t);mkdirSync(join(root,'crew/agents'),{recursive:true})
- const text=definition('Read [the charter](../roles/reviewer.md).\n')
+ const text=definition('Read [the charter](../references/reviewer.md).\n')
  writeFileSync(join(root,'crew/agents/reviewer.md'),text)
  const source=library.read().definitions[0]
  assert.equal(source.text,text)
- assert.match(source.copy_text,/\(\.\.\/crew\/roles\/reviewer.md\)/)
- assert.deepEqual(source.linked_files,[join(root,'crew/roles/reviewer.md')])
+ assert.match(source.copy_text,/\(\.\.\/crew\/references\/reviewer.md\)/)
+ assert.deepEqual(source.linked_files,[join(root,'crew/references/reviewer.md')])
  assert.equal(parseAgentFile(source.copy_text).metadata,parseAgentFile(text).metadata)
 })
 test('linked library directory is refused, and HTTP installed-copy mode prevents saves',async t=>{

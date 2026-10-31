@@ -139,7 +139,7 @@ New-path tests follow `qa-test-writing`: behaviour only, a kill-mutation per gua
 ## Skills and agents
 
 New: `crew/agents/lead.md`, `crew/agents/planner.md`, `crew/agents/builder.md`, `crew/agents/reviewer.md`, `crew/agents/tech-lead.md`
-(from `crew/roles/*.md`), `agents/brief-writer.md`, and skills `lane-brief` and `plan`.
+`agents/brief-writer.md`, and skills `lane-brief` and `plan`.
 Kept: `code-less`, `qa-test-writing`, `pr-review`, `prose-plain`, `backend-node`, `frontend-svelte`,
 `ui-design`, `ux`. At the switch: `crew-dispatch` is replaced by `lane-brief`; `crew-recovery`, `devops` and
 `crew-onboard` shrink to what an operator still does by hand; every `anchors.json` goes.

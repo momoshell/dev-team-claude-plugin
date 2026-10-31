@@ -77,7 +77,7 @@ before its first lane.
   PR), `agents.mjs` and `protocols.mjs` (seat definitions and the closed
   protocols), `acp/` and `acp-client.mjs` (the ACP seat transport), and the
   verbs `show`, `finish`, `record-pr`, `closeout` and `lanes`. Seat definitions
-  are in `crew/agents/`; charters are in `crew/roles/`.
+  and instructions are delivered from `crew/agents/*.md`.
 - **`skills/`, `commands/`** — the operating knowledge as Claude Code surfaces.
   The knowledge skills (`pr-review`, `qa-test-writing`, `backend-node`,
   `frontend-svelte`, `ui-design`, `devops`, `ux`, `code-less`, `prose-plain`)

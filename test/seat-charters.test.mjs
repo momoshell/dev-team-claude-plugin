@@ -53,17 +53,16 @@ test('SC4: the delivered skill owns the ladder and its references', () => {
   assert.ok(ladder)
   assert.deepEqual([...ladder.matchAll(/^\d+\.\s+[^\r\n]+/gm)].map((m) => flat(m[0])), rungs)
   for (const text of ['Lazy means efficient, not careless.', 'the ladder shortens the solution, never the reading.', 'Bug fix = root cause, not symptom: grep every caller, fix the shared function once.']) has(ladder, text)
-  assert.doesNotMatch(skill, /crew\/roles\/|_shared\.md|ladder is in your shared charter/i)
-  assert.doesNotMatch(read('crew/roles/_shared.md'), /## The ladder|Does this need to exist at all\?/)
+  assert.doesNotMatch(skill, /_shared\.md|ladder is in your shared charter/i)
   for (const path of ['skills/pr-review/SKILL.md', 'skills/pr-review/references/falsification.md']) {
-    assert.doesNotMatch(read(path), /crew\/roles\/_shared\.md/)
+    assert.doesNotMatch(read(path), /_shared\.md|ladder is in your shared charter/i)
     has(read(path), 'skills/code-less/SKILL.md')
   }
   has(skill, 'Derived from ponytail by Dietrich Gebert (MIT)')
   const notice = read('THIRD-PARTY-NOTICES.md').split('## ponytail (MIT)')[1]?.split('\n## ')[0]
   assert.ok(notice)
   for (const text of ['skills/code-less/SKILL.md', 'crew/agents/builder.md', 'e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156', '01cbf81', 'docs/licenses/ponytail-MIT.txt', 'Copyright (c) 2026 DietrichGebert', 'THE SOFTWARE IS PROVIDED "AS IS"']) has(notice, text)
-  assert.doesNotMatch(notice, /crew\/roles\/|_shared\.md|compiled into every role prompt/)
+  assert.doesNotMatch(notice, /_shared\.md|compiled into every role prompt/)
 })
 
 // MUTATION: remove either live definition's code-less grant or instruction.

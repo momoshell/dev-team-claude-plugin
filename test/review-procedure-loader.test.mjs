@@ -104,7 +104,7 @@ test('BB3', () => {
 })
 
 test('BB4', () => {
-  const text = readFileSync(join(ROOT, 'crew/guidelines/seat-pre-return-checklist.md'), 'utf8')
+  const text = readFileSync(join(ROOT, 'crew/guidelines/vitest-gates.md'), 'utf8')
   const found = text.match(/[A-Za-z0-9_./-]+\.mjs:\d+/g) ?? []
   assert.deepEqual(found, [])
 })

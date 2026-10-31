@@ -76,6 +76,48 @@ function failedFixture({ text = '', assist, role = 'builder', editsIndex = 0, er
 function failureRows(f) { return rows(f).filter((row) => row.builder_edit_failure).map((row) => row.builder_edit_failure) }
 function assignment(id) { return { prompt: `ASSIGNMENT ${id}: continue\nbody` } }
 
+test('sed in-place diagnostic hint is conservative and scoped to assignment and state', async () => {
+  const f = fixture()
+  const loop = loopFor(f, { assist: 'off' })
+  const failure = { toolName: 'bash', input: { command: "sed -i 's/a/b/' f" }, isError: true, content: [{ type: 'text', text: 'sed: 1: "f": command c expects \\ followed by text' }] }
+  const run = (evt) => loop.onToolResult(evt, { cwd: f.root })
+  loop.onBeforeAgentStart(assignment('one'))
+  for (const evt of [
+    { ...failure, isError: false, input: { command: "sed -i '' 's/a/b/' f" }, content: [{ type: 'text', text: '' }] },
+    { ...failure, input: { command: "echo sed -i 's/a/b/' f" } },
+    { ...failure, input: { command: "sed 's/a/b/' f" } },
+    { ...failure, input: { command: 'echo unrelated' } },
+    { ...failure, content: [{ type: 'text', text: 'unrelated failure' }] },
+    { ...failure, content: null },
+    { ...failure, input: null },
+  ]) assert.equal(await run(evt), undefined)
+  assert.equal(await loopFor(f, { role: 'planner' }).onToolResult(failure, {}), undefined)
+  // The measured shape: a chained command whose last step succeeded, so the call reports no error.
+  const chained = { ...failure, isError: false, input: { command: "cd T; sed -i 's/a/b/' f; node --test f.test.mjs" }, content: [{ type: 'text', text: 'sed: 1: "f": command c expects \\ followed by text\nℹ pass 1' }] }
+  assert.match(appendedText(await loopFor(f).onToolResult(chained, {})), /sed -i '' .*Edit tool/)
+  // A chained test run is still filtered, with the hint after it.
+  const noisy = { ...chained, input: { command: "cd T; sed -i 's/a/b/' f; node --test f.test.mjs" }, content: [{ type: 'text', text: 'sed: 1: "f": command c expects \\ followed by text\n' + '✔ passing case (1ms)\n'.repeat(50) + 'ℹ tests 50\nℹ pass 50\n' }] }
+  const filtered = await loopFor(f).onToolResult(noisy, {})
+  assert.doesNotMatch(filtered.content[0].text, /✔ passing case/)
+  assert.match(filtered.content.at(-1).text, /sed -i '' .*Edit tool/)
+  for (const command of ["  sed -i 's/a/b/' f", "echo ok\nsed -i 's/a/b/' f"]) assert.match(appendedText(await loopFor(f).onToolResult({ ...chained, input: { command } }, {})), /Edit tool/, command)
+  const result = await run(failure)
+  assert.equal(result.content[0], failure.content[0])
+  assert.match(appendedText(result), /sed -i '' .*Edit tool/)
+  assert.equal(await run(failure), undefined)
+  loop.onBeforeAgentStart(assignment('one'))
+  assert.equal(await run(failure), undefined)
+  const restored = loopFor(f)
+  restored.importState(loop.exportState())
+  assert.equal(await restored.onToolResult(failure, {}), undefined)
+  restored.onBeforeAgentStart(assignment('two'))
+  assert.match(appendedText(await restored.onToolResult(failure, {})), /Edit tool/)
+  const old = loop.exportState(); delete old.sedHinted
+  restored.importState(old)
+  assert.match(appendedText(await restored.onToolResult(failure, {})), /Edit tool/)
+  assert.throws(() => restored.importState({ ...old, sedHinted: 'yes' }), /malformed/)
+})
+
 // BL1: one successful lane result is appended to both supported mutating tools,
 // while the original content remains the first part of each result.
 test('BL1', async () => {

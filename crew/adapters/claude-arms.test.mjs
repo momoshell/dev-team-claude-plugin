@@ -312,6 +312,30 @@ test('CH3 a claude seat granted an advisor gets the repeated-failure note once, 
   }
 })
 
+test('builderloop sed diagnostic hint survives Claude hook processes and is session scoped', () => {
+  const sb = sandbox()
+  const launch = seat(sb, { extensions: ['builderloop'], edit_assist: false })
+  const post = sb.frame('PostToolUse', 'Bash', 'sed-one')
+  post.tool_input.command = "sed -i 's/a/b/' f"
+  post.tool_response = { stdout: '', stderr: 'sed: 1: "f": command c expects \\ followed by text', exitCode: 1 }
+  const success = structuredClone(post)
+  success.tool_input.command = "sed -i '' 's/a/b/' f"
+  success.tool_response.exitCode = 0; success.tool_response.stderr = ''
+  assertNoEffect(fire(sb, launch, success))
+  assert.match(contexts(fire(sb, launch, post)), /sed -i '' .*Edit tool/)
+  assertNoEffect(fire(sb, launch, post))
+  const unknown = structuredClone(post); unknown.session_id = 'sed-two'; delete unknown.tool_response.exitCode
+  assert.match(contexts(fire(sb, launch, unknown)), /sed -i '' .*Edit tool/)
+  const failed = structuredClone(post); failed.session_id = 'sed-three'; failed.hook_event_name = 'PostToolUseFailure'
+  failed.error = failed.tool_response.stderr; delete failed.tool_response
+  assert.match(contexts(fire(sb, launch, failed)), /sed -i '' .*Edit tool/)
+  assertNoEffect(fire(sb, launch, failed))
+  const chained = structuredClone(post); chained.session_id = 'sed-four'
+  chained.tool_input.command = "cd T; sed -i 's/a/b/' f; node --test f.test.mjs"
+  chained.tool_response = { stdout: 'ℹ pass 1\n', stderr: 'sed: 1: "f": command c expects \\ followed by text', exitCode: 0 }
+  assert.match(contexts(fire(sb, launch, chained)), /sed -i '' .*Edit tool/)
+})
+
 test('CH4 a claude builder granted edit assist gets the file-derived hint on the call after a failed Edit, once', () => {
   const sb = sandbox()
   const launch = seat(sb, { extensions: ['builderloop'], edit_assist: true })

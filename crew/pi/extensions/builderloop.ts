@@ -781,6 +781,16 @@ function eligibleTestWords(words, current) {
   return operands > 0
 }
 
+// Measured 2026-10-30: all 48 failed claude `sed -i` calls were chained (`cd T; sed -i …; node --test …`) and 46
+// reported exit 0, so the hint keys on a `sed -i` at a command position plus BSD sed's own error line, not on the
+// exit status or a lone command. A hint is a nudge: a misfire costs one line, a miss costs the seat a retry.
+function failedSedInPlace(event) {
+  const command = event?.input?.command
+  if (typeof command !== 'string' || !/(?:^|[;&|(\n])\s*sed\s+-i\b/.test(command)) return false
+  if (!Array.isArray(event?.content)) return false
+  return event.content.some((part) => part?.type === 'text' && typeof part.text === 'string' && /^sed: \d+: /m.test(part.text))
+}
+
 export function createBuilderLoop(value = {}) {
   const input = value && typeof value === 'object' ? value : {}
   const deps = input.deps || {}
@@ -812,12 +822,13 @@ export function createBuilderLoop(value = {}) {
   const corpus = []
   let corpusBytes = 0
   let currentId = null
+  let sedHinted = false
 
   function onBeforeAgentStart(event) {
     const first = String(event?.prompt || event?.text || '').split(/\r?\n/, 1)[0]
     const parsed = /^ASSIGNMENT\s+([^\s:]+):/.exec(first); const assignment = parsed && { id: parsed[1] }
     if (assignment && assignment.id !== currentId) corpus.length = 0
-    if (assignment && assignment.id !== currentId) corpusBytes = 0
+    if (assignment && assignment.id !== currentId) { corpusBytes = 0; sedHinted = false }
     if (assignment) currentId = assignment.id
     return undefined
   }
@@ -871,6 +882,9 @@ export function createBuilderLoop(value = {}) {
   async function onToolResult(event, ctx) {
     if (role === 'builder' && event?.toolName === 'bash') {
       saveCorpus(event)
+      // The hint rides on whatever the result becomes, so a chained test run is still filtered.
+      const hint = !sedHinted && failedSedInPlace(event) ? { type: 'text', text: "Use sed -i '' for BSD in-place editing, or use the Edit tool." } : null
+      if (hint) sedHinted = true
       const command = typeof event?.input?.command === 'string' ? event.input.command : ''
       const content = event?.content
       if (Array.isArray(content) && content.length === 1 && content[0]?.type === 'text' && typeof content[0].text === 'string') {
@@ -897,12 +911,12 @@ export function createBuilderLoop(value = {}) {
           const passingCount = ansi.split(/\r?\n/).filter((line) => /^\s*(?:✔ |ok \d+(?:\s|$))/.test(line)).length
           const notice = `[test output filtered: dropped ${passingCount} passing-test lines, ${bytes(source) - bytes(filtered)} bytes]`
           const text = `${filtered}\n${notice}`
-          const patch = { content: [{ type: 'text', text }] }
+          const patch = { content: [{ type: 'text', text }, ...(hint ? [hint] : [])] }
           if (event.structuredContent !== undefined) patch.structuredContent = { ...event.structuredContent, output: text }
           return patch
         }
       }
-      return undefined
+      return hint ? { content: [...event.content, hint] } : undefined
     }
     if (role !== 'builder' || event?.toolName !== 'edit' || !event?.isError) {
       saveCorpus(event)
@@ -995,16 +1009,18 @@ export function createBuilderLoop(value = {}) {
 
   // A host that runs each hook in a fresh process (the claude seat plugin) keeps the rerun guard and the
   // result corpus between calls. Pi never calls these.
-  function exportState() { return { last, current_id: currentId, corpus: [...corpus] } }
+  function exportState() { return { last, current_id: currentId, corpus: [...corpus], sedHinted } }
 
   function importState(state) {
     const stored = state?.last
     const wordsOk = (words) => Array.isArray(words) && words.every((word) => typeof word === 'string')
     if (!state || typeof state !== 'object' || !Array.isArray(state.corpus) || !state.corpus.every((text) => typeof text === 'string')
+      || (state.sedHinted !== undefined && typeof state.sedHinted !== 'boolean')
       || (state.current_id !== null && typeof state.current_id !== 'string')
       || (stored !== null && !(stored && wordsOk(stored.words) && typeof stored.digest === 'string' && typeof stored.raw === 'string' && typeof stored.toolName === 'string'))) throw new Error('builder loop state is malformed')
     last = stored === null ? null : { words: [...stored.words], digest: stored.digest, raw: stored.raw, toolName: stored.toolName }
     currentId = state.current_id
+    sedHinted = state.sedHinted ?? false
     corpus.length = 0; corpusBytes = 0
     for (const text of state.corpus) { corpus.push(text); corpusBytes += bytes(text) }
     while (corpus.length && corpusBytes > EDIT_CORPUS_CAP_BYTES) corpusBytes -= bytes(corpus.shift())

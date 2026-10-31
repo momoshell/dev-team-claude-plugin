@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { appendFileSync as appendFileSyncReal, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -58,6 +58,79 @@ function fakes({ brief = BRIEF, exists = () => false, worktreeStatus = 0, origin
 const effects = (calls) => calls.filter(([kind]) => ['spawn', 'detached', 'mkdir', 'write'].includes(kind))
 const written = (calls, suffix) => calls.find(([kind, path]) => kind === 'write' && path.endsWith(suffix))
 const spawned = (calls, verb) => calls.find(([kind, , args]) => (kind === 'spawn' || kind === 'detached') && args.includes(verb))
+
+const pipeFixture = `
+import { writeSync } from 'node:fs'
+const invalid = process.argv[1] === 'invalid'
+process.argv[1] = process.execPath
+const { main } = await import(${JSON.stringify(new URL('./start.mjs', import.meta.url).href)})
+const deps = {
+  readFileSync: () => invalid ? ${JSON.stringify(BRIEF)}.replace('tier: build', 'tier: rigorous') : ${JSON.stringify(BRIEF)},
+  resolveAgents: () => ({ seats: {} }), existsSync: () => false,
+  mkdirSync: () => {}, writeFileSync: () => {},
+  spawnSync: () => ({ status: 0, stdout: 'origin/main' }),
+  spawnDetached: () => { writeSync(3, 'started\\n'); return 4242 }, crewRoot: '/virtual/crew',
+}
+const argv = invalid ? ['/d/b1.md', '--check', '--loop', 'lean'] :
+  ['/d/b1.md', '--checkout', '/virtual/' + 'x'.repeat(1024 * 1024) + '/checkout', '--loop', 'lean']
+process.exitCode = await main(argv, deps)
+`
+
+function runPipeChild(mode) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', pipeFixture, mode], { stdio: ['ignore', 'pipe', 'pipe', 'pipe'] })
+    let stdout = '', stderr = '', started = '', closed = false, timedOut = false
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL') }, 10000)
+    child.on('error', reject)
+    child.stderr.on('data', (data) => { stderr += data })
+    child.stdio[3].on('data', (data) => { started += data })
+    child.stdout.on('data', (data) => {
+      stdout += data
+      if (stdout.includes('\n') && !closed) { closed = true; child.stdout.destroy() }
+    })
+    if (mode === 'invalid') child.stdout.destroy()
+    child.on('close', (code, signal) => { clearTimeout(timer); resolve({ code, signal, stdout, stderr, started, closed, timedOut }) })
+  })
+}
+
+// MUTATION: change the successful main return to 1 and a started lane reports failure.
+test('(SE1) a reader closing stdout after the first line does not crash a started lane', async () => {
+  const result = await runPipeChild('pipe')
+  assert.equal(result.timedOut, false)
+  assert.equal(result.signal, null)
+  assert.equal(result.code, 0, result.stderr)
+  assert.equal(result.started, 'started\n')
+  assert.equal(result.closed, true)
+  assert.match(result.stdout, /^crew start: lane=b1 .*pid=4242\n/)
+  assert.equal(result.stderr, '')
+})
+
+// MUTATION: change the refusal return to 0 and an invalid brief reports success.
+test('(SE2) invalid --check still refuses with stdout closed', async () => {
+  const result = await runPipeChild('invalid')
+  assert.equal(result.timedOut, false)
+  assert.equal(result.signal, null)
+  assert.ok(Number.isInteger(result.code) && result.code !== 0)
+  assert.match(result.stderr, /brief .* is not a P1 brief:/)
+  assert.match(result.stderr, /tier is one of/)
+  assert.doesNotMatch(result.stderr, /\n\s+at |Unhandled 'error' event/)
+  assert.equal(result.started, '')
+})
+
+test('throwing injected loggers do not change start metadata or main status', async () => {
+  for (const error of [Object.assign(new Error('EIO'), { code: 'EIO' }), new StartRefusal('output')]) {
+    const lane = fakes()
+    lane.deps.log = () => { throw error }
+    const result = await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: lane.deps })
+    assert.equal(result.lane, 'b1')
+    assert.equal(result.pid, 4242)
+    assert.ok(leanLaunch(lane.calls))
+    const run = fakes()
+    run.deps.log = () => { throw error }
+    assert.equal(await main(['/d/b1.md', '--checkout', '/repo/checkout'], run.deps), 0)
+    assert.ok(leanLaunch(run.calls))
+  }
+})
 
 test('the lane name is the brief file name and must be a slug', () => {
   assert.equal(laneName('/drafts/b1360-lean-entry.md'), 'b1360-lean-entry')

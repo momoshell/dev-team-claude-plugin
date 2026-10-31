@@ -626,8 +626,18 @@ export async function openPullRequest(spec = {}, deps = {}) {
       remoteOid = await remoteHead()
     }
     if (remoteOid !== head) return unmeasured('push-unmeasured')
-    if (existing.length === 1) return { status: 'green', reason: null, pr: existing[0], reused: true }
-    await gh(['pr', 'create', '--base', base, '--head', branch, '--title', withoutIssueTokens(title), '--body', composeLanePrBody({ body, closes: closing, refs: referenced })])
+    const composedBody = composeLanePrBody({ body, closes: closing, refs: referenced })
+    if (existing.length === 1) {
+      const edited = await gh(['pr', 'edit', String(existing[0].number), '--body', composedBody])
+      if (edited.status !== 'green') return notGreen(edited, 'pr-unmeasured')
+      const viewed = await gh(['pr', 'view', String(existing[0].number), '--json', 'body'])
+      if (viewed.status !== 'green') return unmeasured('pr-unmeasured')
+      let confirmedBody
+      try { confirmedBody = JSON.parse(viewed.stdout)?.body } catch { return unmeasured('pr-unmeasured') }
+      if (confirmedBody !== composedBody) return unmeasured('pr-unmeasured')
+      return { status: 'green', reason: null, pr: existing[0], reused: true }
+    }
+    await gh(['pr', 'create', '--base', base, '--head', branch, '--title', withoutIssueTokens(title), '--body', composedBody])
     const confirmed = await openPrs() ?? []
     if (confirmed.length !== 1 || confirmed[0].baseRefName !== base) return unmeasured('pr-unmeasured')
     return { status: 'green', reason: null, pr: confirmed[0], reused: false }

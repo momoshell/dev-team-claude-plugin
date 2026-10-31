@@ -405,10 +405,11 @@ function ghLane({ open = null } = {}) {
     }
     if (args[1] === 'list') return ok(JSON.stringify(prs))
     if (args[1] === 'create') { prs.push(record); return ok() }
-    if (args[1] === 'edit') return ok()
+    if (args[1] === 'edit') { record.body = args[args.indexOf('--body') + 1]; return ok() }
+    if (args[1] === 'view') return ok(JSON.stringify({ body: record.body }))
     throw new Error(`unexpected ${JSON.stringify(spec)}`)
   }
-  return { calls, run, gh: (word) => calls.find((c) => c.command === 'gh' && c.args[1] === word)?.args }
+  return { calls, run, gh: (word) => calls.findLast((c) => c.command === 'gh' && c.args[1] === word)?.args }
 }
 const argOf = (args, flag) => args[args.indexOf(flag) + 1]
 

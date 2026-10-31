@@ -29,7 +29,7 @@ It does not grep `parameter properties`.
 It does not grep decorators.
 
 Those constructs are caught only when the module import executes.
-Exhibit: `crew/pi/extensions/subagent.test.mjs:8`.
+Exhibit: the module import in `crew/pi/extensions/subagent.test.mjs`.
 
 No separate repo test was found for either spelling.
 
@@ -76,7 +76,7 @@ Keep those edge rules in `cli-flags.md` marked unbacked until a test pins them.
 No local mutation test isolates an interrupted TypeScript import or an empty
 extension source from the ordinary loader failure.
 
-The import at `crew/pi/extensions/subagent.test.mjs:8` catches syntax failures,
+The module import in `crew/pi/extensions/subagent.test.mjs` catches syntax failures,
 but it does not separately measure those two edge outcomes.
 
 Keep those edge rules in `erasable-ts.md` marked unbacked until measured.
@@ -87,7 +87,7 @@ No local mutation test separately measures an interrupted child or a malformed
 usage parse after work has started.
 
 The complete-or-absent getter and omitted-key assertion are backed at
-`crew/pi/extensions/subagent.ts:472` and `crew/pi/extensions/subagent.test.mjs:488`.
+`createStreamReducer` in `crew/pi/extensions/subagent.ts` and the `usage is a complete pi Usage or absent, never partial` test in `crew/pi/extensions/subagent.test.mjs`.
 
 Keep interrupted-child and failed-parse instructions in `usage-records.md`
 marked unbacked until those paths receive a measured fixture.

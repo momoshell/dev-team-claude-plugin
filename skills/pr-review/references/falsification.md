@@ -24,6 +24,9 @@ would aim at.
 
 ## Falsify before you write
 
+Report a finding only when its wrong outcome reaches a user, an operator, data, or a security boundary.
+A preference, wording, or style point alone is not a finding.
+
 Your job with a candidate is to kill it. Go and find the code that makes
 it a non-issue — the guard upstream, the caller that cannot reach it, the type
 that makes the case impossible, the convention that already covers it. A
@@ -72,7 +75,11 @@ as free.
 The loop carries a round's findings forward as feedback and nothing more: a
 bounced round hands the next seat the previous review's findings
 (`crew/loop.mjs`, the review-bounce path). It carries no *rationale*, so no
-carrier can tell a later reviewer which variants a ruling covers. What does hold:
+carrier can tell a later reviewer which variants a ruling covers. When a rationale is recorded and available, apply it:
+
+Do not report a variant that a recorded ruling's rationale already covers.
+
+What does hold:
 
 1. A carried finding is closed or restated against the diff — never silently
    re-litigated from scratch.
@@ -94,8 +101,7 @@ root cause, with no recap of what the change does.
 
 ## For a hand review
 
-When running a model directly over an unreviewed diff (the recipe in
-`sol-reviews-hand-written-diffs`), paste this reference after the doctrine
+When running a model directly over an unreviewed diff, paste this reference after the doctrine
 paragraph and before the diff. Ask for: findings as `must-fix` / `should-fix`
 / `consider` with `file:line` and a correction each; a separate **Verified**
 section (not a severity) listing what was checked and held, including every

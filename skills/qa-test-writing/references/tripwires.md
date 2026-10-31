@@ -11,15 +11,15 @@ A detector is anything that scans the tree and reports hits: a drift guard, a
 lint-shaped check, a source grep, a schema validator. Widen it, and it starts
 flagging files nobody asked you to touch. Those files belong in the plan's
 `files_in_scope`, or the builder either leaves the suite red or edits outside
-the declared surface.
+the permitted surface.
 
-This is computable **before the build**: run the widened detector, list what it
+This is computable **before the build**: run the widened detector, identify what it
 newly flags, and put those files in `files_in_scope`.
 
 ## Source-grep tripwires when code moves
 
-When a change moves code between modules, declare the **source-grep** tripwires
-in `files_in_scope`, not just the behavioural tests. A test that greps for a
+When a change moves code between modules, include affected **source-grep** tests
+in `files_in_scope`, alongside behavioural tests. A test that greps for a
 symbol's location fails when the symbol relocates, even though behaviour is
 unchanged.
 

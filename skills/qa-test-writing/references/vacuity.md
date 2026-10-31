@@ -62,10 +62,8 @@ The assertion is fine; the input never exercises the code.
 
 - **V9** — a check pinned a sort, over a fixture that **was already sorted**.
   Removing the sort left it green.
-- **V3** — a stale-reaping check never reached the `guardedKill` seam, because
-  the integration fixture returned first. The kill seam could be bypassed with a
-  green suite. `guardedKill` exists because a bare-PID kill reparents a process
-  group instead of killing it — a real boundary, unpinned.
+- **V3** — a historical stale-reaping fixture returned before reaching its
+  process-kill seam, leaving a security boundary unpinned (no live exhibit).
 
 **The fix changes the FIXTURE, not the assertion.** Strengthening an assertion
 over input that never arrives produces a more confident vacuous check.
@@ -74,7 +72,7 @@ over input that never arrives produces a more confident vacuous check.
 
 The check compares the implementation to itself.
 
-- **V7** — a mirror check compared `MODIFIER_KINDS` to `MODIFIER_KINDS`.
+- **V7** — a mirror check compared a vocabulary to itself.
   Removing a member changed both sides.
 - **V8** — a loop iterated exactly the keys the implementation produced, then
   asserted each was produced.
@@ -88,7 +86,7 @@ capture.
 A drift guard that greps for a literal is blind to every spelling that is not
 that literal.
 
-- **V5** — the ledger-sandbox tripwire keys on the literal `openRun(`. Measured
+- **V5** — a historical ledger-sandbox detector keyed on one literal spelling (no live exhibit). Measured
   blind to: an alias, an indirect caller, a block comment, a JSDoc body, a
   template literal, and an assignment pointing *at* the real ledger. Defeated in
   the sweep by aliasing.
@@ -110,11 +108,7 @@ path or a symbol, not a line.
 Recorded so no later sweep re-spends them — these **do** discriminate:
 
 - the billed-money null assertion (`crew/pi/extensions/subagent.test.mjs`, the absent-usage case: omitting the key and keeping usage `null` reddens when the null becomes a zero)
-- the transcript drift guard **for the `tools` literal itself** (adding `Agent`
-  reddens)
-- the direct `guardedKill` helper assertion (once mutated to `false` it
-  reddens; the helper was removed with its script, so the case is recorded, not
-  citable)
+- historical transcript and kill-helper checks (no live exhibit)
 
 Note V4/N2 as a pair: that guard genuinely pins `tools` and does **not** pin
 `deny` at all. A check can discriminate for one field and be vacuous for the
@@ -125,8 +119,7 @@ field beside it. Establish which field you are pinning.
 Either make it redden when the behaviour is removed, or **delete it and say what
 it was supposed to stop**. Do not delete checks to move a number.
 
-The two from the sweep that were more than test debt — the builder's
-`deny: NO_FANOUT` boundary and the `guardedKill` seam — are the argument for
+The two from the sweep that were more than test debt — two historical security boundaries (no live exhibit) — are the argument for
 this whole file: both are security-shaped boundaries that could have been
 deleted with a fully green suite.
 

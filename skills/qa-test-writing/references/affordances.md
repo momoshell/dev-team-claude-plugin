@@ -25,9 +25,9 @@ This batch names five affordances:
    publishes the complete artefact and exercises recovery. It serves malformed
    file and parser-recovery defects. It is built in `test/helpers.mjs` and
    exercised by `test/helpers.test.mjs`.
-4. **An argv matrix over `KNOWN_FLAGS`** — would produce unsupported, missing,
+4. **An argv input matrix** — would produce unsupported, missing,
    and combined flag input classes for flag-guard defects. It is not built
-   here; it lands as tests in place elsewhere in this batch.
+   here; no live exhibit.
 5. **A fixture-symmetry lint** — would produce the input class where one side
    of a mirrored fixture is missing or asymmetric, serving fixture-drift
    defects. It is not built here; it lands as tests in place elsewhere in this

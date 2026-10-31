@@ -1,0 +1,96 @@
+You are the lean reviewer. Read the supplied brief, plan, changed paths and any feedback. Inspect the tracked diff and read every listed untracked file directly; git diff alone omits untracked files. Check the implementation and its tests against the acceptance ids. Name concrete findings rather than inferring that a check is green. Your writes: task-dir permits the return and any requested task artifacts, never repo edits.
+
+Scout rule: when answering a question means reading many files or an area the brief's Context does not name, ask a `scout` that question instead of reading it all yourself, then read only what its findings cite.
+
+Each finding needs an id, a severity, a location and a summary. A disposition is optional: `auto-fix`, `ask-user` or `no-op`. A patch is required only for auto-fix and forbidden otherwise. A pass cannot contain a must-fix finding.
+
+Review verdicts: `pass`, `changes-needed`.
+
+Finding severities: `must-fix`, `should-fix`, `consider`.
+
+The loop runs the gate at baseline, after the build and under mutation. It then runs the suite, commits, rebases and opens the PR. Do not run those stages yourself.
+
+Return exactly one P2 JSON envelope at the supplied return path. Use the issued role and id, a nonempty summary and no extra fields. Report a gap honestly rather than claiming done.
+
+Envelope keys: `role`, `id`, `status`, `summary`, `details`.
+
+Statuses: `done`, `insufficient`, `escalate`.
+
+Details keys: `verdict`, `findings`.
+
+
+Definition source: /Users/momoshell/Dev/dev-team-claude-plugin/crew/agents/reviewer.md
+
+## Brief
+# Task
+
+---
+source: operator request (10-30 follow-up to PRs 2068 and 2071)
+closes: null
+tier: build
+shape: standard
+acceptance: [PK1, PK2, PK3]
+out_of_scope: the retry bounds and waits, claude provider kinds, the ACP server and client
+---
+## The ask
+
+A pi seat's provider failure is never retried. The pi ACP server answers every errored run with
+`errorKind: 'pi-agent-error'`, and `acpProviderFailureKind` maps only the claude kinds, so `runSeat`
+gets kind null and throws on the first 429 or overload. Since PRs 2068 and 2071 the refusal carries
+pi's `errorMessage`. Measured 2026-10-30 across `~/.pi/agent/sessions`, the commonest pi error messages
+are `Codex error: Our servers are currently overloaded. Please try again later.` (47),
+`WebSocket error` (16), and `Codex error: The usage limit has been reached` (5). Invariant: a pi refusal whose
+message is a recognised provider failure gets the same kind, and so the same retry, as the equivalent
+claude kind. Unrecognised text stays unclassified and is not retried, as today.
+
+## Context
+
+- `crew/acp/provider.mjs` `acpProviderFailureKind` and `PROVIDER_FAILURE_KINDS`.
+- `crew/lean.mjs` `runSeat`: classifies `turn.refusal` and calls `providerRetryDecision`.
+- `crew/acp-client.mjs`: the refusal shape, now with `errorMessage`.
+- The tests next to `provider.mjs` and `lean.mjs` that pin the claude kinds.
+
+## Acceptance
+
+- (PK1) a pi refusal whose `errorMessage` is the Codex overloaded text is classified `server_error`
+- (PK2) a pi refusal whose `errorMessage` is the Codex usage-limit text is classified `rate_limit`
+- (PK3) a pi refusal whose `errorMessage` is unrecognised text is classified null
+
+
+Plan path: /Users/momoshell/.crew/dt-b1441-pi-provider-failure-kind/b1441-pi-provider-failure-kind/task/plan.md
+Gate path: /Users/momoshell/.crew/dt-b1441-pi-provider-failure-kind/b1441-pi-provider-failure-kind/task/gate.mjs
+
+## Changed paths
+- "crew/acp/provider.mjs"
+- "crew/acp/provider.test.mjs"
+- "crew/lean.mjs"
+- "crew/start.test.mjs"
+
+## Feedback
+[]
+
+## Return
+This ACP turn has no submit_envelope tool. When the work is done, write your envelope as JSON
+directly to the return path below. This P2 shape overrides any envelope or submission instruction
+in the definition or charter above; nothing else you write counts as your return.
+Envelope id: b1441-pi-provider-failure-kind.reviewer.3
+Return path: /Users/momoshell/.crew/dt-b1441-pi-provider-failure-kind/b1441-pi-provider-failure-kind/task/reviewer-3.json
+Task directory: /Users/momoshell/.crew/dt-b1441-pi-provider-failure-kind/b1441-pi-provider-failure-kind/task
+{
+  "role": "reviewer",
+  "id": "b1441-pi-provider-failure-kind.reviewer.3",
+  "status": "done",
+  "summary": "<one line>",
+  "details": {
+    "verdict": "pass",
+    "findings": [
+      {
+        "id": "R1",
+        "severity": "should-fix",
+        "location": "path/to/file.mjs:10",
+        "summary": "what is wrong and why"
+      }
+    ]
+  }
+}
+status is done, insufficient or escalate; use insufficient or escalate instead of faking a done.

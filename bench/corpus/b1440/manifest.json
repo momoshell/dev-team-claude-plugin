@@ -4,5 +4,10 @@
   "base": "b593d34d0ac93f85854ba38ecfd31e6e613980ac",
   "originalTask": "/Users/momoshell/.crew/dt-b1440-acp-client-error-message/b1440-acp-client-error-message/task",
   "originalTree": "/Users/momoshell/Dev/dt-b1440-acp-client-error-message",
-  "source": "/Users/momoshell/.crew-journal-archive/dt-b1440-acp-client-error-message/b1440-acp-client-error-message/task"
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1440-acp-client-error-message/b1440-acp-client-error-message/task",
+  "reviewer": {
+    "builtHead": null,
+    "promptSource": null,
+    "reason": "no archived reviewer prompt or reproducible built head"
+  }
 }

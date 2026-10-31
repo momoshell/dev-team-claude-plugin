@@ -4,5 +4,9 @@
   "base": "88f70c51c78ebd1931728bb7ded08727b34cff3c",
   "originalTask": "/Users/momoshell/.crew/dt-b1442-finish-insufficient-build/b1442-finish-insufficient-build/task",
   "originalTree": "/Users/momoshell/Dev/dt-b1442-finish-insufficient-build",
-  "source": "/Users/momoshell/.crew-journal-archive/dt-b1442-finish-insufficient-build/b1442-finish-insufficient-build/task"
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1442-finish-insufficient-build/b1442-finish-insufficient-build/task",
+  "reviewer": {
+    "builtHead": "982f75fd42a4f7dd36989f9dc67d593a597fc962",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1442-finish-insufficient-build/b1442-finish-insufficient-build/task/lean/reviewer/b1442-finish-insufficient-build.reviewer.3.jsonl"
+  }
 }

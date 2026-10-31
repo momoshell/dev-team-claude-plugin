@@ -4,5 +4,10 @@
   "base": "1d282ec7",
   "originalTask": "/Users/momoshell/.crew/dt-b1380-lean-suite-rerun/b1380-lean-suite-rerun/task",
   "originalTree": "/Users/momoshell/Dev/dt-b1380-lean-suite-rerun",
-  "source": "/Users/momoshell/.crew-journal-archive/dt-b1380-lean-suite-rerun/b1380-lean-suite-rerun/task"
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1380-lean-suite-rerun/b1380-lean-suite-rerun/task",
+  "reviewer": {
+    "builtHead": null,
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1380-lean-suite-rerun/b1380-lean-suite-rerun/task/lean/reviewer/b1380-lean-suite-rerun.reviewer.3.jsonl",
+    "reason": "no archived reproducible built head"
+  }
 }

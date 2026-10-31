@@ -4,5 +4,9 @@
   "base": "fbc9ad2a",
   "originalTask": "/Users/momoshell/.crew/dt-b1408-lean-reaim-per-build/b1408-lean-reaim-per-build/task",
   "originalTree": "/Users/momoshell/Dev/dt-b1408-lean-reaim-per-build",
-  "source": "/Users/momoshell/.crew-journal-archive/dt-b1408-lean-reaim-per-build/b1408-lean-reaim-per-build/task"
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1408-lean-reaim-per-build/b1408-lean-reaim-per-build/task",
+  "reviewer": {
+    "builtHead": "914262c1601102facd57ae6b9844d2b42ea40625",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1408-lean-reaim-per-build/b1408-lean-reaim-per-build/task/lean/reviewer/b1408-lean-reaim-per-build.reviewer.3.jsonl"
+  }
 }

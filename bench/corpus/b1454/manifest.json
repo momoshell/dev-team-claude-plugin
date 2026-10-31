@@ -4,5 +4,9 @@
   "base": "4fbffc0c4b1695ec131167ecec0ef63792e6b4b1",
   "originalTask": "/Users/momoshell/.crew/dt-b1454-waterfall-polish/b1454-waterfall-polish/task",
   "originalTree": "/Users/momoshell/Dev/dt-b1454-waterfall-polish",
-  "source": "/Users/momoshell/.crew-journal-archive/dt-b1454-waterfall-polish/b1454-waterfall-polish/task"
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1454-waterfall-polish/b1454-waterfall-polish/task",
+  "reviewer": {
+    "builtHead": "c43edcff0d1a0b710b958a814424063056637ae0",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1454-waterfall-polish/b1454-waterfall-polish/task/lean/reviewer/b1454-waterfall-polish.reviewer.4.jsonl"
+  }
 }

@@ -4,5 +4,9 @@
   "base": "0d08adff4f5ccc8c2f0b94327b4a9e47ed5ff598",
   "originalTask": "/Users/momoshell/.crew/dt-b1458-viz-skills-remeasure/b1458-viz-skills-remeasure/task",
   "originalTree": "/Users/momoshell/Dev/dt-b1458-viz-skills-remeasure",
-  "source": "/Users/momoshell/.crew-journal-archive/dt-b1458-viz-skills-remeasure/b1458-viz-skills-remeasure/task"
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1458-viz-skills-remeasure/b1458-viz-skills-remeasure/task",
+  "reviewer": {
+    "builtHead": "c0ef8ac4b41abc55a3ec94ab6d61792966ae54a5",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1458-viz-skills-remeasure/b1458-viz-skills-remeasure/task/lean/reviewer/b1458-viz-skills-remeasure.reviewer.3.jsonl"
+  }
 }

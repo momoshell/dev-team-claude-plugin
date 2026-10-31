@@ -4,5 +4,9 @@
   "base": "0d08adff4f5ccc8c2f0b94327b4a9e47ed5ff598",
   "originalTask": "/Users/momoshell/.crew/dt-b1459-skills-live-exhibits/b1459-skills-live-exhibits/task",
   "originalTree": "/Users/momoshell/Dev/dt-b1459-skills-live-exhibits",
-  "source": "/Users/momoshell/.crew-journal-archive/dt-b1459-skills-live-exhibits/b1459-skills-live-exhibits/task"
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1459-skills-live-exhibits/b1459-skills-live-exhibits/task",
+  "reviewer": {
+    "builtHead": "35fe365a49a5ea46ed5bcd009ae3ad0de2c78ff9",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1459-skills-live-exhibits/b1459-skills-live-exhibits/task/lean/reviewer/b1459-skills-live-exhibits.reviewer.3.jsonl"
+  }
 }

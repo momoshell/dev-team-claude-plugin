@@ -4,5 +4,9 @@
   "base": "1d282ec7",
   "originalTask": "/Users/momoshell/.crew/dt-b1381-lean-provider-retry/b1381-lean-provider-retry/task",
   "originalTree": "/Users/momoshell/Dev/dt-b1381-lean-provider-retry",
-  "source": "/Users/momoshell/.crew-journal-archive/dt-b1381-lean-provider-retry/b1381-lean-provider-retry/task"
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1381-lean-provider-retry/b1381-lean-provider-retry/task",
+  "reviewer": {
+    "builtHead": "d4bb1dd73971be0d36718eb5291cab258831a5aa",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1381-lean-provider-retry/b1381-lean-provider-retry/task/lean/reviewer/b1381-lean-provider-retry.reviewer.3.jsonl"
+  }
 }

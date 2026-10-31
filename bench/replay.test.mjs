@@ -14,6 +14,42 @@ import { runPlanner } from './replay-planner.mjs'
 const LANES = { b1380: '1d282ec7', b1381: '1d282ec7', b1402: '2966b484', b1408: 'fbc9ad2a', b1416: 'abe2d073', b1417: 'abe2d073', b1457: '0d08adff4f5ccc8c2f0b94327b4a9e47ed5ff598', b1458: '0d08adff4f5ccc8c2f0b94327b4a9e47ed5ff598', b1459: '0d08adff4f5ccc8c2f0b94327b4a9e47ed5ff598' }
 const NEW_LANES = { b1440: 'b1440-acp-client-error-message', b1441: 'b1441-pi-provider-failure-kind', b1442: 'b1442-finish-insufficient-build', b1444: 'b1444-claude-reads-use-read-tool', b1448: 'b1448-lean-memory-injection', b1450: 'b1450-start-log-never-throws', b1451: 'b1451-pi-websocket-error-retry', b1454: 'b1454-waterfall-polish' }
 Object.assign(LANES, { b1440: 'b593d34d0ac93f85854ba38ecfd31e6e613980ac', b1441: '88f70c51c78ebd1931728bb7ded08727b34cff3c', b1442: '88f70c51c78ebd1931728bb7ded08727b34cff3c', b1444: '1d2fc7cdd8864e24e9d0b714641597d74b901660', b1448: 'ccac8537ad7f0231a181e47e5e81828648d2a4b7', b1450: '0634116878372be6e56ce51bf752c305d34adf2c', b1451: '0634116878372be6e56ce51bf752c305d34adf2c', b1454: '4fbffc0c4b1695ec131167ecec0ef63792e6b4b1' })
+const REVIEWER_METADATA = {
+  "b1440": {
+    "builtHead": null,
+    "promptSource": null,
+    "reason": "no archived reviewer prompt or reproducible built head"
+  },
+  "b1441": {
+    "builtHead": "f1ceef3db170c050ad6f977b8d0a368a01014feb",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1441-pi-provider-failure-kind/b1441-pi-provider-failure-kind/task/lean/reviewer/b1441-pi-provider-failure-kind.reviewer.3.jsonl"
+  },
+  "b1442": {
+    "builtHead": "982f75fd42a4f7dd36989f9dc67d593a597fc962",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1442-finish-insufficient-build/b1442-finish-insufficient-build/task/lean/reviewer/b1442-finish-insufficient-build.reviewer.3.jsonl"
+  },
+  "b1444": {
+    "builtHead": null,
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1444-claude-reads-use-read-tool/b1444-claude-reads-use-read-tool/task/lean/reviewer/b1444-claude-reads-use-read-tool.reviewer.7.jsonl",
+    "reason": "no archived reproducible built head"
+  },
+  "b1448": {
+    "builtHead": "7c7c9e71d3d9e59a5b78357899213e645624de82",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1448-lean-memory-injection/b1448-lean-memory-injection/task/lean/reviewer/b1448-lean-memory-injection.reviewer.3.jsonl"
+  },
+  "b1450": {
+    "builtHead": "bef547bc2772a26ef13837dca0f90506a6c76d5a",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1450-start-log-never-throws/b1450-start-log-never-throws/task/lean/reviewer/b1450-start-log-never-throws.reviewer.5.jsonl"
+  },
+  "b1451": {
+    "builtHead": "4ad976f60cd1048129613297eedff674db44dffd",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1451-pi-websocket-error-retry/b1451-pi-websocket-error-retry/task/lean/reviewer/b1451-pi-websocket-error-retry.reviewer.3.jsonl"
+  },
+  "b1454": {
+    "builtHead": "c43edcff0d1a0b710b958a814424063056637ae0",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1454-waterfall-polish/b1454-waterfall-polish/task/lean/reviewer/b1454-waterfall-polish.reviewer.4.jsonl"
+  }
+}
 // SHA256 of the seven inputs, computed from the archives at freeze time.
 const ARCHIVE_HASHES = {
   "b1440": {
@@ -131,7 +167,7 @@ test('CL1 archived code lanes retain their exact inputs and provenance', () => {
     const lean = json(join(dir, 'lean.json'))
     assert.deepEqual(json(join(dir, 'manifest.json')), {
       lane, id, base: LANES[lane], originalTask: lean.taskDir, originalTree: lean.cwd,
-      source: `/Users/momoshell/.crew-journal-archive/dt-${id}/${id}/task`,
+      source: `/Users/momoshell/.crew-journal-archive/dt-${id}/${id}/task`, reviewer: REVIEWER_METADATA[lane],
     })
     for (const [name, expected] of Object.entries(ARCHIVE_HASHES[lane])) {
       assert.equal(createHash('sha256').update(readFileSync(join(dir, name))).digest('hex'), expected, `${lane}/${name}`)

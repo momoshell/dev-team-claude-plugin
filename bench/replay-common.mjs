@@ -211,7 +211,7 @@ export function unmeasuredError(name, r) {
 
 export function removeDir(dir) { rmSync(dir, { recursive: true, force: true }) }
 
-export function parseCli(argv) {
+export function parseCli(argv, { allowMemory = false } = {}) {
   const opts = { arms: null }
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]
@@ -220,11 +220,15 @@ export function parseCli(argv) {
     else if (flag === '--cell') opts.cell = value()
     else if (flag === '--arms') { const raw = value(); opts.arms = raw === '' ? [] : raw.split(',') }
     else if (flag === '--out') opts.out = value()
+    else if (flag === '--memory' && allowMemory) {
+      if (!argv[i + 1] || argv[i + 1].startsWith('--')) throw new Error('--memory needs a value')
+      opts.memory = value()
+    }
     else throw new Error(`unknown argument ${flag}`)
   }
   for (const key of ['lane', 'cell', 'out']) if (!opts[key]) throw new Error(`--${key} is required`)
   if (opts.arms === null) throw new Error('--arms is required (use --arms "" for none)')
-  return { lane: opts.lane, cellFile: opts.cell, arms: opts.arms, out: opts.out }
+  return { lane: opts.lane, cellFile: opts.cell, arms: opts.arms, out: opts.out, ...(opts.memory !== undefined ? { memory: opts.memory } : {}) }
 }
 
 export function readCellFile(file) {

@@ -37,6 +37,7 @@ export function validateCell(cell) {
     for (const key of ['agent', 'model', 'effort']) if (typeof c[key] !== 'string' || !c[key]) throw new Error(`${what}.${key} must be a nonempty string`)
   }
   named(cell, 'cell')
+  if ('codemode' in cell && typeof cell.codemode !== 'boolean') throw new Error('cell.codemode must be a boolean')
   if ('skills' in cell && (!Array.isArray(cell.skills) || cell.skills.some((name) => typeof name !== 'string' || !name.trim()))) throw new Error('cell.skills must be a list of nonempty strings')
   if (cell.advisor != null) named(cell.advisor, 'cell.advisor')
   for (const key of ['wait_s', 'settle_s']) {
@@ -46,7 +47,7 @@ export function validateCell(cell) {
 }
 
 export function seatDefinition({ role, cell, arms }) {
-  return { role, agent: cell.agent, model: cell.model, effort: cell.effort, writes: role === 'builder' ? 'repo' : 'task-dir', wait_s: cell.wait_s ?? 3600, advisor: cell.advisor ?? null, skills: cell.skills ?? [], extensions: [...arms] }
+  return { role, agent: cell.agent, model: cell.model, effort: cell.effort, writes: role === 'builder' ? 'repo' : 'task-dir', wait_s: cell.wait_s ?? 3600, advisor: cell.advisor ?? null, skills: cell.skills ?? [], codemode: cell.codemode ?? false, extensions: [...arms] }
 }
 
 export function loadCorpus(lane, corpusDir = CORPUS_DIR) {
@@ -172,7 +173,7 @@ export const errText = (e) => `${e?.code ? `${e.code} ` : ''}${e?.message ?? e}`
 // cleanup error ends up in row.error. result.json is always written.
 export async function runReplay({ kind, options, deps, body }) {
   const { lane, cell, arms, out } = options ?? {}
-  const result = { id: null, kind, lane: lane ?? null, cell: cell ?? null, arms: Array.isArray(arms) ? arms : null, error: null }
+  const result = { id: null, kind, lane: lane ?? null, cell: cell ?? null, arms: Array.isArray(arms) ? arms : null, status: null, status_reason: 'not-run', error: null }
   const cleanups = []
   const errors = []
   const outDir = createOutDir(out, { corpusDir: deps.corpusDir, home: deps.home }) // refuses unsafe destinations; nothing is written then
@@ -295,16 +296,18 @@ export function readEnvelope(task, returnName) {
   try { return JSON.parse(readFileSync(join(task, returnName), 'utf8')) } catch { return null }
 }
 
-// The seat's required return file. Returns { envelope, error }: a missing, unparseable or incomplete file is an error to record, never a clean run.
+// The seat's required return file. Preserve a readable status even if the envelope is incomplete.
 export function loadEnvelope(task, returnName) {
   const file = join(task, returnName)
   let text
-  try { text = readFileSync(file, 'utf8') } catch (e) { return { envelope: null, error: `envelope: ${returnName} not written (${e.code ?? e.message})` } }
+  try { text = readFileSync(file, 'utf8') } catch (e) { return { envelope: null, status: null, status_reason: e.code === 'ENOENT' ? 'missing-return' : 'unreadable-return', error: `envelope: ${returnName} not written (${e.code ?? e.message})` } }
   let envelope
-  try { envelope = JSON.parse(text) } catch (e) { return { envelope: null, error: `envelope: ${returnName} is not valid JSON (${e.message})` } }
-  if (envelope === null || typeof envelope !== 'object' || Array.isArray(envelope)) return { envelope: null, error: `envelope: ${returnName} is not a JSON object` }
-  if (typeof envelope.status !== 'string' || !envelope.status || typeof envelope.summary !== 'string' || !envelope.summary.trim()) return { envelope: null, error: `envelope: ${returnName} lacks a status and summary` }
-  return { envelope, error: null }
+  try { envelope = JSON.parse(text) } catch (e) { return { envelope: null, status: null, status_reason: 'invalid-json', error: `envelope: ${returnName} is not valid JSON (${e.message})` } }
+  if (envelope === null || typeof envelope !== 'object' || Array.isArray(envelope)) return { envelope: null, status: null, status_reason: 'invalid-envelope', error: `envelope: ${returnName} is not a JSON object` }
+  const status = ['done', 'insufficient', 'escalate'].includes(envelope.status) ? envelope.status : null
+  const status_reason = status === null ? 'invalid-status' : null
+  if (typeof envelope.status !== 'string' || !envelope.status || typeof envelope.summary !== 'string' || !envelope.summary.trim()) return { envelope: null, status, status_reason, error: `envelope: ${returnName} lacks a status and summary` }
+  return { envelope, status, status_reason, error: null }
 }
 
 // Run the seat, returning { turn, error, wallS }. A seat failure is recorded, never thrown.

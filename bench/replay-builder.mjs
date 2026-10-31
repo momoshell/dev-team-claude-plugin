@@ -27,7 +27,8 @@ export async function runBuilder(options, deps = {}) {
       if (seatError) errors.push(`seat: ${seatError}`)
       if (cell.advisor) (deps.sleepMs ?? sleepMs)((cell.settle_s ?? 120) * 1000) // let the advisor's last rows land
       const wallS = seatWallS
-      const { envelope, error: envelopeError } = loadEnvelope(task, prep.returnName)
+      const { envelope, error: envelopeError, status, status_reason } = loadEnvelope(task, prep.returnName)
+      Object.assign(result, { status, status_reason })
       if (envelopeError) errors.push(envelopeError)
       const gatePath = join(task, 'gate.mjs')
       const { runGate, proveMutations } = await loadChecks(deps)

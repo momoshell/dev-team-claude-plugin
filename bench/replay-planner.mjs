@@ -48,7 +48,8 @@ export async function runPlanner(options, deps = {}) {
       const { turn, error: seatError, wallS } = await callSeat({ deps, definition: seatDefinition({ role: 'planner', cell, arms }), prep, outDir })
       if (seatError) errors.push(`seat: ${seatError}`)
       if (cell.advisor) (deps.sleepMs ?? sleepMs)((cell.settle_s ?? 120) * 1000)
-      const { envelope, error: envelopeError } = loadEnvelope(task, prep.returnName)
+      const { envelope, error: envelopeError, status, status_reason } = loadEnvelope(task, prep.returnName)
+      Object.assign(result, { status, status_reason })
       if (envelopeError) errors.push(envelopeError)
       const details = envelope?.details ?? {}
       const gatePath = gateFile(task, details)

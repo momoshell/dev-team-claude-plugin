@@ -11,6 +11,24 @@ function time(value) {
 
 export function layoutTimeline(run = {}, events = [], { now = Date.now() } = {}) {
   const phases = Array.isArray(run.phases) ? run.phases : []
+  const recordedOnly = run.source === 'lean'
+  if (recordedOnly) {
+    const complete = [], unrecorded = []
+    for (const phase of phases) {
+      const start = time(phase.started_at), end = time(phase.ended_at)
+      const reason = start == null ? 'Start time missing or invalid' : end == null ? 'End time missing or invalid' : end < start ? 'Interval ends before it starts' : null
+      if (reason) unrecorded.push({ ...phase, x: null, width: null, duration_ms: null, reason })
+      else complete.push({ phase, start, end })
+    }
+    const origin = complete.length ? Math.min(...complete.map((entry) => entry.start)) : null
+    const finish = complete.length ? Math.max(...complete.map((entry) => entry.end)) : null
+    const span = origin == null ? null : finish - origin
+    const blocks = complete.map(({ phase, start, end }) => ({
+      ...phase, phase_id: phase.id ?? null, duration_ms: end - start,
+      x: span ? (start - origin) / span : 0, width: span ? (end - start) / span : 0,
+    }))
+    return { request: null, origin_at: origin == null ? null : new Date(origin).toISOString(), span_ms: span, blocks, queued: [], unrecorded, marks: [], lanes: [] }
+  }
   const timed = phases.filter((phase) => phase.started_at != null).sort((a, b) => (time(a.started_at) - time(b.started_at)) || ((a.seq ?? 0) - (b.seq ?? 0)))
   const queued = phases.filter((phase) => phase.started_at == null).sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
   if (!phases.length || !timed.length) {

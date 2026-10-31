@@ -1,5 +1,5 @@
-// Pure presentation for lean lanes (ADR-052). Lean lanes record no heartbeat or usage and date only their
-// run-start: every unrecorded value is shown absent with the reason the server gave, never guessed.
+// Pure presentation for lean lanes (ADR-052). Stage boundaries and checks carry timestamps;
+// heartbeat and usage are not recorded. Unrecorded values remain absent with their reason.
 import { leanStatus } from './fleet.js'
 
 // Journal rows → recorded-order lines. No time is read or invented.

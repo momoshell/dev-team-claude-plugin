@@ -1042,9 +1042,9 @@ const prRecord = (number, extra = {}) => ({ number, url: `https://github.com/o/r
 const publishSpec = { cwd: process.cwd(), branch: 'lane', base: 'main', title: 'feat: publish', body: 'Fixes #91; issue #92 stays open.', closes: [91], refs: [92] }
 
 // A scripted git remote and gh. `push` and `create` say whether the effect lands and what the command reports; `list` and `lsRemote` override a readback by call number.
-function fakeRemote({ remote = OTHER_SHA, prs = [], push = 'lands', create = 'lands', list, lsRemote, head = SHA, branch = 'lane' } = {}) {
+function fakeRemote({ remote = OTHER_SHA, prs = [], push = 'lands', create = 'lands', edit = 'lands', view, list, lsRemote, head = SHA, branch = 'lane' } = {}) {
   const calls = []
-  const state = { remote, prs: [...prs], listed: 0, lsed: 0 }
+  const state = { remote, prs: prs.map((pr) => ({ ...pr })), listed: 0, lsed: 0 }
   const run = async (spec) => {
     calls.push(spec)
     const { command, args } = spec
@@ -1060,8 +1060,20 @@ function fakeRemote({ remote = OTHER_SHA, prs = [], push = 'lands', create = 'la
     }
     if (command === 'gh' && args[1] === 'list') return list?.(++state.listed, state) ?? FAKE_OK(JSON.stringify(state.prs))
     if (command === 'gh' && args[1] === 'create') {
-      if (create.startsWith('lands')) state.prs.push(prRecord(18))
+      if (create.startsWith('lands')) state.prs.push(prRecord(18, { body: args[args.indexOf('--body') + 1] }))
       return create.endsWith('fails') ? FAKE_BAD : FAKE_OK('https://github.com/o/r/pull/18\n')
+    }
+    if (command === 'gh' && args[1] === 'edit') {
+      const pr = state.prs.find((item) => String(item.number) === args[2])
+      assert.ok(pr)
+      if (typeof edit === 'function') return edit(spec, pr)
+      if (edit === 'lands') pr.body = args[args.indexOf('--body') + 1]
+      return FAKE_OK()
+    }
+    if (command === 'gh' && args[1] === 'view') {
+      const pr = state.prs.find((item) => String(item.number) === args[2])
+      assert.ok(pr)
+      return view ? view(spec, pr) : FAKE_OK(JSON.stringify({ body: pr.body }))
     }
     throw new Error(`unexpected call ${JSON.stringify(spec)}`)
   }
@@ -1099,6 +1111,60 @@ test('openPullRequest returns the PR already open without creating, and skips a 
   assert.equal((await openPullRequest(publishSpec, { run: stale.run })).pr.number, 17)
   assert.equal(stale.count('git', 'push'), 1)
   assert.equal(stale.count('gh', 'create'), 0)
+})
+
+// MUTATION: substitute stale text for the edit's composedBody.
+test('RP1: reuse replaces the body exactly as a fresh PR for each publication', async () => {
+  const reused = fakeRemote({ prs: [prRecord(17, { body: 'stale measurements' })] })
+  const inputs = [
+    { ...publishSpec, body: 'Fixes #5; measurements 1/1.', closes: [91, 91], refs: [91, 92, 92] },
+    { ...publishSpec, body: 'New measurements 2/2; see #93.', closes: [93], refs: [94] },
+    { ...publishSpec, body: '', closes: [], refs: [] },
+    { ...publishSpec, body: '  Unicode ✓ and trailing whitespace  \n\n', closes: [], refs: [] },
+  ]
+  for (const [index, input] of inputs.entries()) {
+    const fresh = fakeRemote({ remote: SHA })
+    assert.equal((await openPullRequest(input, { run: fresh.run })).status, 'green')
+    const start = reused.calls.length
+    const result = await openPullRequest(input, { run: reused.run })
+    assert.equal(result.status, 'green')
+    assert.equal(result.reused, true)
+    assert.equal(result.pr.number, 17)
+    assert.equal(reused.state.prs[0].body, fresh.state.prs[0].body)
+    const calls = reused.calls.slice(start)
+    const editAt = calls.findIndex((call) => call.command === 'gh' && call.args[1] === 'edit')
+    const pushAt = calls.findIndex((call) => call.command === 'git' && call.args[0] === 'push')
+    assert.ok(editAt >= 0)
+    assert.equal(pushAt >= 0, index === 0)
+    if (pushAt >= 0) assert.ok(pushAt < editAt)
+  }
+  assert.equal(reused.count('gh', 'create'), 0)
+  assert.equal(reused.count('gh', 'edit'), inputs.length)
+})
+
+// MUTATION: disable the confirmedBody !== composedBody refusal.
+test('RP2: reuse refuses failed or unconfirmed body updates', async () => {
+  const cases = {
+    failed: { edit: () => FAKE_BAD },
+    timeout: { edit: () => FAKE_UNMEASURED('timeout') },
+    thrown: { edit: () => { throw new Error('interrupted') } },
+    malformed: { edit: () => undefined },
+    dropped: { edit: 'drops' },
+    viewFailed: { view: () => FAKE_BAD },
+    viewTimeout: { view: () => FAKE_UNMEASURED('timeout') },
+    invalidJson: { view: () => FAKE_OK('{') },
+    missing: { view: () => FAKE_OK('{}') },
+    nonString: { view: () => FAKE_OK('{"body":42}') },
+    newline: { view: (_spec, pr) => FAKE_OK(JSON.stringify({ body: `${pr.body}\n` })) },
+  }
+  for (const [name, options] of Object.entries(cases)) {
+    const f = fakeRemote({ prs: [prRecord(17, { body: 'stale' })], remote: SHA, ...options })
+    const result = await openPullRequest(publishSpec, { run: f.run })
+    assert.ok(['red', 'unmeasured'].includes(result.status), name)
+    assert.ok(CHECK_REASONS.includes(reasonOf(result)), name)
+    assert.equal(f.count('gh', 'edit'), 1, name)
+    assert.equal(f.count('gh', 'create'), 0, name)
+  }
 })
 
 test('openPullRequest pushes a branch the remote does not have, and trusts the readback over the push exit', async () => {

@@ -52,7 +52,7 @@ const expected = [
   {
     heading: '## 4. Do prompt changes require a measured eval (#1031)?',
     question: 'Do prompt changes require a measured eval (#1031)?',
-    measurement: '`crew/roles/*.md` are prompts and today a lane changes one under an ordinary code review; b524 added two lines to `planner.md` and no cell moved to show what it did.',
+    measurement: 'The retired seat-charter files were prompts changed under ordinary code review; b524 added two lines to the planner charter and no cell moved to show what it did.',
   },
   {
     heading: '## 5. The builder turn-ceiling number (#1028 ask 1)',

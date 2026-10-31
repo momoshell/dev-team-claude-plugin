@@ -90,7 +90,7 @@ test('RP3 M1 shipped role packs pin exactly and session start is silent', () => 
     { when: { paths: ['**/*.test.mjs'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:qa-test-writing'] },
     { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.js', 'visualizer/**/*.mjs', 'visualizer/**/*.css'], roles: ['planner', 'builder', 'reviewer'] }, skills: ['dev-team:frontend-svelte'] },
     { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.css'], roles: ['planner', 'builder', 'reviewer'] }, skills: ['dev-team:ui-design', 'dev-team:ux'] },
-    { when: { paths: ['docs/**/*.md', 'skills/**/*.md', 'crew/roles/*.md'], roles: ['builder', 'reviewer'] }, delivery: 'grant', skills: ['dev-team:prose-plain'] },
+    { when: { paths: ['docs/**/*.md', 'skills/**/*.md', 'crew/agents/*.md'], roles: ['builder', 'reviewer'] }, delivery: 'grant', skills: ['dev-team:prose-plain'] },
   ] })
   assert.equal(loadMap(ROOT).ok, true)
   assert.equal(result.stdout, '')
@@ -137,7 +137,7 @@ test('T1', () => {
   assert.equal(r.stdout, '')
 })
 test('T2', () => { const dir = fixture(); const file = transcript(dir, [{ type: 'tool_schema', name: 'Skill', text: 'dev-team:code-less dev-team:backend-node' }]); deny(invoke(dir, 'pre-edit', { transcript_path: file })) })
-test('X1', () => { const dir = fixture(); writeMap(dir, { version: 1, exempt: ['**/anchors.json'], rules: [{ when: { paths: ['**'] }, skills: ['dev-team:code-less'] }] }); const r = invoke(dir, 'pre-edit', { tool_input: { file_path: 'crew/roles/anchors.json' } }); assert.equal(r.stdout, '') })
+test('X1', () => { const dir = fixture(); writeMap(dir, { version: 1, exempt: ['**/anchors.json'], rules: [{ when: { paths: ['**'] }, skills: ['dev-team:code-less'] }] }); const r = invoke(dir, 'pre-edit', { tool_input: { file_path: 'crew/agents/anchors.json' } }); assert.equal(r.stdout, '') })
 test('I1', () => { const dir = fixture(); const r = invoke(dir, 'pre-edit', {}, { DEVTEAM_WORKER: '1' }); assert.equal(r.status, 0); assert.equal(r.stdout, ''); assert.equal(r.stderr, '') })
 test('I2', () => {
   const dir = scratchDir('foreign-')

@@ -181,8 +181,8 @@ export const CHILD_TIMEOUT_MS = 10 * 60 * 1000
 // cumulative one bounds cost.
 //
 // 24, argued from OUR seat costs rather than copied from the neighbour's 64.
-// The legitimate side: the crew's own documented fan-out is 2-4 scouts per
-// sweep (crew/roles/planner.md:13-14), and the seats that scout at all
+// The legitimate side: a historical sizing assumption was 2-4 scouts per
+// sweep, and the seats that scout at all
 // (planner, tech-lead, reviewer) run at most about three rounds each, so the
 // busiest seat has roughly 4 x 3 = 12 warranted spawns in a run; 24 is that
 // with a doubling of headroom for a scout that has to be re-asked.

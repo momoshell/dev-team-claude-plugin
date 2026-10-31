@@ -122,7 +122,7 @@ Everything durable is a file; session chat is never the record.
 - `pi/extensions/` — the kept pi arms (readgate, builderloop, reminders, skeletonread, subagent, advisor, lab).
 - `mcp/lab-server.mjs` — the planner's lab tool server.
 - `memory.mjs` — lane memory.
-- `agents/*.md`, `roles/*.md` — seat definitions and charters.
+- `agents/*.md` — delivered seat definitions and instructions.
 - Tests sit beside the code as `*.test.mjs`.
 
 ## Posture

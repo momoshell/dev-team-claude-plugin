@@ -1,9 +1,7 @@
 # Motion and reduced motion
 
-- **Rule M1.** Animations honor `prefers-reduced-motion` through the CSS media query. Sources: vercel-web-interface-guidelines.md — Animation / “Honor `prefers-reduced-motion`”; ui-ux-pro-max-ux-guidelines.csv — row 9. **Exhibit:** `visualizer/web/src/lib/PhaseDots.svelte:8`.
+**Rule M1:** Honor `prefers-reduced-motion` for animation and transitions. Sources: vercel-web-interface-guidelines.md — Animation / “Honor `prefers-reduced-motion`”; ui-ux-pro-max-ux-guidelines.csv — row 9.
 
-Measured: 1 `animation:` declaration in 1 of 27 components — the pulse at `visualizer/web/src/lib/PhaseDots.svelte:8`. `prefers-reduced-motion` occurs 0 times in 0 of 27 components.
+Live reduced-motion handling: `visualizer/web/src/lib/theme.css` uses `@media (prefers-reduced-motion:reduce)` to disable animations and transitions and set `scroll-behavior:auto` for all elements and their pseudo-elements.
 
-**Stated gap:** the component-only census contains 0 reduced-motion queries and cannot alone establish application coverage. The shared query now covers the 1/27 animated components.
-
-The component-only census excludes the shared theme sheet, which now disables animations and transitions for reduced motion, and the App shell, which uses immediate scrolling for that preference.
+The global override sets animation and transition to none with `!important`, including `::before` and `::after`; automatic scroll behavior is also important. Independently, `visualizer/web/src/App.svelte` chooses auto rather than smooth scrolling in `focusActivity` when the preference matches. These are source observations, not rendered browser evidence. Keep new motion compatible with this preference.

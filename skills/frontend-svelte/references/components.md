@@ -1,39 +1,17 @@
 # Component idioms
 
-These are measured conventions in `visualizer/web/src/` rather than general Svelte advice; reproduce the rune census with `grep` over that directory. Retrieve any API fact from the `svelte` MCP as required by `references/routing.md`.
+These are source exhibits, not Svelte API documentation; retrieve API facts through `references/routing.md`.
 
-## Props are one destructuring line
+## Props and callbacks
 
-Declare props with one destructuring `$props()` line and put defaults there:
+Live prop exhibit: `visualizer/web/src/lib/TaskList.svelte` (`$props`).
 
-- `let { run, taskEnvelope = null, onopen = () => {} } = $props()` — `visualizer/web/src/lib/RunCard.svelte:8`.
-- `let { rows = [], onopen = () => {} } = $props()` — `visualizer/web/src/lib/FleetTable.svelte:2`.
-- `let { run, phase = null, returns = {}, events = [] } = $props()` — `visualizer/web/src/lib/PhasePanel.svelte:5`.
+TaskList uses a single destructuring line with defaults and an `onopen` callback; `visualizer/web/src/lib/LeanRunDetail.svelte` accepts `onback`. Prefer clear boundary defaults and callback names. `visualizer/web/src/lib/Dropdown.svelte` uses a multiline prop declaration and makes `value` bindable: use binding intentionally for shared writable state, not for every prop.
 
-Keep callbacks as props named `on<verb>` (`onopen`, `onback`, `onphase`, `onselectphase`) rather than adding an event-dispatching seam. `visualizer/web/src/lib/PhaseGantt.svelte:8` uses `onselectphase`; `visualizer/web/src/App.svelte:136` passes `onback` to `LeanRunDetail`. Defaults make the component's call shape visible at its boundary.
+## State, events and effects
 
-## Two-way state is explicit
+TaskList derives filtered and paged rows from local state and uses native buttons with `onclick`. It binds its filters to Dropdown and Pagination. Dropdown's effect registers document and window listeners and returns their cleanup; keep effects' cleanup boundaries explicit.
 
-`$bindable(` occurs 5 times in 3 files (measured over visualizer/web/src/**/*.svelte, 28 files); `visualizer/web/src/lib/Filters.svelte:4` exhibits the idiom: `filters` and `viewFilters` are bindable props, while `hiddenLine` is an ordinary defaulted prop. Use that exact local idiom when the parent and child intentionally share writable filter state; do not make every prop bindable.
+## Composition and styles
 
-## Snippets and rendering
-
-The census found `{#snippet` 4 times in 3 files and `{@render` 21 times in 3 files (measured over visualizer/web/src/**/*.svelte, 28 files). `visualizer/web/src/lib/PhasePanel.svelte:49-72` defines the `countMark` snippet and renders it; `visualizer/web/src/lib/AcceptPanel.svelte:16` renders evidence blocks through `MarkdownView`. Keep a snippet's input shape local and render it at the call site rather than duplicating markdown markup.
-
-## Events and bindings
-
-Use native `onclick=` attributes: the census found 82 across 17 files and zero `on:click` uses (measured over visualizer/web/src/**/*.svelte, 28 files). Exhibits include `visualizer/web/src/App.svelte:117`, `visualizer/web/src/lib/RunCard.svelte:55`, and `visualizer/web/src/lib/EventStream.svelte:44`. Existing form bindings are `bind:value` and `bind:checked`, with the filter state declared at `visualizer/web/src/lib/Filters.svelte:4`; follow the existing spelling and route uncertain binding semantics to the MCP.
-
-## Runes census and effects
-
-The measured source (visualizer/web/src/**/*.svelte, 28 files) contains `$state(` 124 times in 16 files, `$derived` 118 times in 22 files, `$props()` 24 times in 24 files, `$effect` 16 times in 9 files, and `$bindable(` 5 times in 3 files, exhibited at `visualizer/web/src/lib/Filters.svelte:4`. The visualizer has no legacy `export let` or `$:`: `test/visualizer-panels.test.mjs:2701-2703` checks those strings across every `.svelte` file.
-
-A correct effect has a dependency and a cleanup boundary. `visualizer/web/src/lib/RunCard.svelte:20-22` carries the `state_referenced_locally` comment: `previousRunning` is left undefined until the effect's first pass so a true running-to-finished transition can trigger the final drain. Treat that comment's shape—local previous value, guarded work, returned cleanup—as the repo's measured effect idiom, not as a generic API tutorial.
-
-## Scoped styles
-
-Component styles are scoped by default. Reserve `:global` for descendants produced by markdown rendering, where the compiler cannot see the generated elements: `.evidence :global(.markdown-document)` appears at `visualizer/web/src/lib/AcceptPanel.svelte:23` and `visualizer/web/src/lib/PhasePanel.svelte:99`. The scoped workspace layout in `visualizer/web/src/App.svelte:172` keeps shell positioning local; the single box-sizing reset lives in theme.css. The repo has zero `{@html}` uses in the measured component suite.
-
-## Composition over cross-cutting colour
-
-`visualizer/web/src/lib/RunCard.svelte:53-54` composes `PhaseDots`, `GateChips`, and `RoleTag`; `visualizer/web/src/lib/RoleTag.svelte:4` and `visualizer/web/src/lib/PhaseDots.svelte:5` own role/lane colour indirection. Keep a component's props and CSS local, and route token choice through the measured shapers and child components rather than reading data status directly.
+`visualizer/web/src/App.svelte` composes TaskList and LeanRunDetail; LeanRunDetail renders `visualizer/web/src/lib/LeanWaterfall.svelte`. Keep layout and styles local where practical. Reserve global selectors for cases where scoping cannot reach the intended descendant; LeanRunDetail uses `:global` for icon descendants. For markdown-rendered global descendants and snippets, no live exhibit; assess the need before introducing either. For role/lane colour composition, no live exhibit; see the design skill rather than assuming alias declarations establish a component pattern.

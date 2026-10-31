@@ -65,6 +65,16 @@ and `gate.failing` should list every acceptance id (`envelope.acceptance`). `rep
 files the planner wrote into the checkout (should be 0); `envelope.mutations` counts declared
 mutations (not proved here); `kinds`, `scouts`, `lab_runs`, `advisor` summarize the journal.
 
+To include team memory in a planner replay:
+
+```
+node bench/replay-planner.mjs --lane b1380 --cell cell.json --arms "" --out /abs/new/dir --memory /abs/store
+```
+
+The rendered section is appended to the recorded prompt; `result.json.memory` records the directory,
+included and dropped entries, bytes and reason. Without `--memory` the prompt is unchanged. A store
+that renders nothing is recorded as an error and no seat is called. This option is planner-only.
+
 ## Blind review
 
 ```

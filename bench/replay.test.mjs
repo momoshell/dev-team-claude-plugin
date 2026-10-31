@@ -4,7 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { ARMS, CHECKOUT, CORPUS_DIR, createOutDir, validateArms, writeDiff } from './replay-common.mjs'
+import { ARMS, CHECKOUT, CORPUS_DIR, createOutDir, parseCli, validateArms, writeDiff } from './replay-common.mjs'
+import { openMemory, renderSection } from '../crew/memory.mjs'
 import { runBuilder } from './replay-builder.mjs'
 import { runPlanner } from './replay-planner.mjs'
 
@@ -334,6 +335,58 @@ test('planner replay: fresh task dir, baseline gate, repo writes, gate path conf
   assert.equal(result.envelope.mutations, 2)
   assert(!existsSync(join(out, 'tree')))
   assert.equal(worktrees(fx.repo), 1)
+})
+
+test('planner memory appends the rendered section and persists accounting; empty stores refuse the seat', async () => {
+  const fx = fixture()
+  const memory = fresh('memory')
+  mkdirSync(memory)
+  writeFileSync(join(memory, 'MEMORY.md'), '- [alpha](alpha.md)\n- [missing](missing.md)\n')
+  writeFileSync(join(memory, 'alpha.md'), 'Team judgment\n')
+  const extract = openMemory({ dir: memory }).context({ task: '# brief\n', role: 'planner' })
+  assert.deepEqual(extract.included.map((entry) => entry.path), ['MEMORY.md', 'alpha.md'])
+  assert.deepEqual(extract.dropped.map((entry) => entry.path), ['missing.md'])
+  for (const dir of [undefined, memory]) {
+    const out = fresh('memory-plan')
+    let prompt
+    const result = await runPlanner({ lane: 'b1380', cell: CELL, arms: [], out, ...(dir ? { memory: dir } : {}) }, {
+      ...fx.deps,
+      runAcpSeat(call) {
+        prompt = call.prompt
+        writeFileSync(join(call.taskDir, 'plan.md'), '# plan\n')
+        writeFileSync(join(call.taskDir, 'gate.mjs'), 'x\n')
+        writeFileSync(join(call.taskDir, 'planner-1.json'), JSON.stringify({ status: 'done', summary: 'planned' }))
+        return { stopReason: 'end_turn' }
+      },
+      runGate: async () => ({ status: 'red', failingIds: [] }),
+    })
+    const original = `You are the lean planner. Task directory: ${join(out, 'task')}\nCheckout: ${join(out, 'tree')}\nReturn path: ${join(out, 'task', 'planner-1.json')}\n`
+    assert.equal(prompt, original + (dir ? `\n\n${renderSection(extract)}` : ''))
+    assert.equal(result.error, null)
+    assert.deepEqual(json(join(out, 'result.json')).memory, dir ? { dir, included: extract.included, dropped: extract.dropped, bytes: extract.bytes, reason: extract.reason } : undefined)
+    assert.equal(worktrees(fx.repo), 1)
+  }
+  const empty = fresh('empty-memory')
+  mkdirSync(empty)
+  const out = fresh('empty-plan')
+  let seats = 0
+  const result = await runPlanner({ lane: 'b1380', cell: CELL, arms: [], out, memory: empty }, { ...fx.deps, runAcpSeat: () => { seats++ } })
+  assert.match(result.error, /memory.*no-index/)
+  assert.equal(json(join(out, 'result.json')).error, result.error)
+  assert.equal(seats, 0)
+  assert(!existsSync(join(out, 'tree')))
+  assert.equal(worktrees(fx.repo), 1)
+})
+
+test('memory CLI option is planner-only and requires a value', () => {
+  const args = ['--lane', 'b1380', '--cell', 'cell.json', '--arms', '', '--out', '/tmp/out']
+  assert.equal(parseCli([...args, '--memory', '/tmp/store'], { allowMemory: true }).memory, '/tmp/store')
+  assert.throws(() => parseCli([...args, '--memory'], { allowMemory: true }), /needs a value/)
+  assert.throws(() => parseCli(['--memory', '--lane', ...args], { allowMemory: true }), /needs a value/)
+  assert.throws(() => parseCli([...args, '--memory', '/tmp/store']), /unknown argument/)
+  const builder = spawnSync(process.execPath, [join(CHECKOUT, 'bench/replay-builder.mjs'), ...args, '--memory', '/tmp/store'], { encoding: 'utf8' })
+  assert.equal(builder.status, 2)
+  assert.match(builder.stderr, /unknown argument --memory/)
 })
 
 test('a turn that ends without its required artifacts is a recorded failure', async () => {

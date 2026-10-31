@@ -72,7 +72,7 @@ or `invalid-status`. A recognized status has a null reason. Report counts of `do
 `escalate` and null alongside blind scores, including the total number of runs:
 
 ```sh
-jq -s 'group_by(.status) | map({status: .[0].status, count: length})' /abs/runs/*/result.json
+node -e 'const c={};for(const f of process.argv.slice(1)){const s=JSON.parse(require("fs").readFileSync(f,"utf8")).status;c[s]=(c[s]??0)+1}console.log(c)' /abs/runs/*/result.json
 ```
 
 ## Planner replay

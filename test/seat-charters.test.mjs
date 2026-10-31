@@ -75,14 +75,15 @@ test('SC4: the delivered skill owns the ladder and its references', () => {
   assert.doesNotMatch(notice, /_shared\.md|compiled into every role prompt/)
 })
 
-// MUTATION: remove either live definition's code-less grant or instruction.
-test('lean builder and reviewer deliver code-less through the ACP launch and prompt', () => {
+// MUTATION: remove prose-plain from the builder base skills list.
+test('PP1: lean builder and reviewer deliver their skills through the ACP launch and prompt', () => {
   const dir = mkdtempSync(join(tmpdir(), 'charter-delivery-'))
   try {
     for (const role of ['builder', 'reviewer']) {
       const { fields, body: prompt, defects } = parseAgent(read(`crew/agents/${role}.md`))
       assert.deepEqual(defects, [])
-      assert.deepEqual(fields.skills, ['code-less'])
+      const skills = role === 'builder' ? ['code-less', 'prose-plain'] : ['code-less']
+      assert.deepEqual(fields.skills, skills)
       assert.match(prompt, /Read the granted `code-less` skill before (working|reviewing)/)
       let launch, sent
       const result = runAcpSeat({
@@ -96,7 +97,8 @@ test('lean builder and reviewer deliver code-less through the ACP launch and pro
       })
       assert.equal(result.stopReason, 'end_turn')
       const path = fileURLToPath(new URL('../skills/code-less/SKILL.md', import.meta.url))
-      assert.deepEqual(launch.args.slice(-3), ['--no-skills', '--skill', path])
+      const skillArgs = ['--no-skills', ...skills.flatMap((skill) => ['--skill', fileURLToPath(new URL(`../skills/${skill}/SKILL.md`, import.meta.url))])]
+      assert.deepEqual(launch.args.slice(-skillArgs.length), skillArgs)
       assert.deepEqual(sent, [{ type: 'text', text: prompt }])
       has(readFileSync(path, 'utf8'), 'Code you move or merge keeps its error handling and validation.')
     }

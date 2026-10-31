@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { laneName, main, runBrief, startLane, StartRefusal } from './start.mjs'
 import { main as leanMain, runLean } from './lean.mjs'
 import { runAcpSeat } from './acp/seat.mjs'
-import { parseAgent, validateEnvelope } from './protocols.mjs'
+import { parseAgent, TIERS, validateEnvelope } from './protocols.mjs'
 import { resolveAgents } from './agents.mjs'
 import { PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS } from './acp/provider.mjs'
 import { scratchDir } from '../test/helpers.mjs'
@@ -436,7 +436,7 @@ test('every turn gets its role definition, the complete brief and P2, and its ow
       assert.ok(request.prompt.includes(wanted), `${id}: ${wanted}`)
     }
     if (role === 'builder' || role === 'reviewer') {
-      assert.deepEqual(request.definition.skills, ['code-less'], id)
+      assert.deepEqual(request.definition.skills, role === 'builder' ? ['code-less', 'prose-plain'] : ['code-less'], id)
       assert.match(request.prompt, /Read the granted `code-less` skill before (working|reviewing)/, id)
     }
     assert.doesNotMatch(request.prompt, /^Charter file/m, id)
@@ -454,6 +454,18 @@ test('every turn gets its role definition, the complete brief and P2, and its ow
   assert.match(f.requests[3].prompt, /redo-this/)
   assert.equal(new Set(f.requests.map((r) => r.sessionFile)).size, 5)
   assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
+})
+
+// MUTATION: override mechanical builder skills with [code-less].
+test('PP2: builder definitions inherit both skills at every tier', async () => {
+  for (const tier of TIERS) {
+    const f = leanFixture({ tier })
+    const result = await f.go()
+    assert.equal(result.status, 'done', tier)
+    const builders = f.requests.filter((request) => request.definition.role === 'builder')
+    assert.ok(builders.length, tier)
+    for (const request of builders) assert.deepEqual(request.definition.skills, ['code-less', 'prose-plain'], tier)
+  }
 })
 
 // MUTATION: drop the changed-path section from the reviewer prompt and the reviewer is told nothing about untracked or renamed files.

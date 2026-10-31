@@ -5,11 +5,15 @@ builder or planner turn at the lane's base commit with a seat you name; a blind 
 the results without knowing which seat made which. Nothing here records results: output dirs are
 yours, outside the repo. What past runs decided is under "Results so far" below.
 
-- `corpus/<lane>/` — frozen inputs for six lanes (b1380, b1381, b1402, b1408, b1416, b1417):
+- `corpus/<lane>/` — frozen inputs for nine lanes (b1380, b1381, b1402, b1408, b1416, b1417, b1457, b1458, b1459):
   `plan.md`, `gate.mjs`, `planner-1.json`, `lean.json`, `brief.md`, `planner-prompt.txt`,
   `builder-prompt.txt` (the first recorded prompts, verbatim) and `manifest.json`
   (`base` commit, and the `originalTask` / `originalTree` paths the prompts cite; the replays
-  rewrite those to the run's own dirs). The replays only read it.
+  rewrite those to the run's own dirs). The replays only read it. The b1457 docs/manifests,
+  b1458 visualizer skills, and b1459 skills exhibits lanes are frozen from their
+  `~/.crew-journal-archive/dt-<lane>-*/<id>/task` archives. If a first planner prompt is
+  unavailable, `plannerPromptMissing` in the manifest gives the reason; planner replay refuses
+  before creating a worktree, while builder replay remains available. An absent prompt also refuses.
 - `replay-builder.mjs`, `replay-planner.mjs`, `replay-common.mjs`, `blind-review.mjs`.
 - `replay.test.mjs`, `blind-review.test.mjs` — `node --test bench/*.test.mjs`; no models or network.
 
@@ -21,13 +25,15 @@ hard-coded in the scripts.
 ```json
 { "agent": "claude", "model": "anthropic/claude-sonnet-5-5", "effort": "high",
   "advisor": { "agent": "pi", "model": "openai/gpt-6.1-sol", "effort": "medium" },
-  "wait_s": 3600, "settle_s": 120 }
+  "wait_s": 3600, "settle_s": 120, "skills": ["code-less"] }
 ```
 
 `agent`, `model`, `effort` are required; `advisor`, `wait_s` (seat timeout, default 3600) and
 `settle_s` (seconds to wait after the seat for the advisor's last journal rows, default 120, only
 with an advisor) are optional. Which agent/model/effort combinations work is up to
-`crew/acp/seat.mjs`, which refuses the rest.
+`crew/acp/seat.mjs`, which refuses the rest. Optional `skills` must be a list of nonempty,
+non-whitespace strings. It is forwarded unchanged, including order and duplicates; an omitted or
+empty list grants no skills. No live-seat defaults are added.
 
 `--arms` is a comma list drawn from `readgate, lab, builderloop, reminders, skeletonread, subagent, fff`
 (`crew/protocols.mjs` `EXTENSIONS`); `--arms ""` is no arms. An unknown name is refused, recorded

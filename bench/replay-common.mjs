@@ -37,6 +37,7 @@ export function validateCell(cell) {
     for (const key of ['agent', 'model', 'effort']) if (typeof c[key] !== 'string' || !c[key]) throw new Error(`${what}.${key} must be a nonempty string`)
   }
   named(cell, 'cell')
+  if ('skills' in cell && (!Array.isArray(cell.skills) || cell.skills.some((name) => typeof name !== 'string' || !name.trim()))) throw new Error('cell.skills must be a list of nonempty strings')
   if (cell.advisor != null) named(cell.advisor, 'cell.advisor')
   for (const key of ['wait_s', 'settle_s']) {
     if (cell[key] !== undefined && !(Number.isSafeInteger(cell[key]) && cell[key] >= (key === 'wait_s' ? 1 : 0))) throw new Error(`cell.${key} must be a ${key === 'wait_s' ? 'positive' : 'non-negative'} safe integer`)
@@ -45,7 +46,7 @@ export function validateCell(cell) {
 }
 
 export function seatDefinition({ role, cell, arms }) {
-  return { role, agent: cell.agent, model: cell.model, effort: cell.effort, writes: role === 'builder' ? 'repo' : 'task-dir', wait_s: cell.wait_s ?? 3600, advisor: cell.advisor ?? null, extensions: [...arms] }
+  return { role, agent: cell.agent, model: cell.model, effort: cell.effort, writes: role === 'builder' ? 'repo' : 'task-dir', wait_s: cell.wait_s ?? 3600, advisor: cell.advisor ?? null, skills: cell.skills ?? [], extensions: [...arms] }
 }
 
 export function loadCorpus(lane, corpusDir = CORPUS_DIR) {
@@ -239,6 +240,10 @@ export function readCellFile(file) {
 // under out/task, the rewritten first prompt, and (builder only) the recorded plan and gate.
 export function prepareLane({ role, lane, outDir, onCleanup, deps = {} }) {
   const { dir, manifest } = loadCorpus(lane, deps.corpusDir)
+  if (role === 'planner') {
+    if (typeof manifest.plannerPromptMissing === 'string' && manifest.plannerPromptMissing.trim()) throw new Error(`missing first planner prompt: ${manifest.plannerPromptMissing}`)
+    if (!existsSync(join(dir, 'planner-prompt.txt'))) throw new Error(`missing first planner prompt for ${lane}`)
+  }
   const task = join(outDir, 'task')
   const tree = join(outDir, 'tree')
   const rewrite = rewriter(manifest, task, tree)

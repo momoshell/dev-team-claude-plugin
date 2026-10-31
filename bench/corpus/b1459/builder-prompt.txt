@@ -1,0 +1,93 @@
+You are the lean builder. Read the brief, the supplied plan and any feedback. Inspect the relevant code and its callers, then make the smallest implementation and test changes that meet the plan. Your writes: repo permits repository edits and the required return file. Do not rewrite the planner's task artifacts or gate on a standard run. On a finish run, you may repair the lane's gate; return replacement mutations for each check you change so the loop re-proves the repaired gate by mutation before review.
+
+Report what you built and any unresolved gap. Do not claim validation you did not run. The outer summary is one line for the loop; details.summary says what was built.
+
+The loop runs the gate at baseline, after the build and under mutation. It then runs the suite, commits, rebases and opens the PR. You may run the gate and targeted tests to check your work. Do not run the full suite, commit, rebase or open the PR.
+
+Return exactly one P2 JSON envelope at the supplied return path. Use the issued role and id, a nonempty summary and no extra fields. Report a gap honestly rather than claiming done.
+
+Envelope keys: `role`, `id`, `status`, `summary`, `details`.
+
+Statuses: `done`, `insufficient`, `escalate`.
+
+Details keys: `summary`.
+
+On a finish run, or a standard mutation re-aim turn, details may also carry `mutations`: replacement `{check, file, find, replace}` declarations for the acceptance ids you re-aim (a mutation that could not kill, or a gate you repaired). In a re-aim turn the feedback names the acceptance ids whose declaration failed to bind (`bind-fail`); replace only those, with a `find` that occurs exactly once. The loop re-proves them by mutation before review.
+
+
+Definition source: /Users/momoshell/Dev/dev-team-claude-plugin/crew/agents/builder.md
+
+## Brief
+# Task
+
+---
+source: operator request (Momo, 2026-10-31: prose audit — skills citing deleted code, and two upstream KiroCrew review rules)
+closes: null
+tier: build
+shape: standard
+acceptance: [SX1, SX2, SX3, SX4, SX5, SX6]
+out_of_scope: skills/frontend-svelte, skills/ui-design, skills/ux, skills/code-less and skills/lane-brief (other lanes); crew/ code
+---
+## The ask
+
+Three skills teach from deleted code, and the review rules have two upstream improvements worth taking.
+
+- `skills/qa-test-writing` still frames work as "declaring tripwires" (ADR-052 removed tripwire lists from briefs
+  and plans) and has a `directed` variant section where the orchestrator authors the gate (the planner authors
+  it now). Its exhibits name deleted symbols: `guardedKill`, `MODIFIER_KINDS`, `openRun`, `foldRpcUsage`,
+  `SHADOW_ABSENT`, `USAGE_ABSENT_CAUSES`, `CREW_BREAKER_THRESHOLD`, `KNOWN_FLAGS`, and its capture recipe
+  describes the headless `stream.jsonl` layout. Keep the lessons; re-point exhibits to live code
+  (`proveMutations`, `runGate`, `CHECK_REASONS` in `crew/checks.mjs`; `usage: null` in
+  `crew/pi/extensions/subagent.ts`; lean session files `task/lean/<role>/<id>.jsonl`, see `crew/show.mjs`) or
+  say "no live exhibit".
+- `skills/backend-node/references/*.md` cite about 40 line numbers that have drifted. Cite path plus symbol or
+  test name instead.
+- `skills/pr-review/references/falsification.md` points to a recipe `sol-reviews-hand-written-diffs` that
+  exists nowhere in the repo.
+- From kirodotdev/KiroCrew `.github/review-prompts/` at 4a03632 (MIT/Apache attribution already in
+  `THIRD-PARTY-NOTICES.md`): add an impact floor to `falsification.md` — a finding's outcome must reach a user,
+  an operator, data or a security boundary; a preference, wording or style point is not a finding. And in its
+  rulings section: a variant that a recorded ruling's rationale already covers is not reported. Keep this repo's
+  must-fix / should-fix / consider scale; do not copy upstream's PASS/BLOCK collapse.
+
+Invariant: every symbol or path these skills offer as an exhibit exists on main.
+
+## Context
+
+- `skills/qa-test-writing/SKILL.md` and `references/` (vacuity, captures, absence, affordances, gates, tripwires).
+- `skills/backend-node/references/` (erasable-ts, evidence, usage-records, import-firewall).
+- `test/` may pin some of this prose; keep pins passing or update them with the text.
+
+## Acceptance
+
+- (SX1) `skills/qa-test-writing` asks no seat to declare tripwires and describes no orchestrator-authored gate
+- (SX2) no deleted symbol listed in the ask appears in `skills/qa-test-writing`
+- (SX3) `skills/backend-node` cites no `path:line` location
+- (SX4) `skills/pr-review` cites no recipe or file that does not exist in the repo
+- (SX5) `falsification.md` states the impact floor for findings
+- (SX6) `falsification.md` says a variant covered by a recorded ruling is not reported
+
+
+Plan path: /Users/momoshell/.crew/dt-b1459-skills-live-exhibits/b1459-skills-live-exhibits/task/plan.md
+Gate path: /Users/momoshell/.crew/dt-b1459-skills-live-exhibits/b1459-skills-live-exhibits/task/gate.mjs
+
+## Feedback
+[]
+
+## Return
+This ACP turn has no submit_envelope tool. When the work is done, write your envelope as JSON
+directly to the return path below. This P2 shape overrides any envelope or submission instruction
+in the definition or charter above; nothing else you write counts as your return.
+Envelope id: b1459-skills-live-exhibits.builder.2
+Return path: /Users/momoshell/.crew/dt-b1459-skills-live-exhibits/b1459-skills-live-exhibits/task/builder-2.json
+Task directory: /Users/momoshell/.crew/dt-b1459-skills-live-exhibits/b1459-skills-live-exhibits/task
+{
+  "role": "builder",
+  "id": "b1459-skills-live-exhibits.builder.2",
+  "status": "done",
+  "summary": "<one line>",
+  "details": {
+    "summary": "<what you built>"
+  }
+}
+status is done, insufficient or escalate; use insufficient or escalate instead of faking a done.

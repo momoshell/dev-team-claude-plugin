@@ -1,0 +1,53 @@
+{
+  "role": "planner",
+  "id": "b1458-viz-skills-remeasure.planner.1",
+  "status": "done",
+  "summary": "Authored the scoped remeasurement plan and independent VS1–VS3 gate with bound kill mutations; execution remains with the loop (shell validation was refused).",
+  "details": {
+    "subject": "fix(skills): remeasure live visualizer exhibits",
+    "plan_path": "/Users/momoshell/.crew/dt-b1458-viz-skills-remeasure/b1458-viz-skills-remeasure/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1458-viz-skills-remeasure/b1458-viz-skills-remeasure/task/gate.mjs",
+    "acceptance": ["VS1", "VS2", "VS3"],
+    "mutations": [
+      {
+        "check": "VS1",
+        "file": "skills/frontend-svelte/references/components.md",
+        "find": "Live prop exhibit: `visualizer/web/src/lib/TaskList.svelte` (`$props`).",
+        "replace": "Live prop exhibit: `visualizer/web/src/lib/MissingVisualizerExhibit.svelte` (`$props`)."
+      },
+      {
+        "check": "VS2",
+        "file": "skills/ux/SKILL.md",
+        "find": "Measured boundary: 11 `.svelte` files under `visualizer/web/src`.",
+        "replace": "Measured boundary: 999 `.svelte` files under `visualizer/web/src`."
+      },
+      {
+        "check": "VS3",
+        "file": "skills/ux/references/motion.md",
+        "find": "Live reduced-motion handling: `visualizer/web/src/lib/theme.css` uses `@media (prefers-reduced-motion:reduce)` to disable animations and transitions and set `scroll-behavior:auto` for all elements and their pseudo-elements.",
+        "replace": "Live reduced-motion handling: `visualizer/web/src/lib/theme.css` uses `@media (prefers-no-motion:reduce)` to disable animations and transitions and set `scroll-behavior:auto` for all elements and their pseudo-elements."
+      }
+    ],
+    "files_in_scope": [
+      "skills/frontend-svelte/SKILL.md",
+      "skills/frontend-svelte/references/components.md",
+      "skills/frontend-svelte/references/structure.md",
+      "skills/frontend-svelte/references/testing.md",
+      "skills/ui-design/SKILL.md",
+      "skills/ui-design/references/colour-checklist.md",
+      "skills/ui-design/references/contract.md",
+      "skills/ui-design/references/limits.md",
+      "skills/ui-design/references/state-colour.md",
+      "skills/ui-design/references/tokens.md",
+      "skills/ux/SKILL.md",
+      "skills/ux/references/absence.md",
+      "skills/ux/references/accessibility-checklist.md",
+      "skills/ux/references/keyboard-focus.md",
+      "skills/ux/references/motion.md",
+      "skills/ux/references/states.md",
+      "test/visualizer-skill-docs.test.mjs"
+    ],
+    "validation_lane": "node --test test/visualizer-skill-docs.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1458-viz-skills-remeasure/b1458-viz-skills-remeasure/task/gate.mjs"
+  }
+}

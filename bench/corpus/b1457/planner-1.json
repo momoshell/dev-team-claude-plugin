@@ -1,0 +1,74 @@
+{
+  "role": "planner",
+  "id": "b1457-docs-manifests-current.planner.1",
+  "status": "done",
+  "summary": "Authored the cited plan, cwd-bound DM1–DM7 gate and seven built-tree mutation declarations; execution stages remain with the loop.",
+  "details": {
+    "subject": "fix(docs): align manifests and docs with lean runtime",
+    "plan_path": "/Users/momoshell/.crew/dt-b1457-docs-manifests-current/b1457-docs-manifests-current/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1457-docs-manifests-current/b1457-docs-manifests-current/task/gate.mjs",
+    "acceptance": ["DM1", "DM2", "DM3", "DM4", "DM5", "DM6", "DM7"],
+    "mutations": [
+      {
+        "check": "DM1",
+        "file": ".claude-plugin/plugin.json",
+        "find": "\"description\": \"Crew: a team runtime",
+        "replace": "\"description\": \"Crew daemon: a team runtime"
+      },
+      {
+        "check": "DM2",
+        "file": "package.json",
+        "find": "\"devDependencies\": {",
+        "replace": "\"devDependencies\": {\n    \"@lean-gate/unused-visualizer\": \"1.0.0\","
+      },
+      {
+        "check": "DM3",
+        "file": "CLAUDE.md",
+        "find": "`lucide-svelte`",
+        "replace": "`lean-gate-missing-icons`"
+      },
+      {
+        "check": "DM4",
+        "file": "docs/adr/README.md",
+        "find": "| 029 | Headless observability and interjection: the pane-parity matrix for piped seats | superseded by ADR-052 |",
+        "replace": "| 029 | Headless observability and interjection: the pane-parity matrix for piped seats | ratified |"
+      },
+      {
+        "check": "DM5",
+        "file": "docs/adr/adr-041-claims-at-plan-accept.md",
+        "find": "**Status:** withdrawn 2026-09-12 by ADR-043",
+        "replace": "**Status:** proposed 2026-09-12 by ADR-043"
+      },
+      {
+        "check": "DM6",
+        "file": "docs/adr/README.md",
+        "find": "code as the authority for invariants (`crew/loop.mjs`)",
+        "replace": "code as the authority for invariants (`crew/deleted-runtime.mjs`)"
+      },
+      {
+        "check": "DM7",
+        "file": "visualizer/README.md",
+        "find": "`/api/prompts/propose`",
+        "replace": "`/api/prompts/propose-retired`"
+      }
+    ],
+    "files_in_scope": [
+      ".claude-plugin/plugin.json",
+      ".claude-plugin/marketplace.json",
+      "package.json",
+      "package-lock.json",
+      "CLAUDE.md",
+      "docs/conventions.md",
+      "docs/adr/README.md",
+      "docs/adr/adr-041-claims-at-plan-accept.md",
+      "visualizer/README.md",
+      "crew/README.md",
+      "test/fixtures/acp/README.md",
+      "docs/decisions-needed.md",
+      "README.md",
+      "test/docs-manifests-current.test.mjs"
+    ],
+    "validation_lane": "node --test test/docs-manifests-current.test.mjs test/version-agreement.test.mjs test/docs-decisions.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1457-docs-manifests-current/b1457-docs-manifests-current/task/gate.mjs"
+  }
+}

@@ -2,19 +2,19 @@
 name: qa-test-writing
 description: >-
   Use when writing a new test, reviewing whether an existing test pins anything,
-  authoring an acceptance gate, deciding what a lane's tripwire tests are,
+  authoring an acceptance gate, identifying affected behavioural and source-grep tests,
   debugging a test that passes when it should not, or judging whether a suite's
   green means anything. Writes and reviews tests for this repo
   against rules it has already paid for: proving a check can fail (vacuity),
   naming the mutation each check kills, building acceptance gates that are red
   at baseline and provably discriminating, pinning vendor stream formats with
-  recorded captures instead of hand-built frames, declaring tripwires when a
+  recorded captures instead of hand-built frames, scoping affected tests when a
   change moves code or changes a detector, and recording an unmeasured value as
   absent rather than zero.
 ---
 
 Every rule here was paid for by a defect that shipped. Each one names its
-exhibit, so you can read what it cost before deciding to skip it.
+exhibit or identifies it as historical, so you can read what it cost before deciding to skip it.
 
 The posture is **measurement-first**: this domain is *this repo*, not a moving
 external API. Do not reason about whether a check discriminates — run the
@@ -29,9 +29,9 @@ can trust.
 | Reviewing an existing check | Neutralise the behaviour; if it stays green, it pins nothing | `references/vacuity.md` |
 | Authoring an acceptance gate | Red at baseline, `errored: 0`, discrimination proved | `references/gates.md` |
 | Testing a reducer over a vendor's stream | Recorded captures, never hand-built frames | `references/captures.md` |
-| Deciding a lane's tripwires | A change that moves code or changes a detector owns what it newly flags | `references/tripwires.md` |
+| Identifying affected tests | A change that moves code or changes a detector owns what it newly flags | `references/tripwires.md` |
 | Parsing a suite summary in a script | Strip ANSI; `FORCE_COLOR=0` | `references/tooling.md` |
-| Asserting on a value nobody measured | Absent with a reason, never zero | `references/absence.md` |
+| Asserting on a value nobody measured | Absent, never zero; retain a reason where available | `references/absence.md` |
 | Writing a test for a malformed or hostile input | If you cannot express the malformed input, you have not tested the guard | `references/affordances.md` |
 | Citing a file from prose or from a comment | Cite a path or a symbol, never a line; every cited path must exist | `references/citations.md` |
 | Pinning a universal claim about a pure function (a tokenizer, classifier, normaliser) | Generate the inputs from every production of the grammar the claim is about — `forAll` in `test/helpers.mjs`, seeded, the failing input printed — with an oracle the generator carries itself, never one rediscovered from the serialized input; keep one example test for the shape | this table |
@@ -44,16 +44,15 @@ irreducible ones; the references carry the exhibits and the failure modes.
 - **Never keep a check you have not watched fail.** Delete the behaviour it
   names, run it, see red, restore. A measured sweep of 12 checks in this repo
   found **9 that passed with the behaviour removed** — 75% vacuity, including
-  the builder's `deny: NO_FANOUT` fan-out boundary and the `guardedKill` seam
-  (#476). Both are real boundaries that could have been deleted with a green
-  suite.
+  historical security boundaries (#476; no live exhibit).
 
 - **Never derive the expected value from the implementation.** A check that
   compares the implementation to itself cannot fail. Exhibit: a check compared
-  `MODIFIER_KINDS` to `MODIFIER_KINDS`, and another looped over exactly the keys
+  a vocabulary to itself, and another looped over exactly the keys
   the implementation produced — both green after the behaviour was removed
   (#476 V7, V8). The expected value comes from somewhere the implementation
-  cannot edit: a literal in the test, a fixture, a captured file.
+  cannot edit: a literal in the test, a fixture, a captured file. For a live
+  vocabulary, see `CHECK_REASONS` in `crew/checks.mjs` and `crew/checks.test.mjs`.
 
 - **Never assert over input that cannot reach the subject.** A stronger
   assertion over unreachable input is still vacuous. Exhibits: a sort was pinned
@@ -62,7 +61,7 @@ irreducible ones; the references carry the exhibits and the failure modes.
   **fixture** is what changes, not the assertion.
 
 - **Never let a detector's key be the only thing that catches drift.** A literal
-  key like `openRun(` is blind to an alias, an indirect caller, a block comment,
+  key for a particular function spelling is blind to an alias, an indirect caller, a block comment,
   a JSDoc body, or a template literal — all four were measured (#476 V5, and the
   same tripwire was hit independently by three separate scouts). If a detector is
   the guard, something must pin the detector.
@@ -78,8 +77,8 @@ irreducible ones; the references carry the exhibits and the failure modes.
   calibrates every cost number (#493, fixed in PR #496). Hand-built fixtures
   encode what you *believe* the format is; that belief is the thing under test.
 
-- **Never report a value nobody measured as a zero.** Absent is `null` plus the
-  reason it is absent. A zero is a measurement. This distinction is load-bearing
+- **Never report a value nobody measured as a zero.** Record absence explicitly (for example `null`); retain a
+  reason where the contract provides one. A zero is a measurement. This distinction is load-bearing
   across usage and cost records, and it is pinned in both directions
   wherever it appears.
 
@@ -102,12 +101,12 @@ something, because the first one is trusted.
 
 ## Key references
 
-- `references/vacuity.md` — the three shapes of vacuity, with all nine exhibits
+- `references/vacuity.md` — the three shapes of vacuity, with historical examples
   and the mutation method (a disposable scratch tree, never the checkout)
 - `references/gates.md` — acceptance gates: baseline-red, `errored: 0`,
   discrimination, and why the loop proves it rather than the brief
 - `references/captures.md` — recording and using vendor stream captures
-- `references/tripwires.md` — declaring tripwires in `files_in_scope`; detectors and
+- `references/tripwires.md` — scoping affected tests and files; detectors and
   what they newly flag
 - `references/tooling.md` — running the suite, ANSI, scratch trees, timeouts
 - `references/absence.md` — absent vs zero, and pinning it

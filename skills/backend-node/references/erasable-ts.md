@@ -1,56 +1,17 @@
 # TypeScript that both loaders can erase
 
-Read the record first: docs/conventions.md:57 owns this decision; this file owns the checklist.
+Read `docs/conventions.md` for the decision. Keep `crew/pi/extensions/subagent.ts`
+erasable-syntax-only: its source header permits annotations, `interface`,
+`type`, `as`, and `satisfies`, but rejects `enum`, `namespace`, and parameter
+properties. jiti loads the extension directly without a build; Node's unflagged
+TypeScript stripping must also load it. Unsupported runtime syntax causes
+`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` (see the conventions).
 
-Keep `crew/pi/extensions/subagent.ts` erasable-syntax-only.
-Exhibit: `crew/pi/extensions/subagent.ts:5-9`.
-
-The header permits annotations, `interface`, `type`, `as`, and `satisfies`.
-Exhibit: `crew/pi/extensions/subagent.ts:5-9`.
-
-The header rejects `enum`, `namespace`, and `parameter properties`.
-Exhibit: `crew/pi/extensions/subagent.ts:5-9`.
-
-jiti loads the extension directly, with no project build step in between.
-Exhibit: `crew/pi/extensions/subagent.ts:5`.
-
-Node's unflagged TypeScript stripping is the other loader to satisfy.
-Exhibit: `crew/pi/extensions/subagent.ts:5-9`.
-
-The local extension test greps for `enum`.
-Exhibit: `crew/pi/extensions/subagent.test.mjs:182`.
-
-It also greps for `namespace`.
-Exhibit: `crew/pi/extensions/subagent.test.mjs:183`.
-
-That grep has a declared gap: `parameter properties` are not searched.
-Exhibit: `crew/pi/extensions/subagent.test.mjs:182`.
-
-Decorators have the same unsearched status; the import test catches failures
-only when loading the module.
-Exhibit: `crew/pi/extensions/subagent.test.mjs:8`.
-
-Node reports unsupported runtime syntax as `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`.
-Exhibit: `docs/conventions.md:57`.
-
-Do not add a construct merely because jiti accepts it in one path.
-Exhibit: `crew/pi/extensions/subagent.ts:5-9`.
-
-Do not claim the grep covers parameter properties or decorators; the gap is
-part of this register's honest checklist.
-Exhibit: `crew/pi/extensions/subagent.test.mjs:182` and `:178`.
-
-An interrupted import is not a passing syntax check, and an empty source is not
-proof that a construct is absent.
-Status: these interrupted and empty-source edges are unbacked in this checkout;
-see `evidence.md`.
-
-Review the first fourteen lines when changing the header or loader assumptions.
-Exhibit: `crew/pi/extensions/subagent.ts:5-9`.
-
-The cost of a forbidden construct is a startup failure before the extension can
-serve a request.
-Exhibit: `crew/pi/extensions/subagent.ts:5-9`.
-
-When the gap closes, update both this checklist and its co-located test.
-Exhibit: `crew/pi/extensions/subagent.test.mjs:182` and `:178`.
+The `the module is zero-dep, erasable, and carries the vendored MIT notice` test
+in `crew/pi/extensions/subagent.test.mjs` greps for enum and namespace, but not
+parameter properties or decorators. The module import catches unsupported syntax
+only when it executes; interrupted imports and empty-source edges remain unbacked
+(see `evidence.md`). Do not claim the grep covers those gaps or add syntax just
+because jiti accepts it. Review the source header when loader assumptions change;
+a forbidden construct can prevent startup. Update this checklist and its test
+when the gap closes.

@@ -58,7 +58,7 @@ A failing check must print `FAIL <label>` ending the line, or `FAIL <label>: <wh
   status (`grep`) makes the check error exactly when the criterion is
   satisfied, because `execFileSync` throws on a non-zero exit. `errored` and
   `failed` are different columns in `GATE-SUMMARY`: an errored check is not a
-  failed check, and the loop refuses a baseline with either one non-zero
+  failed check, and the loop requires failed checks and refuses a baseline with errors
   (#581, PR #577).
 
 An absence check MUST be demonstrated red by ADDING the thing it forbids, not merely observed red at baseline.
@@ -103,9 +103,4 @@ restore   → the tree is back
 "The suite went red" is not a discrimination proof if you cannot say *which*
 check reddened and that it was the one naming that mutation.
 
-## Where the gate's author is outside the crew
-
-In the `directed` variant the orchestrator authors the gate, so a defective gate
-**escalates** rather than being repaired by a seat that never wrote it. That is
-deliberate: a seat repairing someone else's acceptance criteria is a seat
-editing the definition of done.
+The planner authors the gate in every variant.

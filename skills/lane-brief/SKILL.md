@@ -60,8 +60,7 @@ Field rules (the validator refuses anything else):
   brief's bound-issue header, and the merged PR closes it. The body carries no `#N` at all; write "issue 1961" or "PR 1968".
 - `tier`: `mechanical`, `build` or `judge`. Use `judge` when the change touches the loop's own enforcement
   (`crew/loop.mjs`, `crew/checks.mjs`, `crew/acp/grants.mjs`, `hooks/`) or the decision records under `docs/adr/`.
-- `shape`: `standard`, or `stepped` for a build that must land in ordered steps. `finish` is not started
-  from a brief.
+- `shape`: `standard` only. `stepped` and `finish` are not started from a brief.
 - `acceptance`: the gate ids, in the order the `## Acceptance` items list them. Each item opens with its id
   in parentheses. One outcome per id (no "and"), each red on main and satisfiable, each checkable by a
   top-level `test(...)`. Do not put `(a)` or `(1)` sub-lists inside an item; the validator reads them as ids.

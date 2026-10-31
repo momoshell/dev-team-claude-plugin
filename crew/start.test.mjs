@@ -427,13 +427,17 @@ test('every turn gets its role definition, the complete brief and P2, and its ow
     const source = join(AGENTS, `${role}.md`)
     const { body, fields } = parseAgent(readFileSync(source, 'utf8'))
     const cell = seats[role]
-    assert.deepEqual(request.definition, { role, agent: cell.agent, model: `${cell.provider}/${cell.id}`, effort: cell.effort, writes: { ...fields, ...fields.tiers?.build }.writes, skills: [], requires: [], tools: { ...fields, ...fields.tiers?.build }.tools, extensions: { ...fields, ...fields.tiers?.build }.extensions, advisor: { ...fields, ...fields.tiers?.build }.advisor, edit_assist: { ...fields, ...fields.tiers?.build }.edit_assist, codemode: { ...fields, ...fields.tiers?.build }.codemode, wait_s: { ...fields, ...fields.tiers?.build }.wait_s, body })
+    assert.deepEqual(request.definition, { role, agent: cell.agent, model: `${cell.provider}/${cell.id}`, effort: cell.effort, writes: { ...fields, ...fields.tiers?.build }.writes, skills: fields.skills ?? [], requires: [], tools: { ...fields, ...fields.tiers?.build }.tools, extensions: { ...fields, ...fields.tiers?.build }.extensions, advisor: { ...fields, ...fields.tiers?.build }.advisor, edit_assist: { ...fields, ...fields.tiers?.build }.edit_assist, codemode: { ...fields, ...fields.tiers?.build }.codemode, wait_s: { ...fields, ...fields.tiers?.build }.wait_s, body })
     assert.equal(request.taskDir, f.spec.taskDir)
     assert.equal(request.cwd, f.spec.cwd)
     assert.notEqual(f.spec.taskDir, request.cwd)
     assert.equal(request.sessionFile, f.sessionOf(role, index + 1))
     for (const wanted of [body, BRIEF, `Envelope id: ${id}`, `Return path: ${returnPath}`, `Task directory: ${f.spec.taskDir}`, `Definition source: ${source}`, 'no submit_envelope', `"role": "${role}"`, `"id": "${id}"`]) {
       assert.ok(request.prompt.includes(wanted), `${id}: ${wanted}`)
+    }
+    if (role === 'builder' || role === 'reviewer') {
+      assert.deepEqual(request.definition.skills, ['code-less'], id)
+      assert.match(request.prompt, /Read the granted `code-less` skill before (working|reviewing)/, id)
     }
     assert.doesNotMatch(request.prompt, /^Charter file/m, id)
     assert.doesNotMatch(request.prompt, /\]\([^)]*roles\//, id)

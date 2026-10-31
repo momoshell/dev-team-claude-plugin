@@ -31,11 +31,12 @@ Upstream NOTICE, the applicable part:
 
 ## ponytail (MIT)
 
-`skills/code-less/SKILL.md` and the ladder in `crew/roles/_shared.md` derive
-from ponytail by Dietrich Gebert, https://github.com/DietrichGebert/ponytail at
-revision `e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156`, rewritten for this repository's seats, doctrine and marker
-name. The `crew/roles/_shared.md` site carries no marker because the file is
-compiled into every role prompt at a fixed byte budget. Licence copy:
+The ladder, examples and preservation rule in `skills/code-less/SKILL.md` and
+the whole-change rule in `crew/agents/builder.md` derive from ponytail by Dietrich
+Gebert, https://github.com/DietrichGebert/ponytail at revisions
+`e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156` and `01cbf81`, rewritten for this
+repository's seats, doctrine and marker name. Copyright (c) 2026 Dietrich Gebert
+(spelled DietrichGebert in the licence). Licence copy:
 `docs/licenses/ponytail-MIT.txt`. The notice, as the MIT
 licence requires it to travel with the work:
 

@@ -1,0 +1,38 @@
+# Task
+
+---
+source: operator request (arm parity, option 1, 2026-10-30)
+closes: null
+tier: build
+shape: standard
+acceptance: [SR1, SR2, SR3, SR4, SR5]
+out_of_scope: the pi extensions, the Read tool mapping, PR 2074's single-read parser, builderloop, reminders and the advisor
+---
+## The ask
+
+readgate and skeletonread act fully on the claude Read tool, but claude seats read files through Bash.
+Measured 2026-10-30 over 333 claude replay sessions: 1025 of 1891 Bash commands read a file. Of those, 828 are
+chains that mix reads with other commands, 151 are chains of reads only, and 45 are single reads. The seat also
+prefixes most commands with `cd <tree>; `. PR 2074 parses only a lone single-file read, so it reaches about 2–4% of
+them, and a smoke replay with both arms produced no arm rows. The operator chose to steer the seat to the Read tool
+rather than parse shell.
+
+Invariant: on a claude seat granted readgate or skeletonread, a Bash command with any segment that prints a file's
+contents (`cat`, `head`, `tail`, `sed -n`, `nl` with a file operand, after an optional `cd <dir>` prefix) is refused
+before it runs, with a reason telling the seat to use the Read tool (with offset and limit for a range). Commands with no
+such segment are unchanged. That includes a filter reading a pipe and a `cat >` heredoc that writes a file. Seats with
+neither arm are unchanged.
+
+## Context
+
+- `crew/adapters/claude-arms.mjs`: the PreToolUse path, `bashRead` from PR 2074, and how a deny is returned.
+- `crew/pi/extensions/readgate.ts`: the existing refusal wording for direct cat and search, to stay consistent.
+- `crew/adapters/claude-arms.test.mjs`: the Bash literal-read test from PR 2074 and its `denial` helper.
+
+## Acceptance
+
+- (SR1) on a claude builder granted readgate, Bash `cd T; sed -n 95,125p crew/loop.mjs` is refused with a reason naming the Read tool
+- (SR2) on a claude builder granted readgate, Bash `cat task/plan.md; ls task` is refused with a reason naming the Read tool
+- (SR3) on a claude builder granted readgate, Bash `node ../task/gate.mjs 2>&1 | tail -20` is not refused
+- (SR4) on a claude builder granted readgate, a Bash `cat > task/builder-2.json` heredoc write is not refused
+- (SR5) on a claude builder granted neither readgate nor skeletonread, Bash `cd T; sed -n 95,125p crew/loop.mjs` is not refused

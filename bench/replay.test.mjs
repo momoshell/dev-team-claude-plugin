@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -10,6 +11,83 @@ import { runBuilder } from './replay-builder.mjs'
 import { runPlanner } from './replay-planner.mjs'
 
 const LANES = { b1380: '1d282ec7', b1381: '1d282ec7', b1402: '2966b484', b1408: 'fbc9ad2a', b1416: 'abe2d073', b1417: 'abe2d073', b1457: '0d08adff4f5ccc8c2f0b94327b4a9e47ed5ff598', b1458: '0d08adff4f5ccc8c2f0b94327b4a9e47ed5ff598', b1459: '0d08adff4f5ccc8c2f0b94327b4a9e47ed5ff598' }
+const NEW_LANES = { b1440: 'b1440-acp-client-error-message', b1441: 'b1441-pi-provider-failure-kind', b1442: 'b1442-finish-insufficient-build', b1444: 'b1444-claude-reads-use-read-tool', b1448: 'b1448-lean-memory-injection', b1450: 'b1450-start-log-never-throws', b1451: 'b1451-pi-websocket-error-retry', b1454: 'b1454-waterfall-polish' }
+Object.assign(LANES, { b1440: 'b593d34d0ac93f85854ba38ecfd31e6e613980ac', b1441: '88f70c51c78ebd1931728bb7ded08727b34cff3c', b1442: '88f70c51c78ebd1931728bb7ded08727b34cff3c', b1444: '1d2fc7cdd8864e24e9d0b714641597d74b901660', b1448: 'ccac8537ad7f0231a181e47e5e81828648d2a4b7', b1450: '0634116878372be6e56ce51bf752c305d34adf2c', b1451: '0634116878372be6e56ce51bf752c305d34adf2c', b1454: '4fbffc0c4b1695ec131167ecec0ef63792e6b4b1' })
+// SHA256 of the seven inputs, computed from the archives at freeze time.
+const ARCHIVE_HASHES = {
+  "b1440": {
+    "plan.md": "60ddd14b29f5204f3783e806460d9f4f763cfe028e9bcafd402e37742ecb5181",
+    "gate.mjs": "90dbd1d619c812de3d3a8fde0af7b7a2f0394b19bc13e6f9f3d63ef5f3de7838",
+    "planner-1.json": "45c59a2499f70cde459e44f796a284561109ccc170fac28364789636aaf78ad0",
+    "lean.json": "425e9fafd545020eedf0e774516a062a40e895f54d906cd7f6529ce01658b5e1",
+    "brief.md": "573b1b42688e6bdeb8440587eebe6d4a16f14767fc40670a14f798de731e54c4",
+    "planner-prompt.txt": "33ce3e3b6e054ea8f992502ab6dfa57042c266cf8ca53758f13147a7ca92940e",
+    "builder-prompt.txt": "d572b570f43827e478d50f305cfad348cacfffa7fa372bc725ea76cd29f5cbbb"
+  },
+  "b1441": {
+    "plan.md": "b78cb4494a52e60dc007478cfc36fd453973a2f40581582258f062b1ca9afe1a",
+    "gate.mjs": "a03dd87ae13e835793f2111d288276db846a1a27f69fae90ddff4d13be9892b8",
+    "planner-1.json": "e431e8e5d2b888c81e599281cc02f7f4b14a46c74a7b23b1981ffc460229d6fd",
+    "lean.json": "a90743f9a003f206702ad5f7f7c168fbf011c5740be759cb78a3f0f6b0092c46",
+    "brief.md": "48fb5d23a4d2da5bfb535a27d330133bc8b77331bc90bb0fc66d8e58fabf8066",
+    "planner-prompt.txt": "5329cbd57d9e30f453ff9b14d3861fa0d5ab909ddd5df7736e6e5145c615d608",
+    "builder-prompt.txt": "0505595a69c1531ab752178c478f2cdacda7c60d2baadf203f7ef7df2b7f4346"
+  },
+  "b1442": {
+    "plan.md": "c91808233ac7ed79ed76f933b646e3381c9408ced206c3025eb6157c66c0f1d1",
+    "gate.mjs": "a118eedb463f06b29992cada8287d72fea27d5211a9fc68bdceb90f5b010207c",
+    "planner-1.json": "4c808955c51267efca3dd1c597f53b3612c400181ba2d37c12adc0798435ca9b",
+    "lean.json": "19d1f04c2b0334ab9cbcbf91a5dd3aa05042fcd6a02b0e220c96680736d2c7ec",
+    "brief.md": "26665bc6d7dc8f9a74595c8e3752c898acf7ebd73ca09f67da8c546939eedc13",
+    "planner-prompt.txt": "254d1424200244e73aae26e6cbbe73dd749f49522221417a0ef0947c77ad316f",
+    "builder-prompt.txt": "a48ee4a79f380ec687b9ad3bff76d735bc0b88ef00e9da66586b9307a563cbaf"
+  },
+  "b1444": {
+    "plan.md": "ff48fb278b8706eb03badf54a68f34660a8835800f8d3bf4909c56b91f66c5eb",
+    "gate.mjs": "76dab367f73efd933b9bf8cf8ac461b341b23f9b1cfd9b792567a25ef1e2cf0e",
+    "planner-1.json": "380473ce87e6e93ef8530895df76fd3e68a9c475505f44f6f2d22a7cf5ca3fd8",
+    "lean.json": "100d55699b1c4ba801c2c90725df5dc649815bd00330401ad440abcf2660a59e",
+    "brief.md": "d2be062bc402838ca8a42860e7f3163fb968e95cda3f5c3e7b34388e2b83f952",
+    "planner-prompt.txt": "5e4cea999e8c396d24790daba8508ddd6cf8b18a35cd2ae4db743980c9c965a6",
+    "builder-prompt.txt": "7d7ecb34cf5b671b90fc438ea73b53901720147e6d8831bdcfd1137b263519e0"
+  },
+  "b1448": {
+    "plan.md": "87e51f2121ab3d9b102596864ef5ef9418e55bcbd821519ee5474f6c5576bc98",
+    "gate.mjs": "f4f6f3d6e2daf55ef6373b1958d3020bb1f35f4f73ef97f60ccea000d15f7ce1",
+    "planner-1.json": "2ef3c22876aa4d3f4774a0118f02ec2771dd2c6093792aa83fb696d1db54ac5b",
+    "lean.json": "75d40e3ecd7904474c9357f189a58ebfa8123935a4c061f36541058113f1636e",
+    "brief.md": "fca6904e9901bab114823e301e52d3c9b116c9a0a4153402ff7ccf2d38d06be2",
+    "planner-prompt.txt": "ed0f4cdda373822dd34eb4910ca046cd4ee04c026e3b5c321d243be813dd299d",
+    "builder-prompt.txt": "a7e43980e5e64f70e1e59f9d7a07e760fc60f6c20daf2b424a4cba1d691ff9be"
+  },
+  "b1450": {
+    "plan.md": "a7ba6c58c09f10116b4f657118b3893b6e12f7b09fbbbc0d9fc1df97dcb728dc",
+    "gate.mjs": "fe8421e948e4d3f2b92590dc1c54ade882c76b636a603e76dd49343464adc7e5",
+    "planner-1.json": "b15300c56d58ecdec205cc6d6f8eaaa184e3bb0d207712c8b0679e23241d3f45",
+    "lean.json": "7697bfc3c9936d89d13bb2cb0c7e9e9c5f0be026cf65bce2432670bed060a6d0",
+    "brief.md": "d1793087c88a40c8335cc19781a5eb7f462d62d847294afedb224dfd4728a584",
+    "planner-prompt.txt": "39d18effe36d77b01a5f9de6d31dd654c673456f028095d240ef337afb828a07",
+    "builder-prompt.txt": "d3afbf849f1e934fbb27d7ad576d6a63742ebba27ad07b47dd656d3258212f23"
+  },
+  "b1451": {
+    "plan.md": "8e98650be2a6c6c6d644fc1dab60d7af8b0f183b71068a1e56755fc41250c5d0",
+    "gate.mjs": "47e30992de0db42001aae4ee45388105ec4dd177c4f3e5f3c9625620211026b1",
+    "planner-1.json": "6acef31064c0ff0727560f5e28efcea13e098d41fe5f2b9101acf2deec73fc8b",
+    "lean.json": "845b57991cc65e266a1348054af6839825a6addf9cec0e90c3f68c8d498458dd",
+    "brief.md": "00fa1609bbec2566e7980541a1f08ccd8b7069ac844f0d9482df50eae2416166",
+    "planner-prompt.txt": "9d92d20e07b09ecaec43dcb634894d361ec0e53ab5e98050e6362a62fada9e71",
+    "builder-prompt.txt": "553fcb38c4cb5f023b4729d646cee44b648a0a463c69612ad49e7d12b4ab2192"
+  },
+  "b1454": {
+    "plan.md": "ec715514e4c253c6766cc90695643eb6e2ac37f06b910c144816a99336f2a03d",
+    "gate.mjs": "fa762a5d45ca864f4fad81c3318c2b572462be6250f6e326731121f9e4093c86",
+    "planner-1.json": "3f2c8b0e3881d3aca5a44330a2b5d52562ff52b9ee90711dfd3227e30d448bb7",
+    "lean.json": "f5b991e2f09aa9a605f94686d24ee6b0ed5215206b9b01184c9cdd1652614700",
+    "brief.md": "6c7d40e8cb23232a0a73504617d7f8c9f83a86cc9f228a5e25b63e37c56f5c76",
+    "planner-prompt.txt": "acd9031a939a232527f7c35dda4ad25c7a21d1f5e1233d30c4af0dbf04068113",
+    "builder-prompt.txt": "545220767931ce60d37749e85eb41715bb49c96d1205d85b5507d9a5b4691175"
+  }
+}
 const CELL = { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' }
 const json = (p) => JSON.parse(readFileSync(p, 'utf8'))
 const scratch = mkdtempSync(join(tmpdir(), 'seat-bench-test-'))
@@ -18,7 +96,7 @@ let n = 0
 const fresh = (label = 'run') => join(scratch, `${label}-${n++}`)
 const sh = (cwd, ...args) => { const r = spawnSync('git', args, { cwd, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim() }
 
-test('the corpus carries every replay input for the nine lanes', () => {
+test('the corpus carries every replay input for the seventeen lanes', () => {
   for (const [lane, base] of Object.entries(LANES)) {
     const dir = join(CORPUS_DIR, lane)
     for (const name of ['plan.md', 'gate.mjs', 'planner-1.json', 'lean.json', 'brief.md', 'planner-prompt.txt', 'builder-prompt.txt', 'manifest.json']) {
@@ -31,7 +109,7 @@ test('the corpus carries every replay input for the nine lanes', () => {
     assert.equal(manifest.base, base)
     assert.equal(manifest.originalTask, lean.taskDir)
     assert.equal(manifest.originalTree, lean.cwd)
-    if (['b1457', 'b1458', 'b1459'].includes(lane)) {
+    if (['b1457', 'b1458', 'b1459', ...Object.keys(NEW_LANES)].includes(lane)) {
       assert.equal(readFileSync(join(dir, 'brief.md'), 'utf8'), lean.brief)
       assert(manifest.source.includes(`dt-${lane}-`))
       assert.equal(manifest.id, lean.id)
@@ -42,6 +120,50 @@ test('the corpus carries every replay input for the nine lanes', () => {
       assert(prompt.includes(manifest.originalTask))
       assert(/Return path: .*(planner|builder)-\d+\.json/.test(prompt))
     }
+  }
+})
+
+// MUTATION: CL1 corrupts b1440 manifest lane.
+test('CL1 archived code lanes retain their exact inputs and provenance', () => {
+  for (const [lane, id] of Object.entries(NEW_LANES)) {
+    const dir = join(CORPUS_DIR, lane)
+    const lean = json(join(dir, 'lean.json'))
+    assert.deepEqual(json(join(dir, 'manifest.json')), {
+      lane, id, base: LANES[lane], originalTask: lean.taskDir, originalTree: lean.cwd,
+      source: `/Users/momoshell/.crew-journal-archive/dt-${id}/${id}/task`,
+    })
+    for (const [name, expected] of Object.entries(ARCHIVE_HASHES[lane])) {
+      assert.equal(createHash('sha256').update(readFileSync(join(dir, name))).digest('hex'), expected, `${lane}/${name}`)
+    }
+  }
+})
+
+// MUTATION: CL2 changes b1440 planner Task directory citation.
+test('CL2 archived code lanes prepare planner replays', async () => {
+  for (const lane of Object.keys(NEW_LANES)) {
+    const fx = fixture(lane)
+    const dir = join(fx.corpusDir, lane)
+    cpSync(join(CORPUS_DIR, lane), dir, { recursive: true })
+    const manifestPath = join(dir, 'manifest.json')
+    const manifest = json(manifestPath)
+    writeFileSync(manifestPath, JSON.stringify({ ...manifest, base: fx.base }))
+    const out = fresh()
+    let seen = false
+    const result = await runPlanner({ lane, cell: CELL, arms: [], out }, { ...fx.deps, runAcpSeat(call) {
+      seen = true
+      assert(call.prompt.includes(`Task directory: ${join(out, 'task')}`))
+      assert(call.prompt.includes(`Return path: ${join(out, 'task', 'planner-1.json')}`))
+      assert(!call.prompt.includes(manifest.originalTask))
+      assert(!call.prompt.includes(manifest.originalTree))
+      writeFileSync(join(call.taskDir, 'plan.md'), '# plan\n')
+      writeFileSync(join(call.taskDir, 'gate.mjs'), 'x\n')
+      writeFileSync(join(call.taskDir, 'planner-1.json'), JSON.stringify({ status: 'done', summary: 'planned', details: {} }))
+      return { stopReason: 'end_turn' }
+    }, runGate: async () => ({ status: 'red', failingIds: [] }) })
+    assert(seen)
+    assert.equal(result.error, null)
+    assert(!existsSync(join(out, 'tree')))
+    assert.equal(worktrees(fx.repo), 1)
   }
 })
 

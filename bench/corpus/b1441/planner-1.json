@@ -1,0 +1,40 @@
+{
+  "role": "planner",
+  "id": "b1441-pi-provider-failure-kind.planner.1",
+  "status": "done",
+  "summary": "Prepared a narrow pi failure-classification plan, cwd-based acceptance gate, and three kill mutations; execution is left to the loop.",
+  "details": {
+    "subject": "fix(crew): classify measured pi provider failures",
+    "plan_path": "/Users/momoshell/.crew/dt-b1441-pi-provider-failure-kind/b1441-pi-provider-failure-kind/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1441-pi-provider-failure-kind/b1441-pi-provider-failure-kind/task/gate.mjs",
+    "acceptance": ["PK1", "PK2", "PK3"],
+    "mutations": [
+      {
+        "check": "PK1",
+        "file": "crew/acp/provider.mjs",
+        "find": "Codex error: Our servers are currently overloaded. Please try again later.",
+        "replace": "Codex error: MUTATED overload recognition."
+      },
+      {
+        "check": "PK2",
+        "file": "crew/acp/provider.mjs",
+        "find": "Codex error: The usage limit has been reached",
+        "replace": "Codex error: MUTATED usage recognition"
+      },
+      {
+        "check": "PK3",
+        "file": "crew/acp/provider.mjs",
+        "find": "export function acpProviderFailureKind(errorKind, errorMessage) {",
+        "replace": "export function acpProviderFailureKind(errorKind, errorMessage) {\n  if (errorKind === 'pi-agent-error' && errorMessage === 'WebSocket error') return PROVIDER_FAILURE_KINDS.SERVER_ERROR"
+      }
+    ],
+    "files_in_scope": [
+      "crew/acp/provider.mjs",
+      "crew/lean.mjs",
+      "crew/acp/provider.test.mjs",
+      "crew/start.test.mjs"
+    ],
+    "validation_lane": "node --test crew/acp/provider.test.mjs crew/start.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1441-pi-provider-failure-kind/b1441-pi-provider-failure-kind/task/gate.mjs"
+  }
+}

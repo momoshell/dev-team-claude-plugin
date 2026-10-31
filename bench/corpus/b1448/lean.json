@@ -1,0 +1,24 @@
+{
+  "id": "b1448-lean-memory-injection",
+  "cwd": "/Users/momoshell/Dev/dt-b1448-lean-memory-injection",
+  "taskDir": "/Users/momoshell/.crew/dt-b1448-lean-memory-injection/b1448-lean-memory-injection/task",
+  "tier": "build",
+  "shape": "standard",
+  "brief": "# Task\n\n---\nsource: operator request (memory arm check, 2026-10-31)\ncloses: null\ntier: build\nshape: standard\nacceptance: [LM1, LM2, LM3]\nout_of_scope: the memory backend and its verbs, memory proposals from seats, the store's content and the bench\n---\n## The ask\n\nThe lean runtime refuses a seat whose effective definition declares `memory: true` (`grant-unsupported`), so the\nmemory arm cannot be measured. The old runtime injected team memory for planner and lead seats:\n`openMemory({ dir }).context({ task, role })`, rendered with `renderSection`. Invariant: a lean seat whose effective\ndefinition declares `memory: true` boots with the rendered team-memory section in its assignment prompt. The section\ncomes from the lane checkout's `.claude/dev-team/memory`, or from `CREW_MEMORY_DIR` when that is set. When no\nsection can be rendered (no dir, no index, empty), the seat still boots without one, and the lane journal records\nwhy. A seat that does not declare memory is unchanged.\n\n## Context\n\n- `crew/lean.mjs`: the `memory: true` refusal and where the seat prompt is built.\n- `crew/memory.mjs`: `openMemory`, `renderSection`; `crew/memory-md.mjs` `context` returns `reason` when empty.\n- `crew/start.test.mjs`: the two memory refusal tests from commit 7060ccca, which this change replaces.\n\n## Acceptance\n\n- (LM1) a lean planner declaring `memory: true` with a store holding `MEMORY.md` and one linked entry gets a prompt containing `## Team memory` and the entry text\n- (LM2) a lean planner declaring `memory: true` with no store boots, its prompt has no team-memory section, and the lane journal records the empty reason\n- (LM3) a lean planner not declaring memory gets no team-memory section even when a store exists\n",
+  "acceptance": [
+    "LM1",
+    "LM2",
+    "LM3"
+  ],
+  "source": "operator request (memory arm check, 2026-10-31)",
+  "branch": "b1448-lean-memory-injection",
+  "base": "main",
+  "closes": [],
+  "suite": {
+    "command": "npm",
+    "args": [
+      "test"
+    ],
+    "timeoutMs": 1800000
+  }
+}

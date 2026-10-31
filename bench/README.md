@@ -5,11 +5,14 @@ builder or planner turn at the lane's base commit with a seat you name; a blind 
 the results without knowing which seat made which. Nothing here records results: output dirs are
 yours, outside the repo. What past runs decided is under "Results so far" below.
 
-- `corpus/<lane>/` — frozen inputs for nine lanes (b1380, b1381, b1402, b1408, b1416, b1417, b1457, b1458, b1459):
+- `corpus/<lane>/` — frozen inputs for seventeen lanes: fourteen code lanes (b1380, b1381,
+  b1402, b1408, b1416, b1417, b1440, b1441, b1442, b1444, b1448, b1450, b1451, b1454),
+  plus b1457, b1458 and b1459:
   `plan.md`, `gate.mjs`, `planner-1.json`, `lean.json`, `brief.md`, `planner-prompt.txt`,
   `builder-prompt.txt` (the first recorded prompts, verbatim) and `manifest.json`
   (`base` commit, and the `originalTask` / `originalTree` paths the prompts cite; the replays
-  rewrite those to the run's own dirs). The replays only read it. The b1457 docs/manifests,
+  rewrite those to the run's own dirs). The replays only read it. The eight new code lanes
+  (b1440–b1454 as listed above), the b1457 docs/manifests,
   b1458 visualizer skills, and b1459 skills exhibits lanes are frozen from their
   `~/.crew-journal-archive/dt-<lane>-*/<id>/task` archives. If a first planner prompt is
   unavailable, `plannerPromptMissing` in the manifest gives the reason; planner replay refuses

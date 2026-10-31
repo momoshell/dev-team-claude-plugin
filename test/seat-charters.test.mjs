@@ -46,6 +46,16 @@ test('SC3: planner scope covers all touched files and retrieval', () => {
   has(body('crew/agents/planner.md'), '`files_in_scope` must list every file the build touches, including files to delete; it fences skeleton retrieval as well as edits.')
 })
 
+// MUTATION: say checkout copies contain .git.
+test('GC1: planner gates run in copies without .git', () => {
+  has(body('crew/agents/planner.md'), 'These checkout copies contain no `.git`.')
+})
+
+// MUTATION: require git or a seat tool instead of Node fs from cwd.
+test('GC2: planner gates list and read files with Node fs', () => {
+  has(body('crew/agents/planner.md'), "A gate that lists or reads files must use Node's `fs` from `process.cwd()`, never git or a seat tool such as fff (seat tools are unavailable to gates and CI).")
+})
+
 // MUTATION: remove a ladder rung or restore the obsolete shared-charter reference.
 test('SC4: the delivered skill owns the ladder and its references', () => {
   const skill = read('skills/code-less/SKILL.md')

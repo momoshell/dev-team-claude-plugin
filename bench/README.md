@@ -278,3 +278,22 @@ do (repair turns, the lead) was not replayed. The blind review sees only `plan.m
 return status, so its 9/42 says nothing about usable returns; read a plan bench with its status counts. b1441,
 b1442 and b1444 drew a must-fix in 3 of 3 runs in both arms. Not shipped. Return status in the benches above:
 `qa-test-writing` 42/42 `done`, fff 40/42 (2 `insufficient` on 11-01).
+
+**The lab arm proving the planner's gate, 2026-11-01** (pi sol high with `subagent`, 14 code lanes × 3 per arm,
+`--charter`, one blind plan batch). The trial arm granted `lab` and added one paragraph telling the planner to
+prove its gate in a lab scratch before returning: write it in, run it on the unchanged tree (must fail), apply a
+minimal correct build (must pass), then one plausible wrong build per acceptance id (its check must fail).
+
+| Planner | First return `done` | Baseline red | Blind pass | Tokens | Median wall |
+|---|---|---|---|---|---|
+| main | 42/42 | 42/42 | 14/42 | 10.81M | 131s |
+| main + lab + the paragraph | 42/42 | 42/42 | 5/42 | 31.45M (2.9x) | 320s |
+
+The lab was used in 42 of 42 trial runs, 424 calls in all (counted from session tool-call titles, because ACP
+seats write no lab journal rows). The self-proof passed gates that confirm the planner's own reading of the
+task, so the blind reviewer still found what that reading missed: later turns and retries, and wrong premises
+about current code. Not shipped. Four planner levers have now failed against the same control: the
+`qa-test-writing` grant, fff, the charter paragraph and the lab.
+
+Compare arms only within one batch. The same main-charter planner scored 8/42 in the charter batch and 14/42
+here, on the same 14 lanes and the same cell.

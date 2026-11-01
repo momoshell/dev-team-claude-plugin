@@ -30,6 +30,52 @@ function fixture(t) {
   return { root, dir, manifest, base, head, mutations, put, run }
 }
 
+// MUTATION: RS1 replaces the loaded status with null.
+test('RS1 records valid reviewer return statuses', async (t) => {
+  const fx = fixture(t)
+  for (const status of ['done', 'insufficient', 'escalate']) {
+    const run = status === 'done' ? await fx.run() : await fx.run({}, undefined, { runAcpSeat: async ({ taskDir }) => {
+      writeFileSync(join(taskDir, 'reviewer-2.json'), JSON.stringify({ role: 'reviewer', id: 'test.reviewer.2', status, summary: 'review', details: { verdict: 'pass', findings: [] } }))
+      return { stopReason: 'end' }
+    } })
+    for (const row of [run.result, JSON.parse(readFileSync(join(run.out, 'result.json'), 'utf8'))]) {
+      assert.equal(row.status, status); assert.equal(row.status_reason, null)
+      assert.equal(row.firstReturnStatus, status); assert.equal(row.error, null)
+      assert.equal(row.verdict, status === 'done' ? 'pass' : null)
+      assert.deepEqual(row.findings, status === 'done' ? [] : null)
+    }
+  }
+})
+
+// MUTATION: RS2 replaces the loaded reason with not-run.
+test('RS2 records a missing reviewer return', async (t) => {
+  const fx = fixture(t)
+  const run = await fx.run({}, undefined, { runAcpSeat: async () => ({ stopReason: 'end' }) })
+  for (const row of [run.result, JSON.parse(readFileSync(join(run.out, 'result.json'), 'utf8'))]) {
+    assert.equal(row.status, null); assert.equal(row.status_reason, 'missing-return')
+    assert.equal(row.firstReturnStatus, null); assert.match(row.error, /reviewer-2\.json not written/)
+  }
+})
+
+// MUTATION: RS3 clears the loaded status when validation rejects an envelope.
+test('RS3 retains loaded status for rejected reviewer returns', async (t) => {
+  const fx = fixture(t)
+  fx.put('reviewer-prompt.txt', 'Envelope id: test.reviewer.2\n/old/task/reviewer-2.json /old/tree\n')
+  for (const status of ['done', 'insufficient', 'escalate']) {
+    for (const invalid of [{ id: 'wrong.reviewer.2' }, { extra: true }]) {
+      const run = await fx.run({}, undefined, { runAcpSeat: async ({ taskDir }) => {
+        writeFileSync(join(taskDir, 'reviewer-2.json'), JSON.stringify({ role: 'reviewer', id: 'test.reviewer.2', status, summary: 'review', details: { verdict: 'pass', findings: [] }, ...invalid }))
+        return { stopReason: 'end' }
+      } })
+      for (const row of [run.result, JSON.parse(readFileSync(join(run.out, 'result.json'), 'utf8'))]) {
+        assert.equal(row.status, status); assert.equal(row.status_reason, null)
+        assert.equal(row.firstReturnStatus, null)
+        assert.match(row.error, invalid.extra ? /unknown field extra/ : /id does not match issued id/)
+      }
+    }
+  }
+})
+
 // MUTATION: RR1 checks out the parent instead of the built head.
 test('RR1 replays built snapshot as changes and records a reviewer return', async (t) => {
   const fx = fixture(t)

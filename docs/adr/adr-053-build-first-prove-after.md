@@ -24,7 +24,7 @@ on the unchanged source, passes on the build, and fails under its kill-mutation.
   tokens and scored worse (5/42 against 14/42).
 - **Mutations are declared blind too.** The planner predicts post-build `find` text before the build exists. An
   audit of 95 archived lean lanes (`~/crew-bench/loop-logic-audit-2026-11-01.md`) counts 49 of 653 mutation rows not
-  killed (34 `bind-fail`, 14 survived) and 8 of 95 lanes stopped on a proof defect, not a code defect. When the
+  killed (34 `bind-fail`, 15 survived) and 8 of 95 lanes stopped on `mutation-unmeasured` or `mutations-survived`. When the
   builder re-aimed the mutations it had built against, the next proof was clean in 10 of 10 cases.
 - **The proof is not on what ships.** The kill-mutation proof runs against `gate.mjs`, which is never committed, while
   the PR body reports "Mutations N/N killed". The repository tests that ship get no kill-proof. The baseline only

@@ -243,3 +243,11 @@ The Pi ACP server forwards its existing `tool_execution_end.result` as the stand
 reconstructing it in the visualizer. Permission decisions, grants, retry bounds, turn completion and
 skill-proof rules are unchanged. The developer-tools surface remains read-only and does not replay or
 execute inspected commands. No new protocol or runtime dependency is introduced.
+
+## Amendment 4 (2026-11-01): lean lane-time skill grants
+
+The lean loop forwards accepted planner scope as internal `filesInScope` to builder and reviewer turns,
+including finish passes. The skill map supplements their native grants using that scope and role. Namespaced
+and reference selections grant the whole skill by bare name. These grants do not extend `requires`.
+Section 4's replacement of the skill map does not apply to these lean grants; no new gate or inline
+delivery is added.

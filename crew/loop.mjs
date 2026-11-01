@@ -109,6 +109,7 @@ export async function runLoop(spec, deps = {}) {
   if (isFinish && !(fin && typeof fin === 'object' && [fin.planPath, fin.gatePath, fin.subject].every(text)
     && Array.isArray(fin.mutations) && Array.isArray(fin.findings) && text(fin.stop?.reason)
     && Number.isSafeInteger(fin.turnOffset) && fin.turnOffset >= 0
+    && (fin.filesInScope == null || strings(fin.filesInScope))
     && (fin.guidance === undefined || typeof fin.guidance === 'string')
     && (fin.priorReviewRounds === undefined || (Number.isSafeInteger(fin.priorReviewRounds) && fin.priorReviewRounds >= 0)))) return refusal('invalid-input')
   const d = {
@@ -135,6 +136,7 @@ export async function runLoop(spec, deps = {}) {
   let turn = isFinish ? fin.turnOffset : 0
   let planPath = isFinish ? fin.planPath : null
   let gatePath = isFinish ? fin.gatePath : null
+  let filesInScope = isFinish ? fin.filesInScope ?? null : null
   let changedPaths = []
   let stagePaths = []
 
@@ -205,7 +207,7 @@ export async function runLoop(spec, deps = {}) {
         rounds[role] += 1
         const id = `${spec.id}.${role}.${turn}`
         const returnPath = join(spec.taskDir, `${role}-${turn}.json`)
-        const request = { role, seat: seats[role], id, returnPath, brief: spec.brief, planPath, gatePath, feedback, ...(role === 'reviewer' ? { changedPaths } : {}) }
+        const request = { role, seat: seats[role], id, returnPath, brief: spec.brief, planPath, gatePath, feedback, ...(['builder', 'reviewer'].includes(role) ? { filesInScope: filesInScope === null ? null : [...filesInScope] } : {}), ...(role === 'reviewer' ? { changedPaths } : {}) }
         // One attempt: run the seat, then read the issued path back, parse it and validate it in full.
         const attempt = async (asked) => {
           let failure = null
@@ -289,6 +291,7 @@ export async function runLoop(spec, deps = {}) {
       planPath = resolve(spec.taskDir, planned.envelope.details.plan_path)
       gatePath = resolve(spec.taskDir, planned.envelope.details.gate_path)
       if (acceptance.length !== spec.acceptance.length || !acceptance.every((id) => spec.acceptance.includes(id))) return await stop('envelope-refused', { acceptance })
+      filesInScope = planned.envelope.details.files_in_scope ?? null
     } else {
       // A --return pass counts the reviews the finish run already spent: it never grants new rounds.
       seats.reviewer = { ...seats.reviewer, rounds: FINISH_REVIEW_ROUNDS - (fin.priorReviewRounds ?? 0) }

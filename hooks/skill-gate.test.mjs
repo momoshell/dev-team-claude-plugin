@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { scratchDir } from '../test/helpers.mjs'
-import { matchGlob, loadMap, validateMap } from './skill-gate.mjs'
+import { matchGlob, loadMap, validateMap, resolveSeatSkills } from './skill-gate.mjs'
 
 const SCRIPT = 'hooks/skill-gate.mjs'
 const MANIFEST = 'hooks/hooks.json'
@@ -91,9 +91,29 @@ test('RP3 M1 shipped role packs pin exactly and session start is silent', () => 
     { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.js', 'visualizer/**/*.mjs', 'visualizer/**/*.css'], roles: ['planner', 'builder', 'reviewer'] }, skills: ['dev-team:frontend-svelte'] },
     { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.css'], roles: ['planner', 'builder', 'reviewer'] }, skills: ['dev-team:ui-design', 'dev-team:ux'] },
     { when: { paths: ['docs/**/*.md', 'skills/**/*.md', 'crew/agents/*.md'], roles: ['builder', 'reviewer'] }, delivery: 'grant', skills: ['dev-team:prose-plain'] },
+    { when: { paths: ['**/*.test.*', '**/*.spec.*', '**/tests/**/*.rs', '**/*_test.*'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:qa-test-writing'] },
+    { when: { paths: ['**/*.svelte'], roles: ['planner', 'builder', 'reviewer'] }, skills: ['dev-team:frontend-svelte', 'dev-team:ui-design', 'dev-team:ux'] },
   ] })
   assert.equal(loadMap(ROOT).ok, true)
   assert.equal(result.stdout, '')
+})
+// MUTATION: remove the generic testing paths from the shipped map.
+test('LG3: generic file types select whole skills in any layout', () => {
+  const { map } = loadMap(ROOT)
+  for (const role of ['builder', 'reviewer']) {
+    for (const file of ['a.test.ts', 'pkg/a.test.js', 'nested/a.test.mjs', 'a.spec.js', 'pkg/a.spec.mjs', 'a.spec.ts', 'tests/a.rs', 'crates/x/tests/deep/a.rs', 'a_test.go', 'pkg/a_test.go', 'a_test.rs', 'pkg/a_test.rs']) {
+      const entries = resolveSeatSkills({ map, role, files: [file] }).entries
+      assert.ok(entries.some((entry) => entry.path === 'skills/qa-test-writing/SKILL.md' && entry.selected_by === 'map-path'), file)
+    }
+    for (const file of ['App.svelte', 'ui/components/App.svelte']) {
+      const skills = resolveSeatSkills({ map, role, files: [file] }).skills
+      for (const skill of ['frontend-svelte', 'ui-design', 'ux']) assert.ok(skills.includes(`skills/${skill}/SKILL.md`), file)
+    }
+    for (const file of ['other/a.ts', 'docs/audits/a.test.ts']) {
+      assert.ok(!resolveSeatSkills({ map, role, files: [file] }).skills.includes('skills/qa-test-writing/SKILL.md'), file)
+    }
+  }
+  assert.ok(resolveSeatSkills({ map, role: 'builder', files: ['crew/a.mjs'] }).skills.includes('skills/backend-node/SKILL.md'))
 })
 test('M2', () => {
   const dir = fixture(); writeMap(dir, { ...JSON.parse(readFileSync(join(dir, MAP_PATH))), surprise: true })

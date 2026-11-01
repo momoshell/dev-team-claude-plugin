@@ -90,6 +90,12 @@ test('SC4: the delivered skill owns the ladder and its references', () => {
   assert.doesNotMatch(notice, /_shared\.md|compiled into every role prompt/)
 })
 
+// MUTATION: delete the builder's universal-read instruction.
+test('LG4: builder and reviewer read every lane grant', () => {
+  has(body('crew/agents/builder.md'), 'Read every skill granted for the lane before working.')
+  has(body('crew/agents/reviewer.md'), 'Read every skill granted for the lane before reviewing.')
+})
+
 // MUTATION: remove prose-plain from the builder base skills list.
 test('PP1: lean builder and reviewer deliver their skills through the ACP launch and prompt', () => {
   const dir = mkdtempSync(join(tmpdir(), 'charter-delivery-'))

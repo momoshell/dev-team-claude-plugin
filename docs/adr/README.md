@@ -1,7 +1,7 @@
 # Architecture decision register
 
 Every ADR number this repo has ever minted, ratified or not. **Grep here before
-minting a new one** — the next free number is **053**.
+minting a new one** — the next free number is **054**.
 
 That instruction is the point of the file. ADR numbers are cited from shipped
 code as the authority for invariants (`crew/loop.mjs`), and those citations name *numbers,
@@ -79,6 +79,7 @@ not free.
 | 050 | Seat skills are selected at dispatch, granted lazily, and their loads are measured | ratified 2026-10-16, operator decision | [full document](adr-050-seat-skills-are-granted-not-pasted.md) |
 | 051 | Escalated lanes are finished by a `finish` shape: the builder codes, Sol reviews, the operator decides | ratified 2026-10-16, amended 2026-10-17 (Amendment 1), lane 1 built, operator decision | [full document](adr-051-finish-shape.md) |
 | 052 | Agents do the work; code keeps it correct | ratified 2026-10-24, amended 2026-10-24 (Amendment 1), 2026-10-26 (Amendment 2), operator decision | [full document](adr-052-agents-do-the-work.md) |
+| 053 | Build first, prove after: the builder writes the acceptance tests and the loop proves them | proposed 2026-11-01, operator direction | [full document](adr-053-build-first-prove-after.md) |
 | 042 | Split the test suites, not the driver | superseded by ADR-052 | [full document](adr-042-split-the-suites-not-the-driver.md) |
 
 ### The 014–019 tangle, recorded so nobody re-derives it

@@ -304,11 +304,11 @@ control is the live planner seat: pi sol high with `subagent`, `--memory` with a
 
 | Planner | First return `done` | Blind pass | p vs control | Tokens | Median wall |
 |---|---|---|---|---|---|
-| control (effort high) | 41/42 | 11/42 | | 12.26M | 182s |
-| effort medium | 41/42 | 6/42 | 0.28 | 8.47M (−31%) | 116.5s |
-| effort xhigh | 42/42 | 16/42 | 0.35 | 18.39M (+50%) | 393s |
-| + readgate | 42/42 | 7/42 | 0.43 | 11.11M | 169s |
-| + skeletonread | 39/42 | 9/42 | 0.80 | 11.80M | 194s |
+| control (effort high) | 41/42 | 11/42 | | 12.61M | 180.5s |
+| effort medium | 41/42 | 6/42 | 0.28 | 8.77M (−30%) | 116.5s |
+| effort xhigh | 42/42 | 16/42 | 0.35 | 19.37M (+54%) | 389s |
+| + readgate | 42/42 | 7/42 | 0.43 | 11.78M | 172.5s |
+| + skeletonread | 39/42 | 9/42 | 0.80 | 12.26M | 180.5s |
 
 p is a two-sided Fisher exact test. The other first returns were `insufficient`. Baseline was red in every run. One xhigh run returned `done` without writing
 `plan.md`; it counts as a fail. No arm differs from the control beyond noise, and the lane decides again: b1381,

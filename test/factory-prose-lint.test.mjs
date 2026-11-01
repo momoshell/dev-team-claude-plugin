@@ -42,15 +42,47 @@ test('PP1 prose-plain skill frontmatter, size, attribution and path-only citatio
   const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/)
   assert.ok(m, 'frontmatter present')
   assert.match(m[1], /^name: prose-plain$/m)
-  assert.ok(m[1].includes('description: Use when writing or editing docs, ADRs, skill prose, PR bodies or commit messages in this repo; plain house style, no AI slop.'))
+  assert.ok(m[1].includes('description: Use when writing or editing docs, ADRs, skill prose, PR bodies or commit messages in any repository; plain house style, no AI slop.'))
   const body = raw.slice(m[0].length)
   const bytes = Buffer.byteLength(body, 'utf8')
   assert.ok(bytes <= 2200, 'body ' + bytes + ' bytes <= 2200')
-  assert.equal(bytes, 1723)
-  assert.ok(body.includes('node scripts/factory/prose-lint.mjs'))
+  assert.equal(bytes, 2041)
+  assert.ok(body.includes('node "<skill-dir>/../../scripts/factory/prose-lint.mjs" <file>'))
   assert.ok(body.includes('denominator'))
   assert.ok(body.trimEnd().endsWith('Derived from no-ai-slop by Peter Yang (MIT).'))
   assert.doesNotMatch(body, /[A-Za-z0-9_./-]+\.md:\d+/)
+})
+
+// MUTATION: replace the skill-relative lint command with a checkout-relative command (PS1).
+test('PS1 documented lint runs outside the plugin checkout', () => {
+  const skill = readFileSync(join(ROOT, 'skills/prose-plain/SKILL.md'), 'utf8')
+  const command = [...skill.matchAll(/`(node [^`\r\n]*prose-lint\.mjs[^`\r\n]*)`/g)][0]?.[1]
+  assert.ok(command?.includes('<file>'))
+  assert.ok(skill.includes('Replace <skill-dir> with the absolute directory containing this loaded SKILL.md in the installed plugin, not the working directory.'))
+  const dir = scratchDir('portable prose ')
+  const clean = writeFixture(dir, 'clean prose.md', 'The file contains three records.\n')
+  const bad = writeFixture(dir, 'bad prose.md', 'We should del' + 've into this.\n')
+  const quote = (text) => "'" + text.replaceAll("'", "'\\''") + "'"
+  const anchored = command.replaceAll('<skill-dir>', join(ROOT, 'skills/prose-plain'))
+  const invoke = (file, input) => spawnSync('/bin/sh', ['-c', anchored.replace('<file>', file ? quote(file) : '')], { cwd: dir, encoding: 'utf8', input })
+  const goodRun = invoke(clean)
+  assert.equal(goodRun.status, 0, goodRun.stderr)
+  assert.equal(goodRun.stdout, '')
+  assert.equal(goodRun.stderr, '')
+  const badRun = invoke(bad)
+  assert.equal(badRun.status, 1)
+  assert.match(badRun.stdout, /: banned-word:/)
+  const stdinRun = invoke(null, 'The file contains three records.\n')
+  assert.equal(stdinRun.status, 0, stdinRun.stderr)
+  assert.equal(stdinRun.stdout, '')
+})
+
+// MUTATION: remove the ownership and target-repository fallback sentence (PS2).
+test('PS2 house style identifies dev-team conventions', () => {
+  const skill = readFileSync(join(ROOT, 'skills/prose-plain/SKILL.md'), 'utf8')
+  assert.ok(skill.includes('## House style (dev-team repository conventions and worked examples)'))
+  assert.ok(skill.includes("The CLAUDE.md references and commit scopes below are dev-team repository conventions; elsewhere follow the target repository's conventions."))
+  for (const scope of ['feat(crew):', 'fix(factory):', 'docs(adr):']) assert.ok(skill.includes(scope))
 })
 
 test('PP4 every banned term fires once per line in the pinned output format', () => {

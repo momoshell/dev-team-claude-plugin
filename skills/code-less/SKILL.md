@@ -26,7 +26,7 @@ shortest working diff — once the problem is understood.
 
 Code you move or merge keeps its error handling and validation.
 
-## Examples
+## Examples (from the dev-team repository)
 
 - Standard library: replace a shell-built `git add` command with `execFileSync('git', ['add', '--', ...toAdd])` (`crew/checks.mjs` runs commands as `spawn(command, args)`, never a shell string).
 - Closed enum: replace an open stage string with `Object.freeze([...])` as `CHECK_REASONS` does (`crew/checks.mjs`).

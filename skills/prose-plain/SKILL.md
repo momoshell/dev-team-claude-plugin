@@ -1,13 +1,15 @@
 ---
 name: prose-plain
-description: Use when writing or editing docs, ADRs, skill prose, PR bodies or commit messages in this repo; plain house style, no AI slop.
+description: Use when writing or editing docs, ADRs, skill prose, PR bodies or commit messages in any repository; plain house style, no AI slop.
 ---
 
 # prose-plain
 
 Write the plain version first: say the thing, name the number, stop.
 
-## House style (this repo, worked examples)
+## House style (dev-team repository conventions and worked examples)
+
+The CLAUDE.md references and commit scopes below are dev-team repository conventions; elsewhere follow the target repository's conventions.
 
 - A rate carries its denominator. Write "1 of 50 PR bodies", never "rarely" (CLAUDE.md, honesty doctrine).
 - Unknown is null with one closed reason, never a guessed zero. State the blind spot instead of omitting it: what was not measured, and why.
@@ -19,7 +21,7 @@ Write the plain version first: say the thing, name the number, stop.
 
 ## Before you finish
 
-Run `node scripts/factory/prose-lint.mjs <file>` on each prose file you wrote or edited (no argument reads stdin). Fix banned words and recap endings; cut em dashes down to two unless the extra ones earn their place. The lint is report-only: a clean run is not proof the prose is good, only that the mechanical patterns are absent.
+Run `node "<skill-dir>/../../scripts/factory/prose-lint.mjs" <file>` on each prose file you wrote or edited (no argument reads stdin). Replace <skill-dir> with the absolute directory containing this loaded SKILL.md in the installed plugin, not the working directory. Fix banned words and recap endings; cut em dashes down to two unless the extra ones earn their place. The lint is report-only: a clean run is not proof the prose is good, only that the mechanical patterns are absent.
 
 Cite files by path, never by path-and-line, so this skill needs no anchors manifest.
 

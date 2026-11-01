@@ -393,7 +393,12 @@ export function startServer(options = {}) {
         // unreadable, not "no lean lanes": its run count is null with the reason, never a zero.
         let runs = []
         let leanSource = { readable: true, absent: null }
-        try { runs = lean.listRuns(filters) } catch (err) { leanSource = { readable: false, absent: err?.message || String(err) } }
+        try {
+          runs = lean.listRuns(filters).slice().sort((a, b) => {
+            if (a.started_at == null || b.started_at == null) return Number(a.started_at == null) - Number(b.started_at == null)
+            return Date.parse(b.started_at) - Date.parse(a.started_at)
+          })
+        } catch (err) { leanSource = { readable: false, absent: err?.message || String(err) } }
         const sources = { lean: { ...leanSource, runs: leanSource.readable ? runs.length : null } }
         return json(res, 200, { schema, runs, sources, degraded: !leanSource.readable })
       }

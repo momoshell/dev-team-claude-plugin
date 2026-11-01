@@ -22,6 +22,13 @@ on the unchanged source, passes on the build, and fails under its kill-mutation.
   fails a correct build). Four planner changes tried on 10-31 and 11-01 (a `qa-test-writing` grant, fff, a charter
   paragraph, the lab with a self-proof instruction) moved none of this beyond noise; the lab self-proof cost 2.9x
   tokens and scored worse (5/42 against 14/42).
+- **Mutations are declared blind too.** The planner predicts post-build `find` text before the build exists. An
+  audit of 95 archived lean lanes (`~/crew-bench/loop-logic-audit-2026-11-01.md`) counts 49 of 653 mutation rows not
+  killed (34 `bind-fail`, 14 survived) and 8 of 95 lanes stopped on a proof defect, not a code defect. When the
+  builder re-aimed the mutations it had built against, the next proof was clean in 10 of 10 cases.
+- **The proof is not on what ships.** The kill-mutation proof runs against `gate.mjs`, which is never committed, while
+  the PR body reports "Mutations N/N killed". The repository tests that ship get no kill-proof. The baseline only
+  needs one red id: 31 of 90 baselines were red on a strict subset of the acceptance ids.
 - **The duplication is instructed.** The `lane-brief` skill makes each acceptance item "checkable by a top-level
   `test(...)`", the planner's team memory (`mutations-must-bind`) asks for a top-level repository test per acceptance
   outcome with a `// MUTATION:` comment, and the planner charter asks for the gate as well.
@@ -38,20 +45,23 @@ The reviewer reviews the code and its tests together, with the proof rows in han
 
 ### 2. Roles
 
-- **Planner.** Returns the plan, the acceptance ids, one kill-mutation per id (`{check, file, find, replace}` against
-  source, as today), `files_in_scope` and the test command. No gate.
+- **Planner.** Returns the plan, the acceptance ids, `files_in_scope` and the test command. No gate and no mutations.
 - **Builder.** Writes the change and one repository test per acceptance id. A test is bound to its id by name: the
-  test's name starts with `(<id>) ` (the shape the briefs already use for acceptance items). The builder may run the
-  tests it wrote.
+  test's name starts with `(<id>) ` (the shape the briefs already use for acceptance items). The builder also declares one
+  kill-mutation per id (`{check, file, find, replace}` against the source it built), since it holds the code the
+  `find` text must match. The builder may run the tests it wrote.
 - **Loop.** For every acceptance id, mechanically:
   1. **Red on base:** apply only the builder's test-file changes onto the pre-build source and run the bound test.
      It must fail. A test that passes without the change proves nothing.
   2. **Green:** the bound test passes on the build.
   3. **Kill-mutation:** with the id's mutation applied to the build, the bound test fails.
   Each step reads the runner's per-test results, never only its exit code: the bound test must be observed
-  running and observed failing (or passing). A test file that fails to import, a bound test that is skipped or never
-  runs, or a runner that reports no result for it is not red; it is unproven. Measured 11-01: an empty `(A1)` test in
-  a file that cannot import on base gave base red, build green and mutation red by exit code alone.
+  running and observed failing (or passing). Only a failure raised by the test's own body counts as red. A test
+  file that fails to import, a bound test that is skipped, cancelled or never runs, a failing hook (`before`,
+  `beforeEach`, `after`, `afterEach`; node reports these as `hookFailed`), or a runner that reports no result for it
+  is not red; it is unproven. The guard that rejects hook and import failures needs its own kill-mutation. Measured 11-01: an empty `(A1)` test in
+  a file that cannot import on base gave base red, build green and mutation red by exit code alone, and a `beforeEach`
+  that fails on base and under mutation made node report the empty `(A1)` test itself as failed in both.
   An id with no bound test, a bound test that did not run, a test that is green on base, or a surviving mutation
   stops the lane with that reason, as an unproven gate does today.
 
@@ -65,7 +75,8 @@ mutation checks. Mutation re-aim keeps its current behaviour against the new pro
 ### 4. Protocol change
 
 P3 changes from "`task/gate.mjs` prints `FAIL <id>`" to "acceptance tests: committed repository tests bound to ids by
-name, red on base, green after, one kill-mutation each". The planner envelope drops `gate_path` and `gate_cmd`; the
+name, red on base, green after, one kill-mutation each". The planner envelope drops `gate_path`, `gate_cmd` and `mutations`; the builder envelope carries `mutations`, one per
+id. Every id must be red on base, not at least one as the baseline check accepts today. The
 test command is the brief's `suite` runner narrowed to the bound tests.
 
 ## What this does not decide

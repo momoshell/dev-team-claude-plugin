@@ -106,6 +106,24 @@ async function runManifestConsult({ cell = { provider: 'local', id: 'advisor-v1'
   return { f, journal, a, argv, spawned, fetched }
 }
 
+// MUTATION: make a false advisor_boot append fatal again
+test('advisor attaches when boot journaling fails', async () => {
+  for (const role of ['builder', 'planner']) for (const mode of ['throw', 'false', 'ok']) {
+    const p = pi(), rows = []
+    await advisor.attachAdvisor(p, { env: env({ CREW_ROLE: role }), deps: {
+      readFile() { throw Object.assign(new Error('missing'), { code: 'ENOENT' }) },
+      appendFile(_path, text) {
+        rows.push(JSON.parse(text))
+        if (mode === 'throw') throw Object.assign(new Error('denied'), { code: 'EACCES' })
+        if (mode === 'false') return false
+      },
+    } })
+    assert.equal(rows.filter((row) => row.advisor_boot?.outcome === 'attached').length, 1)
+    assert.deepEqual(p.handlers.map(([name]) => name).sort(), ['tool_call', 'tool_result'])
+    assert.ok(p.handlers.every(([, handler]) => typeof handler === 'function'))
+  }
+})
+
 test('ADR47-L2 A1 child argv disables tools and context files', async () => { const r = await runManifestConsult(); assert.deepEqual(r.argv.slice(0, 13), ['-p','--mode','json','--no-session','--model','local/advisor-v1','--thinking','high','--no-tools','--no-context-files','--no-extensions','--no-skills','--append-system-prompt']); assert.equal(r.argv.length,14) })
 test('ADR47-L2 A2 child model comes from manifest rather than environment', async () => { const r = await runManifestConsult({ envExtra: { CREW_ADVISOR_MODEL: 'env/wrong' } }); assert.equal(r.argv[r.argv.indexOf('--model') + 1], 'local/advisor-v1') })
 test('ADR47-L2 A3 child thinking uses manifest effort', async () => { const r = await runManifestConsult(); assert.equal(r.argv[r.argv.indexOf('--thinking') + 1], 'high') })

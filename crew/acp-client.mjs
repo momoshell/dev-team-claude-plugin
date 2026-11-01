@@ -21,7 +21,7 @@ export const ACP_UPDATE_KINDS = Object.freeze([
 export const ACP_STOP_REASONS = Object.freeze(['end_turn', 'max_tokens', 'max_turn_requests', 'refusal', 'cancelled'])
 export const ACP_REFUSALS = Object.freeze([
   'acp-malformed-frame', 'acp-protocol-mismatch', 'acp-spawn-failed', 'acp-session-busy',
-  'acp-session-cancelled', 'acp-unresolvable-reservation', 'acp-request-timeout', 'acp-prompt-write-timeout',
+  'acp-session-cancelled', 'acp-unresolvable-reservation', 'acp-request-timeout', 'acp-prompt-write-timeout', 'acp-seat-closed',
 ])
 export const ACP_REQUEST_TIMEOUT_MS = 600000
 export const ACP_WRITE_DEADLINE_MS = 30000
@@ -231,6 +231,11 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     for (;;) {
       pump()
       if (responses.has(id)) { const frame = responses.get(id); responses.delete(id); return frame }
+      if (hasExitMarker()) {
+        pump()
+        if (responses.has(id)) { const frame = responses.get(id); responses.delete(id); return frame }
+        throw acpRefuse('acp-seat-closed', `acp seat ${role} exited before answering ${method}`)
+      }
       if (now() > deadline) throw acpRefuse('acp-request-timeout', `acp seat ${role} did not answer ${method}`)
       sleep(ACP_POLL_MS)
     }

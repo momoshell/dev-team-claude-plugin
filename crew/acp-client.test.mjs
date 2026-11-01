@@ -13,6 +13,49 @@ import {
 } from './acp-client.mjs'
 import { seatCommandPath } from './acp/wire.mjs'
 
+// MUTATION: disable the request exit-marker branch
+test('requests fail promptly on seat exit but consume final responses', () => {
+  for (const method of ['initialize', 'session/new', 'session/resume', 'session/set_mode', 'session/prompt']) {
+    for (const mode of ['lost', 'queued', 'race', 'alive']) {
+      const root = scratchDir('acp-exit-'), dir = join(root, 'acp'), commandRoot = join(root, 'commands')
+      const paths = acpSeatPaths(dir, 'reviewer', commandRoot)
+      let bytes = '', clock = 0, exited = false, pending
+      const answer = (frame) => { bytes += JSON.stringify({ jsonrpc: '2.0', id: frame.id, result: frame.method === 'initialize' ? { protocolVersion: 1 } : frame.method === 'session/new' ? { sessionId: 's' } : frame.method === 'session/prompt' ? { stopReason: 'end_turn' } : {} }) + '\n' }
+      const client = acpClient({ launch: { bin: '/unused', args: [] }, dir, cwd: root, role: 'reviewer', deps: {
+        seatCommandRoot: commandRoot, pid: 900,
+        spawn() { writeFileSync(paths.pgid, '901'); return { pid: 901, unref() {} } },
+        openSync: () => 7, closeSync() {},
+        writeSync(_fd, buffer, offset = 0, length = buffer.length) {
+          const frame = JSON.parse(Buffer.from(buffer).subarray(offset, offset + length).toString())
+          if (frame.method !== method) answer(frame)
+          else { pending = frame; if (mode === 'queued') { answer(frame); exited = true } else if (mode === 'race') exited = true }
+          return length
+        },
+        readFileSync(path, ...args) { return path === paths.stream ? Buffer.from(bytes) : readFileSync(path, ...args) },
+        existsSync(path) {
+          if (path === paths.stream) return true
+          if (path === paths.exit) { if (mode === 'race' && pending) { answer(pending); pending = null }; return exited }
+          return existsSync(path) || path === paths.fifo
+        },
+        now: () => clock, sleep() { clock += 1000; if (mode === 'lost' && pending) exited = true },
+        kill() { throw Object.assign(new Error('gone'), { code: 'ESRCH' }) }, spawnSync: () => ({ status: 1, stdout: '' }),
+      } })
+      try {
+        client.start()
+        if (method !== 'initialize') client.initialize()
+        if (!['initialize', 'session/new'].includes(method)) client.newSession()
+        const at = clock
+        const run = () => method === 'initialize' ? client.initialize() : method === 'session/new' ? client.newSession() : method === 'session/resume' ? client.resumeSession('s') : method === 'session/set_mode' ? client.setMode('default') : client.prompt([{ type: 'text', text: 'x' }])
+        if (mode === 'lost') {
+          assert.throws(run, (error) => error.reason === 'acp-seat-closed' && error.message.includes('reviewer') && error.message.includes(method))
+          assert.ok(clock - at < 10000)
+        } else if (mode === 'alive') assert.throws(run, { reason: 'acp-request-timeout' })
+        else assert.doesNotThrow(run)
+      } finally { client.close(); rmSync(root, { recursive: true, force: true }) }
+    }
+  }
+})
+
 const REGISTER_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
 const FIXTURES = join(REGISTER_ROOT, 'test', 'fixtures', 'acp')

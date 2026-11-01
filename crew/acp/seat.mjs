@@ -11,7 +11,7 @@ import { AGENT_ROLES, validateEnvelope } from '../protocols.mjs'
 import * as claudeAdapter from '../adapters/adapter-claude.mjs'
 import * as piAdapter from '../adapters/adapter-pi.mjs'
 import { CONTEXT_LAYOUT_ENV, LEAN_LAYOUT, journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../pi/context-layout.mjs'
-import { loadContext as advisorContext } from '../pi/extensions/advisor.ts'
+import { ADVISED_ROLES, loadContext as advisorContext } from '../pi/extensions/advisor.ts'
 import { loadPlannerContext } from '../pi/extensions/builderloop.ts'
 import { loadAcceptedContext } from '../pi/extensions/skeletonread.ts'
 
@@ -78,6 +78,7 @@ function seatGrants(definition, { role, isClaude, skills, deps }) {
   const extensions = definition.extensions ?? []
   if (!Array.isArray(extensions) || !extensions.every(nonempty)) throw new Error('extensions must be a list of extension names')
   const advisor = definition.advisor !== undefined && definition.advisor !== null
+  if (!isClaude && advisor && !ADVISED_ROLES.has(role)) throw refuse('grant-unsupported', `advisor grant is unsupported for seat ${role}`)
   if (isClaude && definition.codemode === true) throw refuse('grant-unsupported', `adapter-claude cannot express the codemode arm of seat ${role} — refusing to boot a silently weaker seat`)
   const armed = armGrants({ role, agent: definition.agent, extensions }, { register: deps.register, root: deps.root, exists: deps.exists })
   const mcp = armed.mcp_servers.length > 0

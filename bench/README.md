@@ -45,6 +45,31 @@ refusal is recorded as an error.
 (`crew/protocols.mjs` `EXTENSIONS`); `--arms ""` is no arms. An unknown name is refused, recorded
 in `result.json`, before any worktree or seat exists.
 
+## Reviewer replay
+
+```
+node bench/replay-reviewer.mjs --lane b1441 --cell cell.json --arms fff --out /abs/clean --variant clean
+node bench/replay-reviewer.mjs --lane b1441 --cell cell.json --arms fff --out /abs/seeded --variant seeded --mutation PK1
+```
+
+The reviewer sees the archived first reviewer prompt and built change. The manifest pins the
+successful rebase commit; its single parent becomes HEAD after a mixed reset, leaving the built
+snapshot as tracked and untracked changes. The commit and its parent must be available locally
+(full history may be needed). b1380 and b1444 have no archived reproducible built head; b1440
+also lacks a reviewer prompt. These lanes are refused before creating a worktree.
+
+A seeded run selects exactly one planner mutation by check ID. Its file must be a regular file
+inside the worktree, with one literal match and no symlink traversal. Clean rejects a mutation.
+The reviewer is not told which variant or mutation was selected. The replay does not run the
+gate, suite or mutation proof. The worktree is removed after the seat, including on errors.
+Output directories follow the same safety restrictions as the other replays.
+
+`result.json` records the variant, full seeded declaration or null, first return status, verdict,
+findings, usage and wall time. `seededFileCited` measures a must-fix finding naming the exact
+seeded file, not the verdict. Unknown measurements are null with a reason in `unknown`; clean
+runs use `not-seeded` for that field. Run `node --test bench/replay.test.mjs
+bench/replay-reviewer.test.mjs` for local tests without models or network.
+
 ## Builder replay
 
 ```

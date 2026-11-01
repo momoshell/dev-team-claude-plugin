@@ -4,5 +4,9 @@
   "base": "abe2d073",
   "originalTask": "/Users/momoshell/.crew/dt-b1416-loop-checks-after-rebase/b1416-loop-checks-after-rebase/task",
   "originalTree": "/Users/momoshell/Dev/dt-b1416-loop-checks-after-rebase",
-  "source": "/Users/momoshell/.crew-journal-archive/dt-b1416-loop-checks-after-rebase/b1416-loop-checks-after-rebase/task"
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1416-loop-checks-after-rebase/b1416-loop-checks-after-rebase/task",
+  "reviewer": {
+    "builtHead": "a231fe3c6e99655081e73d30ca686a13a06a5a8d",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1416-loop-checks-after-rebase/b1416-loop-checks-after-rebase/task/lean/reviewer/b1416-loop-checks-after-rebase.reviewer.3.jsonl"
+  }
 }

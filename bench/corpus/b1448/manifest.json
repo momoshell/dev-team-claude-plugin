@@ -4,5 +4,9 @@
   "base": "ccac8537ad7f0231a181e47e5e81828648d2a4b7",
   "originalTask": "/Users/momoshell/.crew/dt-b1448-lean-memory-injection/b1448-lean-memory-injection/task",
   "originalTree": "/Users/momoshell/Dev/dt-b1448-lean-memory-injection",
-  "source": "/Users/momoshell/.crew-journal-archive/dt-b1448-lean-memory-injection/b1448-lean-memory-injection/task"
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1448-lean-memory-injection/b1448-lean-memory-injection/task",
+  "reviewer": {
+    "builtHead": "7c7c9e71d3d9e59a5b78357899213e645624de82",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1448-lean-memory-injection/b1448-lean-memory-injection/task/lean/reviewer/b1448-lean-memory-injection.reviewer.3.jsonl"
+  }
 }

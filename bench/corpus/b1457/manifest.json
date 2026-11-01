@@ -4,5 +4,9 @@
   "base": "0d08adff4f5ccc8c2f0b94327b4a9e47ed5ff598",
   "originalTask": "/Users/momoshell/.crew/dt-b1457-docs-manifests-current/b1457-docs-manifests-current/task",
   "originalTree": "/Users/momoshell/Dev/dt-b1457-docs-manifests-current",
-  "source": "/Users/momoshell/.crew-journal-archive/dt-b1457-docs-manifests-current/b1457-docs-manifests-current/task"
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1457-docs-manifests-current/b1457-docs-manifests-current/task",
+  "reviewer": {
+    "builtHead": "c3c206a2406a257f40d32dca65297bf565de994f",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1457-docs-manifests-current/b1457-docs-manifests-current/task/lean/reviewer/b1457-docs-manifests-current.reviewer.3.jsonl"
+  }
 }

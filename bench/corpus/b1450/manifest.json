@@ -4,5 +4,9 @@
   "base": "0634116878372be6e56ce51bf752c305d34adf2c",
   "originalTask": "/Users/momoshell/.crew/dt-b1450-start-log-never-throws/b1450-start-log-never-throws/task",
   "originalTree": "/Users/momoshell/Dev/dt-b1450-start-log-never-throws",
-  "source": "/Users/momoshell/.crew-journal-archive/dt-b1450-start-log-never-throws/b1450-start-log-never-throws/task"
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1450-start-log-never-throws/b1450-start-log-never-throws/task",
+  "reviewer": {
+    "builtHead": "bef547bc2772a26ef13837dca0f90506a6c76d5a",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1450-start-log-never-throws/b1450-start-log-never-throws/task/lean/reviewer/b1450-start-log-never-throws.reviewer.5.jsonl"
+  }
 }

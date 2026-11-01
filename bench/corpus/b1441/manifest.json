@@ -4,5 +4,9 @@
   "base": "88f70c51c78ebd1931728bb7ded08727b34cff3c",
   "originalTask": "/Users/momoshell/.crew/dt-b1441-pi-provider-failure-kind/b1441-pi-provider-failure-kind/task",
   "originalTree": "/Users/momoshell/Dev/dt-b1441-pi-provider-failure-kind",
-  "source": "/Users/momoshell/.crew-journal-archive/dt-b1441-pi-provider-failure-kind/b1441-pi-provider-failure-kind/task"
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1441-pi-provider-failure-kind/b1441-pi-provider-failure-kind/task",
+  "reviewer": {
+    "builtHead": "f1ceef3db170c050ad6f977b8d0a368a01014feb",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1441-pi-provider-failure-kind/b1441-pi-provider-failure-kind/task/lean/reviewer/b1441-pi-provider-failure-kind.reviewer.3.jsonl"
+  }
 }

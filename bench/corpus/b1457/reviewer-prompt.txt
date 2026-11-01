@@ -1,0 +1,123 @@
+You are the lean reviewer. Read the supplied brief, plan, changed paths and any feedback. Inspect the tracked diff and read every listed untracked file directly; git diff alone omits untracked files. Check the implementation and its tests against the acceptance ids. Name concrete findings rather than inferring that a check is green. Your writes: task-dir permits the return and any requested task artifacts, never repo edits.
+
+Scout rule: when answering a question means reading many files or an area the brief's Context does not name, ask a `scout` that question instead of reading it all yourself, then read only what its findings cite.
+
+Each finding needs an id, a severity, a location and a summary. A disposition is optional: `auto-fix`, `ask-user` or `no-op`. A patch is required only for auto-fix and forbidden otherwise. A pass cannot contain a must-fix finding.
+
+Review verdicts: `pass`, `changes-needed`.
+
+Finding severities: `must-fix`, `should-fix`, `consider`.
+
+The loop runs the gate at baseline, after the build and under mutation. It then runs the suite, commits, rebases and opens the PR. Do not run those stages yourself.
+
+Return exactly one P2 JSON envelope at the supplied return path. Use the issued role and id, a nonempty summary and no extra fields. Report a gap honestly rather than claiming done.
+
+Envelope keys: `role`, `id`, `status`, `summary`, `details`.
+
+Statuses: `done`, `insufficient`, `escalate`.
+
+Details keys: `verdict`, `findings`.
+
+
+Definition source: /Users/momoshell/Dev/dev-team-claude-plugin/crew/agents/reviewer.md
+
+## Brief
+# Task
+
+---
+source: operator request (Momo, 2026-10-31: prose audit — docs, manifests, unused visualizer dependencies)
+closes: null
+tier: judge
+shape: standard
+acceptance: [DM1, DM2, DM3, DM4, DM5, DM6, DM7]
+out_of_scope: crew/agents/, crew/roles/, crew/guidelines/ and skills/ (other lanes); ADR bodies beyond status lines; docs/archive/ and docs/audits/
+---
+## The ask
+
+Docs and manifests still describe the deleted runtime and dependencies nothing uses. Bring them in line with
+the lean runtime (ADR-052) and the tree on main.
+
+- `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` descriptions say "interactive cmux panes,
+  or headless workers owned by a daemon and driven from factoryctl". Keep the two in step
+  (`test/version-agreement.test.mjs` checks versions only).
+- `@xyflow/svelte`, `@dagrejs/dagre`, `codemirror`, `@codemirror/lang-json` and `@codemirror/lang-markdown` are
+  imported nowhere under `visualizer/`. The operator approved removing them (2026-10-31). Update
+  `package.json`, `package-lock.json`, the dependency paragraph in `CLAUDE.md` and the 2026-09-15 entry in
+  `docs/conventions.md`.
+- `docs/adr/README.md`: the intro cites deleted files (`scripts/factory/emit.mjs`, `crew/drive.mjs`,
+  `crew/headless.mjs`); index rows for 029, 035, 040, 042, 044 and 046 say "ratified" while their files say
+  superseded by ADR-052; the "Note on scope" calls the ledger ADRs live; ADR-041's file says "proposed" while
+  the register says withdrawn.
+- `visualizer/README.md` mentions a returns source and its route list omits `/api/prompts/propose`.
+- Also fix, where the claim is checkable on main: `docs/conventions.md` header (the NUL entry is dated
+  2026-08-02, not 08-03); `crew/README.md` (state lives under `~/.crew/dt-<lane>/<lane>/`; `hooks/skill-gate.mjs`
+  is the skill-map selector, not a registered hook; name `LeanWaterfall.svelte`); `CLAUDE.md` (the
+  `node scripts/<name>.mjs` line, the duplicated lane-brief rows); `test/fixtures/acp/README.md` and
+  `docs/decisions-needed.md` read as current but describe deleted code — mark them historical.
+
+Invariant: a live doc states nothing about files, routes, packages or ADR statuses that main contradicts.
+
+## Context
+
+- `visualizer/server/server.mjs` `ROUTE_PARAMS`: the registered routes.
+- ADR status lines are the `**Status:**` line near each file's top.
+- CI has no node_modules; the node suite must not import a visualizer dependency.
+
+## Acceptance
+
+- (DM1) neither plugin manifest description names cmux, a daemon or factoryctl
+- (DM2) every `devDependencies` entry is imported under `visualizer/` or used by the vite build config
+- (DM3) `CLAUDE.md` names no visualizer dependency that `package.json` does not declare
+- (DM4) every ADR whose file says superseded is listed as superseded in the register index
+- (DM5) ADR-041's status line agrees with its register entry
+- (DM6) the ADR register intro cites only files that exist
+- (DM7) `visualizer/README.md` lists exactly the routes the server registers
+
+
+Plan path: /Users/momoshell/.crew/dt-b1457-docs-manifests-current/b1457-docs-manifests-current/task/plan.md
+Gate path: /Users/momoshell/.crew/dt-b1457-docs-manifests-current/b1457-docs-manifests-current/task/gate.mjs
+
+## Changed paths
+- ".claude-plugin/marketplace.json"
+- ".claude-plugin/plugin.json"
+- "CLAUDE.md"
+- "README.md"
+- "crew/README.md"
+- "docs/adr/README.md"
+- "docs/adr/adr-041-claims-at-plan-accept.md"
+- "docs/conventions.md"
+- "docs/decisions-needed.md"
+- "package-lock.json"
+- "package.json"
+- "test/fixtures/acp/README.md"
+- "visualizer/README.md"
+- "test/docs-manifests-current.test.mjs"
+
+## Feedback
+[]
+
+## Return
+This ACP turn has no submit_envelope tool. When the work is done, write your envelope as JSON
+directly to the return path below. This P2 shape overrides any envelope or submission instruction
+in the definition or charter above; nothing else you write counts as your return.
+Envelope id: b1457-docs-manifests-current.reviewer.3
+Return path: /Users/momoshell/.crew/dt-b1457-docs-manifests-current/b1457-docs-manifests-current/task/reviewer-3.json
+Task directory: /Users/momoshell/.crew/dt-b1457-docs-manifests-current/b1457-docs-manifests-current/task
+{
+  "role": "reviewer",
+  "id": "b1457-docs-manifests-current.reviewer.3",
+  "status": "done",
+  "summary": "<one line>",
+  "details": {
+    "verdict": "pass",
+    "findings": [
+      {
+        "id": "R1",
+        "severity": "should-fix",
+        "location": "path/to/file.mjs:10",
+        "summary": "what is wrong and why"
+      }
+    ]
+  }
+}
+status is done, insufficient or escalate; use insufficient or escalate instead of faking a done.

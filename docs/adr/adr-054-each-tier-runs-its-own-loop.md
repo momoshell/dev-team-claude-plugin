@@ -23,9 +23,11 @@ An audit of 95 archived lean lanes (`~/crew-bench/loop-logic-audit-2026-11-01.md
 - **Planning is the largest share of wall time:** 185 of 471 stage minutes over the 44 timed lanes, against 131 for
   build and 111 for review. The blind score of a first plan does not sort lanes by outcome
   (`~/crew-bench/plan-review-vs-outcome-2026-11-01.md`).
-- **Reviewers miss real bugs.** On 10 lanes whose built change carried a defect a later lane fixed, the live reviewer
-  caught 9 of 30 runs and the same model at xhigh 14 of 30; four defects were caught by no GPT reviewer, `sol-review`
-  included (`bench/README.md`).
+- **Reviewers miss real bugs.** On 10 lanes whose built change carried a defect a later lane fixed
+  (`~/crew-bench/defects-2026-11-01`), a `changes` verdict with a finding that names a defect file came back in 9 of
+  30 live-reviewer runs and 14 of 30 at xhigh. That is an upper bound on catches, not a count of them: some of those
+  findings name the defect's file but a different bug (b1433 at xhigh, run 2). On four lanes no reviewer named a defect
+  file at all, `sol-review` included.
 
 The tier mix is lopsided: of 97 archived lanes, 90 ran `build`, 6 `judge` and 1 `mechanical`. The build loop below
 rests on that evidence; the mechanical and judge loops are design until their own lanes are measured.
@@ -38,6 +40,10 @@ A stage is in a tier's loop only if it makes the change, proves something mechan
 worth its cost on that tier. A stage that fails the rule leaves the loop. No loop promises the best result; each keeps
 every guarantee the loop can prove.
 
+A fix turn is not a retry. After any fix turn the loop runs the proof, the suite and every review of that loop again on
+the changed tree, within the role's round bound; a lane never publishes a tree that has not passed all of its tier's
+checks. What this record drops is the automatic re-run of an unchanged tree after a red suite.
+
 ### 2. The loops
 
 Every loop rebases onto `main` before the build, runs the ADR-053 proof (each acceptance id red on base, green on the
@@ -46,11 +52,14 @@ build, red under its kill-mutation), runs the suite once with no automatic re-ru
 
 ```
 mechanical:  brief -> rebase -> build -> prove -> suite -> PR
-build:       brief -> [plan] -> rebase -> build -> prove -> (suite || review) -> one fix turn if either is red -> PR
-judge:       brief -> plan -> rebase -> build -> prove -> suite -> review -> second review -> one fix turn if any is red -> PR
+build:       brief -> [plan] -> rebase -> build -> prove -> (suite || review) -> PR
+judge:       brief -> plan -> rebase -> build -> prove -> suite -> review -> second review -> PR
+
+any red check -> one builder fix turn with every red result -> back to prove (bounded by rounds)
 ```
 
-- **Mechanical** is for changes with no behaviour to judge: a rename, a config value, docs, a version bump. The brief is
+- **Mechanical** is for changes with no behaviour to judge: a rename, docs, a version bump, or a config value no code reads. A config value the loop or a seat reads
+(a seat's `effort`, for example) changes behaviour and is not mechanical. The brief is
   the plan. The proof and the suite are the check; there is no review. A seat's `insufficient` or `escalate` stops the
   lane for the operator.
 - **Build** runs the suite and the review side by side and hands the builder both results in one turn. A plan gap

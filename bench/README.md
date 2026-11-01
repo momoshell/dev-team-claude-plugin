@@ -337,3 +337,9 @@ b1458 dropped the ui-design rem-spacing rule while the visualizer still uses it.
 `changes` verdicts on those two lanes, 3 runs each. Only 1 of the other 252 clean runs failed (b1459). xhigh caught
 6 of 6 against the control's 3 of 6 (Fisher p = 0.18). Ranking reviewer arms needs a corpus of changes with
 known defects in place of seeded mutations. Nothing shipped.
+
+A later trace of every fix commit on main since 2026-10-24 (`~/crew-bench/realbug-candidates-2026-11-01.md`,
+attributed by line blame, no code run) found three more corpus lanes whose change carried a defect a later lane
+fixed: b1402 (fixed by b1408), b1416 (by b1422) and b1441 (by b1451). No arm flagged any of them: 0 of 21 clean
+runs on each lane. Over all five defect lanes the control caught 3 of 15 and xhigh 6 of 15. Whether those three
+defects are visible from the diff alone is unmeasured.

@@ -1,0 +1,22 @@
+{
+  "lane": "b1452",
+  "id": "b1452-lean-waterfall",
+  "base": "660f6d99b92536a07bfd9f8c8dff4102afed4218",
+  "originalTask": "/Users/momoshell/.crew/dt-b1452-lean-waterfall/b1452-lean-waterfall/task",
+  "originalTree": "/Users/momoshell/Dev/dt-b1452-lean-waterfall",
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1452-lean-waterfall/b1452-lean-waterfall/task",
+  "reviewer": {
+    "builtHead": "45ad32da22f1339efb3b2c6ce56803348a5c1d1f",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1452-lean-waterfall/b1452-lean-waterfall/task/lean/reviewer/b1452-lean-waterfall.reviewer.3.jsonl"
+  },
+  "knownDefect": {
+    "fixingCommits": [
+      "c43edcff0d1a0b710b958a814424063056637ae0"
+    ],
+    "files": [
+      "visualizer/web/src/lib/LeanWaterfall.svelte",
+      "visualizer/web/src/lib/timeline.js"
+    ],
+    "description": "Open stages were invalid, thin bars invisible, durations raw ms."
+  }
+}

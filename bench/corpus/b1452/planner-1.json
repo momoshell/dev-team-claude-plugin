@@ -1,0 +1,42 @@
+{
+  "role": "planner",
+  "id": "b1452-lean-waterfall.planner.1",
+  "status": "done",
+  "summary": "Authored the lean waterfall plan and dependency-free WF1–WF3 gate; execution remains loop-owned.",
+  "details": {
+    "subject": "feat(visualizer): show recorded lean stage waterfall",
+    "plan_path": "/Users/momoshell/.crew/dt-b1452-lean-waterfall/b1452-lean-waterfall/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1452-lean-waterfall/b1452-lean-waterfall/task/gate.mjs",
+    "acceptance": ["WF1", "WF2", "WF3"],
+    "mutations": [
+      {
+        "check": "WF1",
+        "file": "visualizer/web/src/lib/LeanRunDetail.svelte",
+        "find": "<LeanWaterfall {run} />",
+        "replace": "<!-- waterfall removed -->"
+      },
+      {
+        "check": "WF2",
+        "file": "visualizer/web/src/lib/timeline.js",
+        "find": "const recordedOnly = run.source === 'lean'",
+        "replace": "const recordedOnly = false"
+      },
+      {
+        "check": "WF3",
+        "file": "visualizer/server/lean-source.mjs",
+        "find": "row.event === 'envelope'",
+        "replace": "row.event === 'envelope-disabled'"
+      }
+    ],
+    "files_in_scope": [
+      "visualizer/server/lean-source.mjs",
+      "visualizer/web/src/lib/timeline.js",
+      "visualizer/web/src/lib/lean.js",
+      "visualizer/web/src/lib/LeanRunDetail.svelte",
+      "visualizer/web/src/lib/LeanWaterfall.svelte",
+      "test/visualizer-lean-waterfall.test.mjs"
+    ],
+    "validation_lane": "node --test test/visualizer-lean-waterfall.test.mjs test/visualizer-lean-web.test.mjs test/visualizer-lean.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1452-lean-waterfall/b1452-lean-waterfall/task/gate.mjs"
+  }
+}

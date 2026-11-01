@@ -1,0 +1,22 @@
+{
+  "lane": "b1386",
+  "id": "b1386-claude-seat-arms",
+  "base": "855bf66b924ef2535c2ab90512aa18c83cf3291c",
+  "originalTask": "/Users/momoshell/.crew/dt-b1386-claude-seat-arms/b1386-claude-seat-arms/task",
+  "originalTree": "/Users/momoshell/Dev/dt-b1386-claude-seat-arms",
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1386-claude-seat-arms/b1386-claude-seat-arms/task",
+  "reviewer": {
+    "builtHead": "21e53d3938c7aeed114612586a40ccdec74e1873",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1386-claude-seat-arms/b1386-claude-seat-arms/task/lean/reviewer/b1386-claude-seat-arms.reviewer.5.jsonl"
+  },
+  "knownDefect": {
+    "fixingCommits": [
+      "04325b182945b637e8ec4c0f0193fa7999705338"
+    ],
+    "files": [
+      "crew/adapters/claude-arms.mjs",
+      "crew/adapters/adapter-claude.mjs"
+    ],
+    "description": "fff reminder ran without its grant."
+  }
+}

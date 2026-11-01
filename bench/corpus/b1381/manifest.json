@@ -8,5 +8,14 @@
   "reviewer": {
     "builtHead": "d4bb1dd73971be0d36718eb5291cab258831a5aa",
     "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1381-lean-provider-retry/b1381-lean-provider-retry/task/lean/reviewer/b1381-lean-provider-retry.reviewer.3.jsonl"
+  },
+  "knownDefect": {
+    "fixingCommits": [
+      "8d6a354b78fda471944df9cbe9e2c3f3b92d8a07"
+    ],
+    "files": [
+      "crew/lean.mjs"
+    ],
+    "description": "Refused attempt's stale envelope survived retry."
   }
 }

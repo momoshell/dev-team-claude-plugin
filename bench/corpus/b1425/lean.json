@@ -1,0 +1,25 @@
+{
+  "id": "b1425-scout-rule-and-nudge",
+  "cwd": "/Users/momoshell/Dev/dt-b1425-scout-rule-and-nudge",
+  "taskDir": "/Users/momoshell/.crew/dt-b1425-scout-rule-and-nudge/b1425-scout-rule-and-nudge/task",
+  "tier": "build",
+  "shape": "standard",
+  "brief": "# Task\n\n---\nsource: operator request 2026-10-29 (scouts are granted but never used; activate them when the work is wide)\ncloses: null\ntier: build\nshape: standard\nacceptance: [SN1, SN2, SN3, SN4]\nout_of_scope: the scout definition and its model; the builder seat; the advisor; claude seats\n---\n## The ask\n\nThe planner and reviewer seats load `crew/pi/extensions/subagent.ts` (PR 2044), but no seat has called its\n`agent` tool: across lanes b1421-b1424 the planners and reviewers spawned 0 scouts. Nothing in their charters says\nwhen to use one. Make scouts get used when the work is wide, in two parts:\n\n1. A charter rule. `crew/agents/planner.md` and `crew/agents/reviewer.md` gain one short rule: when answering a\n   question means reading many files or an area the brief's Context does not name, ask a `scout` that question\n   instead of reading it all yourself, then read only what its findings cite.\n2. A nudge from what the seat actually does. While the `agent` tool is granted, the extension counts the seat's\n   read-type tool calls (read, grep, find, ls) since its last write or scout call. When the count passes a\n   threshold and the reads span several directories, it sends the seat one short message suggesting a scout.\n   It nudges at most once per turn, writes one journal row when it does, and never blocks or changes a tool call.\n   The tool that provides scouts is the natural home: no grant, no nudge.\n\nInvariants: a seat without the `agent` tool never gets the nudge; writing the journal row never throws into the\nseat; the nudge is advice and the seat may ignore it.\n\n## Context\n\n- `crew/pi/extensions/subagent.ts`: `createAgentTool`, the extension entry, `usageRow` and how it appends journal\n  rows (`journalPathFrom`).\n- `crew/pi/extensions/advisor.ts` and `crew/pi/extensions/reminders.ts`: how an arm watches tool calls and sends a\n  message to the seat.\n- `crew/agents/planner.md`, `crew/agents/reviewer.md`: the charters; `crew/acp/grants.mjs` `armGrants`.\n- Tests to read first: `crew/pi/extensions/subagent.test.mjs`.\n\n## Acceptance\n\n- (SN1) the planner charter names the scout rule\n- (SN2) the reviewer charter names the scout rule\n- (SN3) a seat granted the agent tool receives one nudge after reads past the threshold across several directories\n- (SN4) a second run of reads past the threshold in the same turn sends no second nudge\n",
+  "acceptance": [
+    "SN1",
+    "SN2",
+    "SN3",
+    "SN4"
+  ],
+  "source": "operator request 2026-10-29 (scouts are granted but never used; activate them when the work is wide)",
+  "branch": "b1425-scout-rule-and-nudge",
+  "base": "main",
+  "closes": [],
+  "suite": {
+    "command": "npm",
+    "args": [
+      "test"
+    ],
+    "timeoutMs": 1800000
+  }
+}

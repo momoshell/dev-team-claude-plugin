@@ -168,6 +168,7 @@ test('CL1 archived code lanes retain their exact inputs and provenance', () => {
     assert.deepEqual(json(join(dir, 'manifest.json')), {
       lane, id, base: LANES[lane], originalTask: lean.taskDir, originalTree: lean.cwd,
       source: `/Users/momoshell/.crew-journal-archive/dt-${id}/${id}/task`, reviewer: REVIEWER_METADATA[lane],
+      ...(lane === 'b1441' ? { knownDefect: { fixingCommits: ['4ad976f60cd1048129613297eedff674db44dffd'], files: ['crew/acp/provider.mjs'], description: 'Exact WebSocket error was not retryable.' } } : {}),
     })
     for (const [name, expected] of Object.entries(ARCHIVE_HASHES[lane])) {
       assert.equal(createHash('sha256').update(readFileSync(join(dir, name))).digest('hex'), expected, `${lane}/${name}`)

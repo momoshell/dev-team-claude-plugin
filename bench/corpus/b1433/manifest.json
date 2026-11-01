@@ -1,0 +1,23 @@
+{
+  "lane": "b1433",
+  "id": "b1433-seat-bench",
+  "base": "67c968c108e13c401dde92e8bed7bcfcce578161",
+  "originalTask": "/Users/momoshell/.crew/dt-b1433-seat-bench/b1433-seat-bench/task",
+  "originalTree": "/Users/momoshell/Dev/dt-b1433-seat-bench",
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1433-seat-bench/b1433-seat-bench/task",
+  "reviewer": {
+    "builtHead": "6f83e0efef6692ebe4b34bd558418d9cd75b3dda",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1433-seat-bench/b1433-seat-bench/task/lean/reviewer/b1433-seat-bench.reviewer.20.jsonl"
+  },
+  "knownDefect": {
+    "fixingCommits": [
+      "1a8856ca8d7d59f488d4b7e4ed245ec96dd4ba1a",
+      "94fa08a8281f18ee9efee86ee33b0a7a59b89d4b"
+    ],
+    "files": [
+      "bench/replay-builder.mjs",
+      "bench/blind-review.mjs"
+    ],
+    "description": "Deleted tests were selected; disposable review commits ran repo hooks."
+  }
+}

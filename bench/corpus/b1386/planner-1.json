@@ -1,0 +1,75 @@
+{
+  "role": "planner",
+  "id": "b1386-claude-seat-arms.planner.1",
+  "status": "done",
+  "summary": "Planned shared Claude ACP hook arms and authored a six-check behavioral gate with kill-mutations; execution is left to the loop.",
+  "details": {
+    "subject": "feat(crew): run Claude ACP seat arms through plugin hooks",
+    "plan_path": "/Users/momoshell/.crew/dt-b1386-claude-seat-arms/b1386-claude-seat-arms/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1386-claude-seat-arms/b1386-claude-seat-arms/task/gate.mjs",
+    "acceptance": ["CH1", "CH2", "CH3", "CH4", "CH5", "CH6"],
+    "mutations": [
+      {
+        "check": "CH1",
+        "file": "crew/pi/extensions/readgate.ts",
+        "find": "function isReadTool(toolName) { return toolName === 'read' }",
+        "replace": "function isReadTool(toolName) { return false }"
+      },
+      {
+        "check": "CH2",
+        "file": "crew/pi/extensions/skeletonread.ts",
+        "find": "if (env?.CREW_ROLE !== 'builder') return undefined",
+        "replace": "if (true) return undefined"
+      },
+      {
+        "check": "CH3",
+        "file": "crew/pi/extensions/advisor.ts",
+        "find": "export const REPEAT_FAILURE_THRESHOLD = 2",
+        "replace": "export const REPEAT_FAILURE_THRESHOLD = 200"
+      },
+      {
+        "check": "CH4",
+        "file": "crew/pi/extensions/builderloop.ts",
+        "find": "if (assist !== 'on' || cause === null || !fileText || !oldText) return undefined",
+        "replace": "if (assist === 'on' || cause === null || !fileText || !oldText) return undefined"
+      },
+      {
+        "check": "CH5",
+        "file": "crew/pi/extensions/reminders.ts",
+        "find": "function sessionStart() {",
+        "replace": "function sessionStart() { return undefined;"
+      },
+      {
+        "check": "CH6",
+        "file": "crew/acp/seat.mjs",
+        "find": "const armed = armGrants({ role, agent: definition.agent, extensions },",
+        "replace": "const armed = armGrants({ role, agent: definition.agent, extensions: extensions.filter((name) => name !== 'subagent') },"
+      }
+    ],
+    "files_in_scope": [
+      "crew/adapters/claude-arms.mjs",
+      "crew/adapters/claude-arms.test.mjs",
+      "crew/adapters/adapter-claude.mjs",
+      "crew/acp/seat.mjs",
+      "crew/acp/seat.test.mjs",
+      "crew/crew-adapters.test.mjs",
+      "crew/pi/extensions/readgate.ts",
+      "crew/pi/extensions/readgate.test.mjs",
+      "crew/pi/extensions/skeletonread.ts",
+      "crew/pi/extensions/skeletonread.test.mjs",
+      "crew/pi/extensions/advisor.ts",
+      "crew/pi/extensions/advisor.test.mjs",
+      "crew/pi/extensions/builderloop.ts",
+      "crew/pi/extensions/builderloop.test.mjs",
+      "crew/pi/extensions/reminders.ts",
+      "crew/pi/extensions/reminders.test.mjs",
+      "crew/pi/context-layout.test.mjs",
+      "test/fixtures/acp/claude-hooks.jsonl",
+      "test/fixtures/acp/claude-hook-transcript.jsonl",
+      "docs/adr/adr-052-agents-do-the-work.md",
+      "docs/adr/README.md"
+    ],
+    "validation_lane": "node --test crew/adapters/claude-arms.test.mjs crew/acp/seat.test.mjs crew/crew-adapters.test.mjs crew/pi/context-layout.test.mjs crew/pi/extensions/readgate.test.mjs crew/pi/extensions/skeletonread.test.mjs crew/pi/extensions/advisor.test.mjs crew/pi/extensions/builderloop.test.mjs crew/pi/extensions/reminders.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1386-claude-seat-arms/b1386-claude-seat-arms/task/gate.mjs"
+  }
+}

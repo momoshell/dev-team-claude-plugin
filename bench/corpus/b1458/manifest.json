@@ -8,5 +8,13 @@
   "reviewer": {
     "builtHead": "c0ef8ac4b41abc55a3ec94ab6d61792966ae54a5",
     "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1458-viz-skills-remeasure/b1458-viz-skills-remeasure/task/lean/reviewer/b1458-viz-skills-remeasure.reviewer.3.jsonl"
+  },
+  "knownDefect": {
+    "fixingCommits": [],
+    "files": [
+      "skills/ui-design/SKILL.md"
+    ],
+    "description": "Rewrite dropped the rem rule for gaps, padding and margins.",
+    "reason": "not-restored"
   }
 }

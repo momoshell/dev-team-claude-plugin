@@ -5,9 +5,9 @@ builder or planner turn at the lane's base commit with a seat you name; a blind 
 the results without knowing which seat made which. Nothing here records results: output dirs are
 yours, outside the repo. What past runs decided is under "Results so far" below.
 
-- `corpus/<lane>/` — frozen inputs for seventeen lanes: fourteen code lanes (b1380, b1381,
-  b1402, b1408, b1416, b1417, b1440, b1441, b1442, b1444, b1448, b1450, b1451, b1454),
-  plus b1457, b1458 and b1459:
+- `corpus/<lane>/` — frozen inputs for 22 lanes: nineteen code lanes (b1380, b1381, b1386,
+  b1402, b1408, b1416, b1417, b1425, b1427, b1433, b1440, b1441, b1442, b1444, b1448,
+  b1450, b1451, b1452, b1454), plus b1457, b1458 and b1459:
   `plan.md`, `gate.mjs`, `planner-1.json`, `lean.json`, `brief.md`, `planner-prompt.txt`,
   `builder-prompt.txt` (the first recorded prompts, verbatim) and `manifest.json`
   (`base` commit, and the `originalTask` / `originalTree` paths the prompts cite; the replays
@@ -52,8 +52,9 @@ node bench/replay-reviewer.mjs --lane b1441 --cell cell.json --arms fff --out /a
 node bench/replay-reviewer.mjs --lane b1441 --cell cell.json --arms fff --out /abs/seeded --variant seeded --mutation PK1
 ```
 
-The reviewer sees the archived first reviewer prompt and built change. The manifest pins the
-successful rebase commit; its single parent becomes HEAD after a mixed reset, leaving the built
+The reviewer sees an archived reviewer prompt and its matching built change. Most lanes use the
+first reviewer prompt; b1386, b1427 and b1433 use their last review round. The manifest pins the
+built commit; its single parent becomes HEAD after a mixed reset, leaving the built
 snapshot as tracked and untracked changes. The commit and its parent must be available locally
 (full history may be needed). b1380 and b1444 have no archived reproducible built head; b1440
 also lacks a reviewer prompt. These lanes are refused before creating a worktree.
@@ -67,7 +68,10 @@ Output directories follow the same safety restrictions as the other replays.
 `result.json` records the variant, full seeded declaration or null, first return status, verdict,
 findings, usage and wall time. `seededFileCited` measures a must-fix finding naming the exact
 seeded file, not the verdict. Unknown measurements are null with a reason in `unknown`; clean
-runs use `not-seeded` for that field. Run `node --test bench/replay.test.mjs
+runs use `not-seeded` for that field. For lanes with `knownDefect` metadata, `defectFileCited`
+records whether any finding names a defect file. This is file-overlap evidence, not semantic recall.
+The metadata names fixing commits, files and a description; b1458 has no fixing commit because its
+rem-spacing rule was never restored. Run `node --test bench/replay.test.mjs
 bench/replay-reviewer.test.mjs` for local tests without models or network.
 
 ## Builder replay

@@ -8,5 +8,14 @@
   "reviewer": {
     "builtHead": "f1ceef3db170c050ad6f977b8d0a368a01014feb",
     "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1441-pi-provider-failure-kind/b1441-pi-provider-failure-kind/task/lean/reviewer/b1441-pi-provider-failure-kind.reviewer.3.jsonl"
+  },
+  "knownDefect": {
+    "fixingCommits": [
+      "4ad976f60cd1048129613297eedff674db44dffd"
+    ],
+    "files": [
+      "crew/acp/provider.mjs"
+    ],
+    "description": "Exact WebSocket error was not retryable."
   }
 }

@@ -8,5 +8,14 @@
   "reviewer": {
     "builtHead": "a231fe3c6e99655081e73d30ca686a13a06a5a8d",
     "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1416-loop-checks-after-rebase/b1416-loop-checks-after-rebase/task/lean/reviewer/b1416-loop-checks-after-rebase.reviewer.3.jsonl"
+  },
+  "knownDefect": {
+    "fixingCommits": [
+      "8592d6efe9ab0d132430f1ad983d1e28b1958ec2"
+    ],
+    "files": [
+      "crew/loop.mjs"
+    ],
+    "description": "Post-rebase checks could dirty the tree without stopping publication."
   }
 }

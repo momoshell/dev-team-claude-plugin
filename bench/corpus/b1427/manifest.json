@@ -1,0 +1,21 @@
+{
+  "lane": "b1427",
+  "id": "b1427-pre-return-whole-diff",
+  "base": "7d96e4674589a816fb37b7f2c1d70805d3084190",
+  "originalTask": "/Users/momoshell/.crew/dt-b1427-pre-return-whole-diff/b1427-pre-return-whole-diff/task",
+  "originalTree": "/Users/momoshell/Dev/dt-b1427-pre-return-whole-diff",
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1427-pre-return-whole-diff/b1427-pre-return-whole-diff/task",
+  "reviewer": {
+    "builtHead": "c14ac23b935f35586a67b13d1beed142e6ff22bb",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1427-pre-return-whole-diff/b1427-pre-return-whole-diff/task/lean/reviewer/b1427-pre-return-whole-diff.reviewer.10.jsonl"
+  },
+  "knownDefect": {
+    "fixingCommits": [
+      "711f27703b006c4cdca42eeefdda5e76e33c6571"
+    ],
+    "files": [
+      "crew/pi/extensions/advisor.ts"
+    ],
+    "description": "Pre-return wholeDiff leaked injected advisor notes."
+  }
+}

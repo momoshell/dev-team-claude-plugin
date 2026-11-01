@@ -25,6 +25,12 @@
   --role-tech-lead-light: #a16500;
   --role-lead-light: #b43f71;
   --role-driver-light: #315eae;
+  --trace-input-light: #087f89;
+  --trace-input-dark: #52ced8;
+  --trace-model-light: #6652db;
+  --trace-model-dark: #9c8cff;
+  --trace-tool-light: #a16500;
+  --trace-tool-dark: #f0b85c;
   --serious: #ff806f;
   --status-ok-raw: #4dcc87;
   --status-fail-raw: #ff6b6b;
@@ -66,6 +72,9 @@
   --role-tech-lead: var(--role-tech-lead-light);
   --role-lead: var(--role-lead-light);
   --role-driver: var(--role-driver-light);
+  --trace-input: var(--trace-input-light);
+  --trace-model: var(--trace-model-light);
+  --trace-tool: var(--trace-tool-light);
 }
 
 :root[data-theme='ink'] {
@@ -93,6 +102,9 @@
   --role-tech-lead: var(--role-tech-lead-dark);
   --role-lead: var(--role-lead-dark);
   --role-driver: var(--role-driver-dark);
+  --trace-input: var(--trace-input-dark);
+  --trace-model: var(--trace-model-dark);
+  --trace-tool: var(--trace-tool-dark);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -121,6 +133,9 @@
     --role-tech-lead: var(--role-tech-lead-dark);
     --role-lead: var(--role-lead-dark);
     --role-driver: var(--role-driver-dark);
+    --trace-input: var(--trace-input-dark);
+    --trace-model: var(--trace-model-dark);
+    --trace-tool: var(--trace-tool-dark);
   }
 }
 

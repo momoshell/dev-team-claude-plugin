@@ -3,12 +3,10 @@
   "exempt": ["docs/audits/**"],
   "rules": [
     {"when":{"roles":["planner"]},"delivery":"inline","skills":["dev-team:qa-test-writing#gates"]},
-    {"when":{"roles":["builder"]},"delivery":"inline","skills":["dev-team:code-less","dev-team:qa-test-writing#vacuity"]},
     {"when":{"roles":["reviewer"]},"delivery":"inline","skills":["dev-team:pr-review"]},
     {"when":{"roles":["tech-lead"]},"delivery":"inline","skills":["dev-team:pr-review#falsification"]},
-    {"when":{"roles":["reviewer"]},"delivery":"grant","skills":["dev-team:code-less","dev-team:qa-test-writing#vacuity"]},
     {"when":{"roles":["tech-lead"]},"delivery":"grant","skills":["dev-team:qa-test-writing#gates"]},
-    {"when":{"paths":["crew/**/*.mjs","crew/**/*.ts","scripts/**/*.mjs","hooks/**/*.mjs","test/**/*.mjs","skills/**/*.mjs","visualizer/**/*.mjs","visualizer/**/*.js","visualizer/**/*.svelte"],"roles":["builder","reviewer"]},"skills":["dev-team:code-less"]},
+    {"when":{"paths":["**/*.mjs","**/*.js","**/*.ts","**/*.tsx","**/*.rs","**/*.py","**/*.svelte"],"roles":["builder","reviewer"]},"skills":["dev-team:code-less"]},
     {"when":{"paths":["crew/**/*.mjs","crew/**/*.ts","scripts/**/*.mjs","hooks/**/*.mjs"],"roles":["builder","reviewer"]},"skills":["dev-team:backend-node"]},
     {"when":{"paths":["**/*.test.mjs"],"roles":["builder","reviewer"]},"skills":["dev-team:qa-test-writing"]},
     {"when":{"paths":["visualizer/**/*.svelte","visualizer/**/*.js","visualizer/**/*.mjs","visualizer/**/*.css"],"roles":["planner","builder","reviewer"]},"skills":["dev-team:frontend-svelte"]},

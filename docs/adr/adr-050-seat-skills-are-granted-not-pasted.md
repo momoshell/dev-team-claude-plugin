@@ -77,7 +77,7 @@ A seat's inline content is its role pack. Everything else that matches is grante
 | planner | `qa-test-writing#gates` — the planner authors every lane's acceptance gate | path-matched skills, index line only |
 | builder | `code-less`, `qa-test-writing#vacuity` | `backend-node`, `frontend-svelte`, `ui-design`, `ux`, `prose-plain`, the rest of `qa-test-writing`, by path |
 | reviewer | `pr-review` | `code-less`, `qa-test-writing#vacuity`, path-matched skills |
-| tech-lead | `pr-review#falsification` — plan-check is falsification | `qa-test-writing#gates` |
+| tech-lead | `pr-review#falsification` (plan-check is falsification) | `qa-test-writing#gates` |
 | lead | none | none |
 
 The planner, lead and tech-lead lose `code-less`: the ladder itself is in the "The ladder (before any new code)" section of `crew/roles/_shared.md` and every
@@ -213,3 +213,10 @@ Lanes 1 and 2 are independent; lane 3 needs both; lane 4 needs 1.
 The plugin registers no Claude Code hook. The operator session is never gated. Seats receive skills
 through role packs (inline) and native grants. Any claude-seat enforcement under section 5 needs a new
 seat-scoped mechanism.
+
+## Operator decisions (2026-11-01)
+
+The builder and reviewer lose their map role packs. The map selects `code-less` by path for source files in any
+layout (`*.mjs`, `*.js`, `*.ts`, `*.tsx`, `*.rs`, `*.py`, `*.svelte`), and test files select `qa-test-writing`. The
+reviewer keeps `pr-review` from its role, because it reviews on every lane. Section 1a's builder and reviewer rows are
+superseded.

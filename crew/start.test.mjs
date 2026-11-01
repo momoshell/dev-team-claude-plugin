@@ -429,7 +429,7 @@ test('every turn gets its role definition, the complete brief and P2, and its ow
     const source = join(AGENTS, `${role}.md`)
     const { body, fields } = parseAgent(readFileSync(source, 'utf8'))
     const cell = seats[role]
-    assert.deepEqual(request.definition, { role, agent: cell.agent, model: `${cell.provider}/${cell.id}`, effort: cell.effort, writes: { ...fields, ...fields.tiers?.build }.writes, skills: role === 'builder' ? ['code-less', 'prose-plain', 'qa-test-writing'] : role === 'reviewer' ? ['code-less', 'pr-review', 'qa-test-writing'] : fields.skills ?? [], requires: [], tools: { ...fields, ...fields.tiers?.build }.tools, extensions: { ...fields, ...fields.tiers?.build }.extensions, advisor: { ...fields, ...fields.tiers?.build }.advisor, edit_assist: { ...fields, ...fields.tiers?.build }.edit_assist, codemode: { ...fields, ...fields.tiers?.build }.codemode, wait_s: { ...fields, ...fields.tiers?.build }.wait_s, body })
+    assert.deepEqual(request.definition, { role, agent: cell.agent, model: `${cell.provider}/${cell.id}`, effort: cell.effort, writes: { ...fields, ...fields.tiers?.build }.writes, skills: role === 'builder' ? ['code-less', 'prose-plain'] : role === 'reviewer' ? ['code-less', 'pr-review'] : fields.skills ?? [], requires: [], tools: { ...fields, ...fields.tiers?.build }.tools, extensions: { ...fields, ...fields.tiers?.build }.extensions, advisor: { ...fields, ...fields.tiers?.build }.advisor, edit_assist: { ...fields, ...fields.tiers?.build }.edit_assist, codemode: { ...fields, ...fields.tiers?.build }.codemode, wait_s: { ...fields, ...fields.tiers?.build }.wait_s, body })
     assert.equal(request.taskDir, f.spec.taskDir)
     assert.equal(request.cwd, f.spec.cwd)
     assert.notEqual(f.spec.taskDir, request.cwd)
@@ -438,7 +438,7 @@ test('every turn gets its role definition, the complete brief and P2, and its ow
       assert.ok(request.prompt.includes(wanted), `${id}: ${wanted}`)
     }
     if (role === 'builder' || role === 'reviewer') {
-      assert.deepEqual(request.definition.skills, role === 'builder' ? ['code-less', 'prose-plain', 'qa-test-writing'] : ['code-less', 'pr-review', 'qa-test-writing'], id)
+      assert.deepEqual(request.definition.skills, role === 'builder' ? ['code-less', 'prose-plain'] : ['code-less', 'pr-review'], id)
       assert.match(request.prompt, /Read the granted `code-less` skill before (working|reviewing)/, id)
     }
     assert.doesNotMatch(request.prompt, /^Charter file/m, id)
@@ -464,12 +464,12 @@ test('LG1: builder gets accepted lane grants as bare whole skills', async () => 
     [['crew/lean.mjs'], ['backend-node']],
     [['visualizer/a.svelte'], ['frontend-svelte', 'ui-design', 'ux']],
     [['other/a.ts'], []],
-    [['elsewhere/a.spec.ts'], []],
+    [['elsewhere/a.spec.ts'], ['qa-test-writing']],
   ]) {
     const f = leanFixture({ tier, scope, repairPlan: true, answers: { reviews: ['changes-needed', 'pass'] } })
     assert.equal((await f.go()).status, 'done')
     for (const { definition } of f.requests.filter((r) => r.definition.role === 'builder')) {
-      assert.deepEqual(definition.skills, ['code-less', 'prose-plain', 'qa-test-writing', ...extra])
+      assert.deepEqual(definition.skills, ['code-less', 'prose-plain', ...extra])
       assert.deepEqual(definition.requires, [])
     }
   }
@@ -477,8 +477,8 @@ test('LG1: builder gets accepted lane grants as bare whole skills', async () => 
   f.spec.shape = 'finish'
   f.spec.finish = { planPath: 'plan', gatePath: 'gate', subject: 'fix: test', mutations: [LEAN_MUTATION], stop: { reason: 'stopped' }, findings: [], turnOffset: 3, filesInScope: ['outside/a.svelte'] }
   assert.equal((await f.go()).status, 'done')
-  assert.deepEqual(f.requests[0].definition.skills, ['code-less', 'prose-plain', 'qa-test-writing', 'frontend-svelte', 'ui-design', 'ux'])
-  assert.deepEqual(f.requests[1].definition.skills, ['code-less', 'pr-review', 'qa-test-writing', 'frontend-svelte', 'ui-design', 'ux'])
+  assert.deepEqual(f.requests[0].definition.skills, ['code-less', 'prose-plain', 'frontend-svelte', 'ui-design', 'ux'])
+  assert.deepEqual(f.requests[1].definition.skills, ['code-less', 'pr-review', 'frontend-svelte', 'ui-design', 'ux'])
 })
 
 // MUTATION: remove reviewer from the laneRole predicate.
@@ -487,12 +487,12 @@ test('LG2: reviewer gets scope grants rather than changed-path grants', async ()
     [['crew/lean.mjs'], ['backend-node']],
     [['visualizer/a.svelte'], ['frontend-svelte', 'ui-design', 'ux']],
     [['other/a.ts'], []],
-    [['elsewhere/a.spec.ts'], []],
+    [['elsewhere/a.spec.ts'], ['qa-test-writing']],
   ]) {
     const f = leanFixture({ tier, scope, repairPlan: true, status: ' M crew/other.mjs\0', answers: { reviews: ['changes-needed', 'pass'] } })
     assert.equal((await f.go()).status, 'done')
     for (const { definition } of f.requests.filter((r) => r.definition.role === 'reviewer')) {
-      assert.deepEqual(definition.skills, ['code-less', 'pr-review', 'qa-test-writing', ...extra])
+      assert.deepEqual(definition.skills, ['code-less', 'pr-review', ...extra])
       assert.deepEqual(definition.requires, [])
     }
   }
@@ -506,7 +506,7 @@ test('PP2: builder definitions inherit both skills at every tier', async () => {
     assert.equal(result.status, 'done', tier)
     const builders = f.requests.filter((request) => request.definition.role === 'builder')
     assert.ok(builders.length, tier)
-    for (const request of builders) assert.deepEqual(request.definition.skills, ['code-less', 'prose-plain', 'qa-test-writing'], tier)
+    for (const request of builders) assert.deepEqual(request.definition.skills, ['code-less', 'prose-plain'], tier)
   }
 })
 

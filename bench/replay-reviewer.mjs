@@ -81,6 +81,7 @@ export async function runReviewer(options, deps = {}) {
     if (error) errors.push(`seat: ${error}`)
     if (cell.advisor) (deps.sleepMs ?? sleepMs)((cell.settle_s ?? 120) * 1000)
     const loaded = loadEnvelope(prep.taskDir, prep.returnName)
+    Object.assign(result, { status: loaded.status, status_reason: loaded.status_reason })
     if (loaded.error) errors.push(loaded.error)
     let envelope = loaded.envelope
     const expectedId = prep.prompt.match(/^Envelope id:\s*(\S+)/m)?.[1]

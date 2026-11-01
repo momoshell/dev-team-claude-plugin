@@ -26,8 +26,8 @@ An audit of 95 archived lean lanes (`~/crew-bench/loop-logic-audit-2026-11-01.md
 - **Reviewers miss real bugs.** On 10 lanes whose built change carried a defect a later lane fixed
   (`~/crew-bench/defects-2026-11-01`), a `changes` verdict with a finding that names a defect file came back in 9 of
   30 live-reviewer runs and 14 of 30 at xhigh. That is an upper bound on catches, not a count of them: some of those
-  findings name the defect's file but a different bug (b1433 at xhigh, run 2). On four lanes no reviewer named a defect
-  file at all, `sol-review` included.
+  findings name the defect's file but a different bug (b1433 at xhigh, run 2). On three lanes (b1402, b1441, b1452) no run of any reviewer,
+  `sol-review` included, returned `changes` with a finding naming a defect file.
 
 The tier mix is lopsided: of 97 archived lanes, 90 ran `build`, 6 `judge` and 1 `mechanical`. The build loop below
 rests on that evidence; the mechanical and judge loops are design until their own lanes are measured.

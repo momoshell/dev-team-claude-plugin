@@ -1,114 +1,49 @@
 ---
 name: qa-test-writing
 description: >-
-  Use when writing a new test, reviewing whether an existing test pins anything,
-  authoring an acceptance gate, identifying affected behavioural and source-grep tests,
-  debugging a test that passes when it should not, or judging whether a suite's
-  green means anything. Writes and reviews tests for this repo
-  against rules it has already paid for: proving a check can fail (vacuity),
-  naming the mutation each check kills, building acceptance gates that are red
-  at baseline and provably discriminating, pinning vendor stream formats with
-  recorded captures instead of hand-built frames, scoping affected tests when a
-  change moves code or changes a detector, and recording an unmeasured value as
-  absent rather than zero.
+  Use when writing or reviewing tests, authoring acceptance gates, scoping affected
+  tests, or investigating a check that passes when it should fail. Writes and reviews tests in any repository.
 ---
 
-Every rule here was paid for by a defect that shipped. Each one names its
-exhibit or identifies it as historical, so you can read what it cost before deciding to skip it.
+# Test writing
 
-The posture is **measurement-first**: this domain is *this repo*, not a moving
-external API. Do not reason about whether a check discriminates — run the
-mutation and watch it go red. A check nobody has seen fail is a check nobody
-can trust.
+Use measurement, not reasoning alone, to establish that a check discriminates.
+A check nobody has seen fail is not trustworthy. See the [dev-team repository evidence](references/dev-team-evidence.md) for the defects behind these rules.
 
 ## Routing
 
-| Doing… | Rule that governs it | Details |
-|---|---|---|
-| Writing any new check | Prove it can fail before you keep it | `references/vacuity.md` |
-| Reviewing an existing check | Neutralise the behaviour; if it stays green, it pins nothing | `references/vacuity.md` |
-| Authoring an acceptance gate | Red at baseline, `errored: 0`, discrimination proved | `references/gates.md` |
-| Testing a reducer over a vendor's stream | Recorded captures, never hand-built frames | `references/captures.md` |
-| Identifying affected tests | A change that moves code or changes a detector owns what it newly flags | `references/tripwires.md` |
-| Parsing a suite summary in a script | Strip ANSI; `FORCE_COLOR=0` | `references/tooling.md` |
-| Asserting on a value nobody measured | Absent with one closed reason, never zero | `references/absence.md` |
-| Writing a test for a malformed or hostile input | If you cannot express the malformed input, you have not tested the guard | `references/affordances.md` |
-| Citing a file from prose or from a comment | Cite a path or a symbol, never a line; every cited path must exist | `references/citations.md` |
-| Pinning a universal claim about a pure function (a tokenizer, classifier, normaliser) | Generate the inputs from every production of the grammar the claim is about — `forAll` in `test/helpers.mjs`, seeded, the failing input printed — with an oracle the generator carries itself, never one rediscovered from the serialized input; keep one example test for the shape | this table |
+- [Vacuity](references/vacuity.md): writing or reviewing any check.
+- [Gates](references/gates.md): authoring an acceptance gate.
+- [Captures](references/captures.md): testing vendor stream reducers.
+- [Tripwires](references/tripwires.md): scoping affected behavioural and source-grep tests.
+- [Tooling](references/tooling.md): scratch trees, suite output and timeouts.
+- [Absence](references/absence.md): unmeasured values and zero.
+- [Affordances](references/affordances.md): malformed or hostile input.
+- [Citations](references/citations.md): citing a path or symbol.
+- Toolchain recipes: [node:test](references/node-test.md), [cargo test](references/cargo-test.md), [vitest](references/vitest.md).
 
-Read the reference before writing the check. The rules below are the
-irreducible ones; the references carry the exhibits and the failure modes.
+For a universal claim about a pure function, generate inputs from every production
+of the relevant grammar. Seed the generator, print the failing input, and use an
+independent oracle carried by the generator, not rediscovered from serialized
+input. Keep an example test for the shape.
 
 ## Critical rules
 
-- **Never keep a check you have not watched fail.** Delete the behaviour it
-  names, run it, see red, restore. A measured sweep of 12 checks in this repo
-  found **9 that passed with the behaviour removed** — 75% vacuity, including
-  historical security boundaries (#476; no live exhibit).
+- Never keep a check you have not watched fail. Name the mutation in a comment
+  beside the check, run it, observe red, and restore.
+- Never derive the expected value from the implementation. Use an independent
+  literal, fixture, or capture.
+- Never assert over input that cannot reach the subject. Change the fixture,
+  not the assertion, when the input is unreachable.
+- Never let a detector's key be the only guard against drift; pin the detector.
+- An acceptance gate must be red at baseline with no errors, and each check's
+  mutation must prove discrimination.
+- Never hand-build vendor stream frames: use a recorded capture.
+- Never report an unmeasured value as zero. Record absence and one closed reason
+  where the contract provides one.
+- Pin both directions when fixing an asymmetry. Where implementations share a
+  rule, pin their agreement behaviourally against one fixture table.
+- Make malformed input expressible before claiming its guard is tested.
 
-- **Never derive the expected value from the implementation.** A check that
-  compares the implementation to itself cannot fail. Exhibit: a check compared
-  a vocabulary to itself, and another looped over exactly the keys
-  the implementation produced — both green after the behaviour was removed
-  (#476 V7, V8). The expected value comes from somewhere the implementation
-  cannot edit: a literal in the test, a fixture, a captured file. For a live
-  vocabulary, see `CHECK_REASONS` in `crew/checks.mjs` and `crew/checks.test.mjs`.
-
-- **Never assert over input that cannot reach the subject.** A stronger
-  assertion over unreachable input is still vacuous. Exhibits: a sort was pinned
-  by a fixture that **was already sorted**, and a kill-seam check returned before
-  reaching the seam (#476 V9, V3). When a check is vacuous for this reason, the
-  **fixture** is what changes, not the assertion.
-
-- **Never let a detector's key be the only thing that catches drift.** A literal
-  key for a particular function spelling is blind to an alias, an indirect caller, a block comment,
-  a JSDoc body, or a template literal — all four were measured (#476 V5, and the
-  same tripwire was hit independently by three separate scouts). If a detector is
-  the guard, something must pin the detector.
-
-- **Always name, in a comment beside the check, the mutation it kills** — and
-  demonstrate that mutation reddens. A named mutation that nobody ran is a
-  claim, not a proof.
-
-- **Never hand-build a vendor's stream frames in a test.** Use a recorded
-  capture. Exhibit: this repo's RPC usage tests constructed `message_end` frames
-  **with no `role` field at all** — a shape the vendor never emits — which left a
-  live token over-count unpinned in either direction, in the one transport that
-  calibrates every cost number (#493, fixed in PR #496). Hand-built fixtures
-  encode what you *believe* the format is; that belief is the thing under test.
-
-- **Never report a value nobody measured as a zero.** Record absence explicitly (for example `null`); retain a
-  reason where the contract provides one. A zero is a measurement. This distinction is load-bearing
-  across usage and cost records, and it is pinned in both directions
-  wherever it appears.
-
-- **Always pin in both directions when you fix an asymmetry.** Fixing an
-  over-count without pinning the under-count leaves the mirror defect live. The
-  fix for #493 pins the nested frame excluded *and* the assistant frame still
-  folded, so it cannot silently invert.
-
-- **Where two implementations share a rule, pin the agreement behaviourally.**
-  A comment stating the rule in a third place is not a coupling. Exhibit: the
-  #493 fix asserts both reducers against **one fixture table** and requires
-  identical results — make either side disagree and the suite goes red.
-
-## When a check cannot be made to discriminate
-
-Delete it, and say what it was supposed to stop. This repo's standing rule is
-that **fewer checks which provably fail beat broad coverage that cannot**. A
-suite whose green means nothing is worse than a smaller suite whose green means
-something, because the first one is trusted.
-
-## Key references
-
-- `references/vacuity.md` — the three shapes of vacuity, with historical examples
-  and the mutation method (a disposable scratch tree, never the checkout)
-- `references/gates.md` — acceptance gates: baseline-red, `errored: 0`,
-  discrimination, and why the loop proves it rather than the brief
-- `references/captures.md` — recording and using vendor stream captures
-- `references/tripwires.md` — scoping affected tests and files; detectors and
-  what they newly flag
-- `references/tooling.md` — running the suite, ANSI, scratch trees, timeouts
-- `references/absence.md` — absent vs zero, and pinning it
-- `references/affordances.md` — expressing malformed and hostile inputs before testing their guards
-- `references/citations.md` — path-or-symbol citations, no line numbers, every cited path real
+If a check cannot discriminate, delete it and say what it was supposed to stop.
+Fewer checks that provably fail beat broad coverage that cannot.

@@ -286,8 +286,8 @@ minimal correct build (must pass), then one plausible wrong build per acceptance
 
 | Planner | First return `done` | Baseline red | Blind pass | Tokens | Median wall |
 |---|---|---|---|---|---|
-| main | 42/42 | 42/42 | 14/42 | 10.81M | 131s |
-| main + lab + the paragraph | 42/42 | 42/42 | 5/42 | 31.45M (2.9x) | 320s |
+| main | 42/42 | 42/42 | 14/42 | 10.81M | 128.5s |
+| main + lab + the paragraph | 42/42 | 42/42 | 5/42 | 31.45M (2.9x) | 316.5s |
 
 The lab was used in 42 of 42 trial runs, 424 calls in all (counted from session tool-call titles, because ACP
 seats write no lab journal rows). The self-proof passed gates that confirm the planner's own reading of the

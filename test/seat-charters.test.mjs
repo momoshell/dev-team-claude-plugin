@@ -56,6 +56,21 @@ test('GC2: planner gates list and read files with Node fs', () => {
   has(body('crew/agents/planner.md'), "A gate that lists or reads files must use Node's `fs` from `process.cwd()`, never git or a seat tool such as fff (seat tools are unavailable to gates and CI).")
 })
 
+// MUTATION: restore the Node-only validation_lane instruction (PS3).
+test('PS3 planner requests a repository-appropriate validation lane', () => {
+  const charter = body('crew/agents/planner.md')
+  has(charter, '`validation_lane` (the repository-appropriate command that checks the change)')
+  assert.doesNotMatch(charter, /validation_lane[^.]*the `node --test` command/)
+})
+
+// MUTATION: remove dev-team attribution from the examples heading (PS4).
+test('PS4 code-less attributes all worked examples', () => {
+  const skill = read('skills/code-less/SKILL.md')
+  assert.match(skill, /^## Examples \(from the dev-team repository\)$/m)
+  const examples = skill.split('## Examples (from the dev-team repository)')[1]?.split('\n\nWhen ')[0] ?? ''
+  for (const text of ['Standard library:', 'Closed enum:', 'Existing helper:', 'Honest absence:', 'crew/checks.mjs', 'test/helpers.mjs', 'crew/pi/extensions/subagent.ts']) has(examples, text)
+})
+
 // MUTATION: remove a ladder rung or restore the obsolete shared-charter reference.
 test('SC4: the delivered skill owns the ladder and its references', () => {
   const skill = read('skills/code-less/SKILL.md')

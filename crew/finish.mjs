@@ -96,7 +96,7 @@ function finishFor(rows, stopped, before, plan) {
   const { subject, plan_path: planPath, gate_path: gatePath, mutations } = plan
   const reviewed = rows.slice(0, before).findLast((row) => row.event === 'verdict' && row.status === 'reviewed')
   return {
-    planPath, gatePath, subject, mutations,
+    planPath, gatePath, subject, mutations, filesInScope: plan.files_in_scope ?? null,
     stop: { reason: stopped.reason, observation: stopped.observation ?? null },
     findings: reviewed?.verdict === 'changes-needed' && Array.isArray(reviewed.findings) ? reviewed.findings : [],
     turnOffset: rows.filter((row) => row.event === 'envelope').length,

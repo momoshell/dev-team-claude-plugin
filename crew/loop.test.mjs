@@ -107,11 +107,33 @@ test('a green run walks every stage in order and returns the measured PR with ea
   assert.deepEqual(f.seen.publish, { cwd: '/virtual/checkout', branch: 'lane', base: 'main', title: 'fix(crew): planned lane', body: BODY, closes: [12], refs: [13], timeoutMs: 5000 })
   const planner = f.requests[0]
   assert.deepEqual(Object.keys(planner).sort(), ['brief', 'feedback', 'gatePath', 'id', 'planPath', 'returnPath', 'role', 'seat'])
-  assert.deepEqual(Object.keys(f.requests[1]).sort(), Object.keys(planner).sort())
-  assert.deepEqual(Object.keys(f.requests[2]).sort(), [...Object.keys(planner), 'changedPaths'].sort())
+  assert.deepEqual(Object.keys(f.requests[1]).sort(), [...Object.keys(planner), 'filesInScope'].sort())
+  assert.deepEqual(Object.keys(f.requests[2]).sort(), [...Object.keys(planner), 'filesInScope', 'changedPaths'].sort())
   assert.deepEqual(f.requests[1], { ...f.requests[1], role: 'builder', planPath: '/virtual/task/plan.md', gatePath: '/virtual/task/gate.mjs', feedback: [] })
   assert.equal(new Set(f.requests.map((r) => r.id)).size, f.requests.length)
   assert.equal(new Set(f.requests.map((r) => r.returnPath)).size, f.requests.length)
+})
+
+// MUTATION: omit or replace the accepted scope in builder and reviewer requests.
+test('accepted scope survives repaired envelopes, repeated turns and finish', async () => {
+  const scope = ['app/component.svelte', 'tests/a.rs']
+  const f = fakes({ review: 1, edit: (value, request) => {
+    if (value.role === 'planner') value.details.files_in_scope = request.repair ? scope : [123]
+    if (value.role === 'builder' && !request.repair && request.id.endsWith('.2')) value.details.extra = true
+    return value
+  } })
+  assert.equal((await f.go()).status, 'done')
+  assert.ok(f.requests.some((r) => r.role === 'planner' && r.repair))
+  assert.ok(f.requests.some((r) => r.role === 'builder' && r.repair))
+  for (const request of f.requests.filter((r) => ['builder', 'reviewer'].includes(r.role))) assert.deepEqual(request.filesInScope, scope)
+  const absent = fakes()
+  assert.equal((await absent.go()).status, 'done')
+  for (const request of absent.requests.slice(1)) assert.equal(request.filesInScope, null)
+  const finish = fakes({ spec: finishSpec({ filesInScope: scope }), unseated: ['planner'] })
+  assert.equal((await finish.go()).status, 'done')
+  for (const request of finish.requests) assert.deepEqual(request.filesInScope, scope)
+  const invalid = fakes({ spec: finishSpec({ filesInScope: [1] }), unseated: ['planner'] })
+  assert.deepEqual(await invalid.go(), stopped('invalid-input'))
 })
 
 // MUTATION: forward the general timeout to the suite and the suite override never reaches the runner.
@@ -500,6 +522,15 @@ const repairing = (sequence, options = {}) => {
   f.deps.runGate = async (input) => options.afterGate && f.inputs.length >= 2 ? (f.calls.push('gate'), structuredClone(options.afterGate)) : base(input)
   return f
 }
+
+// MUTATION: omit scope on a suite-repair turn.
+test('suite repair keeps the accepted scope', async () => {
+  const scope = ['src/widget.svelte']
+  const f = sequenced([redRun(1), redRun(1), green()], { edit: (v) => v.role === 'planner' ? { ...v, details: { ...v.details, files_in_scope: scope } } : v })
+  assert.equal((await f.go()).status, 'done')
+  assert.equal(builderTurns(f).length, 2)
+  for (const r of f.requests.filter((r) => ['builder', 'reviewer'].includes(r.role))) assert.deepEqual(r.filesInScope, scope)
+})
 
 // MUTATION: drop the feedback at the repair call, or skip the repair turn, and a double red stops without a builder.
 test('a suite red on both runs gives the builder one repair turn whose feedback names the failing tests and files', async () => {
@@ -1115,10 +1146,11 @@ const twoBaseline = { accepted: true, reason: 'gate-failed', result: { ...green(
 
 // MUTATION: stop a bind-fail proof at once, or never raise the builder bound, and the lane dies without a re-aim turn.
 test('a bind-fail proof gives the builder one more turn whose feedback names the failed acceptance id (RA1)', async () => {
-  const f = fakes({ bounds: { builder: 1 }, proof: sequence(unbound(BIND_FAIL('A1')), killedProof('A1')) })
+  const f = fakes({ bounds: { builder: 1 }, proof: sequence(unbound(BIND_FAIL('A1')), killedProof('A1')), edit: (v) => v.role === 'planner' ? { ...v, details: { ...v.details, files_in_scope: ['test/a.rs'] } } : v })
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
   const builders = f.requests.filter((r) => r.role === 'builder')
   assert.equal(builders.length, 2)
+  assert.deepEqual(builders.map((r) => r.filesInScope), [['test/a.rs'], ['test/a.rs']])
   assert.equal(builders[1].feedback.find((entry) => entry.id === 'A1')?.check, 'A1')
 })
 

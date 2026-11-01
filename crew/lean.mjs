@@ -10,6 +10,7 @@ import { openMemory, renderSection } from './memory.mjs'
 import { acpProviderFailureKind, acpTextReset, providerRetryDecision, PROVIDER_RETRY_TOTAL_WAIT_MS } from './acp/provider.mjs'
 import { runLoop } from './loop.mjs'
 import { AGENT_ROLES, parseAgent } from './protocols.mjs'
+import { loadMap, resolveSeatSkills } from '../hooks/skill-gate.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CHARTER_LINK = /\]\((\.\.?\/[^)\s]+\.md)\)/g
@@ -42,7 +43,7 @@ function exampleEnvelope(role, id, acceptance, shape = 'standard') {
 
 // The definition one turn runs: the file's fields with the tier override applied, then the
 // received cell's agent, effort and model, which the loop resolved from the same definitions.
-function definitionFor({ role, seat }, tier, d) {
+function definitionFor({ role, seat, filesInScope }, tier, d) {
   if (!AGENT_ROLES.includes(role)) throw new Error(`unknown role ${JSON.stringify(role)}`)
   const source = join(HERE, 'agents', `${role}.md`)
   const { fields, body, defects } = parseAgent(d.readFileSync(source, 'utf8'))
@@ -50,9 +51,17 @@ function definitionFor({ role, seat }, tier, d) {
   const override = fields.tiers?.[tier]
   if (override === null) throw new Error(`role ${role} is unseated at tier ${tier}`)
   const effective = { ...fields, ...override }
+  const laneRole = role === 'builder' || role === 'reviewer'
+  let skills = effective.skills ?? []
+  if (laneRole) {
+    const loaded = loadMap(dirname(HERE), { requireSkillFiles: false })
+    if (!loaded.ok) throw new Error(`skill map: ${loaded.reason}`)
+    const selected = resolveSeatSkills({ map: loaded.map, role, files: filesInScope ?? null })
+    skills = [...new Set([...skills, ...selected.skills.map((path) => path.split('/')[1])])]
+  }
   const charters = [...body.matchAll(CHARTER_LINK)].map((link) => resolve(dirname(source), link[1]))
   return {
-    definition: { role, agent: seat.agent, model: `${seat.provider}/${seat.id}`, effort: seat.effort, writes: effective.writes ?? 'none', skills: effective.skills ?? [], requires: effective.requires ?? [],
+    definition: { role, agent: seat.agent, model: `${seat.provider}/${seat.id}`, effort: seat.effort, writes: effective.writes ?? 'none', skills, requires: effective.requires ?? [],
       tools: effective.tools,
       extensions: effective.extensions, advisor: effective.advisor, edit_assist: effective.edit_assist, codemode: effective.codemode,
       wait_s: effective.wait_s,

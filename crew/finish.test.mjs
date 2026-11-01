@@ -12,7 +12,7 @@ const MUTATION = { check: 'A1', file: 'lib.mjs', find: 'old', replace: 'new' }
 const STOP = { reason: 'mutations-survived', observation: { stage: 'mutations', detail: 'A1 survived' } }
 const PLANNER = {
   role: 'planner', id: 'lane9.planner.1', status: 'done', summary: 'planned',
-  details: { subject: 'fix(crew): planned lane', plan_path: '/t/plan.md', gate_path: '/t/gate.mjs', acceptance: ['A1'], mutations: [MUTATION] },
+  details: { subject: 'fix(crew): planned lane', plan_path: '/t/plan.md', gate_path: '/t/gate.mjs', acceptance: ['A1'], mutations: [MUTATION], files_in_scope: ['src/widget.svelte'] },
 }
 const BUILDER = { role: 'builder', id: 'lane9.builder.2', status: 'done', summary: 'built', details: { summary: 'built the change' } }
 const builderRow = { event: 'envelope', role: 'builder', id: BUILDER.id, parsed: BUILDER, defects: [], error: null }
@@ -128,7 +128,7 @@ test('a stopped lane with a build is finished: finish.json carries the stop, fin
     assert.equal(spec.shape, 'finish')
     assert.equal(spec.cwd, f.cwd)
     assert.deepEqual(spec.finish, {
-      planPath: '/t/plan.md', gatePath: '/t/gate.mjs', subject: 'fix(crew): planned lane', mutations: [MUTATION],
+      planPath: '/t/plan.md', gatePath: '/t/gate.mjs', subject: 'fix(crew): planned lane', mutations: [MUTATION], filesInScope: ['src/widget.svelte'],
       stop: STOP, findings: [FINDING], turnOffset: 3,
     })
     assert.equal(r.spawned.length, 1)
@@ -139,6 +139,16 @@ test('a stopped lane with a build is finished: finish.json carries the stop, fin
     assert.equal(r.spawned[0].opts.log, join(f.root, 'briefs', 'started', 'lane9.run.log'))
     assert.equal(r.spawned[0].opts.env.CREW_SUITE_SLOTS, '0')
     assert.deepEqual(out, { lane: 'lane9', worktree: f.cwd, specPath: join(f.taskDir, 'finish.json'), pid: 4242 })
+  } finally { cleanup(f) }
+})
+
+test('older accepted plans without scope still finish', () => {
+  const f = fixture()
+  try {
+    const { files_in_scope, ...details } = PLANNER.details
+    writeFileSync(join(f.taskDir, 'planner-1.json'), JSON.stringify({ ...PLANNER, details }))
+    run(f).go()
+    assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.filesInScope, null)
   } finally { cleanup(f) }
 })
 
@@ -309,6 +319,7 @@ test('--return spawns a finish run whose spec carries the guidance and the spent
     assert.equal(existsSync(report), false, 'the ready pass report outlived the return')
     const spec = JSON.parse(readFileSync(join(r.f.taskDir, 'finish.json'), 'utf8'))
     assert.deepEqual([spec.shape, spec.finish.guidance, spec.finish.priorReviewRounds, spec.finish.stop.reason, spec.finish.turnOffset], ['finish', 'Fix the widget first', 2, STOP.reason, 2])
+    assert.deepEqual(spec.finish.filesInScope, ['src/widget.svelte'])
     assert.equal(r.rowsOf().at(-1).choice, 'return')
   } finally { cleanup(r.f) }
   const bare = ready()

@@ -1114,12 +1114,12 @@ const DROPPED_ROUTES = ['/api/returns', '/api/roster', '/api/roster/pick', '/api
   '/api/workflows', '/api/workflows/propose', '/api/workflows/editor', '/api/workflows/save', '/api/workflows/library', '/api/workflows/preview', '/api/prepared-tasks', '/api/assurances', '/api/assurances/preview', '/api/assurances/propose',
   '/api/prompt-library', '/api/prompt-library/preview', '/api/prompt-library/save', '/api/cell-health', '/api/run-set', '/api/intake', '/api/intake/brake', '/api/seat-teardowns', '/api/cell-attribution', '/api/triage']
 
-function leanLane(crewRoot, id) {
+function leanLane(crewRoot, id, rows = [{ event: 'run-start', at: Date.now() }, { event: 'stage-start', stage: 'plan' }]) {
   const laneDir = join(crewRoot, `dt-${id}`, id)
   mkdirSync(join(laneDir, 'task'), { recursive: true })
   writeFileSync(join(laneDir, 'crew.json'), JSON.stringify({ members: { planner: { agent: 'pi' }, builder: { agent: 'pi' } } }))
   writeFileSync(join(laneDir, 'task', 'lean.json'), JSON.stringify({ id, tier: 'build' }))
-  writeFileSync(join(laneDir, 'task', 'journal.jsonl'), [JSON.stringify({ event: 'run-start', at: Date.now() }), JSON.stringify({ event: 'stage-start', stage: 'plan' })].join('\n') + '\n')
+  writeFileSync(join(laneDir, 'task', 'journal.jsonl'), rows.map(row => JSON.stringify(row)).join('\n') + '\n')
 }
 
 test('VC2 the route table holds no ledger ops-pane, roster, ladder, workflow, prepared-task, assurance or prompt-library route', () => {
@@ -1143,6 +1143,66 @@ test('VC2 a dropped route answers 404 on GET and 405 on POST, never a handler', 
   } finally {
     await stopInProcess(started?.server)
     rmSync(crewRoot, { recursive: true, force: true })
+  }
+})
+
+// MUTATION: reverse the date subtraction and the dated order fails.
+test('VN1 /api/sessions orders recorded starts newest first', async () => {
+  const root = scratchDir('visualizer-newest-'), crewRoot = join(root, 'crew'), archiveRoot = join(root, 'archive')
+  mkdirSync(crewRoot); mkdirSync(archiveRoot)
+  let started
+  try {
+    for (let i = 0; i < 13; i++) {
+      const at = i === 0 ? 0 : i === 7 ? 6000 : i * 1000
+      leanLane(crewRoot, `lane-${String(i).padStart(2, '0')}`, [{ event: 'run-start', at }, { event: 'stage-start', stage: 'plan', at: 100000 - i }])
+    }
+    started = await startInProcess({}, { crewRoot, leanArchiveRoot: archiveRoot })
+    const response = await json(started.base, '/api/sessions')
+    assert.equal(response.status, 200)
+    assert.equal(response.json.degraded, false)
+    assert.deepEqual(response.json.sources, { lean: { readable: true, absent: null, runs: 13 } })
+    assert.deepEqual(response.json.runs.map(run => run.task_slug), [12, 11, 10, 9, 8, 6, 7, 5, 4, 3, 2, 1, 0].map(i => `lane-${String(i).padStart(2, '0')}`))
+    assert.equal(response.json.runs.at(-1).started_at, new Date(0).toISOString())
+  } finally {
+    await stopInProcess(started?.server)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// MUTATION: reverse the missing-start rank and unknown starts lead the list.
+test('VN2 /api/sessions puts unknown starts after every recorded start', async () => {
+  const root = scratchDir('visualizer-unknown-'), crewRoot = join(root, 'crew'), archiveRoot = join(root, 'archive')
+  mkdirSync(crewRoot); mkdirSync(archiveRoot)
+  let started
+  try {
+    const lanes = [
+      ['a-missing', []], ['b-old', [{ event: 'run-start', at: -1000 }]],
+      ['c-no-at', [{ event: 'run-start' }]], ['d-new', [{ event: 'run-start', at: 1000 }]],
+      ['e-invalid', [{ event: 'run-start', at: 'invalid' }]],
+    ]
+    for (const [id, rows] of lanes) leanLane(crewRoot, id, rows)
+    started = await startInProcess({}, { crewRoot, leanArchiveRoot: archiveRoot })
+    const read = async count => {
+      const response = await json(started.base, '/api/sessions')
+      assert.equal(response.status, 200)
+      assert.equal(response.json.degraded, false)
+      assert.deepEqual(response.json.sources, { lean: { readable: true, absent: null, runs: count } })
+      assert.equal(response.json.runs.length, count)
+      return response.json.runs
+    }
+    const runs = await read(5)
+    assert.deepEqual(runs.map(run => run.task_slug), ['d-new', 'b-old', 'a-missing', 'c-no-at', 'e-invalid'])
+    assert.ok(runs.slice(0, 2).every(run => run.started_at !== null))
+    assert.ok(runs.slice(2).every(run => run.started_at === null))
+    for (const id of ['b-old', 'd-new']) rmSync(join(crewRoot, `dt-${id}`), { recursive: true })
+    const unknown = await read(3)
+    assert.deepEqual(unknown.map(run => run.task_slug), ['a-missing', 'c-no-at', 'e-invalid'])
+    assert.ok(unknown.every(run => run.started_at === null))
+    for (const [id] of lanes) rmSync(join(crewRoot, `dt-${id}`), { recursive: true, force: true })
+    assert.deepEqual(await read(0), [])
+  } finally {
+    await stopInProcess(started?.server)
+    rmSync(root, { recursive: true, force: true })
   }
 })
 

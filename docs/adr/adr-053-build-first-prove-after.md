@@ -46,7 +46,8 @@ The reviewer reviews the code and its tests together, with the proof rows in han
 ### 2. Roles
 
 - **Planner.** Returns the plan, the acceptance ids, `files_in_scope` and the test command. No gate and no mutations.
-- **Builder.** Writes the change and one repository test per acceptance id. A test is bound to its id by name: the
+- **Builder.** In one turn, writes the change first and then one repository test per acceptance id, against the
+  code it has just written. A test is bound to its id by name: the
   test's name starts with `(<id>) ` (the shape the briefs already use for acceptance items). The builder also declares one
   kill-mutation per id (`{check, file, find, replace}` against the source it built), since it holds the code the
   `find` text must match. The builder may run the tests it wrote.

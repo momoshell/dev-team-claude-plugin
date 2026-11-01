@@ -52,7 +52,7 @@ build, red under its kill-mutation), runs the suite once with no automatic re-ru
 
 ```
 mechanical:  brief -> rebase -> build -> prove -> suite -> PR
-build:       brief -> [plan] -> rebase -> build -> prove -> (suite || review) -> PR
+build:       brief -> plan -> rebase -> build -> prove -> (suite || review) -> PR
 judge:       brief -> plan -> rebase -> build -> prove -> suite -> review -> second review -> PR
 
 any red check -> one builder fix turn with every red result -> back to prove (bounded by rounds)
@@ -64,16 +64,16 @@ any red check -> one builder fix turn with every red result -> back to prove (bo
   lane for the operator.
 - **Build** runs the suite and the review side by side and hands the builder both results in one turn. A plan gap
   (a builder `insufficient` that names one) goes back to the planner once. A seat's own `escalate` goes to the operator
-  without a lead round. Whether build keeps its planner is decided by measurement (§3); `[plan]` marks it as open.
+  without a lead round.
 - **Judge** keeps the stages sequential so each sees a green predecessor, adds ADR-038's mutation on the changed
   behaviour, and adds a second review by the tech-lead seat, a different model family from the reviewer. Escalations go
   to the lead, then the tech-lead.
 
 ### 3. Measurement before each loop is adopted
 
-- **Build** first, on the ADR-053 replay of the 14 code corpus lanes with three arms: today's loop, build-first with a
-  planner, and build-first with the builder working from the brief alone. The shortest arm that is not worse on blind
-  diff pass and on known-defect catches becomes the build loop.
+- **Build** first, on the ADR-053 replay of the 14 code corpus lanes with two arms: today's loop and the build loop
+  above, both with a planner (operator decision 2026-11-01: the build tier keeps its plan). The build loop is adopted if
+  it is not worse on blind diff pass and on known-defect findings.
 - **Mechanical** and **judge** after their first 10 lanes each, compared on rounds, wall time, suite repairs and defects
   found after merge against the build tier.
 - **Every loop** reports per lane: total wall time, rounds, suite-repair turns, lead consults, and whether the PR's

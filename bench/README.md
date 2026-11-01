@@ -18,7 +18,7 @@ yours, outside the repo. What past runs decided is under "Results so far" below.
   unavailable, `plannerPromptMissing` in the manifest gives the reason; planner replay refuses
   before creating a worktree, while builder replay remains available. An absent prompt also refuses.
 - `replay-builder.mjs`, `replay-planner.mjs`, `replay-common.mjs`, `blind-review.mjs`.
-- `replay.test.mjs`, `blind-review.test.mjs` — `node --test bench/*.test.mjs`; no models or network.
+- `replay.test.mjs`, `replay-build-first.test.mjs`, `blind-review.test.mjs` — `node --test bench/*.test.mjs`; no models or network.
 
 ## Cell and arms
 
@@ -85,6 +85,20 @@ gate and planner return (with the scope and `gate_cmd` backfills the older lanes
 first builder prompt, then the gate, the mutation proof (only after a green gate) and the touched
 `*.test.mjs` files. Writes `result.json`, `diff.patch` (including added files) and `session.jsonl`.
 The worktree is removed on every exit.
+
+`--charter <file>` replaces the builder charter under the same contract as the planner option below.
+`--build-first` requires `--charter`; `bench/charters/build-first-builder.md` is an example experiment input.
+This variant withholds `gate.mjs`, gate path and command prompt lines, `gate_cmd`, `gate_path` and planner
+mutations, but still supplies `plan.md`. It supports `node --test` only.
+
+`result.json.variant` is `gate` or `build-first`. Both record `added.source`, `added.test` and
+`added.binary` (binary files are counted separately). Build-first records `bound.of`, `bound.proven`
+and a row per acceptance id in `bound.ids`, with base, build and mutant states and red/green/killed
+booleans. A proven row also requires the same test name and source location in all three phases.
+Null states carry one of `missing`, `ambiguous`, `skipped`, `todo`, `hook-failed`,
+`cancelled`, `not-body-failure`, `not-run`, `no-mutation`, `mutation-in-test` or `bind-fail`.
+A failed test needs a test-file stack frame to count as a body failure; failures without one are
+unproven, including some asynchronous body failures. Gate and mutation proof records are null in this variant.
 
 Reading `result.json`: `error` is `null` for a clean run, otherwise a string naming each failed
 stage (`seat:`, `gate:`, `mutations:`, `tests:`, `cleanup:`…). `gate.status` is the built tree's

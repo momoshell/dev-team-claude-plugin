@@ -11,8 +11,8 @@ on the unchanged source, passes on the build, and fails under its kill-mutation.
 ## Why (measured 2026-11-01)
 
 - **Two artifacts for one fact.** Over 14 corpus lanes (`bench/corpus`, builder replays in
-  `~/crew-bench/codemode-2026-11-01`), each lane's gate is 47 to 259 lines, and the builder adds about one repository
-  test per acceptance id (2 to 5 ids per lane). Of the 790 lines the live builder added, 567 (72%) are test lines;
+  `~/crew-bench/codemode-2026-11-01`), each lane's gate is 47 to 259 lines, and the builder adds repository tests for the
+  same ids: 34 new top-level tests for 42 acceptance ids (2 to 5 per lane), exactly one per id in 6 of the 14 lanes. Of the 790 lines the live builder added, 567 (72%) are test lines;
   the median source change is about 6 lines. The gate lives in the task dir and is never committed, so the
   repository test is the only lasting record of the proof.
 - **The gate is written blind.** Planner seats may run only read-only commands, so the planner authors the gate
@@ -48,10 +48,21 @@ The reviewer reviews the code and its tests together, with the proof rows in han
      It must fail. A test that passes without the change proves nothing.
   2. **Green:** the bound test passes on the build.
   3. **Kill-mutation:** with the id's mutation applied to the build, the bound test fails.
-  An id with no bound test, a test that is green on base, or a surviving mutation stops the lane with that reason,
-  as an unproven gate does today.
+  Each step reads the runner's per-test results, never only its exit code: the bound test must be observed
+  running and observed failing (or passing). A test file that fails to import, a bound test that is skipped or never
+  runs, or a runner that reports no result for it is not red; it is unproven. Measured 11-01: an empty `(A1)` test in
+  a file that cannot import on base gave base red, build green and mutation red by exit code alone.
+  An id with no bound test, a bound test that did not run, a test that is green on base, or a surviving mutation
+  stops the lane with that reason, as an unproven gate does today.
 
-### 3. Protocol change
+### 3. The finish shape
+
+Today a finish run starts at build and skips the baseline (`crew/loop.mjs`). Under this record a lane can stop after
+the builder returns and before the proof, so finish must run red-on-base too, unless the journal already holds a red
+proof for the same bound test content. Without it, a test that already passes on base would clear finish's green and
+mutation checks. Mutation re-aim keeps its current behaviour against the new proof.
+
+### 4. Protocol change
 
 P3 changes from "`task/gate.mjs` prints `FAIL <id>`" to "acceptance tests: committed repository tests bound to ids by
 name, red on base, green after, one kill-mutation each". The planner envelope drops `gate_path` and `gate_cmd`; the
@@ -64,7 +75,6 @@ test command is the brief's `suite` runner narrowed to the bound tests.
   until each is added.
 - **Confirmation bias.** A test written after the code can be shaped to the code. Red-on-base and the kill-mutation
   are the guards, and the reviewer sees both; whether they are enough is what the measurement below checks.
-- **The finish shape and mutation re-aim.** They keep their current behaviour against the new proof.
 - **Test economy.** How many and how small the tests should be is skill guidance (`qa-test-writing`, `code-less`)
   and brief guidance (fewer, coarser acceptance ids), decided separately.
 

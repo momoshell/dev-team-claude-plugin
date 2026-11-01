@@ -36,7 +36,10 @@ hard-coded in the scripts.
 with an advisor) are optional. Which agent/model/effort combinations work is up to
 `crew/acp/seat.mjs`, which refuses the rest. Optional `skills` must be a list of nonempty,
 non-whitespace strings. It is forwarded unchanged, including order and duplicates; an omitted or
-empty list grants no skills. No live-seat defaults are added.
+empty list grants no skills. No live-seat defaults are added. Optional `codemode` must be a boolean;
+it is forwarded unchanged and defaults to false. Non-booleans are refused before worktree or seat
+creation. Codemode is supported on pi; Claude with `codemode: true` is refused by the seat and the
+refusal is recorded as an error.
 
 `--arms` is a comma list drawn from `readgate, lab, builderloop, reminders, skeletonread, subagent, fff`
 (`crew/protocols.mjs` `EXTENSIONS`); `--arms ""` is no arms. An unknown name is refused, recorded
@@ -61,6 +64,16 @@ gate; `mutations.killed` of `mutations.of` is the proof; `targeted.pass/fail` th
 (notes, usage, consults, `blocked` pre-return stops) say what the seat did; `changed` and `diff`
 size the change. A red gate or a surviving mutation is a result, not an error; a gate or mutation proof
 that comes back `unmeasured` (timeout, spawn or copy failure) is recorded in `error`, with its reason and diagnostics.
+
+For both replay kinds, top-level `status` is the first return's `done`, `insufficient` or `escalate`,
+read before envelope validation. It is separate from the gate and `error`. A null status has a
+`status_reason`: `not-run`, `missing-return`, `unreadable-return`, `invalid-json`, `invalid-envelope`
+or `invalid-status`. A recognized status has a null reason. Report counts of `done`, `insufficient`,
+`escalate` and null alongside blind scores, including the total number of runs:
+
+```sh
+node -e 'const c={};for(const f of process.argv.slice(1)){const s=JSON.parse(require("fs").readFileSync(f,"utf8")).status;c[s]=(c[s]??0)+1}console.log(c)' /abs/runs/*/result.json
+```
 
 ## Planner replay
 

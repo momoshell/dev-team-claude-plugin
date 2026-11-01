@@ -168,6 +168,91 @@ test('CL2 archived code lanes prepare planner replays', async () => {
   }
 })
 
+// MUTATION: CC1 forces codemode false in the definition.
+test('CC1 forwards codemode independently of skills and arms', async () => {
+  const fx = fixture()
+  for (const run of [runBuilder, runPlanner]) for (const value of [true, false, undefined]) {
+    const cell = { ...CELL, skills: ['code-less'], ...(value === undefined ? {} : { codemode: value }) }
+    let definition
+    await run({ lane: 'b1380', cell, arms: ['fff'], out: fresh() }, { ...fx.deps,
+      runAcpSeat: (call) => { definition = call.definition; return { stopReason: 'end_turn' } },
+      runGate: async () => ({ status: 'red' }), proveMutations: async () => ({}),
+    })
+    assert.equal(definition.codemode, value ?? false)
+    assert.deepEqual(definition.skills, ['code-less'])
+    assert.deepEqual(definition.extensions, ['fff'])
+  }
+  for (const run of [runBuilder, runPlanner]) for (const throws of [true, false]) {
+    const out = fresh()
+    const result = await run({ lane: 'b1380', cell: { ...CELL, agent: 'claude', codemode: true }, arms: [], out }, { ...fx.deps,
+      runAcpSeat: ({ definition }) => {
+        assert.equal(definition.codemode, true)
+        if (throws) throw Object.assign(new Error('unsupported'), { code: 'grant-unsupported' })
+        return { refusal: { code: 'grant-unsupported', message: 'unsupported' } }
+      }, runGate: async () => ({ status: 'red' }), proveMutations: async () => ({}),
+    })
+    assert.match(result.error, /grant-unsupported/)
+    assert.equal(result.status, null)
+    assert.equal(result.status_reason, 'missing-return')
+    assert.equal(json(join(out, 'result.json')).error, result.error)
+  }
+})
+
+// MUTATION: CC2 removes codemode type validation.
+test('CC2 rejects non-boolean codemode before preparation', async () => {
+  for (const run of [runBuilder, runPlanner]) for (const codemode of [null, undefined, 'true', 1, [], {}]) {
+    let calls = 0
+    const out = fresh()
+    const result = await run({ lane: 'b1380', cell: { ...CELL, codemode }, arms: [], out }, { prepareRun: () => { calls++ }, runAcpSeat: () => { calls++ } })
+    assert.equal(calls, 0)
+    assert.match(result.error, /cell\.codemode/)
+    assert.equal(json(join(out, 'result.json')).error, result.error)
+    assert.equal(result.status_reason, 'not-run')
+  }
+})
+
+// MUTATION: CC3 replaces the first-return status extraction with null.
+test('CC3 persists first-return status and reasons for both roles', async () => {
+  const fx = fixture()
+  const cases = [
+    ['done', JSON.stringify({ status: 'done', summary: 'ok' }), 'done', null],
+    ['insufficient', JSON.stringify({ status: 'insufficient', summary: 'ok' }), 'insufficient', null],
+    ['escalate', JSON.stringify({ status: 'escalate', summary: 'ok' }), 'escalate', null],
+    ['no summary', JSON.stringify({ status: 'insufficient' }), 'insufficient', null],
+    ['missing', null, null, 'missing-return'],
+    ['unreadable', 'directory', null, 'unreadable-return'],
+    ['malformed', '{', null, 'invalid-json'],
+    ['non-object', '[]', null, 'invalid-envelope'],
+    ['no status', JSON.stringify({ summary: 'ok' }), null, 'invalid-status'],
+    ['unknown', JSON.stringify({ status: 'other', summary: 'ok' }), null, 'invalid-status'],
+  ]
+  for (const [role, run] of [['builder', runBuilder], ['planner', runPlanner]]) for (const [label, content, status, reason] of cases) {
+    const out = fresh()
+    const result = await run({ lane: 'b1380', cell: CELL, arms: [], out }, { ...fx.deps,
+      runAcpSeat: (call) => {
+        const file = join(call.taskDir, role === 'builder' ? 'builder-2.json' : 'planner-1.json')
+        if (content === 'directory') mkdirSync(file)
+        else if (content !== null) writeFileSync(file, content)
+        if (role === 'planner') { writeFileSync(join(call.taskDir, 'plan.md'), 'plan'); writeFileSync(join(call.taskDir, 'gate.mjs'), 'gate') }
+        return { stopReason: 'end_turn' }
+      }, runGate: async () => { throw new Error('gate failed') }, proveMutations: async () => ({}),
+    })
+    assert.equal(result.status, status, label)
+    assert.equal(result.status_reason, reason, label)
+    assert.match(result.error, /gate failed/)
+    const saved = json(join(out, 'result.json'))
+    assert.equal(saved.status, status, label)
+    assert.equal(saved.status_reason, reason, label)
+  }
+  for (const run of [runBuilder, runPlanner]) {
+    const out = fresh()
+    const result = await run({ lane: 'b1380', cell: CELL, arms: [], out }, { prepareRun: () => { throw new Error('setup failed') } })
+    assert.equal(result.status, null)
+    assert.equal(result.status_reason, 'not-run')
+    assert.equal(json(join(out, 'result.json')).status_reason, 'not-run')
+  }
+})
+
 // MUTATION: SK1 drops the cell skills from the seat definition.
 test('SK1 forwards explicit skills to both seats unchanged', async () => {
   for (const run of [runBuilder, runPlanner]) for (const skills of [['zeta', 'alpha', 'zeta'], []]) {
@@ -373,7 +458,7 @@ test('builder replay: prompt rewrite, backfills, checks, diff with additions and
     proveMutations: async ({ checks, mutations }) => { assert.deepEqual(checks, ['X1']); assert.equal(mutations.length, 1); return { status: 'ok', rows: [{ check: 'X1', outcome: 'killed' }] } },
   })
   assert.equal(result.error, null)
-  assert.deepEqual(seen.definition, { role: 'builder', ...CELL, writes: 'repo', wait_s: 60, advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'medium' }, skills: [], extensions: ['fff', 'readgate'] })
+  assert.deepEqual(seen.definition, { role: 'builder', ...CELL, writes: 'repo', wait_s: 60, advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'medium' }, skills: [], codemode: false, extensions: ['fff', 'readgate'] })
   assert(!seen.prompt.includes('/orig/'))
   assert(seen.prompt.includes(join(out, 'task', 'builder-2.json')) && seen.prompt.includes(join(out, 'tree')))
   const ret = json(join(out, 'task', 'planner-1.json'))

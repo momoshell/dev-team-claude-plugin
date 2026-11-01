@@ -74,18 +74,16 @@ test('RP2 slice satisfies the edit gate via its parent skill', () => {
   assert.equal(allowed.stdout, '')
 })
 test('RP3 M1 shipped role packs pin exactly and session start is silent', () => {
-  // MUTATION: flip rule 5 of skills/skill-map.json from grant to inline and the shipped-map pin fails.
+  // MUTATION: flip the prose-plain rule's delivery from grant to inline.
   const dir = fixture()
   const result = invoke(dir, 'session-start', {}, {}, ROOT)
   assert.equal(result.status, 0)
   assert.deepEqual(JSON.parse(readFileSync(join(ROOT, MAP_PATH), 'utf8')), { version: 1, exempt: ['docs/audits/**'], rules: [
     { when: { roles: ['planner'] }, delivery: 'inline', skills: ['dev-team:qa-test-writing#gates'] },
-    { when: { roles: ['builder'] }, delivery: 'inline', skills: ['dev-team:code-less', 'dev-team:qa-test-writing#vacuity'] },
     { when: { roles: ['reviewer'] }, delivery: 'inline', skills: ['dev-team:pr-review'] },
     { when: { roles: ['tech-lead'] }, delivery: 'inline', skills: ['dev-team:pr-review#falsification'] },
-    { when: { roles: ['reviewer'] }, delivery: 'grant', skills: ['dev-team:code-less', 'dev-team:qa-test-writing#vacuity'] },
     { when: { roles: ['tech-lead'] }, delivery: 'grant', skills: ['dev-team:qa-test-writing#gates'] },
-    { when: { paths: ['crew/**/*.mjs', 'crew/**/*.ts', 'scripts/**/*.mjs', 'hooks/**/*.mjs', 'test/**/*.mjs', 'skills/**/*.mjs', 'visualizer/**/*.mjs', 'visualizer/**/*.js', 'visualizer/**/*.svelte'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:code-less'] },
+    { when: { paths: ['**/*.mjs', '**/*.js', '**/*.ts', '**/*.tsx', '**/*.rs', '**/*.py', '**/*.svelte'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:code-less'] },
     { when: { paths: ['crew/**/*.mjs', 'crew/**/*.ts', 'scripts/**/*.mjs', 'hooks/**/*.mjs'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:backend-node'] },
     { when: { paths: ['**/*.test.mjs'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:qa-test-writing'] },
     { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.js', 'visualizer/**/*.mjs', 'visualizer/**/*.css'], roles: ['planner', 'builder', 'reviewer'] }, skills: ['dev-team:frontend-svelte'] },
@@ -97,6 +95,30 @@ test('RP3 M1 shipped role packs pin exactly and session start is silent', () => 
   assert.equal(loadMap(ROOT).ok, true)
   assert.equal(result.stdout, '')
 })
+// MUTATION: add dev-team:code-less to the reviewer's pr-review role rule.
+test('SF1: builder and reviewer get no role-only skill but pr-review', () => {
+  const { map } = loadMap(ROOT)
+  const skills = (role, files) => resolveSeatSkills({ map, role, files }).skills
+  assert.deepEqual(skills('builder', []), [])
+  assert.deepEqual(skills('reviewer', []), ['skills/pr-review/SKILL.md'])
+  assert.deepEqual(skills('builder', ['docs/x.md']), ['skills/prose-plain/SKILL.md'])
+  assert.deepEqual(skills('reviewer', ['docs/x.md']).sort(), ['skills/pr-review/SKILL.md', 'skills/prose-plain/SKILL.md'])
+})
+
+// MUTATION: narrow "**/*.py" to "pkg/*.py".
+test('SF2: code-less follows source files in any layout', () => {
+  const { map } = loadMap(ROOT)
+  for (const role of ['builder', 'reviewer']) {
+    for (const file of ['src/a.mjs', 'lib/a.js', 'app/a.ts', 'ui/a.tsx', 'src/main.rs', 'a.py', 'pkg/a.py', 'web/App.svelte']) {
+      const entries = resolveSeatSkills({ map, role, files: [file] }).entries
+      assert.ok(entries.some((entry) => entry.path === 'skills/code-less/SKILL.md' && entry.selected_by === 'map-path'), `${role} ${file}`)
+    }
+    for (const file of ['docs/x.md', 'docs/audits/a.ts']) {
+      assert.ok(!resolveSeatSkills({ map, role, files: [file] }).skills.includes('skills/code-less/SKILL.md'), `${role} ${file}`)
+    }
+  }
+})
+
 // MUTATION: remove the generic testing paths from the shipped map.
 test('LG3: generic file types select whole skills in any layout', () => {
   const { map } = loadMap(ROOT)

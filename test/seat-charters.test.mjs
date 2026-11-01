@@ -51,6 +51,18 @@ test('GC1: planner gates run in copies without .git', () => {
   has(body('crew/agents/planner.md'), 'These checkout copies contain no `.git`.')
 })
 
+// MUTATION: replace "is a bare file path" with "is an artifact path".
+test('SF3: planner plan_path is a bare file path', () => {
+  const charter = body('crew/agents/planner.md')
+  has(charter, '`plan_path` is a bare file path without a line-range suffix; cite plan lines as `file:start-end` in the plan text.')
+  assert.doesNotMatch(charter, /inside `plan_path`/)
+})
+
+// MUTATION: reinsert a Scout rule paragraph.
+test('SF4: planner charter has no scout rule', () => {
+  assert.doesNotMatch(body('crew/agents/planner.md'), /scout/i)
+})
+
 // MUTATION: require git or a seat tool instead of Node fs from cwd.
 test('GC2: planner gates list and read files with Node fs', () => {
   has(body('crew/agents/planner.md'), "A gate that lists or reads files must use Node's `fs` from `process.cwd()`, never git or a seat tool such as fff (seat tools are unavailable to gates and CI).")

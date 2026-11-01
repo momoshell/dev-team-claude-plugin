@@ -297,3 +297,49 @@ about current code. Not shipped. Four planner levers have now failed against the
 
 Compare arms only within one batch. The same main-charter planner scored 8/42 in the charter batch and 14/42
 here, on the same 14 lanes and the same cell.
+
+**Planner effort and read arms, 2026-11-01** (14 code lanes × 3 per arm, one blind plan batch of 210). The
+control is the live planner seat: pi sol high with `subagent`, `--memory` with a frozen copy of the repo store
+(7 entries, 4,252 bytes) and main's charter. Each arm changes one thing.
+
+| Planner | First return `done` | Blind pass | p vs control | Tokens | Median wall |
+|---|---|---|---|---|---|
+| control (effort high) | 41/42 | 11/42 | | 12.61M | 180.5s |
+| effort medium | 41/42 | 6/42 | 0.28 | 8.77M (−30%) | 116.5s |
+| effort xhigh | 42/42 | 16/42 | 0.35 | 19.37M (+54%) | 389s |
+| + readgate | 42/42 | 7/42 | 0.43 | 11.78M | 172.5s |
+| + skeletonread | 39/42 | 9/42 | 0.80 | 12.26M | 180.5s |
+
+p is a two-sided Fisher exact test. The other first returns were `insufficient`. Baseline was red in every run. One xhigh run returned `done` without writing
+`plan.md`; it counts as a fail. No arm differs from the control beyond noise, and the lane decides again: b1381,
+b1441, b1442, b1444, b1448, b1451 and b1454 failed in 102 of 105 runs across all arms. At N = 42 per arm a
+difference this size cannot be confirmed: detecting 26% against 38% at 80% power needs about 240 runs per arm.
+Nothing shipped.
+
+**Reviewer arms, 2026-11-01** (`replay-reviewer.mjs`, the 14 reviewable lanes × 7 arms × clean and seeded × 3,
+588 runs, no errors, every return `done`). The control is the live reviewer seat: pi sol high with `subagent`
+and the `code-less` skill. Seeded runs apply the first declared kill-mutation of each lane's plan.
+
+| Reviewer | Seeded caught | Seeded file cited | Real defects caught | Tokens | Median wall |
+|---|---|---|---|---|---|
+| control | 42/42 | 42/42 | 3/6 | 9.86M | 44.5s |
+| + fff | 42/42 | 42/42 | 4/6 | 11.78M | 49.5s |
+| + readgate, skeletonread | 42/42 | 42/42 | 2/6 | 9.62M | 50s |
+| + lab | 42/42 | 42/42 | 3/6 | 10.06M | 48s |
+| effort xhigh | 42/42 | 42/42 | 6/6 | 13.61M (+38%) | 88.5s |
+| no `subagent` | 42/42 | 42/42 | 1/6 | 10.17M | 35s |
+| no `code-less` | 42/42 | 42/42 | 2/6 | 10.08M | 43s |
+
+Every arm caught every seeded mutation, so the seeded variant cannot rank arms: a declared kill-mutation sits
+in the diff under review and is easy to see. The clean variant replays each lane's change as it was first built,
+and two of those changes had real defects. b1381 kept a refused attempt's stale envelope (fixed later on main);
+b1458 dropped the ui-design rem-spacing rule while the visualizer still uses it. "Real defects caught" counts
+`changes` verdicts on those two lanes, 3 runs each. Only 1 of the other 252 clean runs failed (b1459). xhigh caught
+6 of 6 against the control's 3 of 6 (Fisher p = 0.18). Ranking reviewer arms needs a corpus of changes with
+known defects in place of seeded mutations. Nothing shipped.
+
+A later trace of every fix commit on main since 2026-10-24 (`~/crew-bench/realbug-candidates-2026-11-01.md`,
+attributed by line blame, no code run) found three more corpus lanes whose change carried a defect a later lane
+fixed: b1402 (fixed by b1408), b1416 (by b1422) and b1441 (by b1451). No arm flagged any of them: 0 of 21 clean
+runs on each lane. Over all five defect lanes the control caught 3 of 15 and xhigh 6 of 15. Whether those three
+defects are visible from the diff alone is unmeasured.

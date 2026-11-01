@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { boundState, runBuilder } from './replay-builder.mjs'
@@ -135,4 +135,63 @@ test('build-first is opt-in on the CLI', () => {
   const args = ['--lane', 'b1', '--cell', 'cell', '--arms', '', '--out', '/tmp/run', '--build-first']
   assert.equal(parseCli(args, { allowBuildFirst: true }).buildFirst, true)
   assert.throws(() => parseCli(args), /unknown argument/)
+})
+
+// A throwaway repo at one base commit and a corpus lane recorded against it.
+function laneFixture(root, { prompt = 'old\nDefinition source: builder\nReturn path: /old/task/builder-1.json\n', setup = () => {} } = {}) {
+  const repo = join(root, 'repo'), corpus = join(root, 'corpus'), lane = join(corpus, 'b1')
+  mkdirSync(repo); mkdirSync(lane, { recursive: true })
+  const git = (...args) => { const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim() }
+  const put = (file, content) => writeFileSync(join(lane, file), typeof content === 'string' ? content : JSON.stringify(content))
+  git('init', '-q'); writeFileSync(join(repo, 'add.mjs'), 'export const add = () => 0\n'); setup(repo)
+  git('add', '.'); git('-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+  put('manifest.json', { base: git('rev-parse', 'HEAD'), originalTask: '/old/task', originalTree: '/old/tree' })
+  put('builder-prompt.txt', prompt); put('plan.md', 'plan'); put('lean.json', {}); put('brief.md', 'brief')
+  put('planner-1.json', { details: { acceptance: ['A'], gate_cmd: 'gate', mutations: [] } })
+  const charter = join(root, 'charter')
+  writeFileSync(charter, '---\nname: builder\ndescription: test\nrole: builder\nagent: pi\nmodel: example/model\neffort: high\n---\nnew charter\n')
+  return { repo, corpus, charter }
+}
+const CELL = { agent: 'pi', model: 'example/model', effort: 'high' }
+const TEST_A = "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { add } from '../add.mjs'\ntest('(A) value', () => assert.equal(add(), 1))\n"
+
+// MUTATION: drop the symlink-leaf or the outside-the-worktree clause of the base copy refusal.
+test('the base copy refuses a symlinked test path instead of writing through it', async () => {
+  for (const [label, file, link] of [['leaf', 't/probe.test.mjs', (repo, out) => { mkdirSync(join(repo, 't')); symlinkSync(join(out, 'sentinel'), join(repo, 't', 'probe.test.mjs')) }], ['parent', 't/probe.test.mjs', (repo, out) => symlinkSync(out, join(repo, 't'))], ['leaf-inside', 't/probe.test.mjs', (repo) => { mkdirSync(join(repo, 't')); symlinkSync('../add.mjs', join(repo, 't', 'probe.test.mjs')) }]]) {
+    const root = mkdtempSync(join(tmpdir(), `base-copy-${label}-`)), outside = join(root, 'outside')
+    mkdirSync(outside); writeFileSync(join(outside, 'sentinel'), 'keep\n'); writeFileSync(join(outside, 'probe.test.mjs'), 'keep\n')
+    try {
+      const { repo, corpus, charter } = laneFixture(root, { setup: (repo) => link(repo, outside) })
+      const result = await runBuilder({ lane: 'b1', cell: CELL, arms: [], out: join(root, 'out'), charter, buildFirst: true }, {
+        repoDir: repo, corpusDir: corpus, home: join(root, 'home'), sleepMs: () => {},
+        runAcpSeat({ cwd, taskDir }) {
+          rmSync(join(cwd, 't'), { recursive: true, force: true }); mkdirSync(join(cwd, 't'))
+          writeFileSync(join(cwd, 'add.mjs'), 'export const add = () => 1\n')
+          writeFileSync(join(cwd, file), TEST_A)
+          writeFileSync(join(taskDir, 'builder-1.json'), JSON.stringify({ status: 'done', summary: 'built', details: { mutations: [] } }))
+          return { stopReason: 'end_turn' }
+        },
+      })
+      assert.match(result.error ?? '', /bound-base: refused base copy of t\/probe\.test\.mjs/, label)
+      assert.equal(readFileSync(join(outside, 'sentinel'), 'utf8'), 'keep\n', label)
+      assert.equal(readFileSync(join(outside, 'probe.test.mjs'), 'utf8'), 'keep\n', label)
+      assert.deepEqual(result.bound.ids.A.base, { state: null, reason: 'not-run' }, label)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }
+})
+
+// MUTATION: apply the Definition source: check to planner prompts only.
+test('a builder charter refuses a recorded prompt with no Definition source: line before any worktree', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'no-definition-'))
+  try {
+    const { repo, corpus, charter } = laneFixture(root, { prompt: 'old prompt with no boundary\n' })
+    let seated = false
+    const result = await runBuilder({ lane: 'b1', cell: CELL, arms: [], out: join(root, 'out'), charter, buildFirst: true }, {
+      repoDir: repo, corpusDir: corpus, home: join(root, 'home'), sleepMs: () => {},
+      runAcpSeat() { seated = true; return { stopReason: 'end_turn' } },
+    })
+    assert.match(result.error ?? '', /builder prompt has no Definition source: line/)
+    assert.equal(seated, false)
+    assert.equal(existsSync(join(root, 'out', 'tree')), false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })

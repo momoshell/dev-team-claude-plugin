@@ -4,11 +4,11 @@
 //   node bench/replay-builder.mjs --lane b1380 --cell cell.json --arms fff,readgate --out /absolute/new-run
 // Writes result.json, diff.patch and session.jsonl into --out (a new directory). See bench/README.md.
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseAgent } from '../crew/protocols.mjs'
-import { addWorktree, addedLines, inside, isTestFile, advisorRows, callSeat, checkDiagnostics, dirtyFiles, errText, loadChecks, parseCli, prepareLane, loadEnvelope, readCellFile, readJournal, rowKinds, runReplay, seatDefinition, sleepMs, unmeasuredError, validateArms, validateCell, writeDiff } from './replay-common.mjs'
+import { addWorktree, addedLines, inside, isTestFile, advisorRows, callSeat, checkDiagnostics, dirtyFiles, errText, loadChecks, parseCli, prepareLane, loadEnvelope, readCellFile, readJournal, realThrough, rowKinds, runReplay, seatDefinition, sleepMs, unmeasuredError, validateArms, validateCell, writeDiff } from './replay-common.mjs'
 
 const count = (s, k) => Number(s?.match(new RegExp(`^ℹ ${k} (\\d+)`, 'm'))?.[1] ?? NaN)
 
@@ -27,7 +27,7 @@ export function boundState(events, id) {
 function testEvents(cwd, files) {
   if (!files.length) return []
   const { NODE_TEST_CONTEXT, ...env } = process.env
-  const reporter = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), 'test-events-reporter.mjs')).href
+  const reporter = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), 'events-reporter.mjs')).href
   const r = spawnSync(process.execPath, ['--test', `--test-reporter=${reporter}`, '--test-reporter-destination=stdout', ...files], { cwd, env, encoding: 'utf8', timeout: 300_000, maxBuffer: 64 << 20 })
   if (r.error) throw r.error
   if (r.signal) throw new Error(`test runner terminated by ${r.signal}`)
@@ -41,10 +41,13 @@ async function proveBound({ tree, outDir, onCleanup, step, changed, plan, envelo
   const baseEvents = await step('bound-base', () => {
     const base = join(outDir, 'base')
     addWorktree({ repo: tree, base: 'HEAD', tree: base, onCleanup })
+    const realBase = realpathSync(base)
     for (const file of changed.filter(isTestFile)) {
       const src = join(tree, file)
       if (!existsSync(src) || !statSync(src).isFile()) continue
       const dest = join(base, file)
+      // copyFileSync follows a symlink at dest, and mkdirSync a symlinked parent: either could write outside the base worktree.
+      if (lstatSync(dest, { throwIfNoEntry: false })?.isSymbolicLink() || !inside(realThrough(dest), realBase)) throw new Error(`refused base copy of ${file}: symlink or outside the base worktree`)
       mkdirSync(dirname(dest), { recursive: true })
       copyFileSync(src, dest)
     }

@@ -1286,6 +1286,26 @@ const refusedBeforeClient = (arms, lane, options = {}) => {
   return probe
 }
 
+// MUTATION: disable the pi advisor role predicate
+test('pi refuses unsupported advisor roles before client construction', () => {
+  for (const role of ['reviewer', 'lead', 'tech-lead', undefined]) {
+    const probe = armLaunch('pi', role, { advisor: advisorArm })
+    leanLane(probe.taskDir)
+    assert.throws(() => probe.run(), (error) => error.reason === 'grant-unsupported' && /advisor/.test(error.message) && error.message.includes(role ?? 'seat'))
+    assert.equal(probe.created.length, 0)
+    assert.deepEqual(readdirSync(probe.runtimeRoot), [])
+    const bare = armLaunch('pi', role, {})
+    bare.run()
+    assert.equal(bare.created.length, 1)
+  }
+  for (const role of ['builder', 'planner']) {
+    const probe = armLaunch('pi', role, { advisor: advisorArm })
+    leanLane(probe.taskDir)
+    probe.run()
+    assert.equal(probe.created.length, 1)
+  }
+})
+
 test('a lean pi builder declaring advisor, edit assist, builderloop and skeletonread launches with all four on the lane layout', () => {
   const probe = armLaunch('pi', 'builder', contextArms, { briefText: 'Tripwire tests:\n- a.test.mjs · tripwire\nBroad keys\n## Acceptance\n- (A1) first item\nnot an item\n- (A2) second item\n## Next\n- (A3) outside\n' })
   const anchor = Date.now() - 60_000

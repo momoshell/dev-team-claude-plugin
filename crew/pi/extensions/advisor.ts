@@ -1797,11 +1797,10 @@ export async function attachAdvisor(pi, { env = process.env, deps = {} } = {}) {
   if (manifestText({ taskDir, readFile: deps.readFile || DEFAULT_READ })?.cell_invalid) return unavailable('manifest-cell-invalid')
   if (typeof pi?.on !== 'function' || typeof pi?.sendMessage !== 'function') throw new Error('advisor extension needs pi.on and pi.sendMessage')
   const boot = { role, outcome: 'attached', config_version: ADVISOR_CONFIG_VERSION }
-  const written = appendLine({
+  appendLine({
     appendFile, journalPath,
     row: { at: atOf(now), advisor_boot: boot, role },
   })
-  if (!written) throw new Error('advisor extension could not append its boot audit row')
   const advisor = createAdvisor({
     env, deps: {
       ...deps, taskDir,

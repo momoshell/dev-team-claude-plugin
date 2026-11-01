@@ -1,0 +1,51 @@
+{
+  "role": "planner",
+  "id": "b1427-pre-return-whole-diff.planner.1",
+  "status": "done",
+  "summary": "Plan and gate for a 48KB whole-diff plus brief-acceptance pre-return consult, keeping diff-growth caps intact.",
+  "details": {
+    "subject": "feat(crew): give pre-return consult the whole diff and brief",
+    "plan_path": "/Users/momoshell/.crew/dt-b1427-pre-return-whole-diff/b1427-pre-return-whole-diff/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1427-pre-return-whole-diff/b1427-pre-return-whole-diff/task/gate.mjs",
+    "acceptance": [
+      "PW1",
+      "PW2",
+      "PW3",
+      "PW4"
+    ],
+    "mutations": [
+      {
+        "check": "PW1",
+        "file": "crew/pi/extensions/advisor.ts",
+        "find": "export const PRE_RETURN_DIFF_BUDGET_BYTES = 48 * 1024",
+        "replace": "export const PRE_RETURN_DIFF_BUDGET_BYTES = 48"
+      },
+      {
+        "check": "PW2",
+        "file": "crew/acp/seat.mjs",
+        "find": "acceptance_items: briefAcceptanceItems(briefText),",
+        "replace": "acceptance_items: [],"
+      },
+      {
+        "check": "PW3",
+        "file": "crew/pi/extensions/advisor.ts",
+        "find": "return { entries, bytes, omitted_files: omittedFiles, lines }",
+        "replace": "return { entries, bytes, omitted_files: [], lines }"
+      },
+      {
+        "check": "PW4",
+        "file": "crew/pi/extensions/advisor.ts",
+        "find": "export const DELTA_ENTRIES = 12",
+        "replace": "export const DELTA_ENTRIES = 1200"
+      }
+    ],
+    "files_in_scope": [
+      "crew/pi/extensions/advisor.ts",
+      "crew/pi/extensions/advisor.test.mjs",
+      "crew/acp/seat.mjs",
+      "crew/acp/seat.test.mjs"
+    ],
+    "validation_lane": "node --test crew/pi/extensions/advisor.test.mjs crew/acp/seat.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1427-pre-return-whole-diff/b1427-pre-return-whole-diff/task/gate.mjs"
+  }
+}

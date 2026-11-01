@@ -1,0 +1,21 @@
+{
+  "lane": "b1425",
+  "id": "b1425-scout-rule-and-nudge",
+  "base": "b33e1b554102ad2d17cafa13d252cef7d986d503",
+  "originalTask": "/Users/momoshell/.crew/dt-b1425-scout-rule-and-nudge/b1425-scout-rule-and-nudge/task",
+  "originalTree": "/Users/momoshell/Dev/dt-b1425-scout-rule-and-nudge",
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1425-scout-rule-and-nudge/b1425-scout-rule-and-nudge/task",
+  "reviewer": {
+    "builtHead": "ab74c3e443cb9f986a26cf4b651926e76f36c0e7",
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1425-scout-rule-and-nudge/b1425-scout-rule-and-nudge/task/lean/reviewer/b1425-scout-rule-and-nudge.reviewer.3.jsonl"
+  },
+  "knownDefect": {
+    "fixingCommits": [
+      "8f2a7037a6f3811a7cc428e6e5205100885ac713"
+    ],
+    "files": [
+      "crew/pi/extensions/subagent.ts"
+    ],
+    "description": "Scout nudge reset every model step, not once per session."
+  }
+}

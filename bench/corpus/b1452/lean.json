@@ -1,0 +1,24 @@
+{
+  "id": "b1452-lean-waterfall",
+  "cwd": "/Users/momoshell/Dev/dt-b1452-lean-waterfall",
+  "taskDir": "/Users/momoshell/.crew/dt-b1452-lean-waterfall/b1452-lean-waterfall/task",
+  "tier": "build",
+  "shape": "standard",
+  "brief": "# Task\n\n---\nsource: operator request (Momo, 2026-10-31: \"can the viz show task execution waterfall?\")\ncloses: null\ntier: build\nshape: standard\nacceptance: [WF1, WF2, WF3]\nout_of_scope: deleting the old-run views (RunDetail, RunCard and what only they import) — a later lane removes them; the journal format and crew/\n---\n## The ask\n\nLean lanes have no execution waterfall. The visualizer routes every lean run to `LeanRunDetail.svelte`, which\nlists journal rows with no times, and the only waterfall (`PhaseGantt.svelte`, laid out by `timeline.js`\n`layoutTimeline`) sits in `RunDetail.svelte`, which nothing imports any more. The data is already there:\n`visualizer/server/lean-source.mjs` `summarize` builds `run.phases` from the journal's stage-start/stage-end\nrows with `started_at`/`ended_at` taken from each row's `at`.\n\nShow a waterfall of the lean run's stages in `LeanRunDetail`: one bar per phase, offset and width from its\nrecorded times, labelled with the seat that answered it. Reuse `layoutTimeline` (or the parts of `PhaseGantt`\nthat fit) rather than writing a second layout. Invariant: a time nobody recorded is shown absent with its\nreason, never as a zero, never at the origin, never stretched to now.\n\n## Context\n\n- `visualizer/server/lean-source.mjs` `summarize`: the lean phases. A phase opened by a `check` or verdict row\n  has `started_at: null`.\n- `visualizer/web/src/lib/timeline.js` `layoutTimeline`: puts phases with no `started_at` in `queued`, which\n  is the old driver's meaning, not \"not recorded\".\n- `visualizer/web/src/lib/LeanRunDetail.svelte`, `lean.js`: the lean view. The header comment of `lean.js`\n  (\"date only their run-start\") is out of date: every stage-start, stage-end and check row carries `at`.\n- Journal rows with `event: 'envelope'` carry `stage` and `role`.\n- `test/visualizer-lean-web.test.mjs`, `test/visualizer-lean.test.mjs`: how lean presentation is pinned\n  (logic through `node --test`, components as source text). CI has no node_modules: the suite must not import\n  svelte or any visualizer dependency.\n- Load `frontend-svelte`, `ui-design` and `ux` before touching a component.\n\n## Acceptance\n\n- (WF1) the lean run detail renders an execution waterfall laid out from the run's phases\n- (WF2) a lean phase with no recorded start is shown as not recorded with its reason, not as a queued or zero-width bar\n- (WF3) a lean phase whose stage has a seat envelope row carries that seat's role\n",
+  "acceptance": [
+    "WF1",
+    "WF2",
+    "WF3"
+  ],
+  "source": "operator request (Momo, 2026-10-31: \"can the viz show task execution waterfall?\")",
+  "branch": "b1452-lean-waterfall",
+  "base": "main",
+  "closes": [],
+  "suite": {
+    "command": "npm",
+    "args": [
+      "test"
+    ],
+    "timeoutMs": 1800000
+  }
+}

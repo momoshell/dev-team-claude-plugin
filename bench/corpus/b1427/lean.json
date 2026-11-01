@@ -1,0 +1,25 @@
+{
+  "id": "b1427-pre-return-whole-diff",
+  "cwd": "/Users/momoshell/Dev/dt-b1427-pre-return-whole-diff",
+  "taskDir": "/Users/momoshell/.crew/dt-b1427-pre-return-whole-diff/b1427-pre-return-whole-diff/task",
+  "tier": "build",
+  "shape": "standard",
+  "brief": "# Task\n\n---\nsource: operator request 2026-10-29 (the pre-return consult sees too little of the diff to review it)\ncloses: null\ntier: build\nshape: standard\nacceptance: [PW1, PW2, PW3, PW4]\nout_of_scope: the diff-growth and cadence consults' window; the advisor's model cells; the reply contract's keys; the visualizer\n---\n## The ask\n\nThe advisor's pre-return consult (PR 2053, fixed in PR 2055) reviews the builder's work before the return file is\nwritten. It sees the same small window as the mid-build hints: at most `DELTA_ENTRIES` (12) entries of\n`DELTA_ENTRY_CAP_BYTES` (512) each, about 12 lines per file, from `gitDiffLines`' `EXCERPT_LINES`. None of the must-fix\nfindings reviewers raised on the 2026-10-29 replays fits in that window, so the consult cannot find them.\n\nGive the pre-return consult its own, larger view:\n1. The whole working diff against HEAD, untracked files included, bounded by a byte budget of about 48 KB. Hunks\n   stay grounded as `path:line:` entries so the reply's evidence can cite them, and removed lines stay grounded at\n   their old path and line.\n2. The brief's acceptance items, so the consult can check the change against what was asked.\n\nWhen the diff is over the budget, the consult sees what fits and is told which files were left out. It is never\nsilently cut. The diff-growth and cadence consults keep today's small window.\n\nInvariants:\n- The reply contract and the journal rows do not change, except that the consult row records the window it was\n  given (bytes, entries, and files left out).\n- A pre-return consult still stays inside `TIER1_MAX_CONSULTS`, and a failed one still lets the return through.\n\n## Context\n\n- `crew/pi/extensions/advisor.ts`: `gitDiffLines`, `EXCERPT_LINES`, `DELTA_ENTRIES`, `DELTA_ENTRY_CAP_BYTES`,\n  `entryFromText`, `appendDelta`, `preReturnVerdict`, `consult`, the prompt builders and `REPLY_CONTRACT`.\n- The advisor reads its lane context through `loadContext` and the advisor manifest that `crew/acp/seat.mjs`\n  `laneContext` writes; the brief text reaches `laneContext` as `briefText`.\n- Tests to read first: `crew/pi/extensions/advisor.test.mjs` (the diff-growth and pre-return triggers).\n\n## Acceptance\n\n- (PW1) a pre-return consult's prompt carries a change on line 200 of a file\n- (PW2) a pre-return consult's prompt carries the brief's acceptance items\n- (PW3) a pre-return consult over the byte budget names the files it left out\n- (PW4) a diff-growth consult's delta stays within the existing entry and byte caps\n",
+  "acceptance": [
+    "PW1",
+    "PW2",
+    "PW3",
+    "PW4"
+  ],
+  "source": "operator request 2026-10-29 (the pre-return consult sees too little of the diff to review it)",
+  "branch": "b1427-pre-return-whole-diff",
+  "base": "main",
+  "closes": [],
+  "suite": {
+    "command": "npm",
+    "args": [
+      "test"
+    ],
+    "timeoutMs": 1800000
+  }
+}

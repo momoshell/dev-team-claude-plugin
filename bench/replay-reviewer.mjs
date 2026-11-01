@@ -39,7 +39,7 @@ function prepare({ lane, outDir, onCleanup, deps }) {
   }
   ret.details.gate_cmd ??= `node ${join(task, 'gate.mjs')}`
   writeFileSync(file, JSON.stringify(ret, null, 2))
-  return { prompt, briefText: readFileSync(join(dir, 'brief.md'), 'utf8'), cwd: tree, taskDir: task, returnName, plan: ret.details }
+  return { prompt, briefText: readFileSync(join(dir, 'brief.md'), 'utf8'), cwd: tree, taskDir: task, returnName, plan: ret.details, knownDefect: manifest.knownDefect ?? null }
 }
 
 function seed(tree, rows, check) {
@@ -66,13 +66,15 @@ function seed(tree, rows, check) {
 export async function runReviewer(options, deps = {}) {
   const { lane, arms, variant, mutation } = options ?? {}
   return runReplay({ kind: 'reviewer', options, deps, async body({ outDir, errors, onCleanup, result }) {
-    Object.assign(result, { variant: variant ?? null, seededMutation: null, verdict: null, findings: null, seededFileCited: null, firstReturnStatus: null, usage: null, wallS: null, unknown: { verdict: 'not-measured', findings: 'not-measured', seededFileCited: variant === 'clean' ? 'not-seeded' : 'not-measured', firstReturnStatus: 'not-measured', usage: 'not-measured', wallS: 'not-measured' } })
+    Object.assign(result, { variant: variant ?? null, seededMutation: null, verdict: null, findings: null, seededFileCited: null, knownDefect: null, defectFileCited: null, firstReturnStatus: null, usage: null, wallS: null, unknown: { verdict: 'not-measured', findings: 'not-measured', defectFileCited: 'not-measured', seededFileCited: variant === 'clean' ? 'not-seeded' : 'not-measured', firstReturnStatus: 'not-measured', usage: 'not-measured', wallS: 'not-measured' } })
     validateArms(arms)
     const cell = validateCell(options.cell ?? readCellFile(options.cellFile))
     result.cell = cell
     if (!['clean', 'seeded'].includes(variant)) throw new Error('variant must be clean or seeded')
     if (variant === 'seeded' ? typeof mutation !== 'string' || !mutation.trim() : mutation !== undefined) throw new Error('seeded requires mutation; clean rejects mutation')
     const prep = prepare({ lane, outDir, onCleanup, deps })
+    result.knownDefect = prep.knownDefect
+    if (!prep.knownDefect) result.unknown.defectFileCited = 'no-known-defect'
     if (variant === 'seeded') result.seededMutation = seed(prep.cwd, prep.plan.mutations, mutation)
     const { turn, error, wallS } = await callSeat({ deps, definition: seatDefinition({ role: 'reviewer', cell, arms }), prep, outDir })
     result.wallS = wallS; delete result.unknown.wallS
@@ -95,6 +97,11 @@ export async function runReviewer(options, deps = {}) {
     if (envelope?.status === 'done') {
       result.verdict = d.verdict; result.findings = d.findings
       delete result.unknown.verdict; delete result.unknown.findings
+      if (prep.knownDefect) {
+        const names = prep.knownDefect.files.flatMap((file) => [file, join(prep.cwd, file)])
+        result.defectFileCited = d.findings.some((finding) => names.some((name) => finding.location === name || (finding.location.startsWith(name + ':') && /^:\d+(?::\d+)?(?:-\d+(?::\d+)?)?$/.test(finding.location.slice(name.length)))))
+        delete result.unknown.defectFileCited
+      }
       if (variant === 'seeded') {
         const names = [result.seededMutation.file, join(prep.cwd, result.seededMutation.file)]
         result.seededFileCited = d.findings.some((finding) => finding.severity === 'must-fix' && names.some((name) => finding.location === name || (finding.location.startsWith(name + ':') && /^:\d+(?::\d+)?(?:-\d+(?::\d+)?)?$/.test(finding.location.slice(name.length)))))

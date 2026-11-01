@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -159,4 +160,71 @@ test('RR4 refuses missing pins before creating a worktree', async (t) => {
   fx.manifest.reviewer.builtHead = fx.head; fx.put('manifest.json', fx.manifest); rmSync(join(fx.dir, 'reviewer-prompt.txt'))
   assert((await fx.run({}, undefined, { addWorktree: () => { calls++ } })).result.error)
   assert.equal(calls, 0)
+})
+
+const corpusPins = {
+  b1452: ['b1452-lean-waterfall', '45ad32da22f1339efb3b2c6ce56803348a5c1d1f', 3, '660f6d99b92536a07bfd9f8c8dff4102afed4218', 'f62a5493ba8eeef9bed7bd3d7049c67ac15a3c16bb88ef6d8492ce7c79e57702'],
+  b1425: ['b1425-scout-rule-and-nudge', 'ab74c3e443cb9f986a26cf4b651926e76f36c0e7', 3, 'b33e1b554102ad2d17cafa13d252cef7d986d503', '64ac502334245987325bf725dc3e6fe81f6841670fb69316dc452b11b9c6f37d'],
+  b1386: ['b1386-claude-seat-arms', '21e53d3938c7aeed114612586a40ccdec74e1873', 5, '855bf66b924ef2535c2ab90512aa18c83cf3291c', '1d53cbd60e5ceb402a0cc341fb59400f343ca69b06ef5221b68223f8cf589550'],
+  b1427: ['b1427-pre-return-whole-diff', 'c14ac23b935f35586a67b13d1beed142e6ff22bb', 10, '7d96e4674589a816fb37b7f2c1d70805d3084190', '6b58476ee3c5939ea10147ff25d6c0281c3485cb565f9a0a9a8fd88015897a56'],
+  b1433: ['b1433-seat-bench', '6f83e0efef6692ebe4b34bd558418d9cd75b3dda', 20, '67c968c108e13c401dde92e8bed7bcfcce578161', '1a5a25023ec8d409cce4dce7939ef7f8740d4e5358852e650c3ad698b654b127'],
+}
+function checkCorpus(lanes) {
+  for (const lane of lanes) {
+    const [id, head, round, base, hash] = corpusPins[lane], dir = join('bench/corpus', lane)
+    const manifest = JSON.parse(readFileSync(join(dir, 'manifest.json'))), lean = JSON.parse(readFileSync(join(dir, 'lean.json')))
+    assert.equal(manifest.lane, lane); assert.equal(manifest.id, id); assert.equal(manifest.base, base)
+    assert.equal(manifest.originalTask, lean.taskDir); assert.equal(manifest.originalTree, lean.cwd)
+    assert.equal(manifest.source, `/Users/momoshell/.crew-journal-archive/dt-${id}/${id}/task`)
+    assert.deepEqual(manifest.reviewer, { builtHead: head, promptSource: `${manifest.source}/lean/reviewer/${id}.reviewer.${round}.jsonl` })
+    assert.equal(readFileSync(join(dir, 'brief.md'), 'utf8'), lean.brief)
+    const prompt = readFileSync(join(dir, 'reviewer-prompt.txt'), 'utf8')
+    assert(prompt.includes(`Envelope id: ${id}.reviewer.${round}\n`)); assert(prompt.includes(`Return path: ${lean.taskDir}/reviewer-${round}.json`))
+    const digest = createHash('sha256')
+    for (const file of ['plan.md', 'gate.mjs', 'planner-1.json', 'lean.json', 'brief.md', 'planner-prompt.txt', 'builder-prompt.txt', 'reviewer-prompt.txt']) digest.update(readFileSync(join(dir, file)))
+    assert.equal(digest.digest('hex'), hash)
+  }
+}
+// MUTATION: DC1 removes a first-round corpus pin.
+test('DC1 freezes first reviewer rounds', () => checkCorpus(['b1452', 'b1425']))
+// MUTATION: DC2 changes a last-round prompt.
+test('DC2 freezes last reviewer rounds', () => checkCorpus(['b1386', 'b1427', 'b1433']))
+
+// MUTATION: DC3 removes known defect metadata.
+test('DC3 records all known defects', () => {
+  const expected = {
+    b1452: [['c43edcff'], ['visualizer/web/src/lib/LeanWaterfall.svelte', 'visualizer/web/src/lib/timeline.js']],
+    b1425: [['8f2a7037'], ['crew/pi/extensions/subagent.ts']], b1386: [['04325b18'], ['crew/adapters/claude-arms.mjs', 'crew/adapters/adapter-claude.mjs']],
+    b1427: [['711f2770'], ['crew/pi/extensions/advisor.ts']], b1433: [['1a8856ca', '94fa08a8'], ['bench/replay-builder.mjs', 'bench/blind-review.mjs']],
+    b1381: [['8d6a354b'], ['crew/lean.mjs']], b1402: [['914262c1'], ['crew/loop.mjs']], b1416: [['8592d6ef'], ['crew/loop.mjs']],
+    b1441: [['4ad976f6'], ['crew/acp/provider.mjs']], b1458: [[], ['skills/ui-design/SKILL.md']],
+  }
+  for (const [lane, [commits, files]] of Object.entries(expected)) {
+    const d = JSON.parse(readFileSync(join('bench/corpus', lane, 'manifest.json'))).knownDefect
+    assert.deepEqual(d.files, files); assert.equal(d.fixingCommits.length, commits.length)
+    commits.forEach((prefix, i) => { assert.match(d.fixingCommits[i], /^[a-f0-9]{40}$/); assert(d.fixingCommits[i].startsWith(prefix)) })
+    assert.match(d.description, /^[^\r\n]+$/); if (lane === 'b1458') assert.equal(d.reason, 'not-restored')
+  }
+})
+
+// MUTATION: DC4 suppresses defect citation measurement.
+test('DC4 records defect file overlap for valid returns', async (t) => {
+  const fx = fixture(t), knownDefect = { fixingCommits: ['a'.repeat(40)], files: ['change', 'added'], description: 'Defect' }
+  fx.manifest.knownDefect = knownDefect; fx.put('manifest.json', fx.manifest)
+  fx.put('reviewer-prompt.txt', 'Envelope id: test.reviewer.2\n/old/task/reviewer-2.json /old/tree\n')
+  const finding = (location, severity = 'should-fix') => ({ id: 'f', severity, location, summary: 'defect' })
+  const check = (run, value, reason) => { for (const row of [run.result, JSON.parse(readFileSync(join(run.out, 'result.json'), 'utf8'))]) { assert.deepEqual(row.knownDefect, knownDefect); assert.equal(row.defectFileCited, value); assert.equal(row.unknown.defectFileCited, reason) } }
+  for (const loc of ['change', 'added:4', 'change:1:2', 'added:1-3', 'change:1:2-3:4', (cwd) => join(cwd, 'added') + ':4']) {
+    check(await fx.run({}, ({ cwd }) => ({ verdict: 'pass', findings: [finding(typeof loc === 'function' ? loc(cwd) : loc, 'consider')] })), true, undefined)
+  }
+  for (const loc of [null, 'change-extra', 'other/change', 'change:bad', 'change:2 trailing']) {
+    check(await fx.run({}, () => ({ verdict: 'pass', findings: loc ? [finding(loc)] : [] })), false, undefined)
+  }
+  for (const envelope of [null, { role: 'reviewer', id: 'wrong', status: 'done', summary: 'review', details: { verdict: 'pass', findings: [] } }, { role: 'reviewer', id: 'test.reviewer.2', status: 'done', summary: 'review', details: { verdict: 'pass', findings: [] }, extra: true }, { role: 'reviewer', id: 'test.reviewer.2', status: 'insufficient', summary: 'review', details: { verdict: 'pass', findings: [] } }]) {
+    check(await fx.run({}, undefined, { runAcpSeat: async ({ taskDir }) => { if (envelope) writeFileSync(join(taskDir, 'reviewer-2.json'), JSON.stringify(envelope)); return { stopReason: 'end' } } }), null, 'not-measured')
+  }
+  const seeded = await fx.run({ variant: 'seeded', mutation: 'X' }, () => ({ verdict: 'pass', findings: [finding('change')] }))
+  check(seeded, true, undefined); assert.equal(seeded.result.seededFileCited, false)
+  delete fx.manifest.knownDefect; fx.put('manifest.json', fx.manifest)
+  const absent = await fx.run(); for (const row of [absent.result, JSON.parse(readFileSync(join(absent.out, 'result.json'), 'utf8'))]) { assert.equal(row.knownDefect, null); assert.equal(row.defectFileCited, null); assert.equal(row.unknown.defectFileCited, 'no-known-defect') }
 })

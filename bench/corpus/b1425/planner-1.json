@@ -1,0 +1,51 @@
+{
+  "role": "planner",
+  "id": "b1425-scout-rule-and-nudge.planner.1",
+  "status": "done",
+  "summary": "Plan and gate written: exact scout rule for planner/reviewer charters plus a grant-gated, once-per-turn read-spread nudge in subagent.ts, proven by subagent.test.mjs.",
+  "details": {
+    "subject": "feat(crew): add scout charter rule and read-spread nudge",
+    "plan_path": "/Users/momoshell/.crew/dt-b1425-scout-rule-and-nudge/b1425-scout-rule-and-nudge/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1425-scout-rule-and-nudge/b1425-scout-rule-and-nudge/task/gate.mjs",
+    "acceptance": [
+      "SN1",
+      "SN2",
+      "SN3",
+      "SN4"
+    ],
+    "mutations": [
+      {
+        "check": "SN1",
+        "file": "crew/agents/planner.md",
+        "find": "ask a `scout` that question instead of reading it all yourself",
+        "replace": "ask a `scout` that question and also read it all yourself"
+      },
+      {
+        "check": "SN2",
+        "file": "crew/agents/reviewer.md",
+        "find": "ask a `scout` that question instead of reading it all yourself",
+        "replace": "ask a `scout` that question and also read it all yourself"
+      },
+      {
+        "check": "SN3",
+        "file": "crew/pi/extensions/subagent.ts",
+        "find": "export const SCOUT_NUDGE_READ_THRESHOLD = 8",
+        "replace": "export const SCOUT_NUDGE_READ_THRESHOLD = 800"
+      },
+      {
+        "check": "SN4",
+        "file": "crew/pi/extensions/subagent.ts",
+        "find": "nudgedThisTurn = true",
+        "replace": "nudgedThisTurn = false"
+      }
+    ],
+    "files_in_scope": [
+      "crew/agents/planner.md",
+      "crew/agents/reviewer.md",
+      "crew/pi/extensions/subagent.ts",
+      "crew/pi/extensions/subagent.test.mjs"
+    ],
+    "validation_lane": "node --test crew/pi/extensions/subagent.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1425-scout-rule-and-nudge/b1425-scout-rule-and-nudge/task/gate.mjs"
+  }
+}

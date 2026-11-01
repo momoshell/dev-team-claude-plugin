@@ -8,5 +8,14 @@
   "reviewer": {
     "builtHead": "6a0ef074779d8ae16b29d3d46b5e5530af903d2d",
     "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1402-lean-reaim-unbound-mutations/b1402-lean-reaim-unbound-mutations/task/lean/reviewer/b1402-lean-reaim-unbound-mutations.reviewer.3.jsonl"
+  },
+  "knownDefect": {
+    "fixingCommits": [
+      "914262c1601102facd57ae6b9844d2b42ea40625"
+    ],
+    "files": [
+      "crew/loop.mjs"
+    ],
+    "description": "Earlier re-aim prevented re-aim after a later review-fix build."
   }
 }

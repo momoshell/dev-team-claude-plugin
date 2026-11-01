@@ -1,42 +1,12 @@
 # Tripwires and scope
 
-A **tripwire** is a test that pins something inside a lane's write surface. Find
-them before you edit, so you know what the change will break.
+Find tests that pin the write surface before editing. A change that alters a
+detector owns whatever it newly flags. Run the widened detector before the build
+and include newly flagged files in the plan. When code moves, include affected
+source-grep tests as well as behavioural tests.
 
-## The rule that costs the most when missed
+List files rather than bare directories unless the whole directory is meant.
+Declare new files in the write surface and name related existing files. Changes
+to enforcement may need a higher review tier; decide at planning time.
 
-**A change that alters a DETECTOR owns whatever that detector newly flags.**
-
-A detector is anything that scans the tree and reports hits: a drift guard, a
-lint-shaped check, a source grep, a schema validator. Widen it, and it starts
-flagging files nobody asked you to touch. Those files belong in the plan's
-`files_in_scope`, or the builder either leaves the suite red or edits outside
-the permitted surface.
-
-This is computable **before the build**: run the widened detector, identify what it
-newly flags, and put those files in `files_in_scope`.
-
-## Source-grep tripwires when code moves
-
-When a change moves code between modules, include affected **source-grep** tests
-in `files_in_scope`, alongside behavioural tests. A test that greps for a
-symbol's location fails when the symbol relocates, even though behaviour is
-unchanged.
-
-## Directory entries
-
-List files, not bare directories, in `files_in_scope` unless the whole directory
-is meant. A directory entry that the builder reads as a single file leaves an
-empty write surface.
-
-## New files
-
-A plan that creates files declares them in `files_in_scope` like any other. Name
-the existing files the work relates to beside them, so the builder starts from
-code that already exists.
-
-## Protected paths
-
-A change that touches the loop's own enforcement (`crew/loop.mjs`,
-`crew/checks.mjs`, `crew/acp/grants.mjs`, `hooks/`) belongs at the judge tier.
-Decide that when you plan, not after the build.
+[Evidence](dev-team-evidence.md#tripwires); [mutation recipes](node-test.md).

@@ -15,6 +15,34 @@ const qa = 'skills/qa-test-writing', backend = 'skills/backend-node', review = '
 const falsification = `${review}/references/falsification.md`
 const section = (text, heading) => text.split(`## ${heading}`)[1]?.split('\n## ')[0] ?? ''
 
+// MUTATION: replace the universal description with a repository-specific one.
+test('QG1', () => {
+  const skill = read(`${qa}/SKILL.md`)
+  assert.ok(flat(skill).includes('Writes and reviews tests in any repository.'))
+  assert.doesNotMatch(skill, /this (?:repo|domain)|node --test|gate\.mjs/i)
+  for (const term of ['vacuity', 'gates', 'captures', 'tripwires', 'tooling', 'absence', 'affordances', 'citations', 'grammar', 'seed', 'oracle', 'failing input']) assert.ok(skill.toLowerCase().includes(term), term)
+})
+
+// MUTATION: replace the node single-test runner with a syntax check.
+test('QG2', () => {
+  const skill = read(`${qa}/SKILL.md`)
+  for (const [name, command, api] of [['node-test', 'node --test --test-name-pattern', 'node:assert/strict'], ['cargo-test', 'cargo test tests::adds_numbers -- --exact', 'assert_eq!'], ['vitest', 'vitest run math.test.ts -t', "from 'vitest'"]]) {
+    assert.ok(skill.includes(`references/${name}.md`))
+    const text = read(`${qa}/references/${name}.md`)
+    for (const term of ['## Test that can fail', '## Run one test', '## Apply and revert a mutation', command, api, 'cp ', 'green', 'red']) assert.ok(text.includes(term), `${name}: ${term}`)
+  }
+})
+
+// MUTATION: point the labelled evidence link at a repository source file.
+test('QG3', () => {
+  const skill = read(`${qa}/SKILL.md`), evidencePath = `${qa}/references/dev-team-evidence.md`
+  assert.equal(skill.split('[dev-team repository evidence](references/dev-team-evidence.md)').length, 2)
+  const evidence = read(evidencePath)
+  assert.match(evidence, /^# Dev-team repository evidence/m)
+  for (const anchor of ['#476', '#493', '#496', '#153', '#168', '#240', '#581', '#577', '#578', '#603', '#543', '#544', 'CHECK_REASONS', 'proveMutations', 'runGate']) assert.ok(evidence.includes(anchor), anchor)
+  for (const file of docs(qa).filter(file => file !== evidencePath)) assert.doesNotMatch(read(file), /\b(?:crew|hooks)\/|\btest\/helpers\.mjs\b|#\d+\b|\bb\d{3,}\b|\b(?:CHECK_REASONS|proveMutations|runGate)\b/, file)
+})
+
 // MUTATION: append a tripwire declaration instruction to the scope heading.
 test('SX1', () => {
   for (const file of docs(qa)) {
@@ -30,11 +58,10 @@ test('SX2', () => {
   const all = docs(qa).map(read).join('\n')
   for (const name of ['guardedKill', 'MODIFIER_KINDS', 'openRun', 'foldRpcUsage', 'SHADOW_ABSENT', 'USAGE_ABSENT_CAUSES', 'CREW_BREAKER_THRESHOLD', 'KNOWN_FLAGS']) assert.ok(!all.includes(name), name)
   for (const name of ['proveMutations', 'runGate', 'CHECK_REASONS', 'crew/checks.mjs']) assert.ok(all.includes(name), name)
-  const captures = read(`${qa}/references/captures.md`)
-  assert.ok(!captures.includes('stream.jsonl'))
-  for (const name of ['task/lean/<role>/<id>.jsonl', 'crew/show.mjs']) assert.ok(captures.includes(name))
-  assert.match(read(`${qa}/references/absence.md`), /usage:\s*null/)
-  assert.ok(read(`${qa}/references/absence.md`).includes('crew/pi/extensions/subagent.ts'))
+  const evidence = read(`${qa}/references/dev-team-evidence.md`)
+  assert.ok(!all.includes('stream.jsonl'))
+  for (const name of ['task/lean/<role>/<id>.jsonl', 'crew/show.mjs', 'crew/pi/extensions/subagent.ts']) assert.ok(evidence.includes(name))
+  assert.match(evidence, /usage:\s*null/)
 })
 
 // MUTATION: append a path with a line number to the evidence heading.

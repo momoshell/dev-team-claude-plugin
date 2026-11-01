@@ -1141,7 +1141,8 @@ test('the requires a seat receives are the effective definition list, tier overr
     const text = readFileSync(path, ...args)
     return path === planner ? text.replace(from, to) : text
   }
-  const load = JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'tool_call', toolCallId: 'r1', title: 'read', kind: 'read', status: 'in_progress', rawInput: { path: fileURLToPath(new URL('../skills/alpha/SKILL.md', import.meta.url)) } } })
+  // The shipped planner is a claude seat: its load is a Skill call in its own crew-skills-planner plugin.
+  const load = JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'tool_call', toolCallId: 'r1', title: 'Skill', kind: 'other', status: 'in_progress', rawInput: { skill: 'crew-skills-planner:alpha' }, _meta: { claudeCode: { toolName: 'Skill' } } } })
   const loaded = JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'tool_call_update', toolCallId: 'r1', status: 'completed' } })
   const based = leanFixture({ deps: { readFileSync: edit('advisor: null', 'advisor: null\nrequires: ["alpha"]') } })
   assert.equal((await based.go()).status, 'stopped')

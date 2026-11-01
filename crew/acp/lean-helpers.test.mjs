@@ -132,8 +132,8 @@ test('armGrants arms native extensions, fff and lab, and refuses what it cannot 
   )
 })
 
-test('the committed planner and reviewer definitions grant subagent with scout', () => {
-  for (const role of ['planner', 'reviewer']) {
+test('the committed reviewer definition grants subagent with scout', () => {
+  for (const role of ['reviewer']) {
     const { fields, defects } = parseAgent(readFileSync(new URL(`../agents/${role}.md`, import.meta.url), 'utf8'))
     assert.deepEqual(defects, [], role)
     const grants = armGrants({ role, agent: fields.agent, extensions: fields.extensions ?? [] })

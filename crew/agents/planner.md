@@ -3,11 +3,10 @@ name: planner
 description: Reads the task and writes the plan the builder implements.
 role: planner
 writes: task-dir
-agent: pi
-model: openai/gpt-6.1-sol
+agent: claude
+model: anthropic/claude-opus-5-5
 effort: high
 advisor: null
-extensions: [subagent]
 memory: true
 tiers: {"mechanical":{"effort":"medium"},"judge":{"effort":"xhigh"}}
 ---

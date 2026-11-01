@@ -229,3 +229,17 @@ extension grant; the old ACP transport (`crew/acp-io.mjs`) neither materialises 
 or `edit_assist`, because `adapter-claude`'s `acpLaunch` takes the arms path only when the lean seat opts in
 (`armHooks`); `crew/agents/*.md` frontmatter values do not change. Token budget and output caps are a later
 lane.
+
+## Amendment 3 (2026-11-01): P4 receipt times and tool results support inspection
+
+The session recording's ACP update rows carry an optional `at` field: epoch milliseconds from the
+recorder's wall clock when it received the update. This clock is separate from the runner's monotonic
+wait clock. Clock or recording failure never throws into the turn. Historical rows without `at` remain
+valid and untimed; readers do not substitute file times or session metadata. Intervals between these
+rows measure the captured event interval, not provider-internal execution, TTFT or decoding latency.
+
+The Pi ACP server forwards its existing `tool_execution_end.result` as the standard update's
+`rawOutput`, beside the call ID and terminal status. This preserves observed output rather than
+reconstructing it in the visualizer. Permission decisions, grants, retry bounds, turn completion and
+skill-proof rules are unchanged. The developer-tools surface remains read-only and does not replay or
+execute inspected commands. No new protocol or runtime dependency is introduced.

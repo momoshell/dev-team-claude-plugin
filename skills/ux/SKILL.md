@@ -5,7 +5,7 @@ description: >-
   or motion to a visualizer component. Records live UX evidence and limits.
 ---
 
-Measured boundary: 11 `.svelte` files under `visualizer/web/src`.
+Measured boundary: 12 `.svelte` files under `visualizer/web/src`.
 
 These rules guide new work; an exhibit demonstrates a local practice, not universal compliance.
 

@@ -117,3 +117,24 @@ test('WF3', () => {
     const markup = source('LeanWaterfall.svelte'); assert.match(markup, /block\.role/); assert.match(markup, /entry\.role/); assert.match(markup, /Seat role not recorded/)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
+
+test('historical stage order stays ordinal without fabricating timing or collapsing retries', async () => {
+  // MUTATION: sort/deduplicate phases or use ordinal positions as durations.
+  const { layoutStageOrder } = await import('../visualizer/web/src/lib/timeline.js')
+  const run = { source: 'lean', phases: [
+    { id: 11, name: 'build', role: 'builder', status: 'done', checks: [] },
+    { id: 12, name: 'review', role: 'reviewer', status: 'done', checks: [] },
+    { id: 13, name: 'build', role: 'builder', status: 'running', checks: [{ check: 'gate', result: { status: 'red' } }] },
+  ] }
+  const before = structuredClone(run), order = layoutStageOrder(run)
+  assert.deepEqual(order.map(p => [p.id, p.ordinal, p.x, p.width, p.duration_ms]), [
+    [11, 1, 0, 1 / 3, null], [12, 2, 1 / 3, 1 / 3, null], [13, 3, 2 / 3, 1 / 3, null],
+  ])
+  assert.equal(order[2].status, 'running'); assert.deepEqual(order[2].checks, run.phases[2].checks)
+  assert.deepEqual(run, before); assert.deepEqual(layoutStageOrder(), []); assert.deepEqual(layoutStageOrder({ phases: null }), [])
+  const component = source('LeanWaterfall.svelte')
+  assert.match(component, /!timeline\.blocks\.length && ordered\.length > 0/)
+  assert.match(component, /positions and widths do not measure elapsed time/)
+  assert.match(component, /Untimed · recorded order/)
+  assert.match(component, /leanCheckStatus\(check\)/)
+})

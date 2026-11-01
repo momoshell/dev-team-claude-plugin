@@ -5,7 +5,7 @@ description: >-
   state presentation, or theme tokens. Records live design evidence and limits.
 ---
 
-Measured boundary: 11 `.svelte` files under `visualizer/web/src`.
+Measured boundary: 12 `.svelte` files under `visualizer/web/src`.
 
 Design against `visualizer/web/src/lib/theme.css` and the live component exhibits, not a historical inventory. Follow the broader rules below even where the checkout has no live exhibit or mechanical enforcement.
 

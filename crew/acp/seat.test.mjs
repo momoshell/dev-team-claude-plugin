@@ -103,11 +103,12 @@ function replaySeat(name, options = {}) {
       responses.splice(1, 0, copy)
     }
     for (const response of responses) {
-      if (response.method === 'session/update') expected.push(response.params)
+      if (response.method === 'session/update') expected.push({ ...response.params, at: 1700000000123 })
       appendFileSync(stream, `${JSON.stringify(response)}\n`)
     }
   }
   const deps = {
+    recordNow: () => 1700000000123,
     clientDeps: {
       pid: 900,
       spawn: (...args) => {
@@ -176,7 +177,8 @@ function use(name, options, inspect) {
 
 const sessionNew = (run) => run.sent.find((frame) => frame.method === 'session/new')
 
-test('every routed update lands once, in order, after the existing sentinel row (known and unknown kinds)', () => {
+// MUTATION: removing `at` from recordUpdate loses the explicit receipt-time oracle.
+test('every routed update lands once, timestamped, in order, after the existing sentinel row (known and unknown kinds)', () => {
   for (const name of ['claude-turn', 'claude-turn-rawsdk', 'pi-turn', 'claude-cancel', 'pi-cancel']) {
     use(name, { unknown: true }, (run) => {
       assert.equal(run.error, undefined, name)
@@ -1487,4 +1489,13 @@ test('a lean builderloop seat refuses a planner return whose gate command is onl
 
 test('a lean builder declaring edit assist without builderloop refuses before a client', () => {
   refusedBeforeClient({ edit_assist: true }, (taskDir) => leanLane(taskDir))
+})
+
+test('a failed receipt-time clock is non-load-bearing and cannot change the seat outcome', () => {
+  // MUTATION: move the clock outside recordUpdate's recording-only try/catch.
+  use('claude-turn', { deps: { recordNow: () => { throw new Error('clock unavailable') } } }, (run) => {
+    assert.equal(run.error, undefined)
+    assert.equal(run.result.stopReason, 'end_turn')
+    assert.deepEqual(run.rows, [{ prior: true }])
+  })
 })

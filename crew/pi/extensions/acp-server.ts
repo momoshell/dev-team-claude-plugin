@@ -336,7 +336,7 @@ export default function acpServerExtension(pi: any) {
   pi.on('tool_execution_end', (event: any, handlerCtx: any) => {
     remember(handlerCtx)
     if (!prompt) return
-    update('tool_call_update', { toolCallId: event.toolCallId, status: event.isError ? 'failed' : 'completed' })
+    update('tool_call_update', { toolCallId: event.toolCallId, status: event.isError ? 'failed' : 'completed', rawOutput: event.result ?? null })
   })
   pi.on('agent_start', (_event: any, handlerCtx: any) => {
     remember(handlerCtx)

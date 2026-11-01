@@ -319,7 +319,10 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, briefText, sessio
       append(recordTo, `${JSON.stringify(row)}\n`, 'utf8')
     } catch { /* session recording never changes the turn */ }
   }
-  const recordUpdate = (payload) => record({ sessionId: payload.sessionId, update: payload.update })
+  // Wall-clock receipt time is recording evidence; the runner's `now` is monotonic.
+  const recordUpdate = (payload) => {
+    try { record({ sessionId: payload.sessionId, update: payload.update, at: (deps.recordNow ?? Date.now)() }) } catch { /* recording cannot change the turn */ }
+  }
   function recordPermission(decision) {
     const { sessionId, toolCall, options, optionId } = decision
     record({

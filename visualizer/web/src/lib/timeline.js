@@ -2,6 +2,16 @@ export const REQUEST_ZONE = 0.12
 export const MIN_WIDTH = 0.02
 export const QUEUED_WIDTH = 0.06
 
+// Ordinal positions are drawing coordinates, never time measurements. Preserve
+// journal order (including repeated stages) when old records have no intervals.
+export function layoutStageOrder(run = {}) {
+  const phases = Array.isArray(run.phases) ? run.phases : []
+  return phases.map((phase, index) => ({
+    ...phase, ordinal: index + 1, x: index / phases.length, width: 1 / phases.length,
+    duration_ms: null,
+  }))
+}
+
 function time(value) {
   if (value == null) return null
   if (typeof value === 'number') return Number.isFinite(value) ? value : null

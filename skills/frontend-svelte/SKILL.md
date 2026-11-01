@@ -8,7 +8,7 @@ description: >-
 
 This is a retrieval-first repo skill, not a Svelte API manual. Retrieve Svelte API facts from the svelte MCP; the references describe this checkout's conventions.
 
-Measured boundary: 11 `.svelte` files under `visualizer/web/src`.
+Measured boundary: 12 `.svelte` files under `visualizer/web/src`.
 
 ## Routing
 

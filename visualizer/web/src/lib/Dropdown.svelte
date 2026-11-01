@@ -111,4 +111,6 @@
 .dropdown-menu b { color:var(--accent); font-size:.65rem; }
 .pill .dropdown-trigger { min-height:1.55rem; border-color:color-mix(in srgb,var(--accent) 48%,var(--line)); border-radius:2rem; background:var(--accent-soft); color:var(--accent); padding:.15rem .5rem; font-size:.55rem; font-weight:700; }
 .compact .dropdown-trigger { min-height:2rem; padding:.34rem .5rem; font-size:.62rem; }
+.form .dropdown-trigger { min-height:2.75rem; gap:.75rem; padding:.65rem 1rem; text-align:start; font-size:.8rem; }
+.form .dropdown-menu button { min-height:2.5rem; padding:.6rem .75rem; text-align:start; font-size:.8rem; }
 </style>

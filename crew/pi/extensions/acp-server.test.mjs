@@ -440,7 +440,8 @@ test('the stop-reason map is closed over ACP_STOP_REASONS and an errored run ans
   } finally { h.close() }
 })
 
-test('session/update carries text and thinking deltas and tool start and end under toolCallId, only ACP_UPDATE_KINDS', async () => {
+// MUTATION: dropping rawOutput loses the tool result while status alone remains green.
+test('session/update carries text and thinking deltas and tool input/result under toolCallId, only ACP_UPDATE_KINDS', async () => {
   const h = await withSession()
   try {
     h.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'x' }] } })
@@ -448,7 +449,7 @@ test('session/update carries text and thinking deltas and tool start and end und
     h.emit('message_update', { message: {}, assistantMessageEvent: { type: 'thinking_delta', contentIndex: 0, delta: 'hmm' } })
     h.emit('message_update', { message: {}, assistantMessageEvent: { type: 'toolcall_delta', contentIndex: 1, delta: '{"com' } })
     h.emit('tool_execution_start', { toolCallId: 'call-u1', toolName: 'write', args: { path: 'a' } })
-    h.emit('tool_execution_end', { toolCallId: 'call-u1', toolName: 'write', result: {}, isError: false })
+    h.emit('tool_execution_end', { toolCallId: 'call-u1', toolName: 'write', result: { content: [{ type: 'text', text: 'recorded output' }], details: { bytes: 42 } }, isError: false })
     h.emit('message_update', { message: {}, assistantMessageEvent: { type: 'text_delta', contentIndex: 2, delta: 'done' } })
     h.emit('agent_before_settle', { outcome: 'completed' })
     h.emit('agent_settled')
@@ -457,7 +458,7 @@ test('session/update carries text and thinking deltas and tool start and end und
     assert.deepEqual(updates, [
       { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'hmm' } },
       { sessionUpdate: 'tool_call', toolCallId: 'call-u1', title: 'write', kind: 'edit', status: 'in_progress', rawInput: { path: 'a' } },
-      { sessionUpdate: 'tool_call_update', toolCallId: 'call-u1', status: 'completed' },
+      { sessionUpdate: 'tool_call_update', toolCallId: 'call-u1', status: 'completed', rawOutput: { content: [{ type: 'text', text: 'recorded output' }], details: { bytes: 42 } } },
       { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'done' } },
     ])
     for (const u of updates) assert.ok(ACP_UPDATE_KINDS.includes(u.sessionUpdate))

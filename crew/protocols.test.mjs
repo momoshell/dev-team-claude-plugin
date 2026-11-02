@@ -232,7 +232,7 @@ const DETAILS = {
   planner: { subject: 'fix(crew): name the lane change', plan_path: '/task/plan.md', tests: [] },
   builder: { summary: 'Implemented the change.' },
   reviewer: { verdict: 'pass', findings: [], requirements: [{ requirement: 'build it', status: 'met', evidence: 'read it' }], failure_modes: [], coverage: { read: ['lib.mjs'], complete: true } },
-  'tech-lead': { verdict: 'pass', findings: [] },
+  'tech-lead': { verdict: 'pass', findings: [], requirements: [{ requirement: 'build it', status: 'met', evidence: 'read it' }], failure_modes: [], coverage: { read: ['lib.mjs'], complete: true } },
   lead: { decision: 'accept' },
 }
 const envelope = (role, overrides = {}) => ({ role, id: 'd1', status: 'done', summary: 'Completed.', details: structuredClone(DETAILS[role]), ...overrides })
@@ -437,6 +437,24 @@ test('P2 typed findings are refused by nested path', () => {
     }
     bad([finding({ severity: 'must-fix' })], 'details.verdict is pass', 'pass')
   }
+})
+
+test('P2 tech-lead details take the reviewer shape and its rules', () => {
+  const role = 'tech-lead'
+  assert.deepEqual(validateEnvelope(role, envelope(role)).defects, [])
+  for (const key of ['requirements', 'failure_modes', 'coverage']) {
+    const value = envelope(role); delete value.details[key]
+    assert.ok(validateEnvelope(role, value).defects.includes(`details.${key} is required`))
+    assert.deepEqual(validateEnvelope(role, value, { archived: true }).defects, [])
+  }
+  const cases = [
+    [review([finding({ severity: 'must-fix' })], 'changes-needed', role), 'trigger'],
+    [review(Array.from({ length: 6 }, (_, i) => finding({ id: `R${i}` })), 'changes-needed', role), 'five'],
+    [envelope(role, { details: { ...structuredClone(DETAILS[role]), requirements: [{ requirement: 'x', status: 'unmet', evidence: 'x' }] } }), 'unmet'],
+    [envelope(role, { details: { ...structuredClone(DETAILS[role]), coverage: { read: ['x'], complete: false } } }), 'incomplete'],
+  ]
+  for (const [value, needle] of cases) assert.ok(validateEnvelope(role, value).defects.some((d) => d.includes(needle)), needle)
+  assert.ok(validateEnvelope(role, envelope(role), { prior: ['T1'] }).defects.some((d) => d.includes('prior finding T1')))
 })
 
 test('P2 reviewer details require requirements, failure modes and coverage, except on an archived return', () => {

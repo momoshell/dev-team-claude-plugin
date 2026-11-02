@@ -72,12 +72,11 @@ test('posture.md names the lean tier posture: one reviewer per round at the lane
   assert.equal(text.includes('crew/drive.mjs'), false)
 })
 
-test('posture.md names the tech-lead seat as manually assigned, with no panel', () => {
+test('posture.md names the automatic judge second review, with no panel', () => {
   const text = readFileSync(join(ROOT, 'skills/pr-review/references/posture.md'), 'utf8')
-  assert.ok(text.includes('not an automatic stage'))
-  assert.ok(text.includes('reviews only when a person assigns it'))
-  assert.equal(text.includes('speaks only on escalation'), false)
-  assert.ok(text.includes('never runs two\nreviewers on one round'))
+  assert.ok(text.includes("judge loop's automatic\nsecond review"))
+  assert.ok(text.includes('after the reviewer passes and the suite is green'))
+  assert.ok(text.includes('never two reviewers on one round'))
 })
 
 test('no review-skill document calls the shipped panel parked', () => {

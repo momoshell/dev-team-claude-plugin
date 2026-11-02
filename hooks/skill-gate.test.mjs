@@ -79,15 +79,15 @@ test('RP3 M1 shipped role packs pin exactly and session start is silent', () => 
   const result = invoke(dir, 'session-start', {}, {}, ROOT)
   assert.equal(result.status, 0)
   assert.deepEqual(JSON.parse(readFileSync(join(ROOT, MAP_PATH), 'utf8')), { version: 1, exempt: ['docs/audits/**'], rules: [
-    { when: { roles: ['reviewer'] }, delivery: 'inline', skills: ['dev-team:pr-review'] },
-    { when: { paths: ['**/*.mjs', '**/*.js', '**/*.ts', '**/*.tsx', '**/*.rs', '**/*.py', '**/*.svelte'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:code-less'] },
-    { when: { paths: ['crew/**/*.mjs', 'crew/**/*.ts', 'scripts/**/*.mjs', 'hooks/**/*.mjs'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:backend-node'] },
-    { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.js', 'visualizer/**/*.mjs', 'visualizer/**/*.css'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:frontend-svelte'] },
-    { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.css'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:ui-design', 'dev-team:ux'] },
-    { when: { paths: ['docs/**/*.md', 'skills/**/*.md', 'crew/agents/*.md'], roles: ['builder', 'reviewer'] }, delivery: 'grant', skills: ['dev-team:prose-plain'] },
+    { when: { roles: ['reviewer', 'tech-lead'] }, delivery: 'inline', skills: ['dev-team:pr-review'] },
+    { when: { paths: ['**/*.mjs', '**/*.js', '**/*.ts', '**/*.tsx', '**/*.rs', '**/*.py', '**/*.svelte'], roles: ['builder', 'reviewer', 'tech-lead'] }, skills: ['dev-team:code-less'] },
+    { when: { paths: ['crew/**/*.mjs', 'crew/**/*.ts', 'scripts/**/*.mjs', 'hooks/**/*.mjs'], roles: ['builder', 'reviewer', 'tech-lead'] }, skills: ['dev-team:backend-node'] },
+    { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.js', 'visualizer/**/*.mjs', 'visualizer/**/*.css'], roles: ['builder', 'reviewer', 'tech-lead'] }, skills: ['dev-team:frontend-svelte'] },
+    { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.css'], roles: ['builder', 'reviewer', 'tech-lead'] }, skills: ['dev-team:ui-design', 'dev-team:ux'] },
+    { when: { paths: ['docs/**/*.md', 'skills/**/*.md', 'crew/agents/*.md'], roles: ['builder', 'reviewer', 'tech-lead'] }, delivery: 'grant', skills: ['dev-team:prose-plain'] },
     { when: { paths: ['**/*.test.*', '**/*.spec.*', '**/tests/**/*.rs', '**/*_test.*'], roles: ['builder'] }, skills: ['dev-team:test-economy'] },
     { when: { paths: ['**/*.test.*', '**/*.spec.*', '**/tests/**/*.rs', '**/*_test.*'], roles: ['reviewer', 'tech-lead'] }, skills: ['dev-team:test-strength'] },
-    { when: { paths: ['**/*.svelte'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:frontend-svelte', 'dev-team:ui-design', 'dev-team:ux'] },
+    { when: { paths: ['**/*.svelte'], roles: ['builder', 'reviewer', 'tech-lead'] }, skills: ['dev-team:frontend-svelte', 'dev-team:ui-design', 'dev-team:ux'] },
   ] })
   assert.equal(loadMap(ROOT).ok, true)
   assert.equal(result.stdout, '')

@@ -216,11 +216,11 @@ export const LEAD_DECISIONS = Object.freeze(['bounce', 'accept', 'escalate'])
 export const FINDING_SEVERITIES = Object.freeze(['must-fix', 'should-fix', 'consider'])
 export const FINDING_DISPOSITIONS = Object.freeze(['auto-fix', 'ask-user', 'no-op'])
 const FINDING_ID = /^[A-Za-z0-9_-]{1,64}$/
-const REVIEW_KEYS = Object.freeze(['verdict', 'findings'])
+const REVIEW_KEYS = Object.freeze(['verdict', 'findings', 'requirements', 'failure_modes', 'coverage'])
 const DETAIL_KEYS = Object.freeze({
   planner: ['subject', 'plan_path', 'tests'],
   builder: ['summary'],
-  reviewer: ['verdict', 'findings', 'requirements', 'failure_modes', 'coverage'],
+  reviewer: REVIEW_KEYS,
   'tech-lead': REVIEW_KEYS,
   lead: ['decision'],
 })
@@ -229,10 +229,10 @@ const OPTIONAL_DETAIL_KEYS = Object.freeze({
   planner: ['files_in_scope', 'validation_lane', 'judge', 'question'],
   builder: ['tests', 'notes', 'question'],
   reviewer: ['question', 'closed', 'findings_omitted'],
-  'tech-lead': ['question'],
+  'tech-lead': ['question', 'closed', 'findings_omitted'],
   lead: ['question', 'target'],
 })
-const ARCHIVED_OPTIONAL = Object.freeze({ planner: ['tests'], reviewer: ['requirements', 'failure_modes', 'coverage'] })
+const ARCHIVED_OPTIONAL = Object.freeze({ planner: ['tests'], reviewer: ['requirements', 'failure_modes', 'coverage'], 'tech-lead': ['requirements', 'failure_modes', 'coverage'] })
 // ADR-055 §8: archived planner returns still carry these fields.
 const LEGACY_DETAIL_KEYS = Object.freeze({
   planner: ['acceptance', 'gate_path', 'gate_cmd', 'mutations'],
@@ -305,7 +305,7 @@ export function validateEnvelope(role, envelope, { archived = false, prior = [] 
         else if (key === 'findings' && !Array.isArray(v)) defects.push('details.findings is a list of findings')
         else if (key === 'findings') {
           const seen = new Set()
-          if (role === 'reviewer' && !archived && v.length > 5) defects.push('details.findings is limited to five; count the rest in details.findings_omitted')
+          if (['reviewer', 'tech-lead'].includes(role) && !archived && v.length > 5) defects.push('details.findings is limited to five; count the rest in details.findings_omitted')
           v.forEach((finding, index) => {
             const path = `details.findings[${index}]`
             if (!plain(finding)) { defects.push(`${path} is an object with ${FINDING_REQUIRED.join(', ')}`); return }
@@ -318,7 +318,7 @@ export function validateEnvelope(role, envelope, { archived = false, prior = [] 
               if (seen.has(finding.id)) defects.push(`${path}.id repeats ${finding.id}`)
               seen.add(finding.id)
             }
-            if (role === 'reviewer' && !archived && finding.severity === 'must-fix' && !Object.hasOwn(finding, 'trigger')) defects.push(`${path}.trigger is required for a must-fix`)
+            if (['reviewer', 'tech-lead'].includes(role) && !archived && finding.severity === 'must-fix' && !Object.hasOwn(finding, 'trigger')) defects.push(`${path}.trigger is required for a must-fix`)
             const hasPatch = Object.hasOwn(finding, 'patch')
             if (finding.disposition === 'auto-fix' && !hasPatch) defects.push(`${path}.patch is required for disposition auto-fix`)
             if (hasPatch && finding.disposition !== 'auto-fix') defects.push(`${path}.patch is only allowed with disposition auto-fix`)
@@ -326,7 +326,7 @@ export function validateEnvelope(role, envelope, { archived = false, prior = [] 
           if (details.verdict === 'pass' && v.some((finding) => plain(finding) && finding.severity === 'must-fix')) defects.push('details.verdict is pass but the findings include a must-fix')
         }
       }
-      if (role === 'reviewer') {
+      if (['reviewer', 'tech-lead'].includes(role)) {
         if (details.verdict === 'pass' && Array.isArray(details.requirements) && details.requirements.some((r) => r?.status === 'unmet')) defects.push('details.verdict is pass but a requirement is unmet')
         if (details.verdict === 'pass' && Object.hasOwn(details, 'coverage') && details.coverage?.complete !== true) defects.push('details.verdict is pass but coverage is incomplete')
         if (!archived && Array.isArray(prior)) for (const id of prior) {

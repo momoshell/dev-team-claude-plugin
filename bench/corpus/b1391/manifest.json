@@ -1,0 +1,13 @@
+{
+  "lane": "b1391",
+  "id": "b1391-viz-lean-lanes",
+  "base": "efaae8e62fdbaf01f0e7c6a2c2a41e2d7b5698e0",
+  "originalTask": "/Users/momoshell/.crew/dt-b1391-viz-lean-lanes/b1391-viz-lean-lanes/task",
+  "originalTree": "/Users/momoshell/Dev/dt-b1391-viz-lean-lanes",
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1391-viz-lean-lanes/b1391-viz-lean-lanes/task",
+  "reviewer": {
+    "builtHead": null,
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1391-viz-lean-lanes/b1391-viz-lean-lanes/task/lean/reviewer/b1391-viz-lean-lanes.reviewer.3.jsonl",
+    "reason": "no archived reproducible built head"
+  }
+}

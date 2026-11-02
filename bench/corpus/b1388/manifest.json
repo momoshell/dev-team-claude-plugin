@@ -1,0 +1,13 @@
+{
+  "lane": "b1388",
+  "id": "b1388-lean-arm-context",
+  "base": "c2639f6e15f06c8f8144023b2e8799fbe9f72bd3",
+  "originalTask": "/Users/momoshell/.crew/dt-b1388-lean-arm-context/b1388-lean-arm-context/task",
+  "originalTree": "/Users/momoshell/Dev/dt-b1388-lean-arm-context",
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1388-lean-arm-context/b1388-lean-arm-context/task",
+  "reviewer": {
+    "builtHead": null,
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1388-lean-arm-context/b1388-lean-arm-context/task/lean/reviewer/b1388-lean-arm-context.reviewer.3.jsonl",
+    "reason": "no archived reproducible built head"
+  }
+}

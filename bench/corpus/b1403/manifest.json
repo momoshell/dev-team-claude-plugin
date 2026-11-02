@@ -1,0 +1,13 @@
+{
+  "lane": "b1403",
+  "id": "b1403-lean-finish-decision",
+  "base": "2732ed7475e29ff3a10df478db64d5510ec816e6",
+  "originalTask": "/Users/momoshell/.crew/dt-b1403-lean-finish-decision/b1403-lean-finish-decision/task",
+  "originalTree": "/Users/momoshell/Dev/dt-b1403-lean-finish-decision",
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1403-lean-finish-decision/b1403-lean-finish-decision/task",
+  "reviewer": {
+    "builtHead": null,
+    "promptSource": "/Users/momoshell/.crew-journal-archive/dt-b1403-lean-finish-decision/b1403-lean-finish-decision/task/lean/reviewer/b1403-lean-finish-decision.reviewer.4.jsonl",
+    "reason": "no archived reproducible built head"
+  }
+}

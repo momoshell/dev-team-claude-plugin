@@ -1,0 +1,44 @@
+{
+  "role": "planner",
+  "id": "b1388-lean-arm-context.planner.1",
+  "status": "done",
+  "summary": "Planned shared lean arm context resolution and authored five behavioral gate checks with kill mutations.",
+  "details": {
+    "subject": "fix(crew): resolve arm context inside lean lanes",
+    "plan_path": "/Users/momoshell/.crew/dt-b1388-lean-arm-context/b1388-lean-arm-context/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1388-lean-arm-context/b1388-lean-arm-context/task/gate.mjs",
+    "acceptance": ["AC1", "AC2", "AC3", "AC4", "AC5"],
+    "mutations": [
+      {
+        "check": "AC1",
+        "file": "crew/pi/extensions/builderloop.ts",
+        "find": "    validation_lane: details.validation_lane.trim(),",
+        "replace": "    validation_lane: 'node --test mutation-wrong.test.mjs',"
+      },
+      {
+        "check": "AC2",
+        "file": "crew/pi/extensions/advisor.ts",
+        "find": "    files_in_scope: planner.files_in_scope,",
+        "replace": "    files_in_scope: [],"
+      },
+      {
+        "check": "AC3",
+        "file": "crew/pi/extensions/skeletonread.ts",
+        "find": "  return ranges.sort((left, right) => left.file.localeCompare(right.file) || left.start - right.start || left.end - right.end)",
+        "replace": "  return [].sort((left, right) => left.file.localeCompare(right.file) || left.start - right.start || left.end - right.end)"
+      },
+      {
+        "check": "AC4",
+        "file": "crew/pi/extensions/subagent.ts",
+        "find": "JSON.stringify({ spawns: count + 1 })",
+        "replace": "JSON.stringify({ spawns: count + 2 })"
+      },
+      {
+        "check": "AC5",
+        "file": "crew/acp/seat.mjs",
+        "find": "    advisor,\n    mcp_servers:",
+        "replace": "    advisor: false,\n    mcp_servers:"
+      }
+    ]
+  }
+}

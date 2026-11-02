@@ -1,0 +1,175 @@
+You are the lean planner. Read the brief, then inspect the code and its callers directly. Write a concise plan and a gate.mjs in the supplied task directory. Your writes: task-dir permits task artifacts and the return envelope, never repo edits.
+
+The plan names the minimal changes and the tests that prove them. The gate checks each acceptance id from the brief, exits nonzero on failure and zero when all pass, and must be red on the unchanged tree. Print one `FAIL <id>` line per failing acceptance id. A failing line may append a colon and an explanation. Emit no FAIL lines on success.
+
+Declare one kill-mutation per acceptance id, each exactly {check, file, find, replace}: a repo-relative file, a literal nonempty find and a differing replace that makes its own check fail. The acceptance list is the brief's ids. The plan_path and gate_path are absolute artifact paths. You author the artifacts; the loop executes them. Each mutation is applied to the tree after the build; each find must match text that exists in the built tree, not text removed by the build.
+
+The loop runs the gate at baseline, after the build and under mutation. It then runs the suite, commits, rebases and opens the PR. Do not run those stages yourself.
+
+Return exactly one P2 JSON envelope at the supplied return path. Use the issued role and id, a nonempty summary and no extra fields. Report a gap honestly rather than claiming done.
+
+Envelope keys: `role`, `id`, `status`, `summary`, `details`.
+
+Statuses: `done`, `insufficient`, `escalate`.
+
+Details keys: `subject`, `plan_path`, `gate_path`, `acceptance`, `mutations`.
+
+Also give `files_in_scope` (the repo-relative files the builder may edit, tests included), `validation_lane` (the `node --test` command that checks the change) and `gate_cmd` (the command that runs your gate). The builder's context arms read them, and a builder that declares those arms is refused without them. Cite plan lines as `file:start-end` inside `plan_path`.
+
+The `subject` is the conventional-commit subject for this change, at most 72 characters, written `type(scope): summary` with an optional scope and optional `!` after it. The type is one of `chore`, `ci`, `crew`, `docs`, `feat`, `fix`, `merge`, `perf`, `refactor`, `revert`, `spike`, `test`, `wip`, `workflow`. It names both the commit and the PR. Do not write a PR body: the loop generates it from the measured results.
+
+
+Definition source: /Users/momoshell/Dev/dev-team-claude-plugin/crew/agents/planner.md
+
+## Brief
+# Task
+
+---
+source: operator request (lean plan item 3.5, the finish shape, second of two lanes)
+closes: null
+tier: build
+shape: standard
+acceptance: [FD1, FD2, FD3, FD4, FD5, FD6, FD7, FD8, FD9]
+out_of_scope: crew/drive.mjs, crew/crew.mjs, crew/checks.mjs, docs/adr/, the standard shape's behaviour, and the finish run's stages before rebase
+---
+## The ask
+
+PR 2022 added `crew finish <lane>`: it finishes a stopped lean lane and stops committed and rebased, with a
+`finish-ready` row and nothing pushed. Add the operator's decision on a ready lane, as ADR-051 section 3 describes:
+
+- `crew finish <lane> --accept [--notes <file>]` publishes the PR, with the operator's notes under their own heading
+  in the body.
+- `crew finish <lane> --return <file>` runs one more finish pass with the file's guidance as the builder's triage
+  input.
+- `crew finish <lane> --abandon` ends it; nothing is published.
+
+Each decision is a `finish-decision` journal row with the choice and the notes' sha256 digest (null when no notes).
+A green finish run also writes one fused finish report, so the deciding session reads it instead of the journal.
+
+Invariants:
+- A decision verb acts only on a lane whose last run ended `finish-ready` and that has no decision since.
+- `--accept` publishes exactly the subject and body the finish run measured, plus the notes; merging stays the
+  operator's.
+- After `--accept`, `crew closeout <lane>` accepts the lane (it reads the journal's last `pr` row).
+- A `--return` pass counts against the finish run's three-round review cap; it never grants new rounds.
+- `crew finish <lane>` with no flag behaves exactly as today.
+
+## Context
+
+- `docs/adr/adr-051-finish-shape.md` section 3: the report, the three verbs, the decision row.
+- `crew/loop.mjs`: the PR body is built at line 357 from `measurements`; a finish run emits `finish-ready` at 377
+  with only `head`. The decision needs the run's subject and body, and the report needs the stop it finished, each
+  review verdict with its findings, and the gate, proof and suite measurements.
+- `crew/finish.mjs`: `finishLane` builds the finish spec and spawns the run; its refusals and the per-stop claim are
+  above that; `main` takes only the lane today.
+- `crew/checks.mjs` `openPullRequest` (line 578) is the publish seam the standard loop uses; `crew/record-pr.mjs`
+  shows the `pr` row shape `crew closeout` reads.
+- `bin/crew.mjs` usage lines and `bin/crew.test.mjs` for the verb.
+
+## Acceptance
+
+- (FD1) a green finish run writes a finish report in the lane task dir that names the stop reason it finished.
+- (FD2) the finish report lists each review verdict of the run with its findings.
+- (FD3) `crew finish <lane> --accept` opens the PR with the finish run's subject as its title.
+- (FD4) `--accept --notes <file>` puts the file's text in the PR body under its own heading.
+- (FD5) `--accept` appends a `pr` row that `crew closeout` reads as the lane's PR.
+- (FD6) `--abandon` appends a `finish-decision` row with choice `abandon` and opens no PR.
+- (FD7) `--return <file>` starts a finish run whose builder's first feedback carries the file's text.
+- (FD8) a decision verb on a lane whose last run did not end `finish-ready` is refused as `finish-not-ready`.
+- (FD9) a second decision on the same ready lane is refused as `finish-decided`.
+
+
+## Feedback
+[]
+
+## Return
+This ACP turn has no submit_envelope tool. When the work is done, write your envelope as JSON
+directly to the return path below. This P2 shape overrides any envelope or submission instruction
+in the definition or charter above; nothing else you write counts as your return.
+Envelope id: b1403-lean-finish-decision.planner.1
+Return path: /Users/momoshell/.crew/dt-b1403-lean-finish-decision/b1403-lean-finish-decision/task/planner-1.json
+Task directory: /Users/momoshell/.crew/dt-b1403-lean-finish-decision/b1403-lean-finish-decision/task
+{
+  "role": "planner",
+  "id": "b1403-lean-finish-decision.planner.1",
+  "status": "done",
+  "summary": "<one line>",
+  "details": {
+    "subject": "fix(crew): publish measured lane results",
+    "plan_path": "<absolute path of the plan you wrote>",
+    "gate_path": "<absolute path of the gate you wrote>",
+    "acceptance": [
+      "FD1",
+      "FD2",
+      "FD3",
+      "FD4",
+      "FD5",
+      "FD6",
+      "FD7",
+      "FD8",
+      "FD9"
+    ],
+    "mutations": [
+      {
+        "check": "FD1",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      },
+      {
+        "check": "FD2",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      },
+      {
+        "check": "FD3",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      },
+      {
+        "check": "FD4",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      },
+      {
+        "check": "FD5",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      },
+      {
+        "check": "FD6",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      },
+      {
+        "check": "FD7",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      },
+      {
+        "check": "FD8",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      },
+      {
+        "check": "FD9",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      }
+    ],
+    "files_in_scope": [
+      "<repo-relative file the builder may edit>"
+    ],
+    "validation_lane": "<the node --test command that checks the change>",
+    "gate_cmd": "<the command that runs your gate>"
+  }
+}
+status is done, insufficient or escalate; use insufficient or escalate instead of faking a done.

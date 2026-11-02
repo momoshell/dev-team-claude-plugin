@@ -12,6 +12,9 @@ import { runBuilder } from './replay-builder.mjs'
 import { runPlanner } from './replay-planner.mjs'
 
 const LANES = { b1380: '1d282ec7', b1381: '1d282ec7', b1402: '2966b484', b1408: 'fbc9ad2a', b1416: 'abe2d073', b1417: 'abe2d073', b1457: '0d08adff4f5ccc8c2f0b94327b4a9e47ed5ff598', b1458: '0d08adff4f5ccc8c2f0b94327b4a9e47ed5ff598', b1459: '0d08adff4f5ccc8c2f0b94327b4a9e47ed5ff598' }
+const FEATURE_LANES = { b1388: 'b1388-lean-arm-context', b1391: 'b1391-viz-lean-lanes', b1401: 'b1401-lean-finish-run', b1403: 'b1403-lean-finish-decision' }
+const FEATURE_BASES = { b1388: 'c2639f6e15f06c8f8144023b2e8799fbe9f72bd3', b1391: 'efaae8e62fdbaf01f0e7c6a2c2a41e2d7b5698e0', b1401: 'c39dfa95b30d9fc04960c6e2e4640d8d2771077f', b1403: '2732ed7475e29ff3a10df478db64d5510ec816e6' }
+Object.assign(LANES, FEATURE_BASES)
 const NEW_LANES = { b1440: 'b1440-acp-client-error-message', b1441: 'b1441-pi-provider-failure-kind', b1442: 'b1442-finish-insufficient-build', b1444: 'b1444-claude-reads-use-read-tool', b1448: 'b1448-lean-memory-injection', b1450: 'b1450-start-log-never-throws', b1451: 'b1451-pi-websocket-error-retry', b1454: 'b1454-waterfall-polish' }
 Object.assign(LANES, { b1440: 'b593d34d0ac93f85854ba38ecfd31e6e613980ac', b1441: '88f70c51c78ebd1931728bb7ded08727b34cff3c', b1442: '88f70c51c78ebd1931728bb7ded08727b34cff3c', b1444: '1d2fc7cdd8864e24e9d0b714641597d74b901660', b1448: 'ccac8537ad7f0231a181e47e5e81828648d2a4b7', b1450: '0634116878372be6e56ce51bf752c305d34adf2c', b1451: '0634116878372be6e56ce51bf752c305d34adf2c', b1454: '4fbffc0c4b1695ec131167ecec0ef63792e6b4b1' })
 const REVIEWER_METADATA = {
@@ -133,7 +136,26 @@ let n = 0
 const fresh = (label = 'run') => join(scratch, `${label}-${n++}`)
 const sh = (cwd, ...args) => { const r = spawnSync('git', args, { cwd, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim() }
 
-test('the corpus carries every replay input for the seventeen lanes', () => {
+// MUTATION: CO1 changes the b1388 manifest lane.
+test('CO1 at least four feature lanes have matching manifest identities', () => {
+  const candidates = ['b1388', 'b1391', 'b1401', 'b1403', 'b1420', 'b1426']
+  const present = candidates.filter((lane) => existsSync(join(CORPUS_DIR, lane)))
+  assert(present.length >= 4)
+  for (const lane of present) {
+    const manifest = json(join(CORPUS_DIR, lane, 'manifest.json'))
+    assert.equal(manifest.lane, lane)
+    assert.equal(manifest.id, json(join(CORPUS_DIR, lane, 'lean.json')).id)
+  }
+})
+
+// MUTATION: CO2 zeroes the b1391 manifest base.
+test('CO2 feature lane bases match their merged PR bases', () => {
+  for (const [lane, base] of Object.entries(FEATURE_BASES)) {
+    assert.equal(json(join(CORPUS_DIR, lane, 'manifest.json')).base, base)
+  }
+})
+
+test('the corpus carries every replay input for the tested lanes', () => {
   for (const [lane, base] of Object.entries(LANES)) {
     const dir = join(CORPUS_DIR, lane)
     for (const name of ['plan.md', 'gate.mjs', 'planner-1.json', 'lean.json', 'brief.md', 'planner-prompt.txt', 'builder-prompt.txt', 'manifest.json']) {
@@ -146,7 +168,7 @@ test('the corpus carries every replay input for the seventeen lanes', () => {
     assert.equal(manifest.base, base)
     assert.equal(manifest.originalTask, lean.taskDir)
     assert.equal(manifest.originalTree, lean.cwd)
-    if (['b1457', 'b1458', 'b1459', ...Object.keys(NEW_LANES)].includes(lane)) {
+    if (['b1457', 'b1458', 'b1459', ...Object.keys(NEW_LANES), ...Object.keys(FEATURE_LANES)].includes(lane)) {
       assert.equal(readFileSync(join(dir, 'brief.md'), 'utf8'), lean.brief)
       assert(manifest.source.includes(`dt-${lane}-`))
       assert.equal(manifest.id, lean.id)
@@ -178,7 +200,7 @@ test('CL1 archived code lanes retain their exact inputs and provenance', () => {
 
 // MUTATION: CL2 changes b1440 planner Task directory citation.
 test('CL2 archived code lanes prepare planner replays', async () => {
-  for (const lane of Object.keys(NEW_LANES)) {
+  for (const lane of [...Object.keys(NEW_LANES), ...Object.keys(FEATURE_LANES)]) {
     const fx = fixture(lane)
     const dir = join(fx.corpusDir, lane)
     cpSync(join(CORPUS_DIR, lane), dir, { recursive: true })

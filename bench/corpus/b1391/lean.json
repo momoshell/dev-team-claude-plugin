@@ -1,0 +1,25 @@
+{
+  "id": "b1391-viz-lean-lanes",
+  "cwd": "/Users/momoshell/Dev/dt-b1391-viz-lean-lanes",
+  "taskDir": "/Users/momoshell/.crew/dt-b1391-viz-lean-lanes/b1391-viz-lean-lanes/task",
+  "tier": "build",
+  "shape": "standard",
+  "brief": "# Task\n\n---\nsource: operator request 2026-10-27 (lean lanes never appear in the visualizer)\ncloses: null\ntier: build\nshape: standard\nacceptance: [LV1, LV2, LV3, LV4]\nout_of_scope: crew/ (the lean loop and what it records), the ledger and its schema, the old-path run views, crew/drive.mjs, crew/crew.mjs\n---\n## The ask\n\nThe visualizer lists runs only from the ledger (`/api/sessions` → `listRuns` in\n`visualizer/server/ledger-feed.mjs`). The lean loop (ADR-052) writes no ledger rows, so no lean lane has ever shown\nup. Checked on 2026-10-27: `/api/sessions` returned none of the lean lanes b1379–b1390 or the running b1386.\n\nA lean lane records everything on disk under `~/.crew/dt-<lane>/<lane>/`:\n- `crew.json`;\n- `task/lean.json`, the lane spec;\n- `task/journal.jsonl`, with stage-start, check, stage-end, verdict and pr rows;\n- `task/<role>-<turn>.json`, the returns;\n- `task/lean/<role>/*.jsonl`, the seat sessions.\n\n`crew show` (`crew/show.mjs` `showLane`) already reads the live copy of a lane and the archived copy in\n`~/.crew-journal-archive`.\n\nMake the visualizer list lean lanes beside ledger runs: running, stopped and finished. Show each lane's stages and\nverdict from its journal and its seats' sessions by role. The visualizer only reads; it never writes into a lane.\n\nInvariant: ledger runs are listed and shown exactly as today. A lean lane's value that its files do not carry is\nshown as absent with a reason, never guessed.\n\n## Context\n\n- `visualizer/server/server.mjs`: the `/api/sessions`, `/api/journal` and `/api/returns` routes.\n- `visualizer/server/ledger-feed.mjs` `listRuns`: the row shape the run list renders.\n- `visualizer/server/journal-source.mjs` `readJournal`: today's journal reader. It expects the old layout, with\n  `ledger/run.json` and the journal beside `task/`.\n- `crew/show.mjs` `showLane`: how a lean lane's live and archived dirs and its sessions are found. Reuse its rules,\n  but do not import across the zero-dependency boundary the wrong way (`visualizer/server` may import from `crew/`\n  only as the existing sources already do).\n- `visualizer/web/src/App.svelte` and `visualizer/web/src/lib/`: the run list and the run detail.\n- Tests that pin today's behaviour: `test/visualizer-server.test.mjs`, `test/visualizer-trajectory.test.mjs`,\n  `test/visualizer-returns.test.mjs`.\n\n## Acceptance\n\n- (LV1) `/api/sessions` lists a lean lane found under the crew root, with its lane name and its journal's latest stage\n- (LV2) `/api/sessions` lists a lean lane whose journal ends in a verdict with that verdict's status and reason\n- (LV3) the journal route serves a lean lane's rows from its `task/journal.jsonl`\n- (LV4) a lean lane's seat sessions are served by role from its `task/lean/<role>/` recordings\n",
+  "acceptance": [
+    "LV1",
+    "LV2",
+    "LV3",
+    "LV4"
+  ],
+  "source": "operator request 2026-10-27 (lean lanes never appear in the visualizer)",
+  "branch": "b1391-viz-lean-lanes",
+  "base": "main",
+  "closes": [],
+  "suite": {
+    "command": "npm",
+    "args": [
+      "test"
+    ],
+    "timeoutMs": 1800000
+  }
+}

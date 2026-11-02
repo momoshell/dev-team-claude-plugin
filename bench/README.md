@@ -5,14 +5,15 @@ builder or planner turn at the lane's base commit with a seat you name; a blind 
 the results without knowing which seat made which. Nothing here records results: output dirs are
 yours, outside the repo. What past runs decided is under "Results so far" below.
 
-- `corpus/<lane>/` — frozen inputs for 22 lanes: nineteen code lanes (b1380, b1381, b1386,
+- `corpus/<lane>/` — frozen inputs for 26 lanes: nineteen code lanes (b1380, b1381, b1386,
   b1402, b1408, b1416, b1417, b1425, b1427, b1433, b1440, b1441, b1442, b1444, b1448,
   b1450, b1451, b1452, b1454), plus b1457, b1458 and b1459:
   `plan.md`, `gate.mjs`, `planner-1.json`, `lean.json`, `brief.md`, `planner-prompt.txt`,
   `builder-prompt.txt` (the first recorded prompts, verbatim) and `manifest.json`
   (`base` commit, and the `originalTask` / `originalTree` paths the prompts cite; the replays
   rewrite those to the run's own dirs). The replays only read it. The eight new code lanes
-  (b1440–b1454 as listed above), the b1457 docs/manifests,
+  (b1440–b1454 as listed above). The feature lanes b1388, b1391, b1401 and b1403 are also
+  frozen from their archives. The b1457 docs/manifests,
   b1458 visualizer skills, and b1459 skills exhibits lanes are frozen from their
   `~/.crew-journal-archive/dt-<lane>-*/<id>/task` archives. If a first planner prompt is
   unavailable, `plannerPromptMissing` in the manifest gives the reason; planner replay refuses
@@ -56,8 +57,9 @@ The reviewer sees an archived reviewer prompt and its matching built change. Mos
 first reviewer prompt; b1386, b1427 and b1433 use their last review round. The manifest pins the
 built commit; its single parent becomes HEAD after a mixed reset, leaving the built
 snapshot as tracked and untracked changes. The commit and its parent must be available locally
-(full history may be needed). b1380 and b1444 have no archived reproducible built head; b1440
-also lacks a reviewer prompt. These lanes are refused before creating a worktree.
+(full history may be needed). b1380, b1388, b1391, b1401, b1403 and b1444 have no archived
+reproducible built head; b1401 also lacks a reviewer prompt. b1440 lacks both. These lanes are
+refused before creating a worktree.
 
 A seeded run selects exactly one planner mutation by check ID. Its file must be a regular file
 inside the worktree, with one literal match and no symlink traversal. Clean rejects a mutation.

@@ -1,0 +1,100 @@
+You are the lean builder. Read the brief, the supplied plan and any feedback. Inspect the relevant code and its callers, then make the smallest implementation and test changes that meet the plan. Your writes: repo permits repository edits and the required return file. Do not rewrite the planner's task artifacts or gate.
+
+Report what you built and any unresolved gap. Do not claim validation you did not run. The outer summary is one line for the loop; details.summary says what was built.
+
+The loop runs the gate at baseline, after the build and under mutation. It then runs the suite, commits, rebases and opens the PR. You may run the gate and targeted tests to check your work. Do not run the full suite, commit, rebase or open the PR.
+
+Return exactly one P2 JSON envelope at the supplied return path. Use the issued role and id, a nonempty summary and no extra fields. Report a gap honestly rather than claiming done.
+
+Envelope keys: `role`, `id`, `status`, `summary`, `details`.
+
+Statuses: `done`, `insufficient`, `escalate`.
+
+Details keys: `summary`.
+
+On a finish run, or a standard mutation re-aim turn, details may also carry `mutations`: replacement `{check, file, find, replace}` declarations for the acceptance ids you re-aim (a mutation that could not kill, or a gate you repaired). In a re-aim turn the feedback names the acceptance ids whose declaration failed to bind (`bind-fail`); replace only those, with a `find` that occurs exactly once. The loop re-proves them by mutation before review.
+
+
+Definition source: /Users/momoshell/Dev/dev-team-claude-plugin/crew/agents/builder.md
+
+## Brief
+# Task
+
+---
+source: operator request (lean plan item 3.5, the finish shape, second of two lanes)
+closes: null
+tier: build
+shape: standard
+acceptance: [FD1, FD2, FD3, FD4, FD5, FD6, FD7, FD8, FD9]
+out_of_scope: crew/drive.mjs, crew/crew.mjs, crew/checks.mjs, docs/adr/, the standard shape's behaviour, and the finish run's stages before rebase
+---
+## The ask
+
+PR 2022 added `crew finish <lane>`: it finishes a stopped lean lane and stops committed and rebased, with a
+`finish-ready` row and nothing pushed. Add the operator's decision on a ready lane, as ADR-051 section 3 describes:
+
+- `crew finish <lane> --accept [--notes <file>]` publishes the PR, with the operator's notes under their own heading
+  in the body.
+- `crew finish <lane> --return <file>` runs one more finish pass with the file's guidance as the builder's triage
+  input.
+- `crew finish <lane> --abandon` ends it; nothing is published.
+
+Each decision is a `finish-decision` journal row with the choice and the notes' sha256 digest (null when no notes).
+A green finish run also writes one fused finish report, so the deciding session reads it instead of the journal.
+
+Invariants:
+- A decision verb acts only on a lane whose last run ended `finish-ready` and that has no decision since.
+- `--accept` publishes exactly the subject and body the finish run measured, plus the notes; merging stays the
+  operator's.
+- After `--accept`, `crew closeout <lane>` accepts the lane (it reads the journal's last `pr` row).
+- A `--return` pass counts against the finish run's three-round review cap; it never grants new rounds.
+- `crew finish <lane>` with no flag behaves exactly as today.
+
+## Context
+
+- `docs/adr/adr-051-finish-shape.md` section 3: the report, the three verbs, the decision row.
+- `crew/loop.mjs`: the PR body is built at line 357 from `measurements`; a finish run emits `finish-ready` at 377
+  with only `head`. The decision needs the run's subject and body, and the report needs the stop it finished, each
+  review verdict with its findings, and the gate, proof and suite measurements.
+- `crew/finish.mjs`: `finishLane` builds the finish spec and spawns the run; its refusals and the per-stop claim are
+  above that; `main` takes only the lane today.
+- `crew/checks.mjs` `openPullRequest` (line 578) is the publish seam the standard loop uses; `crew/record-pr.mjs`
+  shows the `pr` row shape `crew closeout` reads.
+- `bin/crew.mjs` usage lines and `bin/crew.test.mjs` for the verb.
+
+## Acceptance
+
+- (FD1) a green finish run writes a finish report in the lane task dir that names the stop reason it finished.
+- (FD2) the finish report lists each review verdict of the run with its findings.
+- (FD3) `crew finish <lane> --accept` opens the PR with the finish run's subject as its title.
+- (FD4) `--accept --notes <file>` puts the file's text in the PR body under its own heading.
+- (FD5) `--accept` appends a `pr` row that `crew closeout` reads as the lane's PR.
+- (FD6) `--abandon` appends a `finish-decision` row with choice `abandon` and opens no PR.
+- (FD7) `--return <file>` starts a finish run whose builder's first feedback carries the file's text.
+- (FD8) a decision verb on a lane whose last run did not end `finish-ready` is refused as `finish-not-ready`.
+- (FD9) a second decision on the same ready lane is refused as `finish-decided`.
+
+
+Plan path: /Users/momoshell/.crew/dt-b1403-lean-finish-decision/b1403-lean-finish-decision/task/plan.md
+Gate path: /Users/momoshell/.crew/dt-b1403-lean-finish-decision/b1403-lean-finish-decision/task/gate.mjs
+
+## Feedback
+[]
+
+## Return
+This ACP turn has no submit_envelope tool. When the work is done, write your envelope as JSON
+directly to the return path below. This P2 shape overrides any envelope or submission instruction
+in the definition or charter above; nothing else you write counts as your return.
+Envelope id: b1403-lean-finish-decision.builder.2
+Return path: /Users/momoshell/.crew/dt-b1403-lean-finish-decision/b1403-lean-finish-decision/task/builder-2.json
+Task directory: /Users/momoshell/.crew/dt-b1403-lean-finish-decision/b1403-lean-finish-decision/task
+{
+  "role": "builder",
+  "id": "b1403-lean-finish-decision.builder.2",
+  "status": "done",
+  "summary": "<one line>",
+  "details": {
+    "summary": "<what you built>"
+  }
+}
+status is done, insufficient or escalate; use insufficient or escalate instead of faking a done.

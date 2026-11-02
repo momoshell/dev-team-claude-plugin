@@ -1,0 +1,13 @@
+{
+  "lane": "b1401",
+  "id": "b1401-lean-finish-run",
+  "base": "c39dfa95b30d9fc04960c6e2e4640d8d2771077f",
+  "originalTask": "/Users/momoshell/.crew/dt-b1401-lean-finish-run/b1401-lean-finish-run/task",
+  "originalTree": "/Users/momoshell/Dev/dt-b1401-lean-finish-run",
+  "source": "/Users/momoshell/.crew-journal-archive/dt-b1401-lean-finish-run/b1401-lean-finish-run/task",
+  "reviewer": {
+    "builtHead": null,
+    "promptSource": null,
+    "reason": "no archived reviewer prompt or reproducible built head"
+  }
+}

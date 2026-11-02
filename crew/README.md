@@ -28,7 +28,7 @@ the brief, the task directory, the lane journal and every seat's session file.
 body is the ask). `crew/loop.mjs` runs it:
 
 ```
-plan -> build -> per-test proof -> review -> full suite -> commit -> rebase -> PR
+plan -> build -> per-test proof -> review -> full suite -> judge second review -> commit -> rebase -> PR
 ```
 
 The lane name is the brief's file name. `crew start` runs the `standard` shape
@@ -68,7 +68,7 @@ A tier override replaces only the fields it names and keeps a raw override model
 | `builder` | edits the repo and names tests to prove | the only seat that writes the repo |
 | `reviewer` | verdict, requirements, ranked findings, failure modes and coverage | none |
 | `lead` | answers an escalation with one closed decision | none |
-| `tech-lead` | optional plan adversary, a different model or effort | none |
+| `tech-lead` | judge loop's automatic second review | none |
 
 A seat loads its `requires` skills before its first write, or its envelope is
 refused (`crew/skills-proof.mjs`). Scope is context, not enforcement

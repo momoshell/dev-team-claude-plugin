@@ -18,7 +18,13 @@ const stopped = (reason) => ({ status: 'stopped', reason, pr: null })
 
 // The P2 shape this turn must write; the role's own detail keys, with the issued role and id.
 function exampleEnvelope(role, id) {
-  const review = { verdict: 'pass', findings: [{ id: 'R1', severity: 'should-fix', location: 'path/to/file.mjs:10', summary: 'what is wrong and why' }] }
+  const review = {
+    verdict: 'changes-needed',
+    findings: [{ id: 'R1', severity: 'must-fix', location: 'path/to/file.mjs:10', summary: 'what breaks', trigger: 'the concrete state that breaks it', start_line: 10, end_line: 10, uncertain: 'what was not verified' }],
+    requirements: [{ requirement: 'the brief asks for this', status: 'unmet', evidence: 'what was read' }],
+    failure_modes: [{ breaks: 'what breaks', where: 'where it breaks', trigger: 'when it breaks', tested: false, covered: false }],
+    coverage: { read: ['paths read'], complete: true },
+  }
   const details = {
     planner: {
       subject: 'fix(crew): publish measured lane results',
@@ -32,13 +38,7 @@ function exampleEnvelope(role, id) {
       tests: [{ file: '<repo-relative test file>', title: '<exact test title>' }],
       notes: '<what you did not test, the guards you relied on, the checks you ran>',
     },
-    reviewer: {
-      verdict: 'changes-needed',
-      findings: [{ id: 'R1', severity: 'must-fix', location: 'path/to/file.mjs:10', summary: 'what breaks', trigger: 'the concrete state that breaks it', start_line: 10, end_line: 10, uncertain: 'what was not verified' }],
-      requirements: [{ requirement: 'the brief asks for this', status: 'unmet', evidence: 'what was read' }],
-      failure_modes: [{ breaks: 'what breaks', where: 'where it breaks', trigger: 'when it breaks', tested: false, covered: false }],
-      coverage: { read: ['paths read'], complete: true },
-    },
+    reviewer: review,
     'tech-lead': review,
     lead: { decision: 'bounce', target: 'builder' },
   }[role]
@@ -55,7 +55,7 @@ function definitionFor({ role, seat, filesInScope }, tier, d) {
   const override = fields.tiers?.[tier]
   if (override === null) throw new Error(`role ${role} is unseated at tier ${tier}`)
   const effective = { ...fields, ...override }
-  const laneRole = role === 'builder' || role === 'reviewer'
+  const laneRole = ['builder', 'reviewer', 'tech-lead'].includes(role)
   let skills = effective.skills ?? []
   if (laneRole) {
     const loaded = loadMap(dirname(HERE), { requireSkillFiles: false })
@@ -106,7 +106,7 @@ function promptFor({ request, spec, source, charters, body, section }) {
     '## Brief',
     brief,
     ...(planPath ? ['', `Plan path: ${planPath}`] : []),
-    ...(role === 'reviewer' ? ['', '## Builder report', `Tests: ${JSON.stringify(request.builderReport?.tests ?? [])}`, `Notes: ${JSON.stringify(request.builderReport?.notes ?? null)}`, '', '## Changed paths', ...request.changedPaths.map((path) => `- ${JSON.stringify(path)}`)] : []),
+    ...(['reviewer', 'tech-lead'].includes(role) ? ['', '## Builder report', `Tests: ${JSON.stringify(request.builderReport?.tests ?? [])}`, `Notes: ${JSON.stringify(request.builderReport?.notes ?? null)}`, '', '## Changed paths', ...request.changedPaths.map((path) => `- ${JSON.stringify(path)}`)] : []),
     ...(section ? ['', section] : []),
     '',
     '## Feedback',

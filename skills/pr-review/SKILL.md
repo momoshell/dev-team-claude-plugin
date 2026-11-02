@@ -21,7 +21,7 @@ place that runs the review flow.
 | Choosing what to attack and how to grade it | `references/rubric.md` | Four axes, ordered by measured yield |
 | Recording a typed scout finding | `references/findings-shape.md` | Keep the scout contract pinned |
 | Resolving two verdicts on one line | `references/divergence.md` | Treat disagreement as signal |
-| Selecting reviewer posture by tier | `references/posture.md` | One reviewer per round; a tech-lead review is assigned by hand |
+| Selecting reviewer posture by tier | `references/posture.md` | One reviewer per round; judge lanes get an automatic tech-lead second review |
 | Sizing a claim or naming an evidence gap | `references/evidence.md` | Keep denominators and unbacked rules visible |
 | Deciding whether a candidate finding survives, and how a ruling carries across rounds | `references/falsification.md` | The diff is not evidence; re-derive input, path and outcome; rulings persist |
 
@@ -83,6 +83,6 @@ When this rubric finds over-building, open the finding's `summary` with one of t
 - `references/rubric.md` — the four review axes and their grading rules.
 - `references/findings-shape.md` — the scout findings contract and its pin.
 - `references/divergence.md` — divergence-as-signal and the recording example.
-- `references/posture.md` — tier-scaled reviewer posture and the manually assigned tech-lead review.
+- `references/posture.md` — tier-scaled reviewer posture and the judge loop's second review.
 - `references/evidence.md` — corpus denominators, limits, and rules with no exhibit.
 - `references/falsification.md` — what survives: the diff is not evidence, the falsification pass, the fix bar, rulings across rounds, calibration.

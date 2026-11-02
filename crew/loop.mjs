@@ -114,13 +114,14 @@ export async function runLoop(spec, deps = {}) {
   let resolved
   try { resolved = d.resolveAgents(spec.tier) } catch { return refusal('seat-unmeasured') }
   const seats = { ...resolved?.seats }
-  if (!(isFinish ? FINISH_ROLES : REQUIRED_ROLES).every((role) => seats[role] && typeof seats[role] === 'object')) return refusal('seat-unmeasured')
+  const requiredRoles = (tier) => isFinish ? FINISH_ROLES : tier === 'judge' ? [...REQUIRED_ROLES, 'tech-lead'] : REQUIRED_ROLES
+  if (!requiredRoles(spec.tier).every((role) => seats[role] && typeof seats[role] === 'object')) return refusal('seat-unmeasured')
   const bounded = (cell) => cell.rounds === undefined || (Number.isSafeInteger(cell.rounds) && cell.rounds > 0)
   if (!Object.values(seats).every(bounded)) return refusal('invalid-input')
 
   const { cwd, timeoutMs } = spec
   const { journal } = d
-  const rounds = { planner: 0, builder: 0, reviewer: 0, lead: 0 }
+  const rounds = { planner: 0, builder: 0, reviewer: 0, 'tech-lead': 0, lead: 0 }
   const last = {}
   let where = null
   let turn = isFinish ? fin.turnOffset : 0
@@ -136,6 +137,7 @@ export async function runLoop(spec, deps = {}) {
   }
   let namedTests = []
   let priorFindings = isFinish ? fin.findings : []
+  let secondFindings = []
   let builderReport = null
   let filesInScope = isFinish ? fin.filesInScope ?? null : null
   let changedPaths = []
@@ -176,7 +178,7 @@ export async function runLoop(spec, deps = {}) {
     if (tier === 'judge') return null
     let next
     try { next = d.resolveAgents('judge')?.seats } catch (error) { return stop('seat-unmeasured', { reason, error: describe(error) }) }
-    if (!(isFinish ? FINISH_ROLES : REQUIRED_ROLES).every((role) => next?.[role] && typeof next[role] === 'object') || !Object.values(next ?? {}).every((cell) => cell == null || (typeof cell === 'object' && bounded(cell)))) return stop('seat-unmeasured', { reason })
+    if (!requiredRoles('judge').every((role) => next?.[role] && typeof next[role] === 'object') || !Object.values(next ?? {}).every((cell) => cell == null || (typeof cell === 'object' && bounded(cell)))) return stop('seat-unmeasured', { reason })
     for (const [role, cell] of Object.entries(next)) {
       if (cell && seats[role]?.rounds !== undefined) next[role] = { ...cell, rounds: seats[role].rounds }
     }
@@ -237,7 +239,7 @@ export async function runLoop(spec, deps = {}) {
         rounds[role] += 1
         const id = `${spec.id}.${role}.${turn}`
         const returnPath = join(spec.taskDir, `${role}-${turn}.json`)
-        const request = { role, tier, seat: seats[role], id, returnPath, brief: spec.brief, planPath, feedback, ...(['builder', 'reviewer'].includes(role) ? { filesInScope: filesInScope === null ? null : [...filesInScope] } : {}), ...(role === 'reviewer' ? { changedPaths, builderReport } : {}) }
+        const request = { role, tier, seat: seats[role], id, returnPath, brief: spec.brief, planPath, feedback, ...(['builder', 'reviewer', 'tech-lead'].includes(role) ? { filesInScope: filesInScope === null ? null : [...filesInScope] } : {}), ...(['reviewer', 'tech-lead'].includes(role) ? { changedPaths, builderReport } : {}) }
         // One attempt: run the seat, then read the issued path back, parse it and validate it in full.
         const attempt = async (asked) => {
           let failure = null
@@ -252,7 +254,7 @@ export async function runLoop(spec, deps = {}) {
           if (!failure) {
             try { parsed = JSON.parse(raw) } catch (error) { failure = { reason: 'envelope-refused', error: describe(error) } }
           }
-          const checked = failure ? { envelope: null, defects: [] } : validateEnvelope(role, parsed, { prior: role === 'reviewer' ? priorFindings.map((finding) => finding?.id) : [] })
+          const checked = failure ? { envelope: null, defects: [] } : validateEnvelope(role, parsed, { prior: (role === 'reviewer' ? priorFindings : role === 'tech-lead' ? secondFindings : []).map((finding) => finding?.id) })
           if (role === 'planner' && checked.envelope && checked.defects.length === 0) checked.defects.push(...await artifactDefects(checked.envelope.details))
           return { failure, parsed, recording, checked }
         }
@@ -325,6 +327,9 @@ export async function runLoop(spec, deps = {}) {
       }
       // bounce: exactly one more turn for this role, beyond its bound only if the bound is spent; the counter keeps its history
       seats[role] = { ...seats[role], rounds: Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }
+      if (!isFinish && role === 'builder') for (const reviewer of ['reviewer', 'tech-lead']) {
+        if (seats[reviewer]) seats[reviewer] = { ...seats[reviewer], rounds: Math.max(seats[reviewer].rounds ?? DEFAULT_ROUNDS, rounds[reviewer] + 1) }
+      }
     }
   }
   // accept releases only a schema-valid envelope the seat itself returned; it never stands in for a measurement.
@@ -463,6 +468,17 @@ export async function runLoop(spec, deps = {}) {
       } else {
         if (suite.status !== 'green') return stop(suite.reason, suite)
         suiteLine = `- Suite: green; exit ${suite.code}.`
+      }
+      if (tier === 'judge' && !isFinish) {
+        const reviewed = await stage('second-review', () => seatTurn('tech-lead', secondFindings))
+        if (reviewed.halt) return reviewed.halt
+        const review = reviewed.envelope
+        secondFindings = review.details.findings
+        await emit('verdict', { status: 'reviewed', role: 'tech-lead', verdict: review.details.verdict, findings: secondFindings })
+        if (review.details.verdict === 'changes-needed') {
+          feedback = secondFindings
+          continue
+        }
       }
       break
     }

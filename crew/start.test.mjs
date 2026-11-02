@@ -405,6 +405,20 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
   const sessionOf = (role, n) => join(spec.taskDir, 'lean', role, `lane.${role}.${n}.jsonl`)
   return { spec, requests, logs, go: () => runLean(spec, options), sessionOf, options }
 }
+test('a judge tech-lead turn gets the reviewer map grants by scope, the builder report, the changed paths and a valid P2 tech-lead example', async () => {
+  const f = leanFixture({ tier: 'judge', scope: ['crew/lean.mjs', 'elsewhere/a.spec.ts'] })
+  assert.equal((await f.go()).status, 'done')
+  const leads = f.requests.filter((r) => r.definition.role === 'tech-lead')
+  assert.equal(leads.length, 1)
+  const lead = leads[0], reviewer = f.requests.find((r) => r.definition.role === 'reviewer')
+  assert.deepEqual([...lead.definition.skills].sort(), [...reviewer.definition.skills].sort())
+  for (const skill of ['pr-review', 'test-strength']) assert.ok(lead.definition.skills.includes(skill))
+  assert.match(lead.prompt, /## Builder report\nTests: \[{"file":"lib.test.mjs","title":"works"}\]\nNotes: "builder turn 2"/)
+  assert.match(lead.prompt, /## Changed paths\n- "src\/a.mjs"/)
+  const example = JSON.parse(lead.prompt.split(`Task directory: ${f.spec.taskDir}\n`)[1].split('\nstatus is done')[0])
+  assert.deepEqual(validateEnvelope('tech-lead', example).defects, [])
+})
+
 test("a raised lane's later turns run the judge tier definition", async () => {
   const f = leanFixture({ tier: 'mechanical', scope: ['crew/loop.mjs'] })
   f.spec.acceptance = ['RV1'] // archived spec, also accepted before ADR-055

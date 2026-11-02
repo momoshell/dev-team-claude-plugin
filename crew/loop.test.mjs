@@ -19,7 +19,7 @@ const MUTATION = { check: 'A1', file: 'lib.mjs', find: 'old', replace: 'new' }
 // A seat "returns" by writing its envelope into a virtual file the loop then reads back.
 function fakes(options = {}) {
   const calls = [], rows = [], requests = [], tiers = [], seen = {}, returns = new Map(), writes = new Map()
-  let reviewTurns = 0, reviewReads = 0
+  let reviewTurns = 0, secondTurns = 0, reviewReads = 0
   const spec = {
     id: 'lane', cwd: '/virtual/checkout', taskDir: '/virtual/task', tier: 'build', shape: 'standard', brief: '## The ask\nBuild the lane.',
     source: 'issue 12', branch: 'lane', base: 'main', closes: [12], refs: [13],
@@ -30,16 +30,21 @@ function fakes(options = {}) {
     details: request.role === 'planner' ? { subject: 'fix(crew): planned lane', plan_path: '/virtual/task/plan.md', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
       : request.role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
       : request.role === 'lead' ? { decision: options.lead ?? 'escalate', ...((options.lead ?? 'escalate') === 'escalate' ? { question: 'Which way should the lane go?' } : options.lead === 'bounce' ? { target: options.target ?? 'builder' } : {}) }
-      : { verdict: options.review && ++reviewTurns <= options.review ? 'changes-needed' : 'pass', findings: options.review && reviewTurns <= options.review ? [finding] : [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['lib.mjs'], complete: true }, closed: request.feedback.filter((f) => f.id && !(options.review && reviewTurns <= options.review && f.id === finding.id)).map((f) => ({ id: f.id, evidence: 'fixed' })) },
+      : (() => {
+          const second = request.role === 'tech-lead'
+          const turns = second ? ++secondTurns : ++reviewTurns
+          const changes = turns <= (second ? options.secondReview ?? 0 : options.review ?? 0)
+          const current = second ? { ...finding, id: 'T1' } : finding
+          return { verdict: changes ? 'changes-needed' : 'pass', findings: changes ? [current] : [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['lib.mjs'], complete: true }, closed: request.feedback.filter((f) => f.id && !(changes && f.id === current.id)).map((f) => ({ id: f.id, evidence: 'fixed' })) }
+        })(),
   })
   const measured = (name, result) => async (input) => {
     calls.push(name); seen[name] = structuredClone(input)
     if (options.throwCheck === name) throw Object.assign(new Error('denied'), { code: 'EPERM' })
     return typeof result === 'function' ? result(input) : structuredClone(result)
   }
-  const roles = ['planner', 'builder', 'reviewer', 'lead'].filter((role) => !(options.unseated ?? []).includes(role))
   const deps = {
-    resolveAgents: (tier) => { tiers.push(tier); if (tier === 'judge' && options.throwJudge) throw new Error('judge unavailable'); return { seats: Object.fromEntries(roles.map((role) => [role, { agent: 'pi', provider: 'test', id: role, effort: tier === 'judge' ? 'xhigh' : 'high', ...(options.bounds?.[role] ? { rounds: options.bounds[role] } : {}) }])), advisor: null } },
+    resolveAgents: (tier) => { tiers.push(tier); if (tier === 'judge' && options.throwJudge) throw new Error('judge unavailable'); const roles = ['planner', 'builder', 'reviewer', 'lead', ...(tier === 'judge' ? ['tech-lead'] : [])].filter((role) => !(options.unseated ?? []).includes(role)); return { seats: Object.fromEntries(roles.map((role) => [role, { agent: 'pi', provider: 'test', id: role, effort: tier === 'judge' ? 'xhigh' : 'high', ...(options.bounds?.[role] ? { rounds: options.bounds[role] } : {}) }])), advisor: null } },
     mkdir: async (path, opts) => { calls.push('mkdir'); seen.mkdir = [path, opts] },
     readFile: async (path) => {
       if (options.readError) throw Object.assign(new Error('denied'), { code: options.readError })
@@ -73,7 +78,7 @@ function fakes(options = {}) {
       : input.args.includes('rev-parse') ? measured('post-rebase-head', () => ({ ...green(), stdout: options.cleanHead ?? `${(options.rebase ?? {}).head ?? 'a'.repeat(40)}\n` }))(input)
       : input.args.includes('status') && calls.includes('rebase') ? measured('post-rebase-clean', () => ({ ...green(), stdout: options.cleanStatus ?? '' }))(input)
       : input.args.includes('status')
-      ? (calls.at(-1) === 'suite'
+      ? (['suite', 'seat:tech-lead'].includes(calls.at(-1))
         ? measured('paths', options.pathsResult ?? (() => ({ ...green(), stdout: options.paths ?? ' M lib.mjs\0' })))
         : measured('review-paths', options.reviewResult ?? (() => ({ ...green(), stdout: [options.reviewPaths].flat()[Math.min(reviewReads++, [options.reviewPaths].flat().length - 1)] ?? ' M lib.mjs\0' }))))(input)
       : measured('fetch', options.fetch ?? green())(input),
@@ -83,6 +88,69 @@ function fakes(options = {}) {
   }
   return { spec, deps, calls, rows, requests, tiers, seen, writes, go: () => runLoop(spec, deps) }
 }
+test('a judge lane runs the tech-lead second review after the reviewer passes and the suite is green, a raised lane too, and a build or finish lane never does', async () => {
+  for (const mode of ['judge', 'planner', 'path', 'build', 'finish']) {
+    const f = fakes({
+      spec: mode === 'finish' ? { ...finishSpec(), tier: 'judge' } : { tier: mode === 'judge' ? 'judge' : 'build' },
+      reviewPaths: mode === 'path' ? ' M crew/loop.mjs\0' : undefined,
+      edit: (v) => { if (v.role === 'planner') { v.details.files_in_scope = ['lib.mjs']; if (mode === 'planner') v.details.judge = 'needs review' } return v },
+    })
+    assert.equal((await f.go()).status, 'done', mode)
+    const second = ['judge', 'planner', 'path'].includes(mode)
+    const expected = ['seat:reviewer', 'suite-stage', 'suite', ...(second ? ['seat:tech-lead'] : []), 'paths', 'commit']
+    assert.deepEqual(f.calls.slice(f.calls.indexOf('seat:reviewer'), f.calls.indexOf('commit') + 1), expected, mode)
+    assert.equal(count(f, 'tech-lead'), second ? 1 : 0, mode)
+    if (second) {
+      const reviewer = f.requests.find((r) => r.role === 'reviewer')
+      const lead = f.requests.find((r) => r.role === 'tech-lead')
+      for (const key of ['filesInScope', 'changedPaths', 'builderReport']) assert.deepEqual(lead[key], reviewer[key], key)
+      const row = f.rows.find((r) => r.event === 'verdict' && r.role === 'tech-lead')
+      assert.deepEqual([row.stage, row.status, row.verdict, row.findings], [null, 'reviewed', 'pass', []])
+    }
+  }
+})
+
+test('a tech-lead changes-needed goes back to the builder like a review finding, then proof, review, suite and the second review run again', async () => {
+  const t = { ...finding, id: 'T1' }
+  for (const drop of [false, true]) {
+    const f = fakes({ spec: { tier: 'judge' }, secondReview: 1, edit: (v, r) => { if (drop && r.role === 'tech-lead' && r.feedback.length) v.details.closed = []; return v } })
+    const result = await f.go()
+    assert.ok(count(f, 'tech-lead') >= 1)
+    assert.deepEqual(f.requests.filter((r) => r.role === 'builder')[1].feedback, [t])
+    assert.deepEqual(f.requests.filter((r) => r.role === 'tech-lead')[1].feedback, [t])
+    if (drop) {
+      assert.equal(result.reason, 'envelope-refused')
+      assert.ok(f.requests.some((r) => r.role === 'tech-lead' && r.repair && r.repair.defects.some((d) => d.includes('prior finding T1'))))
+    } else {
+      const at = f.calls.indexOf('seat:tech-lead')
+      assert.deepEqual(f.calls.slice(at + 1), ['seat:builder', 'proof', 'review-paths', 'seat:reviewer', 'suite-stage', 'suite', 'seat:tech-lead', 'paths', 'commit', 'fetch', 'rebase', 'publish'])
+      assert.deepEqual(result, { status: 'done', reason: null, pr: PR })
+    }
+  }
+})
+
+test('a judge lane with no tech-lead seat stops seat-unmeasured at the start and on a raise', async () => {
+  for (const tier of ['judge', 'build']) {
+    const f = fakes({ spec: { tier }, unseated: ['tech-lead'], edit: (v) => { if (v.role === 'planner') v.details.judge = 'needs review'; return v } })
+    assert.deepEqual(await f.go(), stopped('seat-unmeasured'))
+    if (tier === 'judge') { assert.deepEqual(f.calls, []); assert.deepEqual(f.rows, []) }
+    else assert.equal(count(f, 'builder'), 0)
+  }
+})
+
+test('the tech-lead turn is bounded like any seat, and a lead bounce past the builder bound gives that build its review and second review (b1487)', async () => {
+  const bounded = fakes({ spec: { tier: 'judge' }, bounds: { 'tech-lead': 1, builder: 3 }, secondReview: 10, lead: 'escalate' })
+  assert.deepEqual(await bounded.go(), stopped('lead-escalated'))
+  assert.equal(count(bounded, 'tech-lead'), 1)
+  assert.equal(bounded.requests.find((r) => r.role === 'lead').feedback[0].role, 'tech-lead')
+  for (const tier of ['build', 'judge']) {
+    const f = fakes({ spec: { tier }, review: tier === 'build' ? 2 : 0, secondReview: tier === 'judge' ? 2 : 0, lead: 'bounce', edit: (v) => { if (v.role === 'lead' && count(f, 'lead') > 1) v.details = { decision: 'accept' }; return v } })
+    assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR }, tier)
+    if (tier === 'build') assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'builder', 'reviewer', 'builder', 'reviewer', 'lead', 'builder', 'reviewer'])
+    else { assert.equal(count(f, 'reviewer'), 3); assert.equal(count(f, 'tech-lead'), 3); assert.equal(count(f, 'lead'), 1) }
+  }
+})
+
 const BODY = ['Source: "issue 12"', '', '## Measurements', '- proof: lib.test.mjs "works": red on the old source, green on the build', '- Suite: green; exit 0.'].join('\n')
 test('a planner judge reason raises a build lane to judge before the build (PD4)', async () => {
   for (const mode of ['judge', 'none', 'throw']) {
@@ -160,7 +228,7 @@ test('a builder insufficient goes to the planner, and the build continues on the
     return v
   } })
   const result = await f.go()
-  assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'builder', 'planner', 'builder', 'reviewer'])
+  assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'builder', 'planner', 'builder', 'reviewer', 'tech-lead'])
   assert.equal(result.status, 'done')
   assert.equal(f.requests[2].feedback[0].envelope.status, 'insufficient')
   assert.deepEqual(f.requests[3].filesInScope, ['crew/loop.mjs'])

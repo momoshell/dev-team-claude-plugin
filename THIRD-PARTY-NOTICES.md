@@ -34,7 +34,9 @@ Upstream NOTICE, the applicable part:
 The ladder, examples and preservation rule in `skills/code-less/SKILL.md` and
 the whole-change rule in `crew/agents/builder.md` derive from ponytail by Dietrich
 Gebert, https://github.com/DietrichGebert/ponytail at revisions
-`e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156` and `01cbf81`, rewritten for this
+`e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156` and `01cbf81`. The v5 revision
+`df9e89941d50419fd5bcf1de41e28097f1db49b2` is the source for `skills/code-less/SKILL.md`;
+`skills/pr-review/SKILL.md` adapts ponytail-review. Rewritten for this
 repository's seats, doctrine and marker name. Copyright (c) 2026 Dietrich Gebert
 (spelled DietrichGebert in the licence). Licence copy:
 `docs/licenses/ponytail-MIT.txt`. The notice, as the MIT

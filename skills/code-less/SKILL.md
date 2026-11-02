@@ -8,9 +8,9 @@ Reach for the codebase's accepted shapes before inventing one.
 
 ## The ladder (before any new code)
 
-Lazy means efficient, not careless. Trace the code the task touches end to end
-FIRST — the ladder shortens the solution, never the reading. Then stop at the
-first rung that holds:
+Read the task and the code it touches. List where the change must reach: callers,
+tests, fixtures, config and exports. Check what it could break for users, including
+data destroyed or exposed. Then stop at the first rung that holds:
 
 1. Does this need to exist at all? Speculative need: skip it, say so in one line.
 2. Already in this codebase? Reuse the helper, util or pattern that lives here.
@@ -21,23 +21,27 @@ first rung that holds:
 
 Bug fix = root cause, not symptom: grep every caller, fix the shared function
 once. No abstraction with one implementation, no config for a value that never
-changes, no scaffolding for later. Deletion over addition; fewest files;
-shortest working diff — once the problem is understood.
+changes, no scaffolding for later. Deletion over addition; shortest working diff
+once the problem is understood. Keep the codebase's structure and conventions;
+do not re-wrap or re-indent lines you did not change.
 
-Code you move or merge keeps its error handling and validation.
+Code you move or merge keeps its error handling and validation. Never cut
+trust-boundary validation, data-loss handling, security or accessibility.
 
 ## Examples (from the dev-team repository)
 
-- Standard library: replace a shell-built `git add` command with `execFileSync('git', ['add', '--', ...toAdd])` (`crew/checks.mjs` runs commands as `spawn(command, args)`, never a shell string).
+- Standard library: use `execFileSync` with an argument array instead of building a shell command.
 - Closed enum: replace an open stage string with `Object.freeze([...])` as `CHECK_REASONS` does (`crew/checks.mjs`).
 - Existing helper: replace a reimplemented temporary-directory cleanup fixture with `scratchDir(...)` (`test/helpers.mjs`).
 - Honest absence: replace an invented candidate count of zero with `usage: null` and no usage key (`crew/pi/extensions/subagent.ts`).
 
 When two standard-library options are the same size, choose the edge-case-correct one.
-A rate is never reported without its denominator; a guard is never claimed without its kill-mutation.
+A rate is never reported without its denominator.
 
-A deliberate ceiling is a comment line, not a silence: `// lean: global lock; per-account locks if throughput matters`. The marker is the whole comment line — never trailing on code or inside a multiline literal — and `;` separates ceiling from upgrade path, so a ceiling may contain commas. Nothing harvests these markers; the next reader and the reviewer are the audience, so state the upgrade path.
+A shortcut with a known limit gets a comment with the limit and upgrade path:
+`// shortcut: global lock; per-account locks if throughput matters`.
 
-Lazy code without its check is unfinished: leave ONE runnable check per non-trivial change — the smallest thing that fails if the logic breaks. Trivial one-liners need none.
+New non-trivial logic needs one small test; trivial changes need none.
+End with what was skipped or not checked and the risk.
 
-Derived from ponytail by Dietrich Gebert (MIT); adapted to this repo's seats, doctrine and marker name.
+Derived from ponytail v5 by Dietrich Gebert (MIT); adapted to this repo's seats.

@@ -34,7 +34,6 @@ source: issue 1962
 closes: 1962
 tier: build
 shape: standard
-acceptance: [RT1, RT2]
 out_of_scope: the visualizer and the roster itself
 ---
 ## The ask
@@ -46,24 +45,17 @@ What to change and why, in a few sentences. State the invariant the change must 
 - `crew/agents.mjs` `resolveAgents`: what it already checks.
 - `test/visualizer-server.test.mjs`: the test that pins the current behaviour.
 
-## Acceptance
-
-- (RT1) one checkable outcome, red on main today
-- (RT2) another
 ```
 
-The body needs a `## Acceptance` section, once; text inside a code fence is an example and does not count.
+No acceptance ids or `## Acceptance` section: the planner writes the criteria (ADR-055 §1). A brief with an `acceptance` field is refused.
 Field rules (the validator refuses anything else):
 
 - `source`: the issue or the request the lane starts from.
 - `closes`: one issue number, or `null`. It is the only issue binding: `crew start` writes it into the run
   brief's bound-issue header, and the merged PR closes it. The body carries no `#N` at all; write "issue 1961" or "PR 1968".
 - `tier`: `mechanical`, `build` or `judge`. Use `judge` when the change touches the loop's own enforcement
-  (`crew/loop.mjs`, `crew/checks.mjs`, `crew/acp/grants.mjs`, `hooks/`) or the decision records under `docs/adr/`.
+  (`crew/loop.mjs`, `crew/checks.mjs`, `crew/acp/grants.mjs`, `hooks/`) or the decision records under `docs/adr/`. Code raises the lane to judge on protected paths.
 - `shape`: `standard` only. `finish` is not started from a brief.
-- `acceptance`: the gate ids, in the order the `## Acceptance` items list them. Each item opens with its id
-  in parentheses. One outcome per id (no "and"), each red on main and satisfiable, each checkable by a
-  top-level `test(...)`. Do not put `(a)` or `(1)` sub-lists inside an item; the validator reads them as ids.
 - `out_of_scope`: what the lane must not change.
 - `suite` (optional): the command line the lean lane runs as its suite, for example `suite: cargo test -p power-api`.
   Absent, the lane runs `npm test`.

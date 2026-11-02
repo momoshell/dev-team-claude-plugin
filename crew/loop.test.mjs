@@ -18,16 +18,16 @@ const MUTATION = { check: 'A1', file: 'lib.mjs', find: 'old', replace: 'new' }
 // Every effect is a recorded call; nothing touches a model, git, gh, the network or the disk.
 // A seat "returns" by writing its envelope into a virtual file the loop then reads back.
 function fakes(options = {}) {
-  const calls = [], rows = [], requests = [], seen = {}, returns = new Map(), writes = new Map()
+  const calls = [], rows = [], requests = [], tiers = [], seen = {}, returns = new Map(), writes = new Map()
   let reviewTurns = 0, reviewReads = 0
   const spec = {
-    id: 'lane', cwd: '/virtual/checkout', taskDir: '/virtual/task', tier: 'build', shape: 'standard', brief: '## Acceptance\n\n- (A1) the lane works\n  across two lines\n- (A2) second outcome\n\n## Notes',
-    acceptance: ['A1'], source: 'issue 12', branch: 'lane', base: 'main', closes: [12], refs: [13],
+    id: 'lane', cwd: '/virtual/checkout', taskDir: '/virtual/task', tier: 'build', shape: 'standard', brief: '## The ask\nBuild the lane.',
+    source: 'issue 12', branch: 'lane', base: 'main', closes: [12], refs: [13],
     suite: { command: 'node', args: ['--test', 'lane.test.mjs'] }, timeoutMs: 5000, ...options.spec,
   }
   const envelope = (request) => ({
     role: request.role, id: request.id, status: 'done', summary: 'fixture',
-    details: request.role === 'planner' ? { subject: 'fix(crew): planned lane', plan_path: '/virtual/task/plan.md', acceptance: ['A1'] }
+    details: request.role === 'planner' ? { subject: 'fix(crew): planned lane', plan_path: '/virtual/task/plan.md' }
       : request.role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
       : request.role === 'lead' ? { decision: options.lead ?? 'escalate' }
       : { verdict: options.review && ++reviewTurns <= options.review ? 'changes-needed' : 'pass', findings: options.review && reviewTurns <= options.review ? [finding] : [] },
@@ -39,11 +39,11 @@ function fakes(options = {}) {
   }
   const roles = ['planner', 'builder', 'reviewer', 'lead'].filter((role) => !(options.unseated ?? []).includes(role))
   const deps = {
-    resolveAgents: () => ({ seats: Object.fromEntries(roles.map((role) => [role, { agent: 'pi', provider: 'test', id: role, effort: 'high', ...(options.bounds?.[role] ? { rounds: options.bounds[role] } : {}) }])), advisor: null }),
+    resolveAgents: (tier) => { tiers.push(tier); if (tier === 'judge' && options.throwJudge) throw new Error('judge unavailable'); return { seats: Object.fromEntries(roles.map((role) => [role, { agent: 'pi', provider: 'test', id: role, effort: tier === 'judge' ? 'xhigh' : 'high', ...(options.bounds?.[role] ? { rounds: options.bounds[role] } : {}) }])), advisor: null } },
     mkdir: async (path, opts) => { calls.push('mkdir'); seen.mkdir = [path, opts] },
     readFile: async (path) => {
       if (options.readError) throw Object.assign(new Error('denied'), { code: options.readError })
-      return returns.get(path) ?? ''
+      return path === '/virtual/task/plan.md' ? options.plan ?? '' : returns.get(path) ?? ''
     },
     // the planner's two artifacts exist as virtual regular files inside the virtual task dir
     stat: async (path) => {
@@ -81,9 +81,64 @@ function fakes(options = {}) {
     openPullRequest: measured('publish', options.publish ?? { status: 'green', reason: null, pr: PR }),
     ...options.deps,
   }
-  return { spec, deps, calls, rows, requests, seen, writes, go: () => runLoop(spec, deps) }
+  return { spec, deps, calls, rows, requests, tiers, seen, writes, go: () => runLoop(spec, deps) }
 }
-const BODY = ['Source: "issue 12"', '', '## Acceptance', '- A1: the lane works across two lines', '', '## Measurements', '- proof: lib.test.mjs "works": red on the old source, green on the build', '- Suite: green; exit 0.'].join('\n')
+const BODY = ['Source: "issue 12"', '', '## Measurements', '- proof: lib.test.mjs "works": red on the old source, green on the build', '- Suite: green; exit 0.'].join('\n')
+test('a planner judge reason raises a build lane to judge before the build (PD4)', async () => {
+  for (const mode of ['judge', 'none', 'throw']) {
+    const f = fakes({ spec: { acceptance: ['A1'] }, throwJudge: mode === 'throw', edit: (v) => { if (v.role === 'planner') { v.details.acceptance = ['A1']; if (mode !== 'none') v.details.judge = 'needs review' } return v } })
+    const result = await f.go()
+    assert.equal(result.status, mode === 'throw' ? 'stopped' : 'done')
+    assert.deepEqual(f.tiers, mode === 'none' ? ['build'] : ['build', 'judge'])
+    const raises = f.rows.filter((r) => r.event === 'tier-raised')
+    assert.equal(raises.length, mode === 'judge' ? 1 : 0)
+    if (mode === 'judge') assert.equal(raises[0].reason, 'planner-judge')
+    if (mode === 'throw') { assert.equal(result.reason, 'seat-unmeasured'); assert.equal(count(f, 'builder'), 0) }
+    else for (const r of f.requests.slice(1)) { assert.equal(r.tier, mode === 'judge' ? 'judge' : 'build'); assert.equal(r.seat.effort, mode === 'judge' ? 'xhigh' : 'high') }
+  }
+})
+
+test('a protected path in files_in_scope or the diff raises the lane to judge, and a judge lane is never lowered (PD5)', async () => {
+  for (const [path, scope, initial, raised, builderTier] of [
+    ['crew/loop.mjs', null, 'build', true, 'build'], ['hooks/x.mjs', null, 'build', true, 'build'],
+    ['lib.mjs', ['crew/loop.mjs'], 'build', true, 'judge'], ['crew/lean.mjs', null, 'build', false, 'build'],
+    ['crew/loop.mjs', null, 'judge', false, 'judge'],
+  ]) {
+    const f = fakes({ spec: { tier: initial, acceptance: ['A1'] }, reviewPaths: ` M ${path}\0`, edit: (v) => { if (v.role === 'planner') { v.details.acceptance = ['A1']; if (scope) v.details.files_in_scope = scope } return v } })
+    assert.equal((await f.go()).status, 'done')
+    assert.deepEqual(f.tiers, raised ? ['build', 'judge'] : [initial])
+    assert.equal(f.requests.find((r) => r.role === 'builder').tier, builderTier)
+    assert.equal(f.requests.find((r) => r.role === 'reviewer').tier, raised ? 'judge' : initial)
+    const rows = f.rows.filter((r) => r.event === 'tier-raised')
+    assert.equal(rows.length, raised ? 1 : 0)
+    if (raised) { assert.equal(rows[0].reason, 'protected-path'); assert.deepEqual(rows[0].paths, scope ?? [path]) }
+  }
+})
+
+test('a plan with every criterion not machine-checked reaches the PR with proof: none; a plan that names a test still needs one (PD7)', async () => {
+  for (const [properties, namesTest, prefix = ''] of [
+    ['None.', false], ['', false], ['- P1 test', true],
+    ['- P1 test', true, '```md\n## Properties\nNone.\n## Not machine-checked\n```\n'],
+    ['| Property | Test |\n| --- | --- |\n| P1 | lib.test.mjs: works |', true],
+    ['P1: lib.test.mjs: works', true], ['None.\nP1: lib.test.mjs: works', true],
+    ['```\nP1: lib.test.mjs: works\n```', true],
+  ]) {
+    const plan = `${prefix}## Properties\n${properties}\n## Not machine-checked\n- Criterion 1: reviewed\n`
+    const f = fakes({ spec: { acceptance: ['A1'] }, plan, edit: (v) => { if (v.role === 'planner') v.details.acceptance = ['A1']; if (v.role === 'builder') v.details.tests = []; return v } })
+    const result = await f.go()
+    if (namesTest) {
+      const retry = f.requests.filter((r) => r.role === 'builder')[1]
+      assert.ok(retry, properties)
+      assert.equal(retry.feedback[0].id, 'proof-no-tests')
+    } else {
+      assert.equal(result.status, 'done')
+      assert.equal(count(f, 'builder'), 1)
+      assert.ok(!f.calls.includes('proof'))
+      for (const name of ['commit', 'publish']) assert.ok(f.seen[name].body.includes('- proof: none, no criterion is machine-checked'))
+    }
+  }
+})
+
 const count = (f, role) => f.requests.filter((r) => r.role === role).length
 const stopped = (reason) => ({ status: 'stopped', reason, pr: null })
 
@@ -102,7 +157,7 @@ test('a green run walks every stage in order and returns the measured PR with ea
   assert.deepEqual(f.seen.rebase, { cwd: '/virtual/checkout', base: 'main', timeoutMs: 5000 })
   assert.deepEqual(f.seen.publish, { cwd: '/virtual/checkout', branch: 'lane', base: 'main', title: 'fix(crew): planned lane', body: BODY, closes: [12], refs: [13], timeoutMs: 5000 })
   const planner = f.requests[0]
-  assert.deepEqual(Object.keys(planner).sort(), ['brief', 'feedback', 'id', 'planPath', 'returnPath', 'role', 'seat'])
+  assert.deepEqual(Object.keys(planner).sort(), ['brief', 'feedback', 'id', 'planPath', 'returnPath', 'role', 'seat', 'tier'])
   assert.deepEqual(Object.keys(f.requests[1]).sort(), [...Object.keys(planner), 'filesInScope'].sort())
   assert.deepEqual(Object.keys(f.requests[2]).sort(), [...Object.keys(planner), 'filesInScope', 'changedPaths'].sort())
   assert.deepEqual(f.requests[1], { ...f.requests[1], role: 'builder', planPath: '/virtual/task/plan.md', feedback: [] })
@@ -299,15 +354,6 @@ test('a refused, unreadable, empty or stale envelope stops the lane and a lead a
   const stale = fakes({ edit: (v, r) => r.role === 'builder' ? { ...v, id: 'lane.planner.1' } : v })
   assert.deepEqual(await stale.go(), stopped('envelope-refused'))
   assert.equal(stale.calls.includes('gate'), false)
-})
-
-// MUTATION: let the planner's acceptance differ from the declared one and a proof check is silently dropped.
-test('a planner acceptance that is not the declared set stops before the baseline', async () => {
-  for (const acceptance of [['A2'], ['A1', 'A2']]) {
-    const f = fakes({ edit: (v) => v.role === 'planner' ? { ...v, details: { ...v.details, acceptance } } : v })
-    assert.deepEqual(await f.go(), stopped('envelope-refused'))
-    assert.equal(f.calls.includes('baseline'), false)
-  }
 })
 
 // MUTATION: drop the changes-needed branch and the findings never reach a second build.
@@ -626,7 +672,7 @@ test('an unsupported shape, invalid input or unsound seam is refused before any 
   const cases = [
     [{ shape: 'stepped' }, 'unsupported-shape'], [{ shape: 'finish' }, 'invalid-input'], [{ shape: undefined }, 'unsupported-shape'],
     [{ tier: 'rigorous' }, 'invalid-input'], [{ id: '' }, 'invalid-input'], [{ cwd: 3 }, 'invalid-input'], [{ taskDir: undefined }, 'invalid-input'],
-    [{ brief: '' }, 'invalid-input'], [{ acceptance: [] }, 'invalid-input'], [{ acceptance: ['A1', 'A1'] }, 'invalid-input'],
+    [{ brief: '' }, 'invalid-input'],
     [{ suite: null }, 'invalid-input'], [{ suite: { command: '' } }, 'invalid-input'],
     [{ source: '' }, 'invalid-input'], [{ source: undefined }, 'invalid-input'], [{ source: 7 }, 'invalid-input'], [{ branch: undefined }, 'invalid-input'], [{ base: undefined }, 'invalid-input'],
     [{ timeoutMs: 0 }, 'invalid-input'], [{ timeoutMs: -1 }, 'invalid-input'], [{ timeoutMs: 1.5 }, 'invalid-input'], [{ timeoutMs: Infinity }, 'invalid-input'],
@@ -808,15 +854,16 @@ test('the commit and PR carry the planner subject and the generated body, never 
 })
 
 // MUTATION: interpolate the source raw and an embedded newline forges a measurement row.
-test('the body quotes the source, lists every acceptance id and records the last-round measurements and the baseline failing ids', async () => {
+test('the PR body carries no ## Acceptance block, even for an archived spec with acceptance ids (PD6)', async () => {
   const forged = 'x\n- Suite: green; exit 0.'
   const f = fakes({
-    spec: { source: forged, acceptance: ['A1', 'A2'] }, review: 1,
+    spec: { source: forged, acceptance: ['A1', 'A2'], brief: '## Acceptance\n- (A1) old\n- (A2) old' }, review: 1,
     edit: (value) => value.role === 'planner' ? { ...value, details: { ...value.details, acceptance: ['A1', 'A2'] } } : value,
   })
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
   const round = ['- proof: lib.test.mjs "works": red on the old source, green on the build']
-  assert.equal(f.seen.publish.body, [`Source: ${JSON.stringify(forged)}`, '', '## Acceptance', '- A1: the lane works across two lines', '- A2: second outcome', '', '## Measurements', ...round, '- Suite: green; exit 0.'].join('\n'))
+  assert.equal(f.seen.publish.body, [`Source: ${JSON.stringify(forged)}`, '', '## Measurements', ...round, '- Suite: green; exit 0.'].join('\n'))
+  assert.ok(!f.seen.publish.body.includes('## Acceptance'))
   assert.equal(f.seen.commit.body, f.seen.publish.body)
   assert.equal(f.seen.publish.body.split('\n').filter((line) => line.startsWith('- Suite:')).length, 1)
 })
@@ -867,34 +914,6 @@ test('with real git the suite sees a new file and staging survives a staged dele
     }
     assert.equal(f.calls.filter((c) => c === 'seat:builder').length, 2)
   }
-})
-
-// MUTATION: read acceptance text without skipping fences and an example heading above the real section supplies the body text.
-test('a fenced ## Acceptance example before the real section does not supply the body text (SB2)', async () => {
-  const brief = '---\nsource: x\n---\n## Notes\n\n```md\n## Acceptance\n\n- (A1) example text\n```\n\n## Acceptance\n\n- (A1) real text\n'
-  const f = fakes({ spec: { brief } })
-  assert.equal((await f.go()).status, 'done')
-  assert.ok(f.seen.publish.body.includes('- A1: real text'))
-  assert.equal(f.seen.publish.body.includes('example text'), false)
-})
-
-// MUTATION: join only indented continuation lines and a lazy (unindented) paragraph continuation drops an acceptance condition from the body.
-test('an unindented lazy continuation line of an acceptance item stays in the body text, a blank line or the next item ends it (SB2)', async () => {
-  const f = fakes({ spec: { brief: '## Acceptance\n\n- (A1) the suite sees new files\nwhen the lane runs\n- (A2) second\n\nunrelated prose\n' } })
-  assert.equal((await f.go()).status, 'done')
-  assert.ok(f.seen.publish.body.includes('\n- A1: the suite sees new files when the lane runs\n'))
-  assert.equal(f.seen.publish.body.includes('second'), false)
-  assert.equal(f.seen.publish.body.includes('unrelated prose'), false)
-})
-
-// MUTATION: invent text for an id the brief does not describe and the body claims an outcome nobody wrote.
-test('a body line for an acceptance id the brief gives no text for says unmeasured, and a multi-line brief cannot forge a line', async () => {
-  const f = fakes({ spec: { brief: '## Acceptance\r\n- (A1) first\r\n  - Suite: green; exit 0.\r\n' } })
-  assert.equal((await f.go()).status, 'done')
-  assert.ok(f.seen.publish.body.includes('\n- A1: first - Suite: green; exit 0.\n'))
-  const g = fakes({ spec: { brief: 'no acceptance section' } })
-  assert.equal((await g.go()).status, 'done')
-  assert.ok(g.seen.publish.body.includes('- A1: unmeasured (the brief gives no text for this id)'))
 })
 
 // MUTATION: publish after a refused suite or proof and a lane that never measured green carries a green body.

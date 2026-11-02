@@ -68,6 +68,8 @@ function loadLane(d, lane, crewRoot) {
   const rows = journalText.split('\n').filter((line) => line.trim() !== '').map((line) => {
     try { return JSON.parse(line) } catch { throw new FinishRefusal('finish-unreadable', 'the lane journal has a malformed row') }
   }).filter(isObject)
+  // ADR-055 §7: a recorded raise survives a finish run.
+  if (rows.some((row) => row.event === 'tier-raised' && row.to === 'judge')) spec.tier = 'judge'
   return { taskDir, spec, rows }
 }
 

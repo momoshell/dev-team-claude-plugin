@@ -5,24 +5,24 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseBrief, parseAgent, validateEnvelope, AGENT_ROLES, BRIEF_FIELDS, TIERS, SHAPES, ENVELOPE_FIELDS, ENVELOPE_STATUSES, REVIEW_VERDICTS, LEAD_DECISIONS, FINDING_SEVERITIES, FINDING_DISPOSITIONS } from './protocols.mjs'
 
-const BODY = '## The ask\n\nRefuse roster edits that cannot boot.\n\n## Acceptance\n\n- (RV1) an edit that cannot boot is refused\n- (RV2) a bootable edit is accepted\n'
+const BODY = '## The ask\n\nRefuse roster edits that cannot boot.\n'
 const brief = (overrides = {}, body = BODY) => {
-  const fields = { source: 'issue 1961', closes: '1961', tier: 'build', shape: 'standard', acceptance: '[RV1, RV2]', out_of_scope: 'the visualizer', ...overrides }
+  const fields = { source: 'issue 1961', closes: '1961', tier: 'build', shape: 'standard', out_of_scope: 'the visualizer', ...overrides }
   const front = Object.entries(fields).filter(([, v]) => v !== undefined).map(([k, v]) => `${k}: ${v}`).join('\n')
   return `---\n${front}\n---\n${body}`
 }
 
 test('P1 vocabularies are the ADR-052 fields, tiers and shapes', () => {
-  assert.deepEqual(BRIEF_FIELDS, ['source', 'closes', 'tier', 'shape', 'acceptance', 'out_of_scope', 'suite'])
+  assert.deepEqual(BRIEF_FIELDS, ['source', 'closes', 'tier', 'shape', 'out_of_scope', 'suite'])
   assert.deepEqual(TIERS, ['mechanical', 'build', 'judge'])
   assert.deepEqual(SHAPES, ['standard', 'finish'])
   assert.ok(Object.isFrozen(SHAPES))
 })
 
-test('a well-formed brief parses with no defects', () => {
+test('a brief with no acceptance field and no ## Acceptance section parses with no defects (PD1)', () => {
   const { fields, body, defects } = parseBrief(brief())
   assert.deepEqual(defects, [])
-  assert.deepEqual(fields, { source: 'issue 1961', closes: 1961, tier: 'build', shape: 'standard', acceptance: ['RV1', 'RV2'], out_of_scope: 'the visualizer' })
+  assert.deepEqual(fields, { source: 'issue 1961', closes: 1961, tier: 'build', shape: 'standard', out_of_scope: 'the visualizer' })
   assert.match(body, /^## The ask/)
   assert.equal(parseBrief(brief({ closes: 'null' })).fields.closes, null)
 })
@@ -52,7 +52,7 @@ test('a brief without frontmatter is refused', () => {
 // MUTATION: skip the unknown-field check and a misspelt field is silently ignored.
 test('unknown and missing fields are refused by name', () => {
   const { defects } = parseBrief(brief({ tier: undefined, lane: 'b1' }))
-  assert.ok(defects.includes('unknown field lane; the fields are source, closes, tier, shape, acceptance, out_of_scope, suite'))
+  assert.ok(defects.includes('unknown field lane; the fields are source, closes, tier, shape, out_of_scope, suite'))
   assert.ok(defects.includes('missing field tier'))
 })
 
@@ -65,25 +65,16 @@ test('tier, shape and closes take only their closed values', () => {
   assert.ok(parseBrief(brief({ closes: '9007199254740993' })).defects.includes('closes is null or one issue number'))
 })
 
-// MUTATION: compare the acceptance ids as sets, or not at all, and a gate id with no item passes.
-test('acceptance ids must open the ## Acceptance items in order', () => {
-  assert.ok(parseBrief(brief({ acceptance: '[RV1, RV3]' })).defects.includes('the ## Acceptance items open with (RV1) (RV2), not the frontmatter ids (RV1) (RV3)'))
-  assert.ok(parseBrief(brief({ acceptance: '[RV1, RV1]' })).defects.includes('acceptance repeats an id'))
-  assert.ok(parseBrief(brief({ acceptance: '[]' })).defects.some((line) => line.startsWith('acceptance lists the gate ids')))
-})
-
-// MUTATION: read items inside a fence, or close a fence on a line with trailing text, and a brief with no enforceable ids validates.
-test('acceptance items inside a fence are examples, and only a bare marker closes a fence', () => {
-  const fenced = '## Acceptance\n\n```\n- (RV1) a\n- (RV2) b\n```\n'
-  assert.ok(parseBrief(brief({}, fenced)).defects.includes('the ## Acceptance items open with (none), not the frontmatter ids (RV1) (RV2)'))
-  const trailing = '## Acceptance\n\n```\nexample\n``` trailing\n- (RV1) a\n- (RV2) b\n```\n'
-  assert.ok(parseBrief(brief({}, trailing)).defects.includes('the ## Acceptance items open with (none), not the frontmatter ids (RV1) (RV2)'))
+test('a brief that carries an acceptance field is refused (PD2)', () => {
+  for (const body of [BODY, `${BODY}\n## Acceptance\n- (RV1) a\n`]) {
+    assert.ok(parseBrief(brief({ acceptance: '[RV1]' }, body)).defects.includes('acceptance is not a brief field: the planner writes the criteria (ADR-055 §1)'))
+  }
 })
 
 // MUTATION: merge repeated sections and the validator approves ids the driver never reads.
 test('a repeated section is refused, because the driver reads only the first', () => {
-  const twice = '## Acceptance\n\n- (RV1) a\n\n## Acceptance\n\n- (RV2) b\n'
-  assert.ok(parseBrief(brief({}, twice)).defects.includes('the body repeats ## Acceptance; the driver reads only the first'))
+  const twice = '## Context\n\na\n\n## Context\n\nb\n'
+  assert.ok(parseBrief(brief({}, twice)).defects.includes('the body repeats ## Context; the driver reads only the first'))
 })
 
 // MUTATION: allow #N in the body and something other than closes can bind an issue.
@@ -237,10 +228,7 @@ test('P5 tier overrides are validated by path and by effective seat', () => {
 
 // P2, the seat envelope.
 const DETAILS = {
-  planner: {
-    subject: 'fix(crew): name the lane change', plan_path: '/task/plan.md', gate_path: '/task/gate.mjs', acceptance: ['EV1', 'EV2'],
-    mutations: [{ check: 'EV1', file: 'a.mjs', find: 'x', replace: 'y' }, { check: 'EV2', file: 'b.mjs', find: 'p', replace: 'q' }],
-  },
+  planner: { subject: 'fix(crew): name the lane change', plan_path: '/task/plan.md' },
   builder: { summary: 'Implemented the change.' },
   reviewer: { verdict: 'pass', findings: [] },
   'tech-lead': { verdict: 'pass', findings: [] },
@@ -289,19 +277,14 @@ test('P2 refuses a role that is not the expected one', () => {
   assert.equal(validateEnvelope('__proto__', envelope('builder')).envelope.id, 'd1')
 })
 
-// MUTATION: drop gate_path from the planner keys and a plan without a gate is accepted.
-test('P2 planner details name the plan, the gate and the acceptance ids', () => {
-  for (const key of ['subject', 'plan_path', 'acceptance']) {
-    const value = envelope('planner'); delete value.details[key]
-    assert.deepEqual(refusedFor('planner', value, `details.${key} is required`).length, 1, key)
+test('P2 planner details need no acceptance and may carry a one-line judge reason (PD3)', () => {
+  for (const extra of [{}, { judge: 'touches crew/loop.mjs' }, { acceptance: null, gate_path: null, gate_cmd: 4, mutations: 'legacy' }]) {
+    const value = envelope('planner'); Object.assign(value.details, extra)
+    assert.deepEqual(validateEnvelope('planner', value).defects, [])
   }
-  for (const key of ['plan_path']) for (const bad of ['', null, 5]) {
-    const value = envelope('planner'); value.details[key] = bad
-    assert.ok(refusedFor('planner', value, `details.${key}`).length, key)
-  }
-  for (const acceptance of [[], ['EV1', 'EV1'], ['9bad'], 'EV1', [null], undefined]) {
-    const value = envelope('planner'); value.details.acceptance = acceptance
-    assert.ok(refusedFor('planner', value, 'details.acceptance').length, JSON.stringify(acceptance))
+  for (const judge of ['', 'a\nb', 5]) {
+    const value = envelope('planner'); value.details.judge = judge
+    assert.ok(refusedFor('planner', value, 'details.judge').length)
   }
 })
 
@@ -338,7 +321,7 @@ test('P2 planner subject is a conventional-commit subject of at most 72 characte
 // MUTATION: reject archived planner keys or accept builder mutations.
 test('P2 accepts legacy planner fields without validating them and refuses builder mutations', () => {
   const planner = envelope('planner')
-  Object.assign(planner.details, { gate_path: null, gate_cmd: 4, mutations: 'legacy' })
+  Object.assign(planner.details, { acceptance: null, gate_path: null, gate_cmd: 4, mutations: 'legacy' })
   assert.deepEqual(validateEnvelope('planner', planner).defects, [])
   const builder = envelope('builder'); builder.details.mutations = []
   assert.ok(refusedFor('builder', builder, 'details.mutations is not a field').length)

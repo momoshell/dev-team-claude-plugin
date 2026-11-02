@@ -17,13 +17,12 @@ const CHARTER_LINK = /\]\((\.\.?\/[^)\s]+\.md)\)/g
 const stopped = (reason) => ({ status: 'stopped', reason, pr: null })
 
 // The P2 shape this turn must write; the role's own detail keys, with the issued role and id.
-function exampleEnvelope(role, id, acceptance, shape = 'standard') {
+function exampleEnvelope(role, id) {
   const review = { verdict: 'pass', findings: [{ id: 'R1', severity: 'should-fix', location: 'path/to/file.mjs:10', summary: 'what is wrong and why' }] }
   const details = {
     planner: {
       subject: 'fix(crew): publish measured lane results',
       plan_path: '<absolute path of the plan you wrote>',
-      acceptance,
       files_in_scope: ['<repo-relative file the builder may edit>'],
       validation_lane: '<the node --test command that checks the change>',
     },
@@ -83,7 +82,7 @@ function repairPromptFor({ request, spec }) {
     'P2 envelope, as JSON, to that same path; nothing else you write counts as your return.',
     `Envelope id: ${id}`,
     `Return path: ${returnPath}`,
-    JSON.stringify(exampleEnvelope(role, id, spec.acceptance, spec.shape), null, 2),
+    JSON.stringify(exampleEnvelope(role, id), null, 2),
     'status is done, insufficient or escalate; use insufficient or escalate instead of faking a done.',
     '',
   ].join('\n')
@@ -113,7 +112,7 @@ function promptFor({ request, spec, source, charters, body, section }) {
     `Envelope id: ${id}`,
     `Return path: ${returnPath}`,
     `Task directory: ${spec.taskDir}`,
-    JSON.stringify(exampleEnvelope(role, id, spec.acceptance, spec.shape), null, 2),
+    JSON.stringify(exampleEnvelope(role, id), null, 2),
     'status is done, insufficient or escalate; use insufficient or escalate instead of faking a done.',
     '',
   ]
@@ -131,7 +130,7 @@ export async function runLean(spec, deps = {}) {
   }
 
   const runSeat = async (request, { emit }) => {
-    const { definition, source, charters, memory } = definitionFor(request, spec.tier, d)
+    const { definition, source, charters, memory } = definitionFor(request, request.tier ?? spec.tier, d)
     const { role, id } = request
     let sectionText = ''
     if (!request.repair) {

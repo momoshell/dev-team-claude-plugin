@@ -19,16 +19,11 @@ source: issue 1961
 closes: 1961
 tier: build
 shape: standard
-acceptance: [RV1]
 out_of_scope: the visualizer
 ---
 ## The ask
 
 Refuse roster edits that cannot boot.
-
-## Acceptance
-
-- (RV1) an edit that cannot boot is refused
 `
 
 // Every effect is a recorded call; nothing touches git, the disk or a process. The agent
@@ -212,7 +207,7 @@ test('--loop lean detaches the bridge on a measured spec and boots nothing', asy
   const spec = JSON.parse(written(calls, '/task/lean.json')[2])
   assert.deepEqual(spec, {
     id: 'b1', cwd: '/repo/dt-b1', taskDir: '/home/.crew/dt-b1/b1/task', tier: 'build', shape: 'standard', brief: runBrief(BRIEF, 1961),
-    acceptance: ['RV1'], source: 'issue 1961', branch: 'b1', base: 'main', closes: [1961], suite: { command: 'npm', args: ['test'], timeoutMs: 1800000 },
+    source: 'issue 1961', branch: 'b1', base: 'main', closes: [1961], suite: { command: 'npm', args: ['test'], timeoutMs: 1800000 },
   })
   assert.equal(spec.timeoutMs, undefined)
   const { members } = JSON.parse(written(calls, '/dt-b1/b1/crew.json')[2])
@@ -226,7 +221,7 @@ test('--loop lean detaches the bridge on a measured spec and boots nothing', asy
 
 // MUTATION: ignore fields.suite and a cargo brief runs npm test; always use it and a brief without suite gets no command.
 test('a brief suite line is the lean spec suite, split on whitespace; without one the suite is npm test (SB5, SB6)', async () => {
-  const cargo = fakes({ brief: BRIEF.replace('acceptance:', 'suite: cargo test -p power-api\nacceptance:') })
+  const cargo = fakes({ brief: BRIEF.replace('out_of_scope:', 'suite: cargo test -p power-api\nout_of_scope:') })
   await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps: cargo.deps })
   assert.deepEqual(JSON.parse(written(cargo.calls, '/task/lean.json')[2]).suite, { command: 'cargo', args: ['test', '-p', 'power-api'], timeoutMs: 1800000 })
   const plain = fakes()
@@ -359,7 +354,7 @@ const EPERM = Object.assign(new Error('denied'), { code: 'EPERM' })
 function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = {}, scope, repairPlan = false, status = ' M src/a.mjs\0' } = {}) {
   const dir = scratchDir('lean-')
   const spec = {
-    id: 'lane', cwd: join(dir, 'worktree'), taskDir: join(dir, 'task'), tier, shape: 'standard', brief: BRIEF, acceptance: ['RV1'],
+    id: 'lane', cwd: join(dir, 'worktree'), taskDir: join(dir, 'task'), tier, shape: 'standard', brief: BRIEF,
     source: 'issue 1961', branch: 'lane', base: 'main', suite: { command: 'npm', args: ['test'] },
   }
   mkdirSync(spec.cwd, { recursive: true })
@@ -410,6 +405,14 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
   const sessionOf = (role, n) => join(spec.taskDir, 'lean', role, `lane.${role}.${n}.jsonl`)
   return { spec, requests, logs, go: () => runLean(spec, options), sessionOf, options }
 }
+test("a raised lane's later turns run the judge tier definition", async () => {
+  const f = leanFixture({ tier: 'mechanical', scope: ['crew/loop.mjs'] })
+  f.spec.acceptance = ['RV1'] // archived spec, also accepted before ADR-055
+  assert.equal((await f.go()).status, 'done')
+  const builder = f.requests.find((r) => r.definition.role === 'builder')
+  assert.deepEqual(builder.definition.advisor, parseAgent(readFileSync(join(AGENTS, 'builder.md'), 'utf8')).fields.advisor)
+})
+
 const terminal = (logs) => logs.map((line) => JSON.parse(line)).filter((row) => row.event === 'loop-result')
 
 // MUTATION: send a request without the role's definition, effort, prompt or recording and a seat turn loses it.
@@ -1170,7 +1173,7 @@ test('a started lean spec reaches the PR with its exact P1 source and measured b
   assert.equal((await g.go()).status, 'done')
   assert.equal(seen.commit.subject, 'fix(crew): publish measured lane results')
   assert.equal(seen.publish.title, seen.commit.subject)
-  assert.equal(seen.publish.body, ['Source: "issue 1961"', '', '## Acceptance', '- RV1: an edit that cannot boot is refused', '', '## Measurements', '- proof: lib.test.mjs "works": red on the old source, green on the build', '- Suite: green; exit 0.'].join('\n'))
+  assert.equal(seen.publish.body, ['Source: "issue 1961"', '', '## Measurements', '- proof: lib.test.mjs "works": red on the old source, green on the build', '- Suite: green; exit 0.'].join('\n'))
   assert.equal(spec.source, 'issue 1961')
 })
 

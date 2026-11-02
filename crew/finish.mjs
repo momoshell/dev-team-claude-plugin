@@ -79,21 +79,26 @@ function requireWorktree(d, spec) {
   if (!isDir) throw new FinishRefusal('finish-worktree', `the lane worktree ${spec?.cwd} does not exist`)
 }
 
-// The lane's accepted plan and subject, including archived planner returns. A journal that records planner envelopes
-// names the accepted ones (no defects, no error, status done); only those are candidates, so a replan the live loop
-// refused is never resumed. A journal with no planner envelope rows falls back to the files alone.
+// The lane's accepted plan and subject, including archived planner returns. Newest first, a planner file that is a
+// valid done return is resumed when the journal records it as accepted, or when the journal records no planner
+// envelope at all (an older journal). One the journal records as refused is skipped. One the journal does not mention
+// while it records others is ambiguous (journal writes are not load-bearing, so a missing row proves nothing) and is
+// refused rather than passed over for an older plan.
 function loadPlan(d, lane, taskDir, rows = []) {
+  const numberOf = (row) => Number(/\.planner\.(\d+)$/.exec(String(row.id ?? row.parsed?.id ?? ''))?.[1])
   const recorded = rows.filter((row) => row.event === 'envelope' && row.role === 'planner')
-  const accepted = new Set(recorded.filter((row) => Array.isArray(row.defects) && row.defects.length === 0 && !row.error && row.parsed?.status === 'done')
-    .map((row) => /\.planner\.(\d+)$/.exec(String(row.id ?? row.parsed?.id ?? ''))?.[1]).filter((n) => n !== undefined).map(Number))
-  const files = d.readdirSync(taskDir).map((name) => ({ name, n: /^planner-(\d+)\.json$/.exec(name)?.[1] }))
-    .filter(({ n }) => n !== undefined && Number(n) > 0 && (recorded.length === 0 || accepted.has(Number(n)))).sort((a, b) => Number(b.n) - Number(a.n))
-  if (!files.length) throw new FinishRefusal('finish-premise', `lane ${lane} has no accepted planner return`)
-  for (const { name } of files) {
+  const accepted = new Set(recorded.filter((row) => Array.isArray(row.defects) && row.defects.length === 0 && !row.error && row.parsed?.status === 'done').map(numberOf))
+  const mentioned = new Set(recorded.map(numberOf))
+  const files = d.readdirSync(taskDir).map((name) => ({ name, n: Number(/^planner-(\d+)\.json$/.exec(name)?.[1]) }))
+    .filter(({ n }) => Number.isInteger(n) && n > 0).sort((a, b) => b.n - a.n)
+  if (!files.length) throw new FinishRefusal('finish-premise', `lane ${lane} has no planner return`)
+  for (const { name, n } of files) {
     const checked = validateEnvelope('planner', readJson(d, join(taskDir, name), 'the planner return'), { archived: true })
-    if (!checked.defects.length && checked.envelope?.status === 'done') return checked.envelope.details
+    if (checked.defects.length || checked.envelope?.status !== 'done') continue
+    if (recorded.length === 0 || accepted.has(n)) return checked.envelope.details
+    if (!mentioned.has(n)) throw new FinishRefusal('finish-premise', `the planner return ${name} has no journal row, so whether it was accepted is unknown`)
   }
-  throw new FinishRefusal('finish-premise', `the planner return ${files[0].name} is not an accepted plan`)
+  throw new FinishRefusal('finish-premise', `lane ${lane} has no accepted planner return`)
 }
 
 // The finish spec for a stop: the stop, the findings still open at that point of the journal, and the turn offset.

@@ -205,6 +205,15 @@ test('a replan the journal records as refused is never the plan finish resumes',
   } finally { cleanup(f) }
 })
 
+// MUTATION: pass over an unrecorded newer plan for an older accepted one.
+test('a valid newer plan the journal does not mention refuses finish rather than resuming an older plan', () => {
+  const f = fixture()
+  try {
+    writeFileSync(join(f.taskDir, 'planner-3.json'), JSON.stringify({ ...PLANNER, id: 'lane9.planner.3', details: { ...PLANNER.details, plan_path: '/t/plan-3.md', tests: [] } }))
+    assert.throws(() => run(f).go(), { reason: 'finish-premise', message: /planner-3\.json has no journal row/ })
+  } finally { cleanup(f) }
+})
+
 test('older accepted plans without scope still finish', () => {
   const f = fixture()
   try {

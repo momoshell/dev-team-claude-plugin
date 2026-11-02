@@ -61,9 +61,18 @@ and drops `acceptance`, `gate_path`, `gate_cmd` and `mutations`.
 
 ### 3. The builder builds and reports
 
-The builder makes the change and writes the tests the plan names. Its envelope adds `tests` (each a file and a test
-title) and `notes`: the paths it did not test, the existing guards it relied on, the checks it ran, and what it verified
-as against what it assumed. The reviewer cannot see the builder's session; the notes are how it learns where to look.
+The builder makes the change first, then writes the tests the plan names, and only those:
+
+- Tests cover behaviour the change adds or alters. Never behaviour it leaves alone (the suite covers that), doc or
+  prose wording (the reviewer reads it), or what a linter or a type already guarantees.
+- One small test per property: the smallest case that fails on the old source. Several cases of one property are rows
+  of one table-driven test. Extend an existing test file and reuse its fixtures and helpers; add no helper or fixture
+  for a single test.
+- A test the plan does not name needs a reason in `notes`; the reviewer flags one without.
+
+Its envelope adds `tests` (each a file and a test title) and `notes`: the paths it did not test, the existing guards it
+relied on, the checks it ran, and what it verified as against what it assumed. The reviewer cannot see the builder's
+session; the notes are how it learns where to look. The PR body states the source and test lines the change adds.
 
 ### 4. Code keeps one proof
 
@@ -150,16 +159,68 @@ source lines and 1,700 test lines.
 old source and green on the build; that is not a kill proof, and a PR never calls it one. A seat may still mutate code by
 hand to test its own tests; nothing requires it.
 
+### 10. What each seat is given
+
+The charter carries what a seat always does; it is always delivered. A skill carries knowledge a lane needs only for
+some files; `skills/skill-map.json` grants it by path. Skills are small and whole: the loop strips a `#section` and
+delivers the whole skill (`hooks/skill-gate.mjs`), and only the builder and reviewer receive map grants
+(`crew/lean.mjs`), so the planner gets no skill today.
+
+| Seat | Charter | Skills, by path |
+|---|---|---|
+| planner | the plan shape of §2; properties only for changed behaviour | none |
+| builder | §3: change first, the plan's tests only, `tests` and `notes` | `test-economy` on test files; `code-less` on source; `backend-node`, `frontend-svelte`, `ui-design`, `ux`, `prose-plain` as today |
+| reviewer, tech-lead | §5 | `pr-review`; `test-strength` on test files; `code-less`; the domain skills as today |
+
+- **`test-economy`** (new, about 40 lines): §3's test rules, the smallest failing case, table-driven cases, fixture
+  reuse, and the `node --test` notes the builder needs.
+- **`test-strength`** (new, about 30 lines): whether a test is vacuous, red for the right reason, and would fail on a
+  broken implementation.
+- **`qa-test-writing`** leaves seat delivery. Its gate and mutation material (`references/gates.md`, the gates section
+  of `references/dev-team-evidence.md`) goes with §8; the rest stays for people writing tests by hand.
+- **`code-less`** is rebased on ponytail v5 (`DietrichGebert/ponytail`, MIT, `skills/ponytail/SKILL.md`). Ours derives
+  from an older version and differs where the cost shows: its "trace the code end to end first, never the reading"
+  line matches the 11-01 measurement of one more read, 2.5 more calls and 62k more median tokens a builder run, with
+  diffs of the same size (828 lines added with it, 847 without, over 14 lanes). v5 reads "the code it touches" and
+  lists where the change must reach; keeps the codebase's structure (b1381's builder wrapped and re-indented 40
+  lines); names what is never cut (trust-boundary validation, data-loss handling, security, accessibility); asks for
+  one small test only for new non-trivial logic; and ends with what was skipped and the risk, which is §3's `notes`.
+  The rebase drops the kill-mutation line, uses v5's `shortcut:` marker in place of `// lean:` (12 in the repo, none in
+  14 builder diffs), and takes examples from code §8 keeps.
+- **`pr-review`** takes `ponytail-review`'s order (correct, safe, holds under load, tested, fast, lean), its "no case,
+  no finding" rule and "one good test, not coverage", beside §5.
+
+### 11. Order of work
+
+| Wave | Lane | Tier | Change |
+|---|---|---|---|
+| 1 | proof | judge | `crew/proof.mjs` (moved from `bench/replay-builder.mjs`, without the mutant leg), the builder `tests` field, §8's gate and mutation removal, the bench, `CLAUDE.md`'s honesty rule. Acceptance ids stay until wave 2 |
+| 1 | seat knowledge | build | §10's skills and the §3 charter rules; `skill-map.json` cleaned of grants no seat receives |
+| 1 | arms | judge | §8's six arms |
+| 1 | corpus | build | four to six feature-sized lanes in `bench/corpus`, so a replay can show what `code-less` claims (every lane there now is a small fix) |
+| 2 | planner | judge | §1, §2 and §7: the brief without acceptance, the plan shape, the `judge` raise and the path raise |
+| 3 | reviewer | judge | §5, `notes` in the reviewer prompt, the tech-lead second review on judge lanes, map grants for the tech-lead |
+| 4 | loops | judge | ADR-054's three loop shapes |
+
+Wave 1 lanes run side by side; worktrees isolate them and the rebase resolves overlap. The proof lane's brief is the
+last that carries acceptance ids.
+
 ## Measurement before ratifying
 
-- **Planner (lane 1):** replay the planner on the 18 corpus lanes with the acceptance ids removed from their briefs.
+- **Builder (wave 1, seat knowledge):** replay the builder on the 18 corpus lanes, one run per arm, with §3's charter
+  and `test-economy` in every arm: today's `code-less`, the v5-based `code-less`, and none. One blind diff review.
+  Report test and source lines (today 804 and 392), blind pass (today 12 of 18) and tokens (today a median of 261k).
+  The rules stay if test lines fall and blind pass does not. The v5-based skill replaces today's if its tokens fall and
+  blind pass and source lines are no worse; if it is no better than no skill, `code-less` leaves the builder and its
+  structure and tie-break rules move into the charter. Repeat on the feature-sized lanes once they exist.
+- **Planner (wave 2):** replay the planner on the 18 corpus lanes with the acceptance ids removed from their briefs.
   Report tests named per lane and blind plan pass against the 11-01 control (11 of 42).
-- **Reviewer (lane 2):** replay the reviewer on the 10 known-defect lanes, three runs each. Report changes verdicts with
+- **Reviewer (wave 3):** replay the reviewer on the 10 known-defect lanes, three runs each. Report changes verdicts with
   a finding naming the defect file, against today's 9 of 30.
 
 ## What this does not decide
 
-- Provider fallback, the reviewer's model and effort, and which skills each seat holds.
+- Provider fallback and the reviewer's model and effort.
 - Whether the advisor and memory arms stay after their next measurement.
 - How the review is posted on GitHub.
 

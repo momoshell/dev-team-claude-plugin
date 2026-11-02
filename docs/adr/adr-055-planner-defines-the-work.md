@@ -253,16 +253,38 @@ land with the wave-2 planner lane.
 
 ## Measurement before ratifying
 
-- **Builder (wave 1, seat knowledge):** replay the builder on the 18 corpus lanes, one run per arm, with §3's charter
-  and `test-economy` in every arm: today's `code-less`, the v5-based `code-less`, and none. One blind diff review.
-  Report test and source lines (today 804 and 392), blind pass (today 12 of 18) and tokens (today a median of 261k).
-  The rules stay if test lines fall and blind pass does not. The v5-based skill replaces today's if its tokens fall and
-  blind pass and source lines are no worse; if it is no better than no skill, `code-less` leaves the builder and its
-  structure and tie-break rules move into the charter. Repeat on the feature-sized lanes once they exist.
-- **Planner (wave 2):** replay the planner on the 18 corpus lanes with the acceptance ids removed from their briefs.
-  Report tests named per lane and blind plan pass against the 11-01 control (11 of 42).
-- **Reviewer (wave 3):** replay the reviewer on the 10 known-defect lanes, three runs each. Report changes verdicts with
-  a finding naming the defect file, against today's 9 of 30.
+*Revised 2026-11-02, operator decision: the builder, the planner and the loops are measured on live lanes, not
+replayed.*
+
+A replay re-runs one seat on one archived prompt. It cannot re-run a loop, and the builder and planner prompts this
+record changes have no archived counterpart: every corpus brief carries acceptance ids and every corpus plan a gate.
+So only the reviewer is replayed. The builder, the planner and the loops are measured on the first 10 lanes started
+after the wave-4 loops lane merges, from their lane journals and merged diffs. A tier with fewer than 10 lanes by then
+reports the lanes it has, with that denominator.
+
+- **Reviewer (replay):** the 10 known-defect lanes of `~/crew-bench/defects-2026-11-01`, three runs each, with each
+  archived reviewer prompt rewritten to §5's charter, an empty builder report (the corpus builders predate `tests` and
+  `notes`) and the new return shape. Report `changes-needed` verdicts with a finding naming a defect file, against the
+  old prompt's 9 of 30 at high effort and 14 of 30 at xhigh (the judge tier).
+  **Measured 2026-11-03** (`~/crew-bench/reviewer-contract-2026-11-02`, 60 runs, none errored after 25 runs lost to a
+  network outage were rerun): high caught 14 of 30 (old 9 of 30), xhigh 12 of 30 (old 14 of 30). Every return met
+  §5's shape (0 of 60 defects under the strict validator). Tokens rose: high 13.6M against 9.4M (+44%), xhigh 20.2M
+  against 12.9M (+57%). No cell caught b1402, b1416 or b1441, old or new. At N = 30 neither difference is significant.
+  The contract is not worse at high; xhigh costs more and caught no more in this sample, so whether judge lanes keep
+  the reviewer at xhigh is open.
+- **Builder (first 10 lanes):** test lines as a share of code lines added (the 18 corpus lanes: 804 of 1196, 67%), tests
+  named per lane, tests red on the old source and green on the build out of tests named, and builder tokens. Lanes
+  differ in size from the corpus, so the share is compared, not raw lines. The §3 rules stay if the share falls. The
+  `code-less` arms comparison (today's, the v5-based, none) is not run; v5 replaces today's skill as §10 states.
+- **Planner (first 10 lanes):** tests named per lane, plans the reviewer or lead sent back to the planner, and builder
+  `insufficient` returns. The blind plan pass against the 11-01 control (11 of 42) is dropped: that review scored the
+  gate, which §8 removes.
+- **Loops (replaces ADR-054 §3):** per tier, total wall time, rounds, suite-repair turns, lead consults, operator
+  stops and defects found after merge (a later fix commit on main whose blame lands on the lane's lines). The build
+  loop is not adopted on the ADR-053 replay, since ADR-053 is rejected.
+
+Passive data from the wave lanes, which ran while the contract changed and so do not count toward the 10: b1485 to
+b1489 (PRs 2127 and 2129 to 2132) added 782 test and 490 source lines, a test share of 61%.
 
 ## What this does not decide
 

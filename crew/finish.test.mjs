@@ -164,6 +164,67 @@ test('a stopped lane with a build is finished: finish.json carries the stop, fin
   } finally { cleanup(f) }
 })
 
+// A replan the journal records as accepted (planner 3) or refused (planner 5).
+const replanRows = (accepted3) => {
+  const p3 = { ...PLANNER, id: 'lane9.planner.3', details: { ...PLANNER.details, plan_path: '/t/plan-3.md', tests: [] } }
+  const p5 = { ...PLANNER, id: 'lane9.planner.5', status: 'insufficient' }
+  return { p3, p5, rows: [
+    { event: 'run-start', stage: null },
+    { event: 'envelope', role: 'planner', id: 'lane9.planner.1', parsed: PLANNER, defects: [], error: null },
+    builderRow,
+    { event: 'envelope', role: 'planner', id: p3.id, parsed: p3, defects: accepted3 ? [] : ['details.tests is required'], error: null },
+    { event: 'envelope', role: 'planner', id: p5.id, parsed: p5, defects: [], error: null },
+    { event: 'verdict', stage: 'review', status: 'reviewed', verdict: 'changes-needed', findings: [FINDING] },
+    { event: 'verdict', stage: 'mutations', status: 'stopped', reason: STOP.reason, observation: STOP.observation },
+  ] }
+}
+
+test('a re-planned lane finishes on its latest accepted plan, and a plan without tests still finishes', () => {
+  for (const revised of [false, true]) {
+    const replan = replanRows(true)
+    const f = revised ? fixture({ rows: replan.rows }) : fixture()
+    try {
+      if (revised) {
+        writeFileSync(join(f.taskDir, 'planner-3.json'), JSON.stringify(replan.p3))
+        writeFileSync(join(f.taskDir, 'planner-5.json'), JSON.stringify(replan.p5))
+      }
+      assert.doesNotThrow(() => run(f).go())
+      assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.planPath, revised ? '/t/plan-3.md' : '/t/plan.md')
+    } finally { cleanup(f) }
+  }
+})
+
+// MUTATION: choose planner files without the journal's acceptance.
+test('a replan the journal records as refused is never the plan finish resumes', () => {
+  const replan = replanRows(false)
+  const f = fixture({ rows: replan.rows })
+  try {
+    writeFileSync(join(f.taskDir, 'planner-3.json'), JSON.stringify(replan.p3))
+    run(f).go()
+    assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.planPath, '/t/plan.md')
+  } finally { cleanup(f) }
+})
+
+// MUTATION: pass over an unrecorded newer plan for an older accepted one.
+test('a valid newer plan the journal does not mention refuses finish rather than resuming an older plan', () => {
+  const f = fixture()
+  try {
+    writeFileSync(join(f.taskDir, 'planner-3.json'), JSON.stringify({ ...PLANNER, id: 'lane9.planner.3', details: { ...PLANNER.details, plan_path: '/t/plan-3.md', tests: [] } }))
+    assert.throws(() => run(f).go(), { reason: 'finish-premise', message: /planner-3\.json has no journal row/ })
+  } finally { cleanup(f) }
+})
+
+// MUTATION: read a journal-refused planner file before skipping it.
+test('a refused replan that is not JSON is skipped for the older accepted plan', () => {
+  const replan = replanRows(false)
+  const f = fixture({ rows: replan.rows })
+  try {
+    writeFileSync(join(f.taskDir, 'planner-3.json'), '{ not json')
+    run(f).go()
+    assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.planPath, '/t/plan.md')
+  } finally { cleanup(f) }
+})
+
 test('older accepted plans without scope still finish', () => {
   const f = fixture()
   try {

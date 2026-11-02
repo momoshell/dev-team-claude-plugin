@@ -6,7 +6,8 @@
 import { appendFileSync, closeSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs'
 import { StringDecoder } from 'node:string_decoder'
 import { join, relative, resolve } from 'node:path'
-import { journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../context-layout.mjs'
+import { isLeanLayout, journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../context-layout.mjs'
+import { validateEnvelope } from '../../protocols.mjs'
 import { exportEntries } from '../../acp/export-entries.mjs'
 import { DEFAULT_MAX_LINES, MAX_LINES_ENV } from './readgate.ts'
 
@@ -487,18 +488,22 @@ export function loadAcceptedContext(value = {}, extraDeps = {}) {
     if (number === null) continue
     const path = join(returnsDir, String(name))
     const mtime = candidateMtime(path, deps)
-    if (mtime === null) continue
+    if (mtime === null) { if (isLeanLayout(env)) return null; continue }
     candidates.push({ number, path, mtime })
   }
   const currentCandidates = SELECT_LATEST_PLANNER_RETURN
     ? candidates.filter((candidate) => candidate.mtime > runStart).sort((left, right) => right.number - left.number)
     : candidates.sort((left, right) => left.number - right.number)
-  const candidate = currentCandidates[0]
+  let candidate, raw
+  for (const entry of currentCandidates) {
+    const plannerText = readBounded(entry.path, read, PLAN_CAP_BYTES)
+    if (plannerText === null) return null
+    try { raw = JSON.parse(plannerText) } catch { return null }
+    if (isLeanLayout(env) && (raw?.status !== 'done' || validateEnvelope('planner', raw, { archived: true }).defects.length)) continue
+    candidate = entry
+    break
+  }
   if (!candidate) return null
-  const plannerText = readBounded(candidate.path, read, PLAN_CAP_BYTES)
-  if (plannerText === null) return null
-  let raw
-  try { raw = JSON.parse(plannerText) } catch { return null }
   const context = plannerContext(raw, taskDir)
   if (!context) return null
   const planText = readBounded(context.plan_path, read, PLAN_CAP_BYTES)

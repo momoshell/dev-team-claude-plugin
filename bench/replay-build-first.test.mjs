@@ -212,7 +212,7 @@ test('the build-first planner return stays schema-valid and carries none of the 
         return { stopReason: 'end_turn' }
       },
     })
-    assert.deepEqual(validateEnvelope('planner', seen).defects, [])
+    assert.deepEqual(validateEnvelope('planner', seen, { archived: true }).defects, [])
     assert.doesNotMatch(JSON.stringify(seen), /RECORDED FIND|gate_cmd/)
     for (const key of ['gate_path', 'gate_cmd', 'mutations']) assert.equal(Object.hasOwn(seen.details, key), false)
   } finally { rmSync(root, { recursive: true, force: true }) }

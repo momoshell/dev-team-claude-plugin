@@ -354,7 +354,8 @@ test('E1 advisor module is node-only, erasable, and exposes no callable registra
   const source = readFileSync(new URL('./advisor.ts', import.meta.url), 'utf8')
   const imports = [...source.matchAll(/^import[\s\S]*?from\s+["']([^"']+)["']/gm)].map((match) => match[1])
   assert.ok(imports.length > 0)
-  assert.ok(imports.every((specifier) => specifier.startsWith('node:') || ['./subagent.ts', '../context-layout.mjs', '../../adapters/adapter-pi.mjs'].includes(specifier)))
+  assert.ok(imports.every((specifier) => specifier.startsWith('node:') || ['./subagent.ts', '../context-layout.mjs', '../../adapters/adapter-pi.mjs', '../../protocols.mjs'].includes(specifier)))
+  assert.doesNotMatch(readFileSync(new URL('../../protocols.mjs', import.meta.url), 'utf8'), /^import\s/m)
   assert.doesNotMatch(source, /registerTool/)
   assert.doesNotMatch(source, /^\s*(enum|namespace)\s/m)
 })
@@ -1612,10 +1613,10 @@ test('a lean lane gives the advisor its scope from the lane planner return writt
   // A seat-time anchor hides a planner return written before the seat; the lane's does not.
   writeFileSync(join(lane.taskDir, 'advisor-manifest.json'), JSON.stringify({ schema_version: 1, run_started_at: Date.now(), tripwires: [], cell }))
   assert.equal(advisor.loadContext({ taskDir: lane.taskDir, env: lane.env }).scope_source, 'absent')
-  // The newest return decides, and the parent's returns are never read.
+  // Invalid later returns cannot replace the accepted plan, and the parent's returns are never read.
   writeFileSync(join(lane.taskDir, 'advisor-manifest.json'), JSON.stringify({ schema_version: 1, run_started_at: lane.at, tripwires: [], cell }))
   lane.write(13, 40_000, { files_in_scope: 'nope', validation_lane: '' })
-  assert.equal(advisor.loadContext({ taskDir: lane.taskDir, env: lane.env }).scope_source, 'absent')
+  assert.equal(advisor.loadContext({ taskDir: lane.taskDir, env: lane.env }).scope_source, 'planner-return-12')
 })
 
 test('the advisor keeps the old layout without a lane layout and journals a lean lane in the lane journal', () => {

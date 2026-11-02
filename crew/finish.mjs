@@ -79,18 +79,28 @@ function requireWorktree(d, spec) {
   if (!isDir) throw new FinishRefusal('finish-worktree', `the lane worktree ${spec?.cwd} does not exist`)
 }
 
-// The lane's accepted plan and subject, including archived planner returns.
-function loadPlan(d, lane, taskDir) {
-  let plannerFile = null
-  let best = 0
-  for (const name of d.readdirSync(taskDir)) {
-    const n = /^planner-(\d+)\.json$/.exec(name)
-    if (n && Number(n[1]) > best) { best = Number(n[1]); plannerFile = name }
+// The lane's accepted plan and subject, including archived planner returns. Newest first, a planner file that is a
+// valid done return is resumed when the journal records it as accepted, or when the journal records no planner
+// envelope at all (an older journal). One the journal records as refused is skipped. One the journal does not mention
+// while it records others is ambiguous (journal writes are not load-bearing, so a missing row proves nothing) and is
+// refused rather than passed over for an older plan.
+function loadPlan(d, lane, taskDir, rows = []) {
+  const numberOf = (row) => Number(/\.planner\.(\d+)$/.exec(String(row.id ?? row.parsed?.id ?? ''))?.[1])
+  const recorded = rows.filter((row) => row.event === 'envelope' && row.role === 'planner')
+  const accepted = new Set(recorded.filter((row) => Array.isArray(row.defects) && row.defects.length === 0 && !row.error && row.parsed?.status === 'done').map(numberOf))
+  const mentioned = new Set(recorded.map(numberOf))
+  const files = d.readdirSync(taskDir).map((name) => ({ name, n: Number(/^planner-(\d+)\.json$/.exec(name)?.[1]) }))
+    .filter(({ n }) => Number.isInteger(n) && n > 0).sort((a, b) => b.n - a.n)
+  if (!files.length) throw new FinishRefusal('finish-premise', `lane ${lane} has no planner return`)
+  for (const { name, n } of files) {
+    // A file the journal records as refused is never read: it may not even be JSON.
+    if (recorded.length && mentioned.has(n) && !accepted.has(n)) continue
+    const checked = validateEnvelope('planner', readJson(d, join(taskDir, name), 'the planner return'), { archived: true })
+    if (checked.defects.length || checked.envelope?.status !== 'done') continue
+    if (recorded.length === 0 || accepted.has(n)) return checked.envelope.details
+    if (!mentioned.has(n)) throw new FinishRefusal('finish-premise', `the planner return ${name} has no journal row, so whether it was accepted is unknown`)
   }
-  if (!plannerFile) throw new FinishRefusal('finish-premise', `lane ${lane} has no planner return`)
-  const checked = validateEnvelope('planner', readJson(d, join(taskDir, plannerFile), 'the planner return'))
-  if (checked.defects.length > 0 || checked.envelope?.status !== 'done') throw new FinishRefusal('finish-premise', `the planner return ${plannerFile} is not an accepted plan`)
-  return checked.envelope.details
+  throw new FinishRefusal('finish-premise', `lane ${lane} has no accepted planner return`)
 }
 
 // The finish spec for a stop: the stop, the findings still open at that point of the journal, and the turn offset.
@@ -158,7 +168,7 @@ export function finishLane({ lane, root, deps = {} }) {
 
   if (!rows.some((row) => row.event === 'envelope' && row.role === 'builder' && Array.isArray(row.defects) && row.defects.length === 0 && ['done', 'insufficient'].includes(row.parsed?.status))) throw new FinishRefusal('finish-no-build', `lane ${lane} has no schema-valid done or insufficient builder envelope in its journal`)
 
-  const finish = finishFor(rows, stopped, stopAt, loadPlan(d, lane, taskDir))
+  const finish = finishFor(rows, stopped, stopAt, loadPlan(d, lane, taskDir, rows))
   const claim = claimStop(d, lane, taskDir, stopAt)
   return launch(d, { crewRoot, taskDir, spec, finish, claim })
 }
@@ -239,7 +249,7 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
     // return: the same finish spec the first pass had, plus the guidance, with the review rounds already spent.
     const stopped = rows.slice(0, readyAt).findLast((row) => row.event === 'verdict' && row.status === 'stopped')
     if (!stopped) throw new FinishRefusal('finish-premise', `lane ${lane} has no stop before its finish-ready row`)
-    const plan = loadPlan(d, lane, taskDir)
+    const plan = loadPlan(d, lane, taskDir, rows)
     // Rounds spent: the journal's own count of reviews since the stop (a ready row from before the count was recorded has none),
     // never less than the ready row's own count. Unknown history is never read as zero.
     const sinceStop = rows.slice(rows.lastIndexOf(stopped) + 1, readyAt)

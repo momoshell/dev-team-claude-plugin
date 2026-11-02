@@ -27,9 +27,9 @@ function fakes(options = {}) {
   }
   const envelope = (request) => ({
     role: request.role, id: request.id, status: 'done', summary: 'fixture',
-    details: request.role === 'planner' ? { subject: 'fix(crew): planned lane', plan_path: '/virtual/task/plan.md' }
+    details: request.role === 'planner' ? { subject: 'fix(crew): planned lane', plan_path: '/virtual/task/plan.md', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
       : request.role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
-      : request.role === 'lead' ? { decision: options.lead ?? 'escalate' }
+      : request.role === 'lead' ? { decision: options.lead ?? 'escalate', ...((options.lead ?? 'escalate') === 'escalate' ? { question: 'Which way should the lane go?' } : options.lead === 'bounce' ? { target: options.target ?? 'builder' } : {}) }
       : { verdict: options.review && ++reviewTurns <= options.review ? 'changes-needed' : 'pass', findings: options.review && reviewTurns <= options.review ? [finding] : [] },
   })
   const measured = (name, result) => async (input) => {
@@ -115,28 +115,108 @@ test('a protected path in files_in_scope or the diff raises the lane to judge, a
   }
 })
 
-test('a plan with every criterion not machine-checked reaches the PR with proof: none; a plan that names a test still needs one (PD7)', async () => {
-  for (const [properties, namesTest, prefix = ''] of [
-    ['None.', false], ['', false], ['- P1 test', true],
-    ['- P1 test', true, '```md\n## Properties\nNone.\n## Not machine-checked\n```\n'],
-    ['| Property | Test |\n| --- | --- |\n| P1 | lib.test.mjs: works |', true],
-    ['P1: lib.test.mjs: works', true], ['None.\nP1: lib.test.mjs: works', true],
-    ['```\nP1: lib.test.mjs: works\n```', true],
-  ]) {
-    const plan = `${prefix}## Properties\n${properties}\n## Not machine-checked\n- Criterion 1: reviewed\n`
-    const f = fakes({ spec: { acceptance: ['A1'] }, plan, edit: (v) => { if (v.role === 'planner') v.details.acceptance = ['A1']; if (v.role === 'builder') v.details.tests = []; return v } })
+test("the planner's tests alone decide proof: an empty list reaches the PR with proof: none, a named test needs one whatever plan.md says (PD7)", async () => {
+  for (const namesTest of [false, true]) {
+    const f = fakes({ plan: namesTest ? '## Properties\nNone.\n' : '## Properties\n- P1 test\n', edit: (v) => { if (v.role === 'planner' && !namesTest) v.details.tests = []; if (v.role === 'builder') v.details.tests = []; return v } })
     const result = await f.go()
+    assert.deepEqual(f.requests.map((r) => r.role), namesTest ? ['planner', 'builder', 'builder'] : ['planner', 'builder', 'reviewer'])
     if (namesTest) {
-      const retry = f.requests.filter((r) => r.role === 'builder')[1]
-      assert.ok(retry, properties)
-      assert.equal(retry.feedback[0].id, 'proof-no-tests')
+      assert.equal(f.requests[2].feedback[0].id, 'proof-no-tests')
+      assert.equal(result.reason, 'no-progress')
     } else {
       assert.equal(result.status, 'done')
-      assert.equal(count(f, 'builder'), 1)
       assert.ok(!f.calls.includes('proof'))
       for (const name of ['commit', 'publish']) assert.ok(f.seen[name].body.includes('- proof: none, no criterion is machine-checked'))
     }
   }
+})
+
+test('an escalate without details.question is a bounce to the same seat, and the lead stops lead-escalated only with its question', async () => {
+  for (const role of ['planner', 'builder', 'reviewer', 'lead']) {
+    let returned = false
+    const f = fakes({ edit: (v) => {
+      if (role === 'lead' && v.role === 'builder') return { ...v, status: 'escalate', details: { ...v.details, question: 'Builder question?' } }
+      if (v.role === role && !returned) { returned = true; return role === 'lead' ? { ...v, details: { decision: 'escalate' } } : { ...v, status: 'escalate' } }
+      return v
+    } })
+    const result = await f.go()
+    const expected = role === 'planner' ? ['planner', 'planner', 'builder', 'reviewer'] : role === 'builder' ? ['planner', 'builder', 'builder', 'reviewer'] : role === 'reviewer' ? ['planner', 'builder', 'reviewer', 'reviewer'] : ['planner', 'builder', 'lead', 'lead']
+    assert.deepEqual(f.requests.map((r) => r.role), expected)
+    const retry = f.requests.filter((r) => r.role === role)[1]
+    assert.equal(retry.feedback[0].id, 'escalate-no-question')
+    if (role === 'lead') {
+      assert.equal(result.reason, 'lead-escalated')
+      assert.equal(f.rows.findLast((r) => r.event === 'verdict').observation.question, 'Which way should the lane go?')
+    } else assert.equal(result.status, 'done')
+  }
+})
+
+test('a builder insufficient goes to the planner, and the build continues on the revised plan without the lead', async () => {
+  let builds = 0, plans = 0
+  const f = fakes({ edit: (v) => {
+    if (v.role === 'planner' && ++plans === 2) Object.assign(v.details, { files_in_scope: ['crew/loop.mjs'], subject: 'fix(crew): revised plan', tests: [] })
+    if (v.role === 'builder' && ++builds === 1) return { ...v, status: 'insufficient', summary: 'gap' }
+    if (v.role === 'builder') v.details.tests = []
+    return v
+  } })
+  const result = await f.go()
+  assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'builder', 'planner', 'builder', 'reviewer'])
+  assert.equal(result.status, 'done')
+  assert.equal(f.requests[2].feedback[0].envelope.status, 'insufficient')
+  assert.deepEqual(f.requests[3].filesInScope, ['crew/loop.mjs'])
+  assert.equal(f.requests[3].feedback[0].id, 'plan-revised')
+  assert.equal(f.seen.publish.title, 'fix(crew): revised plan')
+  assert.ok(f.seen.publish.body.includes('proof: none'))
+  assert.equal(f.requests[3].tier, 'judge')
+})
+
+test('a lead bounce names its target: planner revises the plan from the builder\'s envelope, builder keeps building', async () => {
+  for (const target of ['planner', 'builder']) {
+    let builds = 0, plans = 0
+    const f = fakes({ lead: 'bounce', target, edit: (v) => {
+      if (v.role === 'planner' && ++plans === 2) v.details.files_in_scope = ['revised.mjs']
+      if (v.role === 'builder' && ++builds === 1) return { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } }
+      return v
+    } })
+    const result = await f.go()
+    assert.deepEqual(f.requests.map((r) => r.role), target === 'planner' ? ['planner', 'builder', 'lead', 'planner', 'builder', 'reviewer'] : ['planner', 'builder', 'lead', 'builder', 'reviewer'])
+    assert.equal(result.status, 'done')
+    if (target === 'planner') {
+      assert.equal(f.requests[3].feedback[0].envelope.status, 'escalate')
+      assert.equal(f.requests[3].feedback[0].lead, 'fixture')
+      assert.deepEqual(f.requests[4].filesInScope, ['revised.mjs'])
+    }
+  }
+})
+
+test('the same failure with the same evidence twice stops the lane no-progress and no seat decides it', async () => {
+  for (const mode of ['envelope', 'insufficient', 'insufficient-reordered', 'lead', 'proof-no-tests', 'proof-unproven']) {
+    let turns = 0
+    const f = fakes({ lead: 'bounce', proof: { status: 'red', reason: 'exit-nonzero', rows: [{ file: 'lib.test.mjs', title: 'works', proven: false, reason: 'base-green' }] }, edit: (v) => {
+      if (v.role === 'builder' && mode === 'envelope') return { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } }
+      if (v.role === 'builder' && mode === 'insufficient') return { ...v, status: 'insufficient', summary: `gap ${++turns}` }
+      if (v.role === 'builder' && mode === 'insufficient-reordered') return { ...v, status: 'insufficient', details: ++turns === 1
+        ? { summary: 'gap', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
+        : { tests: [{ title: 'works', file: 'lib.test.mjs' }], summary: 'gap' } }
+      if (v.role === 'builder' && mode === 'lead') return { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } }
+      if (v.role === 'lead' && mode === 'lead') return { ...v, details: { decision: 'escalate' }, summary: `gap ${++turns}` }
+      if (v.role === 'builder' && mode === 'proof-no-tests') v.details.tests = []
+      return v
+    } })
+    const result = await f.go()
+    const expected = mode === 'envelope' ? ['planner', 'builder', 'lead', 'builder'] : mode.startsWith('insufficient') ? ['planner', 'builder', 'planner', 'builder'] : mode === 'lead' ? ['planner', 'builder', 'lead', 'lead'] : ['planner', 'builder', 'builder']
+    assert.deepEqual(f.requests.map((r) => r.role), expected)
+    assert.equal(result.reason, 'no-progress')
+    const observation = f.rows.findLast((r) => r.event === 'verdict').observation
+    assert.equal(['envelope', 'insufficient', 'insufficient-reordered', 'lead'].includes(mode) ? observation.role : observation.failure, mode === 'lead' ? 'lead' : mode === 'envelope' || mode.startsWith('insufficient') ? 'builder' : mode)
+  }
+  let builds = 0
+  const revised = fakes({ bounds: { planner: 3 }, edit: (v) => {
+    if (v.role === 'builder' && ++builds <= 2) return { ...v, status: 'insufficient', details: { ...v.details, summary: `gap ${builds}` } }
+    return v
+  } })
+  assert.equal((await revised.go()).status, 'done')
+  assert.deepEqual(revised.requests.map((r) => r.role), ['planner', 'builder', 'planner', 'builder', 'planner', 'builder', 'reviewer'])
 })
 
 const count = (f, role) => f.requests.filter((r) => r.role === role).length
@@ -287,7 +367,7 @@ test('a repaired envelope that is refused again stops the lane with no third tur
     assert.equal(f.calls.includes('gate'), false, name)
   }
   // a refused repair of the lead is a lead refusal
-  const lead = fakes({ edit: (v) => (v.role === 'planner' ? { ...v, status: 'escalate' } : v.role === 'lead' ? gaps(v) : v) })
+  const lead = fakes({ edit: (v) => (v.role === 'planner' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v.role === 'lead' ? gaps(v) : v) })
   assert.deepEqual(await lead.go(), stopped('lead-refused'))
   assert.equal(count(lead, 'lead'), 2)
 })
@@ -400,21 +480,21 @@ test('a lead bounce grants one retry, repeated bounces are bounded by the lead a
 
 // MUTATION: grant a whole extra round on every bounce and a seat with turns left outruns its bound unsupervised.
 test('a lead bounce on a seat with turns left does not raise its bound, so the next exhausted bound is put to the lead again', async () => {
-  const f = fakes({ review: 2, lead: 'bounce', edit: (v) => v.id === 'lane.builder.2' ? { ...v, status: 'insufficient' } : v })
+  const f = fakes({ review: 2, lead: 'bounce', edit: (v) => v.id === 'lane.builder.2' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v })
   await f.go()
   assert.deepEqual(f.requests.map((r) => r.role).slice(0, 7), ['planner', 'builder', 'lead', 'builder', 'reviewer', 'lead', 'builder'])
 })
 
 // MUTATION: let accept pass with no valid envelope and a bound or lead decision stands in for a measurement.
 test('a lead accept releases only a valid non-done envelope and never an exhausted bound', async () => {
-  const escalated = fakes({ lead: 'accept', edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate' } : v })
+  const escalated = fakes({ lead: 'accept', edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v })
   assert.equal((await escalated.go()).status, 'done')
   assert.equal(count(escalated, 'lead'), 1)
   assert.deepEqual(escalated.requests.find((r) => r.role === 'lead').feedback.map((x) => [x.role, x.reason, x.envelope.status]), [['planner', 'escalate', 'escalate']])
   const exhausted = fakes({ lead: 'accept', review: 10, bounds: { builder: 1 } })
   assert.deepEqual(await exhausted.go(), stopped('accept-unmeasured'))
   assert.equal(exhausted.calls.includes('commit'), false)
-  const changes = fakes({ lead: 'accept', review: 10, edit: (v) => v.role === 'reviewer' ? { ...v, status: 'escalate' } : v })
+  const changes = fakes({ lead: 'accept', review: 10, edit: (v) => v.role === 'reviewer' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v })
   assert.notEqual((await changes.go()).status, 'done')
   assert.equal(changes.calls.includes('suite'), false)
 
@@ -422,10 +502,10 @@ test('a lead accept releases only a valid non-done envelope and never an exhaust
 
 // MUTATION: consult a missing lead anyway, or let a bad lead envelope decide.
 test('an unseated, refusing or insufficient lead stops without recursion', async () => {
-  const none = fakes({ unseated: ['lead'], edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate' } : v })
+  const none = fakes({ unseated: ['lead'], edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v })
   assert.deepEqual(await none.go(), stopped('lead-unavailable'))
   assert.equal(count(none, 'lead'), 0)
-  const bad = fakes({ edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate' } : v.role === 'lead' ? { ...v, extra: 1 } : v })
+  const bad = fakes({ edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v.role === 'lead' ? { ...v, extra: 1 } : v })
   assert.deepEqual(await bad.go(), stopped('lead-refused'))
   assert.equal(count(bad, 'lead'), 2)
   const insufficient = fakes({ edit: (v) => v.role === 'planner' || v.role === 'lead' ? { ...v, status: 'insufficient' } : v })
@@ -433,7 +513,7 @@ test('an unseated, refusing or insufficient lead stops without recursion', async
   assert.equal(count(insufficient, 'lead'), 1)
   const undecided = fakes({ edit: (v) => v.role === 'planner' ? { ...v, status: 'insufficient' } : v.role === 'lead' ? { ...v, status: 'insufficient', details: {} } : v })
   assert.deepEqual(await undecided.go(), stopped('lead-refused'))
-  const crashed = fakes({ seatThrows: 'lead', edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate' } : v })
+  const crashed = fakes({ seatThrows: 'lead', edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v })
   assert.deepEqual(await crashed.go(), stopped('lead-refused'))
 })
 
@@ -622,7 +702,7 @@ test('every started stage ends on success and refusal, in order', async () => {
   assert.deepEqual(pairs(refused.rows), [...STAGES.slice(0, 7), 'suite', 'suite-repair', ...STAGES.slice(2, 7), 'suite'].flatMap((s) => [['stage-start', s], ['stage-end', s]]))
   const thrown = fakes({ deps: { mkdir: async () => {}, resolveAgents: undefined } })
   assert.deepEqual(await thrown.go(), stopped('invalid-input'))
-  const lead = fakes({ edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate' } : v })
+  const lead = fakes({ edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v })
   await lead.go()
   assert.deepEqual(pairs(lead.rows), [['stage-start', 'plan'], ['stage-start', 'lead'], ['stage-end', 'lead'], ['stage-end', 'plan']])
   const crashing = fakes({ deps: { readFile: async () => { throw new Error('boom') } } })
@@ -720,7 +800,7 @@ test('a task directory that cannot be made stops the lane before any seat', asyn
 test('every stopped reason is a member of the closed enum', async () => {
   assert.ok(Object.isFrozen(LOOP_REASONS))
   for (const reason of CHECK_REASONS) assert.ok(LOOP_REASONS.includes(reason))
-  for (const reason of ['unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'lead-escalated', 'lead-unavailable', 'lead-refused', 'accept-unmeasured', 'round-bound', 'paths-unmeasured']) assert.ok(LOOP_REASONS.includes(reason))
+  for (const reason of ['unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'lead-escalated', 'lead-unavailable', 'lead-refused', 'accept-unmeasured', 'round-bound', 'paths-unmeasured', 'no-progress']) assert.ok(LOOP_REASONS.includes(reason))
   const f = fakes({ suite: { status: 'red', reason: 'free text the enum has never heard of' } })
   assert.deepEqual(await f.go(), stopped('runner-threw'))
 })
@@ -835,7 +915,7 @@ test('the loop imports only builtins, the three contract modules and the skill p
   const dir = fileURLToPath(new URL('.', import.meta.url))
   const source = readFileSync(join(dir, 'loop.mjs'), 'utf8')
   const specifiers = [...source.matchAll(/^(?:import|} from|export [^\n]* from)[^'\n]*'([^']+)'/gm)].map((m) => m[1]).sort()
-  assert.deepEqual(specifiers, ['./agents.mjs', './checks.mjs', './proof.mjs', './protocols.mjs', './skills-proof.mjs', 'node:fs/promises', 'node:path'])
+  assert.deepEqual(specifiers, ['./agents.mjs', './checks.mjs', './proof.mjs', './protocols.mjs', './skills-proof.mjs', 'node:fs/promises', 'node:path', 'node:util'])
   const importers = readdirSync(dir, { recursive: true, withFileTypes: true })
     .filter((e) => e.isFile() && e.name.endsWith('.mjs') && !e.name.endsWith('.test.mjs') && e.name !== 'loop.mjs')
     .map((e) => join(e.parentPath, e.name))

@@ -18,7 +18,7 @@ Escalate only for a case in ADR-055 §12: the ask cannot be done as written, the
 
 Lead decisions: `bounce`, `accept`, `escalate`.
 
-The loop runs the gate at baseline, after the build and under mutation. It then runs the suite, commits, rebases and opens the PR. Do not run those stages yourself.
+The loop runs each test the builder names on the old source and on the build. It then runs the suite, commits, rebases and opens the PR. Do not run those stages yourself.
 
 Return exactly one P2 JSON envelope at the supplied return path. Use the issued role and id, a nonempty summary and no extra fields. Report a gap honestly rather than claiming done.
 

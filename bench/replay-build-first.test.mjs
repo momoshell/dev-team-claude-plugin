@@ -214,7 +214,6 @@ test('the build-first planner return stays schema-valid and carries none of the 
     })
     assert.deepEqual(validateEnvelope('planner', seen).defects, [])
     assert.doesNotMatch(JSON.stringify(seen), /RECORDED FIND|gate_cmd/)
-    assert.equal(seen.details.gate_path, join(root, 'out', 'task', 'gate.mjs'))
-    assert.equal(existsSync(seen.details.gate_path), false)
+    for (const key of ['gate_path', 'gate_cmd', 'mutations']) assert.equal(Object.hasOwn(seen.details, key), false)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })

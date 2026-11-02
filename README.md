@@ -4,11 +4,11 @@
 
 One brief goes in; a lean lane comes out. `crew start <brief.md>` makes a
 worktree and a journal, then plays four seats over ACP: a **planner** explores
-the code and writes the plan and an acceptance gate, a **builder** edits the
+the code and writes the plan, a **builder** edits the
 repo, a **reviewer** gives a verdict, and a **lead** answers escalations with
-one closed decision. Code only checks the result: the gate is red at baseline
-and green after the build, each gate check has a mutation that kills it, the
-full suite is green, and commit, rebase and PR happen only on green. A stopped
+one closed decision. Code only checks the result: each named test is red on the
+old source and green on the build, and the full suite is green. Commit, rebase
+and PR happen only on green (ADR-052, ADR-055). A stopped
 lane is picked up again with `crew finish`. Every seat's full session is
 recorded, so any lane can be inspected afterwards, and the visualizer reads
 those journals and session files.
@@ -73,7 +73,7 @@ before its first lane.
 ## What's in this repo
 
 - **`crew/`** — the runtime: `start.mjs` (lane start), `lean.mjs` and
-  `loop.mjs` (the loop), `checks.mjs` (gate, mutation proof, suite, commit,
+  `loop.mjs` (the loop), `proof.mjs` (per-test proof), `checks.mjs` (suite, commit, rebase,
   PR), `agents.mjs` and `protocols.mjs` (seat definitions and the closed
   protocols), `acp/` and `acp-client.mjs` (the ACP seat transport), and the
   verbs `show`, `finish`, `record-pr`, `closeout` and `lanes`. Seat definitions

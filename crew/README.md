@@ -28,8 +28,7 @@ the brief, the task directory, the lane journal and every seat's session file.
 body is the ask). `crew/loop.mjs` runs it:
 
 ```
-plan -> gate baseline (RED required) -> build -> gate (GREEN) -> mutation proof
-     -> review -> full suite -> commit -> rebase -> PR
+plan -> build -> per-test proof -> review -> full suite -> commit -> rebase -> PR
 ```
 
 The lane name is the brief's file name. `crew start` runs the `standard` shape
@@ -63,8 +62,8 @@ A tier override replaces only the fields it names and keeps a raw override model
 
 | Seat | Job | Repo writes |
 |---|---|---|
-| `planner` | explores the code, writes the plan and the acceptance gate; envelope carries the plan and gate paths and the acceptance ids covered | none (task dir only) |
-| `builder` | edits the repo, tests included; on a finish run may repair the gate and returns replacement mutations | the only seat that writes the repo |
+| `planner` | explores the code, writes the plan and names the acceptance ids | none (task dir only) |
+| `builder` | edits the repo and names tests to prove | the only seat that writes the repo |
 | `reviewer` | verdict and typed findings; conformance to plan, then correctness | none |
 | `lead` | answers an escalation with one closed decision | none |
 | `tech-lead` | optional plan adversary, a different model or effort | none |
@@ -75,13 +74,9 @@ refused (`crew/skills-proof.mjs`). Scope is context, not enforcement
 
 ## Checks
 
-`crew/checks.mjs` owns what code verifies:
+`crew/proof.mjs` and `crew/checks.mjs` own what code verifies:
 
-- **Gate** — `task/gate.mjs` prints `FAIL <id>` per failing acceptance id. It
-  must be red at baseline and green after the build.
-- **Mutation proof** — each gate check has a `{check, file, find, replace}`
-  declaration that turns exactly that check red; the loop applies it and
-  restores the tree (`crew/tree-fingerprint.mjs`).
+- **Proof** — each named test must fail in its own body on the old source and pass on the build. This is not a kill proof.
 - **Suite** — the full suite runs with a timeout and a process-group kill.
 - **Commit, rebase, PR** — only on green; the PR is opened, never merged.
 
@@ -93,7 +88,7 @@ Everything durable is a file; session chat is never the record.
 - **P2 envelope**: one JSON object per seat turn at the path the loop issued,
   `{ role, id, status: done|insufficient|escalate, summary, details }`; the
   loop reads it back from that path and checks the id.
-- **P3 gate**: `task/gate.mjs`, with one kill-mutation per check.
+- **P3 gate**: retired by ADR-055; proof reads builder `details.tests`.
 - **P4 journal and sessions**: one append-only JSONL per lane and one session
   file per seat turn holding its full ACP update stream, under
   `<task>/lean/<role>/`. `crew show` reads them; the visualizer reads them.
@@ -103,7 +98,8 @@ Everything durable is a file; session chat is never the record.
 - `start.mjs` — `crew start`: checks the brief, creates the worktree, starts the detached run.
 - `lean.mjs` — the detached entry; plays each seat turn over ACP and writes the session files.
 - `loop.mjs` — the loop: bounded rounds, lead consults, the `finish` shape, journal rows.
-- `checks.mjs` — gate, mutation proof, suite, commit, rebase, PR.
+- `proof.mjs` — per-test proof.
+- `checks.mjs` — suite, commit, rebase, PR.
 - `agents.mjs`, `protocols.mjs` — agent definitions, tiers, and the closed protocols.
 - `acp/`, `acp-client.mjs`, `acp-permission.mjs` — the ACP seat transport, grants and permission handling.
 - `skills-proof.mjs` — the required-skill proof.

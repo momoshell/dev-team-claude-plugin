@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url'
 import { assertOutsideProtected, CHECKOUT, CORPUS_DIR, errText, git, inside, loadCorpus, realThrough } from './replay-common.mjs'
 
 const DIFF_RUBRIC = 'Review only this change against the task. Count must-fix findings precisely.'
-const PLAN_RUBRIC = "# What to review\n\nThis change adds a lane's plan (lane/plan.md) and acceptance gate (lane/gate.mjs) for the brief above, before any code is built. In the lane the gate runs from the task dir with the checkout as cwd. Judge whether a builder following this plan, checked by this gate, would deliver what the brief asks. A must-fix is a plan or gate defect that would let a wrong build pass, make a right build fail, or miss an acceptance item or invariant. Count must-fix findings precisely."
+const PLAN_RUBRIC = "# What to review\n\nThis change adds a lane's plan (lane/plan.md) and its gate (lane/gate.mjs) when present for the brief above, before any code is built. Judge whether a builder following this plan would deliver what the brief asks. A must-fix is a defect that would miss an acceptance item or invariant. Count must-fix findings precisely."
 
 const present = (path) => { try { lstatSync(path); return true } catch (error) { if (error.code === 'ENOENT') return false; throw error } } // a dangling symlink is present
 const readOr = (file) => (existsSync(file) ? readFileSync(file, 'utf8') : null)
@@ -91,7 +91,7 @@ export async function prepareReviews({ runs, kind, out, keyPath, corpusDir = COR
       job.plan = `plan-${code}.md`
       job.gate = `gate-${code}.mjs`
       if (plan === null) job.missing.push('plan.md'); else writeFileSync(join(outDir, job.plan), scrub(plan))
-      if (gate === null) job.missing.push('gate.mjs'); else writeFileSync(join(outDir, job.gate), scrub(gate))
+      if (gate !== null) writeFileSync(join(outDir, job.gate), scrub(gate))
       context = `# Brief\n\n${readFileSync(join(dir, 'brief.md'), 'utf8')}\n\n${PLAN_RUBRIC}\n`
     }
     writeFileSync(join(outDir, job.context), context)
@@ -169,7 +169,7 @@ async function reviewOne(job, { out, repo, reviewer, home, homeError }) {
     } else {
       mkdirSync(join(wt, 'lane'), { recursive: true })
       copyFileSync(join(out, job.plan), join(wt, 'lane', 'plan.md'))
-      copyFileSync(join(out, job.gate), join(wt, 'lane', 'gate.mjs'))
+      if (existsSync(join(out, job.gate))) copyFileSync(join(out, job.gate), join(wt, 'lane', 'gate.mjs'))
       git(['-C', wt, 'add', '-A'])
       const commit = git(['-C', wt, ...GIT_ID, 'commit', '-q', '-m', 'lane plan and gate under review'])
       if (commit.status !== 0) throw new Error(`commit failed: ${(commit.stderr || commit.stdout || '').trim()}`)

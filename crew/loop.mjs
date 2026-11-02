@@ -1,5 +1,4 @@
-// The ADR-052 standard loop: plan -> gate baseline (red) -> build -> gate (green) -> mutation
-// proof -> review -> suite -> commit -> PR. Import-only: every effect (seat turn, filesystem,
+// The standard loop: plan -> build -> proof -> review -> suite -> commit -> PR. Import-only: every effect (seat turn, filesystem,
 // check, git, journal) crosses an injected seam, and nothing here is wired to the boot path yet.
 // A seat's return is never trusted from the callback: the envelope is read back from the path
 // the loop issued, parsed and validated as P2, and must carry the id the loop issued.
@@ -7,13 +6,15 @@ import { appendFile, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { resolveAgents } from './agents.mjs'
 import {
-  CHECK_REASONS, checkBaseline, commitChanges, openPullRequest, proveMutations, rebaseBranch, runGate, runSuite,
+  CHECK_REASONS, commitChanges, openPullRequest, rebaseBranch, runSuite,
 } from './checks.mjs'
+import { proveTests } from './proof.mjs'
 import { TIERS, sections, validateEnvelope } from './protocols.mjs'
 import { proveRequiredSkills } from './skills-proof.mjs'
 
 export const DEFAULT_ROUNDS = 2
 const MAX_ENVELOPE_REPAIRS = 1
+const PROOF_UNMEASURED = '- proof: unmeasured'
 export const LOOP_REASONS = Object.freeze([
   ...CHECK_REASONS, 'unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'lead-escalated', 'lead-unavailable',
   'lead-refused', 'accept-unmeasured', 'round-bound', 'paths-unmeasured',
@@ -105,21 +106,21 @@ export async function runLoop(spec, deps = {}) {
     && (spec.timeoutMs === undefined || (Number.isSafeInteger(spec.timeoutMs) && spec.timeoutMs > 0))
   if (!sound) return refusal('invalid-input')
   const fin = spec.finish
-  // A finish run re-enters a stopped lane: its accepted plan, gate and declarations, why it stopped, and the open findings.
-  if (isFinish && !(fin && typeof fin === 'object' && [fin.planPath, fin.gatePath, fin.subject].every(text)
-    && Array.isArray(fin.mutations) && Array.isArray(fin.findings) && text(fin.stop?.reason)
+  // A finish run re-enters a stopped lane with its accepted plan and open findings.
+  if (isFinish && !(fin && typeof fin === 'object' && [fin.planPath, fin.subject].every(text)
+    && Array.isArray(fin.findings) && text(fin.stop?.reason)
     && Number.isSafeInteger(fin.turnOffset) && fin.turnOffset >= 0
     && (fin.filesInScope == null || strings(fin.filesInScope))
     && (fin.guidance === undefined || typeof fin.guidance === 'string')
     && (fin.priorReviewRounds === undefined || (Number.isSafeInteger(fin.priorReviewRounds) && fin.priorReviewRounds >= 0)))) return refusal('invalid-input')
   const d = {
-    resolveAgents, mkdir, readFile, stat, realpath, writeFile, checkBaseline, runGate, proveMutations, runSuite, commitChanges, rebaseBranch, openPullRequest,
+    resolveAgents, mkdir, readFile, stat, realpath, writeFile, proveTests, runSuite, commitChanges, rebaseBranch, openPullRequest,
     run: runSuite,
     now: Date.now,
     journal: async (row) => appendFile(join(spec.taskDir, 'journal.jsonl'), `${JSON.stringify(row)}\n`),
     ...deps,
   }
-  const seams = ['runSeat', 'resolveAgents', 'mkdir', 'readFile', 'stat', 'realpath', 'writeFile', 'journal', 'checkBaseline', 'runGate', 'proveMutations', 'runSuite', 'commitChanges', 'rebaseBranch', 'openPullRequest', 'run', 'now']
+  const seams = ['runSeat', 'resolveAgents', 'mkdir', 'readFile', 'stat', 'realpath', 'writeFile', 'journal', 'proveTests', 'runSuite', 'commitChanges', 'rebaseBranch', 'openPullRequest', 'run', 'now']
   if (!seams.every((name) => typeof d[name] === 'function')) return refusal('invalid-input')
   let resolved
   try { resolved = d.resolveAgents(spec.tier) } catch { return refusal('seat-unmeasured') }
@@ -135,12 +136,12 @@ export async function runLoop(spec, deps = {}) {
   let where = null
   let turn = isFinish ? fin.turnOffset : 0
   let planPath = isFinish ? fin.planPath : null
-  let gatePath = isFinish ? fin.gatePath : null
+  let namedTests = []
   let filesInScope = isFinish ? fin.filesInScope ?? null : null
   let changedPaths = []
   let stagePaths = []
 
-  // A planner's plan_path and gate_path must each name an existing regular file inside the task dir (a relative
+  // A planner's plan_path must name an existing regular file inside the task dir (a relative
   // path is read against it), the way the context arms resolve them; anything else is a defect for the planner to repair.
   const within = (root, target) => {
     const rel = relative(root, target)
@@ -149,8 +150,8 @@ export async function runLoop(spec, deps = {}) {
   const artifactDefects = async (details) => {
     const defects = []
     let root = null
-    try { root = await d.realpath(resolve(spec.taskDir)) } catch (error) { return [`details.plan_path and details.gate_path cannot be checked: the task dir is unreadable (${describe(error).message})`] }
-    for (const key of ['plan_path', 'gate_path']) {
+    try { root = await d.realpath(resolve(spec.taskDir)) } catch (error) { return [`details.plan_path cannot be checked: the task dir is unreadable (${describe(error).message})`] }
+    for (const key of ['plan_path']) {
       const target = resolve(spec.taskDir, details[key])
       if (/:\d+(-\d+)?$/.test(details[key])) { defects.push(`details.${key} must be a bare file path, without a line-range suffix: ${details[key]}`); continue }
       if (!within(resolve(spec.taskDir), target)) { defects.push(`details.${key} must be a file inside the task dir ${spec.taskDir}`); continue }
@@ -207,7 +208,7 @@ export async function runLoop(spec, deps = {}) {
         rounds[role] += 1
         const id = `${spec.id}.${role}.${turn}`
         const returnPath = join(spec.taskDir, `${role}-${turn}.json`)
-        const request = { role, seat: seats[role], id, returnPath, brief: spec.brief, planPath, gatePath, feedback, ...(['builder', 'reviewer'].includes(role) ? { filesInScope: filesInScope === null ? null : [...filesInScope] } : {}), ...(role === 'reviewer' ? { changedPaths } : {}) }
+        const request = { role, seat: seats[role], id, returnPath, brief: spec.brief, planPath, feedback, ...(['builder', 'reviewer'].includes(role) ? { filesInScope: filesInScope === null ? null : [...filesInScope] } : {}), ...(role === 'reviewer' ? { changedPaths } : {}) }
         // One attempt: run the seat, then read the issued path back, parse it and validate it in full.
         const attempt = async (asked) => {
           let failure = null
@@ -286,10 +287,8 @@ export async function runLoop(spec, deps = {}) {
     if (planned?.halt) return planned.halt
     const acceptance = isFinish ? spec.acceptance : planned.envelope.details.acceptance
     const subject = isFinish ? fin.subject : planned.envelope.details.subject
-    let mutations = isFinish ? [...fin.mutations] : planned.envelope.details.mutations
     if (!isFinish) {
       planPath = resolve(spec.taskDir, planned.envelope.details.plan_path)
-      gatePath = resolve(spec.taskDir, planned.envelope.details.gate_path)
       if (acceptance.length !== spec.acceptance.length || !acceptance.every((id) => spec.acceptance.includes(id))) return await stop('envelope-refused', { acceptance })
       filesInScope = planned.envelope.details.files_in_scope ?? null
     } else {
@@ -297,67 +296,34 @@ export async function runLoop(spec, deps = {}) {
       seats.reviewer = { ...seats.reviewer, rounds: FINISH_REVIEW_ROUNDS - (fin.priorReviewRounds ?? 0) }
     }
 
-    // One line each, from the last round: a result never measured stays unmeasured in the body.
-    const baselineLines = []
-    let gateLine = '- Gate: unmeasured.'
-    let proofLine = '- Mutations: unmeasured.'
+    let proofLines = [PROOF_UNMEASURED]
     let suiteLine = '- Suite: unmeasured.'
     const finishReviews = []
-    const baseline = isFinish ? null : await stage('baseline', () => callCheck('baseline', d.checkBaseline, { cwd, gatePath, timeoutMs }))
-    if (!isFinish) {
-      if (!baseline.accepted) return stop(baseline.reason, baseline)
-      if (baseline.reason !== 'gate-failed' || baseline.result?.status !== 'red' || baseline.result.reason !== 'gate-failed' || !(baseline.result.failingIds?.length > 0)) return stop('runner-threw', baseline)
-      baselineLines.push(`- Baseline gate: ${baseline.result.status}; failing ids: ${baseline.result.failingIds.join(', ')}.`)
-    }
-
-    let feedback = isFinish ? [{ id: 'finish-stop', reason: fin.stop.reason, observation: fin.stop.observation }, ...(fin.guidance !== undefined ? [{ id: 'finish-return', guidance: fin.guidance }] : []), ...fin.findings, { id: 'finish-gate', summary: 'You may repair the lane gate at the Gate path; return replacement mutations for any check you change.' }] : []
-    // A suite red on both runs sends the lane back through build, gate, proof and review once, with the failures as feedback.
+    let feedback = isFinish ? [{ id: 'finish-stop', reason: fin.stop.reason, observation: fin.stop.observation }, ...(fin.guidance !== undefined ? [{ id: 'finish-return', guidance: fin.guidance }] : []), ...fin.findings] : []
     let repairing = false
     let repaired = false
-    // A proof whose only non-killed rows are bind-fail earns the builder one re-aim turn, for those ids alone; a re-aim turn never earns another.
-    let reaiming = false
-    let reaimIds = []
     for (;;) {
       for (;;) {
-        const wasReaimTurn = reaiming
-        const built = await stage(reaiming ? 'mutation-reaim' : repairing ? 'suite-repair' : 'build', () => seatTurn('builder', feedback, { singleTurn: repairing || reaiming }))
+        proofLines = [PROOF_UNMEASURED]
+        const built = await stage(repairing ? 'suite-repair' : 'build', () => seatTurn('builder', feedback, { singleTurn: repairing }))
         repairing = false
         if (built.halt) return built.halt
-        // A finish builder, or a standard re-aim turn, may replace declarations the proof runs; the gate and proof below re-prove whatever it changed.
-        const replacements = built.envelope.details.mutations
-        if (replacements !== undefined) {
-          const mayReaim = isFinish || reaiming
-          const allowed = reaiming ? reaimIds : acceptance
-          if (!mayReaim || replacements.some((r) => !allowed.includes(r.check))) return await stop('envelope-refused', { mutations: replacements })
-          mutations = mutations.map((declaration) => replacements.find((replacement) => replacement.check === declaration.check) ?? declaration)
-        }
-        reaiming = false
-        const gate = await stage('gate', () => callCheck('gate', d.runGate, { cwd, gatePath, timeoutMs }, { command: true }))
-        if (gate.status !== 'green') return stop(gate.reason, gate)
-        gateLine = `- Gate: ${gate.status}.`
-
-        const proof = await stage('mutations', () => callCheck('mutations', d.proveMutations, { cwd, gatePath, checks: acceptance, mutations, timeoutMs }))
-        const rows = Array.isArray(proof.rows) ? proof.rows : []
-        const proofOK = proof.status === 'green' && proof.reason === null && rows.length === acceptance.length
-          && acceptance.every((id) => rows.filter((row) => row?.check === id && row.outcome === 'killed' && row.reason === null).length === 1)
-        if (!proofOK) {
-          const nonKilled = rows.filter((row) => row?.outcome !== 'killed')
-          const bindFailRows = rows.filter((row) => row?.outcome === 'unmeasured' && row?.reason === 'bind-fail')
-          const canReaim = !wasReaimTurn && rows.length === acceptance.length && nonKilled.length > 0 && bindFailRows.length === nonKilled.length
-          if (!canReaim) return stop(proof.reason ?? 'mutation-unmeasured', proof)
-          reaiming = true
-          reaimIds = bindFailRows.map((row) => row.check)
-          seats.builder = { ...seats.builder, rounds: (seats.builder.rounds ?? DEFAULT_ROUNDS) + 1 }
-          feedback = bindFailRows.map((row) => ({
-            id: row.check,
-            severity: 'must-fix',
-            summary: `Mutation ${row.check} failed to bind (bind-fail); return details.mutations replacing only this declaration with a find text that occurs exactly once.`,
-            check: row.check,
-            occurrences: row.occurrences ?? null,
-          }))
+        if (Array.isArray(built.envelope.details.tests) && built.envelope.details.tests.length) namedTests = built.envelope.details.tests
+        if (!namedTests.length && !isFinish) {
+          feedback = [{ id: 'proof-no-tests', severity: 'must-fix', summary: 'Name at least one test in details.tests ({file, title}); the loop proves each red on the old source and green on the build.' }]
           continue
         }
-        proofLine = `- Mutations: ${rows.filter((row) => row.outcome === 'killed').length}/${acceptance.length} killed (${rows.map((row) => `${row.check}: ${row.outcome}`).join(', ')}).`
+        if (namedTests.length) {
+          const proof = await stage('proof', () => callCheck('proof', d.proveTests, { cwd, base: 'HEAD', tests: namedTests, timeoutMs }))
+          const rows = Array.isArray(proof.rows) ? proof.rows : []
+          const proofOK = proof.status === 'green' && proof.reason === null && rows.length === namedTests.length && rows.every((row) => row?.proven === true)
+          if (!proofOK && proof.status === 'red') {
+            feedback = [{ id: 'proof-unproven', severity: 'must-fix', summary: 'Named tests must be red on the old source and green on the build.', tests: rows.filter((row) => !row?.proven).map(({ file, title, base, build, reason }) => ({ file, title, base, build, reason })) }]
+            continue
+          }
+          if (!proofOK) return stop(proof.reason ?? 'runner-threw', proof)
+          proofLines = rows.map(({ file, title }) => `- proof: ${file} ${JSON.stringify(oneLine(title))}: red on the old source, green on the build`)
+        }
 
         // The reviewer is told what git reports changed now, remeasured every round; an unreadable status stops the lane.
         const status = await stage('review-paths', () => callCheck('review-paths', d.run, { cwd, command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs }, { command: true }))
@@ -393,7 +359,7 @@ export async function runLoop(spec, deps = {}) {
         const rerun = await runSuite()
         if (rerun.status === 'red') {
           if (repaired) return stop(suite.reason, rerun)
-          // Two measured reds earn one builder turn and one review (beyond their rounds if spent), then the gate, proof, review and suite again.
+          // Two measured reds earn one builder turn and one review (beyond their rounds if spent), then proof, review and suite again.
           const failures = suiteFailures([suite, rerun])
           feedback = [{
             id: 'suite-repair',
@@ -417,7 +383,7 @@ export async function runLoop(spec, deps = {}) {
       }
       break
     }
-    const measurements = [...baselineLines, gateLine, proofLine, suiteLine]
+    const measurements = [...proofLines, suiteLine]
     const texts = acceptanceTexts(spec.brief)
     const finishLines = !isFinish ? [] : [
       '## Finish',
@@ -454,8 +420,10 @@ export async function runLoop(spec, deps = {}) {
     if (rebased.status !== 'green' || !text(rebased.head)) return stop(rebased.reason ?? 'runner-threw', rebased)
 
     if (rebased.head !== committed.head) {
-      const postGate = await stage('gate', () => callCheck('gate', d.runGate, { cwd, gatePath, timeoutMs }, { command: true }))
-      if (postGate.status !== 'green') return stop(postGate.reason, postGate)
+      if (namedTests.length) {
+        const reproven = await stage('proof', () => callCheck('proof', d.proveTests, { cwd, base: `${rebased.head}^`, tests: namedTests, timeoutMs }))
+        if (reproven.status !== 'green' || reproven.reason !== null || !Array.isArray(reproven.rows) || reproven.rows.length !== namedTests.length || !reproven.rows.every((row) => row?.proven === true)) return stop(reproven.reason ?? 'runner-threw', reproven)
+      }
       const postSuite = await stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs ?? timeoutMs }, { command: true }))
       if (postSuite.status !== 'green') return stop(postSuite.reason, postSuite)
       // The tree the checks passed on must be the commit that is published or reported ready.
@@ -473,7 +441,7 @@ export async function runLoop(spec, deps = {}) {
       const reviewRounds = (fin.priorReviewRounds ?? 0) + rounds.reviewer
       const report = { schema: 'finish-report/1', lane: spec.id, stop: { reason: fin.stop.reason, observation: fin.stop.observation ?? null }, subject, body, head: rebased.head, reviewRounds, reviews: finishReviews, measurements, acceptance }
       await d.writeFile(join(spec.taskDir, 'finish-report.json'), `${JSON.stringify(report, null, 2)}\n`)
-      await emit('finish-ready', { status: 'ready-for-operator', head: rebased.head, subject, body, reviewRounds, mutations })
+      await emit('finish-ready', { status: 'ready-for-operator', head: rebased.head, subject, body, reviewRounds })
       return { status: 'done', reason: null, pr: null }
     }
 

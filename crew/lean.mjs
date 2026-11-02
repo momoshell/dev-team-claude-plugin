@@ -23,16 +23,14 @@ function exampleEnvelope(role, id, acceptance, shape = 'standard') {
     planner: {
       subject: 'fix(crew): publish measured lane results',
       plan_path: '<absolute path of the plan you wrote>',
-      gate_path: '<absolute path of the gate you wrote>',
       acceptance,
-      mutations: acceptance.map((check) => ({ check, file: '<repo-relative file the gate reads>', find: '<literal text in that file>', replace: '<different literal text that makes this check fail>' })),
       files_in_scope: ['<repo-relative file the builder may edit>'],
       validation_lane: '<the node --test command that checks the change>',
-      gate_cmd: '<the command that runs your gate>',
     },
     builder: {
       summary: '<what you built>',
-      ...(shape === 'finish' ? { mutations: [{ check: '<acceptance id whose declaration you replace>', file: '<repo-relative file>', find: '<literal text in that file>', replace: '<different literal text that makes the check fail>' }] } : {}),
+      tests: [{ file: '<repo-relative test file>', title: '<exact test title>' }],
+      notes: '<what you did not test, the guards you relied on, the checks you ran>',
     },
     reviewer: review,
     'tech-lead': review,
@@ -92,7 +90,7 @@ function repairPromptFor({ request, spec }) {
 }
 
 function promptFor({ request, spec, source, charters, body, section }) {
-  const { role, id, returnPath, brief, planPath, gatePath, feedback } = request
+  const { role, id, returnPath, brief, planPath, feedback } = request
   const lines = [
     body,
     '',
@@ -102,7 +100,6 @@ function promptFor({ request, spec, source, charters, body, section }) {
     '## Brief',
     brief,
     ...(planPath ? ['', `Plan path: ${planPath}`] : []),
-    ...(gatePath ? [`Gate path: ${gatePath}`] : []),
     ...(role === 'reviewer' ? ['', '## Changed paths', ...request.changedPaths.map((path) => `- ${JSON.stringify(path)}`)] : []),
     ...(section ? ['', section] : []),
     '',

@@ -27,11 +27,10 @@ test('DR2: guidelines are live or operator references', () => {
   const live = `${directory}/review-do-not-flag.md`
   const reference = `${directory}/vitest-gates.md`
   assert.ok(docs.includes(live))
-  assert.ok(docs.includes(reference))
+  assert.ok(!docs.includes(reference))
   assert.ok(!docs.includes(`${directory}/seat-pre-return-checklist.md`))
   for (const path of docs.filter((path) => path !== live)) assert.match(read(path), /\boperator reference\b/i, path)
-  assert.ok(existsSync(join(cwd, directory, 'gate-kit.mjs')))
-  assert.ok(!read(reference).includes('The planner receives this document as an absolute plugin path.'))
+  assert.equal(existsSync(join(cwd, directory, 'gate-kit.mjs')), false)
   const loader = spawnSync(process.execPath, [join(cwd, '.agents/skills/review-procedure/scripts/load-guidelines.mjs')], { cwd, encoding: 'utf8' })
   assert.equal(loader.status, 0, loader.stderr)
   assert.equal(loader.stdout, read(live))

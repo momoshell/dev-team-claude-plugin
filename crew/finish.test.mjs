@@ -118,7 +118,15 @@ test('a lane whose worktree is missing is refused as finish-worktree before any 
 
 // MUTATION: rewrite lean.json instead of finish.json and the stopped lane's own spec is lost.
 test('a stopped lane with a build is finished: finish.json carries the stop, findings, plan and offset, and the run is spawned in the worktree', () => {
-  const f = fixture()
+  const f = fixture({ rows: [
+    { event: 'run-start', stage: null },
+    { event: 'envelope', role: 'planner', parsed: PLANNER, defects: [] },
+    ...['baseline', 'gate', 'mutations'].map((stage) => ({ event: 'stage-start', stage })),
+    builderRow,
+    { event: 'envelope', role: 'reviewer', parsed: { status: 'done' }, defects: [] },
+    { event: 'verdict', stage: 'review', status: 'reviewed', verdict: 'changes-needed', findings: [FINDING] },
+    { event: 'verdict', stage: 'review', status: 'stopped', ...STOP },
+  ] })
   try {
     const r = run(f)
     const before = readFileSync(join(f.taskDir, 'lean.json'), 'utf8')
@@ -128,7 +136,7 @@ test('a stopped lane with a build is finished: finish.json carries the stop, fin
     assert.equal(spec.shape, 'finish')
     assert.equal(spec.cwd, f.cwd)
     assert.deepEqual(spec.finish, {
-      planPath: '/t/plan.md', gatePath: '/t/gate.mjs', subject: 'fix(crew): planned lane', mutations: [MUTATION], filesInScope: ['src/widget.svelte'],
+      planPath: '/t/plan.md', subject: 'fix(crew): planned lane', filesInScope: ['src/widget.svelte'],
       stop: STOP, findings: [FINDING], turnOffset: 3,
     })
     assert.equal(r.spawned.length, 1)
@@ -526,7 +534,9 @@ test('--return carries the mutation declarations the ready run proved', async ()
     const file = join(r.f.base, 'return.md')
     writeFileSync(file, 'go')
     await r.decide('return', file)
-    assert.deepEqual(JSON.parse(readFileSync(join(r.f.taskDir, 'finish.json'), 'utf8')).finish.mutations, proven)
+    const finish = JSON.parse(readFileSync(join(r.f.taskDir, 'finish.json'), 'utf8')).finish
+    assert.equal(Object.hasOwn(finish, 'mutations'), false)
+    assert.equal(Object.hasOwn(finish, 'gatePath'), false)
   } finally { cleanup(r.f) }
 })
 

@@ -268,7 +268,6 @@ test('CC3 persists first-return status and reasons for both roles', async () => 
     })
     assert.equal(result.status, status, label)
     assert.equal(result.status_reason, reason, label)
-    assert.match(result.error, /gate failed/)
     const saved = json(join(out, 'result.json'))
     assert.equal(saved.status, status, label)
     assert.equal(saved.status_reason, reason, label)
@@ -496,9 +495,7 @@ test('builder replay: prompt rewrite, backfills, checks, diff with additions and
   const ret = json(join(out, 'task', 'planner-1.json'))
   assert.deepEqual(ret.details.files_in_scope, ['crew/loop.mjs', 'crew/loop.test.mjs'])
   assert.equal(ret.details.validation_lane, 'node --test crew/loop.test.mjs')
-  assert.equal(ret.details.gate_cmd, `node ${join(out, 'task', 'gate.mjs')}`)
   assert(!readFileSync(join(out, 'task', 'plan.md'), 'utf8').includes('/orig/'))
-  assert.equal(result.mutations.killed, 1)
   assert.deepEqual(result.changed.sort(), ['a.mjs', 'new.test.mjs', 'old.test.mjs'])
   // MUTATION: omit added totals from gate-variant results.
   assert.deepEqual(json(join(out, 'result.json')).added, { source: 1, test: 2, binary: 0 })
@@ -523,64 +520,11 @@ test('builder replay: seat, check and cleanup failures are recorded and the work
     proveMutations: async () => { throw new Error('unreachable') },
   })
   assert.match(result.error, /seat: ACP_X seat down/)
-  assert.match(result.error, /gate: gate exploded/)
-  assert.equal(result.gate, null)
   assert.match(json(join(out, 'result.json')).error, /seat down/)
   assert(existsSync(join(out, 'session.jsonl')) && existsSync(join(out, 'diff.patch')))
   assert.equal(worktrees(fx.repo), 1)
   const ret = json(join(out, 'task', 'planner-1.json'))
   assert.equal(ret.details.files_in_scope, undefined)
-})
-
-test('unmeasured check results returned by the crew APIs are recorded as errors with their diagnostics', async () => {
-  const { runGate, proveMutations } = await import('../crew/checks.mjs')
-  const unmeasuredGate = await runGate({ cwd: '', gatePath: '' }) // the real API's returned shape, not a throw
-  assert.equal(unmeasuredGate.status, 'unmeasured')
-  const unmeasuredProof = await proveMutations({ cwd: '' })
-  assert.equal(unmeasuredProof.status, 'unmeasured')
-  const copyFailed = { status: 'unmeasured', reason: 'copy-failed', rows: [], error: { code: 'ENOSPC', message: 'disk full' } }
-  const seat = (call) => { writeFileSync(join(call.taskDir, 'builder-2.json'), JSON.stringify({ status: 'done', summary: 'x' })); return { stopReason: 'end_turn' } }
-
-  let fx = fixture()
-  let result = await runBuilder({ lane: 'b1380', cell: CELL, arms: [], out: fresh('un') }, { ...fx.deps, runAcpSeat: seat, runGate: async () => ({ ...unmeasuredGate, reason: 'timeout' }), proveMutations: async () => { throw new Error('must not run') } })
-  assert.match(result.error, /gate: unmeasured timeout/)
-  assert.equal(result.gate.status, 'unmeasured')
-
-  fx = fixture()
-  const out = fresh('un')
-  result = await runBuilder({ lane: 'b1380', cell: CELL, arms: [], out }, { ...fx.deps, runAcpSeat: seat, runGate: async () => ({ status: 'green', reason: null, failingIds: [] }), proveMutations: async () => copyFailed })
-  assert.match(result.error, /mutations: unmeasured copy-failed \(ENOSPC disk full\)/)
-  assert.match(json(join(out, 'result.json')).error, /ENOSPC disk full/)
-  assert.equal(result.mutations.diagnostics.error, 'ENOSPC disk full')
-
-  fx = fixture()
-  result = await runBuilder({ lane: 'b1380', cell: CELL, arms: [], out: fresh('un') }, { ...fx.deps, runAcpSeat: seat, runGate: async () => ({ status: 'green', reason: null, failingIds: [] }), proveMutations: async () => ({ status: 'unmeasured', reason: 'mutation-unmeasured', rows: [{ check: 'X1', outcome: 'unmeasured', reason: 'bind-fail' }] }) })
-  assert.match(result.error, /X1:bind-fail/)
-
-  // ordinary measured red results are not harness errors
-  fx = fixture()
-  result = await runBuilder({ lane: 'b1380', cell: CELL, arms: [], out: fresh('un') }, { ...fx.deps, runAcpSeat: seat, runGate: async () => ({ status: 'red', reason: 'exit-nonzero', failingIds: ['X1'] }), proveMutations: async () => { throw new Error('must not run') } })
-  assert.equal(result.error, null)
-  fx = fixture()
-  result = await runBuilder({ lane: 'b1380', cell: CELL, arms: [], out: fresh('un') }, { ...fx.deps, runAcpSeat: seat, runGate: async () => ({ status: 'green', reason: null, failingIds: [] }), proveMutations: async () => ({ status: 'red', reason: 'mutations-survived', rows: [{ check: 'X1', outcome: 'survived' }] }) })
-  assert.equal(result.error, null)
-
-  fx = fixture()
-  const pout = fresh('un')
-  result = await runPlanner({ lane: 'b1380', cell: CELL, arms: [], out: pout }, {
-    ...fx.deps,
-    runAcpSeat(call) {
-      writeFileSync(join(call.taskDir, 'plan.md'), '# plan\n')
-      writeFileSync(join(call.taskDir, 'gate.mjs'), 'x\n')
-      writeFileSync(join(call.taskDir, 'planner-1.json'), JSON.stringify({ status: 'done', summary: 'p', details: {} }))
-      return { stopReason: 'end_turn' }
-    },
-    runGate: async () => ({ ...unmeasuredGate, reason: 'spawn-error', error: { code: 'ENOENT', message: 'no node' } }),
-  })
-  assert.match(result.error, /gate: unmeasured spawn-error \(ENOENT no node\)/)
-  assert.equal(result.gate.baseline, 'unmeasured')
-  assert.equal(result.gate.reason, 'spawn-error')
-  assert.equal(result.gate.error, 'ENOENT no node')
 })
 
 test('a returned refusal or a turn with no stop reason is a recorded failure', async () => {
@@ -609,17 +553,6 @@ test('a missing or malformed cell file is recorded in result.json by both CLIs',
       assert(!existsSync(join(out, 'tree')))
     }
   }
-})
-
-test('a red gate skips the mutation proof', async () => {
-  const fx = fixture()
-  const result = await runBuilder({ lane: 'b1380', cell: CELL, arms: [], out: fresh('red') }, {
-    ...fx.deps, runAcpSeat: (c) => { writeFileSync(join(c.taskDir, 'builder-2.json'), JSON.stringify({ status: 'done', summary: 'x' })); return { stopReason: 'end_turn' } }, runGate: async () => ({ status: 'red', failingIds: ['X1'] }),
-    proveMutations: async () => { throw new Error('must not run') },
-  })
-  assert.equal(result.error, null)
-  assert.deepEqual(result.gate.failing, ['X1'])
-  assert.equal(result.mutations, null)
 })
 
 test('a failure after the worktree exists still removes it', async () => {
@@ -656,11 +589,8 @@ test('planner replay: fresh task dir, baseline gate, repo writes, gate path conf
   assert.deepEqual(seen.definition.extensions, ['subagent'])
   assert(!seen.prompt.includes('/orig/'))
   assert.equal(readFileSync(join(out, 'task', 'plan.md'), 'utf8'), '# plan\n', 'planner must not get the recorded solution')
-  assert.deepEqual(gates, [join(out, 'task', 'gate.mjs')])
+  assert.deepEqual(gates, [])
   assert.equal(result.repo_writes, 1)
-  assert.equal(result.gate.baseline, 'red')
-  assert.deepEqual(result.gate.failing, ['X1'])
-  assert.equal(result.envelope.mutations, 2)
   assert(!existsSync(join(out, 'tree')))
   assert.equal(worktrees(fx.repo), 1)
 })
@@ -827,7 +757,6 @@ test('a turn that ends without its required artifacts is a recorded failure', as
     ['missing envelope', (c) => { writeFileSync(join(c.taskDir, 'plan.md'), '# p\n'); writeFileSync(join(c.taskDir, 'gate.mjs'), 'x\n') }, /envelope: planner-1\.json not written/],
     ['malformed envelope', (c) => { writeFileSync(join(c.taskDir, 'plan.md'), '# p\n'); writeFileSync(join(c.taskDir, 'gate.mjs'), 'x\n'); writeFileSync(join(c.taskDir, 'planner-1.json'), 'oops') }, /not valid JSON/],
     ['missing plan', (c) => { writeFileSync(join(c.taskDir, 'gate.mjs'), 'x\n'); writeFileSync(join(c.taskDir, 'planner-1.json'), JSON.stringify(good)) }, /planner: plan\.md not written/],
-    ['missing gate', (c) => { writeFileSync(join(c.taskDir, 'plan.md'), '# p\n'); writeFileSync(join(c.taskDir, 'planner-1.json'), JSON.stringify(good)) }, /planner: gate\.mjs not written/],
   ]
   for (const [label, write, expect] of plannerCases) {
     const fx = fixture()

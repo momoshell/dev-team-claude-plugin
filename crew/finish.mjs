@@ -1,7 +1,7 @@
 // crew finish <lane> — finish a stopped lean lane with its own builder seat (ADR-051's finish shape, lean loop).
 //
-// Re-enters the lane in its own worktree, on its uncommitted build, with its accepted plan and gate, and starts the
-// detached `finish` run: builder triage -> gate -> mutation proof -> review -> suite -> commit -> rebase. It never
+// Re-enters the lane in its own worktree, on its uncommitted build, with its accepted plan, and starts the
+// detached `finish` run: builder triage -> proof -> review -> suite -> commit -> rebase. It never
 // re-plans, never re-runs the baseline and publishes nothing; the operator's publish decision is a later step:
 // `--accept [--notes <file>]` publishes the PR the finish run measured (merging stays the operator's), `--return <file>`
 // runs one more finish pass with the file as the builder's guidance (it counts against the three review rounds) and
@@ -77,7 +77,7 @@ function requireWorktree(d, spec) {
   if (!isDir) throw new FinishRefusal('finish-worktree', `the lane worktree ${spec?.cwd} does not exist`)
 }
 
-// The lane's accepted plan: subject, plan and gate paths and mutation declarations.
+// The lane's accepted plan and subject, including archived planner returns.
 function loadPlan(d, lane, taskDir) {
   let plannerFile = null
   let best = 0
@@ -93,10 +93,10 @@ function loadPlan(d, lane, taskDir) {
 
 // The finish spec for a stop: the stop, the findings still open at that point of the journal, and the turn offset.
 function finishFor(rows, stopped, before, plan) {
-  const { subject, plan_path: planPath, gate_path: gatePath, mutations } = plan
+  const { subject, plan_path: planPath } = plan
   const reviewed = rows.slice(0, before).findLast((row) => row.event === 'verdict' && row.status === 'reviewed')
   return {
-    planPath, gatePath, subject, mutations, filesInScope: plan.files_in_scope ?? null,
+    planPath, subject, filesInScope: plan.files_in_scope ?? null,
     stop: { reason: stopped.reason, observation: stopped.observation ?? null },
     findings: reviewed?.verdict === 'changes-needed' && Array.isArray(reviewed.findings) ? reviewed.findings : [],
     turnOffset: rows.filter((row) => row.event === 'envelope').length,
@@ -246,10 +246,8 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
       sinceStop.filter((row) => row.event === 'envelope' && row.role === 'reviewer').length,
     )
     const priorReviewRounds = Math.max(journalReviews, Number.isSafeInteger(ready.reviewRounds) && ready.reviewRounds >= 0 ? ready.reviewRounds : 0)
-    // The declarations the ready run proved (it may have replaced unbound ones) carry forward; the planner's are the fallback.
-    const proven = Array.isArray(ready.mutations) && ready.mutations.every(isObject) ? ready.mutations : plan.mutations
     const finish = {
-      ...finishFor(rows, stopped, readyAt, { ...plan, mutations: proven }),
+      ...finishFor(rows, stopped, readyAt, plan),
       guidance: notes,
       priorReviewRounds,
     }

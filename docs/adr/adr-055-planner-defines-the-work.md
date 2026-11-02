@@ -56,8 +56,12 @@ line). It has no acceptance ids and no `## Acceptance` section, and nobody write
 - **Tasks:** an ordered checklist, at most two levels, each citing its criteria and the test that proves it, or
   "not machine-checked" when its criteria have no test.
 
-The planner envelope keeps `subject`, `plan_path` and `files_in_scope`, adds an optional `judge` (a one-line reason),
-and drops `acceptance`, `gate_path`, `gate_cmd` and `mutations`.
+The planner envelope keeps `subject`, `plan_path` and `files_in_scope`, adds an optional `judge` (a one-line reason)
+and a required `tests` (each a file and a test title, one per property, in the plan's order; an empty list says every
+criterion is not machine-checked), and drops `acceptance`, `gate_path`, `gate_cmd` and `mutations`. Code reads
+`tests`, never `plan.md`: on 2026-11-02 b1486's review found two ways a parse of the plan's Markdown read Properties
+as empty (a table, then a fenced example before the real section), each a false `proof: none`. The reviewer judges
+that `tests` and the plan's Properties agree.
 
 ### 3. The builder builds and reports
 
@@ -83,8 +87,8 @@ results:
   missing result is unproven);
 - green on the build.
 
-A builder that names no test while the plan names one, or a named test that is unproven, sends the lane back to the
-builder within its rounds. When the plan lists every criterion as not machine-checked, no test is named, the PR states
+A builder that names no test while the planner's `tests` names one, or a named test that is unproven, sends the lane back to the
+builder within its rounds. When the planner's `tests` is empty, no test is required, the PR states
 `proof: none, no criterion is machine-checked`, and the reviewer judges each criterion. A mechanical lane has no plan and
 no review: when its builder names no test, the PR states `proof: none, mechanical lane, not reviewed`, and the operator
 reviews the diff before merging.

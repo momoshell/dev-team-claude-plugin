@@ -10,8 +10,6 @@
 // launch in config.json beside the hooks; an arm that is not in it is never imported, and no ambient flag grants one.
 // A hook that fails for any reason prints nothing and exits 0: a granted arm that breaks never changes the turn.
 //
-// Claude validates an Edit's input before any hook fires, so a failed Edit has no hook. Edit assist reads the session
-// transcript on the next PreToolUse instead and hands the hint over one tool call late.
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -23,26 +21,21 @@ const SELF = fileURLToPath(import.meta.url)
 export const ARMS_CONFIG_FILE = 'config.json'
 const CONFIG_VERSION = 1
 const STATE_VERSION = 1
-// The arms this lane carries. subagent and codemode have no hook to run on and stay refused.
-export const CLAUDE_EXTENSION_ARMS = Object.freeze(['readgate', 'skeletonread', 'reminders', 'builderloop'])
+// subagent has no hook to run on and stays refused.
+export const CLAUDE_EXTENSION_ARMS = Object.freeze(['readgate', 'skeletonread'])
 export const CLAUDE_ARMS = Object.freeze([...CLAUDE_EXTENSION_ARMS, 'advisor'])
 // advisor.ts ADVISED_ROLES: any other role's advisor never attaches on pi, so it must not be silently inert here.
 export const CLAUDE_ADVISED_ROLES = Object.freeze(['builder', 'planner'])
 const EVENTS_OF = Object.freeze({
   readgate: ['PreToolUse', 'PostToolUse', 'PostToolUseFailure'],
   skeletonread: ['PreToolUse', 'PostToolUse'],
-  reminders: ['SessionStart', 'PostToolUse', 'PostToolUseFailure'],
-  builderloop: ['PreToolUse', 'PostToolUse', 'PostToolUseFailure'],
   advisor: ['PreToolUse', 'PostToolUse', 'PostToolUseFailure'],
 })
 // Must outlive an inline pre-return consult: its 20s bound, the child kill graces, and the journal writes.
 const HOOK_TIMEOUT_S = 45
 const LOCK_WAIT_MS = 10_000
 const LOCK_STALE_MS = 30_000
-const TRANSCRIPT_WINDOW_BYTES = 8 * 1024 * 1024
 const JOURNAL_WINDOW_BYTES = 8 * 1024 * 1024
-const HINTED_CAP = 256
-const HINTS_PER_CALL = 3
 const TOOL_NAMES = Object.freeze({ Bash: 'bash', Read: 'read', Edit: 'edit', Write: 'write' })
 // A skeleton ends by pointing at pi's retrieve tool, which a claude seat does not have: it reads the range instead.
 const RETRIEVE_USAGE = /^Retrieve usage: retrieve\(.*$/m
@@ -75,7 +68,7 @@ const shellQuote = (value) => `'${String(value).replaceAll("'", `'"'"'`)}'`
 
 // The plugin a seat with these arms loads: a manifest, one command hook per event the arms use, and the launch
 // configuration the hook reads. taskDir is the per-seat runtime; the seat's lasting state goes under laneTaskDir.
-export function writeArmsPlugin({ taskDir, role, arms, cwd, editAssist = null, fff = false, laneTaskDir = null, layout = null, nodeBin = process.execPath } = {}, deps = {}) {
+export function writeArmsPlugin({ taskDir, role, arms, cwd, fff = false, laneTaskDir = null, layout = null, nodeBin = process.execPath } = {}, deps = {}) {
   requireDir(taskDir, role, 'writeArmsPlugin')
   if (!Array.isArray(arms) || arms.length === 0 || !arms.every((arm) => CLAUDE_ARMS.includes(arm))) throw new Error(`adapter-claude.writeArmsPlugin: arms must be a nonempty list of ${CLAUDE_ARMS.join(', ')}`)
   if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw new Error(`adapter-claude.writeArmsPlugin: cwd must be an ABSOLUTE path, got ${JSON.stringify(cwd)}`)
@@ -83,7 +76,6 @@ export function writeArmsPlugin({ taskDir, role, arms, cwd, editAssist = null, f
   const seat = basename(taskDir)
   const config = {
     version: CONFIG_VERSION, role, seat, cwd, arms: [...arms], fff,
-    edit_assist: editAssist === 'on' || editAssist === 'off' ? editAssist : null,
     lane_task_dir: laneTaskDir || null, layout: laneTaskDir && layout === LEAN_LAYOUT ? LEAN_LAYOUT : null,
     state_dir: join(laneTaskDir || root, 'claude-arms', seat),
   }
@@ -293,36 +285,6 @@ function readWindow(path, bytes) {
   } catch { return null } finally { if (fd !== null) { try { closeSync(fd) } catch { /* nothing to release */ } } }
 }
 
-const errorText = (content) => (typeof content === 'string' ? content : Array.isArray(content) ? content.map(partText).join('\n') : '').replace(/<\/?tool_use_error>/g, '').trim()
-
-// Failed Edit results in the transcript not yet hinted, each with the input that made it. Claude says "String to replace not
-// found" and "Found N matches"; builderloop's failed-edit path reads "Could not find the exact text" and "Found N occurrences".
-export function failedEdits(transcriptPath, hinted) {
-  if (typeof transcriptPath !== 'string' || !isAbsolute(transcriptPath) || !transcriptPath.endsWith('.jsonl')) return []
-  const text = readWindow(transcriptPath, TRANSCRIPT_WINDOW_BYTES)
-  if (text === null) return []
-  const uses = new Map()
-  const failed = []
-  for (const line of text.split('\n')) {
-    if (!line.trim()) continue
-    let row
-    try { row = JSON.parse(line) } catch { continue }
-    for (const block of Array.isArray(row?.message?.content) ? row.message.content : []) {
-      if (block?.type === 'tool_use' && block.name === 'Edit' && isObject(block.input) && typeof block.id === 'string') uses.set(block.id, block.input)
-      else if (block?.type === 'tool_result' && block.is_error === true && uses.has(block.tool_use_id) && !hinted.includes(block.tool_use_id)) {
-        const input = uses.get(block.tool_use_id)
-        const reported = errorText(block.content)
-        const path = input.file_path
-        const matches = /Found (\d+) matches? of the string to replace/.exec(reported)
-        const message = /String to replace not found/.test(reported) ? `Could not find the exact text in ${path}.`
-          : matches ? `Found ${matches[1]} occurrences of the text in ${path}.` : reported
-        failed.push({ id: block.tool_use_id, path, event: { toolName: 'edit', toolCallId: block.tool_use_id, input: piInput('edit', input), isError: true, content: [{ type: 'text', text: message }] } })
-      }
-    }
-  }
-  return failed
-}
-
 // ---- state -----------------------------------------------------------------------------------------------------
 
 function laneRunStart(config) {
@@ -368,11 +330,11 @@ const MALFORMED = Symbol('malformed')
 // run, and MALFORMED when it is unreadable as ours.
 function loadState(path, identity) {
   let raw
-  try { raw = readFileSync(path, 'utf8') } catch (error) { if (error?.code === 'ENOENT') return { ...identity, arms: {}, hinted: [] }; return MALFORMED }
+  try { raw = readFileSync(path, 'utf8') } catch (error) { if (error?.code === 'ENOENT') return { ...identity, arms: {} }; return MALFORMED }
   let state
   try { state = JSON.parse(raw) } catch { return MALFORMED }
-  if (!isObject(state) || state.version !== STATE_VERSION || !isObject(state.arms) || !Array.isArray(state.hinted) || !state.hinted.every((id) => typeof id === 'string')) return MALFORMED
-  if (state.seat !== identity.seat || state.session !== identity.session || state.run_start !== identity.run_start) return { ...identity, arms: {}, hinted: [] }
+  if (!isObject(state) || state.version !== STATE_VERSION || !isObject(state.arms)) return MALFORMED
+  if (state.seat !== identity.seat || state.session !== identity.session || state.run_start !== identity.run_start) return { ...identity, arms: {} }
   return state
 }
 
@@ -428,8 +390,6 @@ function resolveConsultBinary(env) {
 async function instantiate(name, env, cwd, outbox, launches) {
   if (name === 'readgate') return (await import('../pi/extensions/readgate.ts')).createReadGate({ env, cwd })
   if (name === 'skeletonread') return (await import('../pi/extensions/skeletonread.ts')).createSkeletonRead({ env, cwd })
-  if (name === 'reminders') return (await import('../pi/extensions/reminders.ts')).createReminders({ env })
-  if (name === 'builderloop') return (await import('../pi/extensions/builderloop.ts')).createBuilderLoop({ env, cwd })
   // Tier 1 asks a model and outlives a hook: the hook only starts the consult (a detached worker) and a later hook delivers its note.
   if (name === 'advisor') return (await import('../pi/extensions/advisor.ts')).createAdvisor({ env, deps: { cwd, resolveBinary: () => resolveConsultBinary(env), deferTier1Consult: (request) => { launches.push(request) }, send: (message) => { outbox.push(`Advisor note: ${String(message?.content ?? '')}`) } } })
   throw new Error(`unknown arm ${name}`)
@@ -439,10 +399,8 @@ function armEnv(config) {
   const env = { ...process.env, CREW_ROLE: config.role, CREW_FFF: config.fff === true ? '1' : '0' }
   // The grants are the launch configuration, not whatever flags the process inherited.
   delete env.CREW_ADVISOR
-  delete env.CREW_EDIT_ASSIST
   delete env[CONTEXT_LAYOUT_ENV]
   if (config.arms.includes('advisor')) env.CREW_ADVISOR = '1'
-  if (config.edit_assist) env.CREW_EDIT_ASSIST = config.edit_assist
   if (config.lane_task_dir) env.CREW_TASK_DIR = config.lane_task_dir
   else delete env.CREW_TASK_DIR
   if (config.layout) env[CONTEXT_LAYOUT_ENV] = config.layout
@@ -462,10 +420,6 @@ async function dispatch(config, payload, arms, state, outbox) {
   const cwd = config.cwd
   const ctx = { cwd }
   const guard = async (arm, fn) => { try { return await fn() } catch (error) { process.stderr.write(`crew arm ${arm} failed: ${String(error?.message ?? error).slice(0, 300)}\n`); return undefined } }
-  if (name === 'SessionStart') {
-    const text = await guard('reminders', () => arms.reminders?.sessionStart())
-    return text ? { hookEventName: name, additionalContext: text } : null
-  }
   const tool = toolOf(payload.tool_name)
   if (name === 'PreToolUse') {
     // Only an arm that actually started may steer, and a parser failure fails open.
@@ -473,16 +427,6 @@ async function dispatch(config, payload, arms, state, outbox) {
       return { hookEventName: name, permissionDecision: 'deny', permissionDecisionReason: 'Refusing Bash file read. Use the Read tool (file_path, offset, limit); use offset and limit for a range.' }
     }
     const extras = []
-    if (arms.builderloop && config.role === 'builder') {
-      // The hint for the Edit that failed since the last call: Claude fires no hook for it.
-      const unseen = failedEdits(payload.transcript_path, state.hinted)
-      for (const failure of unseen.slice(-HINTS_PER_CALL)) {
-        const result = await guard('builderloop', () => arms.builderloop.onToolResult(failure.event, ctx))
-        const hint = (result?.content ?? []).filter((part) => !failure.event.content.includes(part)).map(partText).join('\n')
-        if (hint) extras.push(`Edit assist — your Edit of ${failure.path} failed:\n${hint}`)
-      }
-      state.hinted = [...state.hinted, ...unseen.map((failure) => failure.id)].slice(-HINTED_CAP)
-    }
     const event = { toolName: tool, toolCallId: String(payload.tool_use_id ?? ''), input: piInput(tool, payload.tool_input) }
     let reason = null
     for (const arm of config.arms) {
@@ -501,8 +445,6 @@ async function dispatch(config, payload, arms, state, outbox) {
   if (event === null) return null
   const original = event.content
   for (const arm of config.arms) {
-    // builderloop's lane run after a successful edit is not carried; edit assist rides on PreToolUse instead.
-    if (arm === 'builderloop' && (tool === 'edit' || tool === 'write')) continue
     const result = await guard(arm, () => (arms[arm]?.onToolResult ?? arms[arm]?.toolResult)?.(event, ctx))
     if (Array.isArray(result?.content)) event.content = result.content
   }

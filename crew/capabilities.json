@@ -99,7 +99,7 @@
             "crew/pi/extensions/subagent.ts",
             "crew/pi/extensions/readgate.ts"
           ],
-          "mcp_servers": [{ "name": "lab", "command": { "bin": "node", "args": ["crew/mcp/lab-server.mjs"] }, "url": null }, { "name": "fff", "command": { "bin": "/opt/homebrew/bin/fff-mcp", "args": [] }, "url": null }],
+          "mcp_servers": [{ "name": "fff", "command": { "bin": "/opt/homebrew/bin/fff-mcp", "args": [] }, "url": null }],
           "skills": [],
           "agents": [
             {
@@ -144,10 +144,8 @@
             }
           ],
           "extensions": [
-            "crew/pi/extensions/builderloop.ts",
             "crew/pi/extensions/readgate.ts",
-            "crew/pi/extensions/skeletonread.ts",
-            "crew/pi/extensions/reminders.ts"
+            "crew/pi/extensions/skeletonread.ts"
           ],
           "skills": []
         },

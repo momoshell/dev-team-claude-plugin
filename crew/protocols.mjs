@@ -6,14 +6,14 @@
 
 export const BRIEF_FIELDS = Object.freeze(['source', 'closes', 'tier', 'shape', 'acceptance', 'out_of_scope', 'suite'])
 export const TIERS = Object.freeze(['mechanical', 'build', 'judge'])
-export const SHAPES = Object.freeze(['standard', 'stepped', 'finish'])
+export const SHAPES = Object.freeze(['standard', 'finish'])
 export const AGENT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
 const ID = /^[A-Za-z][A-Za-z0-9._-]*$/
 const AGENTS = Object.freeze(['claude', 'pi'])
 const EFFORTS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max'])
 const WRITES = Object.freeze(['none', 'task-dir', 'repo'])
-const EXTENSIONS = Object.freeze(['readgate', 'lab', 'builderloop', 'reminders', 'skeletonread', 'subagent', 'fff'])
-const AGENT_FIELDS = Object.freeze(['name', 'description', 'role', 'writes', 'envelope', 'agent', 'model', 'effort', 'fallback', 'skills', 'requires', 'tools', 'extensions', 'advisor', 'edit_assist', 'codemode', 'memory', 'rounds', 'wait_s', 'tiers'])
+const EXTENSIONS = Object.freeze(['readgate', 'skeletonread', 'subagent', 'fff'])
+const AGENT_FIELDS = Object.freeze(['name', 'description', 'role', 'writes', 'envelope', 'agent', 'model', 'effort', 'fallback', 'skills', 'requires', 'tools', 'extensions', 'advisor', 'memory', 'rounds', 'wait_s', 'tiers'])
 const AGENT_REQUIRED = Object.freeze(['name', 'description', 'role', 'agent', 'model', 'effort'])
 // A tier may override how a seat runs, never who it is or which tiers exist.
 const TIER_OVERRIDES = Object.freeze(AGENT_FIELDS.filter((key) => !['name', 'description', 'role', 'tiers'].includes(key)))
@@ -106,8 +106,6 @@ const AGENT_RULES = {
   requires: [list, 'is a list of nonempty strings'],
   tools: [list, 'is a list of nonempty strings'],
   extensions: [(v) => Array.isArray(v) && v.every((item) => EXTENSIONS.includes(item)), `is a list drawn from ${EXTENSIONS.join(', ')}`],
-  edit_assist: [(v) => typeof v === 'boolean', 'is true or false'],
-  codemode: [(v) => typeof v === 'boolean', 'is true or false'],
   memory: [(v) => typeof v === 'boolean', 'is true or false'],
   rounds: [(v) => Number.isSafeInteger(v) && v > 0, 'is a positive safe integer'],
   wait_s: [(v) => Number.isSafeInteger(v) && v > 0, 'is a positive safe integer'],

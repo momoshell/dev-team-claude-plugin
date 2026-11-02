@@ -12,7 +12,6 @@ import * as claudeAdapter from '../adapters/adapter-claude.mjs'
 import * as piAdapter from '../adapters/adapter-pi.mjs'
 import { CONTEXT_LAYOUT_ENV, LEAN_LAYOUT, journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../pi/context-layout.mjs'
 import { ADVISED_ROLES, loadContext as advisorContext } from '../pi/extensions/advisor.ts'
-import { loadPlannerContext } from '../pi/extensions/builderloop.ts'
 import { loadAcceptedContext } from '../pi/extensions/skeletonread.ts'
 
 const ROLE = 'seat'
@@ -59,11 +58,9 @@ function resolveSkill(skill, cwd) {
 // planner details it cannot do without.
 const CONTEXT_ARMS = Object.freeze({
   advisor: ['files_in_scope'],
-  builderloop: ['files_in_scope', 'validation_lane', 'gate_cmd'],
-  edit_assist: ['files_in_scope', 'validation_lane', 'gate_cmd'],
   skeletonread: ['files_in_scope', 'plan_path'],
 })
-const CONTEXT_EXTENSIONS = Object.freeze(['builderloop', 'skeletonread'])
+const CONTEXT_EXTENSIONS = Object.freeze(['skeletonread'])
 const ADVISOR_MANIFEST = 'advisor-manifest.json'
 const ADVISOR_MANIFEST_VERSION = 1
 // advisor.ts SAFE_MODEL: the spellings its manifest reader accepts for a cell.
@@ -73,18 +70,17 @@ const nonempty = (value) => typeof value === 'string' && value !== ''
 
 // The arms the effective definition declares, as the seat's grants. An arm the adapter cannot express
 // is refused here or by the adapter itself; none is dropped. Claude runs the arms adapter-claude lists as plugin hooks,
-// expresses the fff and lab MCP servers, and refuses the rest (subagent among them) when it builds the launch.
+// expresses the fff MCP server, and refuses the rest (subagent among them) when it builds the launch.
 function seatGrants(definition, { role, isClaude, skills, deps }) {
   const extensions = definition.extensions ?? []
   if (!Array.isArray(extensions) || !extensions.every(nonempty)) throw new Error('extensions must be a list of extension names')
   const advisor = definition.advisor !== undefined && definition.advisor !== null
   if (!isClaude && advisor && !ADVISED_ROLES.has(role)) throw refuse('grant-unsupported', `advisor grant is unsupported for seat ${role}`)
-  if (isClaude && definition.codemode === true) throw refuse('grant-unsupported', `adapter-claude cannot express the codemode arm of seat ${role} — refusing to boot a silently weaker seat`)
   const armed = armGrants({ role, agent: definition.agent, extensions }, { register: deps.register, root: deps.root, exists: deps.exists })
   const mcp = armed.mcp_servers.length > 0
-  const piBuiltins = isClaude ? [] : [...(definition.codemode === true ? ['builtin:codemode'] : []), ...(mcp ? ['builtin:mcp'] : [])]
+  const piBuiltins = !isClaude && mcp ? ['builtin:mcp'] : []
   return {
-    tools: isClaude && armed.mcp_servers.some((server) => server.name === 'lab') ? [...piAdapter.PI_MCP_SERVER_TOOLS.lab] : [],
+    tools: [],
     extensions: [...armed.extensions, ...piBuiltins],
     agents: [...armed.agents],
     skills,
@@ -97,10 +93,10 @@ function seatGrants(definition, { role, isClaude, skills, deps }) {
 // per-seat runtime: the operator's dir symlinked in, settings.json and mcp.json written for the seat.
 function writePiAgentDir({ agentDir, grants, cwd, env, role }) {
   const mcp = grants.extensions.includes('builtin:mcp')
-  const codemode = grants.extensions.includes('builtin:codemode')
-  if (!mcp && !codemode) return
+  if (!mcp) return
   try {
     if (mcp && existsSync(join(cwd, '.pi', 'mcp.json'))) throw new Error(`project MCP config ${join(cwd, '.pi', 'mcp.json')} would add to or override the granted servers`)
+    if (env[PI_AGENT_DIR_ENV] === '') throw new Error(`${PI_AGENT_DIR_ENV} must not be empty`)
     const baseDir = resolve(env[PI_AGENT_DIR_ENV] ?? join(homedir(), '.pi', 'agent'))
     const inside = relative(agentDir, baseDir)
     if (inside === '' || (!inside.startsWith('..') && !isAbsolute(inside))) throw new Error(`base directory ${baseDir} is within seat destination ${agentDir}`)
@@ -110,11 +106,11 @@ function writePiAgentDir({ agentDir, grants, cwd, env, role }) {
     let names = []
     try { names = readdirSync(baseDir) } catch (error) { if (error.code !== 'ENOENT') throw error }
     mkdirSync(agentDir, { recursive: true })
-    writeFileSync(join(agentDir, 'settings.json'), JSON.stringify(codemode ? { ...base, codemode: { ...base.codemode, mode: 'only' } } : base, null, 2))
+    writeFileSync(join(agentDir, 'settings.json'), JSON.stringify(base, null, 2))
     if (mcp) {
       const mcpServers = {}
       for (const server of grants.mcp_servers) {
-        mcpServers[server.name] = { command: server.command.bin, args: [...server.command.args], exposure: 'direct', ...(server.name === 'lab' ? { timeout: 960 } : {}) }
+        mcpServers[server.name] = { command: server.command.bin, args: [...server.command.args], exposure: 'direct' }
       }
       writeFileSync(join(agentDir, 'mcp.json'), JSON.stringify({ mcpServers }, null, 2))
     }
@@ -239,9 +235,7 @@ function laneContext({ arms, role, laneTaskDir, workdir, definition, briefText, 
     if (missing.length) return refusal(`the lane's planner return written since its start does not carry ${missing.join(', ')}`)
     // The arms' own readers have the last word, so a return this check accepts is one each arm can read.
     const env = { [CONTEXT_LAYOUT_ENV]: LEAN_LAYOUT, CREW_TASK_DIR: laneTaskDir }
-    const unread = arms.filter((arm) => (arm === 'skeletonread'
-      ? loadAcceptedContext({ taskDir: laneTaskDir, cwd: workdir, env }) === null
-      : ['builderloop', 'edit_assist'].includes(arm) && loadPlannerContext({ taskDir: laneTaskDir, env }) === null))
+    const unread = arms.filter((arm) => arm === 'skeletonread' && loadAcceptedContext({ taskDir: laneTaskDir, cwd: workdir, env }) === null)
     if (unread.length) return refusal(`${unread.join(', ')} cannot read the lane's planner return`)
   }
   if (!arms.includes('advisor')) return
@@ -297,17 +291,14 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, briefText, sessio
   const grants = seatGrants(definition, { role, isClaude, skills: grantedSkills, deps })
   // fff replaces native search, as the old path's effectiveDeny did; pi reads Glob and Grep as find and grep.
   if (grants.mcp_servers.some((server) => server.name === 'fff')) deny = [deny, 'Glob,Grep'].filter(Boolean).join(',')
-  const editAssist = typeof definition.edit_assist === 'boolean' ? (definition.edit_assist ? 'on' : 'off') : null
   const contextArms = [
     ...(definition.extensions ?? []).filter((name) => CONTEXT_EXTENSIONS.includes(name)),
-    ...(grants.advisor ? ['advisor'] : []), ...(definition.edit_assist === true ? ['edit_assist'] : []),
+    ...(grants.advisor ? ['advisor'] : []),
   ]
 
   const append = deps.appendFileSync ?? appendFileSync
   const real = deps.realpathSync ?? realpathSync
   const laneTaskDir = nonempty(taskDir) ? resolve(taskDir) : null
-  // edit_assist runs inside builderloop; without it the seat would carry the flag and no arm to act on it.
-  if (contextArms.includes('edit_assist') && !contextArms.includes('builderloop')) throw refuse('grant-unsupported', `seat ${role} declares edit_assist without builderloop, which runs it — refusing to boot a silently weaker seat`)
   if (contextArms.length) laneContext({ arms: contextArms, role, laneTaskDir, workdir, definition, briefText, deps })
   const workRoot = canonicalRoot(workdir, real)
   const taskRoot = laneTaskDir ? canonicalRoot(laneTaskDir, real) : null
@@ -372,7 +363,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, briefText, sessio
     const writableDirs = writes === 'none' || !laneTaskDir ? [] : [laneTaskDir]
     // taskDir stays the per-seat runtime, where materialised resources live; the lane's task dir reaches the seat through its environment.
     const spec = {
-      role, cwd: workdir, effort: definition.effort, promptFile, taskDir: runtime, grants, tools, deny, writableDirs, editAssist,
+      role, cwd: workdir, effort: definition.effort, promptFile, taskDir: runtime, grants, tools, deny, writableDirs,
       env: {
         ...(laneTaskDir ? { CREW_ROLE: role, CREW_TASK_DIR: laneTaskDir, [CONTEXT_LAYOUT_ENV]: LEAN_LAYOUT } : { CREW_ROLE: role }),
         // Launch-authoritative: an inherited value never decides whether the seat's refusals carry a reason.
@@ -383,7 +374,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, briefText, sessio
     if (isClaude) {
       claudeAdapter.writeSeatSkills({ taskDir: runtime, role, grants }, deps.skillDeps ?? {})
       // The arms' hooks keep their state in the lane's task dir (spec.env), not in this runtime.
-      claudeAdapter.writeSeatArms({ taskDir: runtime, role, grants, cwd: workdir, editAssist, env: spec.env }, deps.armDeps ?? {})
+      claudeAdapter.writeSeatArms({ taskDir: runtime, role, grants, cwd: workdir, env: spec.env }, deps.armDeps ?? {})
       launch = claudeAdapter.acpLaunch({ ...spec, bin: claudeAcp, claudeBin: claude, model, armHooks: true })
       launch.sessionParams._meta.systemPrompt = LEAN_CLAUDE_SYSTEM_PROMPT
       const options = launch.sessionParams._meta.claudeCode.options

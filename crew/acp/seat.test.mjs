@@ -1235,16 +1235,18 @@ test('a claude seat that declares fff launches with the fff server, its tools an
   assert.equal(bare.launch.env.CREW_FFF, '0')
 })
 
-test('a claude seat that declares lab launches with the lab server and its tool allowed', () => {
-  const options = claudeOptions(armed('claude', 'planner', { extensions: ['lab'] }).launch)
-  assert.equal(options.mcpServers.lab.command, BIN)
-  assert.deepEqual(options.mcpServers.lab.args, [join(ROOT, 'crew', 'mcp', 'lab-server.mjs')])
-  assert.ok(options.allowedTools.includes('mcp__lab__lab'))
+// MUTATION: silently discard a missing extension grant.
+test('both agents refuse a retired lab grant before client construction', () => {
+  for (const agent of ['pi', 'claude']) {
+    const probe = armLaunch(agent, 'planner', { extensions: ['lab'] })
+    assert.throws(() => probe.run(), { reason: 'extension-missing' })
+    assert.equal(probe.created.length, 0)
+  }
 })
 
-test('a claude seat refuses the arms it cannot carry before a client: subagent and codemode, alone or beside arms it can', () => {
+test('a claude seat refuses the arms it cannot carry before a client: subagent, alone or beside arms it can', () => {
   const requests = [
-    { extensions: ['subagent'] }, { extensions: ['readgate', 'subagent'] }, { extensions: ['subagent'], advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' } }, { codemode: true },
+    { extensions: ['subagent'] }, { extensions: ['readgate', 'subagent'] }, { extensions: ['subagent'], advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' } },
   ]
   for (const arms of requests) {
     const probe = armLaunch('claude', 'builder', arms)
@@ -1253,11 +1255,11 @@ test('a claude seat refuses the arms it cannot carry before a client: subagent a
     assert.deepEqual(readdirSync(probe.runtimeRoot), [], 'a refused seat leaves no runtime')
   }
   // Only a requested arm refuses: false is the absence of the arm.
-  assert.equal(armed('claude', 'builder', { edit_assist: false, codemode: false, advisor: null, extensions: [] }).created.length, 1)
+  assert.equal(armed('claude', 'builder', { advisor: null, extensions: [] }).created.length, 1)
 })
 
-test('a claude seat granted readgate and reminders launches with the arms plugin; one granted nothing launches without', () => {
-  const { launch } = armed('claude', 'builder', { extensions: ['readgate', 'reminders'] })
+test('a claude seat granted readgate launches with the arms plugin; one granted nothing launches without', () => {
+  const { launch } = armed('claude', 'builder', { extensions: ['readgate'] })
   const [plugin, ...others] = claudeOptions(launch).plugins
   assert.deepEqual(others, [])
   assert.match(plugin.path, /\/claude-arms\/builder$/)
@@ -1276,7 +1278,7 @@ function leanLane(taskDir, { anchor = Date.now() - 60_000, details = laneDetails
   }
 }
 const advisorArm = { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' }
-const contextArms = { advisor: advisorArm, edit_assist: true, extensions: ['builderloop', 'skeletonread'] }
+const contextArms = { advisor: advisorArm, extensions: ['skeletonread'] }
 const refusedBeforeClient = (arms, lane, options = {}) => {
   const probe = armLaunch('pi', 'builder', arms, options)
   lane(probe.taskDir)
@@ -1306,7 +1308,7 @@ test('pi refuses unsupported advisor roles before client construction', () => {
   }
 })
 
-test('a lean pi builder declaring advisor, edit assist, builderloop and skeletonread launches with all four on the lane layout', () => {
+test('a lean pi builder declaring advisor and skeletonread launches with both on the lane layout', () => {
   const probe = armLaunch('pi', 'builder', contextArms, { briefText: 'Tripwire tests:\n- a.test.mjs · tripwire\nBroad keys\n## Acceptance\n- (A1) first item\nnot an item\n- (A2) second item\n## Next\n- (A3) outside\n' })
   const anchor = Date.now() - 60_000
   leanLane(probe.taskDir, { anchor })
@@ -1315,8 +1317,7 @@ test('a lean pi builder declaring advisor, edit assist, builderloop and skeleton
   assert.equal(launch.env.CREW_CONTEXT_LAYOUT, 'lean')
   assert.equal(launch.env.CREW_TASK_DIR, probe.taskDir)
   assert.equal(launch.env.CREW_ADVISOR, '1')
-  assert.equal(launch.env.CREW_EDIT_ASSIST, 'on')
-  for (const name of ['advisor', 'builderloop', 'skeletonread']) assert.ok(piExtensions(launch).includes(join(ROOT, 'crew', 'pi', 'extensions', `${name}.ts`)), name)
+  for (const name of ['advisor', 'skeletonread']) assert.ok(piExtensions(launch).includes(join(ROOT, 'crew', 'pi', 'extensions', `${name}.ts`)), name)
   assert.ok(piTools(launch).includes('retrieve'))
   const manifest = JSON.parse(readFileSync(join(probe.taskDir, 'advisor-manifest.json'), 'utf8'))
   assert.equal(manifest.schema_version, 1)
@@ -1328,7 +1329,7 @@ test('a lean pi builder declaring advisor, edit assist, builderloop and skeleton
 })
 
 test('a lean pi seat with context arms refuses before a client when the lane has no run-start of its own, whatever its parent holds', () => {
-  for (const arms of [{ advisor: advisorArm }, { edit_assist: true }, { extensions: ['builderloop'] }, { extensions: ['skeletonread'] }]) {
+  for (const arms of [{ advisor: advisorArm }, { extensions: ['skeletonread'] }]) {
     refusedBeforeClient(arms, (taskDir) => {
       // The old layout's journal and returns beside the task dir are another lane's context.
       writeFileSync(join(dirname(taskDir), 'journal.jsonl'), `${JSON.stringify({ event: 'run-start', at: 1, run_id: 'foreign' })}\n`)
@@ -1336,14 +1337,13 @@ test('a lean pi seat with context arms refuses before a client when the lane has
       leanLane(taskDir, { anchor: null })
     })
   }
-  refusedBeforeClient({ extensions: ['builderloop'] }, (taskDir) => { leanLane(taskDir); writeFileSync(join(taskDir, 'journal.jsonl'), 'not json\n{"event":"stage-start"}\n') })
+  refusedBeforeClient({ extensions: ['skeletonread'] }, (taskDir) => { leanLane(taskDir); writeFileSync(join(taskDir, 'journal.jsonl'), 'not json\n{"event":"stage-start"}\n') })
 })
 
 test('a lean pi seat with context arms refuses when the lane planner return is missing, stale, newest-invalid or lacks what an arm reads', () => {
-  const arms = { extensions: ['builderloop'] }
+  const arms = { extensions: ['skeletonread'] }
   refusedBeforeClient(arms, (taskDir) => leanLane(taskDir, { details: null }))
   refusedBeforeClient(arms, (taskDir) => leanLane(taskDir, { anchor: Date.now() - 60_000, mtime: Date.now() - 120_000 }))
-  refusedBeforeClient(arms, (taskDir) => { const { gate_cmd: _, ...rest } = laneDetails; leanLane(taskDir, { details: rest }) })
   refusedBeforeClient({ extensions: ['skeletonread'] }, (taskDir) => leanLane(taskDir, { details: { ...laneDetails, files_in_scope: [] } }))
   // The newest return decides: an older valid one does not stand in for it.
   refusedBeforeClient(arms, (taskDir) => {
@@ -1365,7 +1365,7 @@ test('a lean pi seat granted the advisor refuses without a pi cell or a written 
   assert.equal(existsSync(join(failing.taskDir, 'advisor-manifest.json')), false)
 })
 
-test('a lean claude builder declaring advisor, edit assist, builderloop and skeletonread launches with all four on the lane layout', () => {
+test('a lean claude builder declaring advisor and skeletonread launches with both on the lane layout', () => {
   const probe = armLaunch('claude', 'builder', contextArms, { briefText: 'Tripwire tests:\n- a.test.mjs · tripwire\nBroad keys\n' })
   const anchor = Date.now() - 60_000
   leanLane(probe.taskDir, { anchor })
@@ -1374,8 +1374,7 @@ test('a lean claude builder declaring advisor, edit assist, builderloop and skel
   assert.equal(launch.env.CREW_CONTEXT_LAYOUT, 'lean')
   assert.equal(launch.env.CREW_TASK_DIR, probe.taskDir)
   const config = JSON.parse(readFileSync(join(claudeOptions(launch).plugins[0].path, 'config.json'), 'utf8'))
-  assert.deepEqual(config.arms, ['builderloop', 'skeletonread', 'advisor'])
-  assert.equal(config.edit_assist, 'on')
+  assert.deepEqual(config.arms, ['skeletonread', 'advisor'])
   assert.equal(config.lane_task_dir, probe.taskDir)
   assert.ok(config.state_dir.startsWith(join(probe.taskDir, 'claude-arms')), 'what the hooks keep lives in the lane, not in the disposable runtime')
   const manifest = JSON.parse(readFileSync(join(probe.taskDir, 'advisor-manifest.json'), 'utf8'))
@@ -1391,26 +1390,19 @@ test('a claude seat with context arms refuses before a client when the lane has 
     assert.equal(probe.created.length, 0, 'a refused seat constructs no client')
     assert.deepEqual(readdirSync(probe.runtimeRoot), [], 'a refused seat leaves no runtime')
   }
-  for (const arms of [{ advisor: advisorArm }, { edit_assist: true }, { extensions: ['builderloop'] }, { extensions: ['skeletonread'] }]) {
+  for (const arms of [{ advisor: advisorArm }, { extensions: ['skeletonread'] }]) {
     refusedClaude(arms, (taskDir) => {
       writeFileSync(join(dirname(taskDir), 'journal.jsonl'), `${JSON.stringify({ event: 'run-start', at: 1, run_id: 'foreign' })}\n`)
       leanLane(taskDir, { anchor: null })
     })
     refusedClaude(arms, (taskDir) => leanLane(taskDir, { details: null }))
   }
-  // edit_assist runs inside builderloop.
-  refusedClaude({ edit_assist: true, extensions: ['skeletonread'] }, (taskDir) => leanLane(taskDir))
   // Arms that read no lane context need none.
-  assert.equal(armed('claude', 'builder', { extensions: ['readgate', 'reminders'] }).created.length, 1)
-})
-
-test('a pi builder with edit assist off carries off; an unset field carries none', () => {
-  assert.equal(armed('pi', 'builder', { edit_assist: false }).launch.env.CREW_EDIT_ASSIST, 'off')
-  assert.equal(armed('pi', 'builder', {}).launch.env.CREW_EDIT_ASSIST, undefined)
+  assert.equal(armed('claude', 'builder', { extensions: ['readgate'] }).created.length, 1)
 })
 
 test('every native extension reaches a pi launch as its checkout extension with its tool; none declared loads none', () => {
-  const tools = { readgate: null, reminders: null }
+  const tools = { readgate: null }
   for (const [name, tool] of Object.entries(tools)) {
     const { launch } = armed('pi', 'builder', { extensions: [name] })
     assert.deepEqual(piExtensions(launch), [join(ROOT, 'crew', 'pi', 'extensions', `${name}.ts`)])
@@ -1436,29 +1428,24 @@ test('a pi seat that declares fff excludes native find and grep; one that does n
   assert.deepEqual(excluded(armed('pi', 'builder', {}).launch).filter((tool) => ['find', 'grep'].includes(tool)), [])
 })
 
-test('a pi seat that declares fff and lab gets builtin MCP, its tools and a runtime agent dir carrying the servers', () => {
-  const probe = armed('pi', 'planner', { extensions: ['fff', 'lab'] })
+test('a pi seat that declares fff gets builtin MCP, its tools and a runtime agent dir carrying the server', () => {
+  const probe = armed('pi', 'planner', { extensions: ['fff'] })
   const { launch } = probe
   assert.equal(launch.env.CREW_FFF, '1')
-  for (const tool of [...FFF_TOOLS, 'mcp__lab__lab']) assert.ok(piTools(launch).includes(tool), tool)
+  for (const tool of FFF_TOOLS) assert.ok(piTools(launch).includes(tool), tool)
   const agentDir = launch.env.PI_CODING_AGENT_DIR
   assert.ok(agentDir.startsWith(probe.runtimeRoot), 'the agent dir is runtime, never the lane task dir')
   assert.equal(agentDir, join(readdirSync(probe.runtimeRoot).map((name) => join(probe.runtimeRoot, name))[0], 'pi-agent', 'planner'))
   const mcp = JSON.parse(readFileSync(join(agentDir, 'mcp.json'), 'utf8')).mcpServers
   assert.deepEqual(mcp.fff, { command: '/opt/homebrew/bin/fff-mcp', args: [], exposure: 'direct' })
-  assert.equal(mcp.lab.timeout, 960)
   assert.equal(JSON.parse(readFileSync(join(agentDir, 'settings.json'), 'utf8')).codemode.mode, 'off')
   assert.equal(readFileSync(join(agentDir, 'auth.json'), 'utf8'), '{}')
 })
 
-test('a pi seat that declares codemode runs it in only mode through its own settings; false leaves the operator settings', () => {
-  const on = armed('pi', 'planner', { codemode: true }).launch
-  assert.ok(piTools(on).includes('codemode'))
-  const settings = JSON.parse(readFileSync(join(on.env.PI_CODING_AGENT_DIR, 'settings.json'), 'utf8'))
-  assert.deepEqual(settings, { theme: 'dark', codemode: { mode: 'only', keep: 1 } })
-  const off = armed('pi', 'planner', { codemode: false }).launch
-  assert.ok(!piTools(off).includes('codemode'))
-  assert.equal(off.env.PI_CODING_AGENT_DIR, undefined)
+test('a pi MCP seat refuses an empty agent directory before creating a client', () => {
+  const probe = armLaunch('pi', 'planner', { extensions: ['fff'] }, { env: { PI_CODING_AGENT_DIR: '' } })
+  assert.throws(() => probe.run(), { reason: 'grant-unsupported', message: /PI_CODING_AGENT_DIR must not be empty/ })
+  assert.equal(probe.created.length, 0)
 })
 
 test('a pi seat refuses an MCP grant that a project MCP config would override', () => {
@@ -1472,13 +1459,11 @@ test('a pi seat refuses an MCP grant that a project MCP config would override', 
 test('a declared asset that is missing refuses the seat, and an unknown extension is not guessed', () => {
   const missing = armLaunch('claude', 'planner', { extensions: ['fff'] }, { deps: { exists: () => false } })
   assert.throws(() => missing.run(), { reason: 'extension-missing' })
-  const lab = armLaunch('pi', 'planner', { extensions: ['lab'] }, { deps: { exists: (path) => !path.endsWith('lab-server.mjs') } })
-  assert.throws(() => lab.run(), { reason: 'extension-missing' })
-  const ext = armLaunch('pi', 'planner', { extensions: ['reminders'] }, { deps: { exists: (path) => !path.endsWith('reminders.ts') } })
+  const ext = armLaunch('pi', 'planner', { extensions: ['readgate'] }, { deps: { exists: () => false } })
   assert.throws(() => ext.run(), { reason: 'extension-missing' })
   const unknown = armLaunch('pi', 'planner', { extensions: ['../escape'] })
   assert.throws(() => unknown.run(), { reason: 'unknown-grant' })
-  for (const probe of [missing, lab, ext, unknown]) assert.equal(probe.created.length, 0)
+  for (const probe of [missing, ext, unknown]) assert.equal(probe.created.length, 0)
 })
 
 test('both ACP launches carry the seat role and the lane task dir, not the runtime or cwd, over ambient values', () => {
@@ -1501,14 +1486,6 @@ test('a claude seat with no MCP grants is still strict about MCP config', () => 
 test('a lean skeletonread seat refuses a planner return its reader rejects for sharing the run-start mtime', () => {
   const anchor = Date.now() - 60_000
   refusedBeforeClient({ extensions: ['skeletonread'] }, (taskDir) => leanLane(taskDir, { anchor, mtime: anchor }))
-})
-
-test('a lean builderloop seat refuses a planner return whose gate command is only whitespace', () => {
-  refusedBeforeClient({ extensions: ['builderloop'] }, (taskDir) => leanLane(taskDir, { details: { ...laneDetails, gate_cmd: '   ' } }))
-})
-
-test('a lean builder declaring edit assist without builderloop refuses before a client', () => {
-  refusedBeforeClient({ edit_assist: true }, (taskDir) => leanLane(taskDir))
 })
 
 test('a failed receipt-time clock is non-load-bearing and cannot change the seat outcome', () => {

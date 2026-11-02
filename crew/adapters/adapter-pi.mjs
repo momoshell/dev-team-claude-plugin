@@ -200,12 +200,10 @@ function piExtensionRefusal(extension, expected, found, diagnosis = 'malformed-e
 export const SUBAGENT_EXTENSION = 'crew/pi/extensions/subagent.ts'
 
 export const PI_BUILTIN_EXTENSION_TOOLS = Object.freeze({
-  'builtin:codemode': Object.freeze(['codemode']),
   'builtin:mcp': Object.freeze([]),
 })
 export const PI_MCP_SERVER_TOOLS = Object.freeze({
   fff: Object.freeze(['mcp__fff__find_files', 'mcp__fff__grep', 'mcp__fff__multi_grep']),
-  lab: Object.freeze(['mcp__lab__lab']),
 })
 
 function piMcpTools(mcpServers) {
@@ -219,12 +217,9 @@ function piMcpTools(mcpServers) {
 
 export const PI_FIRST_PARTY_EXTENSION_TOOLS = Object.freeze({
   'crew/pi/extensions/advisor.ts': Object.freeze([]),
-  'crew/pi/extensions/builderloop.ts': Object.freeze([]),
   'crew/pi/extensions/readgate.ts': Object.freeze([]),
-  'crew/pi/extensions/lab.ts': Object.freeze(['lab']),
   'crew/pi/extensions/skeletonread.ts': Object.freeze(['retrieve']),
   'crew/pi/extensions/subagent.ts': Object.freeze(['agent']),
-  'crew/pi/extensions/reminders.ts': Object.freeze([]),
 })
 
 export function validatePiExtensionTools(table) {
@@ -308,21 +303,16 @@ export function piSeatAgentDir({ taskDir, role } = {}) {
 
 export function mcpConfigPath(spec) { return join(piSeatAgentDir(spec), 'mcp.json') }
 
-export const PI_EDIT_ASSIST_ENV = 'CREW_EDIT_ASSIST'
-export const EDIT_ASSIST_VALUES = Object.freeze(['on', 'off'])
-export const PI_CODEMODE_ENV = 'CREW_PI_CODEMODE'
-export const PI_CODEMODE_VALUES = Object.freeze(['on', 'off'])
-
 function piFffEnv(grants) {
   const granted = grants?.extensions?.includes('builtin:mcp') && grants?.mcp_servers?.some((server) => server?.name === 'fff' && server?.command?.bin === '/opt/homebrew/bin/fff-mcp')
   return { CREW_FFF: granted ? '1' : '0' }
 }
 
 function hasPiAgentDir(grants) {
-  return grants?.extensions?.some((extension) => ['builtin:codemode', 'builtin:mcp'].includes(extension))
+  return grants?.extensions?.some((extension) => extension === 'builtin:mcp')
 }
 
-function isPiSeatWithheldEnvKey(key) { return key.startsWith('CREW_ADVISOR') || key === PI_EDIT_ASSIST_ENV || key === 'CREW_PI_AGENTS' }
+function isPiSeatWithheldEnvKey(key) { return key.startsWith('CREW_ADVISOR') || key === 'CREW_PI_AGENTS' }
 
 // A key the seat parts withheld must not return via the daemon's inherited
 // env; an explicit seat-env value (the grant-built one) always wins. Node
@@ -330,7 +320,7 @@ function isPiSeatWithheldEnvKey(key) { return key.startsWith('CREW_ADVISOR') || 
 export function piSeatSpawnEnv(inherited = {}, seatEnv = {}) { const env = { ...inherited, ...seatEnv }; for (const key of Object.keys(inherited)) if (isPiSeatWithheldEnvKey(key) && !Object.hasOwn(seatEnv, key)) env[key] = undefined; return env }
 
 export function piRpcSeatParts(spec = {}) {
-  const { model, effort, promptFile, deny, env = {}, grants = NO_GRANTS, configDir, advisorCell = null, editAssist = null, role, taskDir } = spec
+  const { model, effort, promptFile, deny, env = {}, grants = NO_GRANTS, configDir, advisorCell = null, role, taskDir } = spec
   const agentDir = hasPiAgentDir(grants) ? piSeatAgentDir({ taskDir, role }) : configDir
   const piDeny = translateDeny(deny)
   const advisor = grants?.advisor === true
@@ -350,7 +340,6 @@ export function piRpcSeatParts(spec = {}) {
       ...piFffEnv(grants),
       ...(agentDir !== null && agentDir !== undefined ? { PI_CODING_AGENT_DIR: agentDir } : {}),
       ...(advisor ? { CREW_ADVISOR: '1' } : {}),
-      ...(role === 'builder' && EDIT_ASSIST_VALUES.includes(editAssist) ? { [PI_EDIT_ASSIST_ENV]: editAssist } : {}),
       ...(grants?.agents?.length ? { CREW_PI_AGENTS: JSON.stringify(grants.agents.map(({ name, def }) => ({ name, def }))) } : {}),
     },
   }
@@ -492,7 +481,7 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   const activatedTools = piActivatedTools({ tools: grants?.tools, extensions, vendorExtensions: grants?.vendor_extensions, agents: grants?.agents || [], mcpServers: grants?.mcp_servers || [] })
   const skills = grants?.skills || []
   const withheldUnsets = [...new Set([
-    PI_ADVISOR_ENV, PI_ADVISOR_ENDPOINT_ENV, PI_ADVISOR_MODEL_ENV, 'CREW_ADVISOR_MODELS', 'CREW_ADVISOR_PROVENANCE', PI_EDIT_ASSIST_ENV, 'CREW_PI_AGENTS',
+    PI_ADVISOR_ENV, PI_ADVISOR_ENDPOINT_ENV, PI_ADVISOR_MODEL_ENV, 'CREW_ADVISOR_MODELS', 'CREW_ADVISOR_PROVENANCE', 'CREW_PI_AGENTS',
     ...Object.keys(env ?? {}).filter((key) => isPiSeatWithheldEnvKey(key)),
   ])].flatMap((key) => ['-u', key])
   return [

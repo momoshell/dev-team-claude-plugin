@@ -34,8 +34,7 @@ plan -> gate baseline (RED required) -> build -> gate (GREEN) -> mutation proof
 
 The lane name is the brief's file name. `crew start` runs the `standard` shape
 only; `finish` (ADR-051) is the second entry path, started by `crew finish` from
-an escalated lane. `stepped` (ADR-048) is retained schema and ADR vocabulary,
-not executable: `crew start` refuses every new-lane shape except `standard`. Every loop is bounded, every envelope is
+an escalated lane. Every loop is bounded, every envelope is
 validated against a closed protocol (P2) and refused if it does not parse, and
 the loop adds no other gate: no host-load gate, no dispatch-time baseline, no
 measurement that holds work. Writing the record never throws into the caller.
@@ -52,20 +51,13 @@ A tier override replaces only the fields it names and keeps a raw override model
 ## Runtime feature map
 | Feature | Where it lives | ADR | Doc |
 |---|---|---|---|
-| Pi planner lab | `crew/mcp/lab-server.mjs` → `crew/pi/extensions/lab.ts` | - | - |
-| Builderloop | `crew/pi/extensions/builderloop.ts` | - | - |
 | Readgate | `crew/pi/extensions/readgate.ts` | - | - |
 | FFF | `crew/adapters/adapter-pi.mjs` | - | - |
-| Rule reminders (pi builder) | `crew/pi/extensions/reminders.ts` | - | - |
-| Pi native codemode and MCP (a seat's `codemode: true` frontmatter arms builtin codemode; MCP follows the declared `extensions`; claude seats refuse `codemode: true` with `grant-unsupported`) | `crew/acp/seat.mjs` | - | [Conventions 2026-10-03](../docs/conventions.md) |
 | Advisor | `crew/pi/extensions/advisor.ts` | ADR-047 ([decision](../docs/adr/adr-047-the-advisor-is-a-roster-seat.md)) | [The advisor is a roster seat](../docs/adr/adr-047-the-advisor-is-a-roster-seat.md) |
 | Seat skills | `hooks/skill-gate.mjs` (skill-map selector, not a registered hook) | ADR-050 ([decision](../docs/adr/adr-050-seat-skills-are-granted-not-pasted.md)) | [Seat skills](../docs/adr/adr-050-seat-skills-are-granted-not-pasted.md) |
-| Builder edit assist | `crew/pi/extensions/builderloop.ts`, `crew/acp/seat.mjs` | ADR-049 ([decision](../docs/adr/adr-049-builder-edit-assist.md)) | a seat's `edit_assist` frontmatter boolean turns the arm on or off; the old per-lane dispatch-batch rotation and `CREW_EDIT_ASSIST` activation belonged to the deleted driver and are history only: [Builder edit assist](../docs/adr/adr-049-builder-edit-assist.md) |
 | Memory | `crew/memory.mjs` | - | - |
 | Visualizer | `visualizer/web/src/lib/LeanRunDetail.svelte`, `visualizer/web/src/lib/LeanWaterfall.svelte` | - | [Visualizer](../visualizer/README.md) |
 | ACP | `crew/acp-client.mjs` | ADR-036 ([decision](../docs/adr/adr-036-acp-seat-transport.md)) | [ACP decision](../docs/adr/adr-036-acp-seat-transport.md) |
-
-The planner's pi seat receives native `mcp__lab__lab` (timeout 960 seconds); the retained `lab.ts` implements the tool. A seat that declares the `lab` extension refuses to boot with `extension-missing` if the server file is absent (`crew/acp/grants.mjs`).
 
 **The seats** (ACP sessions, each played from its `crew/agents/<role>.md`):
 
@@ -119,8 +111,7 @@ Everything durable is a file; session chat is never the record.
 - `reclaim.mjs` — token-fenced transition locks, the lease surface and parks, documented in
   `docs/park-lease-protocol.md`.
 - `adapters/adapter-*.mjs` — per-agent launch shapes for `claude` and `pi`.
-- `pi/extensions/` — the kept pi arms (readgate, builderloop, reminders, skeletonread, subagent, advisor, lab).
-- `mcp/lab-server.mjs` — the planner's lab tool server.
+- `pi/extensions/` — the kept pi arms (readgate, skeletonread, subagent, advisor).
 - `memory.mjs` — lane memory.
 - `agents/*.md` — delivered seat definitions and instructions.
 - Tests sit beside the code as `*.test.mjs`.

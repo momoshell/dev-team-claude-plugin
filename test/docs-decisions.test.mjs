@@ -187,7 +187,7 @@ test('runtime feature map has concrete paths and pins ACP', () => {
   assert.equal(lines[1], '| Feature | Where it lives | ADR | Doc |')
   assert.equal(lines[2], '|---|---|---|---|')
   const rows = lines.slice(3).filter((line) => line.startsWith('|') && line.endsWith('|'))
-  assert.ok(rows.length >= 12, `expected at least 12 feature rows, got ${rows.length}`)
+  assert.ok(rows.length >= 7, `expected at least 7 feature rows, got ${rows.length}`)
 
   for (const row of rows) {
     const paths = [...row.matchAll(/`([^`]+)`/g)].map(([, value]) => value).filter((value) => value.includes('/'))
@@ -249,14 +249,6 @@ test('OD5', () => {
   assert.ok(installing.includes('/plugin marketplace add momoshell/dev-team-claude-plugin'))
   assert.ok(installing.includes('/plugin install dev-team@dev-team'))
   assert.ok(installing.includes('README.md#install'))
-})
-
-test('RD1', () => {
-  // MUTATION RD1: replacing dispatch-batch rotation with dispatch-batch assignment hides the edit-assist drift.
-  const row = crewReadme.split('\n').find((line) => line.startsWith('| Builder edit assist |'))
-  assert.ok(row, 'missing Builder edit assist row')
-  assert.ok(row.includes('rotation'), 'edit-assist row must name rotation')
-  assert.equal(row.includes('off unless CREW_EDIT_ASSIST is set'), false)
 })
 
 test('RD3', () => {

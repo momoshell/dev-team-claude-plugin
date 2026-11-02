@@ -282,12 +282,11 @@ function assertSupportedGrants(grants = NO_GRANTS) {
 
 // ACP seats carry the arms in CLAUDE_ARMS as plugin hooks (ADR-052 Amendment 2); every other extension is still refused.
 // The old headless and pane transports keep assertSupportedGrants above.
-function acpArms(grants = NO_GRANTS, role, editAssist) {
+function acpArms(grants = NO_GRANTS, role) {
   const { arms, unsupported } = claudeArmsOf(grants)
   const refuse = (why) => Object.assign(new Error(`adapter-claude cannot express ${why} — refusing to boot a silently weaker seat [grant-unsupported]`), { reason: 'grant-unsupported' })
   if (unsupported.length) throw refuse(`extension grants ${JSON.stringify({ extensions: unsupported })} over ACP (it carries ${CLAUDE_ARMS.join(', ')})`)
   if (arms.includes('advisor') && !CLAUDE_ADVISED_ROLES.includes(role)) throw refuse(`the advisor arm of seat ${role}`)
-  if (editAssist === 'on' && !arms.includes('builderloop')) throw refuse('edit_assist without builderloop, which runs it')
   return arms
 }
 
@@ -402,11 +401,11 @@ export function writeSeatSkills({ taskDir, role, grants } = {}, deps = {}) {
 }
 
 // The plugin that runs a claude ACP seat's arms. taskDir is the per-seat runtime; the hooks keep their state in the lane.
-export function writeSeatArms({ taskDir, role, grants, cwd, editAssist = null, env = {} } = {}, deps = {}) {
-  const arms = acpArms(grants, role, editAssist)
+export function writeSeatArms({ taskDir, role, grants, cwd, env = {} } = {}, deps = {}) {
+  const arms = acpArms(grants, role)
   if (arms.length === 0) return
   assertInsideTaskDir(armsPluginDir({ taskDir, role }), taskDir, deps)
-  writeArmsPlugin({ taskDir, role, arms, cwd, editAssist, fff: hasFffGrant(grants), laneTaskDir: env.CREW_TASK_DIR, layout: env.CREW_CONTEXT_LAYOUT }, deps)
+  writeArmsPlugin({ taskDir, role, arms, cwd, fff: hasFffGrant(grants), laneTaskDir: env.CREW_TASK_DIR, layout: env.CREW_CONTEXT_LAYOUT }, deps)
 }
 
 function assertArmsMaterialised({ taskDir, role, arms }) {
@@ -459,11 +458,11 @@ const ACP_PROFILE = Object.freeze({ interjection: 'turn', abort: 'cancel', sessi
 export const ACP_BINARY = 'claude-agent-acp'
 
 // armHooks is the lean seat's opt-in (crew/acp/seat.mjs, which also writes the plugin with writeSeatArms). Without it the launch
-// keeps the old ACP transport's rule (crew/acp-io.mjs): extension grants refuse, advisor and editAssist are not read, no arms plugin.
+// keeps the old ACP transport's rule (crew/acp-io.mjs): extension grants refuse, advisor is not read, no arms plugin.
 export function acpLaunch(spec = {}) {
-  const { bin, claudeBin, cwd, model, tools, deny, effort, promptFile, role, taskDir, grants = NO_GRANTS, configDir, env = {}, editAssist = null, armHooks = false } = spec
+  const { bin, claudeBin, cwd, model, tools, deny, effort, promptFile, role, taskDir, grants = NO_GRANTS, configDir, env = {}, armHooks = false } = spec
   let arms = []
-  if (armHooks === true) arms = acpArms(grants, role, editAssist)
+  if (armHooks === true) arms = acpArms(grants, role)
   else assertSupportedGrants(grants)
   assertSkillsMaterialised({ role, taskDir, grants })
   assertArmsMaterialised({ role, taskDir, arms })

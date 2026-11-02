@@ -7,11 +7,10 @@ import { accessSync, chmodSync, constants, lstatSync, readdirSync, readFileSync,
 import { execFileSync, spawnSync } from 'node:child_process'
 import { settlePermission } from './acp-permission.mjs'
 import { delimiter, dirname, join, basename } from 'node:path'
-import { seatCommand, acpLaunch, piRpcSeatParts, capabilitiesFor, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_BUILTIN_EXTENSION_TOOLS, PI_MCP_SERVER_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, PI_EDIT_ASSIST_ENV, EDIT_ASSIST_VALUES, PI_CODEMODE_ENV, PI_CODEMODE_VALUES, shellSingleQuote, ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapters/adapter-pi.mjs'
+import { seatCommand, acpLaunch, piRpcSeatParts, capabilitiesFor, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_BUILTIN_EXTENSION_TOOLS, PI_MCP_SERVER_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, shellSingleQuote, ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapters/adapter-pi.mjs'
 import { seatCommand as claudeSeatCommand, PANE_USAGE_SETTINGS } from './adapters/adapter-claude.mjs'
 import { scratchDir, ROOT } from '../test/helpers.mjs'
 import { childArgs, resolvePiBinary } from './pi/extensions/subagent.ts'
-import { EDIT_ASSIST_ENV } from './pi/extensions/builderloop.ts'
 
 // Seat tool boundaries the pi seat command must translate (the retired driver's seat defaults).
 const NO_FANOUT = 'Task,Agent,Workflow'
@@ -27,25 +26,17 @@ const SEAT_DEFAULTS = Object.freeze({
 // Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
 delete process.env.CREW_ROUTER_ATTEMPT_URL
 
-test('K5 builtin codemode is activated by rpc --tools', () => {
-  // MUTATION: empty PI_BUILTIN_EXTENSION_TOOLS['builtin:codemode'].
-  const rpc = piRpcSeatParts({ role: 'builder', taskDir: '/tmp/task', model: 'm', promptFile: 'p', grants: { extensions: ['builtin:codemode'] } })
-  assert.ok(rpc.args[rpc.args.indexOf('--tools') + 1].split(',').includes('codemode'))
-})
 test('K7 and K8 MCP tools are pinned and unknown servers refuse', () => {
   // MUTATION: skip MCP table activation or its own-property guard.
   const expected = ['mcp__fff__find_files', 'mcp__fff__grep', 'mcp__fff__multi_grep']
-  const tools = piActivatedTools({ extensions: ['builtin:mcp'], mcpServers: [{ name: 'fff' }, { name: 'lab' }] })
-  assert.deepEqual(tools.filter((tool) => tool.startsWith('mcp__')), [...expected, 'mcp__lab__lab'])
   assert.deepEqual(piActivatedTools({ extensions: ['builtin:mcp'], mcpServers: [{ name: 'fff' }] }).filter((tool) => tool.startsWith('mcp__')), expected)
   assert.throws(() => piActivatedTools({ extensions: ['builtin:mcp'], mcpServers: [{ name: 'toString' }] }), (error) => error.reason === 'grant-unsupported' && error.message.includes('toString'))
   assert.deepEqual(PI_MCP_SERVER_TOOLS.fff, expected)
-  assert.deepEqual(PI_MCP_SERVER_TOOLS.lab, ['mcp__lab__lab'])
-  assert.ok(Object.isFrozen(PI_MCP_SERVER_TOOLS) && Object.isFrozen(PI_MCP_SERVER_TOOLS.fff) && Object.isFrozen(PI_BUILTIN_EXTENSION_TOOLS['builtin:codemode']))
+  assert.ok(Object.isFrozen(PI_MCP_SERVER_TOOLS) && Object.isFrozen(PI_MCP_SERVER_TOOLS.fff))
 })
-test('K15 and K16 codemode selects deterministic rpc and pane agent directories', () => {
+test('K15 and K16 MCP selects deterministic rpc and pane agent directories', () => {
   // MUTATION: restore configDir as the agent directory.
-  const grants = { extensions: ['builtin:codemode'] }
+  const grants = { extensions: ['builtin:mcp'], mcpServers: [{ name: 'fff' }] }
   const expected = '/tmp/task/pi-agent/builder'
   const rpc = piRpcSeatParts({ role: 'builder', taskDir: '/tmp/task', configDir: '/legacy', model: 'm', promptFile: 'p', grants })
   assert.equal(rpc.env.PI_CODING_AGENT_DIR, expected)
@@ -54,18 +45,18 @@ test('K15 and K16 codemode selects deterministic rpc and pane agent directories'
 })
 test('K17 ACP launch retains deterministic agent directory', () => {
   // MUTATION: override the launch env with spec.configDir.
-  const launch = acpLaunch({ role: 'builder', taskDir: '/tmp/task', configDir: '/legacy', bin: '/opt/pi', model: 'm', promptFile: 'p', grants: { extensions: ['builtin:codemode'] } })
+  const launch = acpLaunch({ role: 'builder', taskDir: '/tmp/task', configDir: '/legacy', bin: '/opt/pi', model: 'm', promptFile: 'p', grants: { extensions: ['builtin:mcp'], mcpServers: [{ name: 'fff' }] } })
   assert.equal(launch.env.PI_CODING_AGENT_DIR, '/tmp/task/pi-agent/builder')
 })
-test('codemode router replaces the seat catalog without modifying base models.json', () => {
-  const root = scratchDir('pi-router-codemode-'); const taskDir = join(root, 'task'); const base = join(root, 'base'); const agent = join(taskDir, 'pi-agent', 'builder')
+test('MCP router replaces the seat catalog without modifying base models.json', () => {
+  const root = scratchDir('pi-router-mcp-'); const taskDir = join(root, 'task'); const base = join(root, 'base'); const agent = join(taskDir, 'pi-agent', 'builder')
   mkdirSync(taskDir); mkdirSync(base); mkdirSync(agent, { recursive: true })
   writeFileSync(join(base, 'models.json'), '{"base":true}')
   writeFileSync(join(base, 'auth.json'), '{}')
   symlinkSync(join(base, 'models.json'), join(agent, 'models.json'))
   symlinkSync(join(base, 'auth.json'), join(agent, 'auth.json'))
   writeFileSync(join(agent, 'settings.json'), '{}'); writeFileSync(join(agent, 'mcp.json'), '{"mcpServers":{}}')
-  const command = seatCommand({ role: 'builder', model: 'openai-codex/test', taskDir, configDir: base, promptFile: '/p', bootBrief: '/b', grants: { extensions: ['builtin:codemode'] }, env: { CREW_ROUTER_ATTEMPT_URL: 'http://127.0.0.1/a/token/' } })
+  const command = seatCommand({ role: 'builder', model: 'openai-codex/test', taskDir, configDir: base, promptFile: '/p', bootBrief: '/b', grants: { extensions: ['builtin:mcp'], mcpServers: [{ name: 'fff' }] }, env: { CREW_ROUTER_ATTEMPT_URL: 'http://127.0.0.1/a/token/' } })
   assert.ok(command.includes(`PI_CODING_AGENT_DIR="${agent}"`))
   assert.deepEqual(JSON.parse(readFileSync(join(agent, 'models.json'), 'utf8')), { providers: { 'openai-codex': { baseUrl: 'http://127.0.0.1/a/token/' } } })
   assert.equal(readFileSync(join(base, 'models.json'), 'utf8'), '{"base":true}')
@@ -103,35 +94,6 @@ test('ADR47-L2 G2 rpc pane and acp expose only advisor activation env', () => {
   assert.match(pane, /CREW_ADVISOR=1/)
   assert.doesNotMatch(pane, /CREW_ADVISOR_(?:MODEL|ENDPOINT|PROVENANCE)=/)
   assert.deepEqual(Object.keys(acp.env).filter((key) => key.startsWith('CREW_ADVISOR')), ['CREW_ADVISOR'])
-})
-
-// MUTATION PC11: change the public pi codemode enum values.
-test('PC11', () => {
-  assert.equal(PI_CODEMODE_ENV, 'CREW_PI_CODEMODE')
-  assert.deepEqual(PI_CODEMODE_VALUES, ['on', 'off'])
-  assert.equal(Object.isFrozen(PI_CODEMODE_VALUES), true)
-})
-
-test('EA6 edit assist is builder-only, strips inherited values, and crosses ACP', () => {
-  // MUTATION EA6: allow inherited or invalid edit-assist values, or insert it for a non-builder.
-  assert.equal(PI_EDIT_ASSIST_ENV, EDIT_ASSIST_ENV)
-  // MUTATION EA-enum: drop the freeze, or add a value; the closed enum is consulted by dispatch, emit and the ledger.
-  assert.deepEqual(EDIT_ASSIST_VALUES, ['on', 'off'])
-  assert.equal(Object.isFrozen(EDIT_ASSIST_VALUES), true)
-  const spec = { model: 'test', promptFile: '/tmp/role.md', env: { CREW_EDIT_ASSIST: 'on' } }
-  for (const editAssist of ['on', 'off']) {
-    assert.equal(piRpcSeatParts({ ...spec, role: 'builder', editAssist }).env[PI_EDIT_ASSIST_ENV], editAssist)
-    assert.equal(acpLaunch({ ...spec, role: 'builder', editAssist, bin: '/bin/pi', cwd: '/tmp' }).env[PI_EDIT_ASSIST_ENV], editAssist)
-  }
-  for (const role of ROLE_ORDER.filter((role) => role !== 'builder'))
-    assert.equal(piRpcSeatParts({ ...spec, role, editAssist: 'on' }).env[PI_EDIT_ASSIST_ENV], undefined)
-  for (const editAssist of [null, 'true', '', true, 'ON']) {
-    const rpc = piRpcSeatParts({ ...spec, role: 'builder', editAssist })
-    assert.equal(rpc.env[PI_EDIT_ASSIST_ENV], undefined)
-    assert.equal(Object.hasOwn(rpc.env, PI_EDIT_ASSIST_ENV), false)
-  }
-  assert.equal(piRpcSeatParts({ ...spec, role: 'builder', editAssist: null }).env[PI_EDIT_ASSIST_ENV], undefined)
-  assert.equal(acpLaunch({ ...spec, role: 'builder', editAssist: null, bin: '/bin/pi', cwd: '/tmp' }).env[PI_EDIT_ASSIST_ENV], undefined)
 })
 
 // MUTATION: drop && key !== 'CREW_PI_AGENTS' from the piRpcSeatParts passthrough filter, or drop the grants agents spread, and this test reddens.
@@ -281,7 +243,7 @@ test('pi extension activation declares tools, preserves passive entries, and ref
     }),
     [...PI_BUILTIN_TOOLS, 'custom'],
   )
-  assert.deepEqual(piActivatedTools({ extensions: ['/repo/crew/pi/extensions/builderloop.ts'] }), PI_BUILTIN_TOOLS)
+  assert.deepEqual(piActivatedTools({ extensions: ['/repo/crew/pi/extensions/readgate.ts'] }), PI_BUILTIN_TOOLS)
 
   assert.throws(
     () => seatCommand({
@@ -356,11 +318,11 @@ test('E1 and H1 activate shipped pane tools in extension order', () => {
   const planner = seatCommand({
     ...base,
     grants: {
-      tools: ['Task'], extensions: ['/repo/crew/pi/extensions/subagent.ts', '/repo/crew/pi/extensions/lab.ts', '/repo/crew/pi/extensions/readgate.ts'],
+      tools: ['Task'], extensions: ['/repo/crew/pi/extensions/subagent.ts', '/repo/crew/pi/extensions/readgate.ts'],
       agents: [{ name: 'scout', def: '/scout.json' }], skills: [], advisor: false,
     },
   })
-  assert.equal(planner.match(/--tools "([^\"]*)"/)?.[1], `${PI_BUILTIN_TOOLS.join(',')},Task,agent,lab`)
+  assert.equal(planner.match(/--tools "([^\"]*)"/)?.[1], `${PI_BUILTIN_TOOLS.join(',')},Task,agent`)
 })
 
 test('J1 preserves folded vendor tools and command shape', () => {
@@ -541,14 +503,14 @@ test('granted pi seats append deduped activators and checkout-pinned extension, 
   const command = seatCommand({
     ...[...seatShapes()][0],
     grants: {
-      tools: ['read', 'task', 'task'], extensions: ['/checkout/crew/pi/extensions/builderloop.ts'],
+      tools: ['read', 'task', 'task'], extensions: ['/checkout/crew/pi/extensions/readgate.ts'],
       skills: ['/checkout/crew/pi/skills/scout.md'], agents: [], advisor: false,
     },
     configDir: '/checkout/crew/pi',
   })
   assert.equal(command.match(/(?:^|\s)--tools "([^"]*)"/)?.[1], `${PI_BUILTIN_TOOLS.join(',')},task`)
   assert.match(command, /--no-extensions/)
-  assert.match(command, /-e "\/checkout\/crew\/pi\/extensions\/builderloop\.ts"/)
+  assert.match(command, /-e "\/checkout\/crew\/pi\/extensions\/readgate\.ts"/)
   assert.match(command, /--skill "\/checkout\/crew\/pi\/skills\/scout\.md"/)
   assert.match(command, /--no-skills/)
   assert.match(command, /PI_CODING_AGENT_DIR="\/checkout\/crew\/pi"/)
@@ -560,12 +522,12 @@ test('a passive extension-only grant adds exactly one quoted operand without cha
     role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md', tools: 'Read', deny: 'Edit,NotebookEdit',
     taskDir: '/tmp/task', bootBrief: 'boot',
   }
-  const grants = { tools: [], extensions: ['/repo/crew/pi/extensions/builderloop.ts'], agents: [], skills: [], advisor: false }
+  const grants = { tools: [], extensions: ['/repo/crew/pi/extensions/readgate.ts'], agents: [], skills: [], advisor: false }
   const plain = seatCommand({ ...shape, grants: { ...grants, extensions: [] } })
   const granted = seatCommand({ ...shape, grants })
   assert.equal(granted.split(' -e ').length - 1, 1)
-  assert.ok(granted.includes('-e "/repo/crew/pi/extensions/builderloop.ts"'))
-  assert.equal(granted.replace(' -e "/repo/crew/pi/extensions/builderloop.ts"', ''), plain)
+  assert.ok(granted.includes('-e "/repo/crew/pi/extensions/readgate.ts"'))
+  assert.equal(granted.replace(' -e "/repo/crew/pi/extensions/readgate.ts"', ''), plain)
   assert.equal(granted.includes('--tools "Read"'), plain.includes('--tools "Read"'))
   assert.equal(granted.includes('--exclude-tools "edit"'), plain.includes('--exclude-tools "edit"'))
   assert.equal(granted.includes('--no-skills'), plain.includes('--no-skills'))
@@ -751,7 +713,7 @@ test('A1', () => {
     role: 'builder', model: 'anthropic/claude-opus-5', promptFile: '/tmp/prompt.md',
     tools: 'Read', deny: 'Task,Agent', taskDir: dir, bootBrief: 'boot',
   }
-  const expected = `env -u CREW_ADVISOR -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE -u CREW_EDIT_ASSIST -u CREW_PI_AGENTS DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="${dir}" CREW_FFF=0 pi --model anthropic/claude-opus-5 --tools "read,bash,edit,write,grep,find,ls" --no-extensions --no-skills --append-system-prompt "/tmp/prompt.md" "boot"`
+  const expected = `env -u CREW_ADVISOR -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE -u CREW_PI_AGENTS DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="${dir}" CREW_FFF=0 pi --model anthropic/claude-opus-5 --tools "read,bash,edit,write,grep,find,ls" --no-extensions --no-skills --append-system-prompt "/tmp/prompt.md" "boot"`
   assert.equal(seatCommand({ ...shape, env: {} }), expected)
   if (process.env[ROUTER_ATTEMPT_URL_ENV] === undefined) assert.equal(seatCommand(shape), expected)
   assert.doesNotMatch(seatCommand({ ...shape, env: {} }), /(^|\s)--provider(\s|$|=)/)
@@ -996,7 +958,7 @@ test('NP7 the grant decides CREW_FFF for rpc, pane and acp, and readgate points 
 test('pane seat unsets inherited CREW_PI_AGENTS while a granted seat keeps its assignment', () => {
   // MUTATION: remove '-u', 'CREW_PI_AGENTS', from seatCommand and an ungranted pane seat inherits the value again.
   const base = { role: 'builder', model: 'sonnet', promptFile: '/tmp/prompt.md', tools: 'Read', deny: 'Task,Agent', taskDir: '/tmp/task', bootBrief: 'boot', env: {} }
-  const prefix = 'env -u CREW_ADVISOR -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE -u CREW_EDIT_ASSIST -u CREW_PI_AGENTS DEVTEAM_WORKER=1'
+  const prefix = 'env -u CREW_ADVISOR -u CREW_ADVISOR_ENDPOINT -u CREW_ADVISOR_MODEL -u CREW_ADVISOR_MODELS -u CREW_ADVISOR_PROVENANCE -u CREW_PI_AGENTS DEVTEAM_WORKER=1'
   const ungranted = seatCommand(base)
   assert.equal(ungranted.startsWith(prefix), true)
   const grants = { tools: [], extensions: ['/repo/crew/pi/extensions/subagent.ts'], agents: [{ name: 'scout', def: '/scout.json' }], skills: [], advisor: false }
@@ -1005,10 +967,10 @@ test('pane seat unsets inherited CREW_PI_AGENTS while a granted seat keeps its a
   assert.equal(granted.includes("CREW_PI_AGENTS='[{\"name\":\"scout\",\"def\":\"/scout.json\"}]'"), true)
 })
 
-test('an ungranted pane seat withholds every advisor/edit-assist value when executed, while granted seats keep their assignments', () => {
+test('an ungranted pane seat withholds every advisor value when executed, while granted seats keep their assignments', () => {
   // MUTATION: drop the dynamic withheld-key spread in seatCommand and an operator CREW_ADVISOR_* key leaks into the pane env again.
   const base = { role: 'builder', model: 'sonnet', promptFile: '/tmp/prompt.md', tools: 'Read', deny: 'Task,Agent', taskDir: '/tmp/task', bootBrief: 'boot' }
-  const inherited = { CREW_ADVISOR: 'evil', CREW_ADVISOR_ENDPOINT: 'http://evil', CREW_ADVISOR_CUSTOM_X: 'evil2', CREW_EDIT_ASSIST: 'on', CREW_PI_AGENTS: 'evil3' }
+  const inherited = { CREW_ADVISOR: 'evil', CREW_ADVISOR_ENDPOINT: 'http://evil', CREW_ADVISOR_CUSTOM_X: 'evil2', CREW_PI_AGENTS: 'evil3' }
   const executed = (command, spawnEnv) => {
     const prefix = command.slice(0, command.indexOf(' pi --model '))
     const out = spawnSync('/bin/sh', ['-c', `${prefix} /usr/bin/env -0`], { env: { PATH: process.env.PATH, ...spawnEnv } })

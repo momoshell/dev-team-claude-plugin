@@ -37,12 +37,9 @@ hard-coded in the scripts.
 with an advisor) are optional. Which agent/model/effort combinations work is up to
 `crew/acp/seat.mjs`, which refuses the rest. Optional `skills` must be a list of nonempty,
 non-whitespace strings. It is forwarded unchanged, including order and duplicates; an omitted or
-empty list grants no skills. No live-seat defaults are added. Optional `codemode` must be a boolean;
-it is forwarded unchanged and defaults to false. Non-booleans are refused before worktree or seat
-creation. Codemode is supported on pi; Claude with `codemode: true` is refused by the seat and the
-refusal is recorded as an error.
+empty list grants no skills. No live-seat defaults are added.
 
-`--arms` is a comma list drawn from `readgate, lab, builderloop, reminders, skeletonread, subagent, fff`
+`--arms` is a comma list drawn from `readgate, skeletonread, subagent, fff`
 (`crew/protocols.mjs` `EXTENSIONS`); `--arms ""` is no arms. An unknown name is refused, recorded
 in `result.json`, before any worktree or seat exists.
 

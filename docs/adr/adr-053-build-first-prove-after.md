@@ -1,6 +1,6 @@
 # ADR-053 — Build first, prove after: the builder writes the acceptance tests and the loop proves them
 
-**Status:** *proposed* 2026-11-01, operator direction · **Owner:** operator ·
+**Status:** *rejected* 2026-11-02 by ADR-055 (bench rep 1: blind diff pass 10 of 18 against 12 of 18, lines added up from 1196 to 1307); was *proposed* 2026-11-01, operator direction · **Owner:** operator ·
 **Relates to:** ADR-052 (P3 acceptance gate, §6 the loop), ADR-038 (judge floor forces proof), ADR-051 (finish shape)
 
 Today every acceptance id is checked twice. The planner writes `task/gate.mjs` before any code exists, from a seat

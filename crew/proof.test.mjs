@@ -33,6 +33,17 @@ test('a test that only needs a git checkout is not proven by the old source lack
   assert.equal(git(cwd, 'worktree', 'list').trim().split('\n').length, 1)
 })
 
+// MUTATION: remove the old-source worktree with a single --force.
+test('an old-source test that locks its worktree is still removed', async () => {
+  const cwd = scratchDir('proof-lock-')
+  git(cwd, 'init', '-q'); writeFileSync(join(cwd, 'old'), 'base')
+  git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+  writeFileSync(join(cwd, 'lock.test.mjs'), "import test from 'node:test'\nimport { execFileSync } from 'node:child_process'\ntest('locks', () => { execFileSync('git', ['worktree', 'lock', process.cwd()]) })\n")
+  const result = await proveTests({ cwd, tests: [{ file: 'lock.test.mjs', title: 'locks' }] })
+  assert.notEqual(result.reason, 'cleanup-unproven')
+  assert.equal(git(cwd, 'worktree', 'list').trim().split('\n').length, 1)
+})
+
 // MUTATION: drop the reporter's import-failure classification.
 test('static and dynamic import failures on the old source are unproven', async () => {
   const cwd = scratchDir('proof-import-')

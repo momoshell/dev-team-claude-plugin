@@ -84,11 +84,14 @@ export async function proveTests(input = {}) {
       if (!result) result = rows.every((r) => r.proven) ? { status: 'green', reason: null, rows } : { status: 'red', reason: 'proof-unproven', rows }
     }
   } catch { result = unmeasured('runner-threw', rows) } finally {
+    // A second --force removes a locked worktree too; one that still will not go is kept and reported, never
+    // deleted under git, so no registered worktree points at a missing path.
+    let kept = null
     if (added) {
-      const removed = await runSuite({ cwd: added.cwd, command: 'git', args: ['worktree', 'remove', '--force', added.root], timeoutMs: added.timeoutMs }).catch(() => null)
-      if (removed?.status !== 'green') result = unmeasured('cleanup-unproven', rows)
+      const removed = await runSuite({ cwd: added.cwd, command: 'git', args: ['worktree', 'remove', '--force', '--force', added.root], timeoutMs: added.timeoutMs }).catch(() => null)
+      if (removed?.status !== 'green') { kept = added.root; result = { ...unmeasured('cleanup-unproven', rows), kept } }
     }
-    if (tmp) try { rmSync(tmp, { recursive: true, force: true }) } catch { result = unmeasured('cleanup-unproven', rows) }
+    if (tmp && !kept) try { rmSync(tmp, { recursive: true, force: true }) } catch { result = unmeasured('cleanup-unproven', rows) }
   }
   return result
 }

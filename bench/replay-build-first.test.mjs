@@ -202,7 +202,7 @@ test('the build-first planner return stays schema-valid and carries none of the 
   const root = mkdtempSync(join(tmpdir(), 'bf-planner-'))
   try {
     const { repo, corpus, charter } = laneFixture(root)
-    writeFileSync(join(corpus, 'b1', 'planner-1.json'), JSON.stringify({ role: 'planner', id: 'b1.planner.1', status: 'done', summary: 'plan', details: { subject: 'feat(add): return one', plan_path: '/old/task/plan.md', gate_path: '/old/task/gate.mjs', gate_cmd: 'node /old/task/gate.mjs', acceptance: ['A'], mutations: [{ check: 'A', file: 'add.mjs', find: 'RECORDED FIND', replace: 'x' }], files_in_scope: ['add.mjs'] } }))
+    writeFileSync(join(corpus, 'b1', 'planner-1.json'), JSON.stringify({ role: 'planner', id: 'b1.planner.1', status: 'done', summary: 'plan', details: { subject: 'feat(add): return one', plan_path: '/old/task/plan.md', gate_path: '/recorded/gate.mjs', gate_cmd: 'node /old/task/gate.mjs', acceptance: ['A'], mutations: [{ check: 'A', file: 'add.mjs', find: 'RECORDED FIND', replace: 'x' }], files_in_scope: ['add.mjs'] } }))
     let seen
     await runBuilder({ lane: 'b1', cell: CELL, arms: [], out: join(root, 'out'), charter, buildFirst: true }, {
       repoDir: repo, corpusDir: corpus, home: join(root, 'home'), sleepMs: () => {},
@@ -214,6 +214,7 @@ test('the build-first planner return stays schema-valid and carries none of the 
     })
     assert.deepEqual(validateEnvelope('planner', seen).defects, [])
     assert.doesNotMatch(JSON.stringify(seen), /RECORDED FIND|gate_cmd/)
+    assert.equal(seen.details.gate_path, join(root, 'out', 'task', 'gate.mjs'))
     assert.equal(existsSync(seen.details.gate_path), false)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })

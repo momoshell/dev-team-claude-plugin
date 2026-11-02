@@ -24,7 +24,7 @@ the brief, the task directory, the lane journal and every seat's session file.
 ## The model
 
 **Agents do the work; code keeps it correct.** A lane starts from one P1 brief
-(`source`, `closes`, `tier`, `shape`, `acceptance` ids, `out_of_scope`; the
+(`source`, `closes`, `tier`, `shape`, `out_of_scope`, optional `suite`; the
 body is the ask). `crew/loop.mjs` runs it:
 
 ```
@@ -43,7 +43,7 @@ place a seat's model, agent (`claude` or `pi`), effort, skills, `requires`
 and extensions are written, and the body is the charter. Tiers are
 `mechanical`, `build` and `judge`; a tier entry overrides how a seat runs there
 or unseats it. `crew/agents.mjs` resolves a tier and `crew/protocols.mjs` holds
-the brief, envelope and agent-definition validators.
+the brief, envelope and agent-definition validators. ADR-055 §7 raises lanes to judge for the planner's reason or protected paths; it never lowers them.
 
 A tier override replaces only the fields it names and keeps a raw override model id exactly as written, with no namespace translation. A provider failure does not reseat the seat on another cell: the retry ladder in `crew/acp/provider.mjs` backs off and retries, and once the retry bound is exhausted the lane stops with the provider failure named.
 
@@ -62,7 +62,7 @@ A tier override replaces only the fields it names and keeps a raw override model
 
 | Seat | Job | Repo writes |
 |---|---|---|
-| `planner` | explores the code, writes the plan and names the acceptance ids | none (task dir only) |
+| `planner` | explores the code and writes the plan: criteria, properties with tests, and tasks | none (task dir only) |
 | `builder` | edits the repo and names tests to prove | the only seat that writes the repo |
 | `reviewer` | verdict and typed findings; conformance to plan, then correctness | none |
 | `lead` | answers an escalation with one closed decision | none |

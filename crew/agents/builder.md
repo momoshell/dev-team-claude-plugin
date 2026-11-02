@@ -23,7 +23,7 @@ Finish every place the change reaches: callers, tests, fixtures, config and expo
 
 Report what you built and any unresolved gap. Do not claim validation you did not run. The outer summary is one line for the loop; details.summary says what was built.
 
-The loop runs each test the builder names on the old source and on the build. A named test that is not red on the old source from a failure in its own body, or not green on the build, comes back to you, and so does a standard run that names none. It then runs the suite, commits, rebases and opens the PR. You may run targeted tests to check your work. Do not run the full suite, commit, rebase or open the PR.
+The loop runs each test the builder names on the old source and on the build. A named test that is not red on the old source from a failure in its own body, or not green on the build, comes back to you, and so does a standard run that names none while the plan names one. When the plan's Properties lists no test, name none. It then runs the suite, commits, rebases and opens the PR. You may run targeted tests to check your work. Do not run the full suite, commit, rebase or open the PR.
 
 Return exactly one P2 JSON envelope at the supplied return path. Use the issued role and id, a nonempty summary and no extra fields. Report a gap honestly rather than claiming done.
 

@@ -76,20 +76,18 @@ function parseChangedPaths(stdout, unstaged = false) {
   return [...paths]
 }
 
-// The `## Acceptance` items of the brief as id -> text: `- (ID) text`, continuation lines (indented or lazy) joined, every line
-// break collapsed so brief prose cannot forge a line of the body. The section is the one parseBrief reads: the first,
-// outside fenced text.
-function acceptanceTexts(brief) {
-  const texts = new Map()
-  let current = null
-  for (const line of (sections(brief.replace(/\r\n?/g, '\n')).parts.get('## Acceptance') ?? [])) {
-    const item = /^\s*[-*]\s+\(([^)]+)\)\s*(.*)$/.exec(line)
-    if (item) { current = item[1]; if (!texts.has(current)) texts.set(current, item[2].trim()); else current = null; continue }
-    // Indented lines and unindented lazy paragraph continuations both belong to the item; a blank line or another list marker ends it.
-    if (current && /\S/.test(line) && (/^\s/.test(line) || !/^([-*+]|\d+[.)])\s/.test(line))) texts.set(current, `${texts.get(current)} ${line.trim()}`.trim())
-    else current = null
-  }
-  return texts
+// ADR-055 §7: exact files and directory trees that require judge review.
+const PROTECTED = ['crew/loop.mjs', 'crew/proof.mjs', 'crew/proof-reporter.mjs', 'crew/protocols.mjs', 'crew/acp/grants.mjs', 'hooks/', 'crew/agents/', '.github/workflows/', 'docs/adr/']
+const protectedPaths = (paths) => (paths ?? []).map((path) => path.replace(/^(\.\/)+/, '')).filter((path) => PROTECTED.some((entry) => entry.endsWith('/') ? path === entry.slice(0, -1) || path.startsWith(entry) : path === entry))
+
+// ADR-055 §4: only an explicit all-not-machine-checked plan waives proof.
+function planNamesNoTest(text) {
+  text = text.replace(/\r\n?/g, '\n')
+  const { parts, repeated } = sections(text)
+  const properties = sections(text, { includeFences: true }).parts.get('## Properties')?.join('\n').trim()
+  const item = (line) => /^\s*([-*+]|\d+[.)])\s+\S/.test(line)
+  return parts.has('## Properties') && !repeated.includes('## Properties') && !repeated.includes('## Not machine-checked')
+    && (properties === '' || properties === 'None.') && (parts.get('## Not machine-checked') ?? []).some(item)
 }
 const oneLine = (v) => String(v ?? '').replace(/\s*[\r\n]+\s*/g, ' ').trim()
 
@@ -99,7 +97,6 @@ export async function runLoop(spec, deps = {}) {
   if (spec.shape !== 'standard' && spec.shape !== 'finish') return refusal('unsupported-shape')
   const isFinish = spec.shape === 'finish'
   const sound = [spec.id, spec.cwd, spec.taskDir, spec.brief, spec.source, spec.branch, spec.base].every(text) && TIERS.includes(spec.tier)
-    && strings(spec.acceptance) && spec.acceptance.length > 0 && new Set(spec.acceptance).size === spec.acceptance.length
     && text(spec.suite?.command) && (spec.suite.args === undefined || Array.isArray(spec.suite.args))
     && (spec.suite.timeoutMs === undefined || (Number.isSafeInteger(spec.suite.timeoutMs) && spec.suite.timeoutMs > 0))
     && [spec.closes, spec.refs].every((v) => v === undefined || Array.isArray(v))
@@ -135,6 +132,8 @@ export async function runLoop(spec, deps = {}) {
   const last = {}
   let where = null
   let turn = isFinish ? fin.turnOffset : 0
+  let tier = spec.tier
+  let testsRequired = true
   let planPath = isFinish ? fin.planPath : null
   let namedTests = []
   let filesInScope = isFinish ? fin.filesInScope ?? null : null
@@ -170,6 +169,22 @@ export async function runLoop(spec, deps = {}) {
     const closed = LOOP_REASONS.includes(reason) ? reason : 'runner-threw'
     await emit('verdict', { status: 'stopped', reason: closed, observation })
     return refusal(closed)
+  }
+  // ADR-055 §7: a raise replaces seats without widening existing round bounds.
+  const raise = async (reason, detail) => {
+    if (tier === 'judge') return null
+    let next
+    try { next = d.resolveAgents('judge')?.seats } catch (error) { return stop('seat-unmeasured', { reason, error: describe(error) }) }
+    if (!(isFinish ? FINISH_ROLES : REQUIRED_ROLES).every((role) => next?.[role] && typeof next[role] === 'object') || !Object.values(next ?? {}).every((cell) => cell == null || (typeof cell === 'object' && bounded(cell)))) return stop('seat-unmeasured', { reason })
+    for (const [role, cell] of Object.entries(next)) {
+      if (cell && seats[role]?.rounds !== undefined) next[role] = { ...cell, rounds: seats[role].rounds }
+    }
+    for (const role of Object.keys(seats)) delete seats[role]
+    Object.assign(seats, next)
+    const from = tier
+    tier = 'judge'
+    await emit('tier-raised', { from, to: tier, reason, ...detail })
+    return null
   }
   const stage = async (name, work) => {
     const outer = where
@@ -208,7 +223,7 @@ export async function runLoop(spec, deps = {}) {
         rounds[role] += 1
         const id = `${spec.id}.${role}.${turn}`
         const returnPath = join(spec.taskDir, `${role}-${turn}.json`)
-        const request = { role, seat: seats[role], id, returnPath, brief: spec.brief, planPath, feedback, ...(['builder', 'reviewer'].includes(role) ? { filesInScope: filesInScope === null ? null : [...filesInScope] } : {}), ...(role === 'reviewer' ? { changedPaths } : {}) }
+        const request = { role, tier, seat: seats[role], id, returnPath, brief: spec.brief, planPath, feedback, ...(['builder', 'reviewer'].includes(role) ? { filesInScope: filesInScope === null ? null : [...filesInScope] } : {}), ...(role === 'reviewer' ? { changedPaths } : {}) }
         // One attempt: run the seat, then read the issued path back, parse it and validate it in full.
         const attempt = async (asked) => {
           let failure = null
@@ -285,15 +300,24 @@ export async function runLoop(spec, deps = {}) {
 
     const planned = isFinish ? null : await stage('plan', () => seatTurn('planner'))
     if (planned?.halt) return planned.halt
-    const acceptance = isFinish ? spec.acceptance : planned.envelope.details.acceptance
     const subject = isFinish ? fin.subject : planned.envelope.details.subject
     if (!isFinish) {
       planPath = resolve(spec.taskDir, planned.envelope.details.plan_path)
-      if (acceptance.length !== spec.acceptance.length || !acceptance.every((id) => spec.acceptance.includes(id))) return await stop('envelope-refused', { acceptance })
       filesInScope = planned.envelope.details.files_in_scope ?? null
+      if (planned.envelope.details.judge) {
+        const halt = await raise('planner-judge', { judge: planned.envelope.details.judge })
+        if (halt) return halt
+      }
+      try { testsRequired = !planNamesNoTest(await d.readFile(planPath, 'utf8')) } catch { /* unreadable plans require proof */ }
     } else {
       // A --return pass counts the reviews the finish run already spent: it never grants new rounds.
       seats.reviewer = { ...seats.reviewer, rounds: FINISH_REVIEW_ROUNDS - (fin.priorReviewRounds ?? 0) }
+    }
+
+    const scopePaths = protectedPaths(filesInScope)
+    if (scopePaths.length) {
+      const halt = await raise('protected-path', { paths: scopePaths })
+      if (halt) return halt
     }
 
     let proofLines = [PROOF_UNMEASURED]
@@ -310,10 +334,11 @@ export async function runLoop(spec, deps = {}) {
         if (built.halt) return built.halt
         // Every return names its own tests; an earlier turn's names never stand in for this build.
         namedTests = Array.isArray(built.envelope.details.tests) ? built.envelope.details.tests : []
-        if (!namedTests.length && !isFinish) {
+        if (!namedTests.length && !isFinish && testsRequired) {
           feedback = [{ id: 'proof-no-tests', severity: 'must-fix', summary: 'Name at least one test in details.tests ({file, title}); the loop proves each red on the old source and green on the build.' }]
           continue
         }
+        if (!namedTests.length && !isFinish && !testsRequired) proofLines = ['- proof: none, no criterion is machine-checked']
         if (namedTests.length) {
           const proof = await stage('proof', () => callCheck('proof', d.proveTests, { cwd, base: 'HEAD', tests: namedTests, timeoutMs }))
           const rows = Array.isArray(proof.rows) ? proof.rows : []
@@ -331,6 +356,11 @@ export async function runLoop(spec, deps = {}) {
         changedPaths = status.status === 'green' && typeof status.stdout === 'string' ? parseChangedPaths(status.stdout) : null
         if (changedPaths === null) return stop('paths-unmeasured', status)
         stagePaths = parseChangedPaths(status.stdout, true)
+        const paths = protectedPaths(changedPaths)
+        if (paths.length) {
+          const halt = await raise('protected-path', { paths })
+          if (halt) return halt
+        }
 
         // A finish review is capped outright: its bound ends the run, never a lead bounce into a fourth round.
         const reviewed = await stage('review', () => seatTurn('reviewer', [], { singleTurn: isFinish }))
@@ -385,7 +415,6 @@ export async function runLoop(spec, deps = {}) {
       break
     }
     const measurements = [...proofLines, suiteLine]
-    const texts = acceptanceTexts(spec.brief)
     const finishLines = !isFinish ? [] : [
       '## Finish',
       `- Stop: ${oneLine(fin.stop.reason)}${fin.stop.observation == null ? '' : `: ${oneLine(JSON.stringify(fin.stop.observation))}`}`,
@@ -398,9 +427,7 @@ export async function runLoop(spec, deps = {}) {
       '',
     ]
     const body = [
-      `Source: ${JSON.stringify(spec.source)}`, '', '## Acceptance',
-      ...acceptance.map((id) => `- ${id}: ${texts.get(id) || 'unmeasured (the brief gives no text for this id)'}`),
-      '', ...finishLines, '## Measurements', ...measurements,
+      `Source: ${JSON.stringify(spec.source)}`, '', ...finishLines, '## Measurements', ...measurements,
     ].join('\n')
 
     // The commit names what git reports changed now, never a list the caller wrote before the build.
@@ -440,7 +467,7 @@ export async function runLoop(spec, deps = {}) {
     if (isFinish) {
       // The fused report the deciding session reads instead of the journal; a run that cannot write it is not ready.
       const reviewRounds = (fin.priorReviewRounds ?? 0) + rounds.reviewer
-      const report = { schema: 'finish-report/1', lane: spec.id, stop: { reason: fin.stop.reason, observation: fin.stop.observation ?? null }, subject, body, head: rebased.head, reviewRounds, reviews: finishReviews, measurements, acceptance }
+      const report = { schema: 'finish-report/1', lane: spec.id, stop: { reason: fin.stop.reason, observation: fin.stop.observation ?? null }, subject, body, head: rebased.head, reviewRounds, reviews: finishReviews, measurements }
       await d.writeFile(join(spec.taskDir, 'finish-report.json'), `${JSON.stringify(report, null, 2)}\n`)
       await emit('finish-ready', { status: 'ready-for-operator', head: rebased.head, subject, body, reviewRounds })
       return { status: 'done', reason: null, pr: null }

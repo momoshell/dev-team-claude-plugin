@@ -46,6 +46,20 @@ const run = (f, extra = {}) => {
 const refusal = (f) => { try { run(f).go() } catch (e) { return e } return null }
 const cleanup = (f) => rmSync(f.base, { recursive: true, force: true })
 
+test('a lane the loop raised to judge is finished on the judge tier', () => {
+  for (const raised of [false, true]) {
+    const f = fixture()
+    try {
+      if (raised) {
+        const path = join(f.taskDir, 'journal.jsonl')
+        writeFileSync(path, `${readFileSync(path, 'utf8')}${JSON.stringify({ event: 'tier-raised', from: 'build', to: 'judge', reason: 'protected-path', paths: ['crew/loop.mjs'] })}\n`)
+      }
+      run(f).go()
+      assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).tier, raised ? 'judge' : 'build')
+    } finally { cleanup(f) }
+  }
+})
+
 // MUTATION: skip the build check and a lane with no accepted builder envelope is finished anyway.
 test('a lane with no qualifying builder envelope is refused as finish-no-build', () => {
   const f = fixture({ builder: false })

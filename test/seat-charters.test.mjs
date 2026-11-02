@@ -44,7 +44,7 @@ test('SC2: the builder finishes the whole change', () => {
 
 // MUTATION: remove deletions or skeleton retrieval from the scope rule.
 test('SC3: planner scope covers all touched files and retrieval', () => {
-  has(body('crew/agents/planner.md'), '`files_in_scope` must list every file the build touches, including files to delete; it fences skeleton retrieval as well as edits.')
+  has(body('crew/agents/planner.md'), '`files_in_scope` must list every file the build touches, including files to delete. It fences skeleton retrieval, not edits; scope is context, not an edit fence (ADR-045).')
 })
 
 // MUTATION: replace "is a bare file path" with "is an artifact path".
@@ -144,16 +144,11 @@ source: operator request
 closes: null
 tier: build
 shape: ${shape}
-acceptance: [SG1]
 out_of_scope: everything else
 ---
 ## The ask
 
 Check shape support.
-
-## Acceptance
-
-- (SG1) the shape is checked
 `
   assert.deepEqual(parseBrief(brief).defects, [])
   const effects = []

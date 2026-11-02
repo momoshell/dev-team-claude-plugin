@@ -4,7 +4,7 @@
 // one field per line, with JSON for objects and object lists. Import-free, so the new
 // path never loads the old one.
 
-export const BRIEF_FIELDS = Object.freeze(['source', 'closes', 'tier', 'shape', 'acceptance', 'out_of_scope', 'suite'])
+export const BRIEF_FIELDS = Object.freeze(['source', 'closes', 'tier', 'shape', 'out_of_scope', 'suite'])
 export const TIERS = Object.freeze(['mechanical', 'build', 'judge'])
 export const SHAPES = Object.freeze(['standard', 'finish'])
 export const AGENT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
@@ -33,16 +33,21 @@ function value(raw) {
 
 // The body's lines grouped by level-1 or level-2 heading, skipping fenced text: a
 // heading or item quoted inside a fence is an example, as the driver reads it.
+// `includeFences` retains fenced lines as content without treating headings inside them as boundaries.
 // A heading the body repeats is listed in `repeated`; the driver reads only the first.
-export function sections(body) {
+export function sections(body, { includeFences = false } = {}) {
   const out = new Map()
   const repeated = []
   let current = null
   let fence = null
   for (const line of body.split('\n')) {
     const mark = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1]
-    if (fence) { if (mark && mark[0] === fence[0] && mark.length >= fence.length && line.trim() === mark) fence = null; continue }
-    if (mark) { fence = mark; continue }
+    if (fence) {
+      if (includeFences && current) out.get(current).push(line)
+      if (mark && mark[0] === fence[0] && mark.length >= fence.length && line.trim() === mark) fence = null
+      continue
+    }
+    if (mark) { if (includeFences && current) out.get(current).push(line); fence = mark; continue }
     if (/^#{1,2}\s+/.test(line)) {
       current = line.trim()
       if (out.has(current)) repeated.push(current)
@@ -66,6 +71,8 @@ export function parseBrief(text) {
     if (!line.trim()) continue
     const pair = /^([a-z_]+):(.*)$/.exec(line)
     if (!pair) { defects.push(`frontmatter line is not key: value: ${JSON.stringify(line)}`); continue }
+    // ADR-055 §1: the planner, not the brief, writes criteria.
+    if (pair[1] === 'acceptance') { defects.push('acceptance is not a brief field: the planner writes the criteria (ADR-055 §1)'); continue }
     if (!BRIEF_FIELDS.includes(pair[1])) { defects.push(`unknown field ${pair[1]}; the fields are ${BRIEF_FIELDS.join(', ')}`); continue }
     fields[pair[1]] = value(pair[2])
   }
@@ -77,13 +84,8 @@ export function parseBrief(text) {
   if (!SHAPES.includes(fields.shape)) defects.push(`shape is one of ${SHAPES.join(', ')}`)
   if (typeof fields.out_of_scope !== 'string' || !fields.out_of_scope) defects.push('out_of_scope says what the lane must not change')
   if (Object.hasOwn(fields, 'suite') && (typeof fields.suite !== 'string' || fields.suite.trim() === '')) defects.push('suite is a command line (for example: suite: cargo test -p power-api)')
-  const acceptance = Array.isArray(fields.acceptance) ? fields.acceptance : []
-  if (acceptance.length === 0 || !acceptance.every((id) => typeof id === 'string' && ID.test(id))) defects.push('acceptance lists the gate ids, each a letter then letters, digits, . _ or -')
-  else if (new Set(acceptance).size !== acceptance.length) defects.push('acceptance repeats an id')
-  const { parts, repeated } = sections(body)
+  const { repeated } = sections(body)
   if (repeated.length) defects.push(`the body repeats ${[...new Set(repeated)].join(', ')}; the driver reads only the first`)
-  const heads = (parts.get('## Acceptance') ?? []).map((line) => /^\s*[-*]\s+\(([^)]+)\)/.exec(line)?.[1]).filter(Boolean)
-  if (acceptance.length && heads.join(' ') !== acceptance.join(' ')) defects.push(`the ## Acceptance items open with (${heads.join(') (') || 'none'}), not the frontmatter ids (${acceptance.join(') (')})`)
   // `closes` is the only issue binding; crew start writes it into the driver's bound-issue slot.
   const stray = body.match(/#\d+/g)
   if (stray) defects.push(`the body names ${stray.join(', ')}; write "issue N" or "PR N", because closes is the only issue binding`)
@@ -215,7 +217,7 @@ export const FINDING_DISPOSITIONS = Object.freeze(['auto-fix', 'ask-user', 'no-o
 const FINDING_ID = /^[A-Za-z0-9_-]{1,64}$/
 const REVIEW_KEYS = Object.freeze(['verdict', 'findings'])
 const DETAIL_KEYS = Object.freeze({
-  planner: ['subject', 'plan_path', 'acceptance'],
+  planner: ['subject', 'plan_path'],
   builder: ['summary'],
   reviewer: REVIEW_KEYS,
   'tech-lead': REVIEW_KEYS,
@@ -223,12 +225,12 @@ const DETAIL_KEYS = Object.freeze({
 })
 // Fields a role may carry beyond its required ones. A planner states the context the builder's arms read.
 const OPTIONAL_DETAIL_KEYS = Object.freeze({
-  planner: ['files_in_scope', 'validation_lane'],
+  planner: ['files_in_scope', 'validation_lane', 'judge'],
   builder: ['tests', 'notes'],
 })
 // ADR-055 §8: archived planner returns still carry these fields.
 const LEGACY_DETAIL_KEYS = Object.freeze({
-  planner: ['gate_path', 'gate_cmd', 'mutations'],
+  planner: ['acceptance', 'gate_path', 'gate_cmd', 'mutations'],
 })
 const DETAIL_RULES = {
   subject: [(v) => typeof v === 'string' && v.length <= 72 && !/[\x00-\x1f\x7f]/.test(v)
@@ -237,6 +239,7 @@ const DETAIL_RULES = {
   plan_path: [nonempty, 'is a nonempty string'],
   files_in_scope: [(v) => Array.isArray(v) && v.length > 0 && v.every(nonempty), 'is a nonempty list of nonempty strings'],
   validation_lane: [nonempty, 'is a nonempty string'],
+  judge: [(v) => nonempty(v) && !/[\x00-\x1f\x7f]/.test(v), 'is a one-line reason the lane needs judge review'],
   summary: [nonempty, 'is a nonempty string'],
   verdict: [(v) => REVIEW_VERDICTS.includes(v), `is one of ${REVIEW_VERDICTS.join(', ')}`],
   decision: [(v) => LEAD_DECISIONS.includes(v), `is one of ${LEAD_DECISIONS.join(', ')}`],
@@ -283,10 +286,7 @@ export function validateEnvelope(role, envelope) {
         if (!Object.hasOwn(details, key)) { defects.push(`details.${key} is required`); continue }
         const v = details[key]
         if (Object.hasOwn(DETAIL_RULES, key)) { if (!DETAIL_RULES[key][0](v)) defects.push(`details.${key} ${DETAIL_RULES[key][1]}`) }
-        else if (key === 'acceptance') {
-          const validAcceptance = Array.isArray(v) && v.length > 0 && v.every((id) => typeof id === 'string' && ID.test(id)) && new Set(v).size === v.length
-          if (!validAcceptance) defects.push('details.acceptance is a nonempty list of unique acceptance ids')
-        } else if (key === 'findings' && !Array.isArray(v)) defects.push('details.findings is a list of findings')
+        else if (key === 'findings' && !Array.isArray(v)) defects.push('details.findings is a list of findings')
         else if (key === 'findings') {
           const seen = new Set()
           v.forEach((finding, index) => {

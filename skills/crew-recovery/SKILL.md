@@ -25,7 +25,7 @@ Read first, decide second, remove last.
 ## Finish it
 
 `crew finish <lane>` re-enters a stopped lane in its own worktree, on its
-uncommitted build, and runs builder triage, gate, mutation proof, review, suite,
+uncommitted build, and runs builder triage, the builder's named tests, review, suite,
 commit and rebase. It publishes nothing (`crew/finish.mjs`). When that run is
 ready, decide once:
 
@@ -47,8 +47,8 @@ longer the head the run measured. Read the refusal; it names the cause.
 - Finished by hand: in the lane worktree, commit every change the build made
   (`git status --short` shows nothing left), fetch, and rebase onto the base the
   lane recorded as `origin/<base>` (`base` in `task/lean.json`; a local `<base>` does not move on fetch). Then, on
-  that rebased tree, run the gate, prove each acceptance check's mutation turns it
-  red, run the suite, and push only if all three hold.
+  that rebased tree, run the builder's named tests against old source and build, run the suite,
+  and push only if both pass.
   Then open the PR and run `crew record-pr <lane> --pr <url>`, which appends one
   operator-marked `pr` row so the lane stops reading as stopped. `record-pr`
   checks only that the lane is quiet and records no PR yet, not that the PR holds

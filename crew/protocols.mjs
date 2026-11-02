@@ -227,7 +227,8 @@ const DETAIL_KEYS = Object.freeze({
 const OPTIONAL_DETAIL_KEYS = Object.freeze({
   planner: ['files_in_scope', 'validation_lane', 'gate_cmd'],
   // A finish builder may replace the declaration for an acceptance id it re-aims; the loop proves the replacements.
-  builder: ['mutations'],
+  // ADR-055 §3: the tests a builder names (file and title) and its notes for the reviewer.
+  builder: ['mutations', 'tests', 'notes'],
 })
 const DETAIL_RULES = {
   subject: [(v) => typeof v === 'string' && v.length <= 72 && !/[\x00-\x1f\x7f]/.test(v)
@@ -241,6 +242,8 @@ const DETAIL_RULES = {
   summary: [nonempty, 'is a nonempty string'],
   verdict: [(v) => REVIEW_VERDICTS.includes(v), `is one of ${REVIEW_VERDICTS.join(', ')}`],
   decision: [(v) => LEAD_DECISIONS.includes(v), `is one of ${LEAD_DECISIONS.join(', ')}`],
+  tests: [(v) => Array.isArray(v) && v.every((t) => plain(t) && Object.keys(t).length === 2 && nonempty(t.file) && nonempty(t.title)), 'is a list of {file, title} with nonempty strings'],
+  notes: [nonempty, 'is a nonempty string'],
 }
 const MUTATION_KEYS = Object.freeze(['check', 'file', 'find', 'replace'])
 const FINDING_REQUIRED = Object.freeze(['id', 'severity', 'location', 'summary'])

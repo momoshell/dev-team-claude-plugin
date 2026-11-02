@@ -416,3 +416,16 @@ test('P2 typed findings are refused by nested path', () => {
     bad([finding({ severity: 'must-fix' })], 'details.verdict is pass', 'pass')
   }
 })
+
+test('a builder envelope carries the tests it names and its notes, refused when malformed', () => {
+  const sound = envelope('builder')
+  sound.details.tests = [{ file: 'crew/a.test.mjs', title: 'a refuses b' }]
+  sound.details.notes = 'relied on the suite for the unchanged parser'
+  assert.deepEqual(validateEnvelope('builder', sound).defects, [])
+  const none = envelope('builder'); none.details.tests = []
+  assert.deepEqual(validateEnvelope('builder', none).defects, [])
+  for (const [key, bad] of [['tests', 'x'], ['tests', [{ file: 'a.test.mjs' }]], ['tests', [{ file: 'a.test.mjs', title: '' }]], ['tests', [{ file: 'a', title: 't', extra: 1 }]], ['notes', ''], ['notes', 7]]) {
+    const malformed = envelope('builder'); malformed.details[key] = bad
+    assert.ok(refusedFor('builder', malformed, `details.${key}`).length, `${key} ${JSON.stringify(bad)}`)
+  }
+})

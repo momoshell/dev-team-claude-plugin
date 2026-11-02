@@ -198,12 +198,54 @@ delivers the whole skill (`hooks/skill-gate.mjs`), and only the builder and revi
 | 1 | seat knowledge | build | §10's skills and the §3 charter rules; `skill-map.json` cleaned of grants no seat receives |
 | 1 | arms | judge | §8's six arms |
 | 1 | corpus | build | four to six feature-sized lanes in `bench/corpus`, so a replay can show what `code-less` claims (every lane there now is a small fix) |
-| 2 | planner | judge | §1, §2 and §7: the brief without acceptance, the plan shape, the `judge` raise and the path raise |
+| 2 | planner | judge | §1, §2 and §7: the brief without acceptance, the plan shape, the `judge` raise and the path raise; §12's code parts |
 | 3 | reviewer | judge | §5, `notes` in the reviewer prompt, the tech-lead second review on judge lanes, map grants for the tech-lead |
 | 4 | loops | judge | ADR-054's three loop shapes |
 
 Wave 1 lanes run side by side; worktrees isolate them and the rebase resolves overlap. The proof lane's brief is the
 last that carries acceptance ids.
+
+### 12. When a lane stops for the operator
+
+Added 2026-11-02 after the first two wave-1 judge lanes. b1481 and b1483 both stopped `round-bound` after three
+builder turns and two lead bounces, with no question for the operator. b1481's builder returned `escalate` three times
+for unfinished work: 43, 38 and 29 tool calls, each turn ended by the model, 2.8M tokens for a 7-file diff. b1483's
+builder returned `insufficient` twice because `files_in_scope` left out a test the deletion broke, and the lead told it
+to extend the plan's scope, which the builder may not edit. Earlier tallies agree: 38 of 71 finished lanes escalated by
+2026-10-02 and all 38 merged after hand work; 13 of 19 escalations on 2026-10-03 were loop defects.
+
+A lane stops for the operator only when it needs a decision or something only the operator can give:
+
+1. The ask cannot be done as written: a brief premise is false on main, or the ask contradicts the code or itself.
+2. The fix needs a decision outside the brief: changing `out_of_scope`, breaking a public contract, dropping data, or
+   a security trade-off.
+3. The lane needs something only the operator has: credentials, an account, or a provider authentication failure
+   (401 or 403).
+4. On a judge lane, the builder and reviewer still dispute a must-fix after the tech-lead's second review.
+5. No progress: the same failure returns twice with the same evidence. Code detects this and stops; no seat decides it.
+
+Everything else goes to the seat that can fix it:
+
+| Situation | Goes to |
+|---|---|
+| Unfinished work, a large change | the builder keeps working; it is never a reason to return |
+| A file the change reaches is missing from `files_in_scope` | the builder edits it and names it (ADR-045) |
+| A gap in the plan | the planner, which revises the plan |
+| A test or the suite breaks after the change, a reviewer must-fix, a rebase conflict | the builder |
+| A provider 429, 529 or 5xx | the bounded retry |
+| An envelope that fails the schema | the repair turn |
+| A protected path | the `judge` raise of §7 |
+
+Code holds the rule:
+
+- An `escalate` from any seat carries `details.question`, the decision it needs from the operator. An `escalate`
+  without one is a bounce to the same seat.
+- A builder `insufficient` goes to the planner on every tier, as §7 already does for a mechanical lane. The build
+  continues on the revised plan.
+- A lead bounce names its target, `builder` or `planner`.
+
+The charter lines (the builder's statuses and `files_in_scope`, the lead's escalation list) apply at once. The code parts
+land with the wave-2 planner lane.
 
 ## Measurement before ratifying
 

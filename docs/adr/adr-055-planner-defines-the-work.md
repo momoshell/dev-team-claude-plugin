@@ -53,7 +53,8 @@ line). It has no acceptance ids and no `## Acceptance` section, and nobody write
 - **Properties:** each states what must hold, lists the criteria it validates, and names one test (file and title). One
   test per property, not per criterion.
 - **Not machine-checked:** criteria no test can check, listed as such.
-- **Tasks:** an ordered checklist, at most two levels, each citing its criteria and the test that proves it.
+- **Tasks:** an ordered checklist, at most two levels, each citing its criteria and the test that proves it, or
+  "not machine-checked" when its criteria have no test.
 
 The planner envelope keeps `subject`, `plan_path` and `files_in_scope`, adds an optional `judge` (a one-line reason),
 and drops `acceptance`, `gate_path`, `gate_cmd` and `mutations`.
@@ -109,13 +110,16 @@ The judge loop's second review is the tech-lead's. It drops ADR-038's mutation o
 
 ### 7. Choosing the loop
 
-1. At dispatch: `mechanical` only when the issue shows it, otherwise `build`.
+1. At dispatch: `mechanical` only when the issue shows it and names none of the protected paths below, otherwise
+   `build`.
 2. After planning: the planner may raise the lane to `judge` with its `judge` reason.
 3. After the build: code raises the lane to `judge` when `files_in_scope` or the diff touches `crew/loop.mjs`, the
    proof module, `crew/protocols.mjs`, `crew/acp/grants.mjs`, `hooks/`, `crew/agents/`, `.github/workflows/` or
    `docs/adr/`.
 
-Code raises a lane and never lowers one. A mechanical lane whose builder returns `insufficient` restarts as `build`.
+Code raises a lane and never lowers one. A build lane raised after its build continues on the judge loop from the
+proof. A mechanical lane has no plan, so when it is raised, or its builder returns `insufficient`, it restarts from
+planning: as `judge` when raised, as `build` otherwise, and its first build is discarded.
 
 ### 8. What is removed
 

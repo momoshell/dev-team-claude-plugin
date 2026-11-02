@@ -9,6 +9,8 @@ import { basename, dirname, join, relative, resolve } from 'node:path'
 import { ROOT, scratchDir } from '../../test/helpers.mjs'
 import { runAcpSeat } from './seat.mjs'
 import { PANE_USAGE_SETTINGS } from '../adapters/adapter-claude.mjs'
+import { loadAcceptedContext } from '../pi/extensions/skeletonread.ts'
+import { loadContext as advisorContext } from '../pi/extensions/advisor.ts'
 
 const FIXTURES = join(ROOT, 'test', 'fixtures', 'acp')
 const BIN = process.execPath
@@ -1326,6 +1328,15 @@ test('a lean pi builder declaring advisor and skeletonread launches with both on
   assert.deepEqual(manifest.acceptance_items, ['(A1) first item', '(A2) second item'])
   assert.deepEqual(manifest.cell, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'high', model: 'openai/gpt-6.1-sol' })
   assert.equal(existsSync(join(probe.taskDir, 'advisor-manifest.json.tmp')), false)
+  const replanned = armLaunch('pi', 'builder', contextArms)
+  leanLane(replanned.taskDir, { anchor })
+  const accepted = JSON.parse(readFileSync(join(replanned.taskDir, 'planner-3.json'), 'utf8'))
+  writeFileSync(join(replanned.taskDir, 'planner-4.json'), JSON.stringify({ ...accepted, details: { ...accepted.details, subject: 'invalid' } }))
+  writeFileSync(join(replanned.taskDir, 'planner-5.json'), JSON.stringify({ ...accepted, status: 'insufficient', details: { ...accepted.details, files_in_scope: ['wrong.mjs'] } }))
+  replanned.run()
+  const env = { CREW_CONTEXT_LAYOUT: 'lean', CREW_TASK_DIR: replanned.taskDir }
+  assert.equal(loadAcceptedContext({ taskDir: replanned.taskDir, cwd: replanned.cwd, env })?.planner_number, 3)
+  assert.deepEqual(advisorContext({ taskDir: replanned.taskDir, env }).files_in_scope, ['a.mjs'])
 })
 
 test('a lean pi seat with context arms refuses before a client when the lane has no run-start of its own, whatever its parent holds', () => {
@@ -1345,11 +1356,12 @@ test('a lean pi seat with context arms refuses when the lane planner return is m
   refusedBeforeClient(arms, (taskDir) => leanLane(taskDir, { details: null }))
   refusedBeforeClient(arms, (taskDir) => leanLane(taskDir, { anchor: Date.now() - 60_000, mtime: Date.now() - 120_000 }))
   refusedBeforeClient({ extensions: ['skeletonread'] }, (taskDir) => leanLane(taskDir, { details: { ...laneDetails, files_in_scope: [] } }))
-  // The newest return decides: an older valid one does not stand in for it.
+  // A malformed or unreadable newer return cannot silently fall back to an older plan.
   refusedBeforeClient(arms, (taskDir) => {
     leanLane(taskDir, { number: 2 })
     writeFileSync(join(taskDir, 'planner-9.json'), '{"role":"planner"')
   })
+  refusedBeforeClient(arms, (taskDir) => { leanLane(taskDir, { number: 2 }); leanLane(taskDir, { number: 9 }) }, { deps: { readFileSync: (path, ...args) => { if (String(path).endsWith('planner-9.json')) throw Object.assign(new Error('denied'), { code: 'EPERM' }); return readFileSync(path, ...args) } } })
   // A planner seat has no planner return yet, but still needs the lane's anchor.
   const planner = armLaunch('pi', 'planner', { extensions: ['skeletonread'] })
   leanLane(planner.taskDir, { details: null })

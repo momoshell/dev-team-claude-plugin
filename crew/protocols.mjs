@@ -217,7 +217,7 @@ export const FINDING_DISPOSITIONS = Object.freeze(['auto-fix', 'ask-user', 'no-o
 const FINDING_ID = /^[A-Za-z0-9_-]{1,64}$/
 const REVIEW_KEYS = Object.freeze(['verdict', 'findings'])
 const DETAIL_KEYS = Object.freeze({
-  planner: ['subject', 'plan_path'],
+  planner: ['subject', 'plan_path', 'tests'],
   builder: ['summary'],
   reviewer: REVIEW_KEYS,
   'tech-lead': REVIEW_KEYS,
@@ -225,9 +225,13 @@ const DETAIL_KEYS = Object.freeze({
 })
 // Fields a role may carry beyond its required ones. A planner states the context the builder's arms read.
 const OPTIONAL_DETAIL_KEYS = Object.freeze({
-  planner: ['files_in_scope', 'validation_lane', 'judge'],
-  builder: ['tests', 'notes'],
+  planner: ['files_in_scope', 'validation_lane', 'judge', 'question'],
+  builder: ['tests', 'notes', 'question'],
+  reviewer: ['question'],
+  'tech-lead': ['question'],
+  lead: ['question', 'target'],
 })
+const ARCHIVED_OPTIONAL = Object.freeze({ planner: ['tests'] })
 // ADR-055 §8: archived planner returns still carry these fields.
 const LEGACY_DETAIL_KEYS = Object.freeze({
   planner: ['acceptance', 'gate_path', 'gate_cmd', 'mutations'],
@@ -245,6 +249,8 @@ const DETAIL_RULES = {
   decision: [(v) => LEAD_DECISIONS.includes(v), `is one of ${LEAD_DECISIONS.join(', ')}`],
   tests: [(v) => Array.isArray(v) && v.every((t) => plain(t) && Object.keys(t).length === 2 && nonempty(t.file) && nonempty(t.title)), 'is a list of {file, title} with nonempty strings'],
   notes: [nonempty, 'is a nonempty string'],
+  question: [nonempty, 'is a nonempty string'],
+  target: [(v) => ['builder', 'planner'].includes(v), 'is one of builder, planner'],
 }
 const FINDING_REQUIRED = Object.freeze(['id', 'severity', 'location', 'summary'])
 const FINDING_RULES = {
@@ -258,7 +264,7 @@ const FINDING_RULES = {
 
 // Returns { envelope, defects }. An empty defects list is an envelope the loop can act on;
 // a refused object root is still returned, a non-object root is null.
-export function validateEnvelope(role, envelope) {
+export function validateEnvelope(role, envelope, { archived = false } = {}) {
   if (!plain(envelope)) return { envelope: null, defects: ['envelope is a JSON object'] }
   const defects = []
   for (const key of Object.keys(envelope)) {
@@ -283,7 +289,7 @@ export function validateEnvelope(role, envelope) {
         else if (!required.includes(key) && !(LEGACY_DETAIL_KEYS[role] ?? []).includes(key)) defects.push(`details.${key} is not a field of ${role} details`)
       }
       for (const key of required) {
-        if (!Object.hasOwn(details, key)) { defects.push(`details.${key} is required`); continue }
+        if (!Object.hasOwn(details, key)) { if (!archived || !(ARCHIVED_OPTIONAL[role] ?? []).includes(key)) defects.push(`details.${key} is required`); continue }
         const v = details[key]
         if (Object.hasOwn(DETAIL_RULES, key)) { if (!DETAIL_RULES[key][0](v)) defects.push(`details.${key} ${DETAIL_RULES[key][1]}`) }
         else if (key === 'findings' && !Array.isArray(v)) defects.push('details.findings is a list of findings')
@@ -308,6 +314,7 @@ export function validateEnvelope(role, envelope) {
           if (details.verdict === 'pass' && v.some((finding) => plain(finding) && finding.severity === 'must-fix')) defects.push('details.verdict is pass but the findings include a must-fix')
         }
       }
+      if (role === 'lead' && details.decision === 'bounce' && !Object.hasOwn(details, 'target')) defects.push('details.target is required for a bounce: builder or planner')
     }
   }
   return { envelope, defects }

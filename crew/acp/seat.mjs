@@ -228,9 +228,12 @@ function laneContext({ arms, role, laneTaskDir, workdir, definition, briefText, 
         .map((name) => ({ name, number: plannerReturnNumber(name, layout) }))
         .filter((entry) => entry.number !== null && statSync(join(dir, entry.name)).mtimeMs >= anchor)
         .sort((a, b) => b.number - a.number)
-      if (candidates[0]) planner = JSON.parse(read(join(dir, candidates[0].name), 'utf8'))
-    } catch { planner = null }
-    const details = planner?.status === 'done' && validateEnvelope('planner', planner).defects.length === 0 ? planner.details : null
+      for (const candidate of candidates) {
+        const value = JSON.parse(read(join(dir, candidate.name), 'utf8'))
+        if (value?.status === 'done' && validateEnvelope('planner', value, { archived: true }).defects.length === 0) { planner = value; break }
+      }
+    } catch (error) { return refusal(`the lane's planner return could not be checked (${error?.code ?? error?.message})`) }
+    const details = planner?.status === 'done' && validateEnvelope('planner', planner, { archived: true }).defects.length === 0 ? planner.details : null
     const missing = details === null ? needs : needs.filter((key) => (Array.isArray(details[key]) ? details[key].length === 0 : !nonempty(details[key])))
     if (missing.length) return refusal(`the lane's planner return written since its start does not carry ${missing.join(', ')}`)
     // The arms' own readers have the last word, so a return this check accepts is one each arm can read.

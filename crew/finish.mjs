@@ -81,16 +81,14 @@ function requireWorktree(d, spec) {
 
 // The lane's accepted plan and subject, including archived planner returns.
 function loadPlan(d, lane, taskDir) {
-  let plannerFile = null
-  let best = 0
-  for (const name of d.readdirSync(taskDir)) {
-    const n = /^planner-(\d+)\.json$/.exec(name)
-    if (n && Number(n[1]) > best) { best = Number(n[1]); plannerFile = name }
+  const files = d.readdirSync(taskDir).map((name) => ({ name, n: /^planner-(\d+)\.json$/.exec(name)?.[1] }))
+    .filter(({ n }) => n !== undefined && Number(n) > 0).sort((a, b) => Number(b.n) - Number(a.n))
+  if (!files.length) throw new FinishRefusal('finish-premise', `lane ${lane} has no planner return`)
+  for (const { name } of files) {
+    const checked = validateEnvelope('planner', readJson(d, join(taskDir, name), 'the planner return'), { archived: true })
+    if (!checked.defects.length && checked.envelope?.status === 'done') return checked.envelope.details
   }
-  if (!plannerFile) throw new FinishRefusal('finish-premise', `lane ${lane} has no planner return`)
-  const checked = validateEnvelope('planner', readJson(d, join(taskDir, plannerFile), 'the planner return'))
-  if (checked.defects.length > 0 || checked.envelope?.status !== 'done') throw new FinishRefusal('finish-premise', `the planner return ${plannerFile} is not an accepted plan`)
-  return checked.envelope.details
+  throw new FinishRefusal('finish-premise', `the planner return ${files[0].name} is not an accepted plan`)
 }
 
 // The finish spec for a stop: the stop, the findings still open at that point of the journal, and the turn offset.

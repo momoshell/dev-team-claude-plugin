@@ -38,6 +38,8 @@ validated against a closed protocol (P2) and refused if it does not parse, and
 the loop adds no other gate: no host-load gate, no dispatch-time baseline, no
 measurement that holds work. Writing the record never throws into the caller.
 
+ADR-055 §12 routes an escalation without `details.question` back to the same seat. A builder's `insufficient` goes to the planner for revision; a lead bounce targets the builder or planner. Repeated failures with the same evidence stop as `no-progress` without a seat decision. The planner's P2 `details.tests` alone decides whether P3 proof is required; an empty list means no criterion is machine-checked.
+
 Seat definitions are `crew/agents/<role>.md`; their frontmatter is the only
 place a seat's model, agent (`claude` or `pi`), effort, skills, `requires`
 and extensions are written, and the body is the charter. Tiers are

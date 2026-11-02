@@ -228,7 +228,7 @@ test('P5 tier overrides are validated by path and by effective seat', () => {
 
 // P2, the seat envelope.
 const DETAILS = {
-  planner: { subject: 'fix(crew): name the lane change', plan_path: '/task/plan.md' },
+  planner: { subject: 'fix(crew): name the lane change', plan_path: '/task/plan.md', tests: [] },
   builder: { summary: 'Implemented the change.' },
   reviewer: { verdict: 'pass', findings: [] },
   'tech-lead': { verdict: 'pass', findings: [] },
@@ -259,8 +259,37 @@ test('P2 accepts every role and status, returning the input untouched', () => {
     assert.equal(result.envelope, value)
     assert.deepEqual(value, snapshot)
   }
-  for (const decision of LEAD_DECISIONS) assert.deepEqual(validateEnvelope('lead', envelope('lead', { details: { decision } })).defects, [])
+  for (const decision of LEAD_DECISIONS) assert.deepEqual(validateEnvelope('lead', envelope('lead', { details: { decision, ...(decision === 'bounce' ? { target: 'builder' } : {}) } })).defects, [])
   for (const verdict of REVIEW_VERDICTS) for (const role of ['reviewer', 'tech-lead']) assert.deepEqual(validateEnvelope(role, review([], verdict, role)).defects, [])
+})
+
+test('P2 planner details require tests, a list of {file, title}, except on an archived return', () => {
+  const value = envelope('planner')
+  delete value.details.tests
+  assert.ok(validateEnvelope('planner', value).defects.some((d) => d.includes('details.tests')))
+  assert.deepEqual(validateEnvelope('planner', value, { archived: true }).defects, [])
+  for (const tests of [null, {}, [{ file: '', title: 'x' }], [{ file: 'x', title: '' }], [{ file: 'x', title: 'y', extra: 1 }]]) {
+    value.details.tests = tests
+    for (const archived of [false, true]) assert.ok(validateEnvelope('planner', value, { archived }).defects.some((d) => d.includes('details.tests')))
+  }
+  value.details.tests = []
+  assert.deepEqual(validateEnvelope('planner', value).defects, [])
+  delete value.details.subject
+  assert.ok(validateEnvelope('planner', value, { archived: true }).defects.some((d) => d.includes('details.subject')))
+})
+
+test('P2 a lead bounce names its target, builder or planner, and any escalate may carry a question', () => {
+  for (const target of [undefined, '', 'reviewer', null]) {
+    const value = envelope('lead', { details: { decision: 'bounce', ...(target === undefined ? {} : { target }) } })
+    assert.ok(validateEnvelope('lead', value).defects.some((d) => d.includes('details.target')))
+  }
+  for (const target of ['builder', 'planner']) assert.deepEqual(validateEnvelope('lead', envelope('lead', { details: { decision: 'bounce', target } })).defects, [])
+  for (const role of AGENT_ROLES) {
+    const value = envelope(role, { status: 'escalate' })
+    value.details.question = 'Which decision?'
+    assert.deepEqual(validateEnvelope(role, value).defects, [])
+    for (const question of ['', null, 1]) { value.details.question = question; assert.ok(validateEnvelope(role, value).defects.some((d) => d.includes('details.question'))) }
+  }
 })
 
 // MUTATION: add blocked to ENVELOPE_STATUSES and a stale status is accepted.

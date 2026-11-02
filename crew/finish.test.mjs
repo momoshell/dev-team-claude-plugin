@@ -164,6 +164,20 @@ test('a stopped lane with a build is finished: finish.json carries the stop, fin
   } finally { cleanup(f) }
 })
 
+test('a re-planned lane finishes on its latest accepted plan, and a plan without tests still finishes', () => {
+  for (const revised of [false, true]) {
+    const f = fixture()
+    try {
+      if (revised) {
+        writeFileSync(join(f.taskDir, 'planner-3.json'), JSON.stringify({ ...PLANNER, details: { ...PLANNER.details, plan_path: '/t/plan-3.md', tests: [] } }))
+        writeFileSync(join(f.taskDir, 'planner-5.json'), JSON.stringify({ ...PLANNER, status: 'insufficient' }))
+      }
+      assert.doesNotThrow(() => run(f).go())
+      assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.planPath, revised ? '/t/plan-3.md' : '/t/plan.md')
+    } finally { cleanup(f) }
+  }
+})
+
 test('older accepted plans without scope still finish', () => {
   const f = fixture()
   try {

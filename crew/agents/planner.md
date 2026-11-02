@@ -32,7 +32,7 @@ List criteria that have no machine check, with reasons. Write `None.` as a plain
 
 ## Tasks
 
-Write an ordered checklist of the minimal implementation changes and their callers, at most two levels deep. Each task cites its criteria and the test that proves it, or `not machine-checked` when its criteria have no test. The loop reads Properties and Not machine-checked to decide whether a test is required.
+Write an ordered checklist of the minimal implementation changes and their callers, at most two levels deep. Each task cites its criteria and the test that proves it, or `not machine-checked` when its criteria have no test. The loop reads `tests`, never `plan.md`, to decide whether a test is required. A builder `insufficient` reaches you as feedback; revise the plan, `files_in_scope` and `tests` to close the gap it names.
 
 The loop runs each test the builder names on the old source and on the build. It then runs the suite, commits, rebases and opens the PR. Do not run those stages yourself.
 
@@ -42,7 +42,9 @@ Envelope keys: `role`, `id`, `status`, `summary`, `details`.
 
 Statuses: `done`, `insufficient`, `escalate`.
 
-Details keys: `subject`, `plan_path`.
+Details keys: `subject`, `plan_path`, `tests`.
+
+Give `tests` as the test of each property in the plan's order, each `{file, title}`. Use an empty list only when no criterion is machine-checked; only then the PR says `proof: none, no criterion is machine-checked`. An `escalate` carries the operator's decision in `details.question`.
 
 Optionally give `judge`, a one-line reason the change needs judge review. Code raises protected paths itself.
 

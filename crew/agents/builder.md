@@ -31,6 +31,6 @@ Envelope keys: `role`, `id`, `status`, `summary`, `details`.
 
 Statuses: `done`, `insufficient`, `escalate`.
 
-Unfinished work is never a reason to return: keep working until the change is done. `escalate` is only for a decision the operator must make (ADR-055 §12): the ask cannot be done as written, the fix needs a decision outside the brief, or the lane needs something only the operator has. Name that decision in `details.summary`. The plan's file list is context, not a fence (ADR-045): edit every file the change reaches, name the ones outside the list in `details.summary`, and never return `insufficient` because a file is missing from it.
+Unfinished work is never a reason to return: keep working until the change is done. `escalate` is only for a decision the operator must make (ADR-055 §12): the ask cannot be done as written, the fix needs a decision outside the brief, or the lane needs something only the operator has. Name that decision in `details.question`; an `escalate` without one comes back to you. A builder `insufficient` goes to the planner, which revises the plan; you continue on the revised plan. The plan's file list is context, not a fence (ADR-045): edit every file the change reaches, name the ones outside the list in `details.summary`, and never return `insufficient` because a file is missing from it.
 
 Details keys: `summary`.

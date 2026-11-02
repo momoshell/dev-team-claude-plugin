@@ -4,12 +4,13 @@
 // the loop issued, parsed and validated as P2, and must carry the id the loop issued.
 import { appendFile, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { resolveAgents } from './agents.mjs'
 import {
   CHECK_REASONS, commitChanges, openPullRequest, rebaseBranch, runSuite,
 } from './checks.mjs'
 import { proveTests } from './proof.mjs'
-import { TIERS, sections, validateEnvelope } from './protocols.mjs'
+import { TIERS, validateEnvelope } from './protocols.mjs'
 import { proveRequiredSkills } from './skills-proof.mjs'
 
 export const DEFAULT_ROUNDS = 2
@@ -17,7 +18,7 @@ const MAX_ENVELOPE_REPAIRS = 1
 const PROOF_UNMEASURED = '- proof: unmeasured'
 export const LOOP_REASONS = Object.freeze([
   ...CHECK_REASONS, 'unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'lead-escalated', 'lead-unavailable',
-  'lead-refused', 'accept-unmeasured', 'round-bound', 'paths-unmeasured',
+  'lead-refused', 'accept-unmeasured', 'round-bound', 'paths-unmeasured', 'no-progress',
 ])
 
 const REQUIRED_ROLES = ['planner', 'builder', 'reviewer']
@@ -80,15 +81,6 @@ function parseChangedPaths(stdout, unstaged = false) {
 const PROTECTED = ['crew/loop.mjs', 'crew/proof.mjs', 'crew/proof-reporter.mjs', 'crew/protocols.mjs', 'crew/acp/grants.mjs', 'hooks/', 'crew/agents/', '.github/workflows/', 'docs/adr/']
 const protectedPaths = (paths) => (paths ?? []).map((path) => path.replace(/^(\.\/)+/, '')).filter((path) => PROTECTED.some((entry) => entry.endsWith('/') ? path === entry.slice(0, -1) || path.startsWith(entry) : path === entry))
 
-// ADR-055 §4: only an explicit all-not-machine-checked plan waives proof.
-function planNamesNoTest(text) {
-  text = text.replace(/\r\n?/g, '\n')
-  const { parts, repeated } = sections(text)
-  const properties = sections(text, { includeFences: true }).parts.get('## Properties')?.join('\n').trim()
-  const item = (line) => /^\s*([-*+]|\d+[.)])\s+\S/.test(line)
-  return parts.has('## Properties') && !repeated.includes('## Properties') && !repeated.includes('## Not machine-checked')
-    && (properties === '' || properties === 'None.') && (parts.get('## Not machine-checked') ?? []).some(item)
-}
 const oneLine = (v) => String(v ?? '').replace(/\s*[\r\n]+\s*/g, ' ').trim()
 
 export async function runLoop(spec, deps = {}) {
@@ -135,6 +127,13 @@ export async function runLoop(spec, deps = {}) {
   let tier = spec.tier
   let testsRequired = true
   let planPath = isFinish ? fin.planPath : null
+  let subject = isFinish ? fin.subject : null
+  const failures = []
+  const repeatsFailure = (failure) => {
+    if (failures.some((previous) => isDeepStrictEqual(previous, failure))) return true
+    failures.push(failure)
+    return false
+  }
   let namedTests = []
   let filesInScope = isFinish ? fin.filesInScope ?? null : null
   let changedPaths = []
@@ -196,6 +195,18 @@ export async function runLoop(spec, deps = {}) {
       where = outer
     }
   }
+  const acceptPlan = async (details) => {
+    planPath = resolve(spec.taskDir, details.plan_path)
+    filesInScope = details.files_in_scope ?? null
+    subject = details.subject
+    testsRequired = details.tests.length > 0
+    if (details.judge) {
+      const halt = await raise('planner-judge', { judge: details.judge })
+      if (halt) return halt
+    }
+    const paths = protectedPaths(filesInScope)
+    return paths.length ? await raise('protected-path', { paths }) : null
+  }
   // Runs one check seam; a throw or a result that contradicts its own status is unmeasured, never trusted.
   const callCheck = async (name, fn, input, { command = false } = {}) => {
     let result
@@ -212,8 +223,9 @@ export async function runLoop(spec, deps = {}) {
 
   // One role's turn: issue, await, read back, validate (a schema-refused file gets one repair turn that
   // costs no round). Returns { envelope } for a done envelope or { halt }.
-  // A valid non-done envelope, or an exhausted bound, is put to the lead; a singleTurn turn stops there instead.
+  // Non-done returns route under ADR-055 §12; an exhausted bound goes to the lead, unless singleTurn stops it.
   const seatTurn = async (role, feedback = [], { singleTurn = false } = {}) => {
+    const given = feedback
     for (;;) {
       let held
       if (rounds[role] >= (seats[role].rounds ?? DEFAULT_ROUNDS)) {
@@ -266,17 +278,49 @@ export async function runLoop(spec, deps = {}) {
         if (!failure && !valid) failure = { reason: 'envelope-refused', defects: checked.defects }
         if (failure) return { halt: await stop(role === 'lead' ? 'lead-refused' : failure.reason, { role, id, ...failure }) }
         last[role] = checked.envelope
+        // ADR-055 §12: a questionless escalation returns to the same seat, including the lead.
+        if (role === 'lead') {
+          const questionless = checked.envelope.details.decision === 'escalate' && !text(checked.envelope.details.question)
+          if (checked.envelope.status !== 'done' || questionless) {
+            const failure = { role, status: checked.envelope.status, details: checked.envelope.details }
+            if (repeatsFailure(failure)) return { halt: await stop('no-progress', failure) }
+          }
+          if (questionless) {
+            feedback = [{ id: 'escalate-no-question', summary: 'Name the decision needed from the operator in details.question.' }, ...given]
+            continue
+          }
+          return { envelope: checked.envelope }
+        }
         if (checked.envelope.status === 'done') return { envelope: checked.envelope }
-        // A lead's schema-valid envelope carries its decision whatever the status; the loop acts on the decision.
-        if (role === 'lead') return { envelope: checked.envelope }
         held = { reason: checked.envelope.status, envelope: checked.envelope }
       }
       if (singleTurn) return { halt: await stop('round-bound', { role, ...held }) }
       // The lead is never consulted about itself: no recursion, an unusable lead turn ends the lane.
       if (role === 'lead') return { halt: await stop(held.envelope ? 'lead-refused' : 'round-bound', held) }
-      const decided = await consultLead(role, held, feedback)
+      if (held.envelope) {
+        const { status, details } = held.envelope
+        const failure = { role, status, details }
+        if (repeatsFailure(failure)) return { halt: await stop('no-progress', failure) }
+        if (status === 'escalate' && !text(details.question)) {
+          feedback = [{ id: 'escalate-no-question', summary: 'Name the decision needed from the operator in details.question.' }, ...given]
+          continue
+        }
+        if (!isFinish && role === 'builder' && status === 'insufficient') {
+          const revised = await replan(held.envelope)
+          if (revised.halt) return revised
+          feedback = [{ id: 'plan-revised', plan_path: planPath }, ...given]
+          seats[role] = { ...seats[role], rounds: Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }
+          continue
+        }
+      }
+      const decided = await consultLead(role, held, given)
       if (decided.halt) return decided
       if (decided.decision === 'accept') return { envelope: held.envelope }
+      if (!isFinish && role === 'builder' && decided.target === 'planner') {
+        const revised = await replan(held.envelope ?? last.builder ?? null, decided.summary)
+        if (revised.halt) return revised
+        feedback = [{ id: 'plan-revised', plan_path: planPath }, ...given]
+      }
       // bounce: exactly one more turn for this role, beyond its bound only if the bound is spent; the counter keeps its history
       seats[role] = { ...seats[role], rounds: Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }
     }
@@ -286,10 +330,16 @@ export async function runLoop(spec, deps = {}) {
     if (!seats.lead) return { halt: await stop('lead-unavailable', { role, ...held }) }
     const asked = await stage('lead', () => seatTurn('lead', [{ role, reason: held.reason, envelope: held.envelope ?? last[role] ?? null, feedback }]))
     if (asked.halt) return asked
-    const { decision } = asked.envelope.details
-    if (decision === 'escalate') return { halt: await stop('lead-escalated', { role, ...held }) }
+    const { decision, target, question } = asked.envelope.details
+    if (decision === 'escalate') return { halt: await stop('lead-escalated', { role, ...held, question }) }
     if (decision === 'accept' && !held.envelope) return { halt: await stop('accept-unmeasured', { role, ...held }) }
-    return { decision }
+    return { decision, target, summary: asked.envelope.summary }
+  }
+  const replan = async (envelope, lead) => {
+    const planned = await stage('replan', () => seatTurn('planner', [{ id: 'plan-gap', role: 'builder', envelope, ...(lead ? { lead } : {}) }]))
+    if (planned.halt) return planned
+    const halt = await acceptPlan(planned.envelope.details)
+    return halt ? { halt } : {}
   }
 
   try {
@@ -300,24 +350,17 @@ export async function runLoop(spec, deps = {}) {
 
     const planned = isFinish ? null : await stage('plan', () => seatTurn('planner'))
     if (planned?.halt) return planned.halt
-    const subject = isFinish ? fin.subject : planned.envelope.details.subject
     if (!isFinish) {
-      planPath = resolve(spec.taskDir, planned.envelope.details.plan_path)
-      filesInScope = planned.envelope.details.files_in_scope ?? null
-      if (planned.envelope.details.judge) {
-        const halt = await raise('planner-judge', { judge: planned.envelope.details.judge })
-        if (halt) return halt
-      }
-      try { testsRequired = !planNamesNoTest(await d.readFile(planPath, 'utf8')) } catch { /* unreadable plans require proof */ }
+      const halt = await acceptPlan(planned.envelope.details)
+      if (halt) return halt
     } else {
       // A --return pass counts the reviews the finish run already spent: it never grants new rounds.
       seats.reviewer = { ...seats.reviewer, rounds: FINISH_REVIEW_ROUNDS - (fin.priorReviewRounds ?? 0) }
-    }
-
-    const scopePaths = protectedPaths(filesInScope)
-    if (scopePaths.length) {
-      const halt = await raise('protected-path', { paths: scopePaths })
-      if (halt) return halt
+      const scopePaths = protectedPaths(filesInScope)
+      if (scopePaths.length) {
+        const halt = await raise('protected-path', { paths: scopePaths })
+        if (halt) return halt
+      }
     }
 
     let proofLines = [PROOF_UNMEASURED]
@@ -335,6 +378,8 @@ export async function runLoop(spec, deps = {}) {
         // Every return names its own tests; an earlier turn's names never stand in for this build.
         namedTests = Array.isArray(built.envelope.details.tests) ? built.envelope.details.tests : []
         if (!namedTests.length && !isFinish && testsRequired) {
+          const failure = { role: 'builder', failure: 'proof-no-tests' }
+          if (repeatsFailure(failure)) return stop('no-progress', failure)
           feedback = [{ id: 'proof-no-tests', severity: 'must-fix', summary: 'Name at least one test in details.tests ({file, title}); the loop proves each red on the old source and green on the build.' }]
           continue
         }
@@ -344,7 +389,10 @@ export async function runLoop(spec, deps = {}) {
           const rows = Array.isArray(proof.rows) ? proof.rows : []
           const proofOK = proof.status === 'green' && proof.reason === null && rows.length === namedTests.length && rows.every((row) => row?.proven === true)
           if (!proofOK && proof.status === 'red') {
-            feedback = [{ id: 'proof-unproven', severity: 'must-fix', summary: 'Named tests must be red on the old source and green on the build.', tests: rows.filter((row) => !row?.proven).map(({ file, title, base, build, reason }) => ({ file, title, base, build, reason })) }]
+            const tests = rows.filter((row) => !row?.proven).map(({ file, title, base, build, reason }) => ({ file, title, base, build, reason }))
+            const failure = { role: 'builder', failure: 'proof-unproven', tests }
+            if (repeatsFailure(failure)) return stop('no-progress', failure)
+            feedback = [{ id: 'proof-unproven', severity: 'must-fix', summary: 'Named tests must be red on the old source and green on the build.', tests }]
             continue
           }
           if (!proofOK) return stop(proof.reason ?? 'runner-threw', proof)

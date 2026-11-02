@@ -23,6 +23,7 @@ function exampleEnvelope(role, id) {
     planner: {
       subject: 'fix(crew): publish measured lane results',
       plan_path: '<absolute path of the plan you wrote>',
+      tests: [{ file: '<repo-relative test file>', title: '<exact test title>' }],
       files_in_scope: ['<repo-relative file the builder may edit>'],
       validation_lane: '<the node --test command that checks the change>',
     },
@@ -33,7 +34,7 @@ function exampleEnvelope(role, id) {
     },
     reviewer: review,
     'tech-lead': review,
-    lead: { decision: 'bounce' },
+    lead: { decision: 'bounce', target: 'builder' },
   }[role]
   return { role, id, status: 'done', summary: '<one line>', details }
 }

@@ -26,7 +26,8 @@ import { appendFileSync, closeSync, openSync, readFileSync, readSync, readdirSyn
 import { tmpdir } from 'node:os'
 import { StringDecoder } from 'node:string_decoder'
 import { isAbsolute, join, relative, resolve } from 'node:path'
-import { journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../context-layout.mjs'
+import { isLeanLayout, journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../context-layout.mjs'
+import { validateEnvelope } from '../../protocols.mjs'
 import { resolvePiBinary, createStreamReducer, carriesOwnSpend, STREAM_CAP_BYTES } from './subagent.ts'
 import { modelString } from '../../adapters/adapter-pi.mjs'
 
@@ -286,19 +287,24 @@ function plannerReturn({ taskDir, manifest, deps, env }) {
     const path = join(returnsDirFrom(taskDir, env), String(name))
     let mtime
     try { mtime = fileMtime(path) } catch { mtime = null }
-    if (typeof mtime !== 'number' || !Number.isFinite(mtime) || mtime < epoch) continue
+    if (typeof mtime !== 'number' || !Number.isFinite(mtime)) { if (isLeanLayout(env)) return { files_in_scope: [], validation_lane: null, source: 'absent' }; continue }
+    if (mtime < epoch) continue
     candidates.push({ number, path })
   }
   candidates.sort((a, b) => b.number - a.number)
   const readFile = deps.readFile || DEFAULT_READ
-  const candidate = candidates[0]
+  let candidate, envelope
+  for (const entry of candidates) {
+    let raw
+    try { raw = readFile(entry.path, 'utf8') } catch { return { files_in_scope: [], validation_lane: null, source: 'absent' } }
+    const text = Buffer.isBuffer(raw) ? raw.toString('utf8') : String(raw ?? '')
+    if (byteLength(text) > READ_CAP_BYTES) return { files_in_scope: [], validation_lane: null, source: 'absent' }
+    try { envelope = JSON.parse(text) } catch { return { files_in_scope: [], validation_lane: null, source: 'absent' } }
+    if (isLeanLayout(env) && (envelope?.status !== 'done' || validateEnvelope('planner', envelope, { archived: true }).defects.length)) continue
+    candidate = entry
+    break
+  }
   if (!candidate) return { files_in_scope: [], validation_lane: null, source: 'absent' }
-  let raw
-  try { raw = readFile(candidate.path, 'utf8') } catch { return { files_in_scope: [], validation_lane: null, source: 'absent' } }
-  const text = Buffer.isBuffer(raw) ? raw.toString('utf8') : String(raw ?? '')
-  if (byteLength(text) > READ_CAP_BYTES) return { files_in_scope: [], validation_lane: null, source: 'absent' }
-  let envelope
-  try { envelope = JSON.parse(text) } catch { return { files_in_scope: [], validation_lane: null, source: 'absent' } }
   const details = envelope && typeof envelope === 'object' && !Array.isArray(envelope) ? envelope.details : null
   if (!details || typeof details !== 'object' || Array.isArray(details)) return { files_in_scope: [], validation_lane: null, source: 'absent' }
   const files = Array.isArray(details.files_in_scope)

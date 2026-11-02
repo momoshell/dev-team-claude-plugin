@@ -4,7 +4,7 @@
   import { projectRecording, filterTrace, traceOverview, nearestTraceSpan, prettyTraceValue } from './trajectory.js'
   import { formatLeanDuration } from './timeline.js'
   let { sessions = [], role = '', model = '', agent = '' } = $props()
-  let timelineMode = $state('sequence')
+  let timelineMode = $state('time')
   let eventList = $state(null)
   let file = $state(''), query = $state(''), kind = $state('all'), selectedId = $state(''), tab = $state('Summary'), page = $state(1), expanded = $state(false)
   let recording = $derived(sessions.find(session => session.file === file) ?? sessions[0] ?? null)
@@ -16,6 +16,8 @@
   let visible = $derived(filtered.slice((currentPage - 1) * 50, currentPage * 50))
   let selected = $derived(filtered.find(record => record.id === selectedId) ?? filtered[0] ?? null)
   let timedOverview = $derived(traceOverview(trace.records, 'time'))
+  let timedRecords = $derived(trace.records.filter(record => record.duration_ms !== null))
+  let timedDuration = $derived(timedRecords.length ? Math.max(...timedRecords.map(record => record.ended_at)) - Math.min(...timedRecords.map(record => record.started_at)) : null)
   let effectiveMode = $derived(timelineMode==='time' && timedOverview.length ? 'time' : 'sequence')
   let overview = $derived(effectiveMode==='time' ? timedOverview : traceOverview(trace.records))
   let pane = $derived(selected ? tab === 'Payload' ? prettyTraceValue(selected.input) : tab === 'Result' ? prettyTraceValue(selected.output) : tab === 'Raw events' ? JSON.stringify(selected.raw, null, 2) : '' : '')
@@ -23,7 +25,7 @@
   const lanes = ['Input', 'Model', 'Tools']
   const labels = {input:'Input',model:'Model',tool:'Tool',runtime:'Runtime'}
   const kindOptions = [{value:'all',label:'All events'},{value:'input',label:'Input'},{value:'model',label:'Model'},{value:'tool',label:'Tools'},{value:'runtime',label:'Runtime'}]
-  function changeFile(){timelineMode='sequence';selectedId='';page=1;tab='Summary';query='';kind='all';expanded=false}
+  function changeFile(){timelineMode='time';selectedId='';page=1;tab='Summary';query='';kind='all';expanded=false}
   function choose(record){selectedId=record.id;tab='Summary';expanded=false}
   async function selectOverview(event){
     if(!trace.records.length)return
@@ -54,17 +56,17 @@
       <div class="counts"><strong>{trace.records.length}</strong> events <span>·</span> <strong>{trace.tool_count}</strong> tool calls</div>
     </div>
     <div class="overview-header"><strong>Execution trace</strong>{#if timedOverview.length}<div class="timeline-mode" role="group" aria-label="Overview scale"><button aria-pressed={effectiveMode==='sequence'} onclick={()=>timelineMode='sequence'}>Recorded order</button><button aria-pressed={effectiveMode==='time'} onclick={()=>timelineMode='time'}>Recorded time</button></div>{:else}<span>Recorded order</span>{/if}</div>
-    <p class="scale-note">{effectiveMode==='time' ? `${timedOverview.length} timed events · ${trace.records.length-timedOverview.length} without timing omitted. Receipt timestamps measure the captured interval.` : !timedOverview.length ? 'Timing unavailable for this recording. No complete event timestamps were recorded; the trace shows event order.' : 'Equal event slots · positions and widths do not measure elapsed time.'}</p>
+    <p class="scale-note">{effectiveMode==='time' ? `Positions and widths follow recorded time · ${trace.records.length-timedOverview.length} untimed events omitted. Bars measure receipt intervals; zero-duration events use point markers.` : !timedOverview.length ? 'Timing unavailable for this recording. No complete event timestamps were recorded; the trace shows event order.' : 'Equal event slots · positions and widths do not measure elapsed time.'}</p>
     <div class="overview">
       <div class="lane-labels" aria-hidden="true">{#each lanes as lane}<span>{lane}</span>{/each}</div>
       <button class="overview-chart" aria-label="Select an event in the overview. The event list offers the same records by keyboard." onclick={selectOverview}>
         <svg viewBox="0 0 1000 84" preserveAspectRatio="none" aria-hidden="true">
           {#each lanes as lane, index}<rect class="lane-track" x="0" y={index*28} width="1000" height="23" />{/each}
-          {#each overview as span (span.id)}<rect data-event-index={span.index} class={`span lane-${span.lane.toLowerCase()}`} class:selected={selected?.id===span.id} x={span.x*1000} y={lanes.indexOf(span.lane)*28+4} width={Math.max(.8,span.width*1000-1)} height="15" />{/each}
+          {#each overview as span (span.id)}<rect data-event-index={span.index} class={`span lane-${span.lane.toLowerCase()}`} class:selected={selected?.id===span.id} x={span.width===0 ? Math.min(span.x*1000,999.2) : span.x*1000} y={lanes.indexOf(span.lane)*28+4} width={effectiveMode==='time' ? (span.width===0 ? .8 : span.width*1000) : Math.max(.8,span.width*1000-1)} height="15"><title>{trace.records[span.index-1].name} · {formatLeanDuration(trace.records[span.index-1].duration_ms) ?? 'Timing unavailable'}</title></rect>{/each}
         </svg>
       </button>
     </div>
-    <div class="overview-axis">{#if effectiveMode==='time'}<span>First recorded timestamp</span><span>Last recorded timestamp</span>{:else}<span>Event 1</span><span>Event {trace.records.length}</span>{/if}</div>
+    <div class="overview-axis">{#if effectiveMode==='time'}<span>0s</span><span>{formatLeanDuration(timedDuration)} elapsed</span>{:else}<span>Event 1</span><span>Event {trace.records.length}</span>{/if}</div>
     {#if trace.warnings.length}<p class="warning" role="status">{trace.warnings.length} unreadable or unsupported source {trace.warnings.length===1?'row':'rows'}. Those rows remain in the event list and raw evidence.</p>{/if}
     <div class="filters">
       <label class="search">Search events<input type="search" placeholder="Tool, file, command, or output…" bind:value={query} oninput={()=>page=1} /></label>

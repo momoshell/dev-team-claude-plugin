@@ -152,6 +152,13 @@ test('recorded-time overview uses measured endpoints and omits unknown/reversed 
   assert.equal(nearestTraceSpan(timed,.35,'Model').index,3)
   assert.equal(nearestTraceSpan([],0,'Tools'),null)
   assert.deepEqual(traceOverview(projectRecording(recording([{type:'prompt',text:'old'}])).records,'time'),[])
+
+  // A trace with no elapsed time must show points, never full-width duration bars.
+  const simultaneous=projectRecording(recording([
+    frame('user_message_chunk',{content:{text:'input'}},'s',{at:1000}),
+    frame('agent_message_chunk',{content:{text:'reply'}},'s',{at:1000}),
+  ]))
+  assert.deepEqual(traceOverview(simultaneous.records,'time').map(span=>[span.x,span.width]),[[0,0],[0,0]])
 })
 
 

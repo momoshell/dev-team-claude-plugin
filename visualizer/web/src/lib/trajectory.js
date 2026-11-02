@@ -114,7 +114,7 @@ export function traceOverview(records, mode = 'sequence') {
     const end = Math.max(...timed.map(record => record.ended_at))
     const span = end - start
     return timed.map(record => ({ id: record.id, index: record.index, lane: record.lane,
-      x: span ? (record.started_at - start) / span : 0, width: span ? record.duration_ms / span : 1 }))
+      x: span ? (record.started_at - start) / span : 0, width: span ? record.duration_ms / span : 0 }))
   }
   const total = records.length
   return records.map((record, index) => ({ id: record.id, index: record.index, lane: record.lane, x: index / total, width: 1 / total }))

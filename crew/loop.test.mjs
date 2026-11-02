@@ -987,6 +987,20 @@ test('unproven and missing named tests return to the builder, while unmeasured s
   }
 })
 
+// MUTATION: keep the previous builder's tests when a later return names none.
+test('a builder that names no tests after a review bounce is not proven by the earlier names', async () => {
+  let builds = 0, reviews = 0
+  const f = fakes({ bounds: { builder: 3, reviewer: 3 }, edit: (v) => {
+    if (v.role === 'builder' && ++builds === 2) v.details.tests = []
+    if (v.role === 'reviewer' && ++reviews === 1) return { ...v, details: { verdict: 'changes-needed', findings: [finding] } }
+    return v
+  } })
+  assert.equal((await f.go()).status, 'done')
+  const turns = f.requests.filter((r) => r.role === 'builder')
+  assert.equal(turns.length, 3)
+  assert.equal(turns[2].feedback[0].id, 'proof-no-tests')
+})
+
 // ---- finish shape (lean plan 3.5): a stopped lane re-entered by its builder ----
 const STOP = { reason: 'mutations-survived', observation: { stage: 'mutations', detail: 'A1 survived' } }
 const finishSpec = (over = {}) => ({

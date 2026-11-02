@@ -21,6 +21,18 @@ test('a body failure on the old source and a pass on the build proves the test',
   assert.equal(result.rows[1].reason, 'proof-not-red-on-base')
 })
 
+// MUTATION: run the old source from a git archive copy instead of a worktree.
+test('a test that only needs a git checkout is not proven by the old source lacking one', async () => {
+  const cwd = scratchDir('proof-env-')
+  git(cwd, 'init', '-q'); writeFileSync(join(cwd, 'old'), 'base')
+  git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+  writeFileSync(join(cwd, 'env.test.mjs'), "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { existsSync } from 'node:fs'\ntest('runs in a checkout', () => assert.ok(existsSync('.git')))\n")
+  const result = await proveTests({ cwd, tests: [{ file: 'env.test.mjs', title: 'runs in a checkout' }] })
+  assert.equal(result.rows[0].base.state, 'green')
+  assert.equal(result.rows[0].reason, 'proof-not-red-on-base')
+  assert.equal(git(cwd, 'worktree', 'list').trim().split('\n').length, 1)
+})
+
 // MUTATION: drop the reporter's import-failure classification.
 test('static and dynamic import failures on the old source are unproven', async () => {
   const cwd = scratchDir('proof-import-')

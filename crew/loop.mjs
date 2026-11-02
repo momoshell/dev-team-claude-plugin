@@ -308,7 +308,8 @@ export async function runLoop(spec, deps = {}) {
         const built = await stage(repairing ? 'suite-repair' : 'build', () => seatTurn('builder', feedback, { singleTurn: repairing }))
         repairing = false
         if (built.halt) return built.halt
-        if (Array.isArray(built.envelope.details.tests) && built.envelope.details.tests.length) namedTests = built.envelope.details.tests
+        // Every return names its own tests; an earlier turn's names never stand in for this build.
+        namedTests = Array.isArray(built.envelope.details.tests) ? built.envelope.details.tests : []
         if (!namedTests.length && !isFinish) {
           feedback = [{ id: 'proof-no-tests', severity: 'must-fix', summary: 'Name at least one test in details.tests ({file, title}); the loop proves each red on the old source and green on the build.' }]
           continue

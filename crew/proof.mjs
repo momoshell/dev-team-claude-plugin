@@ -38,54 +38,56 @@ function safePath(root, file, required) {
 
 export async function proveTests(input = {}) {
   const unmeasured = (reason, rows = []) => ({ status: 'unmeasured', reason, rows })
-  let tmp, result, rows = []
+  let tmp, added = null, result, rows = []
   try {
     const { cwd, base = 'HEAD', tests, timeoutMs = 120_000 } = input ?? {}
     if (typeof cwd !== 'string' || !cwd || typeof base !== 'string' || !/^[^-\s]\S*$/.test(base) || !Array.isArray(tests) || !tests.length || !tests.every((t) => t && typeof t.file === 'string' && t.file && typeof t.title === 'string' && t.title)) return unmeasured('invalid-input')
     const notRun = () => ({ state: null, reason: 'not-run' })
     rows = tests.map(({ file, title }) => ({ file, title, base: notRun(), build: notRun(), proven: false, reason: null }))
     tmp = mkdtempSync(join(tmpdir(), 'crew-proof-'))
-    const root = join(tmp, 'base'), archive = join(tmp, 'base.tar')
-    mkdirSync(root)
-    const archiveRun = await runSuite({ cwd, command: 'git', args: ['archive', '--format=tar', '-o', archive, base], timeoutMs })
-    if (archiveRun.status !== 'green') result = unmeasured(archiveRun.reason, rows)
+    // The old source runs in a detached worktree, a checkout like the build's, so an environment difference
+    // (a missing .git, for one) can never supply the red.
+    const root = join(tmp, 'base')
+    const addRun = await runSuite({ cwd, command: 'git', args: ['worktree', 'add', '--detach', '--quiet', root, base], timeoutMs })
+    if (addRun.status !== 'green') result = unmeasured(addRun.reason, rows)
     else {
-      const extract = await runSuite({ cwd, command: 'tar', args: ['-xf', archive, '-C', root], timeoutMs })
-      if (extract.status !== 'green') result = unmeasured(extract.reason, rows)
-      else {
-        for (const row of rows) {
-          if (!/\.[cm]?js$/.test(row.file)) row.reason = 'unsupported-runner'
-          else if (!literalRelative(row.file) || !safePath(cwd, row.file, true) || !safePath(root, row.file, false)) row.reason = 'unsafe-path'
-          else {
-            const dest = join(root, row.file)
-            mkdirSync(dirname(dest), { recursive: true })
-            copyFileSync(join(cwd, row.file), dest)
-          }
+      added = { cwd, root, timeoutMs }
+      for (const row of rows) {
+        if (!/\.[cm]?js$/.test(row.file)) row.reason = 'unsupported-runner'
+        else if (!literalRelative(row.file) || !safePath(cwd, row.file, true) || !safePath(root, row.file, false)) row.reason = 'unsafe-path'
+        else {
+          const dest = join(root, row.file)
+          mkdirSync(dirname(dest), { recursive: true })
+          copyFileSync(join(cwd, row.file), dest)
         }
-        const files = [...new Set(rows.filter((r) => !r.reason).map((r) => r.file))]
-        if (files.length) {
-          const old = await testEvents({ cwd: root, files, timeoutMs })
-          const build = await testEvents({ cwd, files, timeoutMs })
-          if (old.status === 'unmeasured' || build.status === 'unmeasured') result = unmeasured(old.status === 'unmeasured' ? old.reason : build.reason, rows)
-          else {
-            const hits = (events, dir, row) => events.filter((e) => {
-              if (e?.name !== row.title || typeof e.file !== 'string') return false
-              try { return relative(realpathSync(dir), realpathSync(e.file)).split(sep).join('/') === row.file } catch { return false }
-            })
-            for (const row of rows.filter((r) => !r.reason)) {
-              const a = hits(old.events, root, row), b = hits(build.events, cwd, row)
-              row.base = testState(a, () => true)
-              row.build = testState(b, () => true)
-              const identity = a.length === 1 && b.length === 1 && Number.isInteger(a[0].line) && Number.isInteger(a[0].column) && a[0].line === b[0].line && a[0].column === b[0].column
-              row.proven = row.base.state === 'red' && row.build.state === 'green' && identity
-              row.reason = row.proven ? null : row.base.state !== 'red' ? 'proof-not-red-on-base' : 'proof-not-green'
-            }
-          }
-        }
-        if (!result) result = rows.every((r) => r.proven) ? { status: 'green', reason: null, rows } : { status: 'red', reason: 'proof-unproven', rows }
       }
+      const files = [...new Set(rows.filter((r) => !r.reason).map((r) => r.file))]
+      if (files.length) {
+        const old = await testEvents({ cwd: root, files, timeoutMs })
+        const build = await testEvents({ cwd, files, timeoutMs })
+        if (old.status === 'unmeasured' || build.status === 'unmeasured') result = unmeasured(old.status === 'unmeasured' ? old.reason : build.reason, rows)
+        else {
+          const hits = (events, dir, row) => events.filter((e) => {
+            if (e?.name !== row.title || typeof e.file !== 'string') return false
+            try { return relative(realpathSync(dir), realpathSync(e.file)).split(sep).join('/') === row.file } catch { return false }
+          })
+          for (const row of rows.filter((r) => !r.reason)) {
+            const a = hits(old.events, root, row), b = hits(build.events, cwd, row)
+            row.base = testState(a, () => true)
+            row.build = testState(b, () => true)
+            const identity = a.length === 1 && b.length === 1 && Number.isInteger(a[0].line) && Number.isInteger(a[0].column) && a[0].line === b[0].line && a[0].column === b[0].column
+            row.proven = row.base.state === 'red' && row.build.state === 'green' && identity
+            row.reason = row.proven ? null : row.base.state !== 'red' ? 'proof-not-red-on-base' : 'proof-not-green'
+          }
+        }
+      }
+      if (!result) result = rows.every((r) => r.proven) ? { status: 'green', reason: null, rows } : { status: 'red', reason: 'proof-unproven', rows }
     }
   } catch { result = unmeasured('runner-threw', rows) } finally {
+    if (added) {
+      const removed = await runSuite({ cwd: added.cwd, command: 'git', args: ['worktree', 'remove', '--force', added.root], timeoutMs: added.timeoutMs }).catch(() => null)
+      if (removed?.status !== 'green') result = unmeasured('cleanup-unproven', rows)
+    }
     if (tmp) try { rmSync(tmp, { recursive: true, force: true }) } catch { result = unmeasured('cleanup-unproven', rows) }
   }
   return result

@@ -79,11 +79,16 @@ function requireWorktree(d, spec) {
   if (!isDir) throw new FinishRefusal('finish-worktree', `the lane worktree ${spec?.cwd} does not exist`)
 }
 
-// The lane's accepted plan and subject, including archived planner returns.
-function loadPlan(d, lane, taskDir) {
+// The lane's accepted plan and subject, including archived planner returns. A journal that records planner envelopes
+// names the accepted ones (no defects, no error, status done); only those are candidates, so a replan the live loop
+// refused is never resumed. A journal with no planner envelope rows falls back to the files alone.
+function loadPlan(d, lane, taskDir, rows = []) {
+  const recorded = rows.filter((row) => row.event === 'envelope' && row.role === 'planner')
+  const accepted = new Set(recorded.filter((row) => Array.isArray(row.defects) && row.defects.length === 0 && !row.error && row.parsed?.status === 'done')
+    .map((row) => /\.planner\.(\d+)$/.exec(String(row.id ?? row.parsed?.id ?? ''))?.[1]).filter((n) => n !== undefined).map(Number))
   const files = d.readdirSync(taskDir).map((name) => ({ name, n: /^planner-(\d+)\.json$/.exec(name)?.[1] }))
-    .filter(({ n }) => n !== undefined && Number(n) > 0).sort((a, b) => Number(b.n) - Number(a.n))
-  if (!files.length) throw new FinishRefusal('finish-premise', `lane ${lane} has no planner return`)
+    .filter(({ n }) => n !== undefined && Number(n) > 0 && (recorded.length === 0 || accepted.has(Number(n)))).sort((a, b) => Number(b.n) - Number(a.n))
+  if (!files.length) throw new FinishRefusal('finish-premise', `lane ${lane} has no accepted planner return`)
   for (const { name } of files) {
     const checked = validateEnvelope('planner', readJson(d, join(taskDir, name), 'the planner return'), { archived: true })
     if (!checked.defects.length && checked.envelope?.status === 'done') return checked.envelope.details
@@ -156,7 +161,7 @@ export function finishLane({ lane, root, deps = {} }) {
 
   if (!rows.some((row) => row.event === 'envelope' && row.role === 'builder' && Array.isArray(row.defects) && row.defects.length === 0 && ['done', 'insufficient'].includes(row.parsed?.status))) throw new FinishRefusal('finish-no-build', `lane ${lane} has no schema-valid done or insufficient builder envelope in its journal`)
 
-  const finish = finishFor(rows, stopped, stopAt, loadPlan(d, lane, taskDir))
+  const finish = finishFor(rows, stopped, stopAt, loadPlan(d, lane, taskDir, rows))
   const claim = claimStop(d, lane, taskDir, stopAt)
   return launch(d, { crewRoot, taskDir, spec, finish, claim })
 }
@@ -237,7 +242,7 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
     // return: the same finish spec the first pass had, plus the guidance, with the review rounds already spent.
     const stopped = rows.slice(0, readyAt).findLast((row) => row.event === 'verdict' && row.status === 'stopped')
     if (!stopped) throw new FinishRefusal('finish-premise', `lane ${lane} has no stop before its finish-ready row`)
-    const plan = loadPlan(d, lane, taskDir)
+    const plan = loadPlan(d, lane, taskDir, rows)
     // Rounds spent: the journal's own count of reviews since the stop (a ready row from before the count was recorded has none),
     // never less than the ready row's own count. Unknown history is never read as zero.
     const sinceStop = rows.slice(rows.lastIndexOf(stopped) + 1, readyAt)

@@ -1,7 +1,7 @@
 ---
 name: qa-test-writing
 description: >-
-  Use when writing or reviewing tests, authoring acceptance gates, scoping affected
+  Use when writing or reviewing tests, scoping affected
   tests, or investigating a check that passes when it should fail. Writes and reviews tests in any repository.
 ---
 
@@ -13,7 +13,6 @@ A check nobody has seen fail is not trustworthy. See the [dev-team repository ev
 ## Routing
 
 - [Vacuity](references/vacuity.md): writing or reviewing any check.
-- [Gates](references/gates.md): authoring an acceptance gate.
 - [Captures](references/captures.md): testing vendor stream reducers.
 - [Tripwires](references/tripwires.md): scoping affected behavioural and source-grep tests.
 - [Tooling](references/tooling.md): scratch trees, suite output and timeouts.
@@ -36,8 +35,6 @@ input. Keep an example test for the shape.
 - Never assert over input that cannot reach the subject. Change the fixture,
   not the assertion, when the input is unreachable.
 - Never let a detector's key be the only guard against drift; pin the detector.
-- An acceptance gate must be red at baseline with no errors, and each check's
-  mutation must prove discrimination.
 - Never hand-build vendor stream frames: use a recorded capture.
 - Never report an unmeasured value as zero. Record absence and one closed reason
   where the contract provides one.

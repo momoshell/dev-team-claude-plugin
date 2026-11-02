@@ -79,18 +79,15 @@ test('RP3 M1 shipped role packs pin exactly and session start is silent', () => 
   const result = invoke(dir, 'session-start', {}, {}, ROOT)
   assert.equal(result.status, 0)
   assert.deepEqual(JSON.parse(readFileSync(join(ROOT, MAP_PATH), 'utf8')), { version: 1, exempt: ['docs/audits/**'], rules: [
-    { when: { roles: ['planner'] }, delivery: 'inline', skills: ['dev-team:qa-test-writing#gates'] },
     { when: { roles: ['reviewer'] }, delivery: 'inline', skills: ['dev-team:pr-review'] },
-    { when: { roles: ['tech-lead'] }, delivery: 'inline', skills: ['dev-team:pr-review#falsification'] },
-    { when: { roles: ['tech-lead'] }, delivery: 'grant', skills: ['dev-team:qa-test-writing#gates'] },
     { when: { paths: ['**/*.mjs', '**/*.js', '**/*.ts', '**/*.tsx', '**/*.rs', '**/*.py', '**/*.svelte'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:code-less'] },
     { when: { paths: ['crew/**/*.mjs', 'crew/**/*.ts', 'scripts/**/*.mjs', 'hooks/**/*.mjs'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:backend-node'] },
-    { when: { paths: ['**/*.test.mjs'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:qa-test-writing'] },
-    { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.js', 'visualizer/**/*.mjs', 'visualizer/**/*.css'], roles: ['planner', 'builder', 'reviewer'] }, skills: ['dev-team:frontend-svelte'] },
-    { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.css'], roles: ['planner', 'builder', 'reviewer'] }, skills: ['dev-team:ui-design', 'dev-team:ux'] },
+    { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.js', 'visualizer/**/*.mjs', 'visualizer/**/*.css'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:frontend-svelte'] },
+    { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.css'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:ui-design', 'dev-team:ux'] },
     { when: { paths: ['docs/**/*.md', 'skills/**/*.md', 'crew/agents/*.md'], roles: ['builder', 'reviewer'] }, delivery: 'grant', skills: ['dev-team:prose-plain'] },
-    { when: { paths: ['**/*.test.*', '**/*.spec.*', '**/tests/**/*.rs', '**/*_test.*'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:qa-test-writing'] },
-    { when: { paths: ['**/*.svelte'], roles: ['planner', 'builder', 'reviewer'] }, skills: ['dev-team:frontend-svelte', 'dev-team:ui-design', 'dev-team:ux'] },
+    { when: { paths: ['**/*.test.*', '**/*.spec.*', '**/tests/**/*.rs', '**/*_test.*'], roles: ['builder'] }, skills: ['dev-team:test-economy'] },
+    { when: { paths: ['**/*.test.*', '**/*.spec.*', '**/tests/**/*.rs', '**/*_test.*'], roles: ['reviewer', 'tech-lead'] }, skills: ['dev-team:test-strength'] },
+    { when: { paths: ['**/*.svelte'], roles: ['builder', 'reviewer'] }, skills: ['dev-team:frontend-svelte', 'dev-team:ui-design', 'dev-team:ux'] },
   ] })
   assert.equal(loadMap(ROOT).ok, true)
   assert.equal(result.stdout, '')
@@ -122,20 +119,29 @@ test('SF2: code-less follows source files in any layout', () => {
 // MUTATION: remove the generic testing paths from the shipped map.
 test('LG3: generic file types select whole skills in any layout', () => {
   const { map } = loadMap(ROOT)
-  for (const role of ['builder', 'reviewer']) {
+  for (const [role, skill] of [['builder', 'test-economy'], ['reviewer', 'test-strength']]) {
     for (const file of ['a.test.ts', 'pkg/a.test.js', 'nested/a.test.mjs', 'a.spec.js', 'pkg/a.spec.mjs', 'a.spec.ts', 'tests/a.rs', 'crates/x/tests/deep/a.rs', 'a_test.go', 'pkg/a_test.go', 'a_test.rs', 'pkg/a_test.rs']) {
       const entries = resolveSeatSkills({ map, role, files: [file] }).entries
-      assert.ok(entries.some((entry) => entry.path === 'skills/qa-test-writing/SKILL.md' && entry.selected_by === 'map-path'), file)
+      assert.ok(entries.some((entry) => entry.path === `skills/${skill}/SKILL.md` && entry.selected_by === 'map-path'), file)
+      assert.ok(!entries.some((entry) => entry.path === 'skills/qa-test-writing/SKILL.md'), file)
     }
     for (const file of ['App.svelte', 'ui/components/App.svelte']) {
       const skills = resolveSeatSkills({ map, role, files: [file] }).skills
       for (const skill of ['frontend-svelte', 'ui-design', 'ux']) assert.ok(skills.includes(`skills/${skill}/SKILL.md`), file)
     }
     for (const file of ['other/a.ts', 'docs/audits/a.test.ts']) {
-      assert.ok(!resolveSeatSkills({ map, role, files: [file] }).skills.includes('skills/qa-test-writing/SKILL.md'), file)
+      assert.ok(!resolveSeatSkills({ map, role, files: [file] }).skills.includes(`skills/${skill}/SKILL.md`), file)
     }
   }
   assert.ok(resolveSeatSkills({ map, role: 'builder', files: ['crew/a.mjs'] }).skills.includes('skills/backend-node/SKILL.md'))
+})
+// MUTATION: add planner or dev-team:qa-test-writing to a shipped rule.
+test('SK3 and SK4: no qa-test-writing or planner grants', () => {
+  const { map } = loadMap(ROOT)
+  for (const rule of map.rules) {
+    assert.ok(!rule.when.roles?.includes('planner'))
+    assert.ok(!rule.skills.some((skill) => skill.replace(/^dev-team:/, '').split('#')[0] === 'qa-test-writing'))
+  }
 })
 test('M2', () => {
   const dir = fixture(); writeMap(dir, { ...JSON.parse(readFileSync(join(dir, MAP_PATH))), surprise: true })

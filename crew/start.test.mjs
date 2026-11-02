@@ -464,7 +464,7 @@ test('LG1: builder gets accepted lane grants as bare whole skills', async () => 
     [['crew/lean.mjs'], ['backend-node']],
     [['visualizer/a.svelte'], ['frontend-svelte', 'ui-design', 'ux']],
     [['other/a.ts'], []],
-    [['elsewhere/a.spec.ts'], ['qa-test-writing']],
+    [['elsewhere/a.spec.ts'], ['test-economy']],
   ]) {
     const f = leanFixture({ tier, scope, repairPlan: true, answers: { reviews: ['changes-needed', 'pass'] } })
     assert.equal((await f.go()).status, 'done')
@@ -487,7 +487,7 @@ test('LG2: reviewer gets scope grants rather than changed-path grants', async ()
     [['crew/lean.mjs'], ['backend-node']],
     [['visualizer/a.svelte'], ['frontend-svelte', 'ui-design', 'ux']],
     [['other/a.ts'], []],
-    [['elsewhere/a.spec.ts'], ['qa-test-writing']],
+    [['elsewhere/a.spec.ts'], ['test-strength']],
   ]) {
     const f = leanFixture({ tier, scope, repairPlan: true, status: ' M crew/other.mjs\0', answers: { reviews: ['changes-needed', 'pass'] } })
     assert.equal((await f.go()).status, 'done')

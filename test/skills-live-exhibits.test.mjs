@@ -20,7 +20,7 @@ test('QG1', () => {
   const skill = read(`${qa}/SKILL.md`)
   assert.ok(flat(skill).includes('Writes and reviews tests in any repository.'))
   assert.doesNotMatch(skill, /this (?:repo|domain)|node --test|gate\.mjs/i)
-  for (const term of ['vacuity', 'gates', 'captures', 'tripwires', 'tooling', 'absence', 'affordances', 'citations', 'grammar', 'seed', 'oracle', 'failing input']) assert.ok(skill.toLowerCase().includes(term), term)
+  for (const term of ['vacuity', 'captures', 'tripwires', 'tooling', 'absence', 'affordances', 'citations', 'grammar', 'seed', 'oracle', 'failing input']) assert.ok(skill.toLowerCase().includes(term), term)
 })
 
 // MUTATION: replace the node single-test runner with a syntax check.
@@ -39,7 +39,7 @@ test('QG3', () => {
   assert.equal(skill.split('[dev-team repository evidence](references/dev-team-evidence.md)').length, 2)
   const evidence = read(evidencePath)
   assert.match(evidence, /^# Dev-team repository evidence/m)
-  for (const anchor of ['#476', '#493', '#496', '#153', '#168', '#240', '#581', '#577', '#578', '#603', '#543', '#544', 'CHECK_REASONS', 'proveMutations', 'runGate']) assert.ok(evidence.includes(anchor), anchor)
+  for (const anchor of ['#476', '#493', '#496', '#581', '#578', '#603', '#543', '#544', 'CHECK_REASONS', 'proveMutations']) assert.ok(evidence.includes(anchor), anchor)
   for (const file of docs(qa).filter(file => file !== evidencePath)) assert.doesNotMatch(read(file), /\b(?:crew|hooks)\/|\btest\/helpers\.mjs\b|#\d+\b|\bb\d{3,}\b|\b(?:CHECK_REASONS|proveMutations|runGate)\b/, file)
 })
 
@@ -50,14 +50,13 @@ test('SX1', () => {
     assert.doesNotMatch(text, /\b(?:declar(?:e|es|ed|ing|ation(?:s)?)|list(?:s|ed|ing)?|enumerat(?:e|es|ed|ing))\b.{0,110}\btripwires?\b|\btripwires?\b.{0,80}\bdeclar(?:e|es|ed|ing|ation(?:s)?)\b/i, file)
     assert.doesNotMatch(text, /\borchestrator\b.{0,120}\b(?:author\w*|writ\w*|creat\w*|owns?)\b.{0,60}\bgate\b|\bgate\b.{0,70}\b(?:authored|written|created|owned)\b.{0,30}\borchestrator\b/i, file)
   }
-  assert.match(flat(read(`${qa}/references/gates.md`)), /\bplanner\b.{0,30}\b(?:authors?|writes?|owns?)\b.{0,60}\bgate\b/i)
 })
 
 // MUTATION: add a deleted vocabulary as an exhibit.
 test('SX2', () => {
   const all = docs(qa).map(read).join('\n')
   for (const name of ['guardedKill', 'MODIFIER_KINDS', 'openRun', 'foldRpcUsage', 'SHADOW_ABSENT', 'USAGE_ABSENT_CAUSES', 'CREW_BREAKER_THRESHOLD', 'KNOWN_FLAGS']) assert.ok(!all.includes(name), name)
-  for (const name of ['proveMutations', 'runGate', 'CHECK_REASONS', 'crew/checks.mjs']) assert.ok(all.includes(name), name)
+  for (const name of ['proveMutations', 'CHECK_REASONS', 'crew/checks.mjs']) assert.ok(all.includes(name), name)
   const evidence = read(`${qa}/references/dev-team-evidence.md`)
   assert.ok(!all.includes('stream.jsonl'))
   for (const name of ['task/lean/<role>/<id>.jsonl', 'crew/show.mjs', 'crew/pi/extensions/subagent.ts']) assert.ok(evidence.includes(name))

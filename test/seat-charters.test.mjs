@@ -39,6 +39,7 @@ test('SC2: the builder finishes the whole change', () => {
   const charter = body('crew/agents/builder.md')
   has(charter, 'Finish every place the change reaches: callers, tests, fixtures, config and exports it breaks.')
   has(charter, 'Be lazy about the solution, never about the change itself.')
+  has(charter, 'Return `tests` (each a file and test title) and `notes` (paths not tested, guards relied on, checks run, and what was verified as against assumed) in `details`.')
 })
 
 // MUTATION: remove deletions or skeleton retrieval from the scope rule.
@@ -89,16 +90,16 @@ test('SC4: the delivered skill owns the ladder and its references', () => {
   const ladder = body('skills/code-less/SKILL.md').split('## The ladder (before any new code)')[1]?.split('\n## ')[0]
   assert.ok(ladder)
   assert.deepEqual([...ladder.matchAll(/^\d+\.\s+[^\r\n]+/gm)].map((m) => flat(m[0])), rungs)
-  for (const text of ['Lazy means efficient, not careless.', 'the ladder shortens the solution, never the reading.', 'Bug fix = root cause, not symptom: grep every caller, fix the shared function once.']) has(ladder, text)
+  for (const text of ['Read the task and the code it touches.', 'callers, tests, fixtures, config and exports.', 'Bug fix = root cause, not symptom: grep every caller, fix the shared function once.']) has(ladder, text)
   assert.doesNotMatch(skill, /_shared\.md|ladder is in your shared charter/i)
   for (const path of ['skills/pr-review/SKILL.md', 'skills/pr-review/references/falsification.md']) {
     assert.doesNotMatch(read(path), /_shared\.md|ladder is in your shared charter/i)
     has(read(path), 'skills/code-less/SKILL.md')
   }
-  has(skill, 'Derived from ponytail by Dietrich Gebert (MIT)')
+  has(skill, 'Derived from ponytail v5 by Dietrich Gebert (MIT)')
   const notice = read('THIRD-PARTY-NOTICES.md').split('## ponytail (MIT)')[1]?.split('\n## ')[0]
   assert.ok(notice)
-  for (const text of ['skills/code-less/SKILL.md', 'crew/agents/builder.md', 'e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156', '01cbf81', 'docs/licenses/ponytail-MIT.txt', 'Copyright (c) 2026 DietrichGebert', 'THE SOFTWARE IS PROVIDED "AS IS"']) has(notice, text)
+  for (const text of ['skills/code-less/SKILL.md', 'crew/agents/builder.md', 'e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156', '01cbf81', 'df9e89941d50419fd5bcf1de41e28097f1db49b2', 'skills/pr-review/SKILL.md', 'docs/licenses/ponytail-MIT.txt', 'Copyright (c) 2026 DietrichGebert', 'THE SOFTWARE IS PROVIDED "AS IS"']) has(notice, text)
   assert.doesNotMatch(notice, /_shared\.md|compiled into every role prompt/)
 })
 
@@ -140,7 +141,10 @@ test('PP1: lean builder and reviewer deliver their skills through the ACP launch
 
 // MUTATION: drop error handling or validation from the preservation rule.
 test('SC5: moved or merged code retains protections', () => {
-  has(body('skills/code-less/SKILL.md'), 'Code you move or merge keeps its error handling and validation.')
+  const skill = body('skills/code-less/SKILL.md')
+  has(skill, 'Code you move or merge keeps its error handling and validation.')
+  has(skill, '// shortcut:')
+  assert.doesNotMatch(skill, /\/\/ lean:/)
 })
 
 async function probe(shape) {

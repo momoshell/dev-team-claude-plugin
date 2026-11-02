@@ -52,7 +52,7 @@ outside the plugin directory.
 There are two ways to use it:
 
 - **Skills only.** Nothing else to set up. The knowledge skills (`pr-review`,
-  `qa-test-writing`, `backend-node`, `frontend-svelte`, `ui-design`, `devops`, `ux`, `code-less`, `prose-plain`)
+  `qa-test-writing`, `test-economy`, `test-strength`, `backend-node`, `frontend-svelte`, `ui-design`, `devops`, `ux`, `code-less`, `prose-plain`)
   work in any repo. Most repos stop here. The plugin registers no hooks.
 - **The crew runtime.** Lanes need one clone of this repo, node 26 or newer
   (`engines` in `package.json`), and a crew root (`~/.crew`, or
@@ -79,7 +79,7 @@ before its first lane.
   verbs `show`, `finish`, `record-pr`, `closeout` and `lanes`. Seat definitions
   and instructions are delivered from `crew/agents/*.md`.
 - **`skills/`, `commands/`** — the operating knowledge as Claude Code surfaces.
-  The knowledge skills (`pr-review`, `qa-test-writing`, `backend-node`,
+  The knowledge skills (`pr-review`, `qa-test-writing`, `test-economy`, `test-strength`, `backend-node`,
   `frontend-svelte`, `ui-design`, `devops`, `ux`, `code-less`, `prose-plain`)
   work in any repo the moment the plugin is installed; the runtime skills
   (`lane-brief`, `crew-recovery`) drive the crew CLI and need

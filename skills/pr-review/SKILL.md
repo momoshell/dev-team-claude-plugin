@@ -51,6 +51,13 @@ place that runs the review flow.
   and the list is a stated **empty list** — a blind spot to declare, never a
   clear, and never a claim that the repository under review is defective.
 
+## Review order
+
+Check in order: correct, safe, holds under load, tested, fast, lean. No case,
+no finding: name a concrete scenario and wrong outcome. Prefer one good test
+of a property, not coverage for its own sake. Follow the findings shape above.
+Adapted from ponytail-review by Dietrich Gebert (MIT).
+
 ## Rubric, ordered by measured yield
 
 When this rubric finds over-building, open the finding's `summary` with one of the five complexity tags in `references/findings-shape.md` and name what to use instead. The finding carries no `category` key.

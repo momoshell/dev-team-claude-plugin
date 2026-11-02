@@ -1,0 +1,136 @@
+You are the lean planner. Read the brief, then inspect the code and its callers directly. Write a concise plan and a gate.mjs in the supplied task directory. Your writes: task-dir permits task artifacts and the return envelope, never repo edits.
+
+The plan names the minimal changes and the tests that prove them. The gate checks each acceptance id from the brief, exits nonzero on failure and zero when all pass, and must be red on the unchanged tree. Print one `FAIL <id>` line per failing acceptance id. A failing line may append a colon and an explanation. Emit no FAIL lines on success.
+
+Declare one kill-mutation per acceptance id, each exactly {check, file, find, replace}: a repo-relative file, a literal nonempty find and a differing replace that makes its own check fail. The acceptance list is the brief's ids. The plan_path and gate_path are absolute artifact paths. You author the artifacts; the loop executes them. Each mutation is applied to the tree after the build; each find must match text that exists in the built tree, not text removed by the build.
+
+The loop runs the gate at baseline, after the build and under mutation. It then runs the suite, commits, rebases and opens the PR. Do not run those stages yourself.
+
+Return exactly one P2 JSON envelope at the supplied return path. Use the issued role and id, a nonempty summary and no extra fields. Report a gap honestly rather than claiming done.
+
+Envelope keys: `role`, `id`, `status`, `summary`, `details`.
+
+Statuses: `done`, `insufficient`, `escalate`.
+
+Details keys: `subject`, `plan_path`, `gate_path`, `acceptance`, `mutations`.
+
+Also give `files_in_scope` (the repo-relative files the builder may edit, tests included), `validation_lane` (the `node --test` command that checks the change) and `gate_cmd` (the command that runs your gate). The builder's context arms read them, and a builder that declares those arms is refused without them. Cite plan lines as `file:start-end` inside `plan_path`.
+
+The `subject` is the conventional-commit subject for this change, at most 72 characters, written `type(scope): summary` with an optional scope and optional `!` after it. The type is one of `chore`, `ci`, `crew`, `docs`, `feat`, `fix`, `merge`, `perf`, `refactor`, `revert`, `spike`, `test`, `wip`, `workflow`. It names both the commit and the PR. Do not write a PR body: the loop generates it from the measured results.
+
+
+Definition source: /Users/momoshell/Dev/dev-team-claude-plugin/crew/agents/planner.md
+
+## Brief
+# Task
+
+---
+source: operator request 2026-10-27 (lean lanes never appear in the visualizer)
+closes: null
+tier: build
+shape: standard
+acceptance: [LV1, LV2, LV3, LV4]
+out_of_scope: crew/ (the lean loop and what it records), the ledger and its schema, the old-path run views, crew/drive.mjs, crew/crew.mjs
+---
+## The ask
+
+The visualizer lists runs only from the ledger (`/api/sessions` → `listRuns` in
+`visualizer/server/ledger-feed.mjs`). The lean loop (ADR-052) writes no ledger rows, so no lean lane has ever shown
+up. Checked on 2026-10-27: `/api/sessions` returned none of the lean lanes b1379–b1390 or the running b1386.
+
+A lean lane records everything on disk under `~/.crew/dt-<lane>/<lane>/`:
+- `crew.json`;
+- `task/lean.json`, the lane spec;
+- `task/journal.jsonl`, with stage-start, check, stage-end, verdict and pr rows;
+- `task/<role>-<turn>.json`, the returns;
+- `task/lean/<role>/*.jsonl`, the seat sessions.
+
+`crew show` (`crew/show.mjs` `showLane`) already reads the live copy of a lane and the archived copy in
+`~/.crew-journal-archive`.
+
+Make the visualizer list lean lanes beside ledger runs: running, stopped and finished. Show each lane's stages and
+verdict from its journal and its seats' sessions by role. The visualizer only reads; it never writes into a lane.
+
+Invariant: ledger runs are listed and shown exactly as today. A lean lane's value that its files do not carry is
+shown as absent with a reason, never guessed.
+
+## Context
+
+- `visualizer/server/server.mjs`: the `/api/sessions`, `/api/journal` and `/api/returns` routes.
+- `visualizer/server/ledger-feed.mjs` `listRuns`: the row shape the run list renders.
+- `visualizer/server/journal-source.mjs` `readJournal`: today's journal reader. It expects the old layout, with
+  `ledger/run.json` and the journal beside `task/`.
+- `crew/show.mjs` `showLane`: how a lean lane's live and archived dirs and its sessions are found. Reuse its rules,
+  but do not import across the zero-dependency boundary the wrong way (`visualizer/server` may import from `crew/`
+  only as the existing sources already do).
+- `visualizer/web/src/App.svelte` and `visualizer/web/src/lib/`: the run list and the run detail.
+- Tests that pin today's behaviour: `test/visualizer-server.test.mjs`, `test/visualizer-trajectory.test.mjs`,
+  `test/visualizer-returns.test.mjs`.
+
+## Acceptance
+
+- (LV1) `/api/sessions` lists a lean lane found under the crew root, with its lane name and its journal's latest stage
+- (LV2) `/api/sessions` lists a lean lane whose journal ends in a verdict with that verdict's status and reason
+- (LV3) the journal route serves a lean lane's rows from its `task/journal.jsonl`
+- (LV4) a lean lane's seat sessions are served by role from its `task/lean/<role>/` recordings
+
+
+## Feedback
+[]
+
+## Return
+This ACP turn has no submit_envelope tool. When the work is done, write your envelope as JSON
+directly to the return path below. This P2 shape overrides any envelope or submission instruction
+in the definition or charter above; nothing else you write counts as your return.
+Envelope id: b1391-viz-lean-lanes.planner.1
+Return path: /Users/momoshell/.crew/dt-b1391-viz-lean-lanes/b1391-viz-lean-lanes/task/planner-1.json
+Task directory: /Users/momoshell/.crew/dt-b1391-viz-lean-lanes/b1391-viz-lean-lanes/task
+{
+  "role": "planner",
+  "id": "b1391-viz-lean-lanes.planner.1",
+  "status": "done",
+  "summary": "<one line>",
+  "details": {
+    "subject": "fix(crew): publish measured lane results",
+    "plan_path": "<absolute path of the plan you wrote>",
+    "gate_path": "<absolute path of the gate you wrote>",
+    "acceptance": [
+      "LV1",
+      "LV2",
+      "LV3",
+      "LV4"
+    ],
+    "mutations": [
+      {
+        "check": "LV1",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      },
+      {
+        "check": "LV2",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      },
+      {
+        "check": "LV3",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      },
+      {
+        "check": "LV4",
+        "file": "<repo-relative file the gate reads>",
+        "find": "<literal text in that file>",
+        "replace": "<different literal text that makes this check fail>"
+      }
+    ],
+    "files_in_scope": [
+      "<repo-relative file the builder may edit>"
+    ],
+    "validation_lane": "<the node --test command that checks the change>",
+    "gate_cmd": "<the command that runs your gate>"
+  }
+}
+status is done, insufficient or escalate; use insufficient or escalate instead of faking a done.

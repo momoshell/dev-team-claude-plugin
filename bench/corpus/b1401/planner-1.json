@@ -1,0 +1,93 @@
+{
+  "role": "planner",
+  "id": "b1401-lean-finish-run.planner.1",
+  "status": "done",
+  "summary": "Planned the lean finish shape: finish branch in runLoop, builder replacement mutations, crew/finish.mjs with the three refusals, routing and D1 inventory, with a red gate for FN1-FN9.",
+  "details": {
+    "subject": "feat(crew): finish stopped lean lanes in-loop",
+    "plan_path": "/Users/momoshell/.crew/dt-b1401-lean-finish-run/b1401-lean-finish-run/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1401-lean-finish-run/b1401-lean-finish-run/task/gate.mjs",
+    "acceptance": [
+      "FN1",
+      "FN2",
+      "FN3",
+      "FN4",
+      "FN5",
+      "FN6",
+      "FN7",
+      "FN8",
+      "FN9"
+    ],
+    "mutations": [
+      {
+        "check": "FN1",
+        "file": "crew/loop.mjs",
+        "find": "isFinish ? null : await stage('plan', () => seatTurn('planner'))",
+        "replace": "isFinish ? await stage('plan', () => seatTurn('planner')) : await stage('plan', () => seatTurn('planner'))"
+      },
+      {
+        "check": "FN2",
+        "file": "crew/loop.mjs",
+        "find": "isFinish ? null : await stage('baseline', () => callCheck('baseline', d.checkBaseline, { cwd, gatePath, timeoutMs }))",
+        "replace": "isFinish ? await stage('baseline', () => callCheck('baseline', d.checkBaseline, { cwd, gatePath, timeoutMs })) : await stage('baseline', () => callCheck('baseline', d.checkBaseline, { cwd, gatePath, timeoutMs }))"
+      },
+      {
+        "check": "FN3",
+        "file": "crew/loop.mjs",
+        "find": "reason: spec.finish.stop.reason",
+        "replace": "reason: 'redacted-stop-reason'"
+      },
+      {
+        "check": "FN4",
+        "file": "crew/loop.mjs",
+        "find": "...spec.finish.findings",
+        "replace": "...[]"
+      },
+      {
+        "check": "FN5",
+        "file": "crew/loop.mjs",
+        "find": "mutations.map((declaration) => built.envelope.details.mutations.find((replacement) => replacement.check === declaration.check) ?? declaration)",
+        "replace": "mutations.map((declaration) => declaration)"
+      },
+      {
+        "check": "FN6",
+        "file": "crew/loop.mjs",
+        "find": "'ready-for-operator'",
+        "replace": "'ready'"
+      },
+      {
+        "check": "FN7",
+        "file": "crew/finish.mjs",
+        "find": "'finish-no-build'",
+        "replace": "'finish-build-missing'"
+      },
+      {
+        "check": "FN8",
+        "file": "crew/finish.mjs",
+        "find": "'finish-premise'",
+        "replace": "'finish-premise-missing'"
+      },
+      {
+        "check": "FN9",
+        "file": "crew/finish.mjs",
+        "find": "'finish-worktree'",
+        "replace": "'finish-worktree-missing'"
+      }
+    ],
+    "files_in_scope": [
+      "crew/loop.mjs",
+      "crew/protocols.mjs",
+      "crew/finish.mjs",
+      "crew/finish.test.mjs",
+      "crew/lean.mjs",
+      "crew/agents/builder.md",
+      "crew/loop.test.mjs",
+      "crew/protocols.test.mjs",
+      "bin/crew.mjs",
+      "bin/crew.test.mjs",
+      "test/factory-suite-cost.test.mjs"
+    ],
+    "validation_lane": "node --test crew/finish.test.mjs crew/loop.test.mjs crew/protocols.test.mjs bin/crew.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1401-lean-finish-run/b1401-lean-finish-run/task/gate.mjs"
+  }
+}

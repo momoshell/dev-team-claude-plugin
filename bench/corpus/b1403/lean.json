@@ -1,0 +1,30 @@
+{
+  "id": "b1403-lean-finish-decision",
+  "cwd": "/Users/momoshell/Dev/dt-b1403-lean-finish-decision",
+  "taskDir": "/Users/momoshell/.crew/dt-b1403-lean-finish-decision/b1403-lean-finish-decision/task",
+  "tier": "build",
+  "shape": "standard",
+  "brief": "# Task\n\n---\nsource: operator request (lean plan item 3.5, the finish shape, second of two lanes)\ncloses: null\ntier: build\nshape: standard\nacceptance: [FD1, FD2, FD3, FD4, FD5, FD6, FD7, FD8, FD9]\nout_of_scope: crew/drive.mjs, crew/crew.mjs, crew/checks.mjs, docs/adr/, the standard shape's behaviour, and the finish run's stages before rebase\n---\n## The ask\n\nPR 2022 added `crew finish <lane>`: it finishes a stopped lean lane and stops committed and rebased, with a\n`finish-ready` row and nothing pushed. Add the operator's decision on a ready lane, as ADR-051 section 3 describes:\n\n- `crew finish <lane> --accept [--notes <file>]` publishes the PR, with the operator's notes under their own heading\n  in the body.\n- `crew finish <lane> --return <file>` runs one more finish pass with the file's guidance as the builder's triage\n  input.\n- `crew finish <lane> --abandon` ends it; nothing is published.\n\nEach decision is a `finish-decision` journal row with the choice and the notes' sha256 digest (null when no notes).\nA green finish run also writes one fused finish report, so the deciding session reads it instead of the journal.\n\nInvariants:\n- A decision verb acts only on a lane whose last run ended `finish-ready` and that has no decision since.\n- `--accept` publishes exactly the subject and body the finish run measured, plus the notes; merging stays the\n  operator's.\n- After `--accept`, `crew closeout <lane>` accepts the lane (it reads the journal's last `pr` row).\n- A `--return` pass counts against the finish run's three-round review cap; it never grants new rounds.\n- `crew finish <lane>` with no flag behaves exactly as today.\n\n## Context\n\n- `docs/adr/adr-051-finish-shape.md` section 3: the report, the three verbs, the decision row.\n- `crew/loop.mjs`: the PR body is built at line 357 from `measurements`; a finish run emits `finish-ready` at 377\n  with only `head`. The decision needs the run's subject and body, and the report needs the stop it finished, each\n  review verdict with its findings, and the gate, proof and suite measurements.\n- `crew/finish.mjs`: `finishLane` builds the finish spec and spawns the run; its refusals and the per-stop claim are\n  above that; `main` takes only the lane today.\n- `crew/checks.mjs` `openPullRequest` (line 578) is the publish seam the standard loop uses; `crew/record-pr.mjs`\n  shows the `pr` row shape `crew closeout` reads.\n- `bin/crew.mjs` usage lines and `bin/crew.test.mjs` for the verb.\n\n## Acceptance\n\n- (FD1) a green finish run writes a finish report in the lane task dir that names the stop reason it finished.\n- (FD2) the finish report lists each review verdict of the run with its findings.\n- (FD3) `crew finish <lane> --accept` opens the PR with the finish run's subject as its title.\n- (FD4) `--accept --notes <file>` puts the file's text in the PR body under its own heading.\n- (FD5) `--accept` appends a `pr` row that `crew closeout` reads as the lane's PR.\n- (FD6) `--abandon` appends a `finish-decision` row with choice `abandon` and opens no PR.\n- (FD7) `--return <file>` starts a finish run whose builder's first feedback carries the file's text.\n- (FD8) a decision verb on a lane whose last run did not end `finish-ready` is refused as `finish-not-ready`.\n- (FD9) a second decision on the same ready lane is refused as `finish-decided`.\n",
+  "acceptance": [
+    "FD1",
+    "FD2",
+    "FD3",
+    "FD4",
+    "FD5",
+    "FD6",
+    "FD7",
+    "FD8",
+    "FD9"
+  ],
+  "source": "operator request (lean plan item 3.5, the finish shape, second of two lanes)",
+  "branch": "b1403-lean-finish-decision",
+  "base": "main",
+  "closes": [],
+  "suite": {
+    "command": "npm",
+    "args": [
+      "test"
+    ],
+    "timeoutMs": 1800000
+  }
+}

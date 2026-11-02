@@ -1,0 +1,53 @@
+{
+  "role": "planner",
+  "id": "b1391-viz-lean-lanes.planner.1",
+  "status": "done",
+  "summary": "Authored the lean-lane visualizer plan and independent LV1–LV4 HTTP gate; execution is left to the loop.",
+  "details": {
+    "subject": "fix(viz): show lean lanes alongside ledger runs",
+    "plan_path": "/Users/momoshell/.crew/dt-b1391-viz-lean-lanes/b1391-viz-lean-lanes/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1391-viz-lean-lanes/b1391-viz-lean-lanes/task/gate.mjs",
+    "acceptance": ["LV1", "LV2", "LV3", "LV4"],
+    "mutations": [
+      {
+        "check": "LV1",
+        "file": "visualizer/server/lean-source.mjs",
+        "find": "const LEAN_SPEC_FILE = 'lean.json'",
+        "replace": "const LEAN_SPEC_FILE = 'missing-lean.json'"
+      },
+      {
+        "check": "LV2",
+        "file": "visualizer/server/lean-source.mjs",
+        "find": "const VERDICT_EVENT = 'verdict'",
+        "replace": "const VERDICT_EVENT = 'missing-verdict'"
+      },
+      {
+        "check": "LV3",
+        "file": "visualizer/server/lean-source.mjs",
+        "find": "const LEAN_JOURNAL_FILE = 'journal.jsonl'",
+        "replace": "const LEAN_JOURNAL_FILE = 'missing-journal.jsonl'"
+      },
+      {
+        "check": "LV4",
+        "file": "visualizer/server/lean-source.mjs",
+        "find": "const LEAN_SESSIONS_DIR = 'lean'",
+        "replace": "const LEAN_SESSIONS_DIR = 'missing-lean'"
+      }
+    ],
+    "files_in_scope": [
+      "visualizer/server/lean-source.mjs",
+      "visualizer/server/server.mjs",
+      "visualizer/server/journal-source.mjs",
+      "visualizer/web/src/App.svelte",
+      "visualizer/web/src/lib/api.js",
+      "visualizer/web/src/lib/lean.js",
+      "visualizer/web/src/lib/LeanRunDetail.svelte",
+      "visualizer/web/src/lib/fleet.js",
+      "visualizer/web/src/lib/TaskList.svelte",
+      "test/visualizer-lean.test.mjs",
+      "test/visualizer-lean-web.test.mjs"
+    ],
+    "validation_lane": "node --test test/visualizer-lean.test.mjs test/visualizer-lean-web.test.mjs test/visualizer-server.test.mjs test/visualizer-trajectory.test.mjs test/visualizer-returns.test.mjs test/visualizer-shape.test.mjs test/visualizer-panels.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1391-viz-lean-lanes/b1391-viz-lean-lanes/task/gate.mjs"
+  }
+}

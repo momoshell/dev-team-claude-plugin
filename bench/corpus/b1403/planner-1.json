@@ -1,0 +1,88 @@
+{
+  "role": "planner",
+  "id": "b1403-lean-finish-decision.planner.1",
+  "status": "done",
+  "summary": "Plan and gate for the fused finish report and the accept/return/abandon decision verbs on ready lean lanes.",
+  "details": {
+    "subject": "fix(crew): publish measured lane results",
+    "plan_path": "/Users/momoshell/.crew/dt-b1403-lean-finish-decision/b1403-lean-finish-decision/task/plan.md",
+    "gate_path": "/Users/momoshell/.crew/dt-b1403-lean-finish-decision/b1403-lean-finish-decision/task/gate.mjs",
+    "acceptance": [
+      "FD1",
+      "FD2",
+      "FD3",
+      "FD4",
+      "FD5",
+      "FD6",
+      "FD7",
+      "FD8",
+      "FD9"
+    ],
+    "mutations": [
+      {
+        "check": "FD1",
+        "file": "crew/loop.mjs",
+        "find": "finish-report.json",
+        "replace": "finish-report-mutant.json"
+      },
+      {
+        "check": "FD2",
+        "file": "crew/loop.mjs",
+        "find": "verdict: review.details.verdict, findings: review.details.findings",
+        "replace": "verdict: review.details.verdict, findings: []"
+      },
+      {
+        "check": "FD3",
+        "file": "crew/finish.mjs",
+        "find": "title: ready.subject",
+        "replace": "title: ready.head"
+      },
+      {
+        "check": "FD4",
+        "file": "crew/finish.mjs",
+        "find": "## Operator notes",
+        "replace": "## Operator note"
+      },
+      {
+        "check": "FD5",
+        "file": "crew/finish.mjs",
+        "find": "event: 'pr', lane, stage: 'publish'",
+        "replace": "event: 'prr', lane, stage: 'publish'"
+      },
+      {
+        "check": "FD6",
+        "file": "crew/finish.mjs",
+        "find": "event: 'finish-decision'",
+        "replace": "event: 'finish-decision-x'"
+      },
+      {
+        "check": "FD7",
+        "file": "crew/loop.mjs",
+        "find": "id: 'finish-return'",
+        "replace": "id: 'finish-return-x'"
+      },
+      {
+        "check": "FD8",
+        "file": "crew/finish.mjs",
+        "find": "finish-not-ready",
+        "replace": "finish-not-ready-x"
+      },
+      {
+        "check": "FD9",
+        "file": "crew/finish.mjs",
+        "find": "finish-decided",
+        "replace": "finish-decided-x"
+      }
+    ],
+    "files_in_scope": [
+      "crew/loop.mjs",
+      "crew/finish.mjs",
+      "crew/loop.test.mjs",
+      "crew/finish.test.mjs",
+      "bin/crew.mjs",
+      "bin/crew.test.mjs"
+    ],
+    "validation_lane": "node --test crew/loop.test.mjs crew/finish.test.mjs bin/crew.test.mjs",
+    "gate_cmd": "node /Users/momoshell/.crew/dt-b1403-lean-finish-decision/b1403-lean-finish-decision/task/gate.mjs"
+  }
+}

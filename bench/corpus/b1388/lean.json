@@ -1,0 +1,26 @@
+{
+  "id": "b1388-lean-arm-context",
+  "cwd": "/Users/momoshell/Dev/dt-b1388-lean-arm-context",
+  "taskDir": "/Users/momoshell/.crew/dt-b1388-lean-arm-context/b1388-lean-arm-context/task",
+  "tier": "build",
+  "shape": "standard",
+  "brief": "# Task\n\n---\nsource: operator request 2026-10-26 (pi arms must work on lean seats; Sol found they read the old task layout)\ncloses: null\ntier: build\nshape: standard\nacceptance: [AC1, AC2, AC3, AC4, AC5]\nout_of_scope: crew/drive.mjs, crew/crew.mjs, the old headless and pane paths (the old layout must keep working unchanged), claude seats (a later lane), the arms' rules themselves (only where they find their context)\n---\n## The ask\n\nPR 2003 (lane b1385) carries the definition's arms to lean ACP seats. It refuses four of them on a lean seat:\nadvisor, builderloop, skeletonread and edit_assist, which builderloop runs. They refuse because each extension\nfinds its context in the OLD runtime layout. The journal is at `dirname(CREW_TASK_DIR)/journal.jsonl`, the run\nanchor is that journal's run-start row, and the planner's return is under `dirname(CREW_TASK_DIR)/returns/<run>/`.\nA lean lane keeps its journal at `<task>/journal.jsonl` and its returns at `<task>/<role>-<turn>.json`, so on a lean\nseat these arms load and find nothing. A Sol pass reproduced the builderloop and skeletonread readers returning\nnull, and the advisor reporting `scope_source: \"absent\"`.\n\nMake these arms find their context on a lean lane, with one shared way to resolve the layout rather than a copy per\nextension. Then lift the lean refusal for them in `crew/acp/seat.mjs`. The pieces:\n- the planner return (files in scope, validation lane, citations), for advisor, builderloop and skeletonread;\n- the run anchor. A per-seat stamp hides a planner return written before it; Sol reproduced this. The anchor must be\n  the lane's start, not the seat's;\n- the advisor manifest and its model cell, which lean does not write today;\n- the subagent spawn counter (`dirname(CREW_TASK_DIR)/subagent-spawns.json`), which must stay inside the lane.\n\nInvariant: on the old layout every arm behaves exactly as today; on a lean lane an arm either reads the lane's own\ncontext or refuses to launch.\n\n## Context\n\n- `crew/pi/extensions/advisor.ts` `journalPathFrom`, `returnsDirFrom`, `manifestText`, `loadContext`,\n  `plannerReturn`.\n- `crew/pi/extensions/builderloop.ts` `loadPlannerContext`; `crew/pi/extensions/skeletonread.ts` near line 471;\n  `crew/pi/extensions/subagent.ts` near line 532.\n- `crew/crew.mjs` `advisorManifest` (read only): the manifest the old path writes.\n- `crew/acp/seat.mjs` `seatGrants` and `LEGACY_CONTEXT_ARMS`, from PR 2003: the refusal to lift. This lane needs\n  PR 2003 on main.\n- `crew/loop.mjs` and `crew/lean.mjs`: where a lean lane writes its journal and returns.\n- The tests that pin each reader: `crew/pi/extensions/*.test.mjs` for those four extensions and\n  `crew/acp/seat.test.mjs`.\n\n## Acceptance\n\n- (AC1) on a lean lane, builderloop's planner context reads the validation lane from the lane's planner return\n- (AC2) on a lean lane, the advisor's scope comes from the lane's planner return written before the seat started\n- (AC3) on a lean lane, skeletonread's citations come from the lane's planner return\n- (AC4) on a lean lane, the subagent spawn counter is written inside the lane task dir\n- (AC5) a lean pi builder that declares advisor, edit_assist, builderloop and skeletonread launches with all four\n",
+  "acceptance": [
+    "AC1",
+    "AC2",
+    "AC3",
+    "AC4",
+    "AC5"
+  ],
+  "source": "operator request 2026-10-26 (pi arms must work on lean seats; Sol found they read the old task layout)",
+  "branch": "b1388-lean-arm-context",
+  "base": "main",
+  "closes": [],
+  "suite": {
+    "command": "npm",
+    "args": [
+      "test"
+    ],
+    "timeoutMs": 1800000
+  }
+}

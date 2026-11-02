@@ -364,9 +364,9 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
     const n = Number(id.split('.').at(-1))
     const own = answers[`${role}.${n}`]
     const details = role === 'planner' ? { subject: 'fix(crew): publish measured lane results', tests: [{ file: 'lib.test.mjs', title: 'works' }], plan_path: join(spec.taskDir, 'plan.md'), gate_path: join(spec.taskDir, 'gate.mjs'), acceptance: ['RV1'], mutations: [LEAN_MUTATION], ...(scope === undefined ? {} : { files_in_scope: scope }) }
-      : role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
+      : role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }], notes: `builder turn ${n}` }
       : role === 'lead' ? { decision: 'bounce', target: 'builder' }
-      : { verdict: reviews[review] ?? 'pass', findings: reviews[review++] === 'changes-needed' ? [{ id: 'F1', severity: 'must-fix', location: 'a:1', summary: 'redo-this' }] : [] }
+      : { verdict: reviews[review] ?? 'pass', findings: reviews[review++] === 'changes-needed' ? [{ id: 'F1', severity: 'must-fix', location: 'a:1', summary: 'redo-this', trigger: 'bad input' }] : [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['a'], complete: true }, ...(review > 1 ? { closed: [{ id: 'F1', evidence: 'fixed' }] } : {}) }
     return { role, id, status: own ?? 'done', summary: 'fixture', details }
   }
   const fakeAcp = acp ?? (async (input) => {
@@ -512,6 +512,22 @@ test('PP2: builder definitions inherit both skills at every tier', async () => {
 })
 
 // MUTATION: drop the changed-path section from the reviewer prompt and the reviewer is told nothing about untracked or renamed files.
+test("each reviewer prompt carries the latest builder's tests and notes and a valid P2 reviewer example", async () => {
+  const f = leanFixture({ answers: { reviews: ['changes-needed', 'pass'] } })
+  assert.equal((await f.go()).status, 'done')
+  const reviewers = f.requests.filter((r) => r.definition.role === 'reviewer')
+  assert.equal(reviewers.length, 2)
+  for (const [i, request] of reviewers.entries()) {
+    const report = request.prompt.split('\n## Builder report\n')[1].split('\n## Changed paths')[0]
+    assert.match(report, /Tests: \[{"file":"lib.test.mjs","title":"works"}\]/)
+    assert.ok(report.includes(`Notes: "builder turn ${i === 0 ? 2 : 4}"`))
+    const example = JSON.parse(request.prompt.split(`Task directory: ${f.spec.taskDir}\n`)[1].split('\nstatus is done')[0])
+    assert.deepEqual(validateEnvelope('reviewer', example).defects, [])
+    assert.ok(example.details.findings.some((finding) => finding.severity === 'must-fix' && finding.trigger))
+  }
+  for (const request of f.requests.filter((r) => r.definition.role !== 'reviewer')) assert.doesNotMatch(request.prompt, /^## Builder report$/m)
+})
+
 test('each reviewer prompt lists that round\'s measured paths as JSON-quoted bullets and no other seat gets the section', async () => {
   const f = leanFixture({
     answers: { reviews: ['changes-needed', 'pass'] },
@@ -850,7 +866,7 @@ async function retryRun(refusals, { oversleep = 0 } = {}) {
       mkdirSync(f.spec.taskDir, { recursive: true })
       if (input.definition.role === 'planner') for (const name of ['plan.md', 'gate.mjs']) writeFileSync(join(f.spec.taskDir, name), '')
       const details = input.definition.role === 'planner' ? { subject: 'fix(crew): publish measured lane results', tests: [{ file: 'lib.test.mjs', title: 'works' }], plan_path: 'plan.md', gate_path: 'gate.mjs', acceptance: ['RV1'], mutations: [LEAN_MUTATION] }
-        : input.definition.role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }] } : { verdict: 'pass', findings: [] }
+        : input.definition.role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }] } : { verdict: 'pass', findings: [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['a'], complete: true } }
       writeFileSync(path, JSON.stringify({ role: input.definition.role, id, status: 'done', summary: 'x', details }))
       return { stopReason: 'end_turn', usage: { input_tokens: 1 }, refusal: null }
     },
@@ -980,7 +996,7 @@ test('a schema-refused builder envelope gets one fresh repair-only turn at the s
     const n = turns[role] = (turns[role] ?? 0) + 1
     mkdirSync(f.spec.taskDir, { recursive: true })
     if (role === 'planner') for (const name of ['plan.md', 'gate.mjs']) writeFileSync(join(f.spec.taskDir, name), '')
-    const value = { role, id, status: 'done', summary: 'fixture', details: role === 'planner' ? { subject: 'fix(crew): publish measured lane results', tests: [{ file: 'lib.test.mjs', title: 'works' }], plan_path: join(f.spec.taskDir, 'plan.md'), gate_path: join(f.spec.taskDir, 'gate.mjs'), acceptance: ['RV1'], mutations: [LEAN_MUTATION] } : role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }], ...(n === 1 ? { gaps: [] } : {}) } : { verdict: 'pass', findings: [] } }
+    const value = { role, id, status: 'done', summary: 'fixture', details: role === 'planner' ? { subject: 'fix(crew): publish measured lane results', tests: [{ file: 'lib.test.mjs', title: 'works' }], plan_path: join(f.spec.taskDir, 'plan.md'), gate_path: join(f.spec.taskDir, 'gate.mjs'), acceptance: ['RV1'], mutations: [LEAN_MUTATION] } : role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }], ...(n === 1 ? { gaps: [] } : {}) } : { verdict: 'pass', findings: [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['a'], complete: true } } }
     mkdirSync(f.spec.taskDir, { recursive: true })
     writeFileSync(path, JSON.stringify(value))
     return { stopReason: 'end_turn', usage: null, refusal: null }

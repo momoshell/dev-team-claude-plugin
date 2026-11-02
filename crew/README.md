@@ -66,7 +66,7 @@ A tier override replaces only the fields it names and keeps a raw override model
 |---|---|---|
 | `planner` | explores the code and writes the plan: criteria, properties with tests, and tasks | none (task dir only) |
 | `builder` | edits the repo and names tests to prove | the only seat that writes the repo |
-| `reviewer` | verdict and typed findings; conformance to plan, then correctness | none |
+| `reviewer` | verdict, requirements, ranked findings, failure modes and coverage | none |
 | `lead` | answers an escalation with one closed decision | none |
 | `tech-lead` | optional plan adversary, a different model or effort | none |
 

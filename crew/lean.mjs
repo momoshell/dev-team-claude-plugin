@@ -32,7 +32,13 @@ function exampleEnvelope(role, id) {
       tests: [{ file: '<repo-relative test file>', title: '<exact test title>' }],
       notes: '<what you did not test, the guards you relied on, the checks you ran>',
     },
-    reviewer: review,
+    reviewer: {
+      verdict: 'changes-needed',
+      findings: [{ id: 'R1', severity: 'must-fix', location: 'path/to/file.mjs:10', summary: 'what breaks', trigger: 'the concrete state that breaks it', start_line: 10, end_line: 10, uncertain: 'what was not verified' }],
+      requirements: [{ requirement: 'the brief asks for this', status: 'unmet', evidence: 'what was read' }],
+      failure_modes: [{ breaks: 'what breaks', where: 'where it breaks', trigger: 'when it breaks', tested: false, covered: false }],
+      coverage: { read: ['paths read'], complete: true },
+    },
     'tech-lead': review,
     lead: { decision: 'bounce', target: 'builder' },
   }[role]
@@ -100,7 +106,7 @@ function promptFor({ request, spec, source, charters, body, section }) {
     '## Brief',
     brief,
     ...(planPath ? ['', `Plan path: ${planPath}`] : []),
-    ...(role === 'reviewer' ? ['', '## Changed paths', ...request.changedPaths.map((path) => `- ${JSON.stringify(path)}`)] : []),
+    ...(role === 'reviewer' ? ['', '## Builder report', `Tests: ${JSON.stringify(request.builderReport?.tests ?? [])}`, `Notes: ${JSON.stringify(request.builderReport?.notes ?? null)}`, '', '## Changed paths', ...request.changedPaths.map((path) => `- ${JSON.stringify(path)}`)] : []),
     ...(section ? ['', section] : []),
     '',
     '## Feedback',

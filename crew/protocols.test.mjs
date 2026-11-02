@@ -4,6 +4,7 @@ import { readdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseBrief, parseAgent, validateEnvelope, AGENT_ROLES, BRIEF_FIELDS, TIERS, SHAPES, ENVELOPE_FIELDS, ENVELOPE_STATUSES, REVIEW_VERDICTS, LEAD_DECISIONS, FINDING_SEVERITIES, FINDING_DISPOSITIONS } from './protocols.mjs'
+import * as protocols from './protocols.mjs'
 
 const BODY = '## The ask\n\nRefuse roster edits that cannot boot.\n'
 const brief = (overrides = {}, body = BODY) => {
@@ -230,19 +231,21 @@ test('P5 tier overrides are validated by path and by effective seat', () => {
 const DETAILS = {
   planner: { subject: 'fix(crew): name the lane change', plan_path: '/task/plan.md', tests: [] },
   builder: { summary: 'Implemented the change.' },
-  reviewer: { verdict: 'pass', findings: [] },
+  reviewer: { verdict: 'pass', findings: [], requirements: [{ requirement: 'build it', status: 'met', evidence: 'read it' }], failure_modes: [], coverage: { read: ['lib.mjs'], complete: true } },
   'tech-lead': { verdict: 'pass', findings: [] },
   lead: { decision: 'accept' },
 }
 const envelope = (role, overrides = {}) => ({ role, id: 'd1', status: 'done', summary: 'Completed.', details: structuredClone(DETAILS[role]), ...overrides })
 const finding = (overrides = {}) => ({ id: 'RV1-1', severity: 'should-fix', location: 'crew/protocols.mjs:1', summary: 'Malformed input is accepted.', ...overrides })
-const review = (findings, verdict = 'changes-needed', role = 'reviewer') => envelope(role, { details: { verdict, findings } })
+const review = (findings, verdict = 'changes-needed', role = 'reviewer') => envelope(role, { details: { ...structuredClone(DETAILS[role]), verdict, findings } })
 const refusedFor = (role, value, needle) => validateEnvelope(role, value).defects.filter((d) => d.includes(needle))
 
 test('P2 vocabularies are closed and frozen', () => {
   assert.deepEqual(ENVELOPE_FIELDS, ['role', 'id', 'status', 'summary', 'details'])
   assert.deepEqual(ENVELOPE_STATUSES, ['done', 'insufficient', 'escalate'])
   assert.deepEqual(REVIEW_VERDICTS, ['pass', 'changes-needed'])
+  assert.deepEqual(protocols.REQUIREMENT_STATUSES, ['met', 'unmet', 'human-verify'])
+  assert.ok(Object.isFrozen(protocols.REQUIREMENT_STATUSES))
   assert.deepEqual(LEAD_DECISIONS, ['bounce', 'accept', 'escalate'])
   assert.deepEqual(FINDING_SEVERITIES, ['must-fix', 'should-fix', 'consider'])
   assert.deepEqual(FINDING_DISPOSITIONS, ['auto-fix', 'ask-user', 'no-op'])
@@ -404,8 +407,8 @@ test('P2 typed findings are accepted in every documented form', () => {
       if (disposition === 'auto-fix') entry.patch = '--- a/x\n+++ b/x\n'
       assert.deepEqual(validateEnvelope(role, review([entry], 'changes-needed', role)).defects, [], String(disposition))
     }
-    for (const severity of FINDING_SEVERITIES) assert.deepEqual(validateEnvelope(role, review([finding({ severity })], 'changes-needed', role)).defects, [])
-    assert.deepEqual(validateEnvelope(role, review([finding({ severity: 'must-fix' })], 'changes-needed', role)).defects, [])
+    for (const severity of FINDING_SEVERITIES) assert.deepEqual(validateEnvelope(role, review([finding({ severity, trigger: 'input' })], 'changes-needed', role)).defects, [])
+    assert.deepEqual(validateEnvelope(role, review([finding({ severity: 'must-fix', trigger: 'input' })], 'changes-needed', role)).defects, [])
   }
 })
 
@@ -434,6 +437,53 @@ test('P2 typed findings are refused by nested path', () => {
     }
     bad([finding({ severity: 'must-fix' })], 'details.verdict is pass', 'pass')
   }
+})
+
+test('P2 reviewer details require requirements, failure modes and coverage, except on an archived return', () => {
+  assert.deepEqual(validateEnvelope('reviewer', envelope('reviewer')).defects, [])
+  for (const key of ['requirements', 'failure_modes', 'coverage']) {
+    const value = envelope('reviewer'); delete value.details[key]
+    assert.ok(validateEnvelope('reviewer', value).defects.includes(`details.${key} is required`))
+  }
+  const mode = { breaks: 'x', where: 'x', trigger: 'x', tested: true, covered: false }
+  for (const [key, bad] of [['requirements', []], ['requirements', [{ requirement: 'x', status: 'wrong', evidence: 'x' }]], ['requirements', [{ requirement: 'x', status: 'met', evidence: 'x', extra: 1 }]], ['failure_modes', [mode, mode, mode, mode]], ['failure_modes', [{ ...mode, extra: 1 }]], ['failure_modes', [{ ...mode, tested: 'yes' }]], ['failure_modes', [{ ...mode, trigger: '' }]], ['coverage', { read: [], complete: true }], ['coverage', { read: ['x'], complete: 'yes' }], ['coverage', { read: ['x'], complete: true, extra: 1 }]]) {
+    const value = envelope('reviewer'); value.details[key] = bad
+    assert.ok(validateEnvelope('reviewer', value).defects.some((d) => d.startsWith(`details.${key}`)), key)
+  }
+  const old = review(Array.from({ length: 6 }, (_, i) => finding({ id: `R${i}`, severity: 'must-fix' })))
+  delete old.details.requirements; delete old.details.failure_modes; delete old.details.coverage
+  assert.ok(validateEnvelope('reviewer', old).defects.length)
+  assert.deepEqual(validateEnvelope('reviewer', old, { archived: true }).defects, [])
+  assert.deepEqual(validateEnvelope('tech-lead', review([], 'pass', 'tech-lead')).defects, [])
+})
+
+test('P2 a reviewer pass carries no unmet requirement and follows a complete review', () => {
+  for (const [key, value] of [['requirements', [{ requirement: 'x', status: 'unmet', evidence: 'x' }]], ['coverage', { read: ['x'], complete: false }]]) {
+    const result = envelope('reviewer'); result.details[key] = value
+    assert.ok(validateEnvelope('reviewer', result).defects.some((d) => d.startsWith('details.verdict is pass')))
+    result.details.verdict = 'changes-needed'
+    assert.deepEqual(validateEnvelope('reviewer', result).defects, [])
+  }
+})
+
+test('P2 a reviewer must-fix names its trigger, and at most five findings are listed with the rest counted', () => {
+  for (const severity of FINDING_SEVERITIES) {
+    const defects = validateEnvelope('reviewer', review([finding({ severity })])).defects
+    assert.equal(defects.some((d) => d.startsWith('details.findings[0].trigger')), severity === 'must-fix')
+  }
+  for (const role of ['reviewer', 'tech-lead']) {
+    const valid = finding({ trigger: 'x', uncertain: 'x', start_line: 1, end_line: 2 })
+    assert.deepEqual(validateEnvelope(role, review([valid], 'changes-needed', role)).defects, [])
+    for (const [key, bad] of [['trigger', ''], ['uncertain', null], ['start_line', 0], ['end_line', Number.MAX_SAFE_INTEGER + 1]]) {
+      assert.ok(validateEnvelope(role, review([{ ...valid, [key]: bad }], 'changes-needed', role)).defects.some((d) => d.startsWith(`details.findings[0].${key}`)))
+    }
+  }
+  const value = review(Array.from({ length: 6 }, (_, i) => finding({ id: `R${i}` })))
+  assert.ok(validateEnvelope('reviewer', value).defects.some((d) => d.includes('five') && d.includes('details.findings_omitted')))
+  value.details.findings.pop()
+  for (const n of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) { value.details.findings_omitted = n; assert.ok(refusedFor('reviewer', value, 'details.findings_omitted').length) }
+  value.details.findings_omitted = 1
+  assert.deepEqual(validateEnvelope('reviewer', value).defects, [])
 })
 
 test('a builder envelope carries the tests it names and its notes, refused when malformed', () => {

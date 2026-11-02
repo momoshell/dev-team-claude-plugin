@@ -109,19 +109,18 @@ test('assertGrantsBacked passes backed grants and refuses unregistered ones', ()
   assert.equal(Object.isFrozen(EMPTY_GRANTS), true)
 })
 
-test('armGrants arms native extensions, fff and lab, and refuses what it cannot back', () => {
+test('armGrants arms native extensions and fff, and refuses what it cannot back', () => {
   const root = '/r'
   const exists = () => true
   const native = armGrants({ role: 'builder', agent: 'pi', extensions: ['skeletonread'] }, { root, exists })
   assert.deepEqual(native.extensions, [resolvePath('/r/crew/pi/extensions/skeletonread.ts')])
   assert.deepEqual(native.mcp_servers, [])
 
-  const mcp = armGrants({ role: 'builder', agent: 'pi', extensions: ['fff', 'lab'] }, { root, exists })
-  assert.deepEqual(mcp.mcp_servers.map((server) => server.name), ['fff', 'lab'])
-  assert.deepEqual(mcp.mcp_servers[1].command, { bin: process.execPath, args: [resolvePath('/r/crew/mcp/lab-server.mjs')] })
+  const mcp = armGrants({ role: 'builder', agent: 'pi', extensions: ['fff'] }, { root, exists })
+  assert.deepEqual(mcp.mcp_servers.map((server) => server.name), ['fff'])
   assert.throws(() => armGrants({ role: 'builder', agent: 'pi', extensions: ['fff'] }, { root, exists: () => false }), (err) => err.reason === 'extension-missing')
   assert.throws(() => armGrants({ role: 'builder', agent: 'pi', extensions: ['Bad_Name'] }, { root, exists }), (err) => err.reason === 'unknown-grant')
-  assert.throws(() => armGrants({ role: 'builder', agent: 'pi', extensions: ['lab'] }, { root, exists, register: { roles: { builder: role() } } }), (err) => err.reason === 'unknown-grant')
+  assert.throws(() => armGrants({ role: 'builder', agent: 'pi', extensions: ['lab'] }, { root, exists: () => false }), (err) => err.reason === 'extension-missing')
 
   assert.equal(SUBAGENT_EXTENSION, 'crew/pi/extensions/subagent.ts')
   const fan = armGrants({ role: 'planner', agent: 'pi', extensions: ['subagent'] }, { root, exists, readFile: () => JSON.stringify({ name: 'scout', prompt: 'look' }) })

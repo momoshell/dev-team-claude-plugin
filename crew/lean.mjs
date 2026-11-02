@@ -63,7 +63,7 @@ function definitionFor({ role, seat, filesInScope }, tier, d) {
   return {
     definition: { role, agent: seat.agent, model: `${seat.provider}/${seat.id}`, effort: seat.effort, writes: effective.writes ?? 'none', skills, requires: effective.requires ?? [],
       tools: effective.tools,
-      extensions: effective.extensions, advisor: effective.advisor, edit_assist: effective.edit_assist, codemode: effective.codemode,
+      extensions: effective.extensions, advisor: effective.advisor,
       wait_s: effective.wait_s,
       body },
     source, charters, memory: effective.memory,

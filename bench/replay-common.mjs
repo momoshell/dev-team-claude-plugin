@@ -12,7 +12,7 @@ export const CORPUS_DIR = join(BENCH_DIR, 'corpus')
 
 // The closed arm vocabulary: crew/protocols.mjs EXTENSIONS. Kept as a list so a
 // prototype name such as "constructor" is never mistaken for an arm.
-export const ARMS = Object.freeze(['readgate', 'lab', 'builderloop', 'reminders', 'skeletonread', 'subagent', 'fff'])
+export const ARMS = Object.freeze(['readgate', 'skeletonread', 'subagent', 'fff'])
 
 // Pre-parity planner returns lack the scope keys the arms read; give every arm the files the lane's merged PR touched.
 export const SCOPE_BACKFILL = Object.freeze({
@@ -37,7 +37,7 @@ export function validateCell(cell) {
     for (const key of ['agent', 'model', 'effort']) if (typeof c[key] !== 'string' || !c[key]) throw new Error(`${what}.${key} must be a nonempty string`)
   }
   named(cell, 'cell')
-  if ('codemode' in cell && typeof cell.codemode !== 'boolean') throw new Error('cell.codemode must be a boolean')
+  if ('codemode' in cell) throw new Error('cell.codemode is not a cell field')
   if ('skills' in cell && (!Array.isArray(cell.skills) || cell.skills.some((name) => typeof name !== 'string' || !name.trim()))) throw new Error('cell.skills must be a list of nonempty strings')
   if (cell.advisor != null) named(cell.advisor, 'cell.advisor')
   for (const key of ['wait_s', 'settle_s']) {
@@ -47,7 +47,7 @@ export function validateCell(cell) {
 }
 
 export function seatDefinition({ role, cell, arms }) {
-  return { role, agent: cell.agent, model: cell.model, effort: cell.effort, writes: role === 'builder' ? 'repo' : 'task-dir', wait_s: cell.wait_s ?? 3600, advisor: cell.advisor ?? null, skills: cell.skills ?? [], codemode: cell.codemode ?? false, extensions: [...arms] }
+  return { role, agent: cell.agent, model: cell.model, effort: cell.effort, writes: role === 'builder' ? 'repo' : 'task-dir', wait_s: cell.wait_s ?? 3600, advisor: cell.advisor ?? null, skills: cell.skills ?? [], extensions: [...arms] }
 }
 
 export function loadCorpus(lane, corpusDir = CORPUS_DIR) {

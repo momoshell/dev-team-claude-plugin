@@ -184,7 +184,7 @@ Check shape support.
 
 // MUTATION: offer stepped in the shape field although start refuses it.
 test('SC6: brief shape offerings and examples match public start behaviour', async () => {
-  assert.deepEqual(SHAPES, ['standard', 'stepped', 'finish'])
+  assert.deepEqual(SHAPES, ['standard', 'finish'])
   const accepted = []
   for (const shape of SHAPES) {
     const { result, error, effects, resolutions } = await probe(shape)

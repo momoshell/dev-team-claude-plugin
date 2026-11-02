@@ -280,7 +280,7 @@ test('(SW4) --check refuses a brief the lean loop cannot run', async () => {
   const lean = fakes({ brief: BRIEF.replace('shape: standard', 'shape: stepped') })
   const { code, stderr } = await mainWithStderr(['/d/b1.md', '--check'], lean.deps)
   assert.equal(code, 1)
-  assert.match(stderr, /--loop lean runs the standard shape only/)
+  assert.match(stderr, /not a P1 brief:[\s\S]*shape is one of standard, finish/)
   assert.deepEqual(effects(lean.calls), [])
   const finish = fakes({ brief: BRIEF.replace('shape: standard', 'shape: finish') })
   await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check: true, deps: finish.deps }), /shape finish starts from an escalated lane/)
@@ -289,7 +289,7 @@ test('(SW4) --check refuses a brief the lean loop cannot run', async () => {
 // MUTATION: drop the shape refusal and a stepped brief starts a lean lane that runs only the standard loop.
 test('--loop lean refuses a non-standard shape before any git call', async () => {
   const { deps, calls } = fakes({ brief: BRIEF.replace('shape: standard', 'shape: stepped') })
-  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps }), /--loop lean runs the standard shape only/)
+  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps }), /not a P1 brief:[\s\S]*shape is one of standard, finish/)
   assert.deepEqual(effects(calls), [])
   await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'other', deps: fakes().deps }), /--loop takes lean, got/)
 })
@@ -429,7 +429,7 @@ test('every turn gets its role definition, the complete brief and P2, and its ow
     const source = join(AGENTS, `${role}.md`)
     const { body, fields } = parseAgent(readFileSync(source, 'utf8'))
     const cell = seats[role]
-    assert.deepEqual(request.definition, { role, agent: cell.agent, model: `${cell.provider}/${cell.id}`, effort: cell.effort, writes: { ...fields, ...fields.tiers?.build }.writes, skills: role === 'builder' ? ['code-less', 'prose-plain'] : role === 'reviewer' ? ['code-less', 'pr-review'] : fields.skills ?? [], requires: [], tools: { ...fields, ...fields.tiers?.build }.tools, extensions: { ...fields, ...fields.tiers?.build }.extensions, advisor: { ...fields, ...fields.tiers?.build }.advisor, edit_assist: { ...fields, ...fields.tiers?.build }.edit_assist, codemode: { ...fields, ...fields.tiers?.build }.codemode, wait_s: { ...fields, ...fields.tiers?.build }.wait_s, body })
+    assert.deepEqual(request.definition, { role, agent: cell.agent, model: `${cell.provider}/${cell.id}`, effort: cell.effort, writes: { ...fields, ...fields.tiers?.build }.writes, skills: role === 'builder' ? ['code-less', 'prose-plain'] : role === 'reviewer' ? ['code-less', 'pr-review'] : fields.skills ?? [], requires: [], tools: { ...fields, ...fields.tiers?.build }.tools, extensions: { ...fields, ...fields.tiers?.build }.extensions, advisor: { ...fields, ...fields.tiers?.build }.advisor, wait_s: { ...fields, ...fields.tiers?.build }.wait_s, body })
     assert.equal(request.taskDir, f.spec.taskDir)
     assert.equal(request.cwd, f.spec.cwd)
     assert.notEqual(f.spec.taskDir, request.cwd)

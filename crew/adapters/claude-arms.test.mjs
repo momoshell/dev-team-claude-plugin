@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path'
 import { ROOT, git, scratchDir } from '../../test/helpers.mjs'
 import { runAcpSeat } from '../acp/seat.mjs'
 import { acpLaunch, headlessCommand, seatCommand, writeSeatArms } from './adapter-claude.mjs'
-import { CLAUDE_ARMS, armsPluginDir, claudeArmsOf, failedEdits, runHook, writeArmsPlugin } from './claude-arms.mjs'
+import { CLAUDE_ARMS, armsPluginDir, claudeArmsOf, runHook, writeArmsPlugin } from './claude-arms.mjs'
 
 // Every frame below is a recorded Claude Code hook input (or the session transcript) cloned with only scenario data
 // changed: paths, tool ids, sizes and failure output. The hooks run as the real commands the plugin names, one process each.
@@ -23,7 +23,6 @@ function sandbox({ links = true } = {}) {
   const taskDir = join(root, 'task')
   const runtimeRoot = join(root, 'runtime')
   for (const dir of [cwd, taskDir, runtimeRoot]) mkdirSync(dir)
-  // The reminders table checks its sources in the checkout it runs in.
   if (links) for (const dir of ['crew', 'test']) symlinkSync(join(ROOT, dir), join(cwd, dir), 'dir')
   const large = ['export function example() { return 1 }', ...Array.from({ length: 400 }, (_, i) => `// large line ${i + 2}`)].join('\n') + '\n'
   writeFileSync(join(cwd, 'large.mjs'), large)
@@ -247,28 +246,11 @@ test('Bash file segments are steered only for reading arms', () => {
     }
     for (const command of safe) { pre.tool_input.command = command; assertNoEffect(fire(sb, launch, pre)) }
   }
-  for (const grants of [{}, { extensions: ['builderloop'] }]) {
+  for (const grants of [{}]) {
     const launch = seat(sb, grants)
     const pre = sb.frame('PreToolUse', 'Bash'); pre.tool_input.command = commands[0]
     assert.equal(denial(fire(sb, launch, pre)), undefined)
   }
-})
-
-test('CH2 a result-transforming arm keeps Bash\'s own output shape', () => {
-  const sb = sandbox()
-  const launch = seat(sb, { extensions: ['builderloop'] })
-  const post = sb.frame('PostToolUse', 'Bash')
-  post.tool_input.command = 'node --test gate.test.mjs'
-  post.tool_response.stdout = '✔ one (0.5ms)\n✔ two (0.2ms)\nℹ tests 2\nℹ pass 2\nℹ fail 0\n'
-  const replaced = replacement(fire(sb, launch, post))
-  assert.deepEqual(Object.keys(replaced), Object.keys(post.tool_response))
-  assert.match(replaced.stdout, /^ℹ tests 2/)
-  assert.match(replaced.stdout, /\[test output filtered: dropped 2 passing-test lines/)
-  assert.doesNotMatch(replaced.stdout, /✔/)
-  for (const key of ['interrupted', 'isImage', 'noOutputExpected']) assert.equal(replaced[key], post.tool_response[key])
-  // Output no arm changes is left alone.
-  const plain = sb.frame('PostToolUse', 'Bash')
-  assert.equal(replacement(fire(sb, launch, plain)), undefined)
 })
 
 test('CH3 a claude seat granted an advisor gets the repeated-failure note once, across fresh processes', () => {
@@ -304,7 +286,7 @@ test('CH3 a claude seat granted an advisor gets the repeated-failure note once, 
   const healthy = sb.frame('PostToolUse', 'Bash'); healthy.tool_input.command = 'node --test gate.test.mjs'
   assert.equal(contexts(fire(sb, launch, healthy)), '')
   const bare = sandbox()
-  const ungranted = seat(bare, { extensions: ['reminders'] })
+  const ungranted = seat(bare, { extensions: ['readgate'] })
   for (const id of ['toolu_u1', 'toolu_u2']) {
     const post = bare.frame('PostToolUse', 'Bash'); post.tool_use_id = id
     Object.assign(post.tool_response, { stdout: 'not ok 1 - hook repeated failure\n', exitCode: 1 })
@@ -312,164 +294,8 @@ test('CH3 a claude seat granted an advisor gets the repeated-failure note once, 
   }
 })
 
-test('builderloop sed diagnostic hint survives Claude hook processes and is session scoped', () => {
-  const sb = sandbox()
-  const launch = seat(sb, { extensions: ['builderloop'], edit_assist: false })
-  const post = sb.frame('PostToolUse', 'Bash', 'sed-one')
-  post.tool_input.command = "sed -i 's/a/b/' f"
-  post.tool_response = { stdout: '', stderr: 'sed: 1: "f": command c expects \\ followed by text', exitCode: 1 }
-  const success = structuredClone(post)
-  success.tool_input.command = "sed -i '' 's/a/b/' f"
-  success.tool_response.exitCode = 0; success.tool_response.stderr = ''
-  assertNoEffect(fire(sb, launch, success))
-  assert.match(contexts(fire(sb, launch, post)), /sed -i '' .*Edit tool/)
-  assertNoEffect(fire(sb, launch, post))
-  const unknown = structuredClone(post); unknown.session_id = 'sed-two'; delete unknown.tool_response.exitCode
-  assert.match(contexts(fire(sb, launch, unknown)), /sed -i '' .*Edit tool/)
-  const failed = structuredClone(post); failed.session_id = 'sed-three'; failed.hook_event_name = 'PostToolUseFailure'
-  failed.error = failed.tool_response.stderr; delete failed.tool_response
-  assert.match(contexts(fire(sb, launch, failed)), /sed -i '' .*Edit tool/)
-  assertNoEffect(fire(sb, launch, failed))
-  const chained = structuredClone(post); chained.session_id = 'sed-four'
-  chained.tool_input.command = "cd T; sed -i 's/a/b/' f; node --test f.test.mjs"
-  chained.tool_response = { stdout: 'ℹ pass 1\n', stderr: 'sed: 1: "f": command c expects \\ followed by text', exitCode: 0 }
-  assert.match(contexts(fire(sb, launch, chained)), /sed -i '' .*Edit tool/)
-})
-
-test('CH4 a claude builder granted edit assist gets the file-derived hint on the call after a failed Edit, once', () => {
-  const sb = sandbox()
-  const launch = seat(sb, { extensions: ['builderloop'], edit_assist: true })
-  const next = sb.frame('PreToolUse', 'Bash'); next.tool_input.command = 'echo ok'
-  sb.writeTranscript(sb.failedEdit)
-  assert.doesNotMatch(contexts(fire(sb, launch, next)), /COBALT/, 'no hint before the failed result exists')
-  sb.writeTranscript(sb.failedEdit + 1)
-  next.tool_use_id = 'toolu_after_failed_edit'
-  const hint = contexts(fire(sb, launch, next))
-  assert.match(hint, /COBALT-file-derived-sentinel/, 'the hint carries the current file text, which the transcript does not')
-  assert.doesNotMatch(readFileSync(sb.transcriptPath, 'utf8'), /COBALT/)
-  assert.match(hint, /Edit of .*a\.txt failed/)
-  next.tool_use_id = 'toolu_following'
-  assert.doesNotMatch(contexts(fire(sb, launch, next)), /COBALT/, 'one hint per failed tool call')
-  assert.match(readFileSync(sb.journal, 'utf8'), /"builder_edit_failure":\{"cause":"never-seen".*"assist":"on"/, 'the failure is journaled as pi journals it')
-  // Another seat in the same lane has its own record of what it hinted.
-  const again = seat(sb, { extensions: ['builderloop'], edit_assist: true })
-  next.tool_use_id = 'toolu_other_seat'
-  assert.match(contexts(fire(sb, again, next)), /COBALT/)
-})
-
-test('CH4 edit assist off, ungranted and an unreadable transcript give no hint, and the failure is still journaled when off', () => {
-  const sb = sandbox()
-  sb.writeTranscript(sb.failedEdit + 1)
-  const next = sb.frame('PreToolUse', 'Bash'); next.tool_input.command = 'echo ok'
-  const off = seat(sb, { extensions: ['builderloop'], edit_assist: false })
-  assert.doesNotMatch(contexts(fire(sb, off, next)), /COBALT/)
-  assert.match(readFileSync(sb.journal, 'utf8'), /"assist":"off"/)
-  const unset = seat(sandbox(), { extensions: ['builderloop'] })
-  assert.deepEqual(JSON.parse(readFileSync(join(unset.sessionParams._meta.claudeCode.options.plugins[0].path, 'config.json'), 'utf8')).edit_assist, null)
-  // Another arm alone does not run edit assist, whatever flag is ambient.
-  const ungranted = seat(sandbox(), { extensions: ['readgate'] })
-  assertNoEffect(fire(sb, ungranted, next, { env: { CREW_EDIT_ASSIST: 'on' } }))
-  // No transcript, an unreadable one and a relative path are all no-ops.
-  const granted = seat(sb, { extensions: ['builderloop'], edit_assist: true })
-  for (const transcript_path of [join(sb.root, 'nowhere.jsonl'), sb.root, 'relative.jsonl', 7]) assertNoEffect(fire(sb, granted, { ...next, transcript_path }))
-  // A builder-only arm.
-  const planner = sandbox()
-  planner.writeTranscript(planner.failedEdit + 1)
-  assertNoEffect(fire(planner, seat(planner, { extensions: ['builderloop'], edit_assist: true }, { role: 'planner' }), planner.frame('PreToolUse', 'Bash')))
-})
-
-test('CH4 failedEdits pairs a failed Edit result with its input, once, and ignores every other failure', () => {
-  const sb = sandbox()
-  sb.writeTranscript(sb.failedEdit + 1)
-  const [failure, ...rest] = failedEdits(sb.transcriptPath, [])
-  assert.equal(rest.length, 0)
-  assert.equal(failure.path, join(sb.cwd, 'a.txt'))
-  assert.deepEqual(failure.event.input, { path: join(sb.cwd, 'a.txt'), edits: [{ oldText: 'alpha\nmissing', newText: 'x' }] })
-  assert.equal(failure.event.isError, true)
-  assert.match(failure.event.content[0].text, /^Could not find the exact text in .*a\.txt\.$/)
-  assert.deepEqual(failedEdits(sb.transcriptPath, [failure.id]), [])
-  // A cloned failure whose output reports duplicates reads as builderloop's not-unique failure.
-  const rows = structuredClone(sb.rows.slice(0, sb.failedEdit + 1))
-  const result = rows[sb.failedEdit].message.content[0]
-  result.content = '<tool_use_error>Found 2 matches of the string to replace, but replace_all is false.</tool_use_error>'
-  const path = join(sb.root, 'duplicates.jsonl')
-  writeFileSync(path, rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
-  assert.match(failedEdits(path, [])[0].event.content[0].text, /^Found 2 occurrences of the text in /)
-  // An errored result of another tool, and a result with no recorded input, are not an Edit failure.
-  rows[sb.failedEdit - 1].message.content[0].name = 'Bash'
-  writeFileSync(path, rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
-  assert.deepEqual(failedEdits(path, []), [])
-})
-
-test('builderloop refuses an unchanged rerun of the lane\'s test command, remembered across hook processes', () => {
-  const sb = sandbox({ links: false })
-  git(sb.cwd, 'init', '-q')
-  git(sb.cwd, 'add', '.')
-  git(sb.cwd, 'commit', '-qm', 'fixture')
-  const launch = seat(sb, { extensions: ['builderloop'] })
-  const run = (id) => { const pre = sb.frame('PreToolUse', 'Bash'); pre.tool_use_id = id; pre.tool_input.command = 'node --test gate.test.mjs'; return fire(sb, launch, pre) }
-  assertNoEffect(run('toolu_run1'))
-  assert.match(denial(run('toolu_run2')).permissionDecisionReason, /^builder-rerun-refusal: rerun of node --test gate.test.mjs/)
-  // The tree changed, so the rerun is not the same one.
-  writeFileSync(join(sb.cwd, 'a.txt'), 'changed\n')
-  assertNoEffect(run('toolu_run3'))
-})
-
-test('CH5 a claude seat granted reminders gets the role\'s table at session start, and a rule\'s reminder once after the matching tool', () => {
-  const sb = sandbox()
-  const table = JSON.parse(readFileSync(join(ROOT, 'crew', 'pi', 'extensions', 'reminders.json'), 'utf8'))
-  const launch = seat(sb, { extensions: ['reminders'] })
-  const start = contexts(fire(sb, launch, sb.frame('SessionStart')))
-  const forBuilder = table.rules.filter((rule) => rule.roles.includes('builder') && !rule.requires_fff)
-  assert.ok(forBuilder.length > 0)
-  for (const rule of forBuilder) assert.ok(start.includes(rule.reminder), rule.id)
-  for (const rule of table.rules.filter((candidate) => !candidate.roles.includes('builder'))) assert.ok(!start.includes(rule.reminder), `${rule.id} is not the builder's`)
-  // The post-tool rule path stays: a Write matching raw-temp-call is reminded once.
-  const write = sb.frame('PostToolUse', 'Bash')
-  Object.assign(write, { tool_name: 'Write', tool_input: { file_path: join(sb.cwd, 'x.test.mjs'), content: 'const d = mkdtempSync(tmpdir())\n' }, tool_response: { type: 'create', filePath: join(sb.cwd, 'x.test.mjs'), content: 'const d = mkdtempSync(tmpdir())\n' } })
-  assert.match(contexts(fire(sb, launch, write)), /reminder \(raw-temp-call\): Use scratchDir/)
-  write.tool_use_id = 'toolu_second_write'
-  assert.equal(contexts(fire(sb, launch, write)), '')
-  // Another role gets its own rules, a seat without the grant gets none, and a checkout without a rule's source fires none.
-  const planner = sandbox()
-  const plannerStart = contexts(fire(planner, seat(planner, { extensions: ['reminders'] }, { role: 'planner' }), planner.frame('SessionStart')))
-  for (const rule of table.rules.filter((candidate) => candidate.roles.includes('builder') && !candidate.roles.includes('planner'))) assert.ok(!plannerStart.includes(rule.reminder))
-  const bare = sandbox()
-  assertNoEffect(fire(bare, seat(bare, {}), bare.frame('SessionStart')))
-  const foreign = sandbox({ links: false })
-  assertNoEffect(fire(foreign, seat(foreign, { extensions: ['reminders'] }), foreign.frame('SessionStart')))
-  assertNoEffect(fire(sb, launch, sb.frame('SessionStart'), { raw: '{malformed' }))
-})
-
-test('RF1 and RF2 Claude hooks use resolved grants rather than ambient flags', async () => {
-  const saved = process.env.CREW_FFF
-  try {
-    for (const granted of [false, true]) {
-      const sb = sandbox()
-      const grants = { extensions: [join(ROOT, 'crew/pi/extensions/reminders.ts')], mcp_servers: granted ? [{ name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] } }] : [] }
-      process.env.CREW_FFF = granted ? '0' : '1'
-      writeSeatArms({ taskDir: sb.runtimeRoot, role: 'builder', grants, cwd: sb.cwd, env: { CREW_FFF: process.env.CREW_FFF } })
-      const plugin = armsPluginDir({ taskDir: sb.runtimeRoot, role: 'builder' })
-      assert.equal(JSON.parse(readFileSync(join(plugin, 'config.json'), 'utf8')).fff, granted)
-      const frame = { session_id: 'rf', hook_event_name: 'SessionStart', cwd: sb.cwd }
-      const start = await runHook(plugin, JSON.stringify(frame))
-      assert.equal(start.additionalContext.includes('reminder (fff-search-evasion):'), granted)
-      assert.match(start.additionalContext, /reminder \(test-name-pattern\):/)
-      const post = { ...frame, hook_event_name: 'PostToolUse', tool_use_id: 'grep', tool_name: 'Bash', tool_input: { command: 'grep -n foo file | head' }, tool_response: { stdout: 'original', stderr: '', exitCode: 0 } }
-      const result = await runHook(plugin, JSON.stringify(post))
-      assert.equal(Boolean(result?.additionalContext?.includes('reminder (fff-search-evasion):')), granted)
-      const other = await runHook(plugin, JSON.stringify({ ...post, tool_use_id: 'other', tool_input: { command: 'node --test --test-name-pattern=foo file' } }))
-      assert.match(other.additionalContext, /reminder \(test-name-pattern\):/)
-    }
-  } finally {
-    if (saved === undefined) delete process.env.CREW_FFF
-    else process.env.CREW_FFF = saved
-    process.chdir(ROOT)
-  }
-})
-
-test('CH6 a claude seat granted subagent or codemode refuses before a client, however it is mixed with arms it can run', () => {
-  for (const arms of [{ extensions: ['subagent'] }, { extensions: ['readgate', 'subagent'] }, { extensions: ['subagent', 'reminders'], advisor: ADVISOR }, { codemode: true }]) refused(sandbox(), arms)
+test('CH6 a claude seat granted subagent refuses before a client, however it is mixed with arms it can run', () => {
+  for (const arms of [{ extensions: ['subagent'] }, { extensions: ['readgate', 'subagent'] }, { extensions: ['subagent', 'readgate'], advisor: ADVISOR }]) refused(sandbox(), arms)
   // The old headless and pane transports refuse every extension grant, as before.
   const grants = { extensions: [join(ROOT, 'crew/pi/extensions/readgate.ts')], skills: [], tools: [], mcp_servers: [] }
   const spec = { role: 'builder', model: 'opus', promptFile: '/p.md', tools: 'Read', deny: '', taskDir: '/tmp/x', bootBrief: 'b', grants }
@@ -479,7 +305,7 @@ test('CH6 a claude seat granted subagent or codemode refuses before a client, ho
 
 test('every arm the lane carries, and only those, is accepted at launch; the rest refuse in the adapter, not by name list in the seat', () => {
   const grant = (...names) => ({ extensions: names.map((name) => join(ROOT, 'crew/pi/extensions', `${name}.ts`)), skills: [], tools: [], mcp_servers: [], advisor: false })
-  assert.deepEqual(claudeArmsOf({ ...grant('readgate', 'skeletonread', 'reminders', 'builderloop'), advisor: true }), { arms: [...CLAUDE_ARMS], unsupported: [] })
+  assert.deepEqual(claudeArmsOf({ ...grant('readgate', 'skeletonread'), advisor: true }), { arms: [...CLAUDE_ARMS], unsupported: [] })
   assert.deepEqual(claudeArmsOf(grant('readgate', 'readgate')).arms, ['readgate'])
   for (const name of ['subagent', 'submit', 'lab', 'fff', 'nosuch']) assert.deepEqual(claudeArmsOf(grant(name)).unsupported, [join(ROOT, 'crew/pi/extensions', `${name}.ts`)])
   assert.deepEqual(claudeArmsOf({ extensions: ['/elsewhere/readgate.ts', 'builtin:codemode'] }).unsupported, ['/elsewhere/readgate.ts', 'builtin:codemode'])
@@ -489,7 +315,6 @@ test('every arm the lane carries, and only those, is accepted at launch; the res
   refuses({ ...base, grants: grant('readgate', 'subagent') })
   refuses({ ...base, grants: grant('nosuch') })
   refuses({ ...base, grants: { ...grant('readgate'), advisor: true }, role: 'reviewer' })
-  refuses({ ...base, grants: grant('readgate'), editAssist: 'on' })
   // Granted but never materialised: the launch would boot without its arms.
   refuses({ ...base, grants: grant('readgate') })
   writeSeatArms({ ...base, grants: grant('readgate') })
@@ -502,16 +327,16 @@ test('the arms plugin sits beside the skills plugin and registers only the event
   const skill = join(sb.root, 'skills', 'alpha', 'SKILL.md')
   mkdirSync(dirname(skill), { recursive: true })
   writeFileSync(skill, '---\nname: alpha\ndescription: fixture\n---\nBody\n')
-  const launch = seat(sb, { extensions: ['reminders'], skills: [skill] })
+  const launch = seat(sb, { extensions: ['readgate'], skills: [skill] })
   const plugins = pluginsOf(launch)
   assert.equal(plugins.length, 2)
   assert.ok(plugins[0].path.endsWith('claude-skills/builder') && plugins[1].path.endsWith('claude-arms/builder'))
-  assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(plugins[1].path, 'hooks', 'hooks.json'), 'utf8')).hooks).sort(), ['PostToolUse', 'PostToolUseFailure', 'SessionStart'])
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(plugins[1].path, 'hooks', 'hooks.json'), 'utf8')).hooks).sort(), ['PostToolUse', 'PostToolUseFailure', 'PreToolUse'])
   assert.equal(JSON.parse(readFileSync(join(plugins[1].path, '.claude-plugin', 'plugin.json'), 'utf8')).name, 'crew-arms-builder')
   const skeleton = seat(sandbox(), { extensions: ['skeletonread'] })
   assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(pluginsOf(skeleton)[0].path, 'hooks', 'hooks.json'), 'utf8')).hooks), ['PreToolUse', 'PostToolUse'])
   const config = JSON.parse(readFileSync(join(plugins[1].path, 'config.json'), 'utf8'))
-  assert.deepEqual({ role: config.role, arms: config.arms, lane: config.lane_task_dir, layout: config.layout }, { role: 'builder', arms: ['reminders'], lane: sb.taskDir, layout: 'lean' })
+  assert.deepEqual({ role: config.role, arms: config.arms, lane: config.lane_task_dir, layout: config.layout }, { role: 'builder', arms: ['readgate'], lane: sb.taskDir, layout: 'lean' })
   assert.ok(config.state_dir.startsWith(join(sb.taskDir, 'claude-arms') + '/'), 'the state outlives the disposable runtime')
   // The launch keeps the lean lane environment the arms resolve their context from.
   assert.equal(launch.env.CREW_CONTEXT_LAYOUT, 'lean')
@@ -519,15 +344,14 @@ test('the arms plugin sits beside the skills plugin and registers only the event
 })
 
 test('a claude seat with context arms refuses before a client when the lane cannot supply their context', () => {
-  const arms = [{ extensions: ['skeletonread'] }, { extensions: ['builderloop'] }, { advisor: ADVISOR }, { extensions: ['builderloop'], edit_assist: true }]
+  const arms = [{ extensions: ['skeletonread'] }, { advisor: ADVISOR }]
   for (const request of arms) {
     const noPlanner = sandbox(); unlinkSync(join(noPlanner.taskDir, 'planner-1.json')); refused(noPlanner, request)
     const noJournal = sandbox(); unlinkSync(join(noJournal.taskDir, 'journal.jsonl')); refused(noJournal, request)
     const noRunStart = sandbox(); writeFileSync(join(noRunStart.taskDir, 'journal.jsonl'), '{"event":"stage-start"}\n'); refused(noRunStart, request)
   }
-  refused(sandbox(), { edit_assist: true }, { role: 'builder' })
   const ready = sandbox()
-  assert.ok(seat(ready, { advisor: ADVISOR, extensions: ['builderloop', 'skeletonread'], edit_assist: true }))
+  assert.ok(seat(ready, { advisor: ADVISOR, extensions: ['skeletonread'] }))
   assert.ok(existsSync(join(ready.taskDir, 'advisor-manifest.json')))
 })
 
@@ -626,9 +450,9 @@ test('concurrent hooks take turns on the store, so no update is lost', async () 
 test('the hook command survives a plugin path with spaces and quotes', () => {
   const taskDir = join(scratchDir('claude arms "it\'s"-'), 'run time')
   mkdirSync(taskDir)
-  const root = writeArmsPlugin({ taskDir, role: 'builder', arms: ['reminders'], cwd: taskDir })
-  const [{ hooks }] = JSON.parse(readFileSync(join(root, 'hooks', 'hooks.json'), 'utf8')).hooks.SessionStart
-  const result = spawnSync('/bin/sh', ['-c', hooks[0].command], { input: JSON.stringify({ session_id: 's', hook_event_name: 'SessionStart', source: 'startup' }), encoding: 'utf8' })
+  const root = writeArmsPlugin({ taskDir, role: 'builder', arms: ['readgate'], cwd: taskDir })
+  const [{ hooks }] = JSON.parse(readFileSync(join(root, 'hooks', 'hooks.json'), 'utf8')).hooks.PreToolUse
+  const result = spawnSync('/bin/sh', ['-c', hooks[0].command], { input: JSON.stringify({ session_id: 's', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'echo ok' }, cwd: taskDir }), encoding: 'utf8' })
   assert.equal(result.status, 0, result.stderr)
   assert.throws(() => writeArmsPlugin({ taskDir, role: 'builder', arms: ['subagent'], cwd: taskDir }), /arms must be a nonempty list/)
   assert.throws(() => writeArmsPlugin({ taskDir, role: 'builder', arms: [], cwd: taskDir }), /arms must be a nonempty list/)

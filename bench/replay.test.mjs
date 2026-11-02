@@ -227,39 +227,9 @@ test('CL2 archived code lanes prepare planner replays', async () => {
   }
 })
 
-// MUTATION: CC1 forces codemode false in the definition.
-test('CC1 forwards codemode independently of skills and arms', async () => {
-  const fx = fixture()
-  for (const run of [runBuilder, runPlanner]) for (const value of [true, false, undefined]) {
-    const cell = { ...CELL, skills: ['code-less'], ...(value === undefined ? {} : { codemode: value }) }
-    let definition
-    await run({ lane: 'b1380', cell, arms: ['fff'], out: fresh() }, { ...fx.deps,
-      runAcpSeat: (call) => { definition = call.definition; return { stopReason: 'end_turn' } },
-      runGate: async () => ({ status: 'red' }), proveMutations: async () => ({}),
-    })
-    assert.equal(definition.codemode, value ?? false)
-    assert.deepEqual(definition.skills, ['code-less'])
-    assert.deepEqual(definition.extensions, ['fff'])
-  }
-  for (const run of [runBuilder, runPlanner]) for (const throws of [true, false]) {
-    const out = fresh()
-    const result = await run({ lane: 'b1380', cell: { ...CELL, agent: 'claude', codemode: true }, arms: [], out }, { ...fx.deps,
-      runAcpSeat: ({ definition }) => {
-        assert.equal(definition.codemode, true)
-        if (throws) throw Object.assign(new Error('unsupported'), { code: 'grant-unsupported' })
-        return { refusal: { code: 'grant-unsupported', message: 'unsupported' } }
-      }, runGate: async () => ({ status: 'red' }), proveMutations: async () => ({}),
-    })
-    assert.match(result.error, /grant-unsupported/)
-    assert.equal(result.status, null)
-    assert.equal(result.status_reason, 'missing-return')
-    assert.equal(json(join(out, 'result.json')).error, result.error)
-  }
-})
-
-// MUTATION: CC2 removes codemode type validation.
-test('CC2 rejects non-boolean codemode before preparation', async () => {
-  for (const run of [runBuilder, runPlanner]) for (const codemode of [null, undefined, 'true', 1, [], {}]) {
+// MUTATION: remove the codemode field refusal.
+test('CC2 rejects codemode before preparation', async () => {
+  for (const run of [runBuilder, runPlanner]) for (const codemode of [true, false, null, undefined, 'true', 1, [], {}]) {
     let calls = 0
     const out = fresh()
     const result = await run({ lane: 'b1380', cell: { ...CELL, codemode }, arms: [], out }, { prepareRun: () => { calls++ }, runAcpSeat: () => { calls++ } })
@@ -393,10 +363,13 @@ test('missing planner prompts refuse early without blocking builders', async () 
   }
 })
 
+// MUTATION: add a retired arm back to ARMS.
 test('validateArms accepts the closed vocabulary and the empty list, and refuses everything else', () => {
   assert.deepEqual(validateArms([]), [])
+  assert.deepEqual(ARMS, ['readgate', 'skeletonread', 'subagent', 'fff'])
+  assert.ok(Object.isFrozen(ARMS))
   assert.deepEqual(validateArms([...ARMS]), [...ARMS])
-  for (const bad of ['nope', 'constructor', '__proto__', 'toString', 'FFF', '']) {
+  for (const bad of ['lab', 'builderloop', 'reminders', 'nope', 'constructor', '__proto__', 'toString', 'FFF', '']) {
     assert.throws(() => validateArms(['fff', bad]), (e) => e.message.startsWith('unknown arm: ') && e.message.includes(bad === '' ? 'unknown arm: ' : bad))
   }
   assert.throws(() => validateArms([42]), /unknown arm/)
@@ -517,7 +490,7 @@ test('builder replay: prompt rewrite, backfills, checks, diff with additions and
     proveMutations: async ({ checks, mutations }) => { assert.deepEqual(checks, ['X1']); assert.equal(mutations.length, 1); return { status: 'ok', rows: [{ check: 'X1', outcome: 'killed' }] } },
   })
   assert.equal(result.error, null)
-  assert.deepEqual(seen.definition, { role: 'builder', ...CELL, writes: 'repo', wait_s: 60, advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'medium' }, skills: [], codemode: false, extensions: ['fff', 'readgate'] })
+  assert.deepEqual(seen.definition, { role: 'builder', ...CELL, writes: 'repo', wait_s: 60, advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'medium' }, skills: [], extensions: ['fff', 'readgate'] })
   assert(!seen.prompt.includes('/orig/'))
   assert(seen.prompt.includes(join(out, 'task', 'builder-2.json')) && seen.prompt.includes(join(out, 'tree')))
   const ret = json(join(out, 'task', 'planner-1.json'))

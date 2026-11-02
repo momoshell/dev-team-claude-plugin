@@ -428,8 +428,8 @@ export function grantsFor(register, role, { root = REGISTER_ROOT, exists = exist
 }
 
 const LEAN_FFF_BIN = '/opt/homebrew/bin/fff-mcp'
-const LEAN_LAB_SERVER = 'crew/mcp/lab-server.mjs'
-const LEAN_MCP_ARMS = Object.freeze(['fff', 'lab'])
+// ADR-055 §8 retired the other MCP arm.
+const LEAN_MCP_ARMS = Object.freeze(['fff'])
 
 // The register entry an MCP arm resolves to: the first role or adapter overlay that declares the server.
 function registeredMcpServer(register, name) {
@@ -455,7 +455,7 @@ function registeredAgents(register, role, agent) {
 }
 
 // The grants one lean seat's effective definition asks for, and no others: a native extension name
-// becomes its checkout extension, fff and lab become the register's MCP servers, and subagent brings
+// becomes its checkout extension, fff becomes the register's MCP server, and subagent brings
 // the registered agent definitions it needs. Resolution and refusals are grantsFor's own; a declared
 // asset that is missing refuses instead of leaving a weaker seat.
 export function armGrants({ role, agent, extensions = [] }, { register = loadCapabilities(), root = REGISTER_ROOT, exists = existsSync, readFile = readFileSync } = {}) {
@@ -465,14 +465,8 @@ export function armGrants({ role, agent, extensions = [] }, { register = loadCap
     if (LEAN_MCP_ARMS.includes(name)) {
       const server = registeredMcpServer(register, name)
       if (!server) throw refuse('unknown-grant', `seat ${role} extension ${JSON.stringify(name)} has no MCP server in the register`)
-      if (name === 'fff') {
-        if (!pathExists(exists, LEAN_FFF_BIN)) throw pathMessage('extension-missing', role, 'fff MCP server', 'an installed fff-mcp binary', 'missing', LEAN_FFF_BIN)
-        mcp_servers.push(server)
-      } else {
-        const path = resolvedGrantPath(root, LEAN_LAB_SERVER)
-        if (!pathExists(exists, path)) throw pathMessage('extension-missing', role, 'lab MCP server', 'an existing checkout-relative path', 'missing', path)
-        mcp_servers.push({ ...server, command: { bin: process.execPath, args: [path] } })
-      }
+      if (!pathExists(exists, LEAN_FFF_BIN)) throw pathMessage('extension-missing', role, 'fff MCP server', 'an installed fff-mcp binary', 'missing', LEAN_FFF_BIN)
+      mcp_servers.push(server)
     } else if (/^[a-z]+$/.test(name)) {
       paths.push(`crew/pi/extensions/${name}.ts`)
     } else {

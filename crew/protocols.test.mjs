@@ -1,5 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readdirSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { parseBrief, parseAgent, validateEnvelope, AGENT_ROLES, BRIEF_FIELDS, TIERS, SHAPES, ENVELOPE_FIELDS, ENVELOPE_STATUSES, REVIEW_VERDICTS, LEAD_DECISIONS, FINDING_SEVERITIES, FINDING_DISPOSITIONS } from './protocols.mjs'
 
 const BODY = '## The ask\n\nRefuse roster edits that cannot boot.\n\n## Acceptance\n\n- (RV1) an edit that cannot boot is refused\n- (RV2) a bootable edit is accepted\n'
@@ -12,7 +15,8 @@ const brief = (overrides = {}, body = BODY) => {
 test('P1 vocabularies are the ADR-052 fields, tiers and shapes', () => {
   assert.deepEqual(BRIEF_FIELDS, ['source', 'closes', 'tier', 'shape', 'acceptance', 'out_of_scope', 'suite'])
   assert.deepEqual(TIERS, ['mechanical', 'build', 'judge'])
-  assert.deepEqual(SHAPES, ['standard', 'stepped', 'finish'])
+  assert.deepEqual(SHAPES, ['standard', 'finish'])
+  assert.ok(Object.isFrozen(SHAPES))
 })
 
 test('a well-formed brief parses with no defects', () => {
@@ -21,6 +25,11 @@ test('a well-formed brief parses with no defects', () => {
   assert.deepEqual(fields, { source: 'issue 1961', closes: 1961, tier: 'build', shape: 'standard', acceptance: ['RV1', 'RV2'], out_of_scope: 'the visualizer' })
   assert.match(body, /^## The ask/)
   assert.equal(parseBrief(brief({ closes: 'null' })).fields.closes, null)
+})
+
+// MUTATION: add stepped back to SHAPES.
+test('AR1 refuses the retired stepped shape', () => {
+  assert.deepEqual(parseBrief(brief({ shape: 'stepped' })).defects, ['shape is one of standard, finish'])
 })
 
 // MUTATION: require suite like the other fields and every brief without it is refused; skip its check and a list passes.
@@ -50,7 +59,7 @@ test('unknown and missing fields are refused by name', () => {
 // MUTATION: accept any tier, shape or closes value and a typo boots on the wrong seats or binds no issue.
 test('tier, shape and closes take only their closed values', () => {
   assert.ok(parseBrief(brief({ tier: 'rigorous' })).defects.includes('tier is one of mechanical, build, judge'))
-  assert.ok(parseBrief(brief({ shape: 'chunked' })).defects.includes('shape is one of standard, stepped, finish'))
+  assert.ok(parseBrief(brief({ shape: 'chunked' })).defects.includes('shape is one of standard, finish'))
   assert.ok(parseBrief(brief({ closes: '0' })).defects.includes('closes is null or one issue number'))
   // MUTATION: accept any integer and 9007199254740993 rounds to a different issue.
   assert.ok(parseBrief(brief({ closes: '9007199254740993' })).defects.includes('closes is null or one issue number'))
@@ -91,6 +100,28 @@ const agent = (fields = {}, body = 'Read [the notes](../notes/planner.md).\n') =
 }
 const defectsOf = (fields, needle) => parseAgent(agent(fields)).defects.filter((d) => d.includes(needle))
 
+// MUTATION: add codemode back to AGENT_FIELDS.
+test('AR2 refuses codemode as an unknown field', () => {
+  for (const codemode of [true, false]) assert.match(defectsOf({ codemode }, 'unknown field codemode')[0], /^unknown field codemode;/)
+})
+
+// MUTATION: add edit_assist back to AGENT_FIELDS.
+test('AR3 refuses edit_assist as an unknown field', () => {
+  for (const edit_assist of [true, false]) assert.match(defectsOf({ edit_assist }, 'unknown field edit_assist')[0], /^unknown field edit_assist;/)
+})
+
+// MUTATION: add each retired extension back to EXTENSIONS.
+test('AR4 refuses retired extensions and accepts retained extensions', () => {
+  for (const name of ['lab', 'builderloop', 'reminders']) assert.deepEqual(defectsOf({ extensions: [name] }, 'extensions'), ['extensions is a list drawn from readgate, skeletonread, subagent, fff'])
+  assert.deepEqual(parseAgent(agent({ extensions: ['readgate', 'skeletonread', 'subagent', 'fff'] })).defects, [])
+})
+
+// MUTATION: add a path segment named for a retired extension.
+test('AR5 crew has no paths named for retired extensions', () => {
+  const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => [join(dir, entry.name), ...(entry.isDirectory() ? walk(join(dir, entry.name)) : [])])
+  for (const path of walk(dirname(fileURLToPath(import.meta.url)))) assert.doesNotMatch(path.split('/').at(-1), /(?:^|[-_.])(lab|builderloop|reminders)(?:$|[-_.])/)
+})
+
 test('P5 roles are the five seats in canonical order', () => {
   assert.deepEqual(AGENT_ROLES, ['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
 })
@@ -100,9 +131,9 @@ test('every P5 field decodes to its own type', () => {
   const full = {
     writes: 'task-dir', envelope: 'plan',
     fallback: [{ agent: 'pi', model: 'openai/gpt-6-astra', effort: 'medium' }, { agent: 'pi', model: 'openai/other' }],
-    skills: ['plan', 'qa-test-writing'], requires: ['qa-test-writing'], tools: ['read', 'bash'], extensions: ['lab', 'fff'],
+    skills: ['plan', 'qa-test-writing'], requires: ['qa-test-writing'], tools: ['read', 'bash'], extensions: ['readgate', 'fff'],
     advisor: { agent: 'pi', model: 'openai/gpt-6-astra', effort: 'high' },
-    edit_assist: false, codemode: true, memory: false, rounds: 2, wait_s: 1800,
+    memory: false, rounds: 2, wait_s: 1800,
     tiers: { mechanical: { effort: 'medium' }, build: null, judge: { effort: 'xhigh', model: 'openai/changed', fallback: [] } },
   }
   const { fields, body, defects } = parseAgent(agent(full))
@@ -152,10 +183,10 @@ test('P5 unknown, duplicate, missing and malformed lines are refused by name', (
 
 // MUTATION: accept any value for a closed field and a typo seats the wrong agent or model.
 test('P5 closed fields take only their values', () => {
-  const cases = { name: '9bad', role: 'scout', agent: 'codex', effort: 'extreme', model: 'no-slash', writes: 'anywhere', edit_assist: 'maybe', codemode: 'falsehood', memory: 2, rounds: 0, wait_s: -1, skills: { name: 'x' }, requires: [{}], tools: [7], extensions: 7, envelope: '' }
+  const cases = { name: '9bad', role: 'scout', agent: 'codex', effort: 'extreme', model: 'no-slash', writes: 'anywhere', memory: 2, rounds: 0, wait_s: -1, skills: { name: 'x' }, requires: [{}], tools: [7], extensions: 7, envelope: '' }
   for (const [key, value] of Object.entries(cases)) assert.equal(defectsOf({ [key]: value }, key).length >= 1, true, key)
   for (const model of ['a/b/c', '/id', 'provider/', 'Upper/id', 'p/i d']) assert.equal(defectsOf({ model }, 'model').length, 1, model)
-  assert.equal(defectsOf({ extensions: ['lab', 'nope'] }, 'extensions').length, 1)
+  assert.equal(defectsOf({ extensions: ['readgate', 'nope'] }, 'extensions').length, 1)
   assert.equal(defectsOf({ rounds: '9007199254740993' }, 'rounds').length, 1)
 })
 

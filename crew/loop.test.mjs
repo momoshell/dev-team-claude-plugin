@@ -11,8 +11,8 @@ import { DEFAULT_ROUNDS, LOOP_REASONS, runLoop } from './loop.mjs'
 const PR = { number: 73, url: 'https://example.test/pr/73', state: 'OPEN', headRefName: 'lane', baseRefName: 'main' }
 const finding = { id: 'R1', severity: 'must-fix', location: 'lib.mjs:1', summary: 'Fix the defect' }
 const green = () => ({ status: 'green', reason: null, code: 0, signal: null, stdout: '', stderr: '', timedOut: false })
-const STAGES = ['plan', 'baseline', 'build', 'gate', 'mutations', 'review-paths', 'review', 'suite-stage', 'suite', 'paths', 'commit', 'fetch', 'rebase', 'publish']
-const SUCCESS = ['seat:planner', 'baseline', 'seat:builder', 'gate', 'mutations', 'review-paths', 'seat:reviewer', 'suite-stage', 'suite', 'paths', 'commit', 'fetch', 'rebase', 'publish']
+const STAGES = ['plan', 'build', 'proof', 'review-paths', 'review', 'suite-stage', 'suite', 'paths', 'commit', 'fetch', 'rebase', 'publish']
+const SUCCESS = ['seat:planner', 'seat:builder', 'proof', 'review-paths', 'seat:reviewer', 'suite-stage', 'suite', 'paths', 'commit', 'fetch', 'rebase', 'publish']
 const MUTATION = { check: 'A1', file: 'lib.mjs', find: 'old', replace: 'new' }
 
 // Every effect is a recorded call; nothing touches a model, git, gh, the network or the disk.
@@ -27,8 +27,8 @@ function fakes(options = {}) {
   }
   const envelope = (request) => ({
     role: request.role, id: request.id, status: 'done', summary: 'fixture',
-    details: request.role === 'planner' ? { subject: 'fix(crew): planned lane', plan_path: '/virtual/task/plan.md', gate_path: '/virtual/task/gate.mjs', acceptance: ['A1'], mutations: [MUTATION] }
-      : request.role === 'builder' ? { summary: 'built' }
+    details: request.role === 'planner' ? { subject: 'fix(crew): planned lane', plan_path: '/virtual/task/plan.md', acceptance: ['A1'] }
+      : request.role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
       : request.role === 'lead' ? { decision: options.lead ?? 'escalate' }
       : { verdict: options.review && ++reviewTurns <= options.review ? 'changes-needed' : 'pass', findings: options.review && reviewTurns <= options.review ? [finding] : [] },
   })
@@ -47,7 +47,7 @@ function fakes(options = {}) {
     },
     // the planner's two artifacts exist as virtual regular files inside the virtual task dir
     stat: async (path) => {
-      if (!['/virtual/task/plan.md', '/virtual/task/gate.mjs'].includes(path)) throw Object.assign(new Error(`no ${path}`), { code: 'ENOENT' })
+      if (path !== '/virtual/task/plan.md') throw Object.assign(new Error(`no ${path}`), { code: 'ENOENT' })
       return { isFile: () => true }
     },
     realpath: async (path) => path,
@@ -65,9 +65,7 @@ function fakes(options = {}) {
       if (!recorded) return undefined
       return { definition: recorded.definition, recorded: recorded.rows ? recorded.rows.map((r) => JSON.stringify(r)).join('\n') : null }
     },
-    checkBaseline: measured('baseline', 'baseline' in options ? options.baseline : { accepted: true, reason: 'gate-failed', result: { ...green(), status: 'red', code: 1, reason: 'gate-failed', failingIds: ['A1'] } }),
-    runGate: measured('gate', options.gate ?? { ...green(), failingIds: [] }),
-    proveMutations: measured('mutations', 'proof' in options ? options.proof : { status: 'green', reason: null, rows: [{ check: 'A1', outcome: 'killed', reason: null }] }),
+    proveTests: measured('proof', options.proof ?? { status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }] }),
     runSuite: measured('suite', options.suite ?? green()),
     commitChanges: measured('commit', options.commit ?? { status: 'green', reason: null, head: 'a'.repeat(40), files: ['lib.mjs'] }),
     // the status probe right after a suite measures the commit's paths, any other measures the reviewer's
@@ -85,7 +83,7 @@ function fakes(options = {}) {
   }
   return { spec, deps, calls, rows, requests, seen, writes, go: () => runLoop(spec, deps) }
 }
-const BODY = ['Source: "issue 12"', '', '## Acceptance', '- A1: the lane works across two lines', '', '## Measurements', '- Baseline gate: red; failing ids: A1.', '- Gate: green.', '- Mutations: 1/1 killed (A1: killed).', '- Suite: green; exit 0.'].join('\n')
+const BODY = ['Source: "issue 12"', '', '## Acceptance', '- A1: the lane works across two lines', '', '## Measurements', '- proof: lib.test.mjs "works": red on the old source, green on the build', '- Suite: green; exit 0.'].join('\n')
 const count = (f, role) => f.requests.filter((r) => r.role === role).length
 const stopped = (reason) => ({ status: 'stopped', reason, pr: null })
 
@@ -95,9 +93,7 @@ test('a green run walks every stage in order and returns the measured PR with ea
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
   assert.deepEqual(f.calls, ['mkdir', ...SUCCESS])
   assert.deepEqual(f.seen.mkdir, ['/virtual/task', { recursive: true }])
-  assert.deepEqual(f.seen.baseline, { cwd: '/virtual/checkout', gatePath: '/virtual/task/gate.mjs', timeoutMs: 5000 })
-  assert.deepEqual(f.seen.gate, f.seen.baseline)
-  assert.deepEqual(f.seen.mutations, { cwd: '/virtual/checkout', gatePath: '/virtual/task/gate.mjs', checks: ['A1'], mutations: [MUTATION], timeoutMs: 5000 })
+  assert.deepEqual(f.seen.proof, { cwd: '/virtual/checkout', base: 'HEAD', tests: [{ file: 'lib.test.mjs', title: 'works' }], timeoutMs: 5000 })
   assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 5000 })
   assert.deepEqual(f.seen['review-paths'], f.seen.paths)
   assert.deepEqual(f.seen.paths, { cwd: '/virtual/checkout', command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs: 5000 })
@@ -106,10 +102,10 @@ test('a green run walks every stage in order and returns the measured PR with ea
   assert.deepEqual(f.seen.rebase, { cwd: '/virtual/checkout', base: 'main', timeoutMs: 5000 })
   assert.deepEqual(f.seen.publish, { cwd: '/virtual/checkout', branch: 'lane', base: 'main', title: 'fix(crew): planned lane', body: BODY, closes: [12], refs: [13], timeoutMs: 5000 })
   const planner = f.requests[0]
-  assert.deepEqual(Object.keys(planner).sort(), ['brief', 'feedback', 'gatePath', 'id', 'planPath', 'returnPath', 'role', 'seat'])
+  assert.deepEqual(Object.keys(planner).sort(), ['brief', 'feedback', 'id', 'planPath', 'returnPath', 'role', 'seat'])
   assert.deepEqual(Object.keys(f.requests[1]).sort(), [...Object.keys(planner), 'filesInScope'].sort())
   assert.deepEqual(Object.keys(f.requests[2]).sort(), [...Object.keys(planner), 'filesInScope', 'changedPaths'].sort())
-  assert.deepEqual(f.requests[1], { ...f.requests[1], role: 'builder', planPath: '/virtual/task/plan.md', gatePath: '/virtual/task/gate.mjs', feedback: [] })
+  assert.deepEqual(f.requests[1], { ...f.requests[1], role: 'builder', planPath: '/virtual/task/plan.md', feedback: [] })
   assert.equal(new Set(f.requests.map((r) => r.id)).size, f.requests.length)
   assert.equal(new Set(f.requests.map((r) => r.returnPath)).size, f.requests.length)
 })
@@ -142,7 +138,7 @@ test('a suite timeout override reaches only the suite and absent overrides inher
     const f = fakes({ spec: { suite: { command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs } } })
     assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
     assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs })
-    for (const stage of ['baseline', 'gate', 'mutations', 'review-paths', 'paths', 'commit', 'fetch', 'rebase', 'publish']) assert.equal(f.seen[stage].timeoutMs, 5000, stage)
+    for (const stage of ['proof', 'review-paths', 'paths', 'commit', 'fetch', 'rebase', 'publish']) assert.equal(f.seen[stage].timeoutMs, 5000, stage)
   }
   const inherit = fakes({ spec: { suite: { command: 'node', timeoutMs: undefined } } })
   await inherit.go()
@@ -173,26 +169,6 @@ test('a measured suite timeout under an override stops the lane with no commit, 
 })
 
 // MUTATION: skip the baseline acceptance branch and a green baseline lets the builder start.
-test('a green, unmeasured, malformed or contradictory baseline stops before the builder', async () => {
-  const redRun = { ...green(), status: 'red', code: 1, reason: 'gate-failed', failingIds: ['A1'] }
-  const cases = [
-    [{ accepted: false, reason: 'baseline-green', result: { ...green(), failingIds: [] } }, 'baseline-green'],
-    [{ accepted: false, reason: 'baseline-unmeasured', result: {} }, 'baseline-unmeasured'],
-    [{ accepted: true, reason: 'gate-failed', result: { ...redRun, failingIds: [] } }, 'runner-threw'],
-    [{ accepted: true, reason: 'gate-failed', result: { ...redRun, status: 'green', reason: null } }, 'runner-threw'],
-    [{ accepted: true, reason: 'gate-no-fail', result: { ...redRun, reason: 'gate-no-fail' } }, 'runner-threw'],
-    [{ accepted: true, reason: 'made-up', result: redRun }, 'runner-threw'],
-    [{ reason: 'gate-failed' }, 'runner-threw'],
-    ['red', 'runner-threw'],
-    [null, 'runner-threw'],
-  ]
-  for (const [baseline, reason] of cases) {
-    const f = fakes({ baseline })
-    assert.deepEqual(await f.go(), stopped(reason), JSON.stringify(baseline))
-    assert.equal(count(f, 'builder'), 0)
-    assert.deepEqual(f.calls.slice(-2), ['seat:planner', 'baseline'])
-  }
-})
 
 const gaps = (v) => ({ ...v, details: { ...v.details, gaps: [] } })
 const nth = (role, turn, edit) => (v, r) => (r.role === role && Number(r.id.split('.').at(-1)) === turn ? edit(v) : v)
@@ -342,8 +318,7 @@ test('changes-needed carries the exact findings to the next build and repeats ga
   assert.equal(builders.length, 2)
   assert.deepEqual(builders[0].feedback, [])
   assert.deepEqual(builders[1].feedback, [finding])
-  assert.deepEqual(f.calls.slice(1, 15), ['seat:planner', 'baseline', 'seat:builder', 'gate', 'mutations', 'review-paths', 'seat:reviewer', 'seat:builder', 'gate', 'mutations', 'review-paths', 'seat:reviewer', 'suite-stage', 'suite'])
-  assert.equal(f.calls.filter((c) => c === 'baseline').length, 1)
+  assert.deepEqual(f.calls.slice(1, 12), ['seat:planner', 'seat:builder', 'proof', 'review-paths', 'seat:reviewer', 'seat:builder', 'proof', 'review-paths', 'seat:reviewer', 'suite-stage', 'suite'])
   assert.equal(count(f, 'planner'), 1)
 })
 
@@ -396,8 +371,7 @@ test('a lead accept releases only a valid non-done envelope and never an exhaust
   const changes = fakes({ lead: 'accept', review: 10, edit: (v) => v.role === 'reviewer' ? { ...v, status: 'escalate' } : v })
   assert.notEqual((await changes.go()).status, 'done')
   assert.equal(changes.calls.includes('suite'), false)
-  const gateStillRuns = fakes({ lead: 'accept', gate: { ...green(), status: 'red', code: 1, reason: 'gate-failed', failingIds: ['A1'] }, edit: (v) => v.role === 'builder' ? { ...v, status: 'escalate' } : v })
-  assert.deepEqual(await gateStillRuns.go(), stopped('gate-failed'))
+
 })
 
 // MUTATION: consult a missing lead anyway, or let a bad lead envelope decide.
@@ -418,48 +392,8 @@ test('an unseated, refusing or insufficient lead stops without recursion', async
 })
 
 // MUTATION: drop the overall proof decision and a surviving or incomplete proof reaches review.
-test('a surviving, unmeasured, missing, duplicate, wrong-check or thrown proof never reaches review or commit', async () => {
-  const killed = { check: 'A1', outcome: 'killed', reason: null }
-  const cases = [
-    [{ status: 'red', reason: 'mutations-survived', rows: [{ check: 'A1', outcome: 'survived', reason: 'gate-green' }] }, 'mutations-survived'],
-    [{ status: 'unmeasured', reason: 'mutation-unmeasured', rows: [{ check: 'A1', outcome: 'unmeasured', reason: 'timeout' }] }, 'mutation-unmeasured'],
-    [{ status: 'green', reason: null, rows: [] }, 'mutation-unmeasured'],
-    [{ status: 'green', reason: null }, 'mutation-unmeasured'],
-    [{ status: 'green', reason: null, rows: [{ check: 'A1', outcome: 'unmeasured', reason: 'timeout' }] }, 'mutation-unmeasured'],
-    [{ status: 'green', reason: null, rows: [killed, killed] }, 'mutation-unmeasured'],
-    [{ status: 'green', reason: null, rows: [{ ...killed, check: 'A2' }] }, 'mutation-unmeasured'],
-    [{ status: 'green', reason: null, rows: [{ ...killed, reason: 'timeout' }] }, 'mutation-unmeasured'],
-    [{ status: 'green', reason: 'gate-green', rows: [killed] }, 'runner-threw'],
-    [{ status: 'purple', reason: null, rows: [killed] }, 'runner-threw'],
-    [null, 'runner-threw'],
-  ]
-  for (const [proof, reason] of cases) {
-    const f = fakes({ proof })
-    assert.deepEqual(await f.go(), stopped(reason), JSON.stringify(proof))
-    assert.equal(f.calls.includes('commit'), false)
-    assert.equal(count(f, 'reviewer'), 0)
-  }
-  const thrown = fakes({ throwCheck: 'mutations' })
-  assert.deepEqual(await thrown.go(), stopped('runner-threw'))
-  assert.equal(count(thrown, 'reviewer'), 0)
-})
 
 // MUTATION: trust a non-green gate and the review and commit run on a build that does not pass.
-test('a build that does not leave the gate green stops before proof, review and commit', async () => {
-  const cases = [
-    [{ ...green(), status: 'red', code: 1, reason: 'gate-failed', failingIds: ['A1'] }, 'gate-failed'],
-    [{ ...green(), status: 'unmeasured', code: null, reason: 'timeout' }, 'timeout'],
-    [{ ...green(), code: 1, failingIds: [] }, 'runner-threw'],
-    [{ ...green(), timedOut: true, failingIds: [] }, 'runner-threw'],
-    [{ ...green(), reason: 'gate-failed', failingIds: [] }, 'runner-threw'],
-  ]
-  for (const [gate, reason] of cases) {
-    const f = fakes({ gate })
-    assert.deepEqual(await f.go(), stopped(reason))
-    assert.equal(f.calls.includes('mutations'), false)
-    assert.equal(count(f, 'reviewer'), 0)
-  }
-})
 
 // MUTATION: skip the suite decision and a red or unmeasured suite still commits.
 test('a red, unmeasured or malformed-green suite never commits', async () => {
@@ -515,14 +449,6 @@ const SPEC_OUT = ['ℹ failing tests:', 'test at skills/qa-test-writing/exhibits
 const TAP_OUT = ['not ok 1 - exhibit census remains current', '  ---', "  location: '/virtual/checkout/skills/ux/exhibits.test.mjs:73:1'", '  ...'].join('\n')
 const redOut = (stdout) => ({ ...redRun(1), stdout })
 const builderTurns = (f) => f.requests.filter((r) => r.role === 'builder')
-// gate answers green until the suite has been red twice, then answers `after`
-const repairing = (sequence, options = {}) => {
-  const f = sequenced(sequence, options)
-  const base = f.deps.runGate
-  f.deps.runGate = async (input) => options.afterGate && f.inputs.length >= 2 ? (f.calls.push('gate'), structuredClone(options.afterGate)) : base(input)
-  return f
-}
-
 // MUTATION: omit scope on a suite-repair turn.
 test('suite repair keeps the accepted scope', async () => {
   const scope = ['src/widget.svelte']
@@ -558,19 +484,13 @@ test('after a suite repair the gate, proof, review and suite run again, then the
   const f = sequenced([redRun(1), redRun(2), green()])
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
   const at = f.calls.lastIndexOf('seat:builder')
-  assert.deepEqual(f.calls.slice(at), ['seat:builder', 'gate', 'mutations', 'review-paths', 'seat:reviewer', 'suite-stage', 'suite', ...EFFECTS])
+  assert.deepEqual(f.calls.slice(at), ['seat:builder', 'proof', 'review-paths', 'seat:reviewer', 'suite-stage', 'suite', ...EFFECTS])
   assert.equal(f.inputs.length, 3)
   assert.deepEqual(f.inputs[2], f.inputs[0])
   const body = BODY
   assert.equal(f.seen.commit.body, body)
   assert.equal(f.seen.publish.body, body)
-  const bad = [{ ...green(), status: 'red', code: 1, reason: 'gate-failed' }, { ...green(), status: 'unmeasured', code: null, reason: 'timeout', timedOut: true }, { ...green(), code: 3 }]
-  for (const afterGate of bad) {
-    const r = repairing([redRun(), redRun(), green()], { afterGate })
-    assert.equal((await r.go()).status, 'stopped')
-    assert.equal(r.inputs.length, 2)
-    for (const effect of EFFECTS) assert.equal(r.calls.includes(effect), false, effect)
-  }
+
 })
 
 // MUTATION: accept a red repaired suite, retry it, or let a non-done repair bounce into more builders.
@@ -653,7 +573,7 @@ test('every started stage ends on success and refusal, in order', async () => {
   const refused = fakes({ suite: { ...green(), status: 'red', code: 1, reason: 'exit-nonzero' } })
   await refused.go()
   // a red suite is run once more, then repaired once: the builder, gate, proof, review and both suite runs follow
-  assert.deepEqual(pairs(refused.rows), [...STAGES.slice(0, 9), 'suite', 'suite-repair', ...STAGES.slice(3, 9), 'suite'].flatMap((s) => [['stage-start', s], ['stage-end', s]]))
+  assert.deepEqual(pairs(refused.rows), [...STAGES.slice(0, 7), 'suite', 'suite-repair', ...STAGES.slice(2, 7), 'suite'].flatMap((s) => [['stage-start', s], ['stage-end', s]]))
   const thrown = fakes({ deps: { mkdir: async () => {}, resolveAgents: undefined } })
   assert.deepEqual(await thrown.go(), stopped('invalid-input'))
   const lead = fakes({ edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate' } : v })
@@ -683,15 +603,15 @@ test('the journal carries each envelope, verdict, check, commit and PR observati
   assert.deepEqual(events('envelope').map((r) => [r.role, r.id, r.parsed.status, r.defects, r.error]), [
     ['planner', 'lane.planner.1', 'done', [], null], ['builder', 'lane.builder.2', 'done', [], null], ['reviewer', 'lane.reviewer.3', 'done', [], null],
   ])
-  assert.deepEqual(events('check').map((r) => r.check), ['baseline', 'gate', 'mutations', 'review-paths', 'suite-stage', 'suite', 'paths', 'commit', 'fetch', 'rebase', 'publish'])
-  assert.deepEqual(events('check')[0].result.result.failingIds, ['A1'])
+  assert.deepEqual(events('check').map((r) => r.check), ['proof', 'review-paths', 'suite-stage', 'suite', 'paths', 'commit', 'fetch', 'rebase', 'publish'])
+  assert.equal(events('check')[0].result.rows[0].proven, true)
   assert.deepEqual(events('verdict').map((r) => [r.status, r.verdict]), [['reviewed', 'pass']])
   assert.deepEqual(events('commit').map((r) => r.head), ['a'.repeat(40)])
   assert.deepEqual(events('pr').map((r) => r.pr), [PR])
-  const stoppedRun = fakes({ proof: { status: 'red', reason: 'mutations-survived', rows: [{ check: 'A1', outcome: 'survived', reason: 'gate-green' }] } })
+  const stoppedRun = fakes({ proof: { status: 'unmeasured', reason: 'timeout', rows: [] } })
   await stoppedRun.go()
   const verdict = stoppedRun.rows.find((r) => r.event === 'verdict')
-  assert.deepEqual([verdict.status, verdict.reason, verdict.observation.rows[0].outcome], ['stopped', 'mutations-survived', 'survived'])
+  assert.deepEqual([verdict.status, verdict.reason], ['stopped', 'timeout'])
   const malformed = fakes({ suite: { status: 'green', reason: 'timeout' } })
   await malformed.go()
   assert.equal(malformed.rows.find((r) => r.event === 'check' && r.check === 'suite').result.reason, 'timeout')
@@ -717,7 +637,7 @@ test('an unsupported shape, invalid input or unsound seam is refused before any 
     assert.deepEqual(await f.go(), stopped(reason), JSON.stringify(spec))
     assert.deepEqual([f.calls, f.rows], [[], []])
   }
-  for (const name of ['runSeat', 'journal', 'readFile', 'checkBaseline', 'openPullRequest', 'run']) {
+  for (const name of ['runSeat', 'journal', 'readFile', 'proveTests', 'openPullRequest', 'run']) {
     const f = fakes({ deps: { [name]: undefined } })
     assert.deepEqual(await f.go(), stopped('invalid-input'), name)
     assert.deepEqual(f.calls, [])
@@ -760,19 +680,6 @@ test('every stopped reason is a member of the closed enum', async () => {
 })
 
 // MUTATION: forward spec.mutations to the proof and a caller-written declaration replaces the planner's.
-test('the proof receives the planner declarations and a caller-supplied files or mutations list is ignored', async () => {
-  const planned = { ...MUTATION, find: 'planned-find' }
-  const f = fakes({
-    spec: { files: ['caller-lie.mjs'], mutations: [{ ...MUTATION, find: 'caller-lie' }] },
-    edit: (v) => v.role === 'planner' ? { ...v, details: { ...v.details, mutations: [planned] } } : v,
-  })
-  assert.equal((await f.go()).status, 'done')
-  assert.deepEqual(f.seen.mutations.mutations, [planned])
-  assert.deepEqual(f.seen.commit.files, ['lib.mjs'])
-  const refused = fakes({ edit: (v) => v.role === 'planner' ? { ...v, details: { ...v.details, mutations: [] } } : v })
-  assert.deepEqual(await refused.go(), stopped('envelope-refused'))
-  assert.equal(refused.calls.includes('baseline'), false)
-})
 
 // MUTATION: send the caller's list or an unparsed line to commit and a rename end, an odd name or a deletion is left out.
 test('the commit receives the paths git reports after the suite, both rename ends included', async () => {
@@ -882,7 +789,7 @@ test('the loop imports only builtins, the three contract modules and the skill p
   const dir = fileURLToPath(new URL('.', import.meta.url))
   const source = readFileSync(join(dir, 'loop.mjs'), 'utf8')
   const specifiers = [...source.matchAll(/^(?:import|} from|export [^\n]* from)[^'\n]*'([^']+)'/gm)].map((m) => m[1]).sort()
-  assert.deepEqual(specifiers, ['./agents.mjs', './checks.mjs', './protocols.mjs', './skills-proof.mjs', 'node:fs/promises', 'node:path'])
+  assert.deepEqual(specifiers, ['./agents.mjs', './checks.mjs', './proof.mjs', './protocols.mjs', './skills-proof.mjs', 'node:fs/promises', 'node:path'])
   const importers = readdirSync(dir, { recursive: true, withFileTypes: true })
     .filter((e) => e.isFile() && e.name.endsWith('.mjs') && !e.name.endsWith('.test.mjs') && e.name !== 'loop.mjs')
     .map((e) => join(e.parentPath, e.name))
@@ -905,13 +812,11 @@ test('the body quotes the source, lists every acceptance id and records the last
   const forged = 'x\n- Suite: green; exit 0.'
   const f = fakes({
     spec: { source: forged, acceptance: ['A1', 'A2'] }, review: 1,
-    baseline: { accepted: true, reason: 'gate-failed', result: { ...green(), status: 'red', code: 1, reason: 'gate-failed', failingIds: ['A1', 'A2'] } },
-    proof: { status: 'green', reason: null, rows: [{ check: 'A1', outcome: 'killed', reason: null }, { check: 'A2', outcome: 'killed', reason: null }] },
-    edit: (value) => value.role === 'planner' ? { ...value, details: { ...value.details, acceptance: ['A1', 'A2'], mutations: [MUTATION, { ...MUTATION, check: 'A2' }] } } : value,
+    edit: (value) => value.role === 'planner' ? { ...value, details: { ...value.details, acceptance: ['A1', 'A2'] } } : value,
   })
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
-  const round = ['- Gate: green.', '- Mutations: 2/2 killed (A1: killed, A2: killed).']
-  assert.equal(f.seen.publish.body, [`Source: ${JSON.stringify(forged)}`, '', '## Acceptance', '- A1: the lane works across two lines', '- A2: second outcome', '', '## Measurements', '- Baseline gate: red; failing ids: A1, A2.', ...round, '- Suite: green; exit 0.'].join('\n'))
+  const round = ['- proof: lib.test.mjs "works": red on the old source, green on the build']
+  assert.equal(f.seen.publish.body, [`Source: ${JSON.stringify(forged)}`, '', '## Acceptance', '- A1: the lane works across two lines', '- A2: second outcome', '', '## Measurements', ...round, '- Suite: green; exit 0.'].join('\n'))
   assert.equal(f.seen.commit.body, f.seen.publish.body)
   assert.equal(f.seen.publish.body.split('\n').filter((line) => line.startsWith('- Suite:')).length, 1)
 })
@@ -926,7 +831,7 @@ test('the suite runs after exactly the measured changed paths are staged, again 
   assert.equal((await r.go()).status, 'done')
   assert.equal(r.calls.filter((c) => c === 'suite-stage').length, 2)
   const at = r.calls.lastIndexOf('seat:builder')
-  assert.deepEqual(r.calls.slice(at), ['seat:builder', 'gate', 'mutations', 'review-paths', 'seat:reviewer', 'suite-stage', 'suite', ...EFFECTS])
+  assert.deepEqual(r.calls.slice(at), ['seat:builder', 'proof', 'review-paths', 'seat:reviewer', 'suite-stage', 'suite', ...EFFECTS])
   for (const stageResult of [{ ...green(), status: 'red', code: 1, reason: 'exit-nonzero' }, { ...green(), code: 3 }, { status: 'unmeasured', reason: 'timeout' }]) {
     const g = fakes({ stageResult })
     assert.equal((await g.go()).status, 'stopped')
@@ -1064,15 +969,58 @@ test('a task dir that cannot be made writes no run-start', async () => {
   assert.equal(f.rows.some((row) => row.event === 'run-start'), false)
 })
 
+// MUTATION: treat a red proof as proven.
+test('unproven and missing named tests return to the builder, while unmeasured stops', async () => {
+  for (const kind of ['red', 'none', 'unmeasured']) {
+    let calls = 0
+    const f = fakes({ edit: (v) => {
+      if (v.role === 'builder' && kind === 'none' && ++calls === 1) v.details.tests = []
+      return v
+    }, proof: (() => { let n = 0; return () => kind === 'unmeasured' ? { status: 'unmeasured', reason: 'timeout', rows: [] } : kind === 'red' && n++ === 0 ? { status: 'red', reason: 'proof-unproven', rows: [{ file: 'lib.test.mjs', title: 'works', proven: false, base: { state: 'green', reason: null }, build: { state: 'green', reason: null }, reason: 'proof-not-red-on-base' }] } : { status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }] } })() })
+    const result = await f.go()
+    if (kind === 'unmeasured') { assert.deepEqual(result, stopped('timeout')); continue }
+    assert.equal(result.status, 'done')
+    const turns = f.requests.filter((r) => r.role === 'builder')
+    assert.equal(turns.length, 2)
+    assert.equal(turns[1].feedback[0].id, kind === 'none' ? 'proof-no-tests' : 'proof-unproven')
+    if (kind === 'red') assert.deepEqual([turns[1].feedback[0].tests[0].file, turns[1].feedback[0].tests[0].title], ['lib.test.mjs', 'works'])
+  }
+})
+
+// MUTATION: keep the previous builder's tests when a later return names none.
+test('a builder that names no tests after a review bounce is not proven by the earlier names', async () => {
+  let builds = 0, reviews = 0
+  const f = fakes({ bounds: { builder: 3, reviewer: 3 }, edit: (v) => {
+    if (v.role === 'builder' && ++builds === 2) v.details.tests = []
+    if (v.role === 'reviewer' && ++reviews === 1) return { ...v, details: { verdict: 'changes-needed', findings: [finding] } }
+    return v
+  } })
+  assert.equal((await f.go()).status, 'done')
+  const turns = f.requests.filter((r) => r.role === 'builder')
+  assert.equal(turns.length, 3)
+  assert.equal(turns[2].feedback[0].id, 'proof-no-tests')
+})
+
 // ---- finish shape (lean plan 3.5): a stopped lane re-entered by its builder ----
 const STOP = { reason: 'mutations-survived', observation: { stage: 'mutations', detail: 'A1 survived' } }
-const REPLACEMENT = { check: 'A1', file: 'lib.mjs', find: 're-aimed', replace: 'new2' }
 const finishSpec = (over = {}) => ({
   shape: 'finish',
-  finish: { planPath: '/virtual/task/plan.md', gatePath: '/virtual/task/gate.mjs', subject: 'fix(crew): planned lane', mutations: [MUTATION], stop: STOP, findings: [finding], turnOffset: 3, ...over },
+  finish: { planPath: '/virtual/task/plan.md', subject: 'fix(crew): planned lane', mutations: [MUTATION], stop: STOP, findings: [finding], turnOffset: 3, ...over },
 })
-const FINISH_GATE = { id: 'finish-gate', summary: 'You may repair the lane gate at the Gate path; return replacement mutations for any check you change.' }
-const FINISH_SUCCESS = ['seat:builder', 'gate', 'mutations', 'review-paths', 'seat:reviewer', 'suite-stage', 'suite', 'paths', 'commit', 'fetch', 'rebase']
+const FINISH_SUCCESS = ['seat:builder', 'proof', 'review-paths', 'seat:reviewer', 'suite-stage', 'suite', 'paths', 'commit', 'fetch', 'rebase']
+
+// MUTATION: change the unmeasured proof line.
+test('finish without named tests reports unmeasured proof and standard reports each test', async () => {
+  const f = fakes({ spec: finishSpec(), unseated: ['planner'], edit: (v) => { if (v.role === 'builder') delete v.details.tests; return v } })
+  assert.equal((await f.go()).status, 'done')
+  assert.equal(f.calls.includes('proof'), false)
+  assert.ok(f.seen.commit.body.includes('- proof: unmeasured'))
+  assert.ok(JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body.includes('- proof: unmeasured'))
+  const standard = fakes()
+  assert.equal((await standard.go()).status, 'done')
+  assert.equal(standard.seen.commit.body.split('\n').filter((line) => line.startsWith('- proof:')).length, 1)
+  assert.doesNotMatch(standard.seen.commit.body, /kill/i)
+})
 
 // MUTATION: run the plan or baseline stage on a finish run and the planner request or baseline call appears.
 test('a finish run issues no planner turn and no baseline, and ends after rebase without a PR (FN1, FN2, FN6)', async () => {
@@ -1092,25 +1040,10 @@ test('a finish run issues no planner turn and no baseline, and ends after rebase
 test('the finish builder first hears the stop reason with its observation, then the open findings; seat ids start past the stopped lane', async () => {
   const f = fakes({ spec: finishSpec(), unseated: ['planner'] })
   await f.go()
-  assert.deepEqual(f.requests[0].feedback, [{ id: 'finish-stop', reason: STOP.reason, observation: STOP.observation }, finding, FINISH_GATE])
+  assert.deepEqual(f.requests[0].feedback, [{ id: 'finish-stop', reason: STOP.reason, observation: STOP.observation }, finding])
   assert.equal(f.requests[0].planPath, '/virtual/task/plan.md')
-  assert.equal(f.requests[0].gatePath, '/virtual/task/gate.mjs')
   assert.equal(f.requests[0].id, 'lane.builder.4')
   assert.equal(f.requests[0].role, 'builder')
-})
-
-// MUTATION: ignore details.mutations from the builder and the proof runs the planner's stale declaration.
-test('a builder replacement mutation is the declaration the proof runs; one outside the acceptance stops the lane (FN5)', async () => {
-  const f = fakes({ spec: finishSpec(), unseated: ['planner'], edit: (v) => (v.role === 'builder' ? { ...v, details: { summary: 'built', mutations: [REPLACEMENT] } } : v) })
-  assert.equal((await f.go()).status, 'done')
-  assert.deepEqual(f.seen.mutations.mutations, [REPLACEMENT])
-  assert.deepEqual(f.rows.at(-1).mutations, [REPLACEMENT])
-  const out = fakes({ spec: finishSpec(), unseated: ['planner'], edit: (v) => (v.role === 'builder' ? { ...v, details: { summary: 'built', mutations: [{ ...REPLACEMENT, check: 'ZZ' }] } } : v) })
-  assert.deepEqual(await out.go(), stopped('envelope-refused'))
-  assert.equal(out.calls.includes('gate'), false)
-  // the standard shape never takes a builder's declarations
-  const std = fakes({ edit: (v) => (v.role === 'builder' ? { ...v, details: { summary: 'built', mutations: [REPLACEMENT] } } : v) })
-  assert.deepEqual(await std.go(), stopped('envelope-refused'))
 })
 
 // MUTATION: leave the reviewer at two rounds and the third finish review bounds out.
@@ -1134,91 +1067,6 @@ test('a finish review that still asks for changes after three rounds stops the r
   assert.equal(f.calls.includes('commit'), false)
 })
 
-// A standard proof whose only non-killed rows are bind-fail earns the builder one re-aim turn.
-const BIND_FAIL = (check) => ({ check, outcome: 'unmeasured', reason: 'bind-fail', occurrences: 0 })
-const KILLED = (check) => ({ check, outcome: 'killed', reason: null })
-const REAIM = { check: 'A1', file: 'lib.mjs', find: 're-aimed', replace: 'new' }
-const sequence = (...proofs) => { let n = 0; return () => proofs[Math.min(n++, proofs.length - 1)] }
-const unbound = (...rows) => ({ status: 'unmeasured', reason: 'mutation-unmeasured', rows })
-const killedProof = (...ids) => ({ status: 'green', reason: null, rows: ids.map(KILLED) })
-const twoIds = (value) => value.role === 'planner' ? { ...value, details: { ...value.details, acceptance: ['A1', 'A2'], mutations: [MUTATION, { ...MUTATION, check: 'A2' }] } } : value
-const twoBaseline = { accepted: true, reason: 'gate-failed', result: { ...green(), status: 'red', code: 1, reason: 'gate-failed', failingIds: ['A1', 'A2'] } }
-
-// MUTATION: stop a bind-fail proof at once, or never raise the builder bound, and the lane dies without a re-aim turn.
-test('a bind-fail proof gives the builder one more turn whose feedback names the failed acceptance id (RA1)', async () => {
-  const f = fakes({ bounds: { builder: 1 }, proof: sequence(unbound(BIND_FAIL('A1')), killedProof('A1')), edit: (v) => v.role === 'planner' ? { ...v, details: { ...v.details, files_in_scope: ['test/a.rs'] } } : v })
-  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
-  const builders = f.requests.filter((r) => r.role === 'builder')
-  assert.equal(builders.length, 2)
-  assert.deepEqual(builders.map((r) => r.filesInScope), [['test/a.rs'], ['test/a.rs']])
-  assert.equal(builders[1].feedback.find((entry) => entry.id === 'A1')?.check, 'A1')
-})
-
-// MUTATION: drop the builder's replacement and the next proof runs the stale declaration.
-test('the replacement the re-aim turn returns is the declaration the next proof runs (RA2)', async () => {
-  const f = fakes({ proof: sequence(unbound(BIND_FAIL('A1')), killedProof('A1')), edit: (v, request) => (v.role === 'builder' && request.id.endsWith('.3') ? { ...v, details: { summary: 'built', mutations: [REAIM] } } : v) })
-  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
-  assert.deepEqual(f.seen.mutations.mutations, [REAIM])
-})
-
-// MUTATION: allow any acceptance id in the re-aim turn and a builder swaps a declaration that already bound.
-test('a re-aim replacement for an id whose declaration bound stops the lane (RA3)', async () => {
-  const f = fakes({
-    spec: { acceptance: ['A1', 'A2'] }, baseline: twoBaseline, edit: (v, request) => (v.role === 'builder' && request.id.endsWith('.3') ? { ...v, details: { summary: 'built', mutations: [{ ...REAIM, check: 'A2' }] } } : twoIds(v)),
-    proof: sequence(unbound(BIND_FAIL('A1'), KILLED('A2')), killedProof('A1', 'A2')),
-  })
-  assert.deepEqual(await f.go(), stopped('envelope-refused'))
-  assert.equal(f.calls.filter((c) => c === 'mutations').length, 1)
-})
-
-// MUTATION: let a finish re-aim turn replace any acceptance id and a builder swaps a declaration that already bound.
-test('a finish re-aim replacement for an id whose declaration bound stops the lane (RA3)', async () => {
-  let builderTurns = 0
-  const f = fakes({
-    spec: { ...finishSpec({ mutations: [MUTATION, { ...MUTATION, check: 'A2' }] }), acceptance: ['A1', 'A2'] }, unseated: ['planner'],
-    edit: (v) => (v.role === 'builder' && ++builderTurns === 2 ? { ...v, details: { summary: 'built', mutations: [{ ...REAIM, check: 'A2' }] } } : v),
-    proof: sequence(unbound(BIND_FAIL('A1'), KILLED('A2')), killedProof('A1', 'A2')),
-  })
-  assert.deepEqual(await f.go(), stopped('envelope-refused'))
-  assert.equal(builderTurns, 2)
-  assert.equal(f.calls.filter((c) => c === 'mutations').length, 1)
-})
-
-// MUTATION: allow a second re-aim turn and a still-unbound proof never stops.
-test('a proof still bind-fail after the re-aim turn stops as mutation-unmeasured (RA4)', async () => {
-  const f = fakes({ proof: unbound(BIND_FAIL('A1')) })
-  assert.deepEqual(await f.go(), stopped('mutation-unmeasured'))
-  assert.equal(count(f, 'builder'), 2)
-  assert.equal(f.calls.filter((c) => c === 'mutations').length, 2)
-})
-
-// MUTATION: keep a once-per-run re-aim flag and a bind-fail after a review-fix build stops the lane.
-test('a bind-fail proof after a review-fix build earns its own re-aim turn (RB1)', async () => {
-  const f = fakes({ review: 1, proof: sequence(unbound(BIND_FAIL('A1')), killedProof('A1'), unbound(BIND_FAIL('A1')), killedProof('A1')) })
-  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
-  assert.equal(count(f, 'builder'), 4)
-})
-
-// MUTATION: let a re-aim turn clear its own flag and a persistent bind-fail loops through re-aims.
-test('a run never takes two re-aim turns in a row (RB3)', async () => {
-  const f = fakes({ proof: sequence(unbound(BIND_FAIL('A1')), unbound(BIND_FAIL('A1')), killedProof('A1')) })
-  assert.deepEqual(await f.go(), stopped('mutation-unmeasured'))
-  assert.equal(count(f, 'builder'), 2)
-  const starts = f.rows.filter((row) => row.event === 'stage-start').map((row) => row.stage)
-  assert.equal(starts.filter((name) => name === 'mutation-reaim').length, 1)
-  assert.ok(!starts.some((name, i) => name === 'mutation-reaim' && starts[i + 1] === 'mutation-reaim'))
-})
-
-// MUTATION: re-aim whenever any row is bind-fail and a survived mutation earns the builder an easier target.
-test('a proof with a survived row stops without another builder turn (RA5)', async () => {
-  const f = fakes({
-    spec: { acceptance: ['A1', 'A2'] }, baseline: twoBaseline, edit: twoIds,
-    proof: { status: 'red', reason: 'mutations-survived', rows: [{ check: 'A1', outcome: 'survived', reason: 'gate-green' }, BIND_FAIL('A2')] },
-  })
-  assert.deepEqual(await f.go(), stopped('mutations-survived'))
-  assert.equal(count(f, 'builder'), 1)
-})
-
 // MUTATION: drop the report write, the guidance entry or the prior-rounds deduction and the matching assertion fails.
 test('a green finish run writes a fused report and a finish-ready row with the measured subject and body; a return pass keeps the cap (FD1, FD2, FD7)', async () => {
   const f = fakes({ spec: finishSpec(), unseated: ['planner'], review: 1, bounds: { builder: 3 } })
@@ -1233,7 +1081,7 @@ test('a green finish run writes a fused report and a finish-ready row with the m
   // SB4: the body names the stop and each review verdict with its findings; a standard body has no Finish section
   assert.ok(report.body.includes('## Finish\n- Stop: mutations-survived: {"stage":"mutations","detail":"A1 survived"}\n- Review 1: changes-needed; findings: R1 (must-fix) at lib.mjs:1: Fix the defect\n- Review 2: pass; findings: none\n'))
   assert.equal(BODY.includes('## Finish'), false)
-  assert.deepEqual(ready.mutations, [MUTATION])
+  assert.equal(Object.hasOwn(ready, 'mutations'), false)
 
   const g = fakes({ spec: finishSpec({ guidance: 'Fix it first', priorReviewRounds: 2 }), unseated: ['planner'], review: 2, bounds: { builder: 3 } })
   assert.deepEqual(await g.go(), stopped('round-bound'))
@@ -1262,66 +1110,40 @@ test('a lead envelope with status insufficient and decision bounce gives the hel
   assert.equal(count(f, 'lead'), 1)
 })
 
-// MUTATION: keep the re-aim to the standard shape and a finish bind-fail stops as mutation-unmeasured.
-test('a finish proof with only bind-fail rows gives the builder one more turn naming those ids (LF1)', async () => {
-  const f = fakes({ spec: finishSpec(), unseated: ['planner'], bounds: { builder: 1 }, proof: sequence(unbound(BIND_FAIL('A1')), killedProof('A1')) })
-  assert.equal((await f.go()).status, 'done')
-  const builders = f.requests.filter((r) => r.role === 'builder')
-  assert.equal(builders.length, 2)
-  assert.equal(builders[1].feedback.find((entry) => entry.id === 'A1')?.check, 'A1')
-  const again = fakes({ spec: finishSpec(), unseated: ['planner'], proof: unbound(BIND_FAIL('A1')) })
-  assert.deepEqual(await again.go(), stopped('mutation-unmeasured'))
-  assert.equal(count(again, 'builder'), 2)
-})
-
-// MUTATION: tell standard builders they may repair the gate, or leave finish builders unaware.
-test('only a finish builder is told it may repair the gate, in the first turn and in builder.md (LF2, LF3)', async () => {
-  const fin = fakes({ spec: finishSpec(), unseated: ['planner'] })
-  await fin.go()
-  assert.deepEqual(fin.requests[0].feedback.filter((e) => e.id === 'finish-gate'), [FINISH_GATE])
-  const std = fakes()
-  await std.go()
-  assert.equal(std.requests.some((r) => r.feedback.some((e) => e.id === 'finish-gate')), false)
-  const text = readFileSync(new URL('./agents/builder.md', import.meta.url), 'utf8')
-  assert.ok(text.includes("Do not rewrite the planner's task artifacts or gate on a standard run."))
-  assert.ok(text.includes("On a finish run, you may repair the lane's gate"))
-})
-
-// MUTATION: raise the bound to max(bound, rounds + 1) and the re-aim turn spends a round the builder still had.
-test('a re-aim turn leaves a standard builder the rounds it had before it (LF5)', async () => {
-  const f = fakes({ review: 1, proof: sequence(unbound(BIND_FAIL('A1')), killedProof('A1')) })
-  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
-  assert.equal(count(f, 'builder'), 3)
-  assert.equal(count(f, 'lead'), 0)
-})
-
 const MOVED = { status: 'green', reason: null, head: 'b'.repeat(40) }
 // A check answering from a sequence (the last answer repeats), for gate and suite seams that must differ across calls.
 const answers = (...list) => { let n = 0; return () => structuredClone(list[Math.min(n++, list.length - 1)]) }
 const moved = (options = {}) => fakes({ rebase: MOVED, ...options })
-const redGate = () => ({ ...green(), status: 'red', code: 1, reason: 'gate-failed', failingIds: ['A1'] })
 
 // MUTATION: skip the post-rebase gate and suite and a moved head is published unchecked.
 test('a rebase that moves the head reruns the gate then the suite on the rebased tree before it publishes (RB1)', async () => {
   const f = moved()
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
   const tail = f.calls.slice(f.calls.indexOf('rebase'))
-  assert.deepEqual(tail, ['rebase', 'gate', 'suite', 'post-rebase-clean', 'post-rebase-head', 'publish'])
-  assert.equal(f.calls.filter((c) => c === 'gate').length, 2)
+  assert.deepEqual(tail, ['rebase', 'proof', 'suite', 'post-rebase-clean', 'post-rebase-head', 'publish'])
+  assert.equal(f.calls.filter((c) => c === 'proof').length, 2)
   assert.equal(f.calls.filter((c) => c === 'suite').length, 2)
   assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 5000 })
-  assert.deepEqual(f.seen.gate, { cwd: '/virtual/checkout', gatePath: '/virtual/task/gate.mjs', timeoutMs: 5000 })
+  assert.equal(f.seen.proof.base, `${MOVED.head}^`)
 })
 
 // MUTATION: rerun after the finish report and finish-ready row and a finish run reports a head no check ran on.
 test('a finish run whose rebase moves the head reruns the gate and suite before the report and finish-ready (RB1)', async () => {
   const f = moved({ spec: finishSpec(), unseated: ['planner'] })
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: null })
-  assert.deepEqual(f.calls.slice(f.calls.indexOf('rebase')), ['rebase', 'gate', 'suite', 'post-rebase-clean', 'post-rebase-head'])
+  assert.deepEqual(f.calls.slice(f.calls.indexOf('rebase')), ['rebase', 'proof', 'suite', 'post-rebase-clean', 'post-rebase-head'])
   const ready = f.rows.findIndex((r) => r.event === 'finish-ready')
   const lastSuite = f.rows.findLastIndex((r) => r.stage === 'suite')
   assert.equal(ready > lastSuite && lastSuite > f.rows.findLastIndex((r) => r.stage === 'rebase'), true)
   assert.equal(f.rows[ready].head, 'b'.repeat(40))
+})
+
+test('an unproven post-rebase proof stops before the suite and publication', async () => {
+  const f = moved({ proof: answers({ status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }] }, { status: 'red', reason: 'proof-unproven', rows: [{ file: 'lib.test.mjs', title: 'works', proven: false }] }) })
+  assert.deepEqual(await f.go(), stopped('proof-unproven'))
+  assert.equal(f.seen.proof.base, `${MOVED.head}^`)
+  assert.equal(f.calls.filter((c) => c === 'suite').length, 1)
+  assert.equal(f.calls.includes('publish'), false)
 })
 
 // MUTATION: ignore the post-rebase suite result and a red suite still publishes.
@@ -1335,14 +1157,6 @@ test('a red suite after a rebase that moved the head stops with its reason and p
   assert.deepEqual(await g.go(), stopped('exit-nonzero'))
   assert.equal(g.writes.size, 0)
   assert.equal(g.rows.some((r) => r.event === 'finish-ready'), false)
-})
-
-// MUTATION: ignore the post-rebase gate result and a red gate still reaches the suite and publishes.
-test('a red gate after a rebase that moved the head stops with the gate reason, runs no suite and publishes nothing (RB2)', async () => {
-  const f = moved({ gate: answers({ ...green(), failingIds: [] }, redGate()) })
-  assert.deepEqual(await f.go(), stopped('gate-failed'))
-  assert.equal(f.calls.filter((c) => c === 'suite').length, 1)
-  assert.equal(f.calls.includes('publish'), false)
 })
 
 // MUTATION: drop the post-rebase clean-tree check and a gate or suite that edits the tree publishes bytes no commit holds.
@@ -1370,7 +1184,7 @@ test('a rebase that leaves the head unchanged runs the gate and the suite once (
   const f = fakes()
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
   assert.equal(f.calls.filter((c) => c === 'suite').length, 1)
-  assert.equal(f.calls.filter((c) => c === 'gate').length, 1)
+  assert.equal(f.calls.filter((c) => c === 'proof').length, 1)
 })
 
 // MUTATION: drop `at` from emit and journal rows carry no time, so the lean source cannot draw a waterfall.
@@ -1416,22 +1230,12 @@ test('a planner return whose plan_path is missing, a directory or carries a line
   assert.ok(denied.requests[1].repair.defects.some((d) => d.includes('plan_path') && d.includes('denied')))
 })
 
-// MUTATION: drop gate_path from the artifact iteration and a gate outside the task dir is accepted.
-test('a planner return whose gate_path leaves the task dir is refused naming gate_path (PP2)', async () => {
-  for (const gate_path of ['/virtual/outside.mjs', '../outside.mjs', '/virtual/task-sibling/gate.mjs', '/virtual/task', 'link.mjs']) {
-    const f = fakes({ edit: pathed({ gate_path }), deps: { stat: regular, realpath: async (p) => (p === '/virtual/task/link.mjs' ? '/virtual/outside.mjs' : p) } })
-    assert.deepEqual(await f.go(), stopped('envelope-refused'), gate_path)
-    assert.ok(f.requests[1].repair.defects.some((d) => d.includes('gate_path')))
-    assert.ok(!f.calls.includes('baseline'))
-  }
-})
-
 // MUTATION: force the validity predicate false and an accepted return is refused.
 test('a planner return naming existing task-dir files is accepted, a relative path is read against the task dir, and a repair costs no round (PP3)', async () => {
   const f = fakes({ edit: pathed({ plan_path: 'plan.md', gate_path: './gate.mjs' }), deps: { stat: regular } })
   assert.equal((await f.go()).status, 'done')
   assert.equal(count(f, 'planner'), 1)
-  assert.equal(f.seen.baseline.gatePath, '/virtual/task/gate.mjs')
+  assert.equal(f.requests[1].planPath, '/virtual/task/plan.md')
   const repaired = fakes({ edit: (v, r) => pathed({ plan_path: r.repair ? '/virtual/task/plan.md' : '/virtual/task/plan.md:1-42' })(v), deps: { stat: regular } })
   assert.equal((await repaired.go()).status, 'done')
   assert.equal(count(repaired, 'planner'), 2)

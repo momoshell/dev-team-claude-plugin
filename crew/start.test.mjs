@@ -369,7 +369,7 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
     const n = Number(id.split('.').at(-1))
     const own = answers[`${role}.${n}`]
     const details = role === 'planner' ? { subject: 'fix(crew): publish measured lane results', plan_path: join(spec.taskDir, 'plan.md'), gate_path: join(spec.taskDir, 'gate.mjs'), acceptance: ['RV1'], mutations: [LEAN_MUTATION], ...(scope === undefined ? {} : { files_in_scope: scope }) }
-      : role === 'builder' ? { summary: 'built' }
+      : role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
       : role === 'lead' ? { decision: 'bounce' }
       : { verdict: reviews[review] ?? 'pass', findings: reviews[review++] === 'changes-needed' ? [{ id: 'F1', severity: 'must-fix', location: 'a:1', summary: 'redo-this' }] : [] }
     return { role, id, status: own ?? 'done', summary: 'fixture', details }
@@ -393,9 +393,7 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
     runAcpSeat: (input) => { if (!acp) return fakeAcp(input); requests.push(input); return fakeAcp(input) },
     loopDeps: {
       journal: async () => {},
-      checkBaseline: async () => ({ accepted: true, reason: 'gate-failed', result: { ...GREEN, status: 'red', code: 1, reason: 'gate-failed', failingIds: ['RV1'] } }),
-      runGate: async () => GREEN,
-      proveMutations: async () => ({ status: 'green', reason: null, rows: [{ check: 'RV1', outcome: 'killed', reason: null }] }),
+      proveTests: async () => ({ status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }] }),
       runSuite: async () => GREEN,
       commitChanges: async () => ({ status: 'green', reason: null, head: 'a'.repeat(40) }),
       rebaseBranch: async () => ({ status: 'green', reason: null, head: 'b'.repeat(40) }),
@@ -449,7 +447,7 @@ test('every turn gets its role definition, the complete brief and P2, and its ow
     assert.deepEqual(lines[2], { type: 'turn', stopReason: 'end_turn', usage: null, refusal: null })
     assert.equal(lines.length, 3)
   })
-  assert.match(f.requests[0].prompt, /"mutations"/)
+  assert.doesNotMatch(f.requests[0].prompt, /"mutations"/)
   assert.match(f.requests[1].prompt, /"summary"/)
   assert.match(f.requests[2].prompt, /"findings"/)
   assert.doesNotMatch(f.requests[1].prompt, /redo-this/)
@@ -849,7 +847,7 @@ async function retryRun(refusals, { oversleep = 0 } = {}) {
       mkdirSync(f.spec.taskDir, { recursive: true })
       if (input.definition.role === 'planner') for (const name of ['plan.md', 'gate.mjs']) writeFileSync(join(f.spec.taskDir, name), '')
       const details = input.definition.role === 'planner' ? { subject: 'fix(crew): publish measured lane results', plan_path: 'plan.md', gate_path: 'gate.mjs', acceptance: ['RV1'], mutations: [LEAN_MUTATION] }
-        : input.definition.role === 'builder' ? { summary: 'built' } : { verdict: 'pass', findings: [] }
+        : input.definition.role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }] } : { verdict: 'pass', findings: [] }
       writeFileSync(path, JSON.stringify({ role: input.definition.role, id, status: 'done', summary: 'x', details }))
       return { stopReason: 'end_turn', usage: { input_tokens: 1 }, refusal: null }
     },
@@ -979,7 +977,7 @@ test('a schema-refused builder envelope gets one fresh repair-only turn at the s
     const n = turns[role] = (turns[role] ?? 0) + 1
     mkdirSync(f.spec.taskDir, { recursive: true })
     if (role === 'planner') for (const name of ['plan.md', 'gate.mjs']) writeFileSync(join(f.spec.taskDir, name), '')
-    const value = { role, id, status: 'done', summary: 'fixture', details: role === 'planner' ? { subject: 'fix(crew): publish measured lane results', plan_path: join(f.spec.taskDir, 'plan.md'), gate_path: join(f.spec.taskDir, 'gate.mjs'), acceptance: ['RV1'], mutations: [LEAN_MUTATION] } : role === 'builder' ? { summary: 'built', ...(n === 1 ? { gaps: [] } : {}) } : { verdict: 'pass', findings: [] } }
+    const value = { role, id, status: 'done', summary: 'fixture', details: role === 'planner' ? { subject: 'fix(crew): publish measured lane results', plan_path: join(f.spec.taskDir, 'plan.md'), gate_path: join(f.spec.taskDir, 'gate.mjs'), acceptance: ['RV1'], mutations: [LEAN_MUTATION] } : role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }], ...(n === 1 ? { gaps: [] } : {}) } : { verdict: 'pass', findings: [] } }
     mkdirSync(f.spec.taskDir, { recursive: true })
     writeFileSync(path, JSON.stringify(value))
     return { stopReason: 'end_turn', usage: null, refusal: null }
@@ -1013,7 +1011,7 @@ test('lean prompts contain only the lean contract', async () => {
     assert.doesNotMatch(prompt, /^Charter file/m, definition.role)
     assert.doesNotMatch(prompt, /\]\([^)]*roles\//, definition.role)
     // Only the planner states the context the builder's arms read; no other turn names it.
-    for (const field of ['gate_cmd', 'validation_lane', 'files_in_scope']) {
+    for (const field of ['validation_lane', 'files_in_scope']) {
       const matcher = new RegExp(`\\b${field}\\b`)
       if (definition.role === 'planner') assert.match(prompt, matcher, `planner: ${field}`)
       else assert.doesNotMatch(prompt, matcher, `${definition.role}: ${field}`)
@@ -1172,7 +1170,7 @@ test('a started lean spec reaches the PR with its exact P1 source and measured b
   assert.equal((await g.go()).status, 'done')
   assert.equal(seen.commit.subject, 'fix(crew): publish measured lane results')
   assert.equal(seen.publish.title, seen.commit.subject)
-  assert.equal(seen.publish.body, ['Source: "issue 1961"', '', '## Acceptance', '- RV1: an edit that cannot boot is refused', '', '## Measurements', '- Baseline gate: red; failing ids: RV1.', '- Gate: green.', '- Mutations: 1/1 killed (RV1: killed).', '- Suite: green; exit 0.'].join('\n'))
+  assert.equal(seen.publish.body, ['Source: "issue 1961"', '', '## Acceptance', '- RV1: an edit that cannot boot is refused', '', '## Measurements', '- proof: lib.test.mjs "works": red on the old source, green on the build', '- Suite: green; exit 0.'].join('\n'))
   assert.equal(spec.source, 'issue 1961')
 })
 

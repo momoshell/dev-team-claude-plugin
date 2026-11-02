@@ -79,38 +79,27 @@ bench/replay-reviewer.test.mjs` for local tests without models or network.
 node bench/replay-builder.mjs --lane b1380 --cell cell.json --arms fff --out /abs/new/dir
 ```
 
-Makes a detached worktree at the lane's base under `<out>/tree`, gives the seat the recorded plan,
-gate and planner return (with the scope and `gate_cmd` backfills the older lanes need), runs the
-first builder prompt, then the gate, the mutation proof (only after a green gate) and the touched
-`*.test.mjs` files. Writes `result.json`, `diff.patch` (including added files) and `session.jsonl`.
-The worktree is removed on every exit.
+Makes a detached worktree at the lane's base under `<out>/tree`, gives the seat the recorded plan
+and planner return, runs the first builder prompt and the touched `*.test.mjs` files. It writes
+`result.json`, `diff.patch` (including added files) and `session.jsonl`, then removes the worktree.
 
-`--charter <file>` replaces the builder charter under the same contract as the planner option below.
-`--build-first` requires `--charter`; `bench/charters/build-first-builder.md` is an example experiment input.
-This variant withholds `gate.mjs`, the gate path and command prompt lines and `gate_cmd`. The seat's arm check still
-reads `planner-1.json` through today's planner schema, so its `gate_path` names the withheld `gate.mjs` and its
-`mutations` are inert placeholders, one per id. It still supplies the recorded `plan.md`, which can quote the planner's
-mutation anchors (b1380's does). It supports `node --test` only.
+`--charter <file>` replaces the builder charter. `--build-first` requires `--charter` and withholds
+the gate and its planner fields. It supports `node --test` only. The recorded plan may still quote
+old mutation anchors.
 
 `result.json.variant` is `gate` or `build-first`. Both record `added.source`, `added.test` and
-`added.binary` (binary files are counted separately). Build-first records `bound.of`, `bound.proven`
-and a row per acceptance id in `bound.ids`, with base, build and mutant states and red/green/killed
-booleans. A proven row also requires the same test name and source location in all three phases.
-Null states carry one of `missing`, `ambiguous`, `skipped`, `todo`, `hook-failed`,
-`cancelled`, `not-body-failure`, `not-run`, `no-mutation`, `mutation-in-test` or `bind-fail`.
-A failed test needs a test-file stack frame to count as a body failure; failures without one are
-unproven, including some asynchronous body failures. Gate and mutation proof records are null in this variant.
+`added.binary`. Build-first records `bound.of`, `bound.proven` and a row per acceptance id with
+base, build and mutant states. Its own mutant leg remains a bench measurement. A proven row needs
+the same test name and source location in all three phases. Null states name why they are unproven.
+A failed test needs a test-file stack frame to count as a body failure; some asynchronous body
+failures therefore remain unproven.
 
-Reading `result.json`: `error` is `null` for a clean run, otherwise a string naming each failed
-stage (`seat:`, `gate:`, `mutations:`, `tests:`, `cleanup:`…). `gate.status` is the built tree's
-gate; `mutations.killed` of `mutations.of` is the proof; `targeted.pass/fail` the touched tests;
-`envelope` the builder's return; `usage`, `wallS`, `armRows` (journal row kinds) and `advisor`
-(notes, usage, consults, `blocked` pre-return stops) say what the seat did; `changed` and `diff`
-size the change. A red gate or a surviving mutation is a result, not an error; a gate or mutation proof
-that comes back `unmeasured` (timeout, spawn or copy failure) is recorded in `error`, with its reason and diagnostics.
+`error` is null for a clean run, otherwise it names failed stages. `targeted` records touched test
+results; `usage`, `wallS`, `armRows` and `advisor` describe the seat; `changed` and `diff` size the
+change.
 
 For both replay kinds, top-level `status` is the first return's `done`, `insufficient` or `escalate`,
-read before envelope validation. It is separate from the gate and `error`. A null status has a
+read before envelope validation. It is separate from `error`. A null status has a
 `status_reason`: `not-run`, `missing-return`, `unreadable-return`, `invalid-json`, `invalid-envelope`
 or `invalid-status`. A recognized status has a null reason. Report counts of `done`, `insufficient`,
 `escalate` and null alongside blind scores, including the total number of runs:
@@ -125,11 +114,9 @@ node -e 'const c={};for(const f of process.argv.slice(1)){const s=JSON.parse(req
 node bench/replay-planner.mjs --lane b1380 --cell cell.json --arms subagent,fff --out /abs/new/dir
 ```
 
-Same shape, for the first planner turn from a fresh task dir (the recorded plan is withheld). After
-the turn it runs the planner's own gate once on the unchanged tree: `gate.baseline` should be `red`
-and `gate.failing` should list every acceptance id (`envelope.acceptance`). `repo_writes` counts
-files the planner wrote into the checkout (should be 0); `envelope.mutations` counts declared
-mutations (not proved here); `kinds`, `scouts`, `lab_runs`, `advisor` summarize the journal.
+Same shape, for the first planner turn from a fresh task dir (the recorded plan is withheld).
+`repo_writes` counts files the planner wrote into the checkout (should be 0); `kinds`, `scouts`,
+`lab_runs` and `advisor` summarize the journal. No gate is run.
 
 To replay with a different planner charter:
 

@@ -291,11 +291,11 @@ test('P2 refuses a role that is not the expected one', () => {
 
 // MUTATION: drop gate_path from the planner keys and a plan without a gate is accepted.
 test('P2 planner details name the plan, the gate and the acceptance ids', () => {
-  for (const key of Object.keys(DETAILS.planner)) {
+  for (const key of ['subject', 'plan_path', 'acceptance']) {
     const value = envelope('planner'); delete value.details[key]
     assert.deepEqual(refusedFor('planner', value, `details.${key} is required`).length, 1, key)
   }
-  for (const key of ['plan_path', 'gate_path']) for (const bad of ['', null, 5]) {
+  for (const key of ['plan_path']) for (const bad of ['', null, 5]) {
     const value = envelope('planner'); value.details[key] = bad
     assert.ok(refusedFor('planner', value, `details.${key}`).length, key)
   }
@@ -310,7 +310,7 @@ test('P2 planner details may carry the context its builder arms read, and refuse
   const full = envelope('planner'); Object.assign(full.details, { files_in_scope: ['crew/a.mjs'], validation_lane: 'node --test crew/a.test.mjs', gate_cmd: 'node gate.mjs' })
   assert.deepEqual(validateEnvelope('planner', full).defects, [])
   assert.deepEqual(validateEnvelope('planner', envelope('planner')).defects, [], 'the fields are optional')
-  for (const [key, bad] of [['files_in_scope', []], ['files_in_scope', 'a.mjs'], ['files_in_scope', ['a.mjs', '']], ['files_in_scope', [3]], ['validation_lane', ''], ['validation_lane', 5], ['gate_cmd', ''], ['gate_cmd', null]]) {
+  for (const [key, bad] of [['files_in_scope', []], ['files_in_scope', 'a.mjs'], ['files_in_scope', ['a.mjs', '']], ['files_in_scope', [3]], ['validation_lane', ''], ['validation_lane', 5]]) {
     const value = envelope('planner'); value.details[key] = bad
     assert.equal(refusedFor('planner', value, `details.${key}`).length, 1, `${key} ${JSON.stringify(bad)}`)
   }
@@ -335,37 +335,13 @@ test('P2 planner subject is a conventional-commit subject of at most 72 characte
   }
 })
 
-// MUTATION: drop the acceptance coverage comparison and a declaration set that skips or invents a check is accepted.
-test('P2 planner mutations declare exactly one {check, file, find, replace} per acceptance id', () => {
-  const [one, two] = DETAILS.planner.mutations
-  const refusedWith = (mutations, needle) => {
-    const value = envelope('planner'); value.details.mutations = mutations
-    return refusedFor('planner', value, needle).length > 0
-  }
-  assert.ok(refusedWith([one], 'no declaration for acceptance EV2'))
-  assert.ok(refusedWith([], 'no declaration for acceptance EV1'))
-  assert.ok(refusedWith([one, two, { ...two, check: 'EV3' }], 'is not a declared acceptance id'))
-  assert.ok(refusedWith([one, two, one], 'repeats EV1'))
-  assert.ok(refusedWith([one, { ...two, extra: 1 }], 'is not a mutation field'))
-  for (const key of ['check', 'file', 'find', 'replace']) {
-    const { [key]: gone, ...rest } = two
-    assert.ok(refusedWith([one, rest], `.${key} is required`), key)
-    assert.ok(refusedWith([one, { ...two, [key]: 5 }], `.${key} is a string`), key)
-  }
-  assert.ok(refusedWith([one, { ...two, find: '' }], 'find is a nonempty string'))
-  assert.ok(refusedWith([one, { ...two, replace: two.find }], 'replace differs from find'))
-  for (const bad of [null, 'x', {}, [null], [[]], [one, 7]]) assert.ok(refusedWith(bad, 'details.mutations'), JSON.stringify(bad))
-  assert.deepEqual(validateEnvelope('planner', envelope('planner')).defects, [])
-  // A builder may carry replacements (a finish run's re-aimed declarations), refused when malformed; no other role may.
-  const replacement = [{ check: 'EV1', file: 'a.mjs', find: 'x2', replace: 'y2' }]
-  const sound = envelope('builder'); sound.details.mutations = replacement
-  assert.deepEqual(validateEnvelope('builder', sound).defects, [])
-  for (const bad of [[], 'x', [null], [{ ...replacement[0], find: '' }], [{ ...replacement[0], replace: 'x2' }], [replacement[0], replacement[0]], [{ check: 'EV1' }]]) {
-    const malformed = envelope('builder'); malformed.details.mutations = bad
-    assert.ok(refusedFor('builder', malformed, 'details.mutations').length, JSON.stringify(bad))
-  }
-  const stray = envelope('reviewer'); stray.details.mutations = replacement
-  assert.ok(refusedFor('reviewer', stray, 'details.mutations is not a field').length)
+// MUTATION: reject archived planner keys or accept builder mutations.
+test('P2 accepts legacy planner fields without validating them and refuses builder mutations', () => {
+  const planner = envelope('planner')
+  Object.assign(planner.details, { gate_path: null, gate_cmd: 4, mutations: 'legacy' })
+  assert.deepEqual(validateEnvelope('planner', planner).defects, [])
+  const builder = envelope('builder'); builder.details.mutations = []
+  assert.ok(refusedFor('builder', builder, 'details.mutations is not a field').length)
 })
 
 // MUTATION: add approved to REVIEW_VERDICTS or retry to LEAD_DECISIONS and the closed enum opens.
@@ -399,7 +375,7 @@ test('P2 malformed roots and common fields are refused without throwing', () => 
 // MUTATION: skip the unknown-key loop over details and extra payload rides along.
 test('P2 role details are exactly the listed keys', () => {
   for (const role of AGENT_ROLES) {
-    for (const key of Object.keys(DETAILS[role])) {
+    for (const key of Object.keys(DETAILS[role]).filter((key) => role !== 'planner' || !['gate_path', 'mutations'].includes(key))) {
       const value = envelope(role); delete value.details[key]
       assert.ok(refusedFor(role, value, `details.${key} is required`).length, `${role}.${key}`)
     }

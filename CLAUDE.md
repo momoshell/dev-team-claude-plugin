@@ -8,9 +8,9 @@ it has to rediscover it.
 
 `dev-team` — a Claude Code plugin whose subject is a **team runtime**. One brief
 starts a lane (`crew start`): a planner, builder and reviewer, and a lead on
-escalation, play their seats over ACP. Code only checks the result — the gate is
-red at baseline and green after the build, each check has a kill-mutation, the
-full suite is green — then commits and opens the PR (ADR-052). A stopped lane is
+escalation, play their seats over ACP. Code only checks the result: each test the
+builder names is red on the old source and green on the build, and the full suite
+is green. Then it commits and opens the PR (ADR-052, ADR-055). A stopped lane is
 finished with `crew finish`.
 
 `README.md` is the map. `crew/README.md` is the full model, verbs, seats and
@@ -64,8 +64,9 @@ enforced by tests, not just preferred:
 - **Unknown is never a guess and never a zero.** An unmeasured cell carries
   `null` and one closed reason. A null beats a value nobody measured — the
   visualizer says "heartbeat unavailable" rather than inventing one.
-- **A guard is vacuous unless proven by mutation.** A gate check without a
-  kill-mutation is not evidence.
+- **A test proves a change only when it is red on the old source and green on
+  the build.** That is not a kill proof, and a PR never calls it one. A seat may
+  still mutate code by hand to test its own tests; nothing requires it.
 - **Never report a rate without its denominator.**
 - **Instrumentation is never load-bearing.** Writing the lane journal and the
   session files never throws into the caller.

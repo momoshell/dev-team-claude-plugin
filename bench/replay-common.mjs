@@ -210,26 +210,6 @@ export async function runReplay({ kind, options, deps, body }) {
   return result
 }
 
-// A crew check (runGate, proveMutations) returns an unmeasured result instead of throwing when it could not run.
-// That is a harness failure, not a measured red: record it, with the diagnostics the check returned.
-const diagText = (e) => (e == null ? null : typeof e === 'string' ? e : [e.code, e.message].filter(Boolean).join(' ') || JSON.stringify(e))
-export function checkDiagnostics(r) {
-  if (!r || typeof r !== 'object') return null
-  const rowIssues = Array.isArray(r.rows) ? r.rows.filter((row) => row?.outcome === 'unmeasured').map((row) => `${row.check}:${row.reason ?? 'unmeasured'}${row.error ? ` ${diagText(row.error)}` : ''}`) : []
-  return {
-    status: r.status ?? null, reason: r.reason ?? null,
-    error: diagText(r.error), diagnostic: r.diagnostic == null ? null : typeof r.diagnostic === 'string' ? r.diagnostic : JSON.stringify(r.diagnostic),
-    preflight: r.preflight ? { status: r.preflight.status ?? null, reason: r.preflight.reason ?? null, error: diagText(r.preflight.error) } : null,
-    unmeasuredRows: rowIssues.length ? rowIssues : null,
-  }
-}
-export function unmeasuredError(name, r) {
-  if (r == null || typeof r !== 'object') return `${name}: returned no result`
-  if (r.status !== 'unmeasured') return null
-  const d = checkDiagnostics(r)
-  return `${name}: unmeasured ${d.reason ?? ''}${d.error ? ` (${d.error})` : ''}${d.unmeasuredRows ? ` [${d.unmeasuredRows.join('; ')}]` : ''}`.replace(/\s+/g, ' ').trim()
-}
-
 export function removeDir(dir) { rmSync(dir, { recursive: true, force: true }) }
 
 export function parseCli(argv, { allowMemory = false, allowCharter = false, allowBuildFirst = false } = {}) {
@@ -292,13 +272,10 @@ export function prepareLane({ role, lane, outDir, onCleanup, charterBody, buildF
       ret.details.validation_lane ??= `node --test ${SCOPE_BACKFILL[lane].filter((f) => f.endsWith('.test.mjs')).join(' ')}`
     }
     if (buildFirst) {
-      // The seat's context-arm check (crew/acp/seat.mjs laneContext) still reads the return through today's planner
-      // schema, which requires gate_path and one mutation per id: keep it valid, but name the withheld gate and carry
-      // inert placeholders so the builder can copy nothing the planner declared.
       delete ret.details.gate_cmd
-      ret.details.gate_path = join(task, 'gate.mjs')
-      ret.details.mutations = (ret.details.acceptance ?? []).map((a) => ({ check: a.id ?? a, file: '', find: 'build-first: the builder declares this mutation', replace: '' }))
-    } else ret.details.gate_cmd ??= `node ${join(task, 'gate.mjs')}`
+      delete ret.details.gate_path
+      delete ret.details.mutations
+    }
     writeFileSync(file, JSON.stringify(ret, null, 2))
     planDetails = ret.details
   }
@@ -312,12 +289,6 @@ export function prepareLane({ role, lane, outDir, onCleanup, charterBody, buildF
 export async function loadSeat(deps) {
   if (deps.runAcpSeat) return deps.runAcpSeat
   return (await import(new URL('../crew/acp/seat.mjs', import.meta.url).href)).runAcpSeat
-}
-
-export async function loadChecks(deps) {
-  if (deps.runGate && deps.proveMutations) return { runGate: deps.runGate, proveMutations: deps.proveMutations }
-  const mod = await import(new URL('../crew/checks.mjs', import.meta.url).href)
-  return { runGate: deps.runGate ?? mod.runGate, proveMutations: deps.proveMutations ?? mod.proveMutations }
 }
 
 export function readEnvelope(task, returnName) {

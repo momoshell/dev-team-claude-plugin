@@ -135,6 +135,8 @@ export async function runLoop(spec, deps = {}) {
     return false
   }
   let namedTests = []
+  let priorFindings = isFinish ? fin.findings : []
+  let builderReport = null
   let filesInScope = isFinish ? fin.filesInScope ?? null : null
   let changedPaths = []
   let stagePaths = []
@@ -235,7 +237,7 @@ export async function runLoop(spec, deps = {}) {
         rounds[role] += 1
         const id = `${spec.id}.${role}.${turn}`
         const returnPath = join(spec.taskDir, `${role}-${turn}.json`)
-        const request = { role, tier, seat: seats[role], id, returnPath, brief: spec.brief, planPath, feedback, ...(['builder', 'reviewer'].includes(role) ? { filesInScope: filesInScope === null ? null : [...filesInScope] } : {}), ...(role === 'reviewer' ? { changedPaths } : {}) }
+        const request = { role, tier, seat: seats[role], id, returnPath, brief: spec.brief, planPath, feedback, ...(['builder', 'reviewer'].includes(role) ? { filesInScope: filesInScope === null ? null : [...filesInScope] } : {}), ...(role === 'reviewer' ? { changedPaths, builderReport } : {}) }
         // One attempt: run the seat, then read the issued path back, parse it and validate it in full.
         const attempt = async (asked) => {
           let failure = null
@@ -250,7 +252,7 @@ export async function runLoop(spec, deps = {}) {
           if (!failure) {
             try { parsed = JSON.parse(raw) } catch (error) { failure = { reason: 'envelope-refused', error: describe(error) } }
           }
-          const checked = failure ? { envelope: null, defects: [] } : validateEnvelope(role, parsed)
+          const checked = failure ? { envelope: null, defects: [] } : validateEnvelope(role, parsed, { prior: role === 'reviewer' ? priorFindings.map((finding) => finding?.id) : [] })
           if (role === 'planner' && checked.envelope && checked.defects.length === 0) checked.defects.push(...await artifactDefects(checked.envelope.details))
           return { failure, parsed, recording, checked }
         }
@@ -377,6 +379,7 @@ export async function runLoop(spec, deps = {}) {
         if (built.halt) return built.halt
         // Every return names its own tests; an earlier turn's names never stand in for this build.
         namedTests = Array.isArray(built.envelope.details.tests) ? built.envelope.details.tests : []
+        builderReport = { tests: namedTests, notes: built.envelope.details.notes ?? null }
         if (!namedTests.length && !isFinish && testsRequired) {
           const failure = { role: 'builder', failure: 'proof-no-tests' }
           if (repeatsFailure(failure)) return stop('no-progress', failure)
@@ -411,9 +414,10 @@ export async function runLoop(spec, deps = {}) {
         }
 
         // A finish review is capped outright: its bound ends the run, never a lead bounce into a fourth round.
-        const reviewed = await stage('review', () => seatTurn('reviewer', [], { singleTurn: isFinish }))
+        const reviewed = await stage('review', () => seatTurn('reviewer', priorFindings, { singleTurn: isFinish }))
         if (reviewed.halt) return reviewed.halt
         const review = reviewed.envelope
+        priorFindings = review.details.findings
         finishReviews.push({ verdict: review.details.verdict, findings: review.details.findings })
         await emit('verdict', { status: 'reviewed', verdict: review.details.verdict, findings: review.details.findings })
         if (review.details.verdict === 'changes-needed') {

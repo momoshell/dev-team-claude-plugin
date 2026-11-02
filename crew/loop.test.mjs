@@ -9,7 +9,7 @@ import { CHECK_REASONS } from './checks.mjs'
 import { DEFAULT_ROUNDS, LOOP_REASONS, runLoop } from './loop.mjs'
 
 const PR = { number: 73, url: 'https://example.test/pr/73', state: 'OPEN', headRefName: 'lane', baseRefName: 'main' }
-const finding = { id: 'R1', severity: 'must-fix', location: 'lib.mjs:1', summary: 'Fix the defect' }
+const finding = { id: 'R1', severity: 'must-fix', location: 'lib.mjs:1', summary: 'Fix the defect', trigger: 'bad input' }
 const green = () => ({ status: 'green', reason: null, code: 0, signal: null, stdout: '', stderr: '', timedOut: false })
 const STAGES = ['plan', 'build', 'proof', 'review-paths', 'review', 'suite-stage', 'suite', 'paths', 'commit', 'fetch', 'rebase', 'publish']
 const SUCCESS = ['seat:planner', 'seat:builder', 'proof', 'review-paths', 'seat:reviewer', 'suite-stage', 'suite', 'paths', 'commit', 'fetch', 'rebase', 'publish']
@@ -30,7 +30,7 @@ function fakes(options = {}) {
     details: request.role === 'planner' ? { subject: 'fix(crew): planned lane', plan_path: '/virtual/task/plan.md', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
       : request.role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
       : request.role === 'lead' ? { decision: options.lead ?? 'escalate', ...((options.lead ?? 'escalate') === 'escalate' ? { question: 'Which way should the lane go?' } : options.lead === 'bounce' ? { target: options.target ?? 'builder' } : {}) }
-      : { verdict: options.review && ++reviewTurns <= options.review ? 'changes-needed' : 'pass', findings: options.review && reviewTurns <= options.review ? [finding] : [] },
+      : { verdict: options.review && ++reviewTurns <= options.review ? 'changes-needed' : 'pass', findings: options.review && reviewTurns <= options.review ? [finding] : [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['lib.mjs'], complete: true }, closed: request.feedback.filter((f) => f.id && !(options.review && reviewTurns <= options.review && f.id === finding.id)).map((f) => ({ id: f.id, evidence: 'fixed' })) },
   })
   const measured = (name, result) => async (input) => {
     calls.push(name); seen[name] = structuredClone(input)
@@ -239,7 +239,7 @@ test('a green run walks every stage in order and returns the measured PR with ea
   const planner = f.requests[0]
   assert.deepEqual(Object.keys(planner).sort(), ['brief', 'feedback', 'id', 'planPath', 'returnPath', 'role', 'seat', 'tier'])
   assert.deepEqual(Object.keys(f.requests[1]).sort(), [...Object.keys(planner), 'filesInScope'].sort())
-  assert.deepEqual(Object.keys(f.requests[2]).sort(), [...Object.keys(planner), 'filesInScope', 'changedPaths'].sort())
+  assert.deepEqual(Object.keys(f.requests[2]).sort(), [...Object.keys(planner), 'filesInScope', 'changedPaths', 'builderReport'].sort())
   assert.deepEqual(f.requests[1], { ...f.requests[1], role: 'builder', planPath: '/virtual/task/plan.md', feedback: [] })
   assert.equal(new Set(f.requests.map((r) => r.id)).size, f.requests.length)
   assert.equal(new Set(f.requests.map((r) => r.returnPath)).size, f.requests.length)
@@ -437,6 +437,33 @@ test('a refused, unreadable, empty or stale envelope stops the lane and a lead a
 })
 
 // MUTATION: drop the changes-needed branch and the findings never reach a second build.
+test('from round 2 the reviewer hears the earlier findings, and a return that drops one is refused', async () => {
+  const normal = fakes({ review: 1 })
+  assert.equal((await normal.go()).status, 'done')
+  assert.deepEqual(normal.requests.filter((r) => r.role === 'reviewer').map((r) => r.feedback), [[], [finding]])
+  assert.deepEqual(normal.requests.find((r) => r.role === 'reviewer').builderReport, { tests: [{ file: 'lib.test.mjs', title: 'works' }], notes: null })
+  for (const mode of ['drop', 'carry', 'bad-closed']) {
+    const f = fakes({ review: 1, edit: (v, req) => {
+      if (req.role === 'reviewer' && req.feedback.length) {
+        v.details.closed = mode === 'bad-closed' ? [{ id: 'R1' }] : []
+        if (mode === 'carry') v.details.findings = [{ ...finding, severity: 'should-fix' }]
+      }
+      return v
+    } })
+    const result = await f.go()
+    assert.equal(result.status, mode === 'carry' ? 'done' : 'stopped')
+    if (mode !== 'carry') {
+      assert.equal(result.reason, 'envelope-refused')
+      assert.ok(f.requests.some((r) => r.role === 'reviewer' && r.repair && r.repair.defects.some((d) => d.includes(mode === 'drop' ? 'R1' : 'details.closed'))))
+    }
+  }
+  const finish = fakes({ spec: finishSpec(), unseated: ['planner'] })
+  assert.equal((await finish.go()).status, 'done')
+  assert.deepEqual(finish.requests.find((r) => r.role === 'reviewer').feedback, [finding])
+  const malformed = fakes({ spec: finishSpec({ findings: [{ ...finding, id: '../bad' }] }), unseated: ['planner'], edit: (v) => { if (v.role === 'reviewer') v.details.closed = []; return v } })
+  assert.equal((await malformed.go()).status, 'done')
+})
+
 test('changes-needed carries the exact findings to the next build and repeats gate, proof and review before the suite', async () => {
   const f = fakes({ review: 1 })
   assert.equal((await f.go()).status, 'done')
@@ -635,7 +662,7 @@ test('a suite still red after the repair turn stops with no second repair turn a
     for (const effect of EFFECTS) assert.equal(r.calls.includes(effect), false, effect)
   }
   // a review asking for changes after the repair stops the lane, even with builder rounds to spare
-  const bounced = sequenced([redRun(), redRun(), green()], { bounds: { builder: 3, reviewer: 3 }, edit: (v, req) => req.role === 'reviewer' && count(bounced, 'builder') === 2 ? { ...v, details: { verdict: 'changes-needed', findings: [finding] } } : v })
+  const bounced = sequenced([redRun(), redRun(), green()], { bounds: { builder: 3, reviewer: 3 }, edit: (v, req) => req.role === 'reviewer' && count(bounced, 'builder') === 2 ? { ...v, details: { ...v.details, verdict: 'changes-needed', findings: [finding] } } : v })
   assert.deepEqual(await bounced.go(), stopped('round-bound'))
   assert.equal(builderTurns(bounced).length, 2)
   for (const effect of EFFECTS) assert.equal(bounced.calls.includes(effect), false, effect)
@@ -1091,7 +1118,7 @@ test('a builder that names no tests after a review bounce is not proven by the e
   let builds = 0, reviews = 0
   const f = fakes({ bounds: { builder: 3, reviewer: 3 }, edit: (v) => {
     if (v.role === 'builder' && ++builds === 2) v.details.tests = []
-    if (v.role === 'reviewer' && ++reviews === 1) return { ...v, details: { verdict: 'changes-needed', findings: [finding] } }
+    if (v.role === 'reviewer' && ++reviews === 1) return { ...v, details: { ...v.details, verdict: 'changes-needed', findings: [finding] } }
     return v
   } })
   assert.equal((await f.go()).status, 'done')

@@ -88,7 +88,7 @@ export async function runReviewer(options, deps = {}) {
     let envelope = loaded.envelope
     const expectedId = prep.prompt.match(/^Envelope id:\s*(\S+)/m)?.[1]
     if (envelope) {
-      const { defects } = validateEnvelope('reviewer', envelope)
+      const { defects } = validateEnvelope('reviewer', envelope, { archived: true })
       if (expectedId && envelope.id !== expectedId) defects.push('id does not match issued id')
       if (defects.length) { errors.push(`envelope: ${defects.join('; ')}`); envelope = null }
     }

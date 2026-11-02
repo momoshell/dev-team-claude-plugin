@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { PANEL_REFRESH_MS, PANEL_STALE_AFTER_MS, acceptRows, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, panelAgeLabel, panelReadLoop, readFreshness, reviewRows } from '../visualizer/web/src/lib/panels.js'
 import { VIEWS, parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
-import { ATTENTION_KEYS, absenceMark, attentionBreakdown, configurationDimensionCell, configurationFilterView, costCell, createSemaphore, crewArchive, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, needsAttention, openRecordNote, operationsOverview, profileEvidenceView, reviewCell, runActivity, runDetailConfiguration, runDetailSeats, runDetailState, runtimeActivitySummary, slotWaitCell, tokenCell, shipStatus } from '../visualizer/web/src/lib/fleet.js'
+import { ATTENTION_KEYS, absenceMark, attentionBreakdown, configurationDimensionCell, configurationFilterView, costCell, createSemaphore, crewArchive, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, needsAttention, newestFirst, openRecordNote, operationsOverview, profileEvidenceView, reviewCell, runActivity, runDetailConfiguration, runDetailSeats, runDetailState, runtimeActivitySummary, slotWaitCell, tokenCell, shipStatus } from '../visualizer/web/src/lib/fleet.js'
 import { assuranceMeta, assuranceOption, executionMeta, runConfiguration, taskProfileMeta } from '../visualizer/web/src/lib/workflow-semantics.js'
 import { diffLines } from '../visualizer/web/src/lib/diff-lines.js'
 import { ROOT, scratchDir, sqliteAvailable } from './helpers.mjs'
@@ -1186,4 +1186,16 @@ test('the Shipped tab shows no count when no run has a measured ship state', () 
   assert.match(source, /shipped: shipMeasured \? runs\.filter\([^\n]*\)\.length : null,/)
   assert.match(source, /\{counts\[tab\[0\]\] \?\? '—'\}/)
   assert.match(source, /title=\{counts\[tab\[0\]\] == null \? 'ship state not measured' : undefined\}/)
+})
+
+test('newestFirst lists the latest started_at first and unstarted runs last in feed order', () => {
+  const rows = [
+    { adw_id: 'a', started_at: null },
+    { adw_id: 'b', started_at: '2026-11-01T20:44:19.652Z' },
+    { adw_id: 'c', started_at: 'not a date' },
+    { adw_id: 'd', started_at: '2026-11-02T16:25:24.265Z' },
+    { adw_id: 'e', started_at: '2026-11-02T16:25:24.265Z' },
+  ]
+  assert.deepEqual(newestFirst(rows).map((run) => run.adw_id), ['d', 'e', 'b', 'a', 'c'])
+  assert.deepEqual(rows.map((run) => run.adw_id), ['a', 'b', 'c', 'd', 'e'])
 })

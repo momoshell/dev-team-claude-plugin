@@ -371,6 +371,14 @@ export function profileEvidenceView(profileKey, returns = {}) {
   }
 }
 
+// The task board lists the newest start first; a run with no parseable started_at keeps its feed order after the rest.
+export function newestFirst(runs = []) {
+  const started = (run) => { const ms = Date.parse(run?.started_at); return Number.isFinite(ms) ? ms : null }
+  return (Array.isArray(runs) ? runs : []).map((run, index) => ({ run, index, ms: started(run) }))
+    .sort((a, b) => (a.ms === null) - (b.ms === null) || (b.ms ?? 0) - (a.ms ?? 0) || a.index - b.index)
+    .map(({ run }) => run)
+}
+
 export function configurationFilterView(runs = [], selections = {}) {
   const source = Array.isArray(runs) ? runs : []
   const dimensions = CONFIGURATION_DIMENSIONS.flatMap((descriptor) => configurationDimensionDescriptor(source, descriptor))

@@ -88,8 +88,10 @@ The worktree is removed on every exit.
 
 `--charter <file>` replaces the builder charter under the same contract as the planner option below.
 `--build-first` requires `--charter`; `bench/charters/build-first-builder.md` is an example experiment input.
-This variant withholds `gate.mjs`, gate path and command prompt lines, `gate_cmd`, `gate_path` and planner
-mutations, but still supplies `plan.md`. It supports `node --test` only.
+This variant withholds `gate.mjs`, the gate path and command prompt lines and `gate_cmd`. The seat's arm check still
+reads `planner-1.json` through today's planner schema, so its `gate_path` names the withheld `gate.mjs` and its
+`mutations` are inert placeholders, one per id. It still supplies the recorded `plan.md`, which can quote the planner's
+mutation anchors (b1380's does). It supports `node --test` only.
 
 `result.json.variant` is `gate` or `build-first`. Both record `added.source`, `added.test` and
 `added.binary` (binary files are counted separately). Build-first records `bound.of`, `bound.proven`

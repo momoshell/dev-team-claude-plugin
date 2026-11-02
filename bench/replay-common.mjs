@@ -292,9 +292,12 @@ export function prepareLane({ role, lane, outDir, onCleanup, charterBody, buildF
       ret.details.validation_lane ??= `node --test ${SCOPE_BACKFILL[lane].filter((f) => f.endsWith('.test.mjs')).join(' ')}`
     }
     if (buildFirst) {
+      // The seat's context-arm check (crew/acp/seat.mjs laneContext) still reads the return through today's planner
+      // schema, which requires gate_path and one mutation per id: keep it valid, but name the withheld gate and carry
+      // inert placeholders so the builder can copy nothing the planner declared.
       delete ret.details.gate_cmd
-      delete ret.details.gate_path
-      delete ret.details.mutations
+      ret.details.gate_path = join(task, 'gate.mjs')
+      ret.details.mutations = (ret.details.acceptance ?? []).map((a) => ({ check: a.id ?? a, file: '', find: 'build-first: the builder declares this mutation', replace: '' }))
     } else ret.details.gate_cmd ??= `node ${join(task, 'gate.mjs')}`
     writeFileSync(file, JSON.stringify(ret, null, 2))
     planDetails = ret.details

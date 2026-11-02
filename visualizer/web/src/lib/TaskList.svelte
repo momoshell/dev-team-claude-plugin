@@ -1,5 +1,5 @@
 <script>
-  import { configurationDimensionCell, configurationFilterView, deriveDisplayStatus, durationCell, needsAttention, runActivity, shipStatus, tokenCell } from './fleet.js'
+  import { configurationDimensionCell, configurationFilterView, deriveDisplayStatus, durationCell, needsAttention, newestFirst, runActivity, shipStatus, tokenCell } from './fleet.js'
   import Pagination from './Pagination.svelte'
   import Dropdown from './Dropdown.svelte'
 
@@ -51,7 +51,7 @@
     attention: runs.filter((run) => needsAttention(statusFor(run).key) && (showArchived || !run.triage?.reviewed_at)).length,
     shipped: shipMeasured ? runs.filter((run) => shipStatus(run).key === 'merged' && (showArchived || !run.triage?.reviewed_at)).length : null,
   })
-  let baseRows = $derived(runs.filter((run) => (showArchived || !run.triage?.reviewed_at) && matchesState(run) && matchesQuery(run)))
+  let baseRows = $derived(newestFirst(runs).filter((run) => (showArchived || !run.triage?.reviewed_at) && matchesState(run) && matchesQuery(run)))
   let configurationView = $derived(configurationFilterView(baseRows, { task_profile: taskProfile, execution_shape: executionShape, assurance }))
   let taskProfileDimension = $derived(configurationView.dimensions.find((dimension) => dimension.key === 'task_profile'))
   let executionDimension = $derived(configurationView.dimensions.find((dimension) => dimension.key === 'execution_shape'))

@@ -93,6 +93,8 @@ function loadPlan(d, lane, taskDir, rows = []) {
     .filter(({ n }) => Number.isInteger(n) && n > 0).sort((a, b) => b.n - a.n)
   if (!files.length) throw new FinishRefusal('finish-premise', `lane ${lane} has no planner return`)
   for (const { name, n } of files) {
+    // A file the journal records as refused is never read: it may not even be JSON.
+    if (recorded.length && mentioned.has(n) && !accepted.has(n)) continue
     const checked = validateEnvelope('planner', readJson(d, join(taskDir, name), 'the planner return'), { archived: true })
     if (checked.defects.length || checked.envelope?.status !== 'done') continue
     if (recorded.length === 0 || accepted.has(n)) return checked.envelope.details

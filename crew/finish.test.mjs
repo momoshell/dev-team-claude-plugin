@@ -214,6 +214,17 @@ test('a valid newer plan the journal does not mention refuses finish rather than
   } finally { cleanup(f) }
 })
 
+// MUTATION: read a journal-refused planner file before skipping it.
+test('a refused replan that is not JSON is skipped for the older accepted plan', () => {
+  const replan = replanRows(false)
+  const f = fixture({ rows: replan.rows })
+  try {
+    writeFileSync(join(f.taskDir, 'planner-3.json'), '{ not json')
+    run(f).go()
+    assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.planPath, '/t/plan.md')
+  } finally { cleanup(f) }
+})
+
 test('older accepted plans without scope still finish', () => {
   const f = fixture()
   try {

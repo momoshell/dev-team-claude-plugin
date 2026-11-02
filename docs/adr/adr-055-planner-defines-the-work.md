@@ -74,7 +74,9 @@ results:
   missing result is unproven);
 - green on the build.
 
-A builder that names no test, or a named test that is unproven, sends the lane back to the builder within its rounds.
+A builder that names no test while the plan names one, or a named test that is unproven, sends the lane back to the
+builder within its rounds. When the plan lists every criterion as not machine-checked, no test is named, the PR states
+`proof: none, no criterion is machine-checked`, and the reviewer judges each criterion.
 The proof runs again after a rebase that moves the head. The PR body states the result, or `proof: unmeasured` when it
 did not run. This shows a test depends on the change. It is not a kill proof, and the PR does not call it one. Other
 test runners refuse with a stated reason until each is added.

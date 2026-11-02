@@ -86,7 +86,7 @@ async function proveBound({ tree, outDir, onCleanup, step, changed, plan, envelo
   return { of: ids.length, proven: Object.values(rows).filter((row) => row.proven).length, ids: rows }
 }
 
-// options: { lane, cell | cellFile, arms, out } (cell already parsed, or a path read inside the recorded run); deps (test seams): prepareRun, runAcpSeat, runGate, proveMutations, corpusDir, repoDir, home, sleepMs.
+// options: { lane, cell | cellFile, arms, out } (cell already parsed, or a path read inside the recorded run); deps (test seams): prepareRun, runAcpSeat, corpusDir, repoDir, home, sleepMs.
 export async function runBuilder(options, deps = {}) {
   const { lane, arms } = options ?? {}
   return runReplay({

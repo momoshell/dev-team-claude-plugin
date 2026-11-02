@@ -11,7 +11,7 @@ import { advisorRows, callSeat, dirtyFiles, errText, parseCli, prepareLane, load
 
 const nonEmptyFile = (f) => { try { return statSync(f).isFile() && statSync(f).size > 0 } catch { return false } }
 
-// options: { lane, cell | cellFile, arms, out, memory?, charter? } (cell already parsed, or a path read inside the recorded run); deps (test seams): prepareRun, runAcpSeat, runGate, corpusDir, repoDir, home, sleepMs.
+// options: { lane, cell | cellFile, arms, out, memory?, charter? } (cell already parsed, or a path read inside the recorded run); deps (test seams): prepareRun, runAcpSeat, corpusDir, repoDir, home, sleepMs.
 export async function runPlanner(options, deps = {}) {
   const { lane, arms } = options ?? {}
   return runReplay({

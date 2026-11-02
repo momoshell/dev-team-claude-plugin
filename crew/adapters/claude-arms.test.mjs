@@ -471,7 +471,7 @@ async function tier1Lane(mode) {
   writeFileSync(join(lane, 'journal.jsonl'), `${JSON.stringify({ event: 'run-start', at: anchor })}\n`)
   writeFileSync(join(lane, 'advisor-manifest.json'), JSON.stringify({ schema_version: 1, run_started_at: anchor, tripwires: [], cell: { provider: 'local', id: 'advisor-v1', agent: 'pi', effort: 'medium', model: 'local/advisor-v1' } }))
   const planner = join(lane, 'planner-1.json')
-  writeFileSync(planner, JSON.stringify({ role: 'planner', id: 'p.planner.1', status: 'done', summary: 's', details: { files_in_scope: ['lib/'], validation_lane: 'node --test x.test.mjs' } }))
+  writeFileSync(planner, JSON.stringify({ role: 'planner', id: 'p.planner.1', status: 'done', summary: 's', details: { subject: 'fix(crew): tier one lane', plan_path: join(lane, 'plan.md'), files_in_scope: ['lib/'], validation_lane: 'node --test x.test.mjs' } }))
   utimesSync(planner, (anchor + 5000) / 1000, (anchor + 5000) / 1000)
   const countFile = join(root, 'pi-count'), pidFile = join(root, 'pi-pid')
   writeFileSync(countFile, '')

@@ -915,7 +915,7 @@ test('the loop imports only builtins, the three contract modules and the skill p
   const dir = fileURLToPath(new URL('.', import.meta.url))
   const source = readFileSync(join(dir, 'loop.mjs'), 'utf8')
   const specifiers = [...source.matchAll(/^(?:import|} from|export [^\n]* from)[^'\n]*'([^']+)'/gm)].map((m) => m[1]).sort()
-  assert.deepEqual(specifiers, ['./agents.mjs', './checks.mjs', './proof.mjs', './protocols.mjs', './skills-proof.mjs', 'node:fs/promises', 'node:path'])
+  assert.deepEqual(specifiers, ['./agents.mjs', './checks.mjs', './proof.mjs', './protocols.mjs', './skills-proof.mjs', 'node:fs/promises', 'node:path', 'node:util'])
   const importers = readdirSync(dir, { recursive: true, withFileTypes: true })
     .filter((e) => e.isFile() && e.name.endsWith('.mjs') && !e.name.endsWith('.test.mjs') && e.name !== 'loop.mjs')
     .map((e) => join(e.parentPath, e.name))

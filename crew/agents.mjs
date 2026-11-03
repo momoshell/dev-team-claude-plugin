@@ -1,6 +1,4 @@
-// The P5 consumer (ADR-052 section 3): resolve a tier's seats from the agent definitions
-// in crew/agents, the way resolveTier reads them from roster.json. Import-free of the
-// old boot path, so the two run in parallel until boot moves over.
+// Resolve a tier's seats from the agent definitions in crew/agents.
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -21,7 +19,7 @@ const cellOf = (model, agent, effort) => {
   return { agent, effort, provider, id }
 }
 
-// Returns { seats, advisor } shaped as resolveTier's roster cells: a null tier override
+// Returns { seats, advisor }: a null tier override
 // unseats a role, any other override replaces the base fields it names.
 export function resolveAgents(tier, directory = DEFAULT_DIRECTORY) {
   if (!TIERS.includes(tier)) throw new Error(`unknown tier "${tier}" — valid tiers: ${TIERS.join(', ')}`)

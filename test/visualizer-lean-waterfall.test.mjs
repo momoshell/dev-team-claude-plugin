@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { layoutTimeline, formatLeanDuration, MIN_WIDTH } from '../visualizer/web/src/lib/timeline.js'
+import { layoutTimeline, formatLeanDuration } from '../visualizer/web/src/lib/timeline.js'
 import { createLeanSource } from '../visualizer/server/lean-source.mjs'
 
 const source = (name) => readFileSync(new URL(`../visualizer/web/src/lib/${name}`, import.meta.url), 'utf8')
@@ -40,7 +40,7 @@ test('WP2', () => {
   // MUTATION: remove the Math.max minimum-width floor.
   const run = { source: 'lean', phases: [phase(1, 0, 1000000), phase(2, 0, 1), phase(3, 200000, 200123), phase(4, 500000, 500000), phase(5, 999999, 1000000)] }
   const original = structuredClone(run), result = layoutTimeline(run)
-  assert.equal(MIN_WIDTH, 0.02); assert.equal(result.origin_at, new Date(base).toISOString()); assert.equal(result.span_ms, 1000000)
+  assert.equal(result.origin_at, new Date(base).toISOString()); assert.equal(result.span_ms, 1000000)
   assert.equal(result.blocks.length, 5)
   for (const [i, block] of result.blocks.entries()) {
     const p = run.phases[i], duration = p.ended_at - p.started_at
@@ -85,9 +85,15 @@ test('WF2', () => {
   assert.match(result.unrecorded[0].reason, /start/i); assert.match(result.unrecorded[1].reason, /end/i); assert.match(result.unrecorded[3].reason, /interval/i)
   assert.deepEqual(result, layoutTimeline(run, [], { now: base + 200000 }))
   for (const list of [[], phases.slice(1)]) { const absent = layoutTimeline({ source: 'lean', phases: list }); assert.equal(absent.origin_at, null); assert.equal(absent.span_ms, null); assert.equal(absent.unrecorded.length, list.length) }
-  const legacy = layoutTimeline({ phases: [phase(1, 0, null), phase(2, null, null)] }, [], { now: base + 10000 })
-  assert.equal(legacy.queued.length, 1); assert.equal(legacy.blocks[0].duration_ms, 10000)
   const markup = source('LeanWaterfall.svelte'); assert.match(markup, /timeline\.unrecorded as entry/); assert.match(markup, /Not recorded — \{entry.reason\}/)
+})
+
+// MUTATION: restore the run.source === 'lean' gate
+test('a run without a source tag lays out as recorded intervals only', () => {
+  const phases = [phase(1, 0, 10000), phase(2, null, null)]
+  const result = layoutTimeline({ phases })
+  assert.deepEqual(result, layoutTimeline({ source: 'lean', phases }))
+  assert.deepEqual(result.queued, [])
 })
 
 test('WF3', () => {

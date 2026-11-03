@@ -1,6 +1,4 @@
-export const REQUEST_ZONE = 0.12
-export const MIN_WIDTH = 0.02
-export const QUEUED_WIDTH = 0.06
+const MIN_WIDTH = 0.02
 
 // Ordinal positions are drawing coordinates, never time measurements. Preserve
 // journal order (including repeated stages) when old records have no intervals.
@@ -27,96 +25,23 @@ export function formatLeanDuration(ms) {
 
 export function layoutTimeline(run = {}, events = [], { now = Date.now() } = {}) {
   const phases = Array.isArray(run.phases) ? run.phases : []
-  const recordedOnly = run.source === 'lean'
-  if (recordedOnly) {
-    const complete = [], unrecorded = [], open = []
-    for (const phase of phases) {
-      const start = time(phase.started_at), end = time(phase.ended_at)
-      if (phase.status === 'running' && phase.ended_at == null && start != null) {
-        open.push({ ...phase, x: null, width: null, duration_ms: null })
-        continue
-      }
-      const reason = start == null ? 'Start time missing or invalid' : end == null ? 'End time missing or invalid' : end < start ? 'Interval ends before it starts' : null
-      if (reason) unrecorded.push({ ...phase, x: null, width: null, duration_ms: null, reason })
-      else complete.push({ phase, start, end })
+  const complete = [], unrecorded = [], open = []
+  for (const phase of phases) {
+    const start = time(phase.started_at), end = time(phase.ended_at)
+    if (phase.status === 'running' && phase.ended_at == null && start != null) {
+      open.push({ ...phase, x: null, width: null, duration_ms: null })
+      continue
     }
-    const origin = complete.length ? Math.min(...complete.map((entry) => entry.start)) : null
-    const finish = complete.length ? Math.max(...complete.map((entry) => entry.end)) : null
-    const span = origin == null ? null : finish - origin
-    const blocks = complete.map(({ phase, start, end }) => ({
-      ...phase, phase_id: phase.id ?? null, duration_ms: end - start,
-      x: span ? (start - origin) / span : 0, width: Math.max(MIN_WIDTH, span ? (end - start) / span : 0),
-    }))
-    return { request: null, origin_at: origin == null ? null : new Date(origin).toISOString(), span_ms: span, blocks, queued: [], unrecorded, open, marks: [], lanes: [] }
+    const reason = start == null ? 'Start time missing or invalid' : end == null ? 'End time missing or invalid' : end < start ? 'Interval ends before it starts' : null
+    if (reason) unrecorded.push({ ...phase, x: null, width: null, duration_ms: null, reason })
+    else complete.push({ phase, start, end })
   }
-  const timed = phases.filter((phase) => phase.started_at != null).sort((a, b) => (time(a.started_at) - time(b.started_at)) || ((a.seq ?? 0) - (b.seq ?? 0)))
-  const queued = phases.filter((phase) => phase.started_at == null).sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
-  if (!phases.length || !timed.length) {
-    return { request: null, origin_at: null, span_ms: 1, blocks: [], queued: [], marks: [], lanes: [], lane_source: run.phase_lanes ?? null,
-      unavailable: run.phase_lanes == null ? (run.pending?.phase_lanes ?? null) : null, min_width: MIN_WIDTH, queued_width: QUEUED_WIDTH }
-  }
-  const origin = Math.min(...timed.map((phase) => time(phase.started_at)).filter((v) => v != null))
-  let finish = time(run.ended_at) ?? origin
-  for (const phase of phases) {
-    const ended = time(phase.ended_at)
-    if (ended != null) finish = Math.max(finish, ended)
-    if (phase.started_at != null && ended == null) finish = Math.max(finish, now)
-  }
-  const span = finish - origin
-  const spanMs = span > 0 ? span : 1
-  const requestStart = time(run.started_at)
-  const request = requestStart != null && origin > requestStart ? { x: 0, width: REQUEST_ZONE, started_at: run.started_at, ended_at: timed[0].started_at, request: true } : null
-  const lead = request ? REQUEST_ZONE : 0
-  const queuedTotal = queued.length * QUEUED_WIDTH
-  const content = Math.max(0, 1 - lead - queuedTotal)
-  const occurrences = new Map()
-  const attempts = new Map()
-  for (const phase of [...phases].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))) {
-    const ordinal = (occurrences.get(phase.name) || 0) + 1
-    occurrences.set(phase.name, ordinal)
-    attempts.set(phase, ordinal)
-  }
-  const eventCounts = new Map()
-  for (const event of events) eventCounts.set(event.phase_id, (eventCounts.get(event.phase_id) || 0) + 1)
-  let shift = 0, prevEnd = 0
-  const raw = []
-  for (const phase of timed) {
-    const start = time(phase.started_at)
-    const end = time(phase.ended_at) ?? now
-    const s = (start - origin) / spanMs
-    const w = Math.max(0, (end - start) / spanMs)
-    const placed = Math.max(s + shift, prevEnd)
-    let width = w
-    const floor = (MIN_WIDTH + 1e-9) / Math.max(content - MIN_WIDTH * timed.length, 1e-9)
-    if (width < floor) { shift += floor - width; width = floor }
-    prevEnd = placed + width
-    raw.push({ phase, s: placed, w: width, duration_ms: Math.max(0, end - start) })
-  }
-  const total = Math.max(1, prevEnd)
-  const blocks = raw.map(({ phase, s, w, duration_ms }) => ({
-    ...phase, phase_id: phase.id ?? null, duration_ms: phase.duration_ms ?? duration_ms, x: lead + (s / total) * content, width: (w / total) * content,
-    queued: false, attempt: attempts.get(phase), attempts_total: occurrences.get(phase.name), event_count: eventCounts.get(phase.id) || 0,
+  const origin = complete.length ? Math.min(...complete.map((entry) => entry.start)) : null
+  const finish = complete.length ? Math.max(...complete.map((entry) => entry.end)) : null
+  const span = origin == null ? null : finish - origin
+  const blocks = complete.map(({ phase, start, end }) => ({
+    ...phase, phase_id: phase.id ?? null, duration_ms: end - start,
+    x: span ? (start - origin) / span : 0, width: Math.max(MIN_WIDTH, span ? (end - start) / span : 0),
   }))
-  const queuedBlocks = queued.map((phase, index) => ({
-    ...phase, phase_id: phase.id ?? null, x: 1 - queuedTotal + index * QUEUED_WIDTH, width: QUEUED_WIDTH, queued: true,
-    attempt: attempts.get(phase), attempts_total: occurrences.get(phase.name), event_count: eventCounts.get(phase.id) || 0,
-  }))
-  const marks = []
-  for (const event of events) {
-    const started = time(event.started_at), ended = time(event.ended_at)
-    if (started == null || ended == null) continue
-    const s = (started - origin) / spanMs
-    const w = Math.max(0, (ended - started) / spanMs)
-    marks.push({ ...event, x: lead + Math.max(0, s) / total * content, width: w / total * content })
-  }
-  const laneRows = [], laneMap = new Map()
-  for (const phase of phases) {
-    const key = phase.lane ?? null
-    if (!laneMap.has(key)) { const row = { lane: key, key: key === null ? 'unlinked' : `lane-${key}`, blocks: [] }; laneMap.set(key, row); laneRows.push(row) }
-  }
-  if (laneMap.has(null)) { const row = laneMap.get(null); laneRows.splice(laneRows.indexOf(row), 1); laneRows.push(row) }
-  for (const block of [...blocks, ...queuedBlocks]) laneMap.get(block.lane ?? null)?.blocks.push(block)
-  return { request, origin_at: timed[0].started_at, span_ms: spanMs, blocks, queued: queuedBlocks, marks, lanes: laneRows,
-    lane_source: run.phase_lanes ?? null, unavailable: run.phase_lanes == null ? (run.pending?.phase_lanes ?? null) : null,
-    min_width: MIN_WIDTH, queued_width: QUEUED_WIDTH }
+  return { request: null, origin_at: origin == null ? null : new Date(origin).toISOString(), span_ms: span, blocks, queued: [], unrecorded, open, marks: [], lanes: [] }
 }

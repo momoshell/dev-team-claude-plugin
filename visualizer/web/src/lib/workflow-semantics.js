@@ -42,11 +42,6 @@ export function assuranceMeta(value) {
   return { key: null, alias: null, recorded: null, source: 'missing', label: 'Not recorded', summary: 'This run records no assurance preset.', staffing: 'It may predate configuration recording or have been booted with explicit roles.' }
 }
 
-export function assuranceOption(value) {
-  const meta = assuranceMeta(value)
-  return { value, label: meta.key ? `${meta.label} · ${meta.recorded}` : meta.label }
-}
-
 export function executionMeta(value) {
   const key = typeof value === 'string' && value.trim() ? value.trim() : null
   if (key && EXECUTION[key]) return EXECUTION[key]
@@ -59,25 +54,3 @@ export function taskProfileMeta(value) {
   if (key) return { key, label: humanize(key), summary: 'Recorded task intent.' }
   return { key: null, label: 'Not recorded', summary: 'This run has no recorded task profile. It may predate configuration recording; this UI does not infer one.' }
 }
-
-export function runConfiguration(run = {}) {
-  const recorded = run?.configuration && typeof run.configuration === 'object' ? run.configuration : null
-  const profileValue = recorded?.task_profile?.effective ?? run?.task_profile
-  const executionValue = recorded?.execution?.effective ?? run?.execution_shape ?? run?.variant
-  const canonicalAssurance = recorded?.assurance?.effective ?? (typeof run?.assurance === 'string' && run.assurance.trim() ? run.assurance : null)
-  const legacyTier = recorded?.legacy_tier ?? (typeof run?.tier === 'string' && run.tier.trim() ? run.tier : null)
-  const assurance = assuranceMeta(canonicalAssurance ?? legacyTier)
-  return {
-    profile: { ...taskProfileMeta(profileValue), requested: recorded?.task_profile?.requested ?? null, source: recorded?.task_profile?.source ?? (profileValue ? 'recorded' : 'legacy_missing') },
-    execution: { ...executionMeta(executionValue), requested: recorded?.execution?.requested ?? null, source: recorded?.execution?.source ?? (executionValue ? 'recorded' : 'legacy_missing') },
-    assurance: {
-      ...assurance,
-      requested: recorded?.assurance?.requested ?? null,
-      legacy_alias: legacyTier,
-      source: recorded?.assurance?.source ?? (canonicalAssurance ? 'recorded' : legacyTier ? 'legacy_alias' : 'legacy_missing'),
-      recording: canonicalAssurance ? 'canonical' : legacyTier ? 'legacy_alias' : 'missing',
-    },
-  }
-}
-
-export const ASSURANCE_KEYS = Object.freeze(Object.keys(ASSURANCE))

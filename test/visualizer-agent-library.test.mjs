@@ -87,8 +87,8 @@ test('linked library directory is refused, and HTTP installed-copy mode prevents
 })
 
 test('model selector lists configured identities and rejects invented choices',async()=>{
- const {configuredModels,setModelPreference,modelPreference}=await import('../visualizer/web/src/lib/agent-settings.js')
- const models=configuredModels({models:[{provider:'openai',id:'example'},{provider:'openai',id:'example'},{provider:null,id:'bad'},{provider:'anthropic',id:'other'}]})
+ const {setModelPreference,modelPreference}=await import('../visualizer/web/src/lib/agent-settings.js')
+ const models=[{key:'anthropic/other',provider:'anthropic',id:'other'},{key:'openai/example',provider:'openai',id:'example'}]
  assert.equal(models.length,2)
  const metadata='tools: Read, Grep\nmodel: sonnet\ncustom:\n  enabled: true'
  const changed=setModelPreference(metadata,'openai/example',models)

@@ -1,5 +1,4 @@
-export const VIEWS = Object.freeze(['fleet', 'agents', 'skills', 'run', 'phase'])
-export const RESERVED = Object.freeze(['agents', 'skills'])
+const RESERVED = Object.freeze(['agents', 'skills'])
 
 function segment(value) {
   try { return decodeURIComponent(value) } catch { return value }

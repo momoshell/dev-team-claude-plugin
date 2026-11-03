@@ -1,4 +1,4 @@
-// crew lean <spec.json>: the detached entry of `crew start --loop lean` (ADR-052). It runs the
+// crew lean <spec.json>: the detached entry of `crew start` (ADR-052). It runs the
 // standard loop (crew/loop.mjs) with each seat turn played over ACP (crew/acp/seat.mjs), records
 // every turn under <taskDir>/lean/<role>/<id>.jsonl, and ends with one terminal row in the run log.
 // Import-safe: importing this module launches nothing; every effect crosses an injected seam.
@@ -218,7 +218,11 @@ export async function runLean(spec, deps = {}) {
   }
 
   let result
-  try { result = await runLoop(spec, { ...d.loopDeps, runSeat }) } catch { result = stopped('runner-threw') }
+  try { result = await runLoop(spec, { ...d.loopDeps, runSeat }) } catch (error) {
+    let described
+    try { described = { code: error?.code ?? null, message: String(error?.message ?? error) } } catch { described = { code: null, message: 'unprintable error' } }
+    result = { ...stopped('runner-threw'), error: described }
+  }
   d.log(JSON.stringify({ event: 'loop-result', ...result }))
   return result
 }

@@ -66,7 +66,7 @@ pins EPERM, unknown, interrupted, and empty import-scan outcomes.
 ### CLI parser interruption and missing values
 
 No dedicated local test or source exhibit was found for an interrupted flag parse.
-A missing value is measured for `--checkout` and `--loop` in
+A missing value is measured for `--checkout` in
 `crew/start.test.mjs`; other verbs are unmeasured.
 
 Keep those edge rules in `cli-flags.md` marked unbacked until a test pins them.

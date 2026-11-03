@@ -95,8 +95,16 @@ function update(home, args) {
 export function main(argv = process.argv.slice(2), env = process.env) {
   const home = crewHome(env)
   const [verb, ...rest] = argv
-  if (verb === 'where') return where(home)
-  if (verb === 'update') return update(home, rest)
+  if (verb === 'where' || verb === 'update') {
+    if (verb === 'where' ? rest.length !== 0 : !(rest.length === 0 || (rest.length === 1 && rest[0] === '--force'))) {
+      process.stderr.write(`usage: crew ${verb}${verb === 'update' ? ' [--force]' : ''}\n`)
+      return 2
+    }
+    try { return verb === 'where' ? where(home) : update(home, rest) } catch (error) {
+      process.stderr.write(`crew ${verb}: ${error.message.replace(/\s*\n\s*/g, ' ')}\n`)
+      return 1
+    }
+  }
   if (verb === 'viz') { const vizEnv = env.DEVTEAM_INTAKE_CHECKOUT ? env : { ...env, DEVTEAM_INTAKE_CHECKOUT: process.cwd() }; return run(process.execPath, ['--env-file-if-exists=.env.local', 'visualizer/server/server.mjs', ...rest], { cwd: home, env: vizEnv }) }
   const entry = ENTRY[verb]
   if (entry) return run(process.execPath, [join(home, entry), ...rest])

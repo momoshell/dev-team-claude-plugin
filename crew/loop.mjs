@@ -4,10 +4,8 @@
 // any seat with the build uncommitted; a mechanical finish uses its brief and publishes nothing.
 // Mechanical: rebase -> build -> proof -> suite -> PR. A fix turn repeats checks; build and judge never
 // automatically rerun a red suite (ADR-055 §6).
-// Build, judge and finish commit only the checked tree; a moved head puts the change on the new base and repeats
-// every check, stopping if Git dropped it as upstream. Mechanical proves and tests again after a moved head.
-// Import-only: every effect (seat turn, filesystem,
-// check, git, journal) crosses an injected seam, and nothing here is wired to the boot path yet.
+// Every shape commits only the checked tree; a moved head repeats checks, stopping if Git dropped the change as upstream.
+// Import-only: every effect (seat turn, filesystem, check, git, journal) crosses an injected seam.
 // A seat's return is never trusted from the callback: the envelope is read back from the path
 // the loop issued, parsed and validated as P2, and must carry the id the loop issued.
 import { AsyncLocalStorage } from 'node:async_hooks'
@@ -16,7 +14,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { resolveAgents } from './agents.mjs'
 import {
-  CHECK_REASONS, commitChanges, openPullRequest, rebaseBranch, runSuite, validGenerated,
+  CHECK_REASONS, commitChanges, openPullRequest, parseStatus, rebaseBranch, runSuite, validGenerated,
 } from './checks.mjs'
 import { proveTests } from './proof.mjs'
 import { TIERS, validateEnvelope } from './protocols.mjs'
@@ -27,7 +25,7 @@ const MAX_ENVELOPE_REPAIRS = 1
 const PROOF_UNMEASURED = '- proof: unmeasured'
 export const LOOP_REASONS = Object.freeze([
   ...CHECK_REASONS, 'unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'lead-escalated', 'lead-unavailable',
-  'lead-refused', 'accept-unmeasured', 'round-bound', 'paths-unmeasured', 'no-progress', 'raise-needs-plan',
+  'lead-refused', 'round-bound', 'paths-unmeasured', 'no-progress', 'raise-needs-plan',
 ])
 
 const REQUIRED_ROLES = ['planner', 'builder', 'reviewer']
@@ -69,33 +67,25 @@ function suiteFailures(results) {
 // added-then-deleted, no change against HEAD) is returned: the entries a `git add` has something to stage, as
 // commitChanges stages them. A staged deletion or a rename source is in neither the tree nor the index and has no pathspec.
 function parseChangedPaths(stdout, unstaged = false) {
-  const parts = stdout.split('\0')
-  if (parts.pop() !== '') return null
+  if (stdout !== '' && !stdout.endsWith('\0')) return null
+  const entries = parseStatus(stdout)
+  if (!entries) return null
   const paths = new Set()
   const safe = (path) => path !== '' && !path.startsWith('/') && !/[\\\0]/.test(path)
     && path.split('/').every((part) => part !== '' && part !== '.' && part !== '..' && part.toLowerCase() !== '.git')
-  for (let at = 0; at < parts.length; at++) {
-    const record = parts[at]
-    if (!/^[ MTADRCU?!]{2} /.test(record)) return null
-    const named = [record.slice(3)]
-    if ('RC'.includes(record[0]) || 'RC'.includes(record[1])) named.push(parts[++at])
-    if (!named.every((path) => typeof path === 'string' && safe(path))) return null
-    if (!unstaged) for (const path of named) paths.add(path)
-    else if (record[1] !== ' ' && !(record[0] === 'A' && record[1] === 'D')) paths.add(named[0])
+  for (const { x, y, path, from } of entries) {
+    if (!/^[ MTADRCU?!]{2}$/.test(x + y)) return null
+    const named = from === null ? [path] : [path, from]
+    if (!named.every(safe)) return null
+    if (!unstaged) for (const name of named) paths.add(name)
+    else if (y !== ' ' && !(x === 'A' && y === 'D')) paths.add(path)
   }
   return [...paths]
 }
 
 // Status is already validated by parseChangedPaths; keep rename and copy sources with their records.
 function worktreeRecords(stdout) {
-  const parts = stdout.split('\0')
-  const records = []
-  for (let at = 0; at < parts.length - 1; at++) {
-    const record = parts[at]
-    const source = 'RC'.includes(record[0]) || 'RC'.includes(record[1]) ? parts[++at] : null
-    if (record[1] !== ' ') records.push(source === null ? record : `${record}\0${source}`)
-  }
-  return records
+  return parseStatus(stdout).filter(({ y }) => y !== ' ').map(({ x, y, path, from }) => `${x}${y} ${path}${from === null ? '' : `\0${from}`}`)
 }
 
 const HEX_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
@@ -194,11 +184,17 @@ export async function runLoop(spec, deps = {}) {
     return defects
   }
 
+  let unwritten = 0, journalError = null
   const emit = async (event, fields) => {
     let at
     try { at = d.now(); if (!Number.isFinite(at)) clockUnreadable = true } catch { clockUnreadable = true }
     if (Number.isFinite(at)) { firstAt ??= at; latestAt = at }
-    try { await journal({ event, lane: spec.id, stage: context.getStore() ?? null, ...fields, at }) } catch {}
+    try { await journal({ event, lane: spec.id, stage: context.getStore() ?? null, ...fields, at }) } catch (error) {
+      unwritten++
+      if (journalError === null) {
+        try { journalError = describe(error) } catch { journalError = { code: null, message: 'unprintable error' } }
+      }
+    }
   }
   const stop = async (reason, observation) => {
     const closed = LOOP_REASONS.includes(reason) ? reason : 'runner-threw'
@@ -422,19 +418,16 @@ export async function runLoop(spec, deps = {}) {
     return halt ? { halt } : {}
   }
 
+  const fetchOrigin = () => stage('fetch', () => callCheck('fetch', d.run, { cwd, command: 'git', args: ['fetch', 'origin'], timeoutMs }, { command: true }))
+  const rebaseOnBase = () => stage('rebase', () => callCheck('rebase', d.rebaseBranch, { cwd, base: spec.base, timeoutMs, ...(spec.generated ? { generated: spec.generated } : {}) }))
+  const suiteRun = () => stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs ?? timeoutMs }, { command: true }))
+  const result = await (async () => {
   try {
     try { await d.mkdir(spec.taskDir, { recursive: true }) } catch (error) { return await stop('runner-threw', { mkdir: describe(error) }) }
     // The lane's own start, written once: the arms of every seat (and every retry) date the planner's return against it.
     // A finish run appends none: the original row stays the anchor the arms date the accepted plan against.
     if (!isFinish) await emit('run-start', { run_id: spec.id })
 
-    if (!isFinish && tier === 'mechanical') {
-      const fetched = await stage('fetch', () => callCheck('fetch', d.run, { cwd, command: 'git', args: ['fetch', 'origin'], timeoutMs }, { command: true }))
-      if (fetched.status !== 'green') return stop(fetched.reason, fetched)
-      const rebased = await stage('rebase', () => callCheck('rebase', d.rebaseBranch, { cwd, base: spec.base, timeoutMs, ...(spec.generated ? { generated: spec.generated } : {}) }))
-      if (rebased.status !== 'green' || !text(rebased.head)) return stop(rebased.reason ?? 'runner-threw', rebased)
-      rebasedHead = rebased.head
-    }
     const planned = isFinish || tier === 'mechanical' ? null : await stage('plan', () => seatTurn('planner'))
     if (planned?.halt) return planned.halt
     if (planned) {
@@ -454,7 +447,7 @@ export async function runLoop(spec, deps = {}) {
       const status = await stage('base-paths', () => callCheck('base-paths', d.run, { cwd, command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs }, { command: true }))
       const files = status.status === 'green' && typeof status.stdout === 'string' ? parseChangedPaths(status.stdout) : null
       if (files === null) return stop('paths-unmeasured', status)
-      const fetched = await stage('fetch', () => callCheck('fetch', d.run, { cwd, command: 'git', args: ['fetch', 'origin'], timeoutMs }, { command: true }))
+      const fetched = await fetchOrigin()
       if (fetched.status !== 'green') return stop(fetched.reason, fetched)
       // An added-then-deleted entry is no part of the build (the work tree deleted it) and no commit can hold it, so it
       // leaves the index before the snapshot; left there, the rebase refuses the checkout as dirty.
@@ -469,7 +462,7 @@ export async function runLoop(spec, deps = {}) {
         wip = await stage('base-commit', () => callCheck('base-commit', d.commitChanges, { cwd, files: kept, subject: 'wip: crew finish base', timeoutMs }))
         if (wip.status !== 'green' || !text(wip.head)) return stop(wip.reason ?? 'runner-threw', wip)
       }
-      const rebased = await stage('rebase', () => callCheck('rebase', d.rebaseBranch, { cwd, base: spec.base, timeoutMs, ...(spec.generated ? { generated: spec.generated } : {}) }))
+      const rebased = await rebaseOnBase()
       const baseFailure = rebased.status !== 'green' ? rebased.reason
         : typeof rebased.onto !== 'string' || !HEX_OID.test(rebased.onto) || !text(rebased.head) ? 'runner-threw'
         : rebased.head === rebased.onto ? 'nothing-to-commit' : null
@@ -490,9 +483,9 @@ export async function runLoop(spec, deps = {}) {
     }
 
     if (!isFinish && rebasedHead === null) {
-      const fetched = await stage('fetch', () => callCheck('fetch', d.run, { cwd, command: 'git', args: ['fetch', 'origin'], timeoutMs }, { command: true }))
+      const fetched = await fetchOrigin()
       if (fetched.status !== 'green') return stop(fetched.reason, fetched)
-      const rebased = await stage('rebase', () => callCheck('rebase', d.rebaseBranch, { cwd, base: spec.base, timeoutMs, ...(spec.generated ? { generated: spec.generated } : {}) }))
+      const rebased = await rebaseOnBase()
       if (rebased.status !== 'green' || !text(rebased.head)) return stop(rebased.reason ?? 'runner-threw', rebased)
       rebasedHead = rebased.head
     }
@@ -504,6 +497,15 @@ export async function runLoop(spec, deps = {}) {
     let repairing = false, recheck = false
     let committed, rebased, measurements, laneBody, reviewStatus, checkedTree
     const readTree = () => stage('checked-tree', () => callCheck('checked-tree', d.run, { cwd, command: 'git', args: ['write-tree'], timeoutMs }, { command: true }))
+    const stageChecked = async () => {
+      if (stagePaths.length > 0) {
+        const staged = await stage('suite-stage', () => callCheck('suite-stage', d.run, { cwd, command: 'git', args: ['--literal-pathspecs', 'add', '--', ...stagePaths], timeoutMs }, { command: true }))
+        if (staged.status !== 'green') return stop(staged.reason, staged)
+      }
+      const tree = await readTree()
+      checkedTree = tree.status === 'green' && typeof tree.stdout === 'string' ? tree.stdout.trim() : ''
+      return HEX_OID.test(checkedTree) ? null : stop('paths-unmeasured', tree)
+    }
     for (;;) {
     for (;;) {
       for (;;) {
@@ -560,24 +562,18 @@ export async function runLoop(spec, deps = {}) {
         }
 
         if (!isFinish) {
-          if (stagePaths.length > 0) {
-            const staged = await stage('suite-stage', () => callCheck('suite-stage', d.run, { cwd, command: 'git', args: ['--literal-pathspecs', 'add', '--', ...stagePaths], timeoutMs }, { command: true }))
-            if (staged.status !== 'green') return stop(staged.reason, staged)
-          }
-          const tree = await readTree()
-          checkedTree = tree.status === 'green' && typeof tree.stdout === 'string' ? tree.stdout.trim() : ''
-          if (!HEX_OID.test(checkedTree)) return stop('paths-unmeasured', tree)
-          const runSuite = () => stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs ?? timeoutMs }, { command: true }))
+          const halt = await stageChecked()
+          if (halt) return halt
           const runReview = () => stage('review', () => seatTurn('reviewer', priorFindings))
           let suite, reviewed
           if (tier === 'build') {
-            const pair = await Promise.allSettled([runSuite(), runReview()])
+            const pair = await Promise.allSettled([suiteRun(), runReview()])
             const failed = pair.find((result) => result.status === 'rejected')
             if (failed) throw failed.reason
             ;[suite, reviewed] = pair.map((result) => result.value)
           }
           else {
-            suite = await runSuite()
+            suite = await suiteRun()
             if (suite.status === 'green') reviewed = await runReview()
           }
           if (reviewed?.halt) return reviewed.halt
@@ -609,13 +605,8 @@ export async function runLoop(spec, deps = {}) {
           break
         }
 
-        if (stagePaths.length > 0) {
-          const staged = await stage('suite-stage', () => callCheck('suite-stage', d.run, { cwd, command: 'git', args: ['--literal-pathspecs', 'add', '--', ...stagePaths], timeoutMs }, { command: true }))
-          if (staged.status !== 'green') return stop(staged.reason, staged)
-        }
-        const tree = await readTree()
-        checkedTree = tree.status === 'green' && typeof tree.stdout === 'string' ? tree.stdout.trim() : ''
-        if (!HEX_OID.test(checkedTree)) return stop('paths-unmeasured', tree)
+        const halt = await stageChecked()
+        if (halt) return halt
 
         // A finish review is capped outright: its bound ends the run, never a lead bounce into a fourth round.
         const reviewed = await stage('review', () => seatTurn('reviewer', priorFindings, { singleTurn: isFinish }))
@@ -635,16 +626,15 @@ export async function runLoop(spec, deps = {}) {
 
       // The suite runs over the file set the commit will hold: the measured changed paths that need staging, and only those, are staged
       // so a test that lists tracked files sees a file the lane created.
-      if (!isFinish && stagePaths.length > 0) {
-        const staged = await stage('suite-stage', () => callCheck('suite-stage', d.run, { cwd, command: 'git', args: ['--literal-pathspecs', 'add', '--', ...stagePaths], timeoutMs }, { command: true }))
-        if (staged.status !== 'green') return stop(staged.reason, staged)
+      if (!isFinish) {
+        const halt = await stageChecked()
+        if (halt) return halt
       }
-      const runSuite = () => stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs ?? timeoutMs }, { command: true }))
-      const suite = await runSuite()
+      const suite = await suiteRun()
       // Mechanical fixes the first red; the other loops retain their unchanged-tree rerun.
       if (suite.status === 'red') {
         const mechanical = !isFinish && tier === 'mechanical'
-        const rerun = mechanical ? suite : await runSuite()
+        const rerun = mechanical ? suite : await suiteRun()
         if (rerun.status === 'red') {
           if (repaired) return stop(suite.reason, rerun)
           // Give the builder one repair turn, then repeat this lane's checks.
@@ -701,7 +691,7 @@ export async function runLoop(spec, deps = {}) {
     // A protected path first seen after the review-time check (the suite wrote it) never met the raise: never commit it.
     const unraised = protectedPaths(files).filter((path) => !protectedPaths(changedPaths).includes(path))
     if (unraised.length) return stop('dirty-worktree', { paths: unraised })
-    if (isFinish || tier !== 'mechanical') {
+    {
       // Only an added-then-deleted path remains unstaged after suite-stage; all other work-tree changes are new.
       const reviewed = new Set(worktreeRecords(reviewStatus).filter((record) => record.startsWith('AD ')))
       if (worktreeRecords(status.stdout).some((record) => !reviewed.has(record))) return stop('dirty-worktree', status)
@@ -717,10 +707,10 @@ export async function runLoop(spec, deps = {}) {
     if (committed.status !== 'green' || !text(committed.head)) return stop(committed.reason ?? 'runner-threw', committed)
     await emit('commit', { head: committed.head })
 
-    const fetched = await stage('fetch', () => callCheck('fetch', d.run, { cwd, command: 'git', args: ['fetch', 'origin'], timeoutMs }, { command: true }))
+    const fetched = await fetchOrigin()
     if (fetched.status !== 'green') return stop(fetched.reason, fetched)
 
-    rebased = await stage('rebase', () => callCheck('rebase', d.rebaseBranch, { cwd, base: spec.base, timeoutMs, ...(spec.generated ? { generated: spec.generated } : {}) }))
+    rebased = await rebaseOnBase()
     if (rebased.status !== 'green' || !text(rebased.head)) return stop(rebased.reason ?? 'runner-threw', rebased)
 
     if (rebased.head !== committed.head && (isFinish || tier !== 'mechanical')) {
@@ -739,7 +729,7 @@ export async function runLoop(spec, deps = {}) {
         const reproven = await stage('proof', () => callCheck('proof', d.proveTests, { cwd, base: `${rebased.head}^`, tests: namedTests, timeoutMs }))
         if (reproven.status !== 'green' || reproven.reason !== null || !Array.isArray(reproven.rows) || reproven.rows.length !== namedTests.length || !reproven.rows.every((row) => row?.proven === true)) return stop(reproven.reason ?? 'runner-threw', reproven)
       }
-      const postSuite = await stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs ?? timeoutMs }, { command: true }))
+      const postSuite = await suiteRun()
       if (postSuite.status !== 'green') return stop(postSuite.reason, postSuite)
       // The tree the checks passed on must be the commit that is published or reported ready.
       const cleanStatus = await stage('post-rebase-clean', () => callCheck('post-rebase-clean', d.run, { cwd, command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs }, { command: true }))
@@ -770,4 +760,6 @@ export async function runLoop(spec, deps = {}) {
   } catch (error) {
     return stop('runner-threw', { threw: describe(error) })
   }
+  })()
+  return unwritten ? { ...result, journal: { unwritten, error: journalError } } : result
 }

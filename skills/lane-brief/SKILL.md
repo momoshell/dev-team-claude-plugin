@@ -56,10 +56,10 @@ Field rules (the validator refuses anything else):
 - `shape`: `standard` only. `finish` is not started from a brief.
 - `out_of_scope`: what the lane must not change.
 - `suite` (optional): the command line the lean lane runs as its suite, for example `suite: cargo test -p power-api`.
-  Absent, the lane runs `npm test`.
+  Absent, the lane runs `npm test`. The line is split on whitespace without a shell; quotes and backslashes are refused, so an argument cannot contain a space.
 - `generated` and `regenerate` (optional, declared together): list literal repo-relative tracked files or directories
   (a trailing `/` marks a directory), for example `generated: [docs/api.json, dist/]`, and give a command line
-  such as `regenerate: npm run generate`. On a rebase conflict limited to those paths, the lane takes the base
+  such as `regenerate: npm run generate`. The line is split on whitespace without a shell; quotes and backslashes are refused, so an argument cannot contain a space. On a rebase conflict limited to those paths, the lane takes the base
   copy and completes the rebase. It runs the command without a shell in a fresh scratch checkout of the rebased
   lane, with no ignored or untracked files, so it must not need an install or a prior build. Ignored output is
   discarded and never committed. An undeclared conflict or change stops with `undeclared-path`; a non-zero command

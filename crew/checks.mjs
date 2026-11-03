@@ -4,6 +4,8 @@ import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 
+export const FINISH_REVIEW_ROUNDS = 3
+
 export const CHECK_REASONS = Object.freeze([
   'invalid-input', 'unsupported-platform', 'exit-nonzero', 'signal', 'spawn-error', 'timeout', 'output-limit',
   'cleanup-unproven', 'proof-unproven', 'runner-threw', 'nothing-to-commit', 'commit-failed', 'rebase-conflict', 'rebase-failed',
@@ -196,7 +198,7 @@ function issueLines(closes, refs) {
   return open.length === 0 ? closingLines : [...closingLines, `Refs: ${open.map((issue) => `#${issue}`).join(', ')}`]
 }
 
-const withoutIssueTokens = (text) => text.replace(ISSUE_TOKEN, 'issue $1')
+export const withoutIssueTokens = (text) => text.replace(ISSUE_TOKEN, 'issue $1')
 const joinBlocks = (blocks) => blocks.filter((block) => block !== '').join('\n\n')
 
 // Issue numbers appear only on the dedicated trailer lines, so prose can never close or reference an issue.
@@ -204,7 +206,7 @@ function composeLaneMessage({ subject, body, closes, refs }) {
   return joinBlocks([withoutIssueTokens(subject), withoutIssueTokens(body), issueLines(closes, refs).join('\n')])
 }
 
-function composeLanePrBody({ body, closes, refs }) {
+export function composeLanePrBody({ body, closes, refs }) {
   const prose = body.replace(/#(\d+)/g, 'issue $1')
   return joinBlocks([prose, issueLines(closes, refs).join('\n')])
 }

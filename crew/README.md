@@ -39,7 +39,13 @@ A brief may choose `mechanical: true` for a change with no behaviour to judge. W
 
 The lane name is the brief's file name. `crew start` runs the `standard` shape
 only; `finish` (ADR-051) is the second entry path, started by `crew finish` from
-an escalated lane. Every loop is bounded, every envelope is
+an escalated lane. A claim whose run is provably gone is taken over. A committed
+build with no remote branch is uncommitted and finished if HEAD is the commit or
+its journal-recorded one-commit rebase. The latter is reset onto the rebase base;
+the journal records `finish-uncommit`. `--return` refuses with `finish-rounds-spent`
+once three review rounds are spent. On `--accept`, issue tokens in the measured
+text and notes are rewritten; issue numbers appear only on trailer lines.
+Every loop is bounded, every envelope is
 validated against a closed protocol (P2) and refused if it does not parse, and
 the loop adds no other gate: no host-load gate, no dispatch-time baseline, no
 measurement that holds work. Writing the record never throws into the caller.

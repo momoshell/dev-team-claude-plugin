@@ -1,9 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { scratchDir } from '../test/helpers.mjs'
 import { createHash } from 'node:crypto'
+import * as finishModule from './finish.mjs'
 import { FinishRefusal, decideFinish, finishLane, main } from './finish.mjs'
 import { openPullRequest } from './checks.mjs'
 
@@ -40,7 +41,7 @@ function fixture({ stage = 'mutations', builder = true, worktree = true, review 
 }
 const run = (f, extra = {}) => {
   const spawned = []
-  const deps = { spawnDetached: (file, args, opts) => { spawned.push({ file, args, opts }); return 4242 }, log: () => {}, ...extra }
+  const deps = { alive: () => true, spawnDetached: (file, args, opts) => { spawned.push({ file, args, opts }); return 4242 }, log: () => {}, ...extra }
   return { spawned, go: () => finishLane({ lane: 'lane9', root: f.root, deps }) }
 }
 const refusal = (f) => { try { run(f).go() } catch (e) { return e } return null }
@@ -356,7 +357,7 @@ test('a lane with a recorded PR or a committed build is refused', () => {
   const stop = { event: 'verdict', stage: null, status: 'stopped', reason: 'rebase-conflict' }
   for (const [row, reason] of [[{ event: 'pr', stage: 'operator', pr: { number: 1 } }, 'finish-published'], [{ event: 'commit', stage: 'commit', head: 'a'.repeat(40) }, 'finish-committed']]) {
     const f = fixture({ rows: [{ event: 'run-start', stage: null }, { event: 'stage-start', stage: 'build' }, builderRow, row, stop] })
-    try { assert.equal(refusal(f)?.reason, reason) } finally { cleanup(f) }
+    try { assert.throws(run(f, { git: () => ({ status: 'green', stdout: 'different' }) }).go, { reason }) } finally { cleanup(f) }
   }
 })
 
@@ -384,7 +385,7 @@ test('a commit the loop undid before its recheck stopped does not block a finish
   ]) {
     const f = fixture({ rows: [...base, ...tail, stop] })
     try {
-      const attempt = run(f)
+      const attempt = run(f, { git: () => ({ status: 'green', stdout: 'different' }) })
       if (allowed) { assert.doesNotThrow(() => attempt.go(), name); assert.equal(attempt.spawned.length, 1, name) }
       else { assert.throws(() => attempt.go(), (e) => e instanceof FinishRefusal && e.reason === 'finish-committed', name); assert.equal(attempt.spawned.length, 0, name) }
     } finally { cleanup(f) }
@@ -421,6 +422,7 @@ function ready(extra = [], { before = [], legacy = false } = {}) {
   const published = [], spawned = []
   const deps = {
     openPullRequest: async (input) => { published.push(input); return { status: 'green', reason: null, pr: PR } },
+    alive: () => true,
     spawnDetached: (file, args, opts) => { spawned.push({ file, args, opts }); return 4242 }, log: () => {},
     run: async () => ({ status: 'green', code: 0, reason: null, signal: null, timedOut: false, stdout: `${'b'.repeat(40)}\n`, stderr: '' }),
   }
@@ -594,8 +596,8 @@ function ghLane({ open = null } = {}) {
 }
 const argOf = (args, flag) => args[args.indexOf(flag) + 1]
 
-// MUTATION: skip the restoring edit and gh keeps the rewritten title and body, not the measured text.
-test('--accept leaves the PR with the measured subject and notes literally, also when it was already open (FD3, FD4)', async () => {
+// MUTATION: pass the raw body to gh pr edit and "Fixes #42" is restored.
+test('--accept leaves the PR with the measured text, issue tokens stripped and issue numbers only on the trailer lines, also when it was already open (FD3, FD4)', async () => {
   const subject = 'fix: repair #42'
   const rows = (r) => r.rowsOf()
   const lane = (open) => {
@@ -613,8 +615,8 @@ test('--accept leaves the PR with the measured subject and notes literally, also
     await decideFinish({ lane: 'lane9', root: created.r.f.root, choice: 'accept', file: notes, deps: created.deps })
     const edit = created.g.gh('edit')
     assert.deepEqual(edit.slice(0, 3), ['pr', 'edit', '18'])
-    assert.equal(argOf(edit, '--title'), subject)
-    assert.equal(argOf(edit, '--body'), 'Fixes #42.\n\n## Operator notes\n\nsee #42\n\nCloses: #91\nRefs: #92')
+    assert.equal(argOf(edit, '--title'), 'fix: repair issue 42')
+    assert.equal(argOf(edit, '--body'), 'Fixes issue 42.\n\n## Operator notes\n\nsee issue 42\n\nCloses: #91\nRefs: #92')
     assert.equal(rows(created.r).at(-2).event, 'pr')
   } finally { cleanup(created.r.f) }
 
@@ -627,8 +629,8 @@ test('--accept leaves the PR with the measured subject and notes literally, also
     assert.equal(reused.g.gh('create'), undefined)
     const edit = reused.g.gh('edit')
     assert.deepEqual(edit.slice(0, 3), ['pr', 'edit', '18'])
-    assert.equal(argOf(edit, '--title'), subject)
-    assert.equal(argOf(edit, '--body'), 'Fixes #42.\n\n## Operator notes\n\nnew notes #42\n\nCloses: #91\nRefs: #92')
+    assert.equal(argOf(edit, '--title'), 'fix: repair issue 42')
+    assert.equal(argOf(edit, '--body'), 'Fixes issue 42.\n\n## Operator notes\n\nnew notes issue 42\n\nCloses: #91\nRefs: #92')
     assert.equal(rows(reused.r).at(-1).notesSha256, createHash('sha256').update('new notes #42').digest('hex'))
   } finally { cleanup(reused.r.f) }
 
@@ -676,13 +678,13 @@ test('--accept refuses when the HEAD probe is red or unmeasured, publishing and 
 // MUTATION: default a missing reviewRounds to zero and a legacy ready row regains three review rounds.
 test('--return on a legacy ready row counts the finish reviews already in the journal', async () => {
   const review = (n) => [{ event: 'envelope', role: 'reviewer', id: `lane9.reviewer.${n}`, parsed: {}, defects: [], error: null }, { event: 'verdict', status: 'reviewed', verdict: 'changes-needed', findings: [] }]
-  const r = ready([], { legacy: true, before: [1, 2, 3].flatMap(review) })
+  const r = ready([], { legacy: true, before: [1, 2].flatMap(review) })
   try {
     const file = join(r.f.base, 'return.md')
     writeFileSync(file, 'More')
     await r.decide('return', file)
     const spec = JSON.parse(readFileSync(join(r.f.taskDir, 'finish.json'), 'utf8'))
-    assert.equal(spec.finish.priorReviewRounds, 3)
+    assert.equal(spec.finish.priorReviewRounds, 2)
   } finally { cleanup(r.f) }
 })
 
@@ -700,6 +702,130 @@ test('--return writes no mutation declarations or gate path into finish.json', a
     assert.equal(Object.hasOwn(finish, 'mutations'), false)
     assert.equal(Object.hasOwn(finish, 'gatePath'), false)
   } finally { cleanup(r.f) }
+})
+
+// MUTATION: drop the constructor's FINISH_REASONS check and an unlisted reason constructs.
+test('FinishRefusal accepts only a reason in the frozen FINISH_REASONS list', () => {
+  const reasons = finishModule.FINISH_REASONS
+  assert.ok(Array.isArray(reasons))
+  assert.deepEqual(reasons, ['finish-unreadable', 'finish-worktree', 'finish-premise', 'finish-running', 'finish-published', 'finish-committed', 'finish-no-build', 'finish-not-ready', 'finish-decided', 'finish-head-moved', 'finish-publish', 'finish-rounds-spent'])
+  assert.ok(Object.isFrozen(reasons))
+  assert.equal(new Set(reasons).size, reasons.length)
+  for (const reason of reasons) assert.equal(new FinishRefusal(reason, 'x').reason, reason)
+  assert.throws(() => new FinishRefusal('finish-bogus', 'x'), TypeError)
+  const source = readFileSync(new URL('./finish.mjs', import.meta.url), 'utf8')
+  for (const [, reason] of source.matchAll(/new FinishRefusal\('([^']+)'/g)) assert.ok(reasons.includes(reason), reason)
+})
+
+// MUTATION: treat an unknown liveness (null) as gone and an EPERM claim is taken over.
+test('a claim whose run is provably gone does not block a retry; a live, unknown or locked claim is still finish-running', () => {
+  for (const mode of ['dead', 'live', 'unknown', 'invalid', 'locked']) {
+    const f = fixture()
+    try {
+      run(f).go()
+      const claim = join(f.taskDir, 'finish-5.claim')
+      assert.equal(readFileSync(claim, 'utf8'), '4242\n')
+      if (mode === 'invalid') writeFileSync(claim, 'not a pid\n')
+      if (mode === 'locked') writeFileSync(join(f.taskDir, 'finish-5.reclaim'), 'locked')
+      const seen = []
+      const attempt = run(f, { alive: (pid) => { seen.push(pid); return mode === 'live' ? true : mode === 'unknown' ? null : false } })
+      if (mode === 'dead') {
+        attempt.go()
+        assert.equal(attempt.spawned.length, 1)
+        assert.ok(seen.includes(4242))
+      } else {
+        assert.throws(attempt.go, { reason: 'finish-running' }, mode)
+        assert.equal(attempt.spawned.length, 0, mode)
+      }
+    } finally { cleanup(f) }
+  }
+})
+
+// MUTATION: compare with > instead of >= and a pass with zero rounds left launches.
+test('--return on a finish run that spent its three review rounds is refused as finish-rounds-spent and writes nothing', async () => {
+  for (const legacy of [false, true]) {
+    const before = legacy ? [1, 2, 3].map(() => ({ event: 'verdict', status: 'reviewed' })) : []
+    const r = ready([], { legacy, before })
+    try {
+      const journal = join(r.f.taskDir, 'journal.jsonl')
+      if (!legacy) writeFileSync(journal, `${r.rowsOf().map((row) => JSON.stringify(row.event === 'finish-ready' ? { ...row, reviewRounds: 3 } : row)).join('\n')}\n`)
+      const original = readFileSync(journal, 'utf8')
+      const report = join(r.f.taskDir, 'finish-report.json')
+      writeFileSync(report, 'keep')
+      assert.equal(await reasonOf(r.decide('return', join(r.f.base, 'missing'))), 'finish-rounds-spent')
+      assert.equal(r.spawned.length, 0)
+      assert.equal(existsSync(join(r.f.taskDir, 'finish.json')), false)
+      assert.equal(readFileSync(journal, 'utf8'), original)
+      assert.equal(readFileSync(report, 'utf8'), 'keep')
+      assert.equal(readdirSync(r.f.taskDir).some((name) => name.startsWith('finish-decision-')), false)
+    } finally { cleanup(r.f) }
+  }
+})
+
+// MUTATION: skip the HEAD equality check and a moved checkout is reset off its own build.
+test('a committed, unpublished build at HEAD is uncommitted and finished; a moved, pushed or unprobed one is still finish-committed', () => {
+  const head = 'a'.repeat(40)
+  for (const mode of ['success', 'retry', 'moved', 'pushed', 'head-red', 'remote-red', 'reset-red']) {
+    const f = fixture({ rows: [{ event: 'run-start' }, builderRow, { event: 'commit', head }, { event: 'verdict', stage: 'rebase', status: 'stopped', reason: 'rebase-conflict' }] })
+    try {
+      const calls = []
+      const gitProbe = (cwd, args) => {
+        calls.push(args)
+        if (args[0] === 'rev-parse') return { status: mode === 'head-red' ? 'red' : 'green', stdout: mode === 'moved' ? 'b'.repeat(40) : head }
+        if (args[0] === 'ls-remote') return { status: mode === 'remote-red' ? 'red' : 'green', stdout: mode === 'pushed' ? `${head}\trefs/heads/lane9\n` : '' }
+        return { status: mode === 'reset-red' ? 'red' : 'green', stdout: '' }
+      }
+      const journal = join(f.taskDir, 'journal.jsonl')
+      const original = readFileSync(journal, 'utf8')
+      const attempt = run(f, { git: gitProbe, ...(mode === 'retry' ? { spawnDetached: () => { throw new Error('spawn failed') } } : {}) })
+      if (mode === 'success' || mode === 'retry') {
+        if (mode === 'retry') assert.throws(attempt.go, /spawn failed/)
+        else { assert.doesNotThrow(attempt.go); assert.equal(attempt.spawned.length, 1) }
+        assert.deepEqual(calls.filter((args) => args[0] === 'reset'), [['reset', '--soft', `${head}^`]])
+        assert.deepEqual(JSON.parse(readFileSync(journal, 'utf8').trim().split('\n').at(-1)), { event: 'finish-uncommit', lane: 'lane9', head, onto: `${head}^` })
+        if (mode === 'retry') {
+          const retry = run(f, { git: gitProbe })
+          retry.go()
+          assert.equal(retry.spawned.length, 1)
+          assert.equal(calls.filter((args) => args[0] === 'reset').length, 1)
+        }
+      } else {
+        assert.throws(attempt.go, { reason: 'finish-committed' }, mode)
+        assert.equal(attempt.spawned.length, 0, mode)
+        assert.equal(readFileSync(journal, 'utf8'), original, mode)
+        assert.equal(readdirSync(f.taskDir).some((name) => name.endsWith('.claim')), false, mode)
+      }
+    } finally { cleanup(f) }
+  }
+  // A prior finish can complete while this caller is probing the remote, before it reclaims the old stop.
+  for (const mode of ['journal', 'head', 'head-red']) {
+    const f = fixture({ rows: [{ event: 'run-start' }, builderRow, { event: 'commit', head }, { event: 'verdict', stage: 'rebase', status: 'stopped', reason: 'rebase-conflict' }] })
+    try {
+      const journal = join(f.taskDir, 'journal.jsonl'), calls = []
+      let probed = false, expected = readFileSync(journal, 'utf8')
+      const attempt = run(f, {
+        alive: () => false,
+        git: (_cwd, args) => {
+          calls.push(args)
+          if (args[0] === 'ls-remote') {
+            writeFileSync(join(f.taskDir, 'finish-3.claim'), '4242\n')
+            if (mode === 'journal') {
+              expected += `${JSON.stringify({ event: 'finish-ready', head: 'b'.repeat(40) })}\n`
+              writeFileSync(journal, expected)
+            }
+            probed = true
+            return { status: 'green', stdout: '' }
+          }
+          return { status: probed && mode === 'head-red' ? 'red' : 'green', stdout: probed && mode === 'head' ? 'b'.repeat(40) : head }
+        },
+      })
+      assert.throws(attempt.go, { reason: mode === 'journal' ? 'finish-running' : 'finish-committed' }, mode)
+      assert.deepEqual(calls.filter((args) => args[0] === 'reset'), [], mode)
+      assert.equal(attempt.spawned.length, 0, mode)
+      assert.equal(readFileSync(journal, 'utf8'), expected, mode)
+      assert.equal(readdirSync(f.taskDir).some((name) => name.endsWith('.claim')), false, mode)
+    } finally { cleanup(f) }
+  }
 })
 
 test('main parses the decision flags and returns 2 for any other shape', async () => {

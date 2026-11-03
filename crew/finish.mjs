@@ -1,18 +1,22 @@
 // crew finish <lane> — finish a stopped lean lane with its own builder seat (ADR-051's finish shape, lean loop).
 //
-// Re-enters the lane in its own worktree, on its uncommitted build, with its accepted plan, and starts the
-// detached `finish` run: builder triage -> proof -> review -> suite -> commit -> rebase. It never
-// re-plans, never re-runs the baseline and publishes nothing; the operator's publish decision is a later step:
-// `--accept [--notes <file>]` publishes the PR the finish run measured (merging stays the operator's), `--return <file>`
-// runs one more finish pass with the file as the builder's guidance (it counts against the three review rounds) and
+// Re-enters the lane in its own worktree and starts the detached `finish` run: rebase onto the current base ->
+// builder triage -> proof -> review -> suite -> commit -> rebase. A base conflict stops before any seat, leaving
+// the build uncommitted. A mechanical lane is finished on its brief. Only the checked tree is committed; a rebase
+// that moves the head repeats proof, review and suite. It never re-plans, re-runs the baseline or publishes; the
+// operator's publish decision is a later step:
+// `--accept [--notes <file>]` publishes the PR the finish run measured (merging stays the operator's),
+// `--return <file>` runs one more finish pass with the file as the builder's guidance (it counts against the three
+// review rounds) and
 // `--abandon` ends the lane unpublished. Each appends a `finish-decision` row; a lane takes one decision per ready.
 // Refused, with nothing written: `finish-worktree` (the worktree is gone), `finish-premise` (the lane never reached
 // a build), `finish-running` (a run re-entered or claimed the lane after its stop), `finish-published` and
-// `finish-committed` (nothing uncommitted is left), `finish-no-build` (no schema-valid done or insufficient builder envelope in the journal).
-// The PR carries the measured subject and body, and the notes, exactly (the lane's issues ride on trailer lines); gh pr edit
-// restores that text where opening rewrote issue tokens or the PR was already open. A decision is refused as `finish-not-ready`
-// (the last run did not end finish-ready), `finish-decided` (it already has one), `finish-head-moved` (accept: the checkout is
-// no longer the head the run measured) or `finish-publish` (the PR did not open; nothing is recorded, so it can be retried).
+// `finish-committed` (nothing uncommitted is left), `finish-no-build` (no schema-valid done or insufficient builder
+// envelope in the journal). The PR carries the measured subject and body, and the notes, exactly (the lane's issues
+// ride on trailer lines); gh pr edit restores that text where opening rewrote issue tokens or the PR was already open.
+// A decision is refused as `finish-not-ready` (the last run did not end finish-ready), `finish-decided` (it already
+// has one), `finish-head-moved` (accept: the checkout is no longer the head the run measured) or `finish-publish`
+// (the PR did not open; nothing is recorded, so it can be retried).
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -68,9 +72,10 @@ function loadLane(d, lane, crewRoot) {
   const rows = journalText.split('\n').filter((line) => line.trim() !== '').map((line) => {
     try { return JSON.parse(line) } catch { throw new FinishRefusal('finish-unreadable', 'the lane journal has a malformed row') }
   }).filter(isObject)
+  const recordedTier = spec.tier
   // ADR-055 §7: a recorded raise survives a finish run.
   for (const row of rows) if (row.event === 'tier-raised' && TIERS.includes(row.to) && TIERS.indexOf(row.to) > TIERS.indexOf(spec.tier)) spec.tier = row.to
-  return { taskDir, spec, rows }
+  return { taskDir, spec, rows, recordedTier }
 }
 
 function requireWorktree(d, spec) {
@@ -101,6 +106,18 @@ function loadPlan(d, lane, taskDir, rows = []) {
     if (!mentioned.has(n)) throw new FinishRefusal('finish-premise', `the planner return ${name} has no journal row, so whether it was accepted is unknown`)
   }
   throw new FinishRefusal('finish-premise', `lane ${lane} has no accepted planner return`)
+}
+
+function planFor(d, lane, taskDir, recordedTier, rows) {
+  if (recordedTier === 'mechanical' && !d.readdirSync(taskDir).some((name) => /^planner-\d+\.json$/.test(name))
+    && !rows.some((row) => row.event === 'envelope' && row.role === 'planner')) {
+    const builder = rows.findLast((row) => row.event === 'envelope' && row.role === 'builder'
+      && Array.isArray(row.defects) && row.defects.length === 0 && !row.error && row.parsed?.status === 'done' && row.parsed.id === row.id
+      && typeof row.parsed.details?.subject === 'string' && row.parsed.details.subject !== '')
+    if (!builder) throw new FinishRefusal('finish-premise', `lane ${lane} has no builder subject`)
+    return { subject: builder.parsed.details.subject, plan_path: null, files_in_scope: null }
+  }
+  return loadPlan(d, lane, taskDir, rows)
 }
 
 // The finish spec for a stop: the stop, the findings still open at that point of the journal, and the turn offset.
@@ -150,7 +167,7 @@ function claimStop(d, lane, taskDir, at) {
 export function finishLane({ lane, root, deps = {} }) {
   const d = { ...defaultDeps(), ...deps }
   const crewRoot = root ?? d.crewRoot
-  const { taskDir, spec, rows } = loadLane(d, lane, crewRoot)
+  const { taskDir, spec, rows, recordedTier } = loadLane(d, lane, crewRoot)
   requireWorktree(d, spec)
 
   const stopped = rows.findLast((row) => row.event === 'verdict' && row.status === 'stopped')
@@ -166,9 +183,9 @@ export function finishLane({ lane, root, deps = {} }) {
   if (rows.some((row) => row.event === 'pr')) throw new FinishRefusal('finish-published', `lane ${lane} already has a recorded PR`)
   if (rows.some((row) => row.event === 'commit')) throw new FinishRefusal('finish-committed', `lane ${lane} already committed its build`)
 
-  if (!rows.some((row) => row.event === 'envelope' && row.role === 'builder' && Array.isArray(row.defects) && row.defects.length === 0 && ['done', 'insufficient'].includes(row.parsed?.status))) throw new FinishRefusal('finish-no-build', `lane ${lane} has no schema-valid done or insufficient builder envelope in its journal`)
+  if (!rows.some((row) => row.event === 'envelope' && row.role === 'builder' && Array.isArray(row.defects) && row.defects.length === 0 && ['done', 'insufficient'].includes(row.parsed?.status) && row.parsed.id === row.id)) throw new FinishRefusal('finish-no-build', `lane ${lane} has no schema-valid done or insufficient builder envelope in its journal`)
 
-  const finish = finishFor(rows, stopped, stopAt, loadPlan(d, lane, taskDir, rows))
+  const finish = finishFor(rows, stopped, stopAt, planFor(d, lane, taskDir, recordedTier, rows))
   const claim = claimStop(d, lane, taskDir, stopAt)
   return launch(d, { crewRoot, taskDir, spec, finish, claim })
 }
@@ -204,7 +221,7 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
   const d = { ...defaultDeps(), ...deps }
   const crewRoot = root ?? d.crewRoot
   if (!['accept', 'return', 'abandon'].includes(choice)) throw new FinishRefusal('finish-unreadable', `${JSON.stringify(choice)} is not a decision`)
-  const { taskDir, spec, rows } = loadLane(d, lane, crewRoot)
+  const { taskDir, spec, rows, recordedTier } = loadLane(d, lane, crewRoot)
   const readyAt = rows.findLastIndex((row) => row.event === 'finish-ready')
   // A run that started or stopped after the ready row means the lane's last run did not end finish-ready.
   if (readyAt < 0 || rows.slice(readyAt + 1).some((row) => row.event === 'stage-start' || (row.event === 'verdict' && row.status === 'stopped'))) throw new FinishRefusal('finish-not-ready', `lane ${lane}'s last run did not end finish-ready`)
@@ -249,7 +266,7 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
     // return: the same finish spec the first pass had, plus the guidance, with the review rounds already spent.
     const stopped = rows.slice(0, readyAt).findLast((row) => row.event === 'verdict' && row.status === 'stopped')
     if (!stopped) throw new FinishRefusal('finish-premise', `lane ${lane} has no stop before its finish-ready row`)
-    const plan = loadPlan(d, lane, taskDir, rows)
+    const plan = planFor(d, lane, taskDir, recordedTier, rows)
     // Rounds spent: the journal's own count of reviews since the stop (a ready row from before the count was recorded has none),
     // never less than the ready row's own count. Unknown history is never read as zero.
     const sinceStop = rows.slice(rows.lastIndexOf(stopped) + 1, readyAt)

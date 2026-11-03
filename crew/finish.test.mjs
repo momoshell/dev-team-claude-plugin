@@ -46,6 +46,44 @@ const run = (f, extra = {}) => {
 const refusal = (f) => { try { run(f).go() } catch (e) { return e } return null }
 const cleanup = (f) => rmSync(f.base, { recursive: true, force: true })
 
+// MUTATION: drop the mechanical fallback or apply it to build lanes.
+test('a mechanical lane with no planner return is finished on its brief under its builder subject; a build lane without one is still refused', async () => {
+  for (const tier of ['mechanical', 'build']) {
+    const row = { ...builderRow, parsed: { ...BUILDER, details: { ...BUILDER.details, subject: 'fix: mechanical' } } }
+    const f = fixture({ rows: [{ event: 'run-start' }, row, { event: 'tier-raised', to: 'judge' }, { event: 'verdict', stage: 'build', status: 'stopped', reason: 'round-bound' }] })
+    try {
+      const path = join(f.taskDir, 'lean.json')
+      writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, 'utf8')), tier }))
+      rmSync(join(f.taskDir, 'planner-1.json'))
+      if (tier === 'build') { assert.equal(refusal(f)?.reason, 'finish-premise'); continue }
+      assert.doesNotThrow(() => run(f).go())
+      const finish = JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish
+      assert.deepEqual([finish.planPath, finish.subject, finish.filesInScope], [null, 'fix: mechanical', null])
+      const journal = join(f.taskDir, 'journal.jsonl')
+      writeFileSync(journal, `${readFileSync(journal, 'utf8')}${JSON.stringify({ event: 'finish-ready', reviewRounds: 1 })}\n`)
+      const guidance = join(f.taskDir, 'guidance.txt')
+      writeFileSync(guidance, 'fix it')
+      await decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file: guidance, deps: { spawnDetached: () => 4242, log: () => {} } })
+      assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.subject, 'fix: mechanical')
+    } finally { cleanup(f) }
+  }
+})
+
+// MUTATION: trust a builder row whose envelope carries another turn's id and finish launches on a return the loop refused.
+test('a builder return whose id is not the issued one is never a finish subject or a finish build', () => {
+  const wrong = { ...builderRow, parsed: { ...BUILDER, id: 'lane9.builder.9', details: { ...BUILDER.details, subject: 'fix: mechanical' } } }
+  const stop = { event: 'verdict', stage: 'build', status: 'stopped', reason: 'envelope-refused' }
+  for (const tier of ['mechanical', 'build']) {
+    const f = fixture({ rows: [{ event: 'run-start' }, wrong, stop] })
+    try {
+      const path = join(f.taskDir, 'lean.json')
+      writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, 'utf8')), tier }))
+      if (tier === 'mechanical') rmSync(join(f.taskDir, 'planner-1.json'))
+      assert.equal(refusal(f)?.reason, 'finish-no-build', tier)
+    } finally { cleanup(f) }
+  }
+})
+
 test('a lane the loop raised to judge is finished on the judge tier', () => {
   for (const raised of [false, true]) {
     const f = fixture()

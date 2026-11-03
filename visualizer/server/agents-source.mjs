@@ -14,8 +14,6 @@ const DEFAULT_REASONS = Object.freeze({
   prompt: 'prompt source is unavailable',
   recipients: 'prompt recipients are unavailable',
   command: 'last-seat delivery has no readable command evidence',
-  journal: 'last boot journal evidence is unavailable',
-  arm: 'compiled role prompt is unavailable',
 })
 
 function record(value) {
@@ -84,10 +82,6 @@ function validName(value) {
 
 function validPath(value) {
   return typeof value === 'string' && value !== '' && !isAbsolute(value) && !value.split('/').includes('..') && /^[A-Za-z0-9._/-]+$/.test(value)
-}
-
-function requirePathSeparator() {
-  return process.platform === 'win32' ? '\\' : '/'
 }
 
 function parseJson(read, path, label) {
@@ -241,12 +235,6 @@ function deliveredNames(command) {
   return { names, reason: null }
 }
 
-function laneForCommand(path) {
-  const marker = `${requirePathSeparator()}task${requirePathSeparator()}`
-  const index = path.lastIndexOf(marker)
-  return index < 0 ? null : path.slice(0, index)
-}
-
 function candidatePaths({ readdir, crewRoot, role }) {
   const candidates = []
   for (const laneName of safeEntries(readdir, crewRoot).map((entry) => entry.name).filter((name) => name.startsWith('dt-')).sort()) {
@@ -280,62 +268,18 @@ function newestCommand({ read, readdir, stat, crewRoot, role }) {
   }
   found.sort((left, right) => right.mtimeMs - left.mtimeMs || (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
   const latest = found[0]
-  if (!latest) return { command: null, path: null, mtimeMs: null, names: null, reason: failures[0] || DEFAULT_REASONS.command, lane: null }
+  if (!latest) return { command: null, path: null, mtimeMs: null, names: null, reason: failures[0] || DEFAULT_REASONS.command }
   const parsed = deliveredNames(latest.command)
-  return { ...latest, ...parsed, reason: parsed.reason, lane: laneForCommand(latest.path) }
-}
-
-function validBootRows(read, path) {
-  const source = safeRead(read, path, path)
-  if (!source.text) return { rows: [], reason: source.reason || DEFAULT_REASONS.journal }
-  const rows = []
-  for (const [index, line] of source.text.split(/\r?\n/).entries()) {
-    if (!line.trim()) continue
-    try {
-      const value = JSON.parse(line)
-      if (record(value) && value.event === 'boot' && record(value.charter_bytes)) rows.push({ value, index })
-    } catch {}
-  }
-  if (!rows.length) return { rows: [], reason: `${path} has no valid boot row` }
-  rows.sort((left, right) => {
-    const leftAt = Date.parse(String(left.value.at || ''))
-    const rightAt = Date.parse(String(right.value.at || ''))
-    const leftMeasured = Number.isFinite(leftAt) ? leftAt : -Infinity
-    const rightMeasured = Number.isFinite(rightAt) ? rightAt : -Infinity
-    return rightMeasured - leftMeasured || right.index - left.index
-  })
-  return { rows, reason: null }
+  return { ...latest, ...parsed, reason: parsed.reason }
 }
 
 function roleDelivery({ read, readdir, stat, crewRoot, role }) {
   const command = newestCommand({ read, readdir, stat, crewRoot, role })
   if (!command.names) return {
     skills: [], measured: false, reason: command.reason || DEFAULT_REASONS.command,
-    source_path: command.path, mtime_ms: command.mtimeMs, arm: marked(null, DEFAULT_REASONS.arm), charter_bytes: marked(null, DEFAULT_REASONS.journal),
+    source_path: command.path, mtime_ms: command.mtimeMs,
   }
-  const lane = command.lane
-  const journal = lane ? join(lane, 'journal.jsonl') : null
-  const boot = journal ? validBootRows(read, journal) : { rows: [], reason: DEFAULT_REASONS.journal }
-  const row = boot.rows[0]?.value || null
-  const compiledPath = lane ? join(lane, 'task', `role-${role}.md`) : null
-  const compiled = compiledPath ? safeRead(read, compiledPath, compiledPath) : { text: null, reason: DEFAULT_REASONS.arm }
-  const tail = '\n\nBe terse: state the result in the fewest words that carry it, and do not restate context the reader already has.\n'
-  const arm = compiled.text
-    ? marked(compiled.text.endsWith(tail) ? 'terse-tail' : 'control', null)
-    : marked(null, compiled.reason || DEFAULT_REASONS.arm)
-  const charterValue = row?.charter_bytes?.[role]
-  const charterReason = charterValue == null ? row?.charter_unmeasured?.[role] || boot.reason || DEFAULT_REASONS.journal : null
-  return {
-    skills: command.names,
-    measured: true,
-    reason: null,
-    source_path: command.path,
-    mtime_ms: command.mtimeMs,
-    arm,
-    charter_bytes: Number.isFinite(Number(charterValue)) ? marked(Number(charterValue), null) : marked(null, charterReason),
-    journal_path: journal,
-    boot_at: row?.at || null,
-  }
+  return { skills: command.names, measured: true, reason: null, source_path: command.path, mtime_ms: command.mtimeMs }
 }
 
 function matrixRows({ skills, register, deliveries }) {
@@ -363,8 +307,6 @@ function promptRows({ read, checkout, deliveries }) {
     const sourceBytes = source.text === null ? marked(null, source.reason || DEFAULT_REASONS.prompt) : marked(Buffer.byteLength(source.text, 'utf8'), null)
     if (!source.text) reasons.push(source.reason || `${path} is unavailable`)
     const delivery = deliveries[role]
-    const charterBytes = delivery.charter_bytes
-    const arm = delivery.arm
     prompts.push({
       role,
       path: relative(checkout, path).replaceAll('\\', '/'),
@@ -372,8 +314,6 @@ function promptRows({ read, checkout, deliveries }) {
       recipients: null,
       recipients_reason: DEFAULT_REASONS.recipients,
       source_bytes: sourceBytes,
-      charter_bytes: charterBytes,
-      arm,
       protected: PROMPT_LABEL,
       label: PROMPT_LABEL,
       delivery_source: delivery?.source_path || null,
@@ -474,7 +414,7 @@ export function createAgentsSource({ checkout = process.cwd(), pluginRoot = chec
       const reasons = [...registerReasons, ...skillResult.reasons, ...promptResult.reasons]
       for (const role of AGENT_ROLES) {
         const delivery = deliveries[role]
-        if (!delivery.measured || delivery.arm.measured === false || delivery.charter_bytes.measured === false) reasons.push(`${role}: ${delivery.reason || delivery.arm.reason || delivery.charter_bytes.reason || DEFAULT_REASONS.command}`)
+        if (!delivery.measured) reasons.push(`${role}: ${delivery.reason || DEFAULT_REASONS.command}`)
       }
       const roleEvidence = Object.fromEntries(AGENT_ROLES.map((role) => [role, deliveries[role]]))
       return {

@@ -167,12 +167,6 @@ function agentsFixture(prefix = 'visualizer-agents-') {
   writeFileSync(newCommand, JSON.stringify({ args: ['pi', '--skill', 'skills/frontend-svelte/SKILL.md'] }))
   utimesSync(oldCommand, new Date(1000), new Date(1000)); utimesSync(newCommand, new Date(2000), new Date(2000))
   writeFileSync(join(task, 'headless-json', 'planner', 'cmd.json'), JSON.stringify({ command: 'pi --skill skills/ui-design/SKILL.md' }))
-  writeFileSync(join(lane, 'journal.jsonl'), [
-    JSON.stringify({ at: '2026-09-14T00:00:00.000Z', event: 'boot', charter_bytes: { builder: 10, planner: 11 } }),
-    JSON.stringify({ at: '2026-09-15T00:00:00.000Z', event: 'boot', charter_bytes: { builder: 20, planner: 21 } }),
-  ].join('\n') + '\n')
-  writeFileSync(join(task, 'role-builder.md'), '# compiled builder\n')
-  writeFileSync(join(task, 'role-planner.md'), '# compiled planner\n')
   return { dir, checkout, crewRoot, capabilitiesPath, lane, task, skillNames }
 }
 
@@ -680,6 +674,18 @@ test('V1 agents resources come from the plugin root for a foreign checkout', asy
   } finally {
     if (server) await stopInProcess(server)
   }
+})
+
+// MUTATION: restore the boot-journal or compiled-role reads and a role with a readable command reads as degraded.
+test('a readable seat command is the whole delivery evidence: no boot-journal or compiled-role read and no stale diagnostic', () => {
+  const fixture = agentsFixture('visualizer-agents-delivery-')
+  try {
+    const read = createAgentsSource({ checkout: fixture.checkout, crewRoot: fixture.crewRoot }).read()
+    const builder = read.role_evidence.builder
+    assert.equal(builder.measured, true)
+    assert.deepEqual(Object.keys(builder).sort(), ['measured', 'mtime_ms', 'reason', 'skills', 'source_path'])
+    assert.equal(read.reasons.some((reason) => reason.startsWith('builder:')), false)
+  } finally { rmSync(fixture.dir, { recursive: true, force: true }) }
 })
 
 test('agents source separates plugin reads from target proposals compatibly', () => {

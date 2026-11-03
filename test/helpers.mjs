@@ -1,8 +1,8 @@
 // Shared test helpers for the surviving suites.
 import { fileURLToPath } from 'node:url'
-import { dirname, join, resolve, sep } from 'node:path'
-import { mkdtempSync, rmSync, readdirSync, statSync, readFileSync, mkdirSync, utimesSync, realpathSync } from 'node:fs'
-import { tmpdir, homedir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { mkdtempSync, rmSync, readdirSync, statSync, readFileSync, mkdirSync, utimesSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { after } from 'node:test'
 import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
@@ -53,11 +53,8 @@ for (const stream of [process.stdout, process.stderr]) {
 // Detached process groups, drained with the scratch dirs. A fixture that
 // spawns a detached group and is killed mid-test never reaches its finally,
 // and the group is reparented to pid 1 — measured 54 such orphans on
-// 2026-10-20, the oldest 9 days old. Register the group at spawn time, from
-// the detached child's pid (a detached child leads its group), never from a
-// pgid file the seat shell writes later; where the group is spawned in a
-// child process, register the pgid FILE and it is read at drain time, before
-// the scratch dirs that hold it are removed.
+// 2026-10-20, the oldest 9 days old. Register the pgid file before spawning;
+// it is read at drain time, before the scratch dirs that hold it are removed.
 // shortcut: entries outlive the test's own reap, so a pgid recycled before the drain is SIGKILLed; release the entry in the finally reap if pid wrap within one file run is ever observed
 const PROCESS_GROUPS = new Set()
 function readTrackedPgid(file) {
@@ -66,54 +63,19 @@ function readTrackedPgid(file) {
     return Number.isSafeInteger(pgid) && pgid > 1 ? pgid : null
   } catch { return null }
 }
-export function trackProcessGroup(pgid) {
-  if (Number.isSafeInteger(pgid) && pgid > 1) PROCESS_GROUPS.add(pgid)
-  return pgid
-}
 export function trackProcessGroupFile(file) {
   if (typeof file === 'string' && file !== '') PROCESS_GROUPS.add({ file })
   return file
 }
-export function trackSpawn(spawnFn) {
-  return (...args) => {
-    const child = spawnFn(...args)
-    if (args[2]?.detached === true) trackProcessGroup(child?.pid)
-    return child
-  }
-}
 function drainProcessGroups() {
   for (const entry of PROCESS_GROUPS) {
-    const pgid = typeof entry === 'number' ? entry : readTrackedPgid(entry.file)
+    const pgid = readTrackedPgid(entry.file)
     if (Number.isSafeInteger(pgid) && pgid > 1) { try { process.kill(-pgid, 'SIGKILL') } catch {} }
   }
   PROCESS_GROUPS.clear()
 }
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-
-// #995: a fixture that needs "a real checkout" must not use ROOT. A cold suite
-// runs from a worktree under tmpdir(), which makes emit.mjs's
-// underSystemTemp(ROOT) true and INVERTS any assertion that a non-throwaway
-// checkout is admitted. That inversion failed one test in every cold suite and
-// killed five lanes (b498, b502, b504, b509, b506) without ever being a defect
-// in the code under test. The refusal reads the checkout as a path string only
-// -- bootCheckout returns it verbatim and canonical() tolerates a path that does
-// not exist -- so a path under the operator home exercises the same branch from
-// any cwd. The precondition is ASSERTED, not assumed: a host whose home is
-// itself under system temp fails loudly here instead of inverting silently.
-export function nonTempCheckout(name = 'crew-real-checkout') {
-  const candidate = join(homedir(), name)
-  const roots = new Set([resolve(tmpdir())])
-  try { roots.add(realpathSync(tmpdir())) } catch { /* best effort */ }
-  const target = resolve(candidate)
-  for (const root of roots) {
-    if (target === root || target.startsWith(root + sep)) {
-      throw new Error(`nonTempCheckout: ${target} is under system temp ${root}; this fixture needs a checkout path outside it`)
-    }
-  }
-  return candidate
-}
-
 
 import { connect } from 'node:net'
 import { spawn } from 'node:child_process'
@@ -280,30 +242,6 @@ export function makeSeedLane(now) {
     if (settled) writeFileSync(join(dir, 'returns', 'task.json'), '{}')
     return { dir, taskDir, journal: join(dir, 'journal.jsonl') }
   }
-}
-
-// One tracker per suite: every spawned child is checked at the end, so a process that
-// outlives its test is a failure, never a zombie. Replaces three copies — two of which only
-// killed and never asserted, and were hiding exactly that.
-//
-// The probe is kill(pid, 0). A child that has exited but not yet been reaped still answers
-// signal 0 — so the probe can only over-report, never clear a live child. Until libuv reaps it
-// in a poll phase that child is a zombie, and one drained turn was measured not to be enough
-// (Sol, #1398): the reap gets a bounded grace, and what still answers at its end is reported.
-export function childTracker(after, assert) {
-  const spawned = new Set()
-  const alive = (child) => { if (!child?.pid) return false; try { process.kill(child.pid, 0); return true } catch { return false } }
-  after(async () => {
-    for (let waited = 0; waited < 500 && [...spawned].some(alive); waited += 10) await new Promise((resolve) => setTimeout(resolve, 10))
-    const survivors = [...spawned].filter(alive)
-    for (const child of survivors) { try { child.kill('SIGKILL') } catch { /* raced to exit */ } }
-    // Name the command, not only the pid: a pid is unmappable after the run; a command names the test.
-    const named = survivors.map((c) => `${c.pid} ${(c.spawnargs || []).join(' ').slice(0, 120)}`)
-    // The suite that leaked, not only the child: under --test each file is its own process.
-    named.push(`in ${process.argv[1]}`)
-    assert.equal(survivors.length, 0, `${survivors.length} spawned child process(es) outlived the suite: ${named.join(' | ')}`)
-  })
-  return (child) => { spawned.add(child); child.on('exit', () => spawned.delete(child)); return child }
 }
 
 // A property over generated inputs: `generate(random)` builds one case from a seeded

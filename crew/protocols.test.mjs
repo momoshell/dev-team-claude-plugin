@@ -78,9 +78,14 @@ test('shape and closes take only their closed values', () => {
   assert.ok(parseBrief(brief({ closes: '9007199254740993' })).defects.includes('closes is null or one issue number'))
 })
 
-test('a brief that carries an acceptance field is refused (PD2)', () => {
-  for (const body of [BODY, `${BODY}\n## Acceptance\n- (RV1) a\n`]) {
-    assert.ok(parseBrief(brief({ acceptance: '[RV1]' }, body)).defects.includes('acceptance is not a brief field: the planner writes the criteria (ADR-055 §1)'))
+test('retired brief fields are refused', () => {
+  for (const [fields, body, defect] of [
+    ...[BODY, `${BODY}\n## Acceptance\n- (RV1) a\n`].map((body) => [{ acceptance: '[RV1]' }, body, 'acceptance is not a brief field: the planner writes the criteria (ADR-055 §1)']),
+    [{ tier: 'build' }, BODY, 'tier is not a brief field: use mechanical: true for a mechanical lane (ADR-055 §1)'],
+  ]) {
+    const result = parseBrief(brief(fields, body))
+    assert.ok(result.defects.includes(defect))
+    if (fields.tier) { assert.equal(result.fields.mechanical, undefined); assert.deepEqual(result.defects, [defect]) }
   }
 })
 
@@ -96,12 +101,11 @@ test('the body names no issue or PR number; closes is the only binding', () => {
   assert.ok(parseBrief(brief({}, body)).defects.includes('the body names #1968, #1961; write "issue N" or "PR N", because closes is the only issue binding'))
 })
 
-test('a brief chooses its loop only with mechanical: true, and a tier field or any other mechanical value is refused (ADR-055 §1)', () => {
+test('a brief chooses its loop only with mechanical: true, and any other mechanical value is refused (ADR-055 §1)', () => {
   for (const [fields, expected, defect] of [
     [{}, undefined, null], [{ mechanical: 'true' }, true, null],
     [{ mechanical: 'false' }, 'false', 'mechanical is true, or the field is absent'],
     [{ mechanical: 'yes' }, 'yes', 'mechanical is true, or the field is absent'],
-    [{ tier: 'build' }, undefined, 'tier is not a brief field: use mechanical: true for a mechanical lane (ADR-055 §1)'],
   ]) {
     const result = parseBrief(brief(fields))
     assert.equal(result.fields.mechanical, expected)
@@ -117,14 +121,11 @@ const agent = (fields = {}, body = 'Read [the notes](../notes/planner.md).\n') =
 }
 const defectsOf = (fields, needle) => parseAgent(agent(fields)).defects.filter((d) => d.includes(needle))
 
-// MUTATION: add codemode back to AGENT_FIELDS.
-test('AR2 refuses codemode as an unknown field', () => {
-  for (const codemode of [true, false]) assert.match(defectsOf({ codemode }, 'unknown field codemode')[0], /^unknown field codemode;/)
-})
-
-// MUTATION: add edit_assist back to AGENT_FIELDS.
-test('AR3 refuses edit_assist as an unknown field', () => {
-  for (const edit_assist of [true, false]) assert.match(defectsOf({ edit_assist }, 'unknown field edit_assist')[0], /^unknown field edit_assist;/)
+// MUTATION: add codemode or edit_assist back to AGENT_FIELDS.
+test('AR2/AR3 refuses retired agent fields as unknown', () => {
+  for (const field of ['codemode', 'edit_assist']) for (const value of [true, false]) {
+    assert.match(defectsOf({ [field]: value }, `unknown field ${field}`)[0], new RegExp(`^unknown field ${field};`))
+  }
 })
 
 // MUTATION: add each retired extension back to EXTENSIONS.

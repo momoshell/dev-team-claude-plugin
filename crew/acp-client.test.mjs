@@ -1159,7 +1159,7 @@ test('AS ACP spawn withholds inherited pi seat keys unless the launch env grants
   const startCapture = (launchEnv) => {
     const root = scratchDir('acp-spawn-env-')
     const acpRoot = join(root, 'acp')
-    let captured = null
+    let captured = null, clock = 0
     const api = acpClient({
       launch: { bin: '/bin/false', args: [], env: launchEnv },
       dir: acpRoot,
@@ -1173,8 +1173,9 @@ test('AS ACP spawn withholds inherited pi seat keys unless the launch env grants
         closeSync: () => {},
         existsSync: (path) => existsSync(path) || String(path).endsWith('cmd.fifo'),
         kill: () => {},
-        now: () => Date.now(),
-        sleep: () => {},
+        now: () => clock,
+        sleep: (ms) => { clock += ms },
+        spawnSync: () => ({ status: 0, stdout: '' }),
         log: () => {},
         seatCommandRoot: join(root, 'seat-runtime'),
       },

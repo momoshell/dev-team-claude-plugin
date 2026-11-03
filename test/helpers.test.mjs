@@ -6,7 +6,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { writeFileSync, readFileSync, existsSync, globSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ROOT, childTracker, forAll, rawRequest, scratchDir, startFileWriter, trackProcessGroup, trackProcessGroupFile, trackSpawn, writeTornFile } from './helpers.mjs'
+import { ROOT, forAll, rawRequest, scratchDir, startFileWriter, trackProcessGroupFile, writeTornFile } from './helpers.mjs'
 
 const listen = async (server) => {
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
@@ -360,17 +360,6 @@ test('no file carries a test-shaped name the narrowed pattern would drop', () =>
   assert.deepEqual(orphans, [], "these files are named for one of node --test's other default patterns, which the narrowed pattern never collects")
 })
 
-// A child whose exit is still in flight when the suite ends — exited but unreaped, or a few
-// milliseconds from exiting — answers kill(pid, 0) and was counted as a leak (Sol on #1398).
-// The tracker gives the exit a bounded grace; a real leak is still alive at its end.
-// Mutation: put the single drained turn back in childTracker and this counts a survivor.
-test('childTracker does not count a child whose exit lands inside the grace', async () => {
-  let hook = null
-  const track = childTracker((fn) => { hook = fn }, assert)
-  track(spawn('sleep', ['0.05'], { stdio: 'ignore' }))
-  await hook()
-})
-
 // The property harness itself. Mutation killed: dropping the seed (two runs then differ);
 // returning state without the zero bump (seed 0 is stuck at 0 forever); counting runs from
 // 1; dropping the input from the failure message.
@@ -394,7 +383,7 @@ test('LG4 tracked detached process group is reaped when its test process is SIGT
   const root = scratchDir('helpers-lg4-')
   const script = join(root, 'child.mjs')
   const report = join(root, 'grandchild.pid')
-  writeFileSync(script, `import { spawn } from 'node:child_process'\nimport { writeFileSync } from 'node:fs'\nimport { trackSpawn } from ${JSON.stringify(helperUrl)}\nconst child = trackSpawn(spawn)('sleep', ['30'], { detached: true, stdio: 'ignore' })\nchild.unref()\nwriteFileSync(${JSON.stringify(report)}, String(child.pid))\nsetInterval(() => {}, 1000)\n`)
+  writeFileSync(script, `import { spawn } from 'node:child_process'\nimport { writeFileSync } from 'node:fs'\nimport { trackProcessGroupFile } from ${JSON.stringify(helperUrl)}\ntrackProcessGroupFile(${JSON.stringify(report)})\nconst child = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' })\nchild.unref()\nwriteFileSync(${JSON.stringify(report)}, String(child.pid))\nsetInterval(() => {}, 1000)\n`)
   const childProcess = spawn(process.execPath, [script], { stdio: 'ignore' })
   let pid = null
   try {
@@ -427,7 +416,7 @@ test('WL1 tracked detached process group is reaped when the node --test runner i
   const script = join(root, 'wl1-child.test.mjs')
   const pidFile = join(root, 'sleep.pid')
   const release = join(root, 'release')
-  writeFileSync(script, `import { test } from 'node:test'\nimport { spawn } from 'node:child_process'\nimport { writeFileSync, existsSync } from 'node:fs'\nimport { trackSpawn } from ${JSON.stringify(helperUrl)}\ntest('wl1 fixture spawns sleep then waits for release', () => {\n  const child = trackSpawn(spawn)('sleep', ['60'], { detached: true, stdio: 'ignore' })\n  child.unref()\n  writeFileSync(${JSON.stringify(pidFile)}, String(child.pid))\n  const deadline = Date.now() + 20000\n  while (!existsSync(${JSON.stringify(release)}) && Date.now() < deadline) {}\n})\ntest('wl1 fixture holds the runner open', async () => {\n  await new Promise((resolve) => setTimeout(resolve, 60000))\n})\n`)
+  writeFileSync(script, `import { test } from 'node:test'\nimport { spawn } from 'node:child_process'\nimport { writeFileSync, existsSync } from 'node:fs'\nimport { trackProcessGroupFile } from ${JSON.stringify(helperUrl)}\ntest('wl1 fixture spawns sleep then waits for release', () => {\n  trackProcessGroupFile(${JSON.stringify(pidFile)})\n  const child = spawn('sleep', ['60'], { detached: true, stdio: 'ignore' })\n  child.unref()\n  writeFileSync(${JSON.stringify(pidFile)}, String(child.pid))\n  const deadline = Date.now() + 20000\n  while (!existsSync(${JSON.stringify(release)}) && Date.now() < deadline) {}\n})\ntest('wl1 fixture holds the runner open', async () => {\n  await new Promise((resolve) => setTimeout(resolve, 60000))\n})\n`)
   const env = { ...process.env, NO_COLOR: '1' }
   delete env.NODE_TEST_CONTEXT
   delete env.FORCE_COLOR
@@ -492,11 +481,12 @@ test('unsafe process group ids never reach process.kill at drain', () => {
   const root = scratchDir('helpers-unsafe-pgid-')
   const script = join(root, 'unsafe-child.mjs')
   const log = join(root, 'kill.log')
-  const f1 = join(root, 'pgid-1')
-  const f0 = join(root, 'pgid-0')
-  writeFileSync(f1, '1')
-  writeFileSync(f0, '0')
-  writeFileSync(script, `import { appendFileSync } from 'node:fs'\nimport { trackProcessGroup, trackProcessGroupFile } from ${JSON.stringify(helperUrl)}\nprocess.kill = (pid, sig) => { appendFileSync(${JSON.stringify(log)}, pid + ' ' + sig + '\\n') }\ntrackProcessGroup(1)\ntrackProcessGroup(0)\ntrackProcessGroup(-5)\ntrackProcessGroup(1.5)\ntrackProcessGroupFile(${JSON.stringify(f1)})\ntrackProcessGroupFile(${JSON.stringify(f0)})\ntrackProcessGroup(424242)\n`)
+  const files = ['1', '0', '-5', '1.5', '424242'].map((id) => {
+    const file = join(root, `pgid-${id}`)
+    writeFileSync(file, id)
+    return file
+  })
+  writeFileSync(script, `import { appendFileSync } from 'node:fs'\nimport { trackProcessGroupFile } from ${JSON.stringify(helperUrl)}\nprocess.kill = (pid, sig) => { appendFileSync(${JSON.stringify(log)}, pid + ' ' + sig + '\\n') }\nfor (const file of ${JSON.stringify(files)}) trackProcessGroupFile(file)\n`)
   const result = spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 30000 })
   assert.equal(result.status, 0, result.stderr)
   assert.equal(readFileSync(log, 'utf8'), '-424242 SIGKILL\n')

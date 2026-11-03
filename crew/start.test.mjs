@@ -252,16 +252,10 @@ test('crew start writes the brief generated paths and regenerate command into th
   }
 })
 
-// MUTATION: ignore --loop in main and an unknown loop starts a lane.
-test('main forwards --loop lean and refuses a missing, duplicate or unknown loop as usage', async () => {
+test('main forwards --loop lean and defaults to lean', async () => {
   const lean = fakes()
   assert.equal(await main(['/d/b1.md', '--loop', 'lean', '--checkout', '/repo/checkout'], lean.deps), 0)
   assert.ok(leanLaunch(lean.calls))
-  for (const argv of [['/d/b1.md', '--loop'], ['/d/b1.md', '--loop', 'stepped'], ['/d/b1.md', '--loop', 'old'], ['/d/b1.md', '--loop', 'lean', '--loop', 'lean'], ['/d/b1.md', '--loop', '--check'], ['--loop', 'old'], ['--loop', 'lean'], ['/d/b1.md', '--lean']]) {
-    const refused = fakes()
-    assert.equal((await mainWithStderr(argv, refused.deps)).code, 2, argv.join(' '))
-    assert.deepEqual(effects(refused.calls), [], argv.join(' '))
-  }
   const plain = fakes()
   await main(['/d/b1.md', '--checkout', '/repo/checkout'], plain.deps)
   assert.ok(leanLaunch(plain.calls))
@@ -282,34 +276,41 @@ test('(SW1) a start with no --loop, from startLane or main, runs the lean loop',
 })
 
 // MUTATION: accept any loop value and --loop old starts a lane instead of being refused as usage.
-test('(SW3) a loop other than lean, old included, is usage: exit 2 from main, exitCode 2 from startLane, no effects', async () => {
-  for (const loop of ['bogus', 'old']) {
+test('(SW3) invalid --loop values and malformed argv are refused as usage', async () => {
+  for (const argv of [['/d/b1.md', '--loop'], ['/d/b1.md', '--loop', ''], ['/d/b1.md', '--loop', 'stepped'], ['/d/b1.md', '--loop', 'old'], ['/d/b1.md', '--loop', 'lean', '--loop', 'lean'], ['/d/b1.md', '--loop', '--check'], ['--loop', 'old'], ['--loop', 'lean'], ['/d/b1.md', '--lean']]) {
+    const refused = fakes()
+    assert.equal((await mainWithStderr(argv, refused.deps)).code, 2, argv.join(' '))
+    assert.deepEqual(effects(refused.calls), [], argv.join(' '))
+  }
+  for (const loop of ['bogus', 'old', 'other']) {
     const { deps, calls } = fakes()
     const { code, stderr } = await mainWithStderr(['/d/b1.md', '--loop', loop], deps)
     assert.equal(code, 2)
-    assert.equal(stderr, 'usage: crew start <brief.md> [--check] [--checkout <dir>] [--loop lean]\n')
+    if (loop !== 'other') assert.equal(stderr, 'usage: crew start <brief.md> [--check] [--checkout <dir>] [--loop lean]\n')
     assert.deepEqual(effects(calls), [])
     await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop, deps: fakes().deps }), (error) => error instanceof StartRefusal && error.exitCode === 2 && /--loop takes lean, got/.test(error.message))
   }
 })
 
-// MUTATION: validate a --check with fewer checks and a stepped brief, which the lean loop cannot run, passes.
+// MUTATION: allow a finish brief to start without an escalated lane.
 test('(SW4) --check refuses a brief the lean loop cannot run', async () => {
-  const lean = fakes({ brief: BRIEF.replace('shape: standard', 'shape: stepped') })
-  const { code, stderr } = await mainWithStderr(['/d/b1.md', '--check'], lean.deps)
-  assert.equal(code, 1)
-  assert.match(stderr, /not a P1 brief:[\s\S]*shape is one of standard, finish/)
-  assert.deepEqual(effects(lean.calls), [])
   const finish = fakes({ brief: BRIEF.replace('shape: standard', 'shape: finish') })
   await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check: true, deps: finish.deps }), /shape finish starts from an escalated lane/)
 })
 
 // MUTATION: drop the shape refusal and a stepped brief starts a lean lane that runs only the standard loop.
-test('--loop lean refuses a non-standard shape before any git call', async () => {
-  const { deps, calls } = fakes({ brief: BRIEF.replace('shape: standard', 'shape: stepped') })
-  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps }), /not a P1 brief:[\s\S]*shape is one of standard, finish/)
-  assert.deepEqual(effects(calls), [])
-  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'other', deps: fakes().deps }), /--loop takes lean, got/)
+test('a stepped brief is refused by main --check and startLane before effects', async () => {
+  for (const via of ['main', 'startLane']) {
+    const { deps, calls } = fakes({ brief: BRIEF.replace('shape: standard', 'shape: stepped') })
+    if (via === 'main') {
+      const { code, stderr } = await mainWithStderr(['/d/b1.md', '--check'], deps)
+      assert.equal(code, 1)
+      assert.match(stderr, /not a P1 brief:[\s\S]*shape is one of standard, finish/)
+    } else {
+      await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps }), /not a P1 brief:[\s\S]*shape is one of standard, finish/)
+    }
+    assert.deepEqual(effects(calls), [])
+  }
 })
 
 test('(LS1) crew/start.mjs imports none of the old driver or roster modules', () => {

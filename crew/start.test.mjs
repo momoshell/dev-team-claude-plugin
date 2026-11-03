@@ -242,6 +242,16 @@ test('a brief suite line is the lean spec suite, split on whitespace; without on
   assert.deepEqual(JSON.parse(written(plain.calls, '/task/lean.json')[2]).suite, { command: 'npm', args: ['test'], timeoutMs: 1800000 })
 })
 
+test('crew start writes the brief generated paths and regenerate command into the lane spec, and no generated key when the brief declares neither', async () => {
+  for (const declared of [true, false]) {
+    const f = fakes({ brief: declared ? BRIEF.replace('out_of_scope:', 'generated: [gen.txt, dist/]\nregenerate: npm run generate\nout_of_scope:') : BRIEF })
+    await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps }))
+    const spec = JSON.parse(written(f.calls, '/task/lean.json')[2])
+    assert.equal(Object.hasOwn(spec, 'generated'), declared)
+    if (declared) assert.deepEqual(spec.generated, { paths: ['gen.txt', 'dist/'], command: 'npm', args: ['run', 'generate'], timeoutMs: 1800000 })
+  }
+})
+
 // MUTATION: ignore --loop in main and an unknown loop starts a lane.
 test('main forwards --loop lean and refuses a missing, duplicate or unknown loop as usage', async () => {
   const lean = fakes()

@@ -116,6 +116,7 @@ export async function startLane({ briefPath, checkout, check = false, loop, deps
     id: lane, cwd: worktree, taskDir, tier, shape: fields.shape, brief: run,
     source: fields.source, branch: lane, base, closes: fields.closes === null ? [] : [fields.closes],
     suite: fields.suite === undefined ? { command: 'npm', args: ['test'], timeoutMs: 1800000 } : suiteSpec(fields.suite),
+    ...(fields.generated === undefined ? {} : { generated: { paths: fields.generated, ...suiteSpec(fields.regenerate) } }),
   }
   try {
     d.mkdirSync(taskDir, { recursive: true })

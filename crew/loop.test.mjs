@@ -207,6 +207,27 @@ function fakes(options = {}) {
   }
   return { spec, deps, calls, rows, requests, tiers, seen, writes, discardArgs, go: () => runLoop(spec, deps) }
 }
+test('every rebase the loop runs carries the spec generated declaration, none when the spec has none, and a malformed declaration is refused', async () => {
+  const generated = { paths: ['dist/'], command: 'npm', args: ['run', 'generate'], timeoutMs: 1800000 }
+  for (const shape of ['standard', 'finish', 'mechanical']) for (const declared of [true, false]) {
+    const inputs = []
+    const f = fakes({ spec: { ...(shape === 'finish' ? finishSpec() : shape === 'mechanical' ? { tier: 'mechanical' } : {}), ...(declared ? { generated } : {}) }, edit: (v) => { if (shape === 'mechanical' && v.role === 'builder') v.details.subject = 'fix: generated'; return v } })
+    const rebase = f.deps.rebaseBranch
+    f.deps.rebaseBranch = (input) => { inputs.push(input); return rebase(input) }
+    assert.equal((await f.go()).status, 'done')
+    assert.equal(inputs.length, 2)
+    for (const input of inputs) {
+      assert.equal(Object.hasOwn(input, 'generated'), declared)
+      if (declared) assert.deepEqual(input.generated, generated)
+    }
+  }
+  for (const bad of [null, {}, { ...generated, paths: ['../bad'] }, { ...generated, args: [1] }]) {
+    const f = fakes({ spec: { generated: bad } })
+    assert.equal((await f.go()).reason, 'invalid-input')
+    assert.deepEqual(f.calls, [])
+  }
+})
+
 test('a mechanical lane runs rebase, build, proof and suite with no plan, review or lead, and publishes under the builder\'s subject', async () => {
   for (const mode of ['none', 'test', 'repair']) {
     const f = fakes({ spec: { tier: 'mechanical' }, unseated: ['planner', 'reviewer', 'lead'], edit: (v, r) => {

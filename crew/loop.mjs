@@ -16,7 +16,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { resolveAgents } from './agents.mjs'
 import {
-  CHECK_REASONS, commitChanges, openPullRequest, rebaseBranch, runSuite,
+  CHECK_REASONS, commitChanges, openPullRequest, rebaseBranch, runSuite, validGenerated,
 } from './checks.mjs'
 import { proveTests } from './proof.mjs'
 import { TIERS, validateEnvelope } from './protocols.mjs'
@@ -114,6 +114,7 @@ export async function runLoop(spec, deps = {}) {
   const sound = [spec.id, spec.cwd, spec.taskDir, spec.brief, spec.source, spec.branch, spec.base].every(text) && TIERS.includes(spec.tier)
     && text(spec.suite?.command) && (spec.suite.args === undefined || Array.isArray(spec.suite.args))
     && (spec.suite.timeoutMs === undefined || (Number.isSafeInteger(spec.suite.timeoutMs) && spec.suite.timeoutMs > 0))
+    && (!Object.hasOwn(spec, 'generated') || validGenerated(spec.generated))
     && [spec.closes, spec.refs].every((v) => v === undefined || Array.isArray(v))
     && (spec.timeoutMs === undefined || (Number.isSafeInteger(spec.timeoutMs) && spec.timeoutMs > 0))
   if (!sound) return refusal('invalid-input')
@@ -430,7 +431,7 @@ export async function runLoop(spec, deps = {}) {
     if (!isFinish && tier === 'mechanical') {
       const fetched = await stage('fetch', () => callCheck('fetch', d.run, { cwd, command: 'git', args: ['fetch', 'origin'], timeoutMs }, { command: true }))
       if (fetched.status !== 'green') return stop(fetched.reason, fetched)
-      const rebased = await stage('rebase', () => callCheck('rebase', d.rebaseBranch, { cwd, base: spec.base, timeoutMs }))
+      const rebased = await stage('rebase', () => callCheck('rebase', d.rebaseBranch, { cwd, base: spec.base, timeoutMs, ...(spec.generated ? { generated: spec.generated } : {}) }))
       if (rebased.status !== 'green' || !text(rebased.head)) return stop(rebased.reason ?? 'runner-threw', rebased)
       rebasedHead = rebased.head
     }
@@ -468,7 +469,7 @@ export async function runLoop(spec, deps = {}) {
         wip = await stage('base-commit', () => callCheck('base-commit', d.commitChanges, { cwd, files: kept, subject: 'wip: crew finish base', timeoutMs }))
         if (wip.status !== 'green' || !text(wip.head)) return stop(wip.reason ?? 'runner-threw', wip)
       }
-      const rebased = await stage('rebase', () => callCheck('rebase', d.rebaseBranch, { cwd, base: spec.base, timeoutMs }))
+      const rebased = await stage('rebase', () => callCheck('rebase', d.rebaseBranch, { cwd, base: spec.base, timeoutMs, ...(spec.generated ? { generated: spec.generated } : {}) }))
       const baseFailure = rebased.status !== 'green' ? rebased.reason
         : typeof rebased.onto !== 'string' || !HEX_OID.test(rebased.onto) || !text(rebased.head) ? 'runner-threw'
         : rebased.head === rebased.onto ? 'nothing-to-commit' : null
@@ -491,7 +492,7 @@ export async function runLoop(spec, deps = {}) {
     if (!isFinish && rebasedHead === null) {
       const fetched = await stage('fetch', () => callCheck('fetch', d.run, { cwd, command: 'git', args: ['fetch', 'origin'], timeoutMs }, { command: true }))
       if (fetched.status !== 'green') return stop(fetched.reason, fetched)
-      const rebased = await stage('rebase', () => callCheck('rebase', d.rebaseBranch, { cwd, base: spec.base, timeoutMs }))
+      const rebased = await stage('rebase', () => callCheck('rebase', d.rebaseBranch, { cwd, base: spec.base, timeoutMs, ...(spec.generated ? { generated: spec.generated } : {}) }))
       if (rebased.status !== 'green' || !text(rebased.head)) return stop(rebased.reason ?? 'runner-threw', rebased)
       rebasedHead = rebased.head
     }
@@ -719,7 +720,7 @@ export async function runLoop(spec, deps = {}) {
     const fetched = await stage('fetch', () => callCheck('fetch', d.run, { cwd, command: 'git', args: ['fetch', 'origin'], timeoutMs }, { command: true }))
     if (fetched.status !== 'green') return stop(fetched.reason, fetched)
 
-    rebased = await stage('rebase', () => callCheck('rebase', d.rebaseBranch, { cwd, base: spec.base, timeoutMs }))
+    rebased = await stage('rebase', () => callCheck('rebase', d.rebaseBranch, { cwd, base: spec.base, timeoutMs, ...(spec.generated ? { generated: spec.generated } : {}) }))
     if (rebased.status !== 'green' || !text(rebased.head)) return stop(rebased.reason ?? 'runner-threw', rebased)
 
     if (rebased.head !== committed.head && (isFinish || tier !== 'mechanical')) {

@@ -14,7 +14,7 @@ const brief = (overrides = {}, body = BODY) => {
 }
 
 test('P1 vocabularies are the ADR-052 fields, tiers and shapes', () => {
-  assert.deepEqual(BRIEF_FIELDS, ['source', 'closes', 'mechanical', 'shape', 'out_of_scope', 'suite'])
+  assert.deepEqual(BRIEF_FIELDS, ['source', 'closes', 'mechanical', 'shape', 'out_of_scope', 'suite', 'generated', 'regenerate'])
   assert.deepEqual(TIERS, ['mechanical', 'build', 'judge'])
   assert.deepEqual(SHAPES, ['standard', 'finish'])
   assert.ok(Object.isFrozen(SHAPES))
@@ -44,6 +44,19 @@ test('suite is an optional command line: absent is defect-free, a string parses,
   }
 })
 
+test('generated and regenerate are an optional pair: both parse, either alone, an empty list or a non-literal path is refused', () => {
+  const valid = parseBrief(brief({ generated: '[gen.txt, dist/]', regenerate: 'npm run generate' }))
+  assert.deepEqual(valid.defects, [])
+  assert.deepEqual(valid.fields.generated, ['gen.txt', 'dist/'])
+  assert.equal(valid.fields.regenerate, 'npm run generate')
+  for (const fields of [
+    { generated: '[a]' }, { regenerate: 'make' }, { generated: '[]', regenerate: 'make' },
+    ...['/abs', '../x', 'a/.git/x', 'a\\b', 'a\0b', 'a/*.js'].map((path) => ({ generated: `[${path}]`, regenerate: 'make' })),
+    { generated: '[a]', regenerate: '' },
+  ]) assert.ok(parseBrief(brief(fields)).defects.some((defect) => /generated|regenerate/.test(defect)), JSON.stringify(fields))
+  assert.ok(parseBrief(brief({ regenerat: 'make' })).defects.some((defect) => defect.includes('regenerat')))
+})
+
 // MUTATION: drop the frontmatter-open check and a plain markdown brief reaches field parsing.
 test('a brief without frontmatter is refused', () => {
   assert.deepEqual(parseBrief('# Ask\n').defects, ['the brief does not open with a --- frontmatter block'])
@@ -53,7 +66,7 @@ test('a brief without frontmatter is refused', () => {
 // MUTATION: skip the unknown-field check and a misspelt field is silently ignored.
 test('unknown and missing fields are refused by name', () => {
   const { defects } = parseBrief(brief({ shape: undefined, lane: 'b1' }))
-  assert.ok(defects.includes('unknown field lane; the fields are source, closes, mechanical, shape, out_of_scope, suite'))
+  assert.ok(defects.includes('unknown field lane; the fields are source, closes, mechanical, shape, out_of_scope, suite, generated, regenerate'))
   assert.ok(defects.includes('missing field shape'))
 })
 

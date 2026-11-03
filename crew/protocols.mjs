@@ -4,7 +4,7 @@
 // one field per line, with JSON for objects and object lists. Import-free, so the new
 // path never loads the old one.
 
-export const BRIEF_FIELDS = Object.freeze(['source', 'closes', 'mechanical', 'shape', 'out_of_scope', 'suite'])
+export const BRIEF_FIELDS = Object.freeze(['source', 'closes', 'mechanical', 'shape', 'out_of_scope', 'suite', 'generated', 'regenerate'])
 export const TIERS = Object.freeze(['mechanical', 'build', 'judge'])
 export const SHAPES = Object.freeze(['standard', 'finish'])
 export const AGENT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
@@ -77,7 +77,7 @@ export function parseBrief(text) {
     if (!BRIEF_FIELDS.includes(pair[1])) { defects.push(`unknown field ${pair[1]}; the fields are ${BRIEF_FIELDS.join(', ')}`); continue }
     fields[pair[1]] = value(pair[2])
   }
-  for (const key of BRIEF_FIELDS) if (!['suite', 'mechanical'].includes(key) && !Object.hasOwn(fields, key)) defects.push(`missing field ${key}`)
+  for (const key of BRIEF_FIELDS) if (!['suite', 'mechanical', 'generated', 'regenerate'].includes(key) && !Object.hasOwn(fields, key)) defects.push(`missing field ${key}`)
   const body = lines.slice(end + 1).join('\n')
   if (typeof fields.source !== 'string' || !fields.source) defects.push('source names the issue or operator command the lane starts from')
   if (fields.closes !== null && !(Number.isSafeInteger(fields.closes) && fields.closes > 0)) defects.push('closes is null or one issue number')
@@ -88,6 +88,13 @@ export function parseBrief(text) {
   if (!SHAPES.includes(fields.shape)) defects.push(`shape is one of ${SHAPES.join(', ')}`)
   if (typeof fields.out_of_scope !== 'string' || !fields.out_of_scope) defects.push('out_of_scope says what the lane must not change')
   if (Object.hasOwn(fields, 'suite') && (typeof fields.suite !== 'string' || fields.suite.trim() === '')) defects.push('suite is a command line (for example: suite: cargo test -p power-api)')
+  if (Object.hasOwn(fields, 'generated') !== Object.hasOwn(fields, 'regenerate')) defects.push('generated and regenerate must be declared together')
+  if (Object.hasOwn(fields, 'generated') && !(Array.isArray(fields.generated) && fields.generated.length > 0 && fields.generated.every((path) => {
+    if (typeof path !== 'string') return false
+    const file = path.endsWith('/') ? path.slice(0, -1) : path
+    return file !== '' && !file.startsWith('/') && !/[\\\0*?\[\]]/.test(file) && file.split('/').every((part) => part !== '' && part !== '.' && part !== '..' && part.toLowerCase() !== '.git')
+  }))) defects.push('generated is a nonempty list of literal repo-relative paths')
+  if (Object.hasOwn(fields, 'regenerate') && (typeof fields.regenerate !== 'string' || fields.regenerate.trim() === '' || fields.regenerate.includes('\0'))) defects.push('regenerate is a nonempty command line')
   const { repeated } = sections(body)
   if (repeated.length) defects.push(`the body repeats ${[...new Set(repeated)].join(', ')}; the driver reads only the first`)
   // `closes` is the only issue binding; crew start writes it into the driver's bound-issue slot.

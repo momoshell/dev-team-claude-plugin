@@ -3,7 +3,7 @@
   import { getAgents } from './api.js'
   import { displayTone, displayValue, normalizeSkillsPage } from './agents.js'
   import { SKILL_ROLES as roles } from './skill-files.js'
-  let payload = $state({agents:[],skills:[],matrix:[],prompts:[],reasons:[]})
+  let payload = $state({skills:[],matrix:[],reasons:[]})
   let loading = $state(true), error = $state(''), deliveryRole = $state('builder')
   let shaped = $derived(normalizeSkillsPage(payload))
   async function load() { loading=true; error=''; try {payload=await getAgents()} catch(cause) {error=`Could not read delivery history: ${cause.message}. Try again.`} finally {loading=false} }

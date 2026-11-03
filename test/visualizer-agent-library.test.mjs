@@ -86,25 +86,6 @@ test('linked library directory is refused, and HTTP installed-copy mode prevents
  assert.equal(response.status,409);assert.equal(existsSync(join(root,'elsewhere/reviewer.md')),false)
 })
 
-test('model selector lists configured identities and rejects invented choices',async()=>{
- const {setModelPreference,modelPreference}=await import('../visualizer/web/src/lib/agent-settings.js')
- const models=[{key:'anthropic/other',provider:'anthropic',id:'other'},{key:'openai/example',provider:'openai',id:'example'}]
- assert.equal(models.length,2)
- const metadata='tools: Read, Grep\nmodel: sonnet\ncustom:\n  enabled: true'
- const changed=setModelPreference(metadata,'openai/example',models)
- assert.equal(modelPreference(changed).value,'openai/example')
- assert.ok(changed.includes('tools: Read, Grep'));assert.ok(changed.includes('custom:\n  enabled: true'))
- assert.throws(()=>setModelPreference(metadata,'fake/model',models),/configured roster/)
- assert.equal(modelPreference(setModelPreference(changed,'',models)).value,'')
- assert.equal(modelPreference(metadata).value,'sonnet')
-})
-test('complex and duplicated model frontmatter cannot be silently replaced by a selector',async()=>{
- const {setModelPreference,modelPreference}=await import('../visualizer/web/src/lib/agent-settings.js')
- for(const metadata of ['model:\n  provider: custom\n  id: example','model: one\nmodel: two','model: {provider: custom}','model: sonnet # retain note']) {
-   assert.equal(modelPreference(metadata).editable,false)
-   assert.throws(()=>setModelPreference(metadata,'',[]),/complex model setting/)
- }
-})
 test('harness evidence exposes supported providers and modes without claiming authentication',t=>{
  const {root,library}=fixture(t);mkdirSync(join(root,'crew'))
  writeFileSync(join(root,'crew/capabilities.json'),JSON.stringify({coding_agents:{claude:{providers:['anthropic'],transports:['pane','headless-json'],adapter:'crew/adapters/adapter-claude.mjs',refuses:['extensions','local_provider']}}}))

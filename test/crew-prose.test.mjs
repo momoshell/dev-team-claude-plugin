@@ -4,7 +4,6 @@ import { existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync }
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
-import { createAgentsSource } from '../visualizer/server/agents-source.mjs'
 
 const cwd = process.cwd()
 const retired = 'roles'
@@ -36,8 +35,8 @@ test('DR2: guidelines are live or operator references', () => {
   assert.equal(loader.stdout, read(live))
 })
 
-// MUTATION: redirect the visualizer prompt reader to the retired directory.
-test('DR3: no live retired paths and visualizer reads delivered definitions', () => {
+// MUTATION: add a live reference to the retired directory.
+test('DR3: no live retired paths', () => {
   const args = ['ls-files', '-z', '--cached', '--others', '--exclude-standard']
   const options = { cwd, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 }
   let files = spawnSync('git', args, options)
@@ -73,10 +72,4 @@ test('DR3: no live retired paths and visualizer reads delivered definitions', ()
         (path.startsWith('crew/') && path.endsWith('.md') && shorthand.test(text))) offenders.push(path)
   }
   assert.deepEqual(offenders, [])
-  const view = createAgentsSource({ checkout: cwd, pluginRoot: cwd, crewRoot: join(cwd, '__no_recorded_delivery__') }).read()
-  assert.deepEqual(view.prompts.map((row) => row.role), ['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
-  for (const row of view.prompts) {
-    assert.equal(row.path, `crew/agents/${row.role}.md`)
-    assert.equal(row.text, read(row.path))
-  }
 })

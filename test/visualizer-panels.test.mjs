@@ -8,6 +8,14 @@ import { assuranceMeta, executionMeta, taskProfileMeta } from '../visualizer/web
 import { ROOT } from './helpers.mjs'
 import { transportLabel } from '../visualizer/web/src/lib/agent-settings.js'
 
+test('D9 the agent editor carries no model picker and agent-settings exports no model helpers', async () => {
+  const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/AgentsPage.svelte'), 'utf8')
+  assert.doesNotMatch(page, /modelsError|model-settings|setModelPreference|chooseModel/)
+  const settings = await import('../visualizer/web/src/lib/agent-settings.js')
+  assert.equal('modelPreference' in settings, false)
+  assert.equal('setModelPreference' in settings, false)
+})
+
 test('TR3 transportLabel names acp and shows a retired transport as recorded', () => {
   assert.equal(transportLabel('acp'), 'Agent Client Protocol (ACP)')
   for (const value of ['pane', 'headless-json', 'headless-rpc']) assert.equal(transportLabel(value), value)

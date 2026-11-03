@@ -8,20 +8,15 @@
   import DiffBlock from './DiffBlock.svelte'
   import { parseAgentFile, composeAgentFile, validateAgentFile, AGENT_FILE_LIMIT } from './agent-files.js'
 
-  import { modelPreference, setModelPreference, transportLabel, capabilityLabel } from './agent-settings.js'
+  import { transportLabel, capabilityLabel } from './agent-settings.js'
+  import { SKILL_ROLES } from './skill-files.js'
 
-  // The roster that supplied model choices is gone: the list is null with a stated reason, never an empty-as-zero list.
-  let models = $state([]), modelsLoading = $state(false), modelsError = $state('the model roster is no longer read by the visualizer, so configured models cannot be listed.'), providerFilter = $state('')
-  let preference = $derived(modelPreference(draft.metadata))
-  let providerOptions = $derived([...new Set(models.map(model=>model.provider))])
-  let filteredModels = $derived(models.filter(model=>!providerFilter || model.provider===providerFilter))
   let payload = $state({definitions:[],harnesses:[],notes:[],scanned:[],writable:false})
   let harnessModeInput = $state()
   let pageView = $state('agents'), harnessDraft = $state(null), harnessSaving = $state(false), harnessMessage = $state(''), harnessError = $state('')
   let loaded = $state(false)
 
   // Crew role definitions: a read-only preview of a one-line crew/agents/<role>.md frontmatter edit.
-  const ROLE_NAMES = ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']
   let roleForm = $state({ role:'builder', field:'effort', tier:'', value:'' }), roleProposal = $state(null)
   async function previewRoleEdit(event) {
     event.preventDefault()
@@ -69,7 +64,7 @@
   })
   onDestroy(() => { pendingDraft=editor && dirty ? {editor:$state.snapshot(editor),draft:$state.snapshot(draft)} : null })
   async function openEditor(agent=null, copy=false) {
-    returnFocus=document.activeElement; saveError=''; notice=''; providerFilter=''
+    returnFocus=document.activeElement; saveError=''; notice=''
     const parsed=agent ? parseAgentFile(copy ? agent.copy_text || agent.text : agent.text) : {}
     if(parsed.error) { error=`Cannot open this definition: ${parsed.error} Download it to repair its frontmatter.`; return }
     let name=parsed.name || ''
@@ -81,10 +76,6 @@
     const text=agent && !copy ? agent.text : composeAgentFile(draft)
     editor={filename:copy ? null : agent?.filename,revision:copy ? null : agent?.revision ?? null,text,initial:JSON.stringify(draft),source:copy ? agent.source : null,linkedFiles:agent?.linked_files || []}
     await tick(); nameInput?.focus()
-  }
-  function chooseModel(value) {
-    try { draft.metadata=setModelPreference(draft.metadata,value,models); saveError='' }
-    catch(cause) { saveError=cause.message }
   }
   async function closeEditor() {
     if(saving || importing) return
@@ -139,14 +130,6 @@
       <fieldset disabled={saving}>
         <div class="identity-fields"><label>Agent name<input bind:this={nameInput} bind:value={draft.name} readonly={!!editor.filename} required pattern="[a-z][a-z0-9._-]{0,79}" placeholder="code-reviewer" /><span class="hint">{editor.filename ? 'The name identifies this saved file.' : 'Lowercase letters, numbers, dots, underscores and hyphens.'}</span></label>
         <label>When to use this agent<textarea rows="3" bind:value={draft.description} required placeholder="Reviews code changes for correctness, regressions and missing tests."></textarea></label></div>
-        <section class="model-settings" aria-labelledby="model-settings-title">
-          <div><h3 id="model-settings-title">Model preference <span class="hint">Optional</span></h3><p class="hint">Let the harness decide, or keep the model already set. Provider credentials are not checked here.</p></div>
-          {#if modelsLoading}<p class="hint" role="status">Reading configured providers and models…</p>{:else if modelsError}<p class="notice">Model choices are unavailable: {modelsError} Your existing setting is preserved.</p>{:else if !preference.editable}<p class="notice">This definition uses a complex model setting. It is preserved in Additional frontmatter.</p>{:else}
-            <div class="identity-fields"><label>Provider<select bind:value={providerFilter}><option value="">All configured providers</option>{#each providerOptions as provider}<option value={provider}>{provider}</option>{/each}</select><span class="hint">Filters the model choices below.</span></label>
-            <label>Preferred model<select value={preference.value} onchange={event=>chooseModel(event.currentTarget.value)}><option value="">Use harness default</option>{#if preference.value && !filteredModels.some(model=>model.key===preference.value)}<option value={preference.value}>Keep current: {preference.value}</option>{/if}{#each filteredModels as model}<option value={model.key}>{model.id} · {model.provider}</option>{/each}</select><span class="hint">Saved as the model field. The selected harness must support this identifier.</span></label></div>
-            
-          {/if}
-        </section>
         <label class="instructions">Instructions<textarea rows="14" bind:value={draft.instructions} required placeholder="Describe what the agent should do, how it should work, and what it should return."></textarea><span class="hint">Markdown is supported. Keep the purpose and workflow independent of a particular harness.</span></label>
         <details class="advanced"><summary>Additional settings <span class="hint">Frontmatter</span></summary><p>Existing fields such as tools, model and skills are preserved. Each harness may interpret these differently.</p><label>Additional frontmatter<textarea class="mono" rows="7" bind:value={draft.metadata} placeholder="tools: Read, Grep, Glob"></textarea></label></details>
       </fieldset>
@@ -176,7 +159,7 @@
     <details class="discovery"><summary>Where these agents come from</summary><p>Project library: <code>{payload.directory || 'Not available until the library is read'}</code></p><p>Discovery checks project and user agent folders for Claude Code and Codex, user Pi and Muse folders, Crew role definitions, and declared Claude plugin folders. Only Markdown files with name and description frontmatter are editable here. Other native formats need an import adapter.</p><p>Folders found: {payload.scanned.join(', ') || 'None found'}.</p>{#each payload.notes as note}<p>{note}</p>{/each}</details>
     <section class="role-editor" aria-labelledby="role-editor-title"><header class="section-heading"><div><h2 id="role-editor-title">Crew role definitions</h2><p>Preview a one-line model or effort change to <code>crew/agents/{roleForm.role}.md</code>. Nothing is written; apply the suggested diff yourself.</p></div></header>
       <form class="role-form" onsubmit={previewRoleEdit}>
-        <label>Role<select bind:value={roleForm.role}>{#each ROLE_NAMES as name}<option value={name}>{name}</option>{/each}</select></label>
+        <label>Role<select bind:value={roleForm.role}>{#each SKILL_ROLES as name}<option value={name}>{name}</option>{/each}</select></label>
         <label>Field<select bind:value={roleForm.field}><option value="model">model</option><option value="effort">effort</option></select></label>
         <label>Tier override<input bind:value={roleForm.tier} placeholder="blank means the base value" /></label>
         <label>Value<input bind:value={roleForm.value} placeholder="blank clears a tier override" /></label>
@@ -230,7 +213,7 @@
   .agent-card { display:flex; flex-direction:column; gap:1rem; padding:1.15rem; background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); }.card-title { display:flex; align-items:center; gap:.8rem; }.agent-icon { display:grid; place-items:center; flex-shrink:0; width:2.5rem; height:2.5rem; border-radius:var(--radius-sm); color:var(--accent); background:var(--accent-surface); }.source { display:block; margin-top:.3rem; }.description { flex:1; font-size:.9rem; overflow-wrap:anywhere; }.agent-card footer { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:.5rem; border-top:1px solid var(--line); padding-top:1rem; }.file-name { font-size:.8rem; color:var(--muted); overflow-wrap:anywhere; }.validation { font-size:.85rem; color:var(--status-escalated); }.empty { grid-column:1/-1; border:1px dashed var(--line); padding:2rem; display:grid; justify-items:center; gap:.7rem; text-align:center; }.empty p { color:var(--muted); }
   .harnesses { display:grid; gap:1rem; }
   .harness-form,.harness-default { display:grid; gap:.8rem; margin:1rem 0; padding-top:1rem; border-top:1px solid var(--line); }.harness-default button { justify-self:start; }.harness-form .actions { justify-content:flex-end; }.harness-form select { font-size:1rem; }
-  .model-settings { display:grid; gap:1rem; padding:1.1rem; background:var(--accent-surface); border:1px solid var(--line); border-radius:var(--radius); }.model-settings h3 { margin-bottom:.4rem; }.model-settings select { font-size:1rem; }.harness-body { width:100%; }.harness-facts { display:grid; gap:1rem; margin:1rem 0; }.harness-facts dt { font-size:.8rem; color:var(--muted); margin-bottom:.4rem; }.harness-facts dd { margin:0; font-size:.9rem; overflow-wrap:anywhere; }.chips { display:flex; flex-wrap:wrap; gap:.4rem; }.harness-facts .chip { display:inline-block; padding:.25rem .5rem; border-radius:var(--radius-sm); color:var(--accent); background:var(--accent-surface); }.integration { border-top:1px solid var(--line); padding-top:.7rem; }.integration summary { font-size:.85rem; }.harness-grid .integration code { display:inline; }
+  .harness-body { width:100%; }.harness-facts { display:grid; gap:1rem; margin:1rem 0; }.harness-facts dt { font-size:.8rem; color:var(--muted); margin-bottom:.4rem; }.harness-facts dd { margin:0; font-size:.9rem; overflow-wrap:anywhere; }.chips { display:flex; flex-wrap:wrap; gap:.4rem; }.harness-facts .chip { display:inline-block; padding:.25rem .5rem; border-radius:var(--radius-sm); color:var(--accent); background:var(--accent-surface); }.integration { border-top:1px solid var(--line); padding-top:.7rem; }.integration summary { font-size:.85rem; }.harness-grid .integration code { display:inline; }
   .harnesses,.discovery,.advanced { border-top:1px solid var(--line); padding-top:1rem; }summary { cursor:pointer; font-weight:600; }summary .hint { font-weight:400; margin-inline-start:.7rem; }details p { margin:1rem 0; font-size:.85rem; color:var(--muted); }.harness-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; }.harness-grid article { display:flex; align-items:flex-start; gap:.7rem; padding:1rem; background:var(--panel); border:1px solid var(--line); border-radius:var(--radius-sm); }.harness-grid article>div { min-width:0; }.harness-grid span { font-size:.85rem; color:var(--muted); }.harness-grid .found { color:var(--status-ok); }.harness-grid code { display:block; margin-top:.5rem; font-size:.75rem; }code { overflow-wrap:anywhere; }
   .editor { display:grid; gap:1.5rem; }.eyebrow { color:var(--accent); font-size:.75rem; font-weight:650; }.badge { color:var(--accent); background:var(--accent-surface); border-radius:var(--radius-sm); padding:.35rem .65rem; font-size:.8rem; }.identity-fields { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.5fr); gap:1.5rem; }fieldset { border:0; margin:0; padding:0; min-width:0; display:grid; gap:1.5rem; }label { display:grid; gap:.5rem; font-size:.9rem; font-weight:600; }label .hint { font-weight:400; }input,textarea,select { box-sizing:border-box; width:100%; min-width:0; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--panel); color:var(--text); padding:.7rem; font:inherit; font-weight:400; }input[readonly] { background:var(--bg); }textarea { resize:vertical; line-height:1.6; }.mono { font-family:monospace; }.instructions textarea { min-height:18rem; }.editor-footer { border-top:1px solid var(--line); padding-top:1rem; display:flex; align-items:center; justify-content:space-between; gap:1rem; flex-wrap:wrap; }.editor-footer p { color:var(--muted); font-size:.8rem; max-width:28rem; }.notice { padding:1rem; background:var(--panel); border:1px solid var(--line); border-radius:var(--radius-sm); }.error { color:var(--status-escalated); }.success { border-inline-start:3px solid var(--status-ok); }.file-input { display:none; }.sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
   @media(max-width:900px) { .agent-grid { grid-template-columns:minmax(0,1fr); } }

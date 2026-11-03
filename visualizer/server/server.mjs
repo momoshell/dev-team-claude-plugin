@@ -12,10 +12,7 @@ import { proposeAgentEdit } from './agents-edit.mjs'
 import { AGENT_ROLES } from '../../crew/protocols.mjs'
 import { createAgentLibrary } from './agent-library.mjs'
 import { createSkillLibrary } from './skill-library.mjs'
-import { createArtificialAnalysisCatalog } from './model-catalog.mjs'
-import { createOpenRouterCatalog } from './openrouter-catalog.mjs'
-import { mergeModelDirectory } from './model-directory.mjs'
-import { saveArtificialAnalysisKey } from './local-env.mjs'
+
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const PROJECT_ROOT = resolve(ROOT, '..')
@@ -77,9 +74,6 @@ export const ROUTE_PARAMS = Object.freeze({
   '/api/skill-rules': [],
   '/api/agents': [],
   '/api/agents/propose': [],
-  '/api/skills/propose': [],
-  '/api/model-catalog': [],
-  '/api/model-catalog/key': [],
   '/api/health': [],
 })
 
@@ -339,20 +333,13 @@ export function startServer(options = {}) {
   const writeMode = pluginWriteMode({ pluginRoot:config.pluginRoot ?? PROJECT_ROOT, home:config.home ?? homedir() })
   const PLUGIN_WRITE_NOTICE = 'This plugin runs from an installed, version-pinned copy whose edits the next plugin update would overwrite.'
   const pluginWriteRefusal = { schema, error:PLUGIN_WRITE_NOTICE, reason:writeMode.reason, basis:writeMode.basis, plugin_root:writeMode.plugin_root }
-  config.envFile = resolve(config.envFile || join(PROJECT_ROOT, '.env.local'))
   const env = config.env ?? process.env
   const lean = config.lean || createLeanSource({ crewRoot: config.crewRoot, archiveRoot: config.leanArchiveRoot })
   const journal = config.journal || createJournalSource({ crewRoot: config.crewRoot, lean })
-  const modelCatalog = config.modelCatalog || createArtificialAnalysisCatalog({ apiKey: env.ARTIFICIAL_ANALYSIS_API_KEY, fetchImpl: config.fetchImpl })
   const agents = config.agents || config.agentsSource || createAgentsSource({ checkout: config.checkout, pluginRoot: PROJECT_ROOT, crewRoot: config.crewRoot })
   const agentLibrary = createAgentLibrary({ capabilitiesPath:config.capabilitiesPath ?? join(PROJECT_ROOT,'crew/capabilities.json'), checkout:config.checkout, home:config.home ?? homedir(), env, writable:writeMode.writable && pluginWriteTargetMode({target:join(config.checkout,'agents'),home:config.home ?? homedir()}).writable })
   const skillRoot = config.skillRoot ?? config.pluginRoot ?? PROJECT_ROOT
   const skillLibrary = createSkillLibrary({root:skillRoot,writable:writeMode.writable && pluginWriteTargetMode({target:join(skillRoot,'skills'),home:config.home ?? homedir()}).writable})
-  const openRouterCatalog = config.openRouterCatalog || createOpenRouterCatalog({ fetchImpl: config.fetchImpl })
-  const readModelCatalog = async () => {
-    const [openRouter, artificialAnalysis] = await Promise.all([openRouterCatalog.get(), modelCatalog.get()])
-    return mergeModelDirectory({ openRouter, artificialAnalysis })
-  }
   const server = createServer(async (req, res) => {
     // #544: the request target and the Host header are both attacker-chosen, and
     // an unparseable one threw ABOVE this handler's try — an unhandled rejection
@@ -505,73 +492,32 @@ export function startServer(options = {}) {
       }
       if (url.pathname === '/api/agents') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
-        const result = typeof agents.read === 'function' ? await agents.read() : { degraded: true, reasons: ['agents source is unavailable'], agents: [], skills: [], roles: [], prompts: [] }
-        return json(res, 200, { schema, ...result })
+        const result = typeof agents.read === 'function' ? await agents.read() : { degraded: true, reasons: ['agents source is unavailable'], error: 'agents source is unavailable', skills: [], matrix: [], role_evidence: {} }
+        return json(res, 200, { ...result, schema })
       }
-      if (url.pathname === '/api/agents/propose' || url.pathname === '/api/skills/propose') {
+      if (url.pathname === '/api/agents/propose') {
         if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
         const refusal = writeGuard(req)
         if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
         let input
         try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
         if (!input || typeof input !== 'object' || Array.isArray(input)) return json(res, 400, { schema, error: 'request body must be an object' })
-        const route = url.pathname === '/api/agents/propose' ? 'agents' : 'skills'
-        // One endpoint, two proposals: {role, tier, field, value} edits a crew/agents/<role>.md frontmatter
-        // field; {name, entry} proposes a coding_agents register entry. A body with `field` is the first.
-        if (route === 'agents' && Object.hasOwn(input, 'field')) {
-          const unknownEdit = Object.keys(input).find((key) => !['role', 'tier', 'field', 'value'].includes(key))
-          if (unknownEdit) return json(res, 400, { schema, error: `unknown field ${unknownEdit}` })
-          if (typeof input.role !== 'string' || typeof input.field !== 'string') return json(res, 400, { schema, error: 'role and field are required strings' })
-          if (!Object.hasOwn(input, 'value')) return json(res, 400, { schema, error: 'value is required: only an explicit null clears a tier override' })
-          const tier = input.tier ?? null, value = input.value ?? null
-          if (tier !== null && typeof tier !== 'string') return json(res, 400, { schema, error: 'tier must be a string or null' })
-          if (value !== null && typeof value !== 'string') return json(res, 400, { schema, error: 'value must be a string or null' })
-          let agentText = null, readError = null
-          const agentPath = join(config.checkout, 'crew/agents', `${input.role}.md`)
-          if (AGENT_ROLES.includes(input.role)) {
-            try { agentText = readFileSync(agentPath, 'utf8') } catch (err) { readError = `unable to read agent definition: ${err.code || err.message || 'unknown read error'}, at ${agentPath}` }
-          }
-          const edit = proposeAgentEdit({ agentText, agentPath, readError, role: input.role, tier, field: input.field, value })
-          const { afterText, ...editResponse } = edit
-          return json(res, 200, { schema, proposal: 'agent-edit', agent_path: `crew/agents/${input.role}.md`, applyable_with: 'git apply / patch -p1', ...editResponse })
+        if (!Object.hasOwn(input, 'field')) return json(res, 400, { schema, error: 'field is required: only a crew/agents frontmatter edit is proposed' })
+        const unknownEdit = Object.keys(input).find((key) => !['role', 'tier', 'field', 'value'].includes(key))
+        if (unknownEdit) return json(res, 400, { schema, error: `unknown field ${unknownEdit}` })
+        if (typeof input.role !== 'string' || typeof input.field !== 'string') return json(res, 400, { schema, error: 'role and field are required strings' })
+        if (!Object.hasOwn(input, 'value')) return json(res, 400, { schema, error: 'value is required: only an explicit null clears a tier override' })
+        const tier = input.tier ?? null, value = input.value ?? null
+        if (tier !== null && typeof tier !== 'string') return json(res, 400, { schema, error: 'tier must be a string or null' })
+        if (value !== null && typeof value !== 'string') return json(res, 400, { schema, error: 'value must be a string or null' })
+        let agentText = null, readError = null
+        const agentPath = join(config.checkout, 'crew/agents', `${input.role}.md`)
+        if (AGENT_ROLES.includes(input.role)) {
+          try { agentText = readFileSync(agentPath, 'utf8') } catch (err) { readError = `unable to read agent definition: ${err.code || err.message || 'unknown read error'}, at ${agentPath}` }
         }
-        const fields = route === 'agents' ? ['name', 'entry'] : ['role', 'skills']
-        const unknownFields = Object.keys(input).filter((field) => !fields.includes(field))
-        if (unknownFields.length) return json(res, 400, { schema, error: `unknown field ${unknownFields[0]}` })
-        if (route === 'agents' && (typeof input.name !== 'string' || !input.name.trim() || !input.entry || typeof input.entry !== 'object' || Array.isArray(input.entry))) return json(res, 400, { schema, error: 'name and entry object are required' })
-        if (route === 'skills' && (typeof input.role !== 'string' || !Array.isArray(input.skills))) return json(res, 400, { schema, error: 'role and skills array are required' })
-        let result
-        if (route === 'agents') result = await agents.proposeAgent(input)
-        else result = await agents.proposeSkills(input)
-        const { target_path, after_text, ...response } = result || { ok: false, diff: null, refusals: [{ code: 'source-unavailable', message: 'agents source returned no proposal' }] }
-        if (route === 'agents') {
-          return json(res, 200, { schema, proposal: 'agents', ...response })
-        }
-        return json(res, 200, { schema, proposal: 'skills', ...response })
-      }
-      if (url.pathname === '/api/model-catalog') {
-        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
-        return json(res, 200, { schema, ...await readModelCatalog() })
-      }
-      if (url.pathname === '/api/model-catalog/key') {
-        if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
-        const refusal = writeGuard(req)
-        if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
-        let input
-        try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
-        if (!input || typeof input !== 'object' || Array.isArray(input)) return json(res, 400, { schema, error: 'request body must be an object' })
-        try {
-          if (input.api_key === null) { modelCatalog.clearApiKey(); return json(res, 200, { schema, ...await readModelCatalog(), persisted:false }) }
-          if (input.persist !== undefined && typeof input.persist !== 'boolean') return json(res, 400, { schema, error:'persist must be a boolean' })
-          if (input.persist === true && !writeMode.writable) return json(res, 409, pluginWriteRefusal)
-          if (input.persist === true) {
-            const targetMode = pluginWriteTargetMode({target: config.envFile, home: config.home ?? homedir()})
-            if (!targetMode.writable) return json(res, 409, {schema, error: PLUGIN_WRITE_NOTICE, reason: targetMode.reason, basis: targetMode.basis, plugin_root: targetMode.plugin_root})
-            saveArtificialAnalysisKey(config.envFile, input.api_key)
-            modelCatalog.setPersistentApiKey(input.api_key)
-          } else modelCatalog.setApiKey(input.api_key)
-        } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid api_key' }) }
-        return json(res, 200, { schema, ...await readModelCatalog(), persisted:input.persist === true })
+        const edit = proposeAgentEdit({ agentText, agentPath, readError, role: input.role, tier, field: input.field, value })
+        const { afterText, ...editResponse } = edit
+        return json(res, 200, { schema, proposal: 'agent-edit', agent_path: `crew/agents/${input.role}.md`, applyable_with: 'git apply / patch -p1', ...editResponse })
       }
       if (url.pathname === '/api/health') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
@@ -593,7 +539,7 @@ export function startServer(options = {}) {
   return { server, agents }
 }
 
-const SERVER_WRITES = ['project agent definition files when Save agent is explicitly requested', 'harness execution preferences when Save harness settings is explicitly requested', 'skill definitions and selection rules when explicitly saved', 'Artificial Analysis key in the project .env.local when explicitly requested']
+const SERVER_WRITES = ['project agent definition files when Save agent is explicitly requested', 'harness execution preferences when Save harness settings is explicitly requested', 'skill definitions and selection rules when explicitly saved']
 
 // For the dist fence above: a path that cannot be realpathed is compared as written.
 function realpathOr(path) {

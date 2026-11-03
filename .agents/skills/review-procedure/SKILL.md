@@ -11,9 +11,11 @@ restates it.
 
 1. Read the plan at the prompt's Plan path, then `git diff` / `git status`, then
    every changed file in full.
-2. Read the `## Builder report`. The loop runs the proof and suite, in parallel
-   with this review on a build lane. Run no tests yourself and never treat a
-   reported pass as evidence.
+2. Read the `## Builder report`. The loop proved the builder's named tests before
+   this review started, on every tier. Only the suite runs beside this review,
+   and only on a build lane; on a judge lane it ran green first, and on a finish
+   lane it runs after. Run no tests yourself and never treat a reported pass as
+   evidence.
 3. Load the guidelines: run `scripts/load-guidelines.mjs` from THIS skill's
    directory — inside this plugin's own checkout that is
    `node .agents/skills/review-procedure/scripts/load-guidelines.mjs`, and from

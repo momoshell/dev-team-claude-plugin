@@ -28,10 +28,11 @@ function imports() {
   }
   return result
 }
-function index() {
+function indexRows() {
   const section = read('docs/adr/README.md').split('## Index\n')[1].split('\n## ')[0]
-  return new Map([...section.matchAll(/^\| (\d{3}) \|.*? \| (.*?) \| .*? \|$/gm)].map(([, id, status]) => [id, status]))
+  return [...section.matchAll(/^\| (\d{3}) \|.*? \| (.*?) \| .*? \|$/gm)].map(([, id, status]) => [id, status])
 }
+const index = () => new Map(indexRows())
 const plain = value => value.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/[*_`]/g, '').trim().toLowerCase()
 const target = value => plain(value).match(/\bby\s+(adr-\d{3})\b/)?.[1]
 
@@ -181,6 +182,24 @@ test('DM10: lane prose names the current seats, loop and arms', () => {
   const advisor = crew.match(/^\| Advisor \|.*$/m)[0]
   assert.ok(advisor.includes('`crew/agents/builder.md`'))
   assert.equal((advisor.match(/adr-047-the-advisor-is-a-roster-seat\.md/g) ?? []).length, 1)
+})
+
+// MUTATION: DM11 restores row 030's status to "ratified 2026-08-14".
+test('DM11: ADR-055 supersedes 030, 038, 048 and 049 in the index', () => {
+  const rows = index()
+  for (const id of ['030', '038', '048', '049']) {
+    assert.match(plain(rows.get(id) ?? ''), /^superseded\b/, id)
+    assert.equal(target(rows.get(id)), 'adr-055', id)
+    const file = readdirSync(resolve(root, 'docs/adr')).find(name => name.startsWith(`adr-${id}-`))
+    assert.match(plain(read(`docs/adr/${file}`).match(/^\*\*Status:\*\*(.*)$/m)?.[1] ?? ''), /^superseded by adr-055\b/, file)
+  }
+})
+
+// MUTATION: DM12 moves the 042 row back after 055.
+test('DM12: index rows are in ADR number order', () => {
+  const ids = indexRows().map(([id]) => id)
+  assert.ok(ids.length)
+  assert.deepEqual(ids, [...ids].sort((a, b) => Number(a) - Number(b)))
 })
 
 test('ancillary prose describes the current runtime and marks history', () => {

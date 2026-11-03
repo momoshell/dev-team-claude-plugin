@@ -1,6 +1,6 @@
 # ADR-038 — The protected floor forces proof on the changed surface, not plan-time adversary rounds
 
-**Status:** ratified 2026-09-01 · **Issue:** none yet (measured in-session, 2026-09-01) · **Owner:** operator
+**Status:** superseded by ADR-055 · was ratified 2026-09-01 · **Issue:** none yet (measured in-session, 2026-09-01) · **Owner:** operator
 
 ## Context
 

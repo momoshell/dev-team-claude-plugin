@@ -1,7 +1,6 @@
 # ADR-055 — The planner defines the work, code checks red and green, the reviewer judges
 
-**Status:** *proposed* 2026-11-02, operator direction ("planner model should define the work, and brief should take
-whats in github task or issue, clean it up and prepare for work nothing more") · **Owner:** operator ·
+**Status:** builder (§3) and planner (§2) parts ratified 2026-11-03 by operator decision on `~/.crew/reviews/adr-055-readout-2026-11-03.md`; loops (§6) stays proposed until about 10 lanes run on b1514's round budgets · **Owner:** operator ·
 **Relates to:** ADR-052 (P1 brief, P3 acceptance gate, §6 the loop), ADR-053 (rejected here), ADR-054 (amended
 here), ADR-038 (superseded here), ADR-030 (superseded here), ADR-051 (finish shape), ADR-048 and ADR-049 (superseded
 here)
@@ -291,12 +290,20 @@ reports the lanes it has, with that denominator.
   named per lane, tests red on the old source and green on the build out of tests named, and builder tokens. Lanes
   differ in size from the corpus, so the share is compared, not raw lines. The §3 rules stay if the share falls. The
   `code-less` arms comparison (today's, the v5-based, none) is not run; v5 replaces today's skill as §10 states.
+  **Measured 2026-11-03** (`~/.crew/reviews/adr-055-readout-2026-11-03.md`): test share was 1205 of 1754 lines,
+  69% over 10 lanes, and 974 of 1505, 65% over 8 lanes with mechanical and deletion-dominant lanes removed,
+  against the corpus 804 of 1196, 67% over 18 lanes. First proof was red on old and green on build for 45 of 46
+  named tests over 9 lanes.
 - **Planner (first 10 lanes):** tests named per lane, plans the reviewer or lead sent back to the planner, and builder
   `insufficient` returns. The blind plan pass against the 11-01 control (11 of 42) is dropped: that review scored the
   gate, which §8 removes.
+  **Measured 2026-11-03** (`~/.crew/reviews/adr-055-readout-2026-11-03.md`): the median was 6 tests named over
+  9 non-mechanical lanes; there were 3 plan re-runs and 3 builder `insufficient` returns in 2 of 10 lanes.
 - **Loops (replaces ADR-054 §3):** per tier, total wall time, rounds, suite-repair turns, lead consults, operator
   stops and defects found after merge (a later fix commit on main whose blame lands on the lane's lines). The build
   loop is not adopted on the ADR-053 replay, since ADR-053 is rejected.
+  **Not yet measured:** the first 10 lanes ran on a changing loop. Measurement waits on about 10 lanes run on
+  b1514's round budgets.
 
 Passive data from the wave lanes, which ran while the contract changed and so do not count toward the 10: b1485 to
 b1489 (PRs 2127 and 2129 to 2132) added 782 test and 490 source lines, a test share of 61%.

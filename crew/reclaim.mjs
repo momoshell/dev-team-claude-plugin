@@ -346,5 +346,3 @@ function reservationEngine({ dir, phases, evidencePolicy, deps, lock }) {
   }
   return { reserve, advance, clear, probeEvidence }
 }
-
-export const SLOT_ENV = Object.freeze({ capacity: 'CREW_SUITE_SLOTS' })

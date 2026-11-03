@@ -23,10 +23,6 @@ export function seatCommandPath(crewDir, role, root) {
   // Resolved, so the opened FIFO and its fifo-path record are absolute even under a relative TMPDIR.
   return resolve(root, 'crew-rpc', key, role, SEAT_COMMAND_FILE)
 }
-// Legacy command path inside the crew dir.
-export function inCrewSeatCommandPath(crewDir, role) {
-  return join(crewDir, 'rpc', role, SEAT_COMMAND_FILE)
-}
 // A shared tmpdir may contain a co-tenant's node that mkfifo leaves in place.
 // Require an owned, private crew-rpc directory before using a command channel.
 export function seatCommandRootPrivate(root, uid = process.getuid()) {

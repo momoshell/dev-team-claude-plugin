@@ -347,11 +347,15 @@ export async function runLoop(spec, deps = {}) {
       // The lead is never consulted about itself: a spent bound asks the operator about the held issue.
       if (role === 'lead') {
         if (held.envelope) return { halt: await stop('lead-refused', held) }
-        const { role, reason, envelope } = given[0]
+        // The question names the blocker in front of the lead now: the held return, else the open feedback; an
+        // earlier return and an earlier lead decision are labelled as earlier, never as this blocker's.
+        const { role, reason, envelope, held: current = null, feedback: open = [] } = given[0]
+        const findings = (Array.isArray(open) ? open : []).map((item) => item?.summary).filter(text)
+        const blocker = current?.summary || findings.join('; ') || (envelope?.summary ? `last return: ${envelope.summary}` : 'no envelope')
         const lead = last.lead ?? null
-        const decision = lead?.details?.decision ? [lead.details.decision, lead.details.target, lead.summary].filter(Boolean).join(' ') : 'nothing'
-        const question = oneLine(`How should ${role} resolve ${reason}: ${envelope?.summary || 'no envelope'}? Lead: ${decision}.`)
-        return { halt: await stop('lead-escalated', { role, reason, envelope, lead, bound: 'lead', question }) }
+        const earlier = lead?.details?.decision ? ` Earlier lead decision: ${[lead.details.decision, lead.details.target, lead.summary].filter(Boolean).join(' ')}.` : ''
+        const question = oneLine(`How should ${role} resolve ${reason}: ${blocker}?${earlier}`)
+        return { halt: await stop('lead-escalated', { role, reason, envelope, feedback: open, lead, bound: 'lead', question }) }
       }
       if (held.envelope) {
         const { status, details } = held.envelope
@@ -399,7 +403,7 @@ export async function runLoop(spec, deps = {}) {
     if (!seats.lead) return { halt: await stop('lead-unavailable', { role, ...held }) }
     for (;;) {
       const lastConsult = rounds.lead + 1 >= (seats.lead.rounds ?? DEFAULT_ROUNDS)
-      const asked = await stage('lead', () => seatTurn('lead', [{ role, reason: held.reason, envelope: held.envelope ?? last[role] ?? null, feedback, last: lastConsult }]))
+      const asked = await stage('lead', () => seatTurn('lead', [{ role, reason: held.reason, envelope: held.envelope ?? last[role] ?? null, held: held.envelope ?? null, feedback, last: lastConsult }]))
       if (asked.halt) return asked
       const { decision, target, question } = asked.envelope.details
       if (decision === 'escalate') return { halt: await stop('lead-escalated', { role, ...held, question }) }

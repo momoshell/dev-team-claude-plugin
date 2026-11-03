@@ -509,7 +509,10 @@ test("the lead's last consult is marked last, and a spent lead bound stops for t
   assert.deepEqual(later.requests.filter((r) => r.role === 'lead').map((r) => r.feedback[0].last), [false, true])
   const observation = later.rows.findLast((r) => r.event === 'verdict').observation
   assert.equal(observation.bound, 'lead'); assert.equal(observation.role, 'builder'); assert.equal(observation.reason, 'round-bound')
-  for (const text of ['builder', 'round-bound', 'built R1', 'bounce', 'keep fixing R1']) assert.ok(observation.question.includes(text))
+  // MUTATION: build the question from the earlier builder return and the review finding never reaches the operator.
+  for (const text of ['builder', 'round-bound', 'Fix the defect', 'Earlier lead decision: bounce', 'keep fixing R1']) assert.ok(observation.question.includes(text), text)
+  assert.ok(!observation.question.includes('built R1'), observation.question)
+  assert.deepEqual(observation.feedback.map((item) => item.summary).filter(Boolean), ['Fix the defect'])
   assert.ok(!later.rows.some((r) => r.event === 'verdict' && r.reason === 'round-bound'))
 
   const reask = fakes({ bounds: { lead: 1 }, edit: (v) => {

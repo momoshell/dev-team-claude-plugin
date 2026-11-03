@@ -1,6 +1,6 @@
 # ADR-030: Acceptance authorship — the seat that plans may draft the gate, but only a proof may accept it
 
-**Status:** RATIFIED 2026-08-14 · **Amended:** 2026-08-19 (§10 — gate custody, #334/PR #348); 2026-08-20 (§11 — module rename, #327); 2026-08-20 (§10 anchors re-derived, #406) · **Source:** issue #166 (from #142) · **Evidence:** #142, PR #162 (#144), #153/PR #154, #130/PR #156, PR #163/#164
+**Status:** superseded by ADR-055 · was ratified 2026-08-14 · **Amended:** 2026-08-19 (§10 — gate custody, #334/PR #348); 2026-08-20 (§11 — module rename, #327); 2026-08-20 (§10 anchors re-derived, #406) · **Source:** issue #166 (from #142) · **Evidence:** #142, PR #162 (#144), #153/PR #154, #130/PR #156, PR #163/#164
 
 Ratified with three amendments to the proposal, each recorded inline at the
 decision it changes and summarised in §9: Decision 2 adopts in **two stages**

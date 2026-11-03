@@ -1,6 +1,6 @@
 # ADR-048 — Ordered build steps: a plan's chunk program can run inside one lane, one builder assignment per step
 
-**Status:** *ratified* 2026-09-27, operator decision (answers in "Operator decisions" below) · **Owner:** operator · **Relates to:** ADR-030 (gate-first
+**Status:** superseded by ADR-055 · was *ratified* 2026-09-27, operator decision (answers in "Operator decisions" below) · **Owner:** operator · **Relates to:** ADR-030 (gate-first
 acceptance), ADR-035 (execution shape is its own axis), ADR-044 (a new executor path is hand-written and named)
 
 The idea comes from Kiro's spec tasks. There, `tasks.md` is a checklist, each task cites the requirements it answers

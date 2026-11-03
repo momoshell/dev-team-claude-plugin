@@ -1,6 +1,6 @@
 # ADR-049 — Builder edits: answer a failed edit with the file's own text before adding a new edit tool
 
-**Status:** *ratified* 2026-09-29, operator decision (answers in "Operator decisions" below) · **Owner:**
+**Status:** superseded by ADR-055 · was *ratified* 2026-09-29, operator decision (answers in "Operator decisions" below) · **Owner:**
 operator · **Relates to:** ADR-045 (scope is context, not enforcement), ADR-046 (a policy decision is a ledger fact),
 ADR-048 (ordered build steps)
 

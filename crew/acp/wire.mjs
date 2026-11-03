@@ -37,8 +37,8 @@ export function seatCommandRootPrivate(root, uid = process.getuid()) {
   } catch { return false }
 }
 
-// Do not use node:readline here. captures/pi-b5-readline-trap.txt has two
-// LF-delimited records, while readline incorrectly exposes three around U+2028.
+// Do not use node:readline here: it also splits on U+2028, which is not
+// an LF frame delimiter.
 export function splitFrames(buffer) {
   const input = Buffer.isBuffer(buffer) ? buffer : Buffer.from(String(buffer ?? ''), 'utf8')
   const lines = []

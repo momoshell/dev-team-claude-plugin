@@ -605,6 +605,7 @@ test('E1', () => {
         writeSync: () => {},
         closeSync: () => {},
         kill: () => true,
+        spawnSync: () => ({ status: 0, stdout: '901 S\n' }),
         now: () => clock++,
         sleep: () => {},
         log: () => {},
@@ -834,7 +835,7 @@ test('W3 real FIFO child delivers 70KB prompt and is always reaped', () => {
   let out
   try {
     writeFileSync(agent, `import readline from 'node:readline'; import {appendFileSync} from 'node:fs'; const stream=${JSON.stringify(join(acpRoot, 'builder', 'stream.jsonl'))}; for await (const line of readline.createInterface({input:process.stdin})) { const f=JSON.parse(line); appendFileSync(stream, JSON.stringify({jsonrpc:'2.0',id:f.id,result:f.method==='initialize'?{protocolVersion:1}:f.method==='session/new'?{sessionId:'s'}:{stopReason:'end_turn'}})+'\\n') }`)
-    writeFileSync(client, `import {acpClient} from ${JSON.stringify(pathToFileURL(join(REGISTER_ROOT, 'crew/acp-client.mjs')).href)}; const c=acpClient({launch:{bin:process.execPath,args:[${JSON.stringify(agent)}]},dir:${JSON.stringify(acpRoot)},cwd:${JSON.stringify(root)},deps:{seatCommandRoot:${JSON.stringify(join(root, 'seat-runtime'))}}});try{c.start();c.initialize();c.newSession();const id=c.beginPrompt([{type:'text',text:'x'.repeat(70000)}]);let r=null;const deadline=Date.now()+15000;while(!r&&Date.now()<deadline){r=c.pollPrompt(id);if(!r)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,20)}if(r?.stopReason!=='end_turn')process.exitCode=2}catch(e){console.error(e);process.exitCode=3}finally{c.close()}`)
+    writeFileSync(client, `import {acpClient} from ${JSON.stringify(pathToFileURL(join(REGISTER_ROOT, 'crew/acp-client.mjs')).href)}; let term=false,killed=false,skip=0; const c=acpClient({launch:{bin:process.execPath,args:[${JSON.stringify(agent)}]},dir:${JSON.stringify(acpRoot)},cwd:${JSON.stringify(root)},deps:{seatCommandRoot:${JSON.stringify(join(root, 'seat-runtime'))},kill:(p,s)=>{if(s==='SIGTERM')term=true;if(s==='SIGKILL')killed=true;return process.kill(p,s)},now:()=>Date.now()+skip,sleep:(ms)=>{Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,ms);if(term&&!killed)skip+=5000}}});try{c.start();c.initialize();c.newSession();const id=c.beginPrompt([{type:'text',text:'x'.repeat(70000)}]);let r=null;const deadline=Date.now()+15000;while(!r&&Date.now()<deadline){r=c.pollPrompt(id);if(!r)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,20)}if(r?.stopReason!=='end_turn')process.exitCode=2}catch(e){console.error(e);process.exitCode=3}finally{c.close()}`)
     trackProcessGroupFile(join(acpRoot, 'builder', 'pgid'))
     out = spawnSync(process.execPath, [client], { timeout: 20000, encoding: 'utf8' })
     assert.equal(out.status, 0, `real FIFO child status=${out.status} signal=${out.signal}; stderr=${out.stderr}`)
@@ -914,6 +915,7 @@ test('RV1-1', () => {
         writeSync: () => {},
         closeSync: () => {},
         kill: () => true,
+        spawnSync: () => ({ status: 0, stdout: '901 S\n' }),
         now: () => clock++,
         sleep: () => {},
         log: () => {},
@@ -995,6 +997,7 @@ test('BZ1 — post-SIGKILL polling and the zombie census each prove death', () =
 })
 
 test('BZ1 real-process witness — a TERM-ignoring sleep proves dead after SIGKILL', () => {
+  let term = false, killed = false, skip = 0
   const root = scratchDir('acp-bz1-real-')
   try {
     const acpRoot = join(root, 'acp')
@@ -1003,10 +1006,16 @@ test('BZ1 real-process witness — a TERM-ignoring sleep proves dead after SIGKI
       dir: acpRoot,
       cwd: root,
       role: 'builder',
-      deps: { pid: process.pid, log: () => {}, seatCommandRoot: join(root, 'seat-runtime') },
+      deps: {
+        pid: process.pid, log: () => {}, seatCommandRoot: join(root, 'seat-runtime'),
+        kill: (p, s) => { if (s === 'SIGTERM') term = true; if (s === 'SIGKILL') killed = true; return process.kill(p, s) },
+        now: () => Date.now() + skip,
+        sleep: (ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); if (term && !killed) skip += 5000 },
+      },
     })
     api.start()
     const result = api.close()
+    assert.equal(killed, true)
     assert.equal(result.outcome, 'proven')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })

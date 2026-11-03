@@ -28,7 +28,7 @@ function fixture() {
   writeFileSync(spaced, 'spaced\n'.repeat(351))
   writeFileSync(dashName, 'dash\n'.repeat(351))
   writeFileSync(plusName, 'plus\n'.repeat(351))
-  writeFileSync(join(root, 'journal.jsonl'), '')
+  writeFileSync(join(taskDir, 'journal.jsonl'), '')
   return { root, taskDir, large, ranged, edge, noNewline, quotedPipe, escapedPipe, spaced, dashName, plusName }
 }
 
@@ -61,6 +61,14 @@ function refusal(result, path, lineCount = 351) {
   assert.match(result.reason, /offset/)
   assert.match(result.reason, /limit/)
 }
+
+// MUTATION: restore the codemode branch in onToolResult
+test('a codemode-shaped result and a nested read pass through the read gate as plain tool calls', () => {
+  const f = fixture()
+  const gate = gateFor(f)
+  assert.equal(gate.onToolResult({ toolName: 'codemode', toolCallId: 'parent', content: [], details: { calls: [{ id: 'child', name: 'read', status: 'error' }] } }), undefined)
+  assert.equal(gate.onToolCall({ toolName: 'read', toolCallId: 'child', parentToolCallId: 'parent', input: { path: f.large } }, { cwd: f.root })?.block, true)
+})
 
 test('oversized whole reads and direct commands refuse without changing inputs', () => {
   const f = fixture()
@@ -242,7 +250,7 @@ test('missing files, injected failures, and throwing recorders always allow', ()
   const f = fixture()
   const missing = gateFor(f)
   assert.equal(call(missing, 'read', { path: join(f.root, 'missing.txt') }, f.root), undefined)
-  const rows = readFileSync(join(f.root, 'journal.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))
+  const rows = readFileSync(join(f.taskDir, 'journal.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))
   assert.equal(rows.length, 1)
   assert.match(rows[0].read_gate_failure.reason, /ENOENT|no such file/i)
 
@@ -691,76 +699,6 @@ test('readgate is zero-dependency, erasable, and exposes three lifecycle registr
   })
 })
 
-test('CM1 nested whole read refusal is softened and redacted', () => {
-  const f = fixture(), gate = gateFor(f)
-  const top = call(gate, 'read', { path: f.large }, f.root)
-  const child = gate.onToolCall({ toolName: 'read', toolCallId: 'cm1-read', parentToolCallId: 'cm1', input: { path: f.large } }, { cwd: f.root })
-  assert.equal(child, undefined)
-  const result = gate.onToolResult({ toolName: 'read', toolCallId: 'cm1-read', parentToolCallId: 'cm1', input: { path: f.large }, content: [{ type: 'text', text: 'SECRET-FILE-CONTENT' }] }, { cwd: f.root })
-  assert.equal(result.isError, false)
-  assert.equal(result.content[0].text, top.reason)
-  assert.equal(result.content[0].text.includes('SECRET-FILE-CONTENT'), false)
-  for (const command of ['cat', 'head', 'tail']) assert.equal(call(gate, 'bash', { command: `${command} '${f.large}'` }, f.root)?.block, true)
-})
-
-test('CM2 nested repeated range refusal is softened even on read error', () => {
-  const f = fixture(), gate = gateFor(f), input = { path: f.ranged, offset: 1, limit: 20 }
-  call(gate, 'read', input, f.root, 'cm2-first')
-  gate.onToolResult({ toolName: 'read', toolCallId: 'cm2-first', input, content: [{ type: 'text', text: 'range content' }] })
-  const top = call(gate, 'read', input, f.root, 'cm2-top')
-  assert.equal(top.block, true)
-  gate.onToolCall({ toolName: 'read', toolCallId: 'cm2-child', parentToolCallId: 'cm2', input }, { cwd: f.root })
-  const result = gate.onToolResult({ toolName: 'read', toolCallId: 'cm2-child', parentToolCallId: 'cm2', input, isError: true, content: [{ type: 'text', text: 'SECRET-FILE-CONTENT' }] })
-  assert.equal(result.isError, false)
-  assert.equal(result.content[0].text, top.reason)
-  assert.match(result.content[0].text, /Use grep/)
-  assert.equal(result.content[0].text.includes('SECRET-FILE-CONTENT'), false)
-})
-
-test('CM3 codemode annotates unsuccessful inner calls and fails open on malformed data', () => {
-  const f = fixture(), rows = [], gate = gateFor(f, { recordFailure: (row) => rows.push(row) })
-  const original = [{ type: 'text', text: 'Script completed' }]
-  const structuredContent = { result: 'preserved' }
-  const result = gate.onToolResult({ toolName: 'codemode', toolCallId: 'cm3', content: original, structuredContent, details: { calls: [{ id: 'a', name: 'bash', status: 'error' }, { id: 'b', name: 'edit', status: 'cancelled' }, { id: 'c', name: 'read', status: 'ok' }] } })
-  assert.equal(result.content[0].text, '[crew] 2 of 3 inner calls did not succeed: bash (error), edit (cancelled)')
-  assert.deepEqual(result.content.slice(1), original)
-  assert.deepEqual(result.structuredContent, structuredContent)
-  assert.equal(result.isError, undefined)
-  const cutOff = gate.onToolResult({ toolName: 'codemode', toolCallId: 'cm-cutoff', content: original, details: { calls: [{ id: 'cm/1', name: 'bash', status: 'ok' }, { id: 'cm-cutoff/?', name: 'bash', status: 'cancelled' }, { id: 'cm-cutoff/?', name: 'bash', status: 'cancelled' }] } })
-  assert.equal(cutOff.content[0].text, '[crew] 2 of 3 inner calls did not succeed: bash (cancelled), bash (cancelled)')
-  assert.deepEqual(cutOff.content.slice(1), original)
-  assert.equal(rows.length, 0)
-  for (const details of [undefined, { calls: {} }, { calls: [null] }, { calls: [{ id: 'x', name: 'x', status: 'unknown' }] }]) assert.equal(gate.onToolResult({ toolName: 'codemode', toolCallId: 'bad', content: original, details }), undefined)
-  assert.equal(gate.onToolResult({ toolName: 'codemode', toolCallId: 'nested', parentToolCallId: 'outer', content: original, details: { calls: [] } }), undefined)
-  assert.equal(rows.length, 4)
-  const duplicate = gate.onToolResult({ toolName: 'codemode', toolCallId: 'duplicate', content: original, details: { calls: [{ id: 'real/1', name: 'bash', status: 'error' }, { id: 'real/1', name: 'bash', status: 'cancelled' }] } })
-  assert.equal(duplicate, undefined)
-  assert.equal(rows.length, 5)
-  const throws = gateFor(f, { recordFailure: () => { throw new Error('logging failed') } })
-  assert.equal(throws.onToolResult({ toolName: 'codemode', toolCallId: 'bad', content: original, details: { calls: {} } }), undefined)
-  assert.equal(rows.length, 5)
-})
-
-test('CM4 codemode attaches parent refusals once and isolates parent state', () => {
-  const f = fixture(), rows = [], gate = gateFor(f, { recordFailure: (row) => rows.push(row) })
-  gate.onToolCall({ toolName: 'read', toolCallId: 'cm/1', parentToolCallId: 'cm', input: { path: f.large } }, { cwd: f.root })
-  gate.onToolResult({ toolName: 'read', toolCallId: 'cm/1', parentToolCallId: 'cm', input: { path: f.large }, content: [{ type: 'text', text: 'secret' }] }, { cwd: f.root })
-  const result = gate.onToolResult({ toolName: 'codemode', toolCallId: 'cm', content: [{ type: 'text', text: 'done' }], details: { calls: [{ id: 'cm/?', name: 'read', status: 'cancelled' }, { id: 'cm/2', name: 'bash', status: 'error' }] } })
-  assert.equal(result.content[0].text, '[crew] 2 of 2 inner calls did not succeed: read (cancelled), bash (error)')
-  assert.equal(rows.length, 0)
-  assert.equal(gate.onToolResult({ toolName: 'codemode', toolCallId: 'cm', content: [], details: { calls: [{ id: 'cm/1', name: 'read', status: 'ok' }] } }), undefined)
-
-  gate.onToolCall({ toolName: 'read', toolCallId: 'c/1', parentToolCallId: 'c', input: { path: f.large } }, { cwd: f.root })
-  gate.onToolResult({ toolName: 'read', toolCallId: 'c/1', parentToolCallId: 'c', input: { path: f.large }, content: [{ type: 'text', text: 'secret' }] }, { cwd: f.root })
-  assert.equal(gate.onToolResult({ toolName: 'codemode', toolCallId: 'c', content: [], details: { calls: {} } }), undefined)
-  assert.equal(gate.onToolResult({ toolName: 'codemode', toolCallId: 'c', content: [], details: { calls: [{ id: 'c/1', name: 'read', status: 'ok' }] } }), undefined)
-  assert.equal(rows.length, 1)
-  for (const parent of ['p', 'q']) gate.onToolCall({ toolName: 'read', toolCallId: `${parent}/1`, parentToolCallId: parent, input: { path: f.large } }, { cwd: f.root })
-  assert.equal(gate.onToolResult({ toolName: 'codemode', toolCallId: 'p', content: [], details: { calls: [{ id: 'p/1', name: 'read', status: 'ok' }] } }).content[0].text, '[crew] 1 of 1 inner calls did not succeed: read (refused by read gate)')
-  assert.equal(gate.onToolResult({ toolName: 'read', toolCallId: 'q/1', parentToolCallId: 'q', input: { path: f.large }, content: [{ type: 'text', text: 'secret' }] }, { cwd: f.root }).content[0].text.includes('secret'), false)
-  assert.equal(gate.onToolResult({ toolName: 'codemode', toolCallId: 'q', content: [], details: { calls: [{ id: 'q/1', name: 'read', status: 'ok' }] } }).content[0].text, '[crew] 1 of 1 inner calls did not succeed: read (refused by read gate)')
-})
-
 function byteFixture({ lines = 300, width = 100, env = {} } = {}) {
   const f = fixture()
   const path = join(f.root, `bytes-${lines}-${width}.txt`)
@@ -980,130 +918,6 @@ test('errors and mixed content are not byte-capped', () => {
   assert.equal(d.gate.onToolResult({ toolName: 'read', toolCallId: 'mixed-content', input, isError: false, content: [{ type: 'text', text: d.text }, { type: 'image', data: 'x' }] }), undefined)
 })
 
-test('offset greater than one advances by delivered lines and head or tail remain unchanged', () => {
-  const d = byteFixture({ lines: 300, width: 100 })
-  const { output } = resultFor(d, { offset: 20, limit: 300, id: 'offset-20' })
-  const prefix = output.slice(0, output.indexOf(readGateMarker))
-  const delivered = prefix.split('\n').length - 1
-  assert.match(output.slice(output.indexOf(readGateMarker)), new RegExp(`offset: ${20 + delivered}`))
-  assert.equal(d.gate.onToolCall({ toolName: 'read', toolCallId: 'offset-next', input: { path: d.path, offset: 20 + delivered, limit: 300 } }, { cwd: d.root }), undefined)
-  assert.equal(call(d.gate, 'bash', { command: `head '${d.path}'` }, d.root), undefined)
-  assert.equal(call(d.gate, 'bash', { command: `tail '${d.path}'` }, d.root), undefined)
-})
-
-function codemodeFixture({ text, env = {}, options = {}, path = 'spill ü "quoted".txt' }) {
-  const f = fixture(), spill = join(f.root, path)
-  writeFileSync(spill, text)
-  const gate = gateFor(f, { env, ...options })
-  const header = { type: 'text', text: 'Script completed\nWall time: 0.1 seconds\nOutput:\n' }
-  const image = { type: 'image', data: 'image-data', mimeType: 'image/png' }
-  const event = { toolName: 'codemode', toolCallId: 'spill-call', content: [header, { type: 'text', text: 'old spill' }, image], structuredContent: { preserved: 42 }, details: { calls: [{ id: 'spill-call/1', name: 'read', status: 'ok' }], fullOutputPath: spill } }
-  return { ...f, spill, text, gate, header, image, event }
-}
-
-const codemodeLines = Array.from({ length: 800 }, (_, i) => String(i + 1).padStart(4, '0') + '|' + 'é'.repeat(45) + '\n')
-const codemodeNotice = (path, cap = 24576) => `\n\n[codemode read gate: ${path}; total 800 lines, 76800 UTF-8 bytes; delivered head 1-128, tail 673-800; cap ${cap}. Continue with read { path: ${JSON.stringify(path)}, offset: 129, limit: 544 } or targeted grep.]`
-
-test('CC1', () => {
-  // MUTATION: zero tailBudget; the expected tail bytes disappear.
-  const d = codemodeFixture({ text: codemodeLines.join('') })
-  const before = JSON.stringify(d.event)
-  const result = d.gate.onToolResult(d.event, { cwd: d.root })
-  assert.equal(result.content[1].text, codemodeLines.slice(0, 128).join('') + codemodeLines.slice(672).join('') + codemodeNotice(d.spill))
-  assert.equal(Buffer.byteLength(result.content[1].text.slice(0, result.content[1].text.indexOf('\n\n[codemode read gate: '))), 24576)
-  assert.equal(JSON.stringify(d.event), before)
-
-  const uneven = 'a\r\n' + 'é'.repeat(20) + '\r\n' + 'c'.repeat(80) + '\r\n' + 'last'
-  const tiny = codemodeFixture({ text: uneven, env: { CREW_READGATE_MAX_BYTES: '20' } })
-  const tinyResult = tiny.gate.onToolResult(tiny.event, { cwd: tiny.root })
-  assert.equal(tinyResult.content[1].text, 'a\r\nlast\n\n[codemode read gate: ' + tiny.spill + '; total 4 lines, 131 UTF-8 bytes; delivered head 1-1, tail 4-4; cap 20. Continue with read { path: ' + JSON.stringify(tiny.spill) + ', offset: 2, limit: 2 } or targeted grep.]')
-
-  const endpoints = codemodeFixture({ text: 'x'.repeat(20) + '\n' + 'middle\n' + 'y'.repeat(20), env: { CREW_READGATE_MAX_BYTES: '10' } })
-  const endpointResult = endpoints.gate.onToolResult(endpoints.event, { cwd: endpoints.root })
-  assert.equal(endpointResult.content[1].text, '\n\n[codemode read gate: ' + endpoints.spill + '; total 3 lines, 48 UTF-8 bytes; delivered head none, tail none; cap 10. Continue with read { path: ' + JSON.stringify(endpoints.spill) + ', offset: 1, limit: 3 } or targeted grep.]')
-})
-
-test('CC2', () => {
-  // MUTATION: advance gapStart; the exact notice must change.
-  const d = codemodeFixture({ text: codemodeLines.join('') })
-  const result = d.gate.onToolResult(d.event, { cwd: d.root })
-  assert.equal(result.content[1].text.slice(result.content[1].text.indexOf('\n\n[codemode read gate: ')), codemodeNotice(d.spill))
-
-  for (const kind of ['missing', 'directory', 'empty', 'within', 'exact', 'no-path']) {
-    const f = fixture(), path = join(f.root, 'eligible')
-    if (kind === 'directory') mkdirSync(path)
-    else if (kind !== 'missing' && kind !== 'no-path') writeFileSync(path, kind === 'empty' ? '' : 'z'.repeat(kind === 'exact' ? 24576 : 20))
-    const rows = []
-    const gate = gateFor(f, { recordFailure: row => rows.push(row) })
-    const event = { toolName: 'codemode', toolCallId: 'edge-' + kind, content: [{ type: 'text', text: 'header' }], details: { calls: [] } }
-    if (kind !== 'no-path') event.details.fullOutputPath = path
-    assert.equal(gate.onToolResult(event, { cwd: f.root }), undefined, kind)
-    assert.equal(rows.length, ['missing', 'directory'].includes(kind) ? 1 : 0, kind)
-  }
-})
-
-test('CC3', () => {
-  // MUTATION: suppress preview.ranges tracking; delivered head and tail become readable.
-  const d = codemodeFixture({ text: codemodeLines.join('') })
-  d.gate.onToolResult(d.event, { cwd: d.root })
-  const call = (offset, limit, id) => d.gate.onToolCall({ toolName: 'read', toolCallId: id, input: { path: d.spill, offset, limit } }, { cwd: d.root })
-  assert.equal(call(1, 1, 'head')?.block, true)
-  assert.match(call(2, 1, 'head2')?.reason ?? '', /Refusing repeated read/)
-  assert.equal(call(673, 1, 'tail')?.block, true)
-  assert.equal(call(129, 544, 'gap'), undefined)
-  writeFileSync(d.spill, codemodeLines.join('').replace('0001|', 'EDIT|'))
-  assert.equal(call(1, 1, 'changed'), undefined)
-
-  const f = fixture(), spill = join(f.root, 'snapshot.txt'), text = codemodeLines.join('')
-  writeFileSync(spill, text)
-  const rows = []
-  const badSnapshot = gateFor(f, { deps: { snapshotFile: () => { const error = new Error('denied'); error.code = 'EPERM'; throw error } }, recordFailure: row => rows.push(row) })
-  const event = { toolName: 'codemode', toolCallId: 'snapshot', content: [{ type: 'text', text: 'header' }], details: { calls: [], fullOutputPath: spill } }
-  assert.equal(badSnapshot.onToolResult(event, { cwd: f.root }), undefined)
-  assert.equal(rows.length, 1)
-  assert.equal(badSnapshot.onToolCall({ toolName: 'read', toolCallId: 'snapshot-read', input: { path: spill, offset: 1, limit: 1 } }, { cwd: f.root }), undefined)
-  const throwing = gateFor(f, { recordFailure: () => { throw new Error('logger failed') }, deps: { snapshotFile: () => { throw new Error('snapshot unknown') } } })
-  assert.equal(throwing.onToolResult(event, { cwd: f.root }), undefined)
-})
-
-test('CC4', () => {
-  // MUTATION: bypass the spill-only byte override; the 960-byte preview changes.
-  const d = codemodeFixture({ text: codemodeLines.join('') })
-  const override = codemodeFixture({ text: codemodeLines.join(''), env: { CREW_READGATE_MAX_BYTES: '960' } })
-  const defaultResult = d.gate.onToolResult(d.event, { cwd: d.root })
-  const overrideResult = override.gate.onToolResult(override.event, { cwd: override.root })
-  assert.equal(defaultResult.content[1].text, codemodeLines.slice(0, 128).join('') + codemodeLines.slice(672).join('') + codemodeNotice(d.spill))
-  const expected = codemodeLines.slice(0, 5).join('') + codemodeLines.slice(795).join('')
-  assert.equal(overrideResult.content[1].text, expected + `\n\n[codemode read gate: ${override.spill}; total 800 lines, 76800 UTF-8 bytes; delivered head 1-5, tail 796-800; cap 960. Continue with read { path: ${JSON.stringify(override.spill)}, offset: 6, limit: 790 } or targeted grep.]`)
-  const rows = []
-  const invalid = codemodeFixture({ text: codemodeLines.join(''), env: { CREW_READGATE_MAX_BYTES: '0' }, options: { recordFailure: row => rows.push(row) } })
-  assert.equal(invalid.gate.onToolResult(invalid.event, { cwd: invalid.root }), undefined)
-  assert.equal(rows.length, 1)
-})
-
-test('CC5', () => {
-  // MUTATION: drop the original header; the first crew line must precede it.
-  for (const status of ['error', 'cancelled']) {
-    const d = codemodeFixture({ text: codemodeLines.join('') })
-    d.event.details.calls[0].status = status
-    const before = JSON.stringify(d.event)
-    const result = d.gate.onToolResult(d.event, { cwd: d.root })
-    assert.equal(result.content[0].text, `[crew] 1 of 1 inner calls did not succeed: read (${status})`)
-    assert.deepEqual(result.content[1], d.header)
-    assert.equal(result.content[2].text, codemodeLines.slice(0, 128).join('') + codemodeLines.slice(672).join('') + codemodeNotice(d.spill))
-    assert.deepEqual(result.content[3], d.image)
-    assert.deepEqual(result.structuredContent, { preserved: 42 })
-    assert.equal(JSON.stringify(d.event), before)
-  }
-
-  const f = fixture(), missing = { toolName: 'codemode', toolCallId: 'missing-failure', content: [{ type: 'text', text: 'header' }], details: { calls: [{ id: 'missing-failure/1', name: 'bash', status: 'error' }], fullOutputPath: join(f.root, 'absent') } }
-  const throwing = gateFor(f, { recordFailure: () => { throw new Error('log failed') } })
-  assert.equal(throwing.onToolResult(missing, { cwd: f.root }).content[0].text, '[crew] 1 of 1 inner calls did not succeed: bash (error)')
-
-  const nested = { ...missing, toolCallId: 'nested', parentToolCallId: 'parent' }
-  assert.equal(throwing.onToolResult(nested, { cwd: f.root }), undefined)
-})
-
 test('missing cat operand fails open and records failure', () => {
   const f = fixture()
   const entries = []
@@ -1113,87 +927,13 @@ test('missing cat operand fails open and records failure', () => {
   assert.equal(entries[0].read_gate_failure.tool, 'bash')
 })
 
-test('RG1 codemode commits child reads only after a successful parent', () => {
-  const f = fixture(), rows = [], gate = gateFor(f, { recordFailure: row => rows.push(row) })
-  const input = { path: f.ranged, offset: 1, limit: 20 }
-  const child = (parent, id = parent + '/read', readInput = input) => {
-    call(gate, 'read', readInput, f.root, id)
-    gate.onToolResult({ toolName: 'read', toolCallId: id, parentToolCallId: parent, input: readInput, isError: false, content: [{ type: 'text', text: 'child output' }] }, { cwd: f.root })
-  }
-  child('failed')
-  gate.onToolResult({ toolName: 'codemode', toolCallId: 'failed', isError: true, content: [], details: { calls: [{ id: 'failed/read', name: 'read', status: 'ok' }, { id: 'failed/other', name: 'bash', status: 'error' }] } })
-  assert.equal(call(gate, 'read', input, f.root, 'failed-retry'), undefined)
-  assert.equal(rows.some(row => row.read_gate_refusal), false)
-
-  child('successful', 'successful/read')
-  gate.onToolResult({ toolName: 'codemode', toolCallId: 'successful', content: [], details: { calls: [{ id: 'successful/read', name: 'read', status: 'ok' }] } })
-  assert.match(call(gate, 'read', input, f.root, 'successful-retry')?.reason ?? '', /delivered at turn/)
-  assert.equal(rows.filter(row => row.read_gate_refusal).length, 1)
-
-  const capped = join(f.root, 'capped-child.txt')
-  writeFileSync(capped, 'line\n'.repeat(351))
-  const cappedGate = gateFor(f, { env: { CREW_READGATE_MAX_BYTES: '12' } })
-  const cappedInput = { path: capped, offset: 1, limit: 351 }
-  call(cappedGate, 'read', cappedInput, f.root, 'capped/read')
-  cappedGate.onToolResult({ toolName: 'read', toolCallId: 'capped/read', parentToolCallId: 'capped', input: cappedInput, isError: false, content: [{ type: 'text', text: 'line\n'.repeat(351) }] }, { cwd: f.root })
-  cappedGate.onToolResult({ toolName: 'codemode', toolCallId: 'capped', content: [], details: { calls: [{ id: 'capped/read', name: 'read', status: 'ok' }] } })
-  assert.equal(call(cappedGate, 'read', { path: capped, offset: 1, limit: 1 }, f.root, 'capped-covered')?.block, true)
-  assert.equal(call(cappedGate, 'read', { path: capped, offset: 3, limit: 1 }, f.root, 'capped-suffix'), undefined)
-
-  const direct = { path: f.edge, offset: 1, limit: 20 }
-  call(gate, 'read', direct, f.root, 'direct')
-  deliver(gate, 'direct')
-  assert.equal(call(gate, 'read', direct, f.root, 'direct-repeat')?.block, true)
-})
-
-test('RG2 malformed and failed codemode parents discard provisional child reads', () => {
-  const f = fixture(), rows = [], gate = gateFor(f, { recordFailure: row => rows.push(row) })
-  const cases = [
-    { id: 'is-error', parent: { isError: true, details: { calls: [{ id: 'is-error/read', name: 'read', status: 'ok' }] } } },
-    { id: 'bad-calls', parent: { details: { calls: {} } } },
-    { id: 'bad-entry', parent: { details: { calls: [null] } } },
-  ]
-  for (const { id, parent } of cases) {
-    const path = join(f.root, id + '.txt')
-    writeFileSync(path, 'x\n'.repeat(50))
-    const input = { path, offset: 1, limit: 20 }
-    call(gate, 'read', input, f.root, id + '/read')
-    gate.onToolResult({ toolName: 'read', toolCallId: id + '/read', parentToolCallId: id, input, content: [{ type: 'text', text: 'x\n'.repeat(20) }] }, { cwd: f.root })
-    gate.onToolResult({ toolName: 'codemode', toolCallId: id, content: [], ...parent })
-    assert.equal(call(gate, 'read', input, f.root, id + '/retry'), undefined, id)
-    gate.onToolResult({ toolName: 'codemode', toolCallId: id, content: [], details: { calls: [{ id: id + '/read', name: 'read', status: 'ok' }] } })
-    assert.equal(call(gate, 'read', input, f.root, id + '/replay-retry'), undefined, id)
-  }
-
-  const pendingPath = join(f.root, 'pending-child.txt')
-  writeFileSync(pendingPath, 'p\n'.repeat(50))
-  const pendingInput = { path: pendingPath, offset: 1, limit: 20 }
-  call(gate, 'read', pendingInput, f.root, 'pending/first')
-  gate.onToolResult({ toolName: 'read', toolCallId: 'pending/first', parentToolCallId: 'pending', input: pendingInput, content: [{ type: 'text', text: 'p\\n'.repeat(20) }] }, { cwd: f.root })
-  assert.equal(gate.onToolCall({ toolName: 'read', toolCallId: 'pending/second', parentToolCallId: 'pending', input: pendingInput }, { cwd: f.root }), undefined)
-  assert.equal(rows.some(row => row.read_gate_refusal), false)
-})
-
-test('RG3 provisional codemode deliveries are isolated by parent', () => {
-  const f = fixture(), rows = [], gate = gateFor(f, { recordFailure: row => rows.push(row) })
-  const inputs = Object.fromEntries(['X', 'Y', 'Z'].map(name => {
-    const path = join(f.root, name + '.txt')
-    writeFileSync(path, name.repeat(2) + '\n'.repeat(30))
-    return [name, { path, offset: 1, limit: 20 }]
-  }))
-  const stage = (parent, name) => {
-    const id = parent + '/read'
-    call(gate, 'read', inputs[name], f.root, id)
-    gate.onToolResult({ toolName: 'read', toolCallId: id, parentToolCallId: parent, input: inputs[name], content: [{ type: 'text', text: 'child output' }] }, { cwd: f.root })
-  }
-  stage('pa', 'X')
-  gate.onToolResult({ toolName: 'codemode', toolCallId: 'pa', isError: true, content: [], details: { calls: [{ id: 'pa/read', name: 'read', status: 'ok' }] } })
-  stage('pb', 'Y')
-  gate.onToolResult({ toolName: 'codemode', toolCallId: 'pb', content: [], details: { calls: [{ id: 'pb/read', name: 'read', status: 'ok' }] } })
-  stage('pc', 'Z')
-  gate.onToolResult({ toolName: 'codemode', toolCallId: 'pc', content: [], details: { calls: [{ id: 'pc/read', name: 'read', status: 'ok' }] } })
-  assert.equal(call(gate, 'read', inputs.X, f.root, 'X-retry')?.block, undefined)
-  assert.match(call(gate, 'read', inputs.Y, f.root, 'Y-retry')?.reason ?? '', /delivered at turn/)
-  assert.match(call(gate, 'read', inputs.Z, f.root, 'Z-retry')?.reason ?? '', /delivered at turn/)
-  assert.equal(rows.filter(row => row.read_gate_refusal).length, 2)
+test('offset greater than one advances by delivered lines and head or tail remain unchanged', () => {
+  const d = byteFixture({ lines: 300, width: 100 })
+  const { output } = resultFor(d, { offset: 20, limit: 300, id: 'offset-20' })
+  const prefix = output.slice(0, output.indexOf(readGateMarker))
+  const delivered = prefix.split('\n').length - 1
+  assert.match(output.slice(output.indexOf(readGateMarker)), new RegExp(`offset: ${20 + delivered}`))
+  assert.equal(d.gate.onToolCall({ toolName: 'read', toolCallId: 'offset-next', input: { path: d.path, offset: 20 + delivered, limit: 300 } }, { cwd: d.root }), undefined)
+  assert.equal(call(d.gate, 'bash', { command: `head '${d.path}'` }, d.root), undefined)
+  assert.equal(call(d.gate, 'bash', { command: `tail '${d.path}'` }, d.root), undefined)
 })

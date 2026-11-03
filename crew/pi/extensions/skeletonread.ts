@@ -6,7 +6,7 @@
 import { appendFileSync, closeSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs'
 import { StringDecoder } from 'node:string_decoder'
 import { join, relative, resolve } from 'node:path'
-import { isLeanLayout, journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../context-layout.mjs'
+import { journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../context-layout.mjs'
 import { validateEnvelope } from '../../protocols.mjs'
 import { exportEntries } from '../../acp/export-entries.mjs'
 import { DEFAULT_MAX_LINES, MAX_LINES_ENV } from './readgate.ts'
@@ -475,20 +475,20 @@ export function loadAcceptedContext(value = {}, extraDeps = {}) {
   if (!taskDir) return null
   const read = deps.readFile || deps.readFileSync || defaultRead
   const env = input.env || process.env
-  const journalPath = journalPathOf(taskDir, env)
+  const journalPath = journalPathOf(taskDir)
   const runStart = journalRunStart(journalPath, deps, read)
   if (runStart === null) return null
-  const returnsDir = plannerReturnsDirOf(taskDir, env)
+  const returnsDir = plannerReturnsDirOf(taskDir)
   let names
   try { names = (deps.readDir || deps.readdirSync || defaultReadDir)(returnsDir) } catch { return null }
   if (!Array.isArray(names) || names.length > MAX_RETURN_ENTRIES) return null
   const candidates = []
   for (const name of names) {
-    const number = plannerReturnNumber(name, env)
+    const number = plannerReturnNumber(name)
     if (number === null) continue
     const path = join(returnsDir, String(name))
     const mtime = candidateMtime(path, deps)
-    if (mtime === null) { if (isLeanLayout(env)) return null; continue }
+    if (mtime === null) return null
     candidates.push({ number, path, mtime })
   }
   const currentCandidates = SELECT_LATEST_PLANNER_RETURN
@@ -499,7 +499,7 @@ export function loadAcceptedContext(value = {}, extraDeps = {}) {
     const plannerText = readBounded(entry.path, read, PLAN_CAP_BYTES)
     if (plannerText === null) return null
     try { raw = JSON.parse(plannerText) } catch { return null }
-    if (isLeanLayout(env) && (raw?.status !== 'done' || validateEnvelope('planner', raw, { archived: true }).defects.length)) continue
+    if (raw?.status !== 'done' || validateEnvelope('planner', raw, { archived: true }).defects.length) continue
     candidate = entry
     break
   }
@@ -705,7 +705,7 @@ export function createSkeletonRead(options = {}) {
   const loadContext = input.loadContext || deps.loadContext || ((value) => loadAcceptedContext(value))
   const index = input.exportEntries || deps.exportEntries || exportEntries
   const recordFailure = input.recordFailure || deps.recordFailure || ((row) => {
-    const journalPath = taskDir ? journalPathOf(taskDir, env) : null
+    const journalPath = taskDir ? journalPathOf(taskDir) : null
     if (!journalPath) return
     ;(deps.appendFile || deps.appendFileSync || defaultAppend)(journalPath, `${JSON.stringify(row)}\n`)
   })

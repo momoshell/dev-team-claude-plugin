@@ -1,13 +1,12 @@
-// The builder-seat advisor: deterministic audit predicates plus a bounded,
-// optional local-model judgment channel. It registers no callable surface: the
-// only pi integration is observation of tool boundaries and boundary advice.
+// The builder-seat advisor runs tier-0 predicates and bounded pi-child consults.
+// It observes tool boundaries and delivers advice without interrupting the turn.
 //
 // Why .ts: pi loads extensions through jiti with no build step, while this
 // repository imports the file directly with Node's erasable type stripping.
 // The file therefore uses only erasable syntax and node:-only imports.
 //
 // Why zero-dep: pi is not a dependency of this checkout. Keeping the extension
-// self-contained makes its closed configuration and endpoint boundary testable
+// self-contained makes its closed configuration testable
 // by this repository without importing pi's private runtime.
 //
 // Both event handlers are ordinary functions returning undefined. A note is
@@ -26,27 +25,16 @@ import { appendFileSync, closeSync, openSync, readFileSync, readSync, readdirSyn
 import { tmpdir } from 'node:os'
 import { StringDecoder } from 'node:string_decoder'
 import { isAbsolute, join, relative, resolve } from 'node:path'
-import { isLeanLayout, journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../context-layout.mjs'
+import { journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../context-layout.mjs'
 import { validateEnvelope } from '../../protocols.mjs'
 import { resolvePiBinary, createStreamReducer, carriesOwnSpend, STREAM_CAP_BYTES } from './subagent.ts'
 import { modelString } from '../../adapters/adapter-pi.mjs'
 
 export const ADVISOR_CONFIG_VERSION = 1
 export const ADVISOR_GRANT_ENV = 'CREW_ADVISOR'
-// Why the delta this endpoint receives is scrubbed before it is stored (#649).
-// The endpoint is a llama.cpp box we own, today, on our own LAN — materially
-// weaker exposure than a vendor API. But the ratified deployment shape is
-// "LAN first", and "first" is a word that anticipates widening. The delta is
-// assembled from whatever the builder happened to touch, which is not a bounded
-// set. A redaction pass is cheap now and is the thing that makes widening a
-// configuration change rather than a disclosure. It is not being added because
-// the current endpoint is untrusted; it is being added so that the boundary does
-// not depend on the endpoint staying trusted.
-export const ADVISOR_ENDPOINT_ENV = 'CREW_ADVISOR_ENDPOINT'
-export const ADVISOR_MODEL_ENV = 'CREW_ADVISOR_MODEL'
 export const ADVISOR_MESSAGE_TYPE = 'crew-advisor'
 export const TRIPWIRE_MANIFEST_FILE = 'advisor-manifest.json'
-export const ADVISED_ROLES = Object.freeze(new Set(['builder', 'planner']))
+export const ADVISED_ROLES = Object.freeze(new Set(['builder']))
 
 export const SCOPE_BREACH = 'scope-breach'
 export const TRIPWIRE_TOUCH = 'tripwire-touch'
@@ -106,14 +94,14 @@ export const PRE_RETURN_DIFF_BUDGET_BYTES = 48 * 1024
 // The omitted_files entries that say the window is incomplete in a way names cannot (not file paths).
 export const PRE_RETURN_INCOMPLETE = '(working diff over the git output limit: list may be incomplete)'
 export const PRE_RETURN_UNAVAILABLE = '(working diff unavailable: git could not read it)'
-const ACCEPTANCE_ITEMS_MAX = 32
-const ACCEPTANCE_ITEM_CAP_BYTES = 512
+const CRITERIA_MAX = 32
+const CRITERION_CAP_BYTES = 512
+const TEST_CAP_BYTES = 256
 export const READ_CAP_BYTES = 65_536
 export const RESPONSE_CAP_BYTES = 65_536
 export const CLAIM_CAP_BYTES = 500
 export const EVIDENCE_MAX = 5
 export const EVIDENCE_ITEM_CAP_BYTES = 200
-export const PROBE_TIMEOUT_MS = 2000
 export const CONSULT_TIMEOUT_MS = 20_000
 // A judgment child that ignores SIGTERM gets SIGKILL after this grace, and a
 // consult settles only once the child has closed (or a second grace has passed).
@@ -124,9 +112,7 @@ export const DIFF_MAX_BUFFER_BYTES = 16 * 1024 * 1024
 export const JUDGMENT_CLASSES = Object.freeze(['edge-path', 'over-claim'])
 export const SEVERITIES = Object.freeze(['low', 'medium', 'high'])
 export const UNAVAILABLE_REASONS = Object.freeze([
-  'role-unsupported', 'endpoint-unset', 'endpoint-not-local',
-  'endpoint-credentials', 'model-unset', 'model-unsafe', 'endpoint-dead',
-  'manifest-cell-invalid',
+  'role-unsupported', 'manifest-cell-invalid',
 ])
 // A model id reaches a shell command line, so it is an allowlist, not a filter.
 // A consult's advisor_usage spend is measured ONLY IF every frame the shared reducer
@@ -146,7 +132,7 @@ export function ownSpendIncomplete(frame: any): boolean {
 
 export const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/
 export const JUDGMENT_ERROR_CODES = Object.freeze([
-  'transport-failed', 'timeout', 'status-not-ok', 'body-too-large', 'body-unreadable',
+  'transport-failed', 'timeout', 'body-too-large',
   'body-not-json', 'content-missing', 'payload-not-an-object', 'unknown-key',
   'class-invalid', 'severity-invalid', 'claim-invalid', 'evidence-invalid',
   'evidence-unanchored', 'no-grounded-delta', 'no-finding',
@@ -177,12 +163,8 @@ export function boundTarget(value) {
   return boundText(value, TARGET_CAP_BYTES)
 }
 
-export function journalPathFrom(taskDir, env) {
-  return journalPathOf(taskDir, env)
-}
-
-export function returnsDirFrom(taskDir, env) {
-  return plannerReturnsDirOf(taskDir, env)
+export function journalPathFrom(taskDir) {
+  return journalPathOf(taskDir)
 }
 
 function roleOf(env) {
@@ -194,6 +176,7 @@ function atOf(now) {
 }
 
 function appendLine({ appendFile, journalPath, row }) {
+  if (!journalPath) return false
   try {
     const result = appendFile(journalPath, `${JSON.stringify(row)}\n`)
     return result !== false
@@ -218,6 +201,7 @@ function epochMilliseconds(value) {
 }
 
 function manifestText({ taskDir, readFile }) {
+  if (!taskDir) return null
   const path = join(String(taskDir || ''), TRIPWIRE_MANIFEST_FILE)
   let raw
   try { raw = readFile(path, 'utf8') } catch { return null }
@@ -228,17 +212,19 @@ function manifestText({ taskDir, readFile }) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null
     if (value.schema_version !== ADVISOR_CONFIG_VERSION) return null
     if (epochMilliseconds(value.run_started_at) === null) return null
-    if (!Array.isArray(value.tripwires) || !value.tripwires.every((item) => typeof item === 'string')) return null
+    if (value.tripwires !== undefined && (!Array.isArray(value.tripwires) || !value.tripwires.every((item) => typeof item === 'string'))) return null
     const rawCell = value.cell
     const cellKeys = ['provider', 'id', 'agent', 'effort', 'model']
     const cell = rawCell && typeof rawCell === 'object' && !Array.isArray(rawCell)
       && rawCell.agent === 'pi' && cellKeys.every((key) => typeof rawCell[key] === 'string' && SAFE_MODEL.test(rawCell[key]))
       ? Object.fromEntries(cellKeys.map((key) => [key, rawCell[key]])) : null
-    const acceptance = Array.isArray(value.acceptance_items) && value.acceptance_items.every((item) => typeof item === 'string')
-      ? value.acceptance_items.map((item) => item.trim()).filter(Boolean).slice(0, ACCEPTANCE_ITEMS_MAX).map((item) => boundText(item, ACCEPTANCE_ITEM_CAP_BYTES)) : []
+    const criteria = Array.isArray(value.criteria) && value.criteria.every((item) => typeof item === 'string')
+      ? value.criteria.map((item) => item.trim()).filter(Boolean).slice(0, CRITERIA_MAX).map((item) => boundText(item, CRITERION_CAP_BYTES)) : []
+    const tests = Array.isArray(value.tests) && value.tests.every((item) => item && typeof item.file === 'string' && typeof item.title === 'string')
+      ? value.tests.slice(0, CRITERIA_MAX).map(({ file, title }) => ({ file: boundText(file, TEST_CAP_BYTES), title: boundText(title, TEST_CAP_BYTES) })) : []
     return {
       schema_version: value.schema_version, run_started_at: value.run_started_at,
-      tripwires: value.tripwires.map((item) => boundTarget(item)), acceptance_items: acceptance, cell,
+      tripwires: (value.tripwires ?? []).map((item) => boundTarget(item)), criteria, tests, cell,
       // A present cell that fails the allowlist is NOT a null (tier-0-only) cell.
       cell_invalid: rawCell != null && cell === null,
     }
@@ -279,15 +265,15 @@ function plannerReturn({ taskDir, manifest, deps, env }) {
     try { return statSync(path).mtimeMs } catch { return null }
   })
   let names
-  try { names = readDir(returnsDirFrom(taskDir, env)) } catch { return { files_in_scope: [], validation_lane: null, source: 'absent' } }
+  try { names = readDir(plannerReturnsDirOf(taskDir)) } catch { return { files_in_scope: [], validation_lane: null, source: 'absent' } }
   const candidates = []
   for (const name of names || []) {
-    const number = plannerReturnNumber(name, env)
+    const number = plannerReturnNumber(name)
     if (number === null) continue
-    const path = join(returnsDirFrom(taskDir, env), String(name))
+    const path = join(plannerReturnsDirOf(taskDir), String(name))
     let mtime
     try { mtime = fileMtime(path) } catch { mtime = null }
-    if (typeof mtime !== 'number' || !Number.isFinite(mtime)) { if (isLeanLayout(env)) return { files_in_scope: [], validation_lane: null, source: 'absent' }; continue }
+    if (typeof mtime !== 'number' || !Number.isFinite(mtime)) return { files_in_scope: [], validation_lane: null, source: 'absent' }
     if (mtime < epoch) continue
     candidates.push({ number, path })
   }
@@ -300,7 +286,7 @@ function plannerReturn({ taskDir, manifest, deps, env }) {
     const text = Buffer.isBuffer(raw) ? raw.toString('utf8') : String(raw ?? '')
     if (byteLength(text) > READ_CAP_BYTES) return { files_in_scope: [], validation_lane: null, source: 'absent' }
     try { envelope = JSON.parse(text) } catch { return { files_in_scope: [], validation_lane: null, source: 'absent' } }
-    if (isLeanLayout(env) && (envelope?.status !== 'done' || validateEnvelope('planner', envelope, { archived: true }).defects.length)) continue
+    if (envelope?.status !== 'done' || validateEnvelope('planner', envelope, { archived: true }).defects.length) continue
     candidate = entry
     break
   }
@@ -325,7 +311,7 @@ export function loadContext({ taskDir, deps = {}, env = process.env } = {}) {
   if (!manifest) {
     return {
       files_in_scope: [], validation_lane: null, scope_source: 'absent',
-      tripwires: [], tripwires_source: 'absent', acceptance_items: [], run_started_at: null, cell: null,
+      tripwires: [], tripwires_source: 'absent', criteria: [], tests: [], run_started_at: null, cell: null,
     }
   }
   const planner = plannerReturn({ taskDir, manifest, deps, env })
@@ -334,7 +320,7 @@ export function loadContext({ taskDir, deps = {}, env = process.env } = {}) {
     validation_lane: planner.validation_lane,
     scope_source: planner.source,
     tripwires: manifest.tripwires,
-    tripwires_source: 'manifest', acceptance_items: manifest.acceptance_items,
+    tripwires_source: 'manifest', criteria: manifest.criteria, tests: manifest.tests,
     run_started_at: manifest.run_started_at, cell: manifest.cell,
   }
 }
@@ -432,8 +418,7 @@ export function isSelfEcho(text, injected) {
   return false
 }
 
-// pi resolves a provider it has no login for by fuzzy match (openai/... reached openrouter), so a roster provider is
-// spelled as pi seats spell it; a cell outside the roster's providers passes through as written, as it always has.
+// Spell providers as pi seats do to avoid fuzzy matching to another provider.
 function consultModel(cell) {
   try { return modelString({ provider: cell.provider, id: cell.id }) } catch { return String(cell.model) }
 }
@@ -779,80 +764,6 @@ export function preReturnDiff({ cwd, deps = {}, budgetBytes = PRE_RETURN_DIFF_BU
   return { entries, bytes, omitted_files: omittedFiles, lines: count, redactions }
 }
 
-export async function probeEndpoint(url, { fetchFn = fetch, timeoutMs = PROBE_TIMEOUT_MS } = {}) {
-  try {
-    const response = await fetchFn(url, { signal: AbortSignal.timeout(timeoutMs) })
-    return response?.status < 500
-  } catch { return false }
-}
-
-function classifyAdvisorModel(model, models) {
-  if (typeof model !== 'string' || model === '') return { reason: 'model-unset' }
-  if (!SAFE_MODEL.test(model) || !model.includes('/')) return { reason: 'model-unsafe' }
-  if (!models || typeof models !== 'object' || Array.isArray(models)
-    || ![Object.prototype, null].includes(Object.getPrototypeOf(models))) return { reason: 'model-unsafe' }
-  const roster = { models }
-  if (!Object.hasOwn(roster.models, model)) return { reason: 'model-unsafe' }
-  return { model }
-}
-
-export function classifyAdvisorCell({ endpoint, model, models } = {}) {
-  if (endpoint === '' || endpoint === undefined) return classifyAdvisorModel(model, models)
-  if (typeof endpoint !== 'string') return { reason: 'endpoint-unset' }
-  let parsed
-  try { parsed = new URL(endpoint) } catch { return { reason: 'endpoint-not-local' } }
-  const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^\/?#]*)/.exec(endpoint)?.[1] || ''
-  const hostText = authority.includes('@') ? authority.slice(authority.lastIndexOf('@') + 1) : authority
-  const rawHost = hostText.startsWith('[') ? hostText.slice(0, hostText.indexOf(']') + 1) : hostText.split(':')[0]
-  if (!['http:', 'https:'].includes(parsed.protocol) || rawHost === '') {
-    return { reason: 'endpoint-not-local' }
-  }
-  if (parsed.username || parsed.password) return { reason: 'endpoint-credentials' }
-  if (typeof model !== 'string' || model === '') return { reason: 'model-unset' }
-  if (!SAFE_MODEL.test(model)) return { reason: 'model-unsafe' }
-  return { endpoint: parsed.href, model }
-}
-
-export function advisorCell(env = process.env) {
-  let models = env?.CREW_ADVISOR_MODELS
-  if (typeof models === 'string') {
-    try { models = JSON.parse(models) } catch { models = undefined }
-  }
-  return { endpoint: env?.[ADVISOR_ENDPOINT_ENV], model: env?.[ADVISOR_MODEL_ENV], models }
-}
-
-function abortSignal(controller) {
-  const timeout = AbortSignal.timeout(CONSULT_TIMEOUT_MS)
-  if (typeof AbortSignal.any === 'function') return AbortSignal.any([controller.signal, timeout])
-  return controller.signal
-}
-
-export async function readBoundedBody(response, cap = RESPONSE_CAP_BYTES) {
-  const header = response?.headers?.get?.('content-length')
-  const length = Number(header)
-  if (Number.isFinite(length) && length > cap) return { ok: false, code: 'body-too-large' }
-  let reader
-  try { reader = response?.body?.getReader?.() } catch { return { ok: false, code: 'body-unreadable' } }
-  if (!reader) return { ok: false, code: 'body-unreadable' }
-  const chunks = []
-  let total = 0
-  try {
-    while (true) {
-      const part = await reader.read()
-      if (part?.done) break
-      const value = part?.value
-      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value || [])
-      total += chunk.length
-      if (total > cap) {
-        try { await reader.cancel?.() } catch { /* cancellation is best effort */ }
-        return { ok: false, code: 'body-too-large' }
-      }
-      chunks.push(chunk)
-    }
-  } catch { return { ok: false, code: 'body-unreadable' } }
-  try { return { ok: true, text: Buffer.concat(chunks, total).toString('utf8') } } catch { return { ok: false, code: 'body-unreadable' } }
-}
-
 export const JUDGMENT_REPLY_MAX = 4
 
 export function validateReply(value, options = {}) {
@@ -892,27 +803,16 @@ export function validateJudgment(value, { anchors = new Set(), scopeFiles = [] }
   return { codes: errorCodeSet(codes), ...(codes.length ? {} : { judgment: value }) }
 }
 
-function responseContent(payload) {
-  const content = payload?.choices?.[0]?.message?.content
-  return typeof content === 'string' ? content : null
-}
-
-function requestUrl(endpoint) {
-  return `${String(endpoint).replace(/\/+$/, '')}/chat/completions`
-}
-
 const REPLY_CONTRACT = `Return JSON alone: one object or an array of 1 to ${JUDGMENT_REPLY_MAX} objects, with no prose, no code fence, no wrapper key and no second object on another line. Each object has exactly the four keys class, severity, claim and evidence. class must be one of ${JUDGMENT_CLASSES.join(', ')}. severity must be one of ${SEVERITIES.join(', ')}. claim must be a non-empty string of at most ${CLAIM_CAP_BYTES} UTF-8 bytes. evidence must be an array of 1 to ${EVIDENCE_MAX} strings, each at most ${EVIDENCE_ITEM_CAP_BYTES} UTF-8 bytes and exactly a bare path:line (no range, no prose, no whitespace or colon in the path; decimal line number). The first evidence item must cite a line shown in the delta. Do not copy the example's evidence unless that line is shown in the delta. Example reply: {"class":"edge-path","severity":"low","claim":"The empty input path is not handled.","evidence":["src/widget.mjs:12"]} If neither class applies, return [] alone.`
 
 export const BUILDER_SYSTEM_PROMPT = `Review the builder delta for exactly two judgment classes: edge-path (checklist B1: answer EPERM, unknown, interrupted, and empty paths) and over-claim (checklist B2: record no verdict stronger than what was measured). ${REPLY_CONTRACT}`
-export const PLANNER_SYSTEM_PROMPT = `Review the planner delta for exactly two judgment classes: edge-path (a plan or gate omits or mishandles a required boundary, failure case, or acceptance path) and over-claim (a Ground truth citation that does not hold at the ref where the plan was written). ${REPLY_CONTRACT}`
+const PRE_RETURN_NOTE = ' Check the change against the accepted plan criteria and the tests it names for the builder.'
+export const PRE_RETURN_NO_BASIS = ' There are no criteria or tests to check the change against.'
+const PRE_RETURN_WINDOW = ' This final review covers the working diff; removed lines are marked (removed). Treat omitted_files as unreviewed rather than clean.'
 
-// Said only to the pre-return consult, whose input also carries the brief's acceptance items and the files its
-// diff window left out.
-const PRE_RETURN_NOTE = ' This is the final review before the return: the delta is the whole working diff (removed lines are marked (removed)), acceptance_items are what the brief asked for, and omitted_files are changed files the delta does not show in full (an entry in parentheses says the diff itself could not be read in full); check the change against the acceptance items, and treat an omitted file as unreviewed rather than as clean.'
-
-function systemPrompt(role, trigger) {
-  const base = role === 'planner' ? PLANNER_SYSTEM_PROMPT : BUILDER_SYSTEM_PROMPT
-  return trigger === 'pre-return' ? base + PRE_RETURN_NOTE : base
+function systemPrompt(trigger, context) {
+  if (trigger !== 'pre-return') return BUILDER_SYSTEM_PROMPT
+  return BUILDER_SYSTEM_PROMPT + PRE_RETURN_WINDOW + (context?.criteria?.length || context?.tests?.length ? PRE_RETURN_NOTE : PRE_RETURN_NO_BASIS)
 }
 
 function noteTextForTier0(kind, target, signature, role) {
@@ -937,7 +837,6 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   const fileMtime = deps.fileMtime || ((path) => {
     try { return statSync(path).mtimeMs } catch { return null }
   })
-  const fetchFn = deps.fetchFn || fetch
   const spawn = deps.spawn || nodeSpawn
   const resolveBinary = deps.resolveBinary || resolvePiBinary
   const consultTimeoutMs = deps.consultTimeoutMs ?? CONSULT_TIMEOUT_MS
@@ -947,7 +846,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   const send = deps.send || null
   const diffSize = deps.diffSize || ((path) => gitDiffSize({ cwd: path, deps }))
   const diffLines = deps.diffLines || ((path) => gitDiffLines({ cwd: path, deps }))
-  const journalPath = journalPathFrom(taskDir, env)
+  const journalPath = taskDir ? journalPathFrom(taskDir) : null
 
   function replyRecord(replyText, codes) {
     const reason = codes.find((code) => REPLY_REASONS.includes(code)) || 'reply-unrecorded'
@@ -1064,13 +963,6 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   function deltaPath(path) {
     const repoPath = repoRelative(cwd, path)
     if (repoPath) return repoPath
-    if (role !== 'planner' || !taskDir || typeof path !== 'string' || !path) return ''
-    let taskPath
-    try {
-      const root = resolve(String(taskDir))
-      taskPath = normalizePath(relative(root, resolve(cwd, path)))
-    } catch { return '' }
-    if (taskPath === 'plan.md' || taskPath === 'gate.mjs') return `task/${taskPath}`
     return ''
   }
 
@@ -1456,7 +1348,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       model: captured.cell.model, model_id: captured.cell.id, provider: captured.cell.provider, agent: captured.cell.agent, effort: captured.cell.effort,
     }
     consultPayload.provider = cell.provider
-    if (window) Object.assign(consultPayload, window)
+    if (window) Object.assign(consultPayload, window, { criteria_count: context?.criteria?.length ?? 0, tests_count: context?.tests?.length ?? 0 })
     const request = (async () => {
       let codes = []
       let judgment = null
@@ -1484,7 +1376,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
           const dir = mkdtempSync(join(tmpdir(), 'crew-advisor-'))
           const promptFile = join(dir, 'system-prompt.txt')
           try {
-            writeFileSync(promptFile, systemPrompt(role, trigger), { mode: 0o600 })
+            writeFileSync(promptFile, systemPrompt(trigger, context), { mode: 0o600 })
             const childArgs = ['-p','--mode','json','--no-session','--model',consultModel(cell),'--thinking',cell.effort,'--no-tools','--no-context-files','--no-extensions','--no-skills','--append-system-prompt',promptFile]
             const child = spawn(binary, [...prefix, ...childArgs], { cwd, stdio: ['pipe','pipe','pipe'] })
             const reducer = createStreamReducer()
@@ -1568,7 +1460,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
               // the seat. It takes the consult's failure path instead.
               if (typeof child.stdin?.on === 'function') child.stdin.on('error', () => fail(new Error('stdin failed')))
               try { child.stdin.end(JSON.stringify(window
-                ? { trigger, delta: captured.snapshot, acceptance_items: context?.acceptance_items ?? [], omitted_files: window.omitted_files }
+                ? { trigger, delta: captured.snapshot, criteria: context?.criteria ?? [], tests: context?.tests ?? [], omitted_files: window.omitted_files }
                 : { trigger, delta: captured.snapshot })) } catch { consultFailed = true; settle(new Error('stdin failed')) }
             })
             foldedUsage = childResult.usage
@@ -1598,7 +1490,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       }
       const uncleanExit = childExit !== null && (childExit.code !== 0 || childExit.signal !== null)
       // Safe frames can still sum past MAX_SAFE_INTEGER: a rounded aggregate is no measured
-      // total, and the ledger writer would refuse it and lose the fact.
+      // total, and the usage writer would refuse it and lose the fact.
       const aggregateSafe = foldedUsage !== null && ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
         .every((key) => Number.isSafeInteger(foldedUsage[key]) && foldedUsage[key] >= 0)
       const spendMeasured = foldedUsage !== null && ownSpendFrames > 0 && !usageIncomplete
@@ -1788,7 +1680,7 @@ export async function attachAdvisor(pi, { env = process.env, deps = {} } = {}) {
   const role = String(env?.CREW_ROLE || '')
   const appendFile = deps.appendFile || DEFAULT_APPEND
   const taskDir = deps.taskDir || env?.CREW_TASK_DIR || ''
-  const journalPath = journalPathFrom(taskDir, env)
+  const journalPath = taskDir ? journalPathFrom(taskDir) : null
 
   const now = deps.now || DEFAULT_NOW
   if (env?.[ADVISOR_GRANT_ENV] !== '1') return

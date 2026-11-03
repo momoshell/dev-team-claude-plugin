@@ -141,36 +141,6 @@ function capReadText(text, maxBytes, start, path) {
   return { text: prefix + notice, wholeLines }
 }
 
-function capCodemodeText(text, maxBytes, path) {
-  const totalBytes = Buffer.byteLength(text, 'utf8')
-  if (totalBytes <= maxBytes) return undefined
-  const lines = text.match(/[^\n]*\n|[^\n]+$/g) || []
-  const totalLines = countTextLines(text)
-  const headBudget = Math.floor(maxBytes / 2)
-  const tailBudget = maxBytes - headBudget
-  let headCount = 0, headBytes = 0, tailCount = 0, tailBytes = 0
-  for (const line of lines) {
-    const size = Buffer.byteLength(line, 'utf8')
-    if (headBytes + size > headBudget) break
-    headBytes += size; headCount += 1
-  }
-  for (let i = lines.length - 1; i >= headCount; i -= 1) {
-    const size = Buffer.byteLength(lines[i], 'utf8')
-    if (tailBytes + size > tailBudget) break
-    tailBytes += size; tailCount += 1
-  }
-  const gapStart = headCount + 1
-  const headText = lines.slice(0, headCount).join('')
-  const tailText = tailCount ? lines.slice(-tailCount).join('') : ''
-  const ranges = []
-  if (headCount) ranges.push({ start: 1, end: headCount })
-  if (tailCount) ranges.push({ start: totalLines - tailCount + 1, end: totalLines })
-  const span = (start, end) => start <= end ? `${start}-${end}` : 'none'
-  const gapLength = totalLines - headCount - tailCount
-  const notice = `\n\n[codemode read gate: ${String(path)}; total ${totalLines} lines, ${totalBytes} UTF-8 bytes; delivered head ${span(1, headCount)}, tail ${span(totalLines - tailCount + 1, tailCount ? totalLines : 0)}; cap ${maxBytes}. Continue with read { path: ${JSON.stringify(String(path))}, offset: ${gapStart}, limit: ${gapLength} } or targeted grep.]`
-  return { text: headText + tailText + notice, ranges }
-}
-
 function hasRange(input) {
   return Boolean(input && typeof input === 'object' && (own(input, 'offset') || own(input, 'limit')))
 }
@@ -481,7 +451,7 @@ export function createReadGate(options = {}) {
   const cwdDefault = input.cwd || deps.cwd || process.cwd()
   let taskDir = ''
   try { taskDir = String(input.taskDir || deps.taskDir || env?.CREW_TASK_DIR || '') } catch { taskDir = '' }
-  const journalPath = input.journalPath || deps.journalPath || (taskDir ? journalPathOf(taskDir, env) : null)
+  const journalPath = input.journalPath || deps.journalPath || (taskDir ? journalPathOf(taskDir) : null)
   const appendFile = input.appendFile || deps.appendFile || deps.appendFileSync || defaultAppend
   const now = input.now || deps.now || defaultNow
   const countLines = input.countLines || deps.countLines || defaultCountLines
@@ -492,8 +462,6 @@ export function createReadGate(options = {}) {
   const snapshotFile = input.snapshotFile || deps.snapshotFile || defaultSnapshotFile
   const readRanges = new Map()
   const pendingReads = new Map()
-  const provisionalDeliveries = new Map()
-  const softRefusals = new Map()
 
   function isHandedFile(path, cwd = cwdDefault) {
     try {
@@ -546,13 +514,6 @@ export function createReadGate(options = {}) {
     return recordAndAllow(error, event)
   }
 
-  function softenReadRefusal(event, result) {
-    if (result?.block !== true || typeof result.reason !== 'string' || !result.reason || typeof event?.parentToolCallId !== 'string' || !event.parentToolCallId || typeof event?.toolCallId !== 'string' || !event.toolCallId) return result
-    softRefusals.set(event.toolCallId, { parent: event.parentToolCallId, reason: result.reason })
-    pendingReads.delete(event.toolCallId)
-    return undefined
-  }
-
   function normalizeRange(input, lineCount) {
     const start = own(input, 'offset') ? validPositiveInteger(input.offset, 'offset') : 1
     const limit = own(input, 'limit') ? validPositiveInteger(input.limit, 'limit') : undefined
@@ -584,12 +545,7 @@ export function createReadGate(options = {}) {
   }
 
   function recordReadDelivery(event, resolved, fingerprint, delivery) {
-    if (event?.parentToolCallId) {
-      const parent = event.parentToolCallId
-      const deliveries = provisionalDeliveries.get(parent) || []
-      deliveries.push({ resolved, fingerprint, delivery })
-      provisionalDeliveries.set(parent, deliveries)
-    } else rememberDelivery(resolved, fingerprint, delivery)
+    rememberDelivery(resolved, fingerprint, delivery)
   }
 
   function recordRefusal(path, requested, overlap) {
@@ -638,65 +594,9 @@ export function createReadGate(options = {}) {
     return undefined
   }
 
-  function rewriteCodemodeSpill(event, ctx) {
-    try {
-      const spill = event?.details?.fullOutputPath
-      if (typeof spill !== 'string' || !spill || event.content?.[0]?.type !== 'text') return undefined
-      const resolved = resolveFile(ctx?.cwd || cwdDefault, spill)
-      const raw = readFileSync(resolved)
-      const text = raw.toString('utf8')
-      const preview = capCodemodeText(text, parseMaxBytes(env[MAX_BYTES_ENV]), spill)
-      if (!preview) return undefined
-      const snapshot = validSnapshot(snapshotFile(resolved))
-      const fingerprint = createHash('sha256').update(raw).digest('hex')
-      if (snapshot.fingerprint !== fingerprint) return undefined
-      try { for (const range of preview.ranges) rememberDelivery(resolved, snapshot.fingerprint, { ...range, turn: currentTurn }) }
-      catch (error) { recordTrackerFailure(error, event) }
-      const content = [event.content[0], { type: 'text', text: preview.text }, ...event.content.slice(1).filter(part => part?.type !== 'text')]
-      return { content }
-    } catch (error) { recordTrackerFailure(error, event); return undefined }
-  }
-
   function onToolResult(event, ctx) {
     try {
-      if (event?.toolName === 'codemode' && !event?.parentToolCallId) {
-        try {
-          const calls = event?.details?.calls
-          if (!Array.isArray(calls) || !Array.isArray(event?.content)) throw new Error('codemode result has malformed calls or content')
-          const placeholder = `${event.toolCallId}/?`
-          const ids = new Set()
-          for (const call of calls) {
-            if (!call || typeof call.id !== 'string' || !call.id || typeof call.name !== 'string' || !call.name || !['ok', 'error', 'cancelled', 'running'].includes(call.status) || (call.id !== placeholder && ids.has(call.id))) throw new Error('codemode result has malformed call entry')
-            ids.add(call.id)
-          }
-          const refusals = []
-          // shortcut: scan pending refusals per parent result; index by parent if nested-call volume grows
-          for (const [id, refusal] of softRefusals) if (refusal.parent === event.toolCallId) refusals.push([id, refusal])
-          const refusalIds = new Set(refusals.map(([id]) => id))
-          const presentIds = new Set(calls.map((call) => call.id))
-          const absentRefusals = refusals.filter(([id]) => !presentIds.has(id)).length
-          const cancelledReadPlaceholders = calls.filter((call) => call.id === placeholder && call.name === 'read' && call.status === 'cancelled').length
-          if (absentRefusals > cancelledReadPlaceholders) throw new Error('codemode result omitted a refused child call')
-          const failed = calls.filter((call) => call.status === 'error' || call.status === 'cancelled')
-          const failures = []
-          for (const call of calls) {
-            if (refusalIds.has(call.id)) failures.push({ name: call.name, status: 'refused by read gate' })
-            else if (failed.includes(call)) failures.push({ name: call.name, status: call.status })
-          }
-          if (event.isError !== true) for (const { resolved, fingerprint, delivery } of provisionalDeliveries.get(event.toolCallId) || []) rememberDelivery(resolved, fingerprint, delivery)
-          const preview = rewriteCodemodeSpill(event, ctx)
-          const parts = preview?.content ?? event.content
-          if (failures.length === 0) return preview ? { content: parts, ...(event.structuredContent === undefined ? {} : { structuredContent: event.structuredContent }) } : undefined
-          const names = failures.map(({ name, status }) => `${name} (${status})`).join(', ')
-          return { content: [{ type: 'text', text: `[crew] ${failures.length} of ${calls.length} inner calls did not succeed: ${names}` }, ...parts], ...(event.structuredContent === undefined ? {} : { structuredContent: event.structuredContent }) }
-        } catch (error) { return recordTrackerFailure(error, event) }
-        finally {
-          provisionalDeliveries.delete(event.toolCallId)
-          for (const [id, refusal] of softRefusals) if (refusal.parent === event.toolCallId) softRefusals.delete(id)
-        }
-      }
       if (event?.toolName !== 'read') return undefined
-      if (softRefusals.has(event?.toolCallId)) { pendingReads.delete(event.toolCallId); return { content: [{ type: 'text', text: softRefusals.get(event.toolCallId).reason }], isError: false } }
       if (event?.isError) { pendingReads.delete(event.toolCallId); return undefined }
       const resultCwd = ctx?.cwd || cwdDefault
       if (!hasRange(event.input) && isHandedFile(event.input?.path, resultCwd)) return undefined
@@ -776,11 +676,11 @@ export function createReadGate(options = {}) {
       if (event?.toolName === 'grep') return undefined
       const input = event?.input || {}
       if (isReadTool(event?.toolName)) {
-        if (hasRange(input)) return softenReadRefusal(event, inspectRangedRead(event, ctx))
+        if (hasRange(input)) return inspectRangedRead(event, ctx)
         const cwd = ctx?.cwd || cwdDefault
         if (isHandedFile(input.path, cwd)) return undefined
         const maxLines = configuredMaxLines()
-        return softenReadRefusal(event, inspectPath(input.path, cwd, maxLines))
+        return inspectPath(input.path, cwd, maxLines)
       }
       if (event?.toolName !== 'bash') return undefined
       const command = input.command

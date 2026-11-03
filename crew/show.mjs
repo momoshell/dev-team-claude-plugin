@@ -6,11 +6,7 @@
 // live crew directory or, when that is gone, its newest archive. Nothing here launches a seat
 // or writes a file.
 //
-// Claude seats (headless-json) record one stream per dispatch under task/headless/d<N>; the
-// seat is named by the CREW_ROLE the driver saved in that dispatch's cmd.json, because N is the
-// order dispatches were allocated in, not a role. Pi seats (headless-rpc) record one persistent
-// stream under task/headless-rpc/<role>. Lean ACP seats (crew start --loop lean) record one JSONL
-// per turn under task/lean/<role>/<lane>.<role>.<turn>.jsonl. Other transports record nothing this reads.
+// Lean ACP seats record one JSONL per turn under task/lean/<role>/<lane>.<role>.<turn>.jsonl.
 import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -18,35 +14,11 @@ import { fileURLToPath } from 'node:url'
 
 const LANE = /^[a-z0-9][a-z0-9-]{0,62}$/
 const ROLE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/
-// Lifecycle frames whose content a canonical message record already carries; rendering them would repeat it.
-const QUIET = {
-  'headless-json': new Set(['system', 'rate_limit_event', 'result']),
-  'headless-rpc': new Set(['session', 'agent_start', 'agent_end', 'agent_settled', 'turn_start', 'turn_end', 'message_start', 'message_update', 'tool_execution_start', 'tool_execution_update', 'tool_execution_end']),
-}
-
 class ShowRefusal extends Error {}
 
 const defaultDeps = () => ({ readFileSync, readdirSync, statSync, crewRoot: join(homedir(), '.crew') })
 
 const pretty = (value) => JSON.stringify(value, null, 2)
-
-// A block list or string rendered to parts; `heading` labels text, null leaves it bare for nesting.
-function renderContent(content, heading) {
-  const labelled = (text) => (heading ? `${heading}\n${text}` : text)
-  if (typeof content === 'string') return [labelled(content)]
-  if (content === undefined || content === null) return []
-  if (!Array.isArray(content)) return [pretty(content)]
-  return content.map((block) => {
-    if (block?.type === 'text' && typeof block.text === 'string') return labelled(block.text)
-    if (block?.type === 'thinking' && typeof block.thinking === 'string') return `THINKING\n${block.thinking}`
-    if (block?.type === 'tool_use') return `TOOL ${block.name} ${block.id}\n${pretty(block.input)}`
-    if (block?.type === 'toolCall') return `TOOL ${block.name} ${block.id}\n${pretty(block.arguments)}`
-    if (block?.type === 'tool_result') {
-      return `TOOL RESULT ${block.tool_use_id}${block.is_error ? ' ERROR' : ''}\n${renderContent(block.content, null).join('\n')}`
-    }
-    return pretty(block)
-  })
-}
 
 // ACP recordings: a {type:'prompt'} head record, then {sessionId, update} frames. Adjacent chunks of
 // one kind are one utterance, so their text joins without separators.
@@ -76,33 +48,12 @@ function renderAcp(events) {
   return parts.map(({ heading, text }) => `${heading}\n${text}`)
 }
 
-function renderSession({ rel, raw, prompt }, transport) {
-  const claude = transport === 'headless-json'
+function renderSession({ rel, raw }) {
   const lines = raw.split('\n').flatMap((line, index) => (line.trim() === '' ? [] : [[index + 1, line]]))
   const events = lines.map(([number, line]) => {
     try { return JSON.parse(line) } catch (error) { throw new ShowRefusal(`${rel} line ${number} is not a complete JSON record (${error.message})`) }
   })
-  if (transport === 'lean-acp') return `=== ${rel} ===\n${(events.length ? renderAcp(events) : ['no recorded events']).join('\n\n')}\n`
-  const parts = prompt === undefined ? [] : [`USER\n${prompt}`]
-  // A failed pi turn is recorded with empty content, so its stopReason and errorMessage are all there is to show.
-  const message = (m) => {
-    const heading = String(m?.role ?? 'message').toUpperCase()
-    const shown = m?.role === 'toolResult'
-      ? [`TOOL RESULT ${m.toolCallId}${m.isError ? ' ERROR' : ''}\n${renderContent(m.content, null).join('\n')}`]
-      : renderContent(m?.content, heading)
-    if (typeof m?.errorMessage === 'string') shown.push(`${heading} ${m.stopReason ?? 'error'}\n${m.errorMessage}`)
-    return shown
-  }
-  for (const event of events) {
-    if (event === null || typeof event !== 'object') parts.push(`EVENT\n${pretty(event)}`)
-    else if (claude) {
-      if (event.type === 'assistant' || event.type === 'user') parts.push(...message(event.message))
-      else if (!(QUIET[transport].has(event.type) && !event.is_error)) parts.push(`EVENT ${event.type}\n${pretty(event)}`)
-    } else if (event.type === 'message_end') parts.push(...message(event.message))
-    else if (!QUIET[transport].has(event.type)) parts.push(`EVENT ${event.type}\n${pretty(event)}`)
-  }
-  if (events.length === 0) parts.push('no recorded events')
-  return `=== ${rel} ===\n${parts.join('\n\n')}\n`
+  return `=== ${rel} ===\n${(events.length ? renderAcp(events) : ['no recorded events']).join('\n\n')}\n`
 }
 
 export function showLane({ lane, role, json = false, deps = {} }) {
@@ -149,41 +100,14 @@ export function showLane({ lane, role, json = false, deps = {} }) {
   }
   if (role !== undefined && !Object.hasOwn(members, role)) throw new ShowRefusal(`lane ${lane} has no role ${role}; it has ${seats.map(([name]) => name).join(', ')}`)
 
-  // Claude dispatches, attributed through the CREW_ROLE each dispatch recorded, in numeric order.
-  const dispatches = new Map()
-  if (seats.some(([, member]) => member.transport === 'headless-json')) {
-    const root = join(crewDir, 'task', 'headless')
-    const names = (attempt(root, d.readdirSync) ?? []).filter((name) => /^d[0-9]+$/.test(name))
-      .sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))
-    for (const name of names) {
-      const rel = `task/headless/${name}/stream.jsonl`
-      if (!stat(join(crewDir, rel))) continue
-      const cmdRel = `task/headless/${name}/cmd.json`
-      const cmdText = text(join(crewDir, cmdRel))
-      if (cmdText === null) throw new ShowRefusal(`lane ${lane}: ${cmdRel} is missing, so ${rel} cannot be attributed to a seat`)
-      let command
-      try { command = JSON.parse(cmdText) } catch (error) { throw new ShowRefusal(`lane ${lane}: ${cmdRel} is not valid JSON (${error.message})`) }
-      if (!isObject(command)) throw new ShowRefusal(`lane ${lane}: ${cmdRel} is not an object`)
-      const sessionRole = command.env?.CREW_ROLE
-      if (typeof sessionRole !== 'string' || !Object.hasOwn(members, sessionRole)) {
-        throw new ShowRefusal(`lane ${lane}: ${cmdRel} records ${sessionRole === undefined ? 'no CREW_ROLE' : `CREW_ROLE ${JSON.stringify(sessionRole)}`}, which is not a member of ${crewPath}`)
-      }
-      const at = Array.isArray(command.args) ? command.args.indexOf('-p') : -1
-      const prompt = at >= 0 && typeof command.args[at + 1] === 'string' ? command.args[at + 1] : undefined
-      dispatches.set(sessionRole, [...(dispatches.get(sessionRole) ?? []), { rel, prompt }])
-    }
-  }
   const sessionsOf = (name, transport) => {
-    if (transport === 'headless-json') return { files: dispatches.get(name) ?? [], reason: 'no session file recorded' }
     if (transport === 'lean-acp') {
       const turn = new RegExp(`^[A-Za-z0-9._-]+\\.${name}\\.([0-9]+)\\.jsonl$`)
       const turns = (attempt(join(crewDir, 'task', 'lean', name), d.readdirSync) ?? []).flatMap((file) => (turn.test(file) ? [[Number(file.match(turn)[1]), file]] : []))
         .sort((a, b) => a[0] - b[0] || (a[1] < b[1] ? -1 : 1))
       return { files: turns.map(([, file]) => ({ rel: `task/lean/${name}/${file}`, prompt: undefined })), reason: 'no session file recorded' }
     }
-    if (transport !== 'headless-rpc') return { files: [], reason: `no session file: transport ${transport} records none this reads` }
-    const rel = `task/headless-rpc/${name}/stream.jsonl`
-    return { files: stat(join(crewDir, rel)) ? [{ rel, prompt: undefined }] : [], reason: 'no session file recorded' }
+    return { files: [], reason: `no session file: transport ${transport} records none this reads` }
   }
   const seatOf = (name) => {
     const member = members[name]
@@ -209,7 +133,7 @@ export function showLane({ lane, role, json = false, deps = {} }) {
   })
   if (streams.every((session) => session.raw.trim() === '')) throw new ShowRefusal(`lane ${lane} role ${role} recorded no events: ${streams.map((session) => session.rel).join(', ')} is empty`)
   if (json) return streams.map((session) => session.raw).join('')
-  return streams.map((session) => renderSession(session, transport)).join('\n')
+  return streams.map((session) => renderSession(session)).join('\n')
 }
 
 export function main(argv = process.argv.slice(2), deps = {}) {

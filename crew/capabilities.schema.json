@@ -141,7 +141,7 @@
         }
       ],
       "properties": {
-        "default_transport": { "enum": ["pane", "headless-json", "headless-rpc", "acp"] }, "display_name": {
+        "default_transport": { "enum": ["acp"] }, "display_name": {
           "type": "string",
           "pattern": "^\\S(?:.*\\S)?$"
         },
@@ -187,9 +187,6 @@
           "minItems": 1,
           "items": {
             "enum": [
-              "pane",
-              "headless-json",
-              "headless-rpc",
               "acp"
             ]
           }

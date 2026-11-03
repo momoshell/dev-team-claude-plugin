@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-23",
+  "updated_at": "2026-11-03",
   "coding_agents": {
     "pi": {
       "providers": [
@@ -10,8 +10,6 @@
         "llama-swap"
       ],
       "transports": [
-        "pane",
-        "headless-rpc",
         "acp"
       ],
       "adapter": "crew/adapters/adapter-pi.mjs",
@@ -27,8 +25,6 @@
         "anthropic"
       ],
       "transports": [
-        "pane",
-        "headless-json",
         "acp"
       ],
       "adapter": "crew/adapters/adapter-claude.mjs",

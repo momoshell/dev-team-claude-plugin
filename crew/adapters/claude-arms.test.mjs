@@ -5,8 +5,22 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, sy
 import { dirname, join } from 'node:path'
 import { ROOT, git, scratchDir } from '../../test/helpers.mjs'
 import { runAcpSeat } from '../acp/seat.mjs'
-import { acpLaunch, headlessCommand, seatCommand, writeSeatArms } from './adapter-claude.mjs'
+import { acpLaunch, writeSeatArms } from './adapter-claude.mjs'
+import * as claude from './adapter-claude.mjs'
 import { CLAUDE_ARMS, armsPluginDir, claudeArmsOf, runHook, writeArmsPlugin } from './claude-arms.mjs'
+
+// MUTATION: restore PROFILES.pane and capabilitiesFor('pane') resolves.
+test('the claude adapter resolves only the acp profile and ships no pane or headless builder', () => {
+  for (const transport of ['pane', 'headless-json', undefined]) {
+    assert.throws(() => claude.capabilitiesFor({ transport }), (error) => error.message.includes(String(transport)))
+  }
+  const profile = claude.capabilitiesFor({ transport: 'acp' })
+  assert.equal(Object.isFrozen(profile), true)
+  assert.equal(profile.abort, 'cancel')
+  assert.equal(profile.durable_cursor, 'protocol')
+  assert.equal(profile.permission_requests, true)
+  for (const name of ['seatCommand', 'headlessCommand', 'mcpConfigPath', 'paneUsageRecords']) assert.equal(name in claude, false, name)
+})
 
 // Every frame below is a recorded Claude Code hook input (or the session transcript) cloned with only scenario data
 // changed: paths, tool ids, sizes and failure output. The hooks run as the real commands the plugin names, one process each.
@@ -296,11 +310,6 @@ test('CH3 a claude seat granted an advisor gets the repeated-failure note once, 
 
 test('CH6 a claude seat granted subagent refuses before a client, however it is mixed with arms it can run', () => {
   for (const arms of [{ extensions: ['subagent'] }, { extensions: ['readgate', 'subagent'] }, { extensions: ['subagent', 'readgate'], advisor: ADVISOR }]) refused(sandbox(), arms)
-  // The old headless and pane transports refuse every extension grant, as before.
-  const grants = { extensions: [join(ROOT, 'crew/pi/extensions/readgate.ts')], skills: [], tools: [], mcp_servers: [] }
-  const spec = { role: 'builder', model: 'opus', promptFile: '/p.md', tools: 'Read', deny: '', taskDir: '/tmp/x', bootBrief: 'b', grants }
-  assert.throws(() => seatCommand(spec), { reason: 'grant-unsupported' })
-  assert.throws(() => headlessCommand({ ...spec, prompt: 'p', sessionId: 'abc', bin: '/bin/claude' }), { reason: 'grant-unsupported' })
 })
 
 test('every arm the lane carries, and only those, is accepted at launch; the rest refuse in the adapter, not by name list in the seat', () => {

@@ -34,10 +34,6 @@ Finding severities: `must-fix`, `should-fix`, `consider`.
 
 The loop runs each test the builder names on the old source and on the build. It then runs the suite, commits, rebases and opens the PR. Do not run those stages yourself.
 
-Return exactly one P2 JSON envelope at the supplied return path. Use the issued role and id, a nonempty summary and no extra fields. Report a gap honestly rather than claiming done.
-
-Envelope keys: `role`, `id`, `status`, `summary`, `details`.
-
-Statuses: `done`, `insufficient`, `escalate`.
+Give the envelope a nonempty `summary` and no top-level field beyond the example's.
 
 Details keys: `verdict`, `findings`, `requirements`, `failure_modes`, `coverage`.

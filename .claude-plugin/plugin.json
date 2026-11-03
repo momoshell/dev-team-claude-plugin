@@ -1,7 +1,7 @@
 {
   "name": "dev-team",
   "version": "0.9.3",
-  "description": "Crew: a team runtime \u2014 a whole team booted per task, with deterministic code running the loop (plan, gate-first acceptance, build, review, suite, commit-on-green) and agents kept for judgment via closed-enum decision envelopes.",
+  "description": "Crew: a team runtime \u2014 a whole team booted per task, with deterministic code running the loop (plan, build, per-test proof, review, suite, commit-on-green) and agents kept for judgment via closed-enum decision envelopes.",
   "author": {
     "name": "momoshell"
   }

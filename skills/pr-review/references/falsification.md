@@ -56,11 +56,11 @@ as much as to the builder's code. The test is whether the defect belongs to the
 behaviour this change touched — not whether its correction happens to land on
 an already-modified line. Two classes are never subject to the bar:
 
-- **vacuity and required proof** — a guard the change adds without a
-  kill-mutation, a check that stays green with the behaviour removed
-  (`CLAUDE.md`: a guard is vacuous unless proven by mutation; the rubric
-  grades vacuity should-fix by default), even when the proof lands in a test
-  file the change did not touch;
+- **vacuity and required proof** — a check that stays green with the behaviour
+  removed, or a named test not red on the old source. `CLAUDE.md` says a test
+  proves a change only when red on the old source and green on the build; this
+  is not a kill proof. The rubric grades vacuity should-fix by default, even
+  when the proof lands in a test file the change did not touch;
 - **an out-of-context repair** the plan or an ADR has not deferred
   (`crew/guidelines/review-do-not-flag.md`) — it stays visible.
 
@@ -104,6 +104,6 @@ root cause, with no recap of what the change does.
 When running a model directly over an unreviewed diff, paste this reference after the doctrine
 paragraph and before the diff. Ask for: findings as `must-fix` / `should-fix`
 / `consider` with `file:line` and a correction each; a separate **Verified**
-section (not a severity) listing what was checked and held, including every
-kill-mutation the change claims re-run independently; and a final
+section (not a severity) listing what was checked and held, including each named
+test's result red on the old source and green on the build where you ran it; and a final
 `net: merge` or `net: do not merge` line.

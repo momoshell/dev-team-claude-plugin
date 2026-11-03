@@ -34,4 +34,4 @@ The limits are part of every interpretation:
 - **Contract drift as an axis — no exhibit:** the nearest instrument is
   `contract-literal`, **4 must-fix of 7** (F9), too small to order by.
 - **A second reviewer buys the most where the gate is quietest — no exhibit:** the
-  corpus gives gate and review counts but has no panel comparison for this claim.
+  corpus gives historical gate and review counts (ADR-055 retired that gate) but has no panel comparison for this claim.

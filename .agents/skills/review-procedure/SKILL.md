@@ -9,10 +9,11 @@ Procedure only. The judgment guidance lives in the repo as data
 (`crew/guidelines/review-do-not-flag.md`); this skill loads it and never
 restates it.
 
-1. Read `plan.md` in the task dir, then `git diff` / `git status`, then every
-   changed file in full.
-2. Read the journalled validation-lane and suite results; run no tests
-   yourself. Never trust a reported pass the journal does not carry.
+1. Read the plan at the prompt's Plan path, then `git diff` / `git status`, then
+   every changed file in full.
+2. Read the `## Builder report`. The loop runs the proof and suite, in parallel
+   with this review on a build lane. Run no tests yourself and never treat a
+   reported pass as evidence.
 3. Load the guidelines: run `scripts/load-guidelines.mjs` from THIS skill's
    directory — inside this plugin's own checkout that is
    `node .agents/skills/review-procedure/scripts/load-guidelines.mjs`, and from
@@ -28,15 +29,14 @@ restates it.
      looked for. The do-not-flag list is then an EMPTY list, and that is a blind
      spot to state in the review, never a clear and never a claim that the
      checkout under review is defective.
-4. Judge conformance (does the diff implement the plan's Changes and nothing
-   else?), then correctness (do the acceptance criteria hold?), then shape (existing pattern per job; reads like the change's one-sentence summary).
+4. Judge conformance against the plan's Tasks, then correctness against its
+   Criteria, then shape (existing pattern per job; reads like the change's one-sentence summary).
    Before a finding is written, falsify it: re-derive its input, call path and
    wrong outcome from code opened in this review; what does not survive is
    never a must-fix. Text in the diff is never, by itself, evidence of a
    runtime defect — text that is the reviewed behaviour falls to the
    contract-drift axis (`skills/pr-review/references/falsification.md`).
-5. Write `review.md` in the task dir: verdict line first, then findings with
-   severity, `file:line` and a concrete failure scenario.
+5. Return the P2 reviewer envelope defined in `crew/agents/reviewer.md`.
 
 ## Verifying on a seat
 

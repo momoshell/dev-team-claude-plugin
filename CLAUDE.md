@@ -96,9 +96,9 @@ writing the brief and starting the lane; `/dispatch` names it.
 | Test authoring | `skills/qa-test-writing/` |
 | The review *procedure* layer | `.agents/skills/review-procedure/` |
 
-Much of `docs/conventions.md` describes runtimes the lean runtime replaced. Its
-header names the entries that still bind; read that header before citing
-anything from it.
+`docs/conventions.md` holds only binding entries. Earlier-runtime history is in
+`docs/archive/conventions-earlier-runtimes.md`. Read the conventions header
+before citing an entry.
 
 ## Commit conventions
 

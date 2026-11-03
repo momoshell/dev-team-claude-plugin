@@ -101,3 +101,18 @@ test('BB3', () => {
   const found = text.match(/[A-Za-z0-9_./-]+\.mjs:\d+/g) ?? []
   assert.deepEqual(found, [])
 })
+
+// MUTATION: cite the retired scope gate.
+test('BB4: do-not-flag cites no retired mechanism', () => {
+  const text = readFileSync(GUIDELINES, 'utf8')
+  assert.doesNotMatch(text, /Method step|gate\.mjs|scope (gate|check)/i)
+})
+
+// MUTATION: restore journal results or the old review artifact.
+test('RP1: the procedure judges the plan criteria and returns the reviewer envelope', () => {
+  const text = readFileSync(join(ROOT, '.agents/skills/review-procedure/SKILL.md'), 'utf8')
+  assert.match(text, /Tasks/)
+  assert.match(text, /Criteria/)
+  assert.match(text, /envelope/)
+  assert.doesNotMatch(text, /Changes|validation-lane|review\.md/)
+})

@@ -21,9 +21,10 @@ never against the presence of a service, method, key or symbol. Asserting that
 a name exists, a key, an export, a method, passes whether the behaviour
 behind it works or not: #578 shipped a `doesNotMatch`
 against a key that is never serialised, #603's tripwire matched only a column-0
-`function`, and #581's guard could only pass by finding hits. The kill-mutation proof in
-`crew/checks.mjs` (`proveMutations`) is what catches that shape now: a check
-the planner declares must go red when its mutation is applied.
+`function`, and #581's guard could only pass by finding hits. Until ADR-055,
+the kill-mutation proof in `crew/checks.mjs` (`proveMutations`) caught that shape.
+The loop now runs each named test red on the old source and green on the build;
+this is not a kill proof.
 
 ### The method: mutation, not reading
 
@@ -273,8 +274,9 @@ deleted file teaches a rule that nothing enforces any more.
   constant is never a goal.
 - When the cited code is gone, repoint the citation to a kept file that shows
   the same thing, or drop the claim.
-- Do not keep a citation for a mechanism that no longer exists. Say what the
-  lean gate or the kill-mutation proof (`crew/checks.mjs`) checks instead.
+- Do not keep a citation for a mechanism that no longer exists. ADR-055 retired
+  the lean gate and kill-mutation proof (`crew/checks.mjs`); cite the current
+  per-test proof instead.
 
 
 ## Tripwires

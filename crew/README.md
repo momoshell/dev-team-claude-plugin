@@ -33,7 +33,7 @@ judge:      plan -> rebase -> build -> per-test proof -> full suite -> review ->
 mechanical: rebase -> build -> per-test proof -> full suite -> PR
 ```
 
-A fix turn carries the red results back to the builder, then repeats proof, the suite and the tier's reviews. Build and judge do not automatically rerun a red suite on an unchanged tree. Before publishing, each lane commits and rebases. Build and judge commit only the tree their suite and reviews checked. If the head changes, they put the change on the new base tip and repeat every check, including reviews. If Git drops the commit as already upstream, they stop. Mechanical and finish prove and test a moved head again.
+A fix turn carries the red results back to the builder, then repeats proof, the suite and the tier's reviews. Build and judge do not automatically rerun a red suite on an unchanged tree. Before publishing, each lane commits and rebases. Build, judge and finish commit only the tree their suite and reviews checked. If the head changes, they put the change on the new base tip and repeat every check, including reviews. If Git drops the commit as already upstream, they stop. Mechanical re-proves and re-tests a moved head.
 
 A brief may choose `mechanical: true` for a change with no behaviour to judge. With no named test, its PR states `proof: none, mechanical lane, not reviewed`; the operator reviews the diff before merging. Protected paths restart it as judge, and builder insufficiency restarts it as build.
 
@@ -60,7 +60,10 @@ A tier override replaces only the fields it names and keeps a raw override model
 |---|---|---|---|
 | Readgate | `crew/pi/extensions/readgate.ts` | - | - |
 | FFF | `crew/adapters/adapter-pi.mjs` | - | - |
-| Advisor | `crew/pi/extensions/advisor.ts` | ADR-047 ([decision](../docs/adr/adr-047-the-advisor-is-a-roster-seat.md)) | [The advisor is a roster seat](../docs/adr/adr-047-the-advisor-is-a-roster-seat.md) |
+| Advisor | `crew/pi/extensions/advisor.ts`, `crew/agents/builder.md` (advisor model) | [ADR-047](../docs/adr/adr-047-the-advisor-is-a-roster-seat.md) | - |
+| Skeletonread | `crew/pi/extensions/skeletonread.ts` | - | - |
+| Subagent | `crew/pi/extensions/subagent.ts` | - | - |
+| Per-test proof | `crew/proof.mjs` | [ADR-055](../docs/adr/adr-055-planner-defines-the-work.md) | - |
 | Seat skills | `hooks/skill-gate.mjs` (skill-map selector, not a registered hook) | ADR-050 ([decision](../docs/adr/adr-050-seat-skills-are-granted-not-pasted.md)) | [Seat skills](../docs/adr/adr-050-seat-skills-are-granted-not-pasted.md) |
 | Memory | `crew/memory.mjs` | - | - |
 | Visualizer | `visualizer/web/src/lib/LeanRunDetail.svelte`, `visualizer/web/src/lib/LeanWaterfall.svelte` | - | [Visualizer](../visualizer/README.md) |

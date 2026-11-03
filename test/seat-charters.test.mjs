@@ -25,50 +25,59 @@ const rungs = [
   '6. Only then: the minimum code that works.',
 ]
 
-// MUTATION: remove the no-envelope accept bounce rule.
-test('LD1: the lead charter makes an accept with nothing to accept a bounce', () => {
-  has(body('crew/agents/lead.md'), "When the held seat's bound is spent with no envelope, there is nothing to accept: an `accept` is a bounce to that seat.")
-})
+const boilerplate = charter => {
+  assert.doesNotMatch(charter, /Return exactly one P2 JSON envelope|^Envelope keys:|^Statuses:/m)
+  has(charter, "Give the envelope a nonempty `summary` and no top-level field beyond the example's.")
+  assert.match(charter, /^Details keys:/m)
+}
+const insufficient = '`insufficient` means a named gap in the plan: say what is wrong or missing, and where. Size or effort is never a reason to return `insufficient`.'
+const types = 'The type is one of `chore`, `ci`, `crew`, `docs`, `feat`, `fix`, `merge`, `perf`, `refactor`, `revert`, `spike`, `test`, `wip`, `workflow`.'
 
-// MUTATION: remove the named plan gap or permit size and effort as reasons.
-test('SC1: both charters define insufficient', () => {
-  for (const role of ['builder', 'planner']) {
-    const charter = body(`crew/agents/${role}.md`)
-    has(charter, '`insufficient` means a named gap in the plan: say what is wrong or missing, and where.')
-    has(charter, 'Size or effort is never a reason to return `insufficient`.')
-  }
-})
-
-// MUTATION: omit a broken caller, test, fixture, config or export from completion.
-test('SC2: the builder finishes the whole change', () => {
+// MUTATION: restore return boilerplate or remove a builder loop rule.
+test('CH1: the builder charter keeps the rules the loop depends on', () => {
   const charter = body('crew/agents/builder.md')
-  has(charter, 'Finish every place the change reaches: callers, tests, fixtures, config and exports it breaks.')
-  has(charter, 'Be lazy about the solution, never about the change itself.')
-  has(charter, 'Return `tests` (each a file and test title) and `notes` (paths not tested, guards relied on, checks run, and what was verified as against assumed) in `details`.')
+  boilerplate(charter)
+  for (const text of [insufficient, types, 'Read every skill granted for the lane before working.', 'Finish every place the change reaches: callers, tests, fixtures, config and exports it breaks.', 'Be lazy about the solution, never about the change itself.', 'Return `tests` (each a file and test title) and `notes` (paths not tested, guards relied on, checks run, and what was verified as against assumed) in `details`.', 'A mechanical lane has no plan: the brief is the plan, and the prompt carries no plan path.', 'Name a test only when you wrote one; a mechanical lane requires none.', 'Add `details.subject`, the conventional-commit subject for the commit and the PR: `type(scope): summary`, at most 72 characters.', 'On a mechanical lane, `insufficient` means the brief cannot be done as a mechanical change: say why. The lane restarts as build and your build is discarded.', 'Name that decision in `details.question`', "The plan's file list is context, not a fence", 'Details keys: `summary`, `tests`, `notes`, and on a mechanical lane `subject`.']) has(charter, text)
+  assert.doesNotMatch(charter, /files_in_scope|validation_lane/)
 })
 
-// MUTATION: remove deletions or skeleton retrieval from the scope rule.
-test('SC3: planner scope covers all touched files and retrieval', () => {
-  has(body('crew/agents/planner.md'), '`files_in_scope` must list every file the build touches, including files to delete. It fences skeleton retrieval, not edits; scope is context, not an edit fence (ADR-045).')
-})
-
-// MUTATION: replace "is a bare file path" with "is an artifact path".
-test('SF3: planner plan_path is a bare file path', () => {
+// MUTATION: restore return boilerplate or remove a planner loop rule.
+test('CH2: the planner charter keeps the rules the loop depends on', () => {
   const charter = body('crew/agents/planner.md')
+  boilerplate(charter)
+  for (const text of [insufficient, types, '`files_in_scope` must list every file the build touches, including files to delete. It fences skeleton retrieval, not edits; scope is context, not an edit fence (ADR-045).', 'skeletonread', 'advisor', 'failing validation runs', 'refused without `files_in_scope`', '## Criteria', '## Properties', '## Not machine-checked', '## Tasks']) has(charter, text)
+  assert.doesNotMatch(charter, /scout|The builder's context arms read them|validation_lane[^.]*the `node --test` command|refused without `validation_lane`/i)
   has(charter, '`plan_path` is a bare file path without a line-range suffix; cite plan lines as `file:start-end` in the plan text.')
   assert.doesNotMatch(charter, /inside `plan_path`/)
+  const tail = charter.split('Details keys:')[1]
+  const anchors = ['The `subject` is the conventional-commit subject', '`plan_path` is a bare file path', 'Give `tests` as the test of each property', 'Give `files_in_scope` (the repo-relative files', '`validation_lane` (the repository-appropriate command that checks the change)', 'Optionally give `judge`']
+  let previous = -1
+  for (const anchor of anchors) { const at = tail.indexOf(anchor); assert.ok(at > previous, anchor); previous = at }
 })
 
-// MUTATION: reinsert a Scout rule paragraph.
-test('SF4: planner charter has no scout rule', () => {
-  assert.doesNotMatch(body('crew/agents/planner.md'), /scout/i)
+// MUTATION: restore return boilerplate or remove a reviewer loop rule.
+test('CH3: the reviewer charter keeps the rules the loop depends on', () => {
+  const charter = body('crew/agents/reviewer.md')
+  boilerplate(charter)
+  for (const text of ['Read every skill granted for the lane before reviewing.', 'read every listed untracked file directly', "Restate the brief's ask as `requirements`", 'A pass carries no unmet requirement.', 'A must-fix carries `trigger`', 'A pass cannot contain a must-fix finding.', 'An incomplete review is never a pass.', 'carry each under its id in `findings` or close it in `closed`', 'Read the `## Builder report`', 'Flag a test the plan does not name']) has(charter, text)
+  assert.doesNotMatch(charter, /files_in_scope|validation_lane/)
 })
 
-// MUTATION: restore the Node-only validation_lane instruction (PS3).
-test('PS3 planner requests a repository-appropriate validation lane', () => {
-  const charter = body('crew/agents/planner.md')
-  has(charter, '`validation_lane` (the repository-appropriate command that checks the change)')
-  assert.doesNotMatch(charter, /validation_lane[^.]*the `node --test` command/)
+// MUTATION: restore the duplicated reviewer charter in the tech-lead.
+test('CH4: the tech-lead charter is a delta over the reviewer charter', () => {
+  const charter = body('crew/agents/tech-lead.md')
+  boilerplate(charter)
+  for (const text of ['](./reviewer.md)', 'after the reviewer passes and the suite is green', 'Read every skill granted for the lane before reviewing.', 'scout']) has(charter, text)
+  assert.ok(flat(charter).length < flat(body('crew/agents/reviewer.md')).length / 2)
+  assert.doesNotMatch(charter, /Restate the brief's ask as `requirements`/)
+})
+
+// MUTATION: restore a gate bypass or remove a lead decision rule.
+test('CH5: the lead charter keeps the rules the loop depends on', () => {
+  const charter = body('crew/agents/lead.md')
+  boilerplate(charter)
+  for (const text of ["When the held seat's bound is spent with no envelope, there is nothing to accept: an `accept` is a bounce to that seat.", 'No decision bypasses the per-test proof or the suite.', 'details.question', 'details.target', '`builder`', '`planner`', 'status: "done"', 'details.decision']) has(charter, text)
+  assert.doesNotMatch(charter, /bypasses a gate/)
 })
 
 // MUTATION: remove dev-team attribution from the examples heading (PS4).
@@ -96,31 +105,6 @@ test('SC4: the delivered skill owns the ladder and its references', () => {
   assert.ok(notice)
   for (const text of ['skills/code-less/SKILL.md', 'crew/agents/builder.md', 'e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156', '01cbf81', 'df9e89941d50419fd5bcf1de41e28097f1db49b2', 'skills/pr-review/SKILL.md', 'docs/licenses/ponytail-MIT.txt', 'Copyright (c) 2026 DietrichGebert', 'THE SOFTWARE IS PROVIDED "AS IS"']) has(notice, text)
   assert.doesNotMatch(notice, /_shared\.md|compiled into every role prompt/)
-})
-
-// MUTATION: delete the builder's universal-read instruction.
-test('LG4: builder and reviewer read every lane grant', () => {
-  has(body('crew/agents/builder.md'), 'Read every skill granted for the lane before working.')
-  has(body('crew/agents/reviewer.md'), 'Read every skill granted for the lane before reviewing.')
-})
-
-// MUTATION: drop the mechanical insufficient sentence.
-test('SC6: the builder charter covers the mechanical lane', () => {
-  const charter = body('crew/agents/builder.md')
-  for (const text of [
-    'A mechanical lane has no plan: the brief is the plan, and the prompt carries no plan path.',
-    'Name a test only when you wrote one; a mechanical lane requires none.',
-    'Add `details.subject`, the conventional-commit subject for the commit and the PR: `type(scope): summary`, at most 72 characters.',
-    'On a mechanical lane, `insufficient` means the brief cannot be done as a mechanical change: say why. The lane restarts as build and your build is discarded.',
-    'Details keys: `summary`, `tests`, `notes`, and on a mechanical lane `subject`.',
-    '`insufficient` means a named gap in the plan: say what is wrong or missing, and where.',
-  ]) has(charter, text)
-})
-
-// MUTATION: drop a type from the builder's subject sentence.
-test('SC7: the builder charter names the accepted subject types', () => {
-  const sentence = 'The type is one of `chore`, `ci`, `crew`, `docs`, `feat`, `fix`, `merge`, `perf`, `refactor`, `revert`, `spike`, `test`, `wip`, `workflow`.'
-  for (const role of ['builder', 'planner']) has(body(`crew/agents/${role}.md`), sentence)
 })
 
 // MUTATION: remove prose-plain from the builder base skills list.
@@ -191,7 +175,7 @@ Check shape support.
 }
 
 // MUTATION: offer stepped in the shape field although start refuses it.
-test('SC6: brief shape offerings and examples match public start behaviour', async () => {
+test('SH1: brief shape offerings and examples match public start behaviour', async () => {
   assert.deepEqual(SHAPES, ['standard', 'finish'])
   const accepted = []
   for (const shape of SHAPES) {
@@ -219,7 +203,7 @@ test('SC6: brief shape offerings and examples match public start behaviour', asy
 })
 
 // MUTATION: advertise stepped in the finish refusal.
-test('SC7: finish refusal names only standard and has no effects', async () => {
+test('SH2: finish refusal names only standard and has no effects', async () => {
   const { result, error, effects, resolutions } = await probe('finish')
   assert.equal(result, undefined)
   assert.ok(error instanceof StartRefusal)

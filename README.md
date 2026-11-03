@@ -3,10 +3,10 @@
 **A team runtime: agents do the work, code keeps it correct.**
 
 One brief goes in; a lean lane comes out. `crew start <brief.md>` makes a
-worktree and a journal, then plays four seats over ACP: a **planner** explores
-the code and writes the plan, a **builder** edits the
-repo, a **reviewer** gives a verdict, and a **lead** answers escalations with
-one closed decision. Code only checks the result: each named test is red on the
+worktree and a journal, then plays five seats over ACP: a **planner** explores
+the code and writes the plan, a **builder** edits the repo, a **reviewer** gives
+a verdict, a **lead** answers escalations with one closed decision, and a
+**tech-lead** gives judge lanes a second review. Code only checks the result: each named test is red on the
 old source and green on the build, and the full suite is green. Commit, rebase
 and PR happen only on green (ADR-052, ADR-055). A stopped
 lane is picked up again with `crew finish`. Every seat's full session is

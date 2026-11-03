@@ -82,8 +82,8 @@ test('RP3 M1 shipped role packs pin exactly and session start is silent', () => 
     { when: { roles: ['reviewer', 'tech-lead'] }, delivery: 'inline', skills: ['dev-team:pr-review'] },
     { when: { paths: ['**/*.mjs', '**/*.js', '**/*.ts', '**/*.tsx', '**/*.rs', '**/*.py', '**/*.svelte'], roles: ['builder', 'reviewer', 'tech-lead'] }, skills: ['dev-team:code-less'] },
     { when: { paths: ['crew/**/*.mjs', 'crew/**/*.ts', 'scripts/**/*.mjs', 'hooks/**/*.mjs'], roles: ['builder', 'reviewer', 'tech-lead'] }, skills: ['dev-team:backend-node'] },
-    { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.js', 'visualizer/**/*.mjs', 'visualizer/**/*.css'], roles: ['builder', 'reviewer', 'tech-lead'] }, skills: ['dev-team:frontend-svelte'] },
-    { when: { paths: ['visualizer/**/*.svelte', 'visualizer/**/*.css'], roles: ['builder', 'reviewer', 'tech-lead'] }, skills: ['dev-team:ui-design', 'dev-team:ux'] },
+    { when: { paths: ['visualizer/**/*.js', 'visualizer/**/*.mjs', 'visualizer/**/*.css'], roles: ['builder', 'reviewer', 'tech-lead'] }, skills: ['dev-team:frontend-svelte'] },
+    { when: { paths: ['visualizer/**/*.css'], roles: ['builder', 'reviewer', 'tech-lead'] }, skills: ['dev-team:ui-design', 'dev-team:ux'] },
     { when: { paths: ['docs/**/*.md', 'skills/**/*.md', 'crew/agents/*.md'], roles: ['builder', 'reviewer', 'tech-lead'] }, delivery: 'grant', skills: ['dev-team:prose-plain'] },
     { when: { paths: ['**/*.test.*', '**/*.spec.*', '**/tests/**/*.rs', '**/*_test.*'], roles: ['builder'] }, skills: ['dev-team:test-economy'] },
     { when: { paths: ['**/*.test.*', '**/*.spec.*', '**/tests/**/*.rs', '**/*_test.*'], roles: ['reviewer', 'tech-lead'] }, skills: ['dev-team:test-strength'] },
@@ -92,6 +92,22 @@ test('RP3 M1 shipped role packs pin exactly and session start is silent', () => 
   assert.equal(loadMap(ROOT).ok, true)
   assert.equal(result.stdout, '')
 })
+// MUTATION: restore a second Svelte-specific frontend grant.
+test('SM1: one skill-map rule grants the Svelte skills', () => {
+  const { map } = loadMap(ROOT)
+  const rules = map.rules.filter(rule => rule.when.paths?.some(path => path.endsWith('.svelte')) && rule.skills.includes('dev-team:frontend-svelte'))
+  assert.equal(rules.length, 1)
+  for (const file of ['visualizer/web/src/App.svelte', 'web/App.svelte']) {
+    for (const [role, expected] of [
+      ['builder', ['code-less', 'frontend-svelte', 'prose-plain', 'test-economy', 'ui-design', 'ux']],
+      ['reviewer', ['code-less', 'frontend-svelte', 'pr-review', 'prose-plain', 'test-strength', 'ui-design', 'ux']],
+    ]) {
+      const skills = resolveSeatSkills({ map, role, files: [file, 'docs/x.md', 'test/x.test.mjs'] }).skills
+      assert.deepEqual(skills.map(path => path.split('/')[1]).sort(), expected)
+    }
+  }
+})
+
 // MUTATION: add dev-team:code-less to the reviewer's pr-review role rule.
 test('SF1: builder and reviewer get no role-only skill but pr-review', () => {
   const { map } = loadMap(ROOT)

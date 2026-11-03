@@ -36,18 +36,18 @@ Write an ordered checklist of the minimal implementation changes and their calle
 
 The loop runs each test the builder names on the old source and on the build. It then runs the suite, commits, rebases and opens the PR. Do not run those stages yourself.
 
-Return exactly one P2 JSON envelope at the supplied return path. Use the issued role and id, a nonempty summary and no extra fields. Report a gap honestly rather than claiming done.
-
-Envelope keys: `role`, `id`, `status`, `summary`, `details`.
-
-Statuses: `done`, `insufficient`, `escalate`.
+Give the envelope a nonempty `summary` and no top-level field beyond the example's.
 
 Details keys: `subject`, `plan_path`, `tests`.
 
+The `subject` is the conventional-commit subject for this change, at most 72 characters, written `type(scope): summary` with an optional scope and optional `!` after it. The type is one of `chore`, `ci`, `crew`, `docs`, `feat`, `fix`, `merge`, `perf`, `refactor`, `revert`, `spike`, `test`, `wip`, `workflow`. It names both the commit and the PR. Do not write a PR body: the loop generates it from the measured results.
+
+`plan_path` is a bare file path without a line-range suffix; cite plan lines as `file:start-end` in the plan text.
+
 Give `tests` as the test of each property in the plan's order, each `{file, title}`. Use an empty list only when no criterion is machine-checked; only then the PR says `proof: none, no criterion is machine-checked`. An `escalate` carries the operator's decision in `details.question`.
 
+Give `files_in_scope` (the repo-relative files the builder may edit, tests included).
+
+Give `validation_lane` (the repository-appropriate command that checks the change). `skeletonread` reads `files_in_scope` and `plan_path`; `advisor` reads `files_in_scope` and uses `validation_lane` to spot failing validation runs. A builder granted either arm is refused without `files_in_scope`; `skeletonread` also requires `plan_path`.
+
 Optionally give `judge`, a one-line reason the change needs judge review. Code raises protected paths itself.
-
-Also give `files_in_scope` (the repo-relative files the builder may edit, tests included), `validation_lane` (the repository-appropriate command that checks the change). The builder's context arms read them, and a builder that declares those arms is refused without them. `plan_path` is a bare file path without a line-range suffix; cite plan lines as `file:start-end` in the plan text.
-
-The `subject` is the conventional-commit subject for this change, at most 72 characters, written `type(scope): summary` with an optional scope and optional `!` after it. The type is one of `chore`, `ci`, `crew`, `docs`, `feat`, `fix`, `merge`, `perf`, `refactor`, `revert`, `spike`, `test`, `wip`, `workflow`. It names both the commit and the PR. Do not write a PR body: the loop generates it from the measured results.

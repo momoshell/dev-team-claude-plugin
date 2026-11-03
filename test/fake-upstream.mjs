@@ -1,7 +1,7 @@
 // A stand-in provider that always fails with a chosen status, so a refusal
 // shape can be MEASURED instead of waited for. Transport-neutral: anything that
 // honours ANTHROPIC_BASE_URL can be pointed at it, which is how the
-// api_error_status -> provider-failure mapping in crew/headless.mjs was pinned.
+// api_error_status -> provider-failure mapping was pinned.
 //
 //   node test/fake-upstream.mjs ratelimit|auth|overloaded     # prints PORT=…
 //   ANTHROPIC_BASE_URL=http://127.0.0.1:<port> ANTHROPIC_API_KEY=… <command>

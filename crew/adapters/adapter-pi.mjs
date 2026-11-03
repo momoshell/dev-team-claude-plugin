@@ -1,21 +1,7 @@
 import { fileURLToPath } from 'node:url'
-import { existsSync, mkdtempSync, symlinkSync, writeFileSync, renameSync, unlinkSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { join, isAbsolute } from 'node:path'
 
-// crew/adapters/adapter-pi.mjs — the pi agent adapter.
-//
-// An adapter is the seam between a crew seat and the CLI agent that fills it:
-// `capabilitiesFor(...)` resolves one frozen profile per (adapter, transport)
-// pair, and `seatCommand(...)` composes the pane's command line. crew.mjs resolves the
-// adapter by seat.agent (default 'claude', overridable via --agent-<role>),
-// by filename, so no adapter name is hard-coded on the seat-resolution path.
-// One site outside it does branch on the literal 'pi': assertAdvisorCellLive
-// (crew/crew.mjs) refuses an advisor cell whose builder adapter is anything
-// else. pi's flag grammar
-// differs from claude's (see below), so there is no byte-identity bar here
-// the way there is for adapter-claude.mjs; this adapter is judged on
-// honesty of its capability claims, not on matching another agent's shape.
+// crew/adapters/adapter-pi.mjs — ACP launch and capability profile for pi seats.
 const INVARIANT = Object.freeze({
   // --append-system-prompt treats an existing path as file contents
   // (verified in pi's resource-loader), so the merged role file lands intact.
@@ -43,18 +29,6 @@ const INVARIANT = Object.freeze({
 })
 
 const PROFILES = Object.freeze({
-  pane: Object.freeze({
-    // ADR-029 §3:52 — pane interjection is not established by a capture.
-    interjection: 'none',
-    // ADR-029 §3:53 — pane owns no process handle for an abort.
-    abort: 'none',
-    // ADR-029 §3:54 — pane command passes no --session-id.
-    session_resume: false,
-    // ADR-029 §3:54 — pane has no client-resumable observation cursor.
-    durable_cursor: 'none',
-    // #131 — drive.mjs bounce paths reassign a settled pane seat.
-    reassign: true,
-  }),
   // Literal, not spread from capabilities.mjs ACP_TRANSPORT_PROFILE: this module is in
   // subagent.ts's import closure, which must stay node:-only (subagent.test.mjs).
   // capabilities.test.mjs pins every shared key to ACP_TRANSPORT_PROFILE.
@@ -68,35 +42,16 @@ const PROFILES = Object.freeze({
     // acp-server.ts forwards tool permission requests.
     permission_requests: true,
   }),
-  'headless-rpc': Object.freeze({
-    // ADR-029 §3:52 — pi RPC steer delivers at a tool boundary.
-    interjection: 'boundary',
-    // ADR-029 §3:53 — pi RPC exposes an in-protocol abort command.
-    abort: 'command',
-    // ADR-029 §3:54 — RPC resumes the persisted pi session.
-    session_resume: true,
-    // ADR-029 §3:54 — pi RPC's session entry id is a durable cursor.
-    durable_cursor: 'entry_id',
-    // #148 — captured 2026-08-14 (captures/pi-b11-reassign.jsonl): a SETTLED
-    // session takes a further assignment both on the same process and on a new
-    // process resuming it with --session, with history intact across the
-    // process boundary (the recall arm answered with turn 1's marker from a
-    // different process). #131's `false` recorded the absence of a capture,
-    // not an observed limitation.
-    reassign: true,
-  }),
 })
 
 export function capabilitiesFor({ transport, grants } = {}) {
-  const p = PROFILES[transport]
+  const p = transport === 'acp' ? PROFILES.acp : null
   if (!p) throw new Error(`adapter-pi: no capability profile for transport "${transport}" (shipped: ${Object.keys(PROFILES).join(', ')}) — refusing a guessed passthrough`)
   if (grants?.extensions?.includes('builtin:mcp')) piMcpTools(grants.mcp_servers || [])
   return Object.freeze({
     ...INVARIANT, ...p,
     ...(grants?.extensions?.includes('builtin:mcp') ? { mcp_servers: true } : {}),
-    // A FUNCTION OF THE GRANTS, on both transports (#693). It was pane-only
-    // while rpcCommand emitted neither `-e` nor `--tools`; it now emits both,
-    // live-probed against pi 0.84.3.
+    // Fan-out is available only to seats granted agents.
     subagents: (grants?.agents?.length ?? 0) > 0,
   })
 }
@@ -107,25 +62,6 @@ export function capabilitiesFor({ transport, grants } = {}) {
 // Code subscription OAuth at api.meta.ai, not per-token OpenRouter (probed
 // 2026-10-16 against muse-spark-1.3-contributor and muse-wonder-1.0-contributor).
 export const PI_PROVIDERS = Object.freeze({ openai: 'openai-codex', anthropic: 'anthropic', meta: 'meta' })
-
-export const ROUTER_ATTEMPT_URL_ENV = 'CREW_ROUTER_ATTEMPT_URL'
-const ROUTER_ATTEMPT_REFUSAL = 'refusing malformed CREW_ROUTER_ATTEMPT_URL (expected http://host/a/<token>/) — refusing a guessed endpoint'
-
-export function routerAttemptUrl(env) {
-  const value = env[ROUTER_ATTEMPT_URL_ENV]
-  if (value === undefined) return null
-  let url
-  try {
-    url = new URL(value)
-  } catch {
-    throw new Error(ROUTER_ATTEMPT_REFUSAL)
-  }
-  if (url.protocol !== 'http:') throw new Error(ROUTER_ATTEMPT_REFUSAL)
-  if (url.username !== '' || url.password !== '') throw new Error(ROUTER_ATTEMPT_REFUSAL)
-  if (url.search !== '' || url.hash !== '') throw new Error(ROUTER_ATTEMPT_REFUSAL)
-  if (!/^\/a\/[^/]+\/$/.test(url.pathname)) throw new Error(ROUTER_ATTEMPT_REFUSAL)
-  return value
-}
 
 // An OWN-property lookup on BOTH halves (#739): a bare bracket read reaches
 // Object.prototype, so a roster provider named `toString` or `constructor`
@@ -275,9 +211,6 @@ export function piActivatedTools({ tools = [], extensions = [], vendorExtensions
 // BOOLEAN, not a path, so the path is the adapter's own checkout-pinned
 // knowledge — resolved from this file's URL, never from cwd.
 export const PI_ADVISOR_EXTENSION = fileURLToPath(new URL('../pi/extensions/advisor.ts', import.meta.url))
-export const PI_ADVISOR_ENV = 'CREW_ADVISOR'
-export const PI_ADVISOR_ENDPOINT_ENV = 'CREW_ADVISOR_ENDPOINT'
-export const PI_ADVISOR_MODEL_ENV = 'CREW_ADVISOR_MODEL'
 
 // ADR-047 §1: a consult is spelled by the advisor agent's adapter, never passed raw. The
 // boot record keeps the canonical catalog key as its identity (`model`) and carries this
@@ -368,162 +301,4 @@ export function acpLaunch(spec = {}) {
   }
 }
 
-// POSIX single-quoting: a literal apostrophe closes the quote, escapes and
-// reopens. A loopback URL may legally contain one and a model id is a
-// command-line value, so neither is interpolated raw.
-export function shellSingleQuote(value) {
-  return `'${String(value).replaceAll("'", `\'"\'"\'`)}'`
-}
-
 const NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills: [], advisor: false })
-
-export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort, grants = NO_GRANTS, configDir = null, advisorCell = null, env = process.env }) {
-  const routerUrl = routerAttemptUrl(env)
-  let router = null
-  let agentDir = hasPiAgentDir(grants) ? piSeatAgentDir({ taskDir, role }) : configDir
-  if (routerUrl !== null) {
-    let provider = null
-    for (const candidate of Object.values(PI_PROVIDERS)) {
-      if (String(model).startsWith(`${candidate}/`) && (provider === null || candidate.length > provider.length)) provider = candidate
-    }
-    if (provider === null) throw new Error(`adapter-pi: no pi provider for router model "${model}" — refusing a guessed endpoint`)
-    const seatAgentDir = hasPiAgentDir(grants)
-    const routerDir = seatAgentDir ? agentDir : mkdtempSync(join(taskDir, 'router-pi-'))
-    const modelsPath = join(routerDir, 'models.json')
-    if (seatAgentDir) {
-      const temporary = `${modelsPath}.tmp-${process.pid}`
-      let created = false
-      try {
-        writeFileSync(temporary, `${JSON.stringify({ providers: { [provider]: { baseUrl: routerUrl } } }, null, 2)}\n`, { flag: 'wx' })
-        created = true
-        renameSync(temporary, modelsPath)
-      } catch (error) { if (created) try { unlinkSync(temporary) } catch {} throw error }
-    } else writeFileSync(modelsPath, `${JSON.stringify({ providers: { [provider]: { baseUrl: routerUrl } } }, null, 2)}\n`)
-    const preRouterDir = configDir !== null && configDir !== undefined ? configDir : join(homedir(), '.pi', 'agent')
-    const authSrc = join(preRouterDir, 'auth.json')
-    if (!seatAgentDir && existsSync(authSrc)) symlinkSync(authSrc, join(routerDir, 'auth.json'))
-    router = { provider, dir: routerDir }
-    agentDir = routerDir
-  }
-  // Same env-var contract as the claude adapter (`env`, DEVTEAM_WORKER=1,
-  // CREW_ROLE, CREW_TASK_DIR) so plugin-quieting and role/taskDir discovery
-  // work regardless of which binary fills the seat.
-  //
-  // #146/#217: deny-only for enforcement, full built-in activation for
-  // capability — #217 does not reverse #146. `tools` stays in the signature
-  // for contract symmetry: adapter-claude.mjs genuinely passes it as
-  // --allowedTools in both seatCommand and headlessCommand, so deleting it
-  // would break the shared adapter contract. There is no translateTools()
-  // counterpart: the activator below is a literal list in pi's namespace,
-  // never translated from `tools`; `tools` stays unused and stays
-  // enforced-unused by the test.
-  // Only read/bash/edit/write are active by default (dist/core/sdk.js:132),
-  // so --tools is an activator, not a restrictor; without it a pi-seated
-  // planner reaches the filesystem through bash alone. pi silently ignores
-  // an unmapped name (dist/cli/args.js:85-90), so a stale list would disable
-  // a live tool while looking enforced — hence the drift pin in
-  // crew/adapter-pi.test.mjs.
-  // --exclude-tools beats --tools on both of pi's filter paths
-  // (dist/core/sdk.js:137 and dist/core/agent-session.js:1945), so activation
-  // cannot widen the denial of any tool pi ACTUALLY HAS.
-  // Activation is append-only over pi's built-in set: register tools can add
-  // names, but never remove or replace a built-in.
-  // What that ANDed denial does NOT cover, and this is the honest statement of
-  // it: a claude name with no pi equivalent translates to nothing, so for the
-  // FANOUT_TOOLS names (PI_TOOL_NAMES maps Task/Agent/NotebookEdit to null,
-  // :95-98) the deny list comes back EMPTY, --exclude-tools is omitted, and
-  // there is nothing for a grant to be ANDed with. The fan-out boundary for a
-  // pi seat is therefore NOT --exclude-tools: it is assertFanoutCoherent
-  // (crew/crew.mjs), which refuses at boot a register that grants fan-out to a
-  // seat whose defaults withhold it.
-  // --no-extensions disables discovery while explicit -e paths remain usable;
-  // --no-skills closes discovery for every seat; granted paths follow explicitly.
-  // These flags make a seat a function of this checkout rather than user-global pi
-  // state, and are enforced by crew/adapter-pi.test.mjs.
-  //
-  // `deny` (the claude-named disallowedTools list, e.g. "Edit,NotebookEdit")
-  // is translated via translateDeny() into pi's own tool namespace before it
-  // reaches --exclude-tools. A seat whose translated list comes back empty
-  // (e.g. the builder: "Task,Agent" has no pi equivalent) omits the flag
-  // entirely rather than passing pi an empty/quoted no-op — pi has no
-  // subagent tool at all, so that boundary is vacuously satisfied, not
-  // silently dropped.
-  //
-  // --print/-p and --no-session are deliberately never passed: --print exits
-  // after the boot brief and --no-session drops the seat's session — either
-  // one would destroy the pane's persistence, so their absence here is
-  // load-bearing, not incidental.
-  //
-  // --provider is deliberately never passed either, same class of omission:
-  // with no --provider, pi pattern-matches the model id across all providers
-  // and an unmatched id is a hard `Model "X" not found` error
-  // (model-resolver.js:424-430). Passing --provider google narrows the
-  // candidate set (model-resolver.js:349), and buildFallbackModel
-  // (:398-422) then synthesizes a google model whose id is the literal
-  // pattern, returning it with only a warning — a phantom seat that dies on
-  // its first message instead of failing to boot.
-  // This omission is ENFORCED, not merely explained: crew/adapter-pi.test.mjs
-  // fails if `--provider` ever appears in a composed seat command (#147).
-  // effort is OPTIONAL and additive: absent, the command is unchanged. It
-  // maps to --thinking (NOT the ':<level>' model-string shorthand, so a
-  // roster model id passes through untouched and effort stays a separate,
-  // auditable dimension).
-  const piDeny = translateDeny(deny)
-  // An agent grant must ALSO activate the tool: pi filters EXTENSION tools
-  // through this same --tools allowlist (dist/core/agent-session.js:1945 and
-  // :1953 drop any registered tool the allowlist omits), so a granted seat
-  // whose activator omits the name loads the extension and registers nothing
-  // callable. Extension tools are active by default ONLY when --tools is
-  // absent (:2003-2007) — this adapter always passes it, so activation is
-  // mandatory here, not merely additive.
-  const paneAdvisor = grants?.advisor === true
-  const extensions = [...new Set([...(grants?.extensions || []), ...(paneAdvisor ? [PI_ADVISOR_EXTENSION] : [])])]
-  const activatedTools = piActivatedTools({ tools: grants?.tools, extensions, vendorExtensions: grants?.vendor_extensions, agents: grants?.agents || [], mcpServers: grants?.mcp_servers || [] })
-  const skills = grants?.skills || []
-  const withheldUnsets = [...new Set([
-    PI_ADVISOR_ENV, PI_ADVISOR_ENDPOINT_ENV, PI_ADVISOR_MODEL_ENV, 'CREW_ADVISOR_MODELS', 'CREW_ADVISOR_PROVENANCE', 'CREW_PI_AGENTS',
-    ...Object.keys(env ?? {}).filter((key) => isPiSeatWithheldEnvKey(key)),
-  ])].flatMap((key) => ['-u', key])
-  return [
-    'env', ...withheldUnsets, 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
-    ...(agentDir !== null && agentDir !== undefined ? [`PI_CODING_AGENT_DIR="${agentDir}"`] : []),
-    `CREW_FFF=${piFffEnv(grants).CREW_FFF}`,
-    // Advisor activation is the sole CREW_ADVISOR* value; the manifest owns the cell.
-    ...(paneAdvisor ? [`${PI_ADVISOR_ENV}=1`] : []),
-    // The register-resolved allowlist, transported to the extension. Emitted
-    // ONLY when an agent is granted, so every ungranted command is unchanged.
-    // Before `pi`, because the boot brief must stay last.
-    ...(grants?.agents?.length
-      ? [`CREW_PI_AGENTS='${JSON.stringify(grants.agents.map(({ name, def }) => ({ name, def })))}'`]
-      : []),
-    'pi',
-    '--model', model,
-    ...(router ? ['--provider', router.provider] : []),
-    ...(effort ? ['--thinking', effort] : []),
-    '--tools', `"${activatedTools.join(',')}"`,
-    ...(piDeny.length ? ['--exclude-tools', `"${piDeny.join(',')}"`] : []),
-    '--no-extensions',
-    ...extensions.flatMap((extension) => ['-e', piExtensionOperand(extension)]),
-    '--no-skills', ...skills.flatMap((skill) => ['--skill', `"${skill}"`]),
-    '--append-system-prompt', `"${promptFile}"`,
-    `"${bootBrief}"`,
-  ].join(' ')
-}
-
-// How a -e operand is transported. A checkout-relative grant resolves under
-// REGISTER_ROOT and is tame, but a VENDOR grant resolves under HOST state and
-// may carry any character the filesystem allows. The characters POSIX double
-// quotes still INTERPRET are $, a backtick, an embedded " and a shell-active
-// backslash, so a path carrying one of those would reach pi as a different
-// argv word. Every character in the class below is inert inside double quotes
-// — no $, no backtick, no backslash, no quote, no whitespace, no newline — so
-// a path made only of them is byte-exact either way and keeps today's form;
-// anything else goes through shellSingleQuote, this module's existing
-// transport for an arbitrary value (:157-159), already used for the advisor
-// endpoint and model at :246-247. An apostrophe is LITERAL inside double
-// quotes; it matters only because the single-quoted branch must escape it,
-// which shellSingleQuote does.
-export function piExtensionOperand(extension) {
-  const value = String(extension)
-  return /^[A-Za-z0-9@._+\-\/]+$/.test(value) ? `"${value}"` : shellSingleQuote(value)
-}

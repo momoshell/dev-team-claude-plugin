@@ -9,16 +9,14 @@ import { main, showLane } from './show.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
 const SHOW = fileURLToPath(new URL('./show.mjs', import.meta.url))
-const CAPTURES = fileURLToPath(new URL('../test/fixtures/headless-worker/captures/', import.meta.url))
-const CLAUDE = readFileSync(join(CAPTURES, 'a-baseline.jsonl'), 'utf8')
-const PI = readFileSync(join(CAPTURES, 'pi-a1-json-baseline.jsonl'), 'utf8')
-const TAIL = `${CLAUDE.trimEnd().split('\n').slice(-2).join('\n')}\n`
-
+const frame = (update) => `${JSON.stringify({ sessionId: 's', update })}\n`
+const chunk = (sessionUpdate, text) => frame({ sessionUpdate, content: { type: 'text', text } })
+const RAW = chunk('agent_message_chunk', 'hello')
 const MEMBERS = {
-  builder: { agent: 'claude', model: 'claude-sonnet-5-5', transport: 'headless-json' },
-  reviewer: { agent: 'claude', model: 'claude-opus-5', transport: 'headless-json' },
-  planner: { agent: 'pi', model: 'openai-codex/gpt-6.1-sol', transport: 'headless-rpc' },
-  lead: { agent: 'pi', model: 'openai-codex/gpt-6-astra', transport: 'headless-rpc' },
+  builder: { agent: 'claude', model: 'claude-sonnet-5-5', transport: 'lean-acp' },
+  reviewer: { agent: 'claude', model: 'claude-opus-5', transport: 'lean-acp' },
+  planner: { agent: 'pi', model: 'openai-codex/gpt-6.1-sol', transport: 'lean-acp' },
+  lead: { agent: 'pi', model: 'openai-codex/gpt-6-astra', transport: 'lean-acp' },
 }
 
 function put(path, data) {
@@ -26,19 +24,12 @@ function put(path, data) {
   writeFileSync(path, data)
 }
 
-function cmd(role, prompt) {
-  return JSON.stringify({ bin: '/unused/claude', args: ['-p', prompt], env: { CREW_ROLE: role } })
-}
-
-// Dispatch numbers interleave the roles: d2 and d10 are the builder's, d3 the reviewer's.
-function lane(crewRoot, name, { suffix = '', members = MEMBERS, dispatches } = {}) {
+function lane(crewRoot, name, { suffix = '', members = MEMBERS, turns } = {}) {
   const dir = join(crewRoot, `dt-${name}`, `${name}${suffix}`)
   put(join(dir, 'crew.json'), JSON.stringify({ members }))
-  for (const [dispatch, role, raw] of dispatches ?? [['d10', 'builder', TAIL], ['d3', 'reviewer', CLAUDE], ['d2', 'builder', CLAUDE]]) {
-    put(join(dir, 'task', 'headless', dispatch, 'cmd.json'), cmd(role, `Recorded assignment for ${dispatch}`))
-    put(join(dir, 'task', 'headless', dispatch, 'stream.jsonl'), raw)
+  for (const [role, turn, raw] of turns ?? [['builder', 1, RAW], ['reviewer', 1, RAW], ['planner', 1, RAW]]) {
+    put(join(dir, 'task', 'lean', role, `${name}.${role}.${turn}.jsonl`), raw)
   }
-  put(join(dir, 'task', 'headless-rpc', 'planner', 'stream.jsonl'), PI)
   return dir
 }
 
@@ -65,28 +56,34 @@ function fingerprint(root) {
   return JSON.stringify(rows)
 }
 
-// MUTATION: attribute dispatches by directory order instead of cmd.env.CREW_ROLE and the reviewer's d3 lands under builder.
-test('CS1 a lane lists every seat with its metadata and the sessions attributed to it by recorded role, in numeric order', () => {
+// MUTATION: restore the headless-rpc branch of sessionsOf and the planner's old stream is listed.
+test('a seat recorded on a retired transport lists no session file even when its old stream is on disk', () => {
   const { crewRoot } = fixture()
-  lane(crewRoot, 'alpha')
-  const out = showLane({ lane: 'alpha', deps: { crewRoot } })
-  assert.equal(out, [
-    'builder  claude  claude-sonnet-5-5  headless-json',
-    '  task/headless/d2/stream.jsonl',
-    '  task/headless/d10/stream.jsonl',
-    'reviewer  claude  claude-opus-5  headless-json',
-    '  task/headless/d3/stream.jsonl',
-    'planner  pi  openai-codex/gpt-6.1-sol  headless-rpc',
-    '  task/headless-rpc/planner/stream.jsonl',
-    'lead  pi  openai-codex/gpt-6-astra  headless-rpc',
-    '  no session file recorded',
+  const members = {
+    builder: { agent: 'claude', model: 'sonnet', transport: 'headless-json' },
+    planner: { agent: 'pi', model: 'test', transport: 'headless-rpc' },
+  }
+  const dir = lane(crewRoot, 'retired', { members, turns: [] })
+  put(join(dir, 'task/headless/d1/cmd.json'), '{ nope')
+  put(join(dir, 'task/headless/d1/stream.jsonl'), '{"type":"assistant"}\n')
+  put(join(dir, 'task/headless-rpc/planner/stream.jsonl'), '{"type":"message_end"}\n')
+  let listing
+  assert.doesNotThrow(() => { listing = showLane({ lane: 'retired', deps: { crewRoot } }) })
+  assert.equal(listing, [
+    'builder  claude  sonnet  headless-json',
+    '  no session file: transport headless-json records none this reads',
+    'planner  pi  test  headless-rpc',
+    '  no session file: transport headless-rpc records none this reads',
     '',
   ].join('\n'))
+  for (const [role, transport] of [['builder', 'headless-json'], ['planner', 'headless-rpc']]) {
+    assert.throws(() => showLane({ lane: 'retired', role, deps: { crewRoot } }), (error) => error.message === `lane retired role ${role} has no session: no session file: transport ${transport} records none this reads`)
+  }
 })
 
 test('CS1 a seat with absent metadata prints unknown, and a transport nothing reads names that reason', () => {
   const { crewRoot } = fixture()
-  lane(crewRoot, 'beta', { members: { solo: {}, scribe: { agent: 'x', transport: 'acp' } }, dispatches: [] })
+  lane(crewRoot, 'beta', { members: { solo: {}, scribe: { agent: 'x', transport: 'acp' } }, turns: [] })
   assert.equal(showLane({ lane: 'beta', deps: { crewRoot } }), [
     'solo  unknown  unknown  unknown',
     '  no session file: transport unknown records none this reads',
@@ -99,12 +96,12 @@ test('CS1 a seat with absent metadata prints unknown, and a transport nothing re
 // MUTATION: always take the newest archive and the live lane's stale member would be shown instead.
 test('CS1 the live directory wins over any archive and, once it is gone, the newest archive is the lane', () => {
   const { crewRoot } = fixture()
-  lane(crewRoot, 'gamma', { members: { live: MEMBERS.builder }, dispatches: [] })
-  lane(crewRoot, 'gamma', { suffix: '.archive-2099-01-01T00-00-00-000Z', members: { later: MEMBERS.builder }, dispatches: [] })
+  lane(crewRoot, 'gamma', { members: { live: MEMBERS.builder }, turns: [] })
+  lane(crewRoot, 'gamma', { suffix: '.archive-2099-01-01T00-00-00-000Z', members: { later: MEMBERS.builder }, turns: [] })
   assert.match(showLane({ lane: 'gamma', deps: { crewRoot } }), /^live /)
-  lane(crewRoot, 'delta', { suffix: '.archive-2026-09-01T00-00-00-000Z', members: { older: MEMBERS.builder }, dispatches: [] })
-  lane(crewRoot, 'delta', { suffix: '.archive-2026-10-24T16-59-50-798Z', members: { newer: MEMBERS.builder }, dispatches: [] })
-  lane(crewRoot, 'delta', { suffix: '.archive-2026-10-02T00-00-00-000Z', members: { middle: MEMBERS.builder }, dispatches: [] })
+  lane(crewRoot, 'delta', { suffix: '.archive-2026-09-01T00-00-00-000Z', members: { older: MEMBERS.builder }, turns: [] })
+  lane(crewRoot, 'delta', { suffix: '.archive-2026-10-24T16-59-50-798Z', members: { newer: MEMBERS.builder }, turns: [] })
+  lane(crewRoot, 'delta', { suffix: '.archive-2026-10-02T00-00-00-000Z', members: { middle: MEMBERS.builder }, turns: [] })
   const out = showLane({ lane: 'delta', deps: { crewRoot } })
   assert.match(out, /^newer /)
   assert.doesNotMatch(out, /older|middle/)
@@ -116,103 +113,11 @@ test('CS1 a sibling lane whose name merely starts with this one is not its archi
   assert.throws(() => showLane({ lane: 'eps', deps: { crewRoot } }), /unknown lane eps/)
 })
 
-// MUTATION: delete the numeric sort and d10 precedes d2.
-test('CS2 a Claude seat prints each dispatch in numeric order with its recorded prompt and the whole conversation', () => {
-  const { crewRoot } = fixture()
-  lane(crewRoot, 'zeta')
-  const out = showLane({ lane: 'zeta', role: 'builder', deps: { crewRoot } })
-  assert.ok(out.startsWith('=== task/headless/d2/stream.jsonl ===\nUSER\nRecorded assignment for d2\n\nTHINKING\n'))
-  assert.ok(out.indexOf('=== task/headless/d2/stream.jsonl ===') < out.indexOf('=== task/headless/d10/stream.jsonl ==='))
-  assert.ok(!out.includes('d3/stream.jsonl') && !out.includes('Recorded assignment for d3'))
-  for (const wanted of [
-    'TOOL Bash toolu_01DaWW7yDDQPmwPWrkzMv7MQ\n{\n  "command": "echo hw1-marker",\n  "description": "Echo the marker string"\n}',
-    'TOOL Write toolu_01W7NWtcqsM2mnyKZjrW9MVj\n{\n  "file_path": "/private/tmp/hw1-scratch-32725/work/notes.txt",\n  "content": "ok"\n}',
-    'TOOL RESULT toolu_01DaWW7yDDQPmwPWrkzMv7MQ\nhw1-marker',
-    'TOOL RESULT toolu_01W7NWtcqsM2mnyKZjrW9MVj\nFile created successfully at: /private/tmp/hw1-scratch-32725/work/notes.txt',
-    'The user is asking me to:\n1. Run `echo hw1-marker` with Bash',
-    'Now I need to reply with DONE.',
-    'ASSISTANT\nDONE',
-  ]) assert.ok(out.includes(wanted), wanted)
-  // d2 holds the full recording, d10 only its closing lines: each tool appears once per recording that has it.
-  assert.equal(out.split('TOOL Bash ').length, 2)
-  assert.equal(out.split('ASSISTANT\nDONE').length, 3)
-  // The terminal result frame repeats the answer; the conversation already printed it.
-  assert.ok(!out.includes('"type": "result"') && !out.includes('total_cost_usd'))
-})
-
-// MUTATION: render lifecycle replays (turn_end / agent_end) and the final answer prints two or three times.
-test('CS2 a pi seat prints each canonical message once even though streaming and lifecycle frames replay it', () => {
-  const { crewRoot } = fixture()
-  lane(crewRoot, 'eta')
-  const out = showLane({ lane: 'eta', role: 'planner', deps: { crewRoot } })
-  const prompt = 'Use bash to run echo pi-a1-marker, then use write to create notes.txt containing pi-write-marker, then reply A1-DONE.'
-  assert.ok(out.startsWith(`=== task/headless-rpc/planner/stream.jsonl ===\nUSER\n${prompt}\n\nTOOL bash call_kSNDMbS4ccwQY5FUXZ7t8BE4|`))
-  for (const [needle, count] of [[prompt, 1], ['TOOL bash ', 1], ['TOOL write ', 1], ['TOOL RESULT ', 2], ['Successfully wrote 15 bytes to notes.txt', 1], ['\nA1-DONE', 1], ['pi-a1-marker\n', 1]]) {
-    assert.equal(out.split(needle).length - 1, count, needle)
-  }
-  assert.ok(out.includes('{\n  "command": "echo pi-a1-marker"\n}'))
-  assert.ok(out.includes('{\n  "path": "notes.txt",\n  "content": "pi-write-marker"\n}'))
-  assert.ok(out.endsWith('ASSISTANT\nA1-DONE\n'))
-})
-
-// MUTATION: drop the errorMessage line from message() and an aborted turn prints as nothing.
-test('CS2 a pi turn that ended in an error or abort prints its stopReason and errorMessage once', () => {
-  const { crewRoot } = fixture()
-  const dir = lane(crewRoot, 'eta-abort', { members: { planner: MEMBERS.planner }, dispatches: [] })
-  const frames = readFileSync(join(CAPTURES, 'pi-b7-abort.jsonl'), 'utf8').split('\n').filter((line) => line.startsWith('{'))
-  put(join(dir, 'task', 'headless-rpc', 'planner', 'stream.jsonl'), `${frames.join('\n')}\n`)
-  const out = showLane({ lane: 'eta-abort', role: 'planner', deps: { crewRoot } })
-  assert.ok(out.includes('ERROR\nCommand aborted\n\nASSISTANT error\nThis operation was aborted\n\n'))
-  assert.ok(out.endsWith('USER\nReply B7-FRESH-DONE.\n\nASSISTANT\nB7-FRESH-DONE\n'))
-  // turn_end and agent_end replay the same failed message; it prints once.
-  assert.equal(out.split('This operation was aborted').length - 1, 1)
-})
-
-test('CS2 content that is not text still prints: unknown blocks and events as JSON, tool errors flagged, nested results complete', () => {
-  const { crewRoot } = fixture()
-  const frames = [
-    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'image', source: { type: 'base64', data: 'AAAA' } }, { type: 'text', text: 'seen' }] } },
-    { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_x', is_error: true, content: [{ type: 'text', text: 'boom' }, { type: 'text', text: 'second' }] }] } },
-    { type: 'novel_event', payload: 1 },
-    { type: 'result', subtype: 'error_max_turns', is_error: true },
-  ]
-  lane(crewRoot, 'theta', { dispatches: [['d1', 'builder', frames.map((frame) => JSON.stringify(frame)).join('\n')]] })
-  const out = showLane({ lane: 'theta', role: 'builder', deps: { crewRoot } })
-  assert.ok(out.includes('"type": "image"') && out.includes('"data": "AAAA"'))
-  assert.ok(out.includes('TOOL RESULT toolu_x ERROR\nboom\nsecond'))
-  assert.ok(out.includes('EVENT novel_event\n{\n  "type": "novel_event",\n  "payload": 1\n}'))
-  assert.ok(out.includes('EVENT result') && out.includes('error_max_turns'))
-})
-
 test('CS2 a record that is not an object prints as bare JSON instead of crashing the renderer', () => {
   const { crewRoot } = fixture()
-  lane(crewRoot, 'theta-bare', { dispatches: [['d1', 'builder', 'null\n42\n"loose"\n']] })
+  lane(crewRoot, 'theta-bare', { turns: [['builder', 1, 'null\n42\n"loose"\n']] })
   const out = showLane({ lane: 'theta-bare', role: 'builder', deps: { crewRoot } })
   assert.ok(out.endsWith('EVENT\nnull\n\nEVENT\n42\n\nEVENT\n"loose"\n'))
-})
-
-test('CS2 a nonempty dispatch followed by an empty one keeps the empty one\'s header and says it recorded nothing', () => {
-  const { crewRoot } = fixture()
-  lane(crewRoot, 'iota', { dispatches: [['d1', 'builder', CLAUDE], ['d2', 'builder', '\n']] })
-  const out = showLane({ lane: 'iota', role: 'builder', deps: { crewRoot } })
-  assert.ok(out.endsWith('=== task/headless/d2/stream.jsonl ===\nUSER\nRecorded assignment for d2\n\nno recorded events\n'))
-})
-
-// MUTATION: replace the raw concatenation with parse-and-restringify and byte equality is lost.
-test('CS3 --json returns the recorded bytes of both transports untouched, dispatches in numeric order', () => {
-  const { crewRoot } = fixture()
-  lane(crewRoot, 'kappa')
-  assert.equal(showLane({ lane: 'kappa', role: 'builder', json: true, deps: { crewRoot } }), CLAUDE + TAIL)
-  assert.equal(showLane({ lane: 'kappa', role: 'planner', json: true, deps: { crewRoot } }), PI)
-  assert.equal(showLane({ lane: 'kappa', role: 'reviewer', json: true, deps: { crewRoot } }), CLAUDE)
-})
-
-test('CS3 --json keeps odd whitespace and a half-written tail exactly, and text mode refuses that tail instead', () => {
-  const { crewRoot } = fixture()
-  const raw = `${CLAUDE.trimEnd()}\n\n  \n{"type":"assistant","message":{"role":"assis`
-  lane(crewRoot, 'lambda', { dispatches: [['d1', 'builder', raw], ['d2', 'builder', 'no newline at all']] })
-  assert.equal(showLane({ lane: 'lambda', role: 'builder', json: true, deps: { crewRoot } }), `${raw}no newline at all`)
-  assert.throws(() => showLane({ lane: 'lambda', role: 'builder', deps: { crewRoot } }), /task\/headless\/d1\/stream\.jsonl line 25 is not a complete JSON record/)
 })
 
 test('CS3 the CLI writes the --json bytes to stdout with nothing added', () => {
@@ -220,7 +125,7 @@ test('CS3 the CLI writes the --json bytes to stdout with nothing added', () => {
   lane(crewRoot, 'mu')
   const out = cli(home, ['mu', 'planner', '--json'])
   assert.equal(out.status, 0, out.stderr)
-  assert.equal(out.stdout, PI)
+  assert.equal(out.stdout, RAW)
   assert.equal(out.stderr, '')
 })
 
@@ -228,10 +133,10 @@ test('CS3 the CLI writes the --json bytes to stdout with nothing added', () => {
 test('CS4 unknown lane, unknown role, a seat with no file and an empty file each exit 1 with one line naming the cause', () => {
   const { home, crewRoot } = fixture()
   lane(crewRoot, 'nu')
-  lane(crewRoot, 'xi', { members: { planner: MEMBERS.planner }, dispatches: [] })
-  writeFileSync(join(crewRoot, 'dt-xi', 'xi', 'task', 'headless-rpc', 'planner', 'stream.jsonl'), '')
-  lane(crewRoot, 'omicron', { members: { planner: MEMBERS.planner }, dispatches: [] })
-  writeFileSync(join(crewRoot, 'dt-omicron', 'omicron', 'task', 'headless-rpc', 'planner', 'stream.jsonl'), ' \n\t\n')
+  lane(crewRoot, 'xi', { members: { planner: MEMBERS.planner }, turns: [] })
+  put(join(crewRoot, 'dt-xi', 'xi', 'task', 'lean', 'planner', 'xi.planner.1.jsonl'), '')
+  lane(crewRoot, 'omicron', { members: { planner: MEMBERS.planner }, turns: [] })
+  put(join(crewRoot, 'dt-omicron', 'omicron', 'task', 'lean', 'planner', 'omicron.planner.1.jsonl'), ' \n\t\n')
   for (const [args, needle] of [
     [['absent-lane'], /unknown lane absent-lane/],
     [['nu', 'nobody'], /lane nu has no role nobody/],
@@ -285,37 +190,14 @@ test('CS4 unreadable crew metadata is a refusal, never an empty roster', () => {
   assert.throws(() => showLane({ lane: 'no-file', deps: { crewRoot } }), /crew\.json is missing/)
 })
 
-test('CS4 a dispatch that cannot be attributed to a seat is refused with its path, never guessed from d<N>', () => {
-  const { crewRoot } = fixture()
-  for (const [name, cmdText, reason] of [
-    ['cmd-bad', '{ nope', /task\/headless\/d1\/cmd\.json is not valid JSON/],
-    ['cmd-null', 'null', /d1\/cmd\.json is not an object/],
-    ['cmd-no-role', JSON.stringify({ args: ['-p', 'x'], env: {} }), /d1\/cmd\.json records no CREW_ROLE/],
-    ['cmd-ghost', JSON.stringify({ env: { CREW_ROLE: 'ghost' } }), /records CREW_ROLE "ghost", which is not a member/],
-    ['cmd-inherited', JSON.stringify({ env: { CREW_ROLE: 'toString' } }), /records CREW_ROLE "toString"/],
-  ]) {
-    const dir = lane(crewRoot, name, { dispatches: [] })
-    put(join(dir, 'task', 'headless', 'd1', 'cmd.json'), cmdText)
-    put(join(dir, 'task', 'headless', 'd1', 'stream.jsonl'), CLAUDE)
-    assert.throws(() => showLane({ lane: name, deps: { crewRoot } }), reason, name)
-  }
-  const dir = lane(crewRoot, 'cmd-missing', { dispatches: [] })
-  put(join(dir, 'task', 'headless', 'd1', 'stream.jsonl'), CLAUDE)
-  assert.throws(() => showLane({ lane: 'cmd-missing', deps: { crewRoot } }), /d1\/cmd\.json is missing/)
-  // A dispatch directory without a stream is not a session, so its stray cmd.json is not read.
-  const stray = lane(crewRoot, 'cmd-stray', { dispatches: [] })
-  put(join(stray, 'task', 'headless', 'd1', 'cmd.json'), '{ nope')
-  assert.doesNotThrow(() => showLane({ lane: 'cmd-stray', deps: { crewRoot } }))
-})
-
 test('CS4 text mode refuses a malformed record with its file and line, and prints nothing', () => {
   const { home, crewRoot } = fixture()
-  lane(crewRoot, 'pi-bad', { dispatches: [] })
-  put(join(crewRoot, 'dt-pi-bad', 'pi-bad', 'task', 'headless-rpc', 'planner', 'stream.jsonl'), `${PI.split('\n')[0]}\n\n{"type":"message_end"\n`)
+  lane(crewRoot, 'pi-bad', { turns: [] })
+  put(join(crewRoot, 'dt-pi-bad', 'pi-bad', 'task', 'lean', 'planner', 'pi-bad.planner.1.jsonl'), `${RAW.split('\n')[0]}\n\n{"type":"message_end"\n`)
   const out = cli(home, ['pi-bad', 'planner'])
   assert.equal(out.status, 1)
   assert.equal(out.stdout, '')
-  assert.match(out.stderr, /task\/headless-rpc\/planner\/stream\.jsonl line 3 is not a complete JSON record/)
+  assert.match(out.stderr, /task\/lean\/planner\/pi-bad\.planner\.1\.jsonl line 3 is not a complete JSON record/)
 })
 
 // MUTATION: treat any read error as absence and a denied live directory falls through to the archive.
@@ -330,10 +212,8 @@ test('CS4 a denied or interrupted read is an error naming the path, never a miss
   for (const code of ['EACCES', 'EINTR', 'EPERM']) {
     assert.throws(() => showLane({ lane: 'rho', deps: { crewRoot, statSync: guard(code, join('dt-rho', 'rho'), statSync) } }), new RegExp(`cannot read ${join(crewRoot, 'dt-rho', 'rho').replaceAll('\\', '\\\\')}: ${code}`), code)
     assert.throws(() => showLane({ lane: 'rho', deps: { crewRoot, readFileSync: guard(code, 'crew.json', readFileSync) } }), new RegExp(`crew\\.json: ${code}`), code)
-    assert.throws(() => showLane({ lane: 'rho', role: 'planner', deps: { crewRoot, readFileSync: guard(code, join('headless-rpc', 'planner'), readFileSync) } }), new RegExp(`stream\\.jsonl: ${code}`), code)
-    assert.throws(() => showLane({ lane: 'rho', role: 'builder', deps: { crewRoot, readFileSync: guard(code, 'cmd.json', readFileSync) } }), new RegExp(`cmd\\.json: ${code}`), code)
-    assert.throws(() => showLane({ lane: 'rho', deps: { crewRoot, readdirSync: guard(code, join('task', 'headless'), readdirSync) } }), new RegExp(`task/headless: ${code}|task\\\\headless: ${code}`), code)
-    assert.throws(() => showLane({ lane: 'rho', deps: { crewRoot, statSync: guard(code, join('headless-rpc', 'planner'), statSync) } }), new RegExp(`stream\\.jsonl: ${code}`), code)
+    assert.throws(() => showLane({ lane: 'rho', role: 'planner', deps: { crewRoot, readFileSync: guard(code, 'rho.planner.1.jsonl', readFileSync) } }), new RegExp(`rho\\.planner\\.1\\.jsonl: ${code}`), code)
+    assert.throws(() => showLane({ lane: 'rho', deps: { crewRoot, readdirSync: guard(code, join('task', 'lean', 'builder'), readdirSync) } }), new RegExp(`builder: ${code}`), code)
   }
   // The live lane is still intact: the guards, not the tree, caused each error.
   assert.match(showLane({ lane: 'rho', deps: { crewRoot } }), /^builder /)
@@ -353,7 +233,7 @@ test('CS4 the CLI reports a refusal from main as one sanitized line and returns 
   assert.equal(main(['tau', 'nobody\nline'], deps), 1)
   assert.equal(err.join(''), 'crew show: "nobody\\nline" is not a role name\n')
   assert.equal(main(['tau', 'planner', '--json'], deps), 0)
-  assert.equal(out.join(''), PI)
+  assert.equal(out.join(''), RAW)
   err.length = 0
   put(join(crewRoot, 'dt-ctl', 'ctl', 'crew.json'), '{"members":{"b":{}}}')
   assert.equal(main(['ctl'], deps), 0)
@@ -384,8 +264,6 @@ test('CS6 listing, text and --json reads of live and archived lanes leave the cr
   assert.deepEqual(readdirSync(home), ['.crew'])
 })
 
-const frame = (update) => `${JSON.stringify({ sessionId: 's', update })}\n`
-const chunk = (sessionUpdate, text) => frame({ sessionUpdate, content: { type: 'text', text } })
 const LEAN = { builder: { agent: 'pi', model: 'test/model', transport: 'lean-acp' }, reviewer: { agent: 'claude', model: 'claude-opus-5', transport: 'lean-acp' } }
 
 function leanLane(crewRoot, name, turns, { suffix = '' } = {}) {

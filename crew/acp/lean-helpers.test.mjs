@@ -33,6 +33,24 @@ test('loadCapabilities reads the shipped register and refuses an invalid injecte
   assert.throws(() => loadCapabilities({ path: '/nonexistent/register.json' }), (err) => err.reason === 'register-invalid')
 })
 
+// MUTATION: put "pane" back in the transports enum and the injected register loads.
+test('the shipped register declares only the acp transport and the schema refuses a retired one', () => {
+  const shipped = loadCapabilities()
+  const source = JSON.parse(readFileSync(join(REGISTER_ROOT, 'crew/capabilities.json'), 'utf8'))
+  const schema = JSON.parse(readFileSync(join(REGISTER_ROOT, 'crew/capabilities.schema.json'), 'utf8'))
+  assert.deepEqual(schema.$defs.codingagent.properties.default_transport.enum, ['acp'])
+  for (const agent of ['pi', 'claude']) {
+    assert.deepEqual(shipped.coding_agents[agent].transports, ['acp'])
+    for (const transport of ['pane', 'headless-json', 'headless-rpc']) {
+      for (const field of ['transports', 'default_transport']) {
+        const register = structuredClone(source)
+        register.coding_agents[agent][field] = field === 'transports' ? [transport] : transport
+        assert.throws(() => loadCapabilities({ register }), (error) => error.reason === 'register-invalid')
+      }
+    }
+  }
+})
+
 test('validateCapabilities reports type, required and enum errors', () => {
   const schema = { type: 'object', required: ['a'], properties: { a: { type: 'integer' }, b: { enum: ['x'] } }, additionalProperties: false }
   assert.deepEqual(validateCapabilities(schema, { a: 1, b: 'x' }), [])

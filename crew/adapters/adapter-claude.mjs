@@ -2,7 +2,6 @@ import { readFileSync as fsReadFileSync, realpathSync, existsSync, cpSync, mkdir
 import { isAbsolute, join, basename, dirname } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
-import { ROUTER_ATTEMPT_URL_ENV, routerAttemptUrl } from './adapter-pi.mjs'
 import { ARMS_CONFIG_FILE, CLAUDE_ADVISED_ROLES, CLAUDE_ARMS, armsPluginDir, claudeArmsOf, writeArmsPlugin } from './claude-arms.mjs'
 
 const require = createRequire(import.meta.url)
@@ -10,18 +9,7 @@ let sharedFffSearchProgram
 
 export const PANE_USAGE_SETTINGS = fileURLToPath(new URL('./claude-usage.settings.json', import.meta.url))
 
-// crew/adapters/adapter-claude.mjs — the claude agent adapter.
-//
-// An adapter is the seam between a crew seat and the CLI agent that fills it:
-// `capabilitiesFor(...)` resolves one frozen profile per (adapter, transport)
-// pair, and `seatCommand(...)` composes the pane's command line. crew.mjs resolves the
-// adapter by seat.agent (default 'claude', overridable via --agent-<role>)
-// and never builds the invocation itself — that composition lives here.
-//
-// seatCommand's output is no longer byte-identical to the pre-refactor
-// paneCommand() in crew.mjs: the per-seat usage settings path is required for
-// pane usage measurement (#492). Any change to the string below is a behavior
-// change, not a refactor.
+// crew/adapters/adapter-claude.mjs — ACP launch and capability profile for Claude seats.
 const INVARIANT = Object.freeze({
   prompt_file: true, tool_deny: true, unattended: true,
   // The Task tool is available in every claude transport; the seats that need
@@ -34,33 +22,6 @@ const INVARIANT = Object.freeze({
   // provider-config seam, so a local-provider cell cannot be honoured here.
   local_provider: false,
   mcp_servers: true,
-})
-
-const PROFILES = Object.freeze({
-  pane: Object.freeze({
-    // ADR-029 §3:52 — pane stdin is not a supported mid-turn channel.
-    interjection: 'none',
-    // ADR-029 §3:54 — pane owns no process handle for an abort.
-    abort: 'none',
-    // ADR-029 §3:54 — pane command passes no --session-id.
-    session_resume: false,
-    // ADR-029 §3:54 — pane has no client-resumable observation cursor.
-    durable_cursor: 'none',
-    // #131 — drive.mjs bounce paths reassign a settled pane seat.
-    reassign: true,
-  }),
-  'headless-json': Object.freeze({
-    // ADR-029 §3:52 — text stdin is read to EOF before the turn.
-    interjection: 'turn',
-    // ADR-029 §3:53 — supervisor signal is the supported abort mechanism.
-    abort: 'signal',
-    // ADR-029 §3:54 — the headless session persists for a later invocation.
-    session_resume: true,
-    // ADR-029 §3:54 — claude's session file is not a durable cursor.
-    durable_cursor: 'none',
-    // #131 — no capture establishes reassign for headless-json.
-    reassign: false,
-  }),
 })
 
 const NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills: [], advisor: false, mcp_servers: [] })
@@ -220,8 +181,8 @@ function runHook() {
 if (invokedDirectly()) runHook()
 
 export function capabilitiesFor({ transport, grants = NO_GRANTS, settings: injectedSettings, settingsDocument, readSettings, settingsReader } = {}) {
-  const p = transport === 'acp' ? ACP_PROFILE : PROFILES[transport]
-  if (!p) throw new Error(`adapter-claude: no capability profile for transport "${transport}" (shipped: ${Object.keys(PROFILES).join(', ')}) — refusing a guessed passthrough`)
+  const p = transport === 'acp' ? ACP_PROFILE : null
+  if (!p) throw new Error(`adapter-claude: no capability profile for transport "${transport}" (shipped: acp) — refusing a guessed passthrough`)
   const settings = (hasFffGrant(grants) || hasSkillGrant(grants))
     ? loadFffSettings({ settings: injectedSettings, settingsDocument, readSettings, settingsReader })
     : undefined
@@ -238,18 +199,6 @@ export function capabilitiesFor({ transport, grants = NO_GRANTS, settings: injec
     )
   }
   return Object.freeze({ ...INVARIANT, ...p })
-}
-
-const STRICT_MCP_ARGS = Object.freeze(['--strict-mcp-config'])
-
-export function mcpConfigPath({ taskDir, role } = {}) {
-  if (typeof taskDir !== 'string' || !isAbsolute(taskDir)) {
-    throw new Error(`adapter-claude.mcpConfigPath: taskDir must be an ABSOLUTE path, got ${JSON.stringify(taskDir)}`)
-  }
-  if (typeof role !== 'string' || role.trim() === '') {
-    throw new Error(`adapter-claude.mcpConfigPath: role must be non-blank, got ${JSON.stringify(role)}`)
-  }
-  return join(taskDir, 'mcp', `${role}.json`)
 }
 
 function allowedTools(tools, grants = NO_GRANTS) {
@@ -269,8 +218,6 @@ function deniedTools(deny, grants = NO_GRANTS) {
   return [...new Set(names)].join(',')
 }
 
-const PLUGIN_DIR_FLAG = '--plugin-dir'
-
 function assertSupportedGrants(grants = NO_GRANTS) {
   if ((grants?.extensions?.length ?? 0) > 0) {
     throw Object.assign(
@@ -281,7 +228,6 @@ function assertSupportedGrants(grants = NO_GRANTS) {
 }
 
 // ACP seats carry the arms in CLAUDE_ARMS as plugin hooks (ADR-052 Amendment 2); every other extension is still refused.
-// The old headless and pane transports keep assertSupportedGrants above.
 function acpArms(grants = NO_GRANTS, role) {
   const { arms, unsupported } = claudeArmsOf(grants)
   const refuse = (why) => Object.assign(new Error(`adapter-claude cannot express ${why} — refusing to boot a silently weaker seat [grant-unsupported]`), { reason: 'grant-unsupported' })
@@ -515,108 +461,4 @@ export function acpLaunch(spec = {}) {
     },
     policy: { autoDeny: [], autoApprove: [], escalate: ['edit', 'execute', 'delete', 'move', 'fetch'] },
   }
-}
-
-// The headless-json invocation shape. Returns ARGV (never a shell string):
-// crew never assembles agent flags, and argv sidesteps quoting entirely.
-// --verbose accompanies --output-format stream-json in every HW-1 capture.
-// resume=false CREATES the session (--session-id); resume=true CONTINUES it
-// (--resume).
-export function headlessCommand({ role, model, promptFile, tools, deny, taskDir,
-                                  prompt, sessionId, resume = false, bin, effort, grants = NO_GRANTS, configDir = null, env = process.env }) {
-  assertSupportedGrants(grants)
-  assertSkillsMaterialised({ taskDir, role, grants })
-  assertNoLocalProvider(configDir)
-  const headlessRouterUrl = routerAttemptUrl(env)
-  if (!bin || !bin.startsWith('/')) throw new Error(`adapter-claude.headlessCommand: bin must be an ABSOLUTE frozen worker binary path, got ${JSON.stringify(bin)} — refusing to inherit whatever PATH resolves`)
-  if (!sessionId) throw new Error('adapter-claude.headlessCommand: sessionId is required (one session per seat)')
-  return {
-    bin,
-    args: [
-      '-p', prompt,
-      '--output-format', 'stream-json',
-      '--verbose',
-      '--model', model,
-      '--permission-mode', 'bypassPermissions',
-      ...STRICT_MCP_ARGS,
-      '--mcp-config', mcpConfigPath({ taskDir, role }),
-      ...((grants?.skills?.length ?? 0) > 0 ? [] : ['--disable-slash-commands']), '--setting-sources', 'project', '--settings', PANE_USAGE_SETTINGS,
-      ...((grants?.skills?.length ?? 0) > 0 ? [PLUGIN_DIR_FLAG, skillsPluginDir({ taskDir, role })] : []),
-      ...(effort ? ['--effort', effort] : []),
-      '--tools', [allowedTools(tools, grants), ...((grants?.skills?.length ?? 0) > 0 ? ['Skill'] : [])].filter(Boolean).join(','),
-      '--allowedTools', allowedTools(tools, grants),
-      '--disallowedTools', deniedTools(deny, grants),
-      '--append-system-prompt-file', promptFile,
-      ...(resume ? ['--resume', sessionId] : ['--session-id', sessionId]),
-    ],
-    env: { DEVTEAM_WORKER: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CREW_ROLE: role, CREW_TASK_DIR: taskDir, ...(headlessRouterUrl ? { ANTHROPIC_BASE_URL: headlessRouterUrl } : {}), ...fffEnvironment(grants) },
-  }
-}
-
-function shellSingleQuote(value) {
-  return `'${String(value).replaceAll("'", `\'"\'"\'`)}'`
-}
-
-export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort, grants = NO_GRANTS, configDir = null, env = process.env }) {
-  assertSupportedGrants(grants)
-  assertSkillsMaterialised({ taskDir, role, grants })
-  assertNoLocalProvider(configDir)
-  const routerUrl = routerAttemptUrl(env)
-  const fff = fffEnvironment(grants)
-  // `env` (a real binary) sets the vars regardless of how cmux runs the
-  // command. DEVTEAM_WORKER=1 keeps any installed dev-team plugin hooks
-  // quiet inside the pane (defensive; a no-op when the plugin is absent).
-  // bypassPermissions: crew seats run unattended (no human at their pane to
-  // approve). The ENFORCED tool boundary is --disallowedTools (it holds even
-  // under bypass; --allowedTools is only an auto-approve list and is inert
-  // here) — beyond that, containment is the git scope gate, the feature-
-  // branch blast radius, and project settings.
-  // effort is OPTIONAL: absent, the command stays byte-identical to the
-  // effort-less fff-aware adapter (the compatibility pin in crew.test.mjs holds).
-  return [
-    'env', 'DEVTEAM_WORKER=1', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY=1', 'CLAUDE_CODE_DISABLE_CLAUDE_MDS=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
-    ...(routerUrl ? [`ANTHROPIC_BASE_URL=${shellSingleQuote(routerUrl)}`] : []),
-    `CREW_FFF=${fff.CREW_FFF}`, `CREW_FFF_NODE="${fff.CREW_FFF_NODE}"`, `CREW_FFF_HOOK="${fff.CREW_FFF_HOOK}"`,
-    'claude', '--model', model, '--permission-mode', 'bypassPermissions',
-    ...STRICT_MCP_ARGS,
-    '--mcp-config', `"${mcpConfigPath({ taskDir, role })}"`,
-    ...((grants?.skills?.length ?? 0) > 0 ? [] : ['--disable-slash-commands']), '--setting-sources', 'project', '--settings', `"${PANE_USAGE_SETTINGS}"`,
-    ...((grants?.skills?.length ?? 0) > 0 ? [PLUGIN_DIR_FLAG, `"${skillsPluginDir({ taskDir, role })}"`] : []),
-    ...(effort ? ['--effort', `"${effort}"`] : []),
-    '--tools', `"${[allowedTools(tools, grants), ...((grants?.skills?.length ?? 0) > 0 ? ['Skill'] : [])].filter(Boolean).join(',')}"`,
-    '--allowedTools', `"${allowedTools(tools, grants)}"`,
-    '--disallowedTools', `"${deniedTools(deny, grants)}"`,
-    '--append-system-prompt-file', `"${promptFile}"`,
-    `"${bootBrief}"`,
-  ].join(' ')
-}
-
-const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
-export function paneUsageRecords({ taskDir, role, deps = {} } = {}) {
-  if (typeof taskDir !== 'string' || typeof role !== 'string') return []
-  let raw
-  try {
-    const readFileSync = deps.readFileSync ?? fsReadFileSync
-    raw = readFileSync(join(taskDir, 'usage', `${role}.jsonl`), 'utf8')
-  } catch {
-    return []
-  }
-  let lines
-  try { lines = String(raw).split(/\r?\n/) } catch { return [] }
-  const records = []
-  const seen = new Set()
-  for (const line of lines) {
-    if (!line.trim()) continue
-    let payload
-    try { payload = JSON.parse(line) } catch { continue }
-    const sessionId = payload && typeof payload === 'object' ? payload.session_id : null
-    const transcriptPath = payload && typeof payload === 'object' ? payload.transcript_path : null
-    if (typeof sessionId !== 'string' || !SESSION_ID_PATTERN.test(sessionId)) continue
-    if (typeof transcriptPath !== 'string' || !transcriptPath.startsWith('/') || !transcriptPath.endsWith('.jsonl')) continue
-    if (seen.has(sessionId)) continue
-    seen.add(sessionId)
-    records.push({ session_id: sessionId, transcript_path: transcriptPath })
-  }
-  return records
 }

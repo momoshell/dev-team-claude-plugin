@@ -13,7 +13,7 @@ test('seat runtime suites leave no crew-rpc entry under a fresh TMPDIR', () => {
     const env = { ...process.env, TMPDIR: scratch, NO_COLOR: '1' }
     delete env.FORCE_COLOR
     delete env.CLICOLOR_FORCE
-    const result = spawnSync(process.execPath, ['--test', '--test-reporter=tap', 'crew/acp-client.test.mjs', 'crew/headless-rpc.test.mjs', 'crew/seat-io-acp.test.mjs'], { cwd: ROOT, env, timeout: 600000, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+    const result = spawnSync(process.execPath, ['--test', '--test-reporter=tap', 'crew/acp-client.test.mjs'], { cwd: ROOT, env, timeout: 600000, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
     const out = String(result.stdout || '') + String(result.stderr || '')
     const tail = out.replace(/\x1b\[[0-9;]*m/g, '').trim().split('\n').slice(-6).join(' | ')
     const spawnProblem = result.error ? ` error ${result.error.code || result.error.message}` : ''

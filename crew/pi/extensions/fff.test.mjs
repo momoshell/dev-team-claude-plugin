@@ -7,17 +7,9 @@ import { join } from 'node:path'
 import { createReadGate } from './readgate.ts'
 import {
   FFF_HOOK_PATH, PANE_USAGE_SETTINGS, capabilitiesFor as claudeCapabilitiesFor, fffHookDecision,
-  headlessCommand as claudeHeadlessCommand, seatCommand as claudeSeatCommand,
+  acpLaunch as claudeAcpLaunch,
 } from '../../adapters/adapter-claude.mjs'
 import { scratchDir } from '../../../test/helpers.mjs'
-
-// Hermetic against the operator's router switch. The adapters default `env` to
-// process.env, so a call that omits `env` resolves CREW_ROUTER_ATTEMPT_URL from the
-// ambient environment — and before this line the suite went red whenever an operator
-// exported it, which is exactly the configuration the router exists to serve (#1497).
-// Every router test here passes the switch explicitly through `env`, so none relies on
-// the ambient value. MUTATION: delete this line and run with the switch exported.
-delete process.env.CREW_ROUTER_ATTEMPT_URL
 
 const FFF_BIN = '/opt/homebrew/bin/fff-mcp'
 
@@ -25,11 +17,6 @@ const FFF_BIN = '/opt/homebrew/bin/fff-mcp'
 const BUILDER_TOOLS = 'Read,Edit,Write,Glob,Grep,Bash'
 const BUILDER_DENY = 'Task,Agent,Workflow'
 const NO_GRANT = { tools: [], extensions: [], agents: [], skills: [], advisor: false, mcp_servers: [] }
-
-function paneFffEnvironment(command) {
-  const read = (name) => command.match(new RegExp(`${name}="([^"]*)"`))?.[1]
-  return { CREW_FFF: command.match(/\bCREW_FFF=([^\s]+)/)?.[1], CREW_FFF_NODE: read('CREW_FFF_NODE'), CREW_FFF_HOOK: read('CREW_FFF_HOOK') }
-}
 
 function hookCommand() {
   const settings = JSON.parse(readFileSync(PANE_USAGE_SETTINGS, 'utf8'))
@@ -66,12 +53,14 @@ test('fff-E1-admit', () => {
 })
 
 test('A1 granted claude Bash search is refused with the fff replacement', () => {
-  const command = claudeSeatCommand({
+  const { env } = claudeAcpLaunch({
+    bin: '/abs/claude-agent-acp', claudeBin: '/abs/claude', cwd: '/tmp',
     role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md',
     tools: BUILDER_TOOLS, deny: `${BUILDER_DENY},Glob,Grep`, taskDir: '/tmp/crew-task',
-    bootBrief: 'boot', grants: fffGrant(),
+    grants: fffGrant(),
   })
-  const environment = paneFffEnvironment(command)
+  const { CREW_FFF, CREW_FFF_NODE, CREW_FFF_HOOK } = env
+  const environment = { CREW_FFF, CREW_FFF_NODE, CREW_FFF_HOOK }
   assert.equal(environment.CREW_FFF, '1')
   assert.equal(environment.CREW_FFF_NODE, process.execPath)
   assert.equal(environment.CREW_FFF_HOOK, FFF_HOOK_PATH)
@@ -94,18 +83,15 @@ test('B1 ungranted claude Bash search remains untouched', () => {
   const taskDir = '/tmp/crew-task'
   const base = {
     role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md',
-    tools: BUILDER_TOOLS, deny: BUILDER_DENY, taskDir, bootBrief: 'boot',
-    prompt: 'go', sessionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', bin: '/usr/local/bin/claude',
+    tools: BUILDER_TOOLS, deny: BUILDER_DENY, taskDir,
+    bin: '/abs/claude-agent-acp', claudeBin: '/abs/claude', cwd: '/tmp',
     grants: NO_GRANT,
   }
-  const pane = claudeSeatCommand(base)
-  const headless = claudeHeadlessCommand(base)
-  assert.deepEqual(paneFffEnvironment(pane), { CREW_FFF: '0', CREW_FFF_NODE: '', CREW_FFF_HOOK: '' })
-  assert.deepEqual(headless.env, {
-    DEVTEAM_WORKER: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: taskDir,
-    CREW_FFF: '0', CREW_FFF_NODE: '', CREW_FFF_HOOK: '',
-  })
-  assert.deepEqual(headless.args.slice(headless.args.indexOf('--settings') - 2, headless.args.indexOf('--allowedTools')), ['--setting-sources', 'project', '--settings', PANE_USAGE_SETTINGS, '--tools', BUILDER_TOOLS])
+  const launch = claudeAcpLaunch(base)
+  const { CREW_FFF, CREW_FFF_NODE, CREW_FFF_HOOK } = launch.env
+  const fffEnv = { CREW_FFF, CREW_FFF_NODE, CREW_FFF_HOOK }
+  assert.deepEqual(fffEnv, { CREW_FFF: '0', CREW_FFF_NODE: '', CREW_FFF_HOOK: '' })
+  assert.equal(launch.sessionParams._meta.claudeCode.options.settings, PANE_USAGE_SETTINGS)
 
   const root = scratchDir('fff-hostile-hook-')
   const marker = join(root, 'hostile-ran')
@@ -117,7 +103,7 @@ test('B1 ungranted claude Bash search remains untouched', () => {
   chmodSync(hostileHook, 0o755)
   const hostile = { CREW_FFF: '1', CREW_FFF_NODE: hostileNode, CREW_FFF_HOOK: hostileHook }
   try {
-    for (const environment of [paneFffEnvironment(pane), headless.env]) {
+    for (const environment of [fffEnv]) {
       const result = runHook(hookCommand(), { ...hostile, ...environment }, { tool_name: 'Bash', tool_input: { command: 'rg needle' } })
       assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
       assert.equal(result.stdout, '')
@@ -195,14 +181,14 @@ test('D1 claude fff grant refuses boot when its hook is absent', () => {
   ]
   for (const [label, injected] of cases) {
     assert.throws(
-      () => claudeCapabilitiesFor({ transport: 'pane', grants, ...injected }),
+      () => claudeCapabilitiesFor({ transport: 'acp', grants, ...injected }),
       (error) => error.reason === 'grant-unsupported', label,
     )
   }
-  assert.doesNotThrow(() => claudeCapabilitiesFor({ transport: 'pane', grants, settings: valid }))
+  assert.doesNotThrow(() => claudeCapabilitiesFor({ transport: 'acp', grants, settings: valid }))
   let reads = 0
   assert.doesNotThrow(() => claudeCapabilitiesFor({
-    transport: 'pane', grants: { tools: [], extensions: [], agents: [], skills: [], advisor: false, mcp_servers: [] },
+    transport: 'acp', grants: { tools: [], extensions: [], agents: [], skills: [], advisor: false, mcp_servers: [] },
     readSettings: () => { reads += 1; throw new Error('must not read') },
   }))
   assert.equal(reads, 0)

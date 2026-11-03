@@ -8,9 +8,6 @@ import { fileURLToPath } from 'node:url'
 import * as mod from './subagent.ts'
 import * as adapter from '../../adapters/adapter-pi.mjs'
 
-// Keep tests hermetic against the operator's router switch; adapter commands inherit process.env.
-delete process.env.CREW_ROUTER_ATTEMPT_URL
-
 const EXTENSION = fileURLToPath(new URL('./subagent.ts', import.meta.url))
 const FINDINGS = {
   summary: 'one sentence',
@@ -757,22 +754,19 @@ test('the granted pi seat activates the agent tool and transports the allowlist'
     skills: [],
     advisor: false,
   }
-  const command = adapter.seatCommand({
-    role: 'planner', model: 'anthropic/claude-opus-5', promptFile: '/tmp/prompt.md', tools: [],
-    deny: 'Edit,Write,Bash', taskDir: '/tmp/task', bootBrief: 'boot', effort: 'high', grants,
+  const command = adapter.piRpcSeatParts({
+    role: 'planner', model: 'anthropic/claude-opus-5', promptFile: '/tmp/prompt.md',
+    deny: 'Edit,Write,Bash', taskDir: '/tmp/task', effort: 'high', grants,
   })
-  const activated = command.match(/--tools "([^"]*)"/)?.[1].split(',') || []
-  assert.ok(activated.includes('agent'))
-  assert.match(command, /-e "crew\/pi\/extensions\/subagent\.ts"/)
-  assert.match(command, /CREW_PI_AGENTS='/)
-  const bare = adapter.seatCommand({
-    role: 'planner', model: 'anthropic/claude-opus-5', promptFile: '/tmp/prompt.md', tools: [],
-    deny: 'Edit', taskDir: '/tmp/task', bootBrief: 'boot', effort: undefined,
+  assert.ok(command.args[command.args.indexOf('--tools') + 1].split(',').includes('agent'))
+  assert.equal(command.args[command.args.indexOf('-e') + 1], 'crew/pi/extensions/subagent.ts')
+  assert.equal(command.env.CREW_PI_AGENTS, JSON.stringify(grants.agents))
+  const bare = adapter.piRpcSeatParts({
+    role: 'planner', model: 'anthropic/claude-opus-5', promptFile: '/tmp/prompt.md',
+    deny: 'Edit', taskDir: '/tmp/task', env: { CREW_PI_AGENTS: 'hostile' },
   })
-  assert.equal(bare.match(/--tools "([^"]*)"/)?.[1], adapter.PI_BUILTIN_TOOLS.join(','))
-  // The bare seat unsets an inherited CREW_PI_AGENTS (-u) but never assigns one.
-  assert.doesNotMatch(bare, /CREW_PI_AGENTS=/)
-  assert.match(bare, /-u CREW_PI_AGENTS /)
+  assert.equal(bare.args[bare.args.indexOf('--tools') + 1], adapter.PI_BUILTIN_TOOLS.join(','))
+  assert.equal(Object.hasOwn(bare.env, 'CREW_PI_AGENTS'), false)
 })
 
 test('the shipped scout bundle loads and declares subagents', () => {
@@ -781,8 +775,8 @@ test('the shipped scout bundle loads and declares subagents', () => {
     agents: [{ name: 'scout', def: join(ROOT, 'crew/pi/agents/scout.json') }],
   }
   assert.equal(mod.loadAgentDefinition(grants.agents[0]).error, undefined)
-  assert.equal(adapter.capabilitiesFor({ transport: 'pane', grants }).subagents, true)
-  assert.equal(adapter.capabilitiesFor({ transport: 'pane' }).subagents, false)
+  assert.equal(adapter.capabilitiesFor({ transport: 'acp', grants }).subagents, true)
+  assert.equal(adapter.capabilitiesFor({ transport: 'acp' }).subagents, false)
   assert.equal(basename(grants.agents[0].def), 'scout.json')
 })
 

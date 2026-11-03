@@ -48,7 +48,7 @@ export function acpProviderFailureKind(errorKind, errorMessage) {
 // plan, a build, a scope gate, a 17/17 mutation proof and a completed review to
 // a 529 at review:r1, and its own stream shows the worker had ALREADY spent ten
 // retries over 223s inside the turn. The kind was measured the whole time
-// (crew/headless.mjs, providerFailureKind) and nothing routed on it. Route here.
+// and nothing routed on it. Route here.
 //
 // A retry that never gives up is worse than the escalation it replaces, so BOTH
 // bounds are closed constants and BOTH are consumed: a park that fits the
@@ -112,7 +112,7 @@ export function acpTextReset(text, at) {
 }
 
 // What the driver does about each kind, as DATA for the same reason
-// SEAT_REFUSAL_ACTIONS (crew/headless.mjs) is data: a policy change is a data edit, not a new
+// SEAT_REFUSAL_ACTIONS is data: a policy change is a data edit, not a new
 // branch. `none` is TODAY'S behaviour, byte for byte — no row, no wait, no
 // respawn — and it is what an UNCLASSIFIED failure and an unmeasured status
 // both get, because a failure nobody diagnosed must not be retried as though it

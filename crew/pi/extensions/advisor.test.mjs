@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import * as advisor from './advisor.ts'
-import { seatCommand } from '../../adapters/adapter-pi.mjs'
+import { piRpcSeatParts } from '../../adapters/adapter-pi.mjs'
 import { leanLaneFixture, scratchDir } from '../../../test/helpers.mjs'
 function fixture() {
   const root = scratchDir('advisor-test-')
@@ -683,11 +683,12 @@ test('model-only attach uses the supplied roster catalog without probing or reso
   rmSync(f.root, { recursive: true, force: true })
 })
 
-test('RV1-1 pane advisor activation uses the manifest cell, not a roster env catalog', async () => {
+test('RV1-1 rpc advisor activation uses the manifest cell, not a roster env catalog', async () => {
   const f = fixture(); const journal = sink(); const p = pi()
-  const command = seatCommand({ role: 'builder', model: 'provider/model', promptFile: '/tmp/prompt', tools: '', deny: '', taskDir: f.taskDir, bootBrief: 'brief', grants: { tools: [], extensions: [], agents: [], skills: [], advisor: true }, advisorCell: null })
-  assert.match(command, /CREW_ADVISOR=1/)
-  assert.doesNotMatch(command, /CREW_ADVISOR_MODELS=|CREW_ADVISOR_MODEL=/)
+  const { env: seatEnv } = piRpcSeatParts({ role: 'builder', model: 'provider/model', promptFile: '/tmp/prompt', tools: '', deny: '', taskDir: f.taskDir, grants: { tools: [], extensions: [], agents: [], skills: [], advisor: true }, advisorCell: null })
+  assert.equal(seatEnv.CREW_ADVISOR, '1')
+  assert.equal(Object.hasOwn(seatEnv, 'CREW_ADVISOR_MODEL'), false)
+  assert.equal(Object.hasOwn(seatEnv, 'CREW_ADVISOR_MODELS'), false)
   await advisor.attachAdvisor(p, { env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_ENDPOINT: undefined, CREW_ADVISOR_MODEL: undefined }), deps: { ...journal, taskDir: f.taskDir } })
   assert.equal(p.handlers.length, 2)
   rmSync(f.root, { recursive: true, force: true })

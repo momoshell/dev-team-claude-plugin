@@ -9,6 +9,7 @@ import { FinishRefusal, decideFinish, finishLane, main } from './finish.mjs'
 import { openPullRequest } from './checks.mjs'
 import { LOOP_REASONS } from './loop.mjs'
 import { validateEnvelope } from './protocols.mjs'
+import { recordPr } from './record-pr.mjs'
 
 const FINDING = { id: 'R1', severity: 'must-fix', location: 'lib.mjs:1', summary: 'Fix the defect' }
 const MUTATION = { check: 'A1', file: 'lib.mjs', find: 'old', replace: 'new' }
@@ -52,6 +53,108 @@ const run = (f, extra = {}) => {
 }
 const refusal = (f) => { try { run(f).go() } catch (e) { return e } return null }
 const cleanup = (f) => rmSync(f.base, { recursive: true, force: true })
+
+test('a finish launch replaces run.pid with the finish run pid', () => {
+  for (const fail of [false, true]) {
+    const f = fixture()
+    try {
+      const path = join(f.taskDir, 'run.pid')
+      writeFileSync(path, '111\n')
+      run(f, { writeFileSync: (file, ...args) => { if (fail && file === path) throw new Error('disk'); writeFileSync(file, ...args) } }).go()
+      if (fail) assert.equal(existsSync(path), false)
+      else assert.equal(readFileSync(path, 'utf8'), '4242\n')
+    } finally { cleanup(f) }
+  }
+  const f = fixture()
+  try {
+    const path = join(f.taskDir, 'run.pid')
+    writeFileSync(path, '111\n')
+    const r = run(f, { rmSync: (file, ...args) => { if (file === path) throw new Error('denied'); rmSync(file, ...args) } })
+    assert.throws(r.go, /denied/)
+    assert.equal(r.spawned.length, 0)
+    assert.equal(readFileSync(path, 'utf8'), '111\n')
+  } finally { cleanup(f) }
+})
+
+test('a lane whose run died with no terminal row is finished as run-died', () => {
+  for (const tail of [[{ event: 'verdict', status: 'reviewed' }], [{ event: 'verdict', status: 'stopped', stage: 'build', reason: 'x' }, { event: 'stage-start', stage: 'review' }]]) {
+    const f = fixture({ rows: [{ event: 'stage-start', stage: 'build' }, builderRow, ...tail] })
+    try {
+      writeFileSync(join(f.taskDir, 'run.pid'), '123\n')
+      assert.doesNotThrow(run(f, { alive: (pid) => pid !== 123 }).go)
+      assert.deepEqual(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.stop, { reason: 'run-died', observation: { pid: 123 } })
+    } finally { cleanup(f) }
+  }
+})
+
+test('a dead open tail remains recoverable after finish spawning fails', () => {
+  for (const recovery of ['finish', 'record-pr']) for (const failure of ['throw', 'no-pid']) {
+    const f = fixture({ rows: [{ event: 'stage-start', stage: 'build' }, builderRow, { event: 'verdict', status: 'reviewed' }] })
+    try {
+      const path = join(f.taskDir, 'run.pid')
+      const alive = (pid) => pid !== 123
+      writeFileSync(path, '123\n')
+      assert.throws(run(f, { alive, spawnDetached: () => { if (failure === 'throw') throw new Error('EAGAIN'); return undefined } }).go, failure === 'throw' ? /EAGAIN/ : /no valid pid/)
+      assert.equal(existsSync(path), true)
+      assert.equal(readFileSync(path, 'utf8'), '123\n')
+      if (recovery === 'finish') {
+        run(f, { alive }).go()
+        assert.deepEqual(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.stop, { reason: 'run-died', observation: { pid: 123 } })
+      } else {
+        writeFileSync(join(f.root, 'dt-lane9', 'lane9', 'crew.json'), JSON.stringify({ members: { planner: { agent: 'pi' } } }))
+        recordPr({ lane: 'lane9', root: f.root, url: 'https://github.com/owner/repo/pull/1', alive })
+        assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'journal.jsonl'), 'utf8').trim().split('\n').at(-1)).event, 'pr')
+      }
+    } finally { cleanup(f) }
+  }
+})
+
+test('a recovered dead run can return from finish-ready without resetting review rounds', async () => {
+  for (const reviews of [1, 3]) {
+    const f = fixture({ rows: [{ event: 'stage-start', stage: 'build' }, builderRow, { event: 'verdict', status: 'reviewed' }] })
+    try {
+      writeFileSync(join(f.taskDir, 'run.pid'), '123\n')
+      assert.doesNotThrow(run(f, { alive: (pid) => pid !== 123 }).go)
+      const journal = join(f.taskDir, 'journal.jsonl')
+      const after = [...Array.from({ length: reviews }, () => ({ event: 'verdict', status: 'reviewed' })), { event: 'finish-ready', reviewRounds: 0 }]
+      writeFileSync(journal, readFileSync(journal, 'utf8') + after.map((row) => `${JSON.stringify(row)}\n`).join(''))
+      const file = join(f.base, 'guidance')
+      writeFileSync(file, 'fix it')
+      const decide = () => decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps: { spawnDetached: () => 4242, log: () => {} } })
+      if (reviews === 3) await assert.rejects(decide(), { reason: 'finish-rounds-spent' })
+      else {
+        await assert.doesNotReject(decide())
+        const finish = JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish
+        assert.deepEqual(finish.stop, { reason: 'run-died', observation: { pid: 123 } })
+        assert.equal(finish.priorReviewRounds, 1)
+        assert.equal(finish.guidance, 'fix it')
+      }
+    } finally { cleanup(f) }
+  }
+})
+
+test('an open tail with a live, unknown or unrecorded run pid is still refused', () => {
+  for (const prior of [false, true]) for (const alive of [true, null, 'missing', false]) {
+    const f = fixture({ rows: [{ event: 'stage-start', stage: 'build' }, builderRow, ...(prior ? [{ event: 'verdict', status: 'stopped', stage: 'build' }] : []), { event: 'stage-start', stage: 'review' }] })
+    try {
+      if (alive !== 'missing') writeFileSync(join(f.taskDir, 'run.pid'), '123\n')
+      const go = run(f, { alive: () => alive }).go
+      if (alive === false) { assert.doesNotThrow(go); assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.stop.reason, 'run-died') }
+      else assert.throws(go, (e) => e.reason === (prior ? 'finish-running' : 'finish-premise'))
+    } finally { cleanup(f) }
+  }
+  const f = fixture({ rows: [{ event: 'stage-start', stage: 'build' }, builderRow, { event: 'verdict', status: 'reviewed' }] })
+  try {
+    writeFileSync(join(f.taskDir, 'run.pid'), '123\n')
+    writeFileSync(join(f.root, 'dt-lane9', 'lane9', 'crew.json'), JSON.stringify({ members: { planner: { agent: 'pi' } } }))
+    const alive = (pid) => pid !== 123
+    assert.throws(run(f, { alive, spawnDetached: () => {
+      assert.throws(run(f, { alive }).go, { reason: 'finish-premise' })
+      assert.throws(() => recordPr({ lane: 'lane9', root: f.root, url: 'https://github.com/owner/repo/pull/1', alive }), /not stopped/)
+      throw new Error('EAGAIN')
+    } }).go, /EAGAIN/)
+  } finally { cleanup(f) }
+})
 
 // MUTATION: drop the mechanical fallback or apply it to build lanes.
 test('a mechanical lane with no planner return is finished on its brief under its builder subject; a build lane without one is still refused', async () => {

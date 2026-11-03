@@ -33,6 +33,21 @@ const run = (w, lane, url = URL1, extra = {}) => {
   return { status, err: err.join('') }
 }
 
+test('a lane whose run died with no terminal row records the operator pr; a live or unrecorded run is refused', () => {
+  const w = world()
+  try {
+    for (const [name, alive] of [['dead', false], ['live', true], ['unknown', null], ['missing', 'missing']]) {
+      const file = w.lane(name, { rows: [{ event: 'stage-start', stage: 'build' }] })
+      if (alive !== 'missing') put(join(dirname(file), 'run.pid'), '123\n')
+      const before = readFileSync(file, 'utf8')
+      const result = run(w, name, URL1, { alive: (pid) => pid === 123 ? alive : null })
+      assert.equal(result.status, name === 'dead' ? 0 : 1)
+      if (name === 'dead') assert.equal(JSON.parse(readFileSync(file, 'utf8').trim().split('\n').at(-1)).event, 'pr')
+      else { assert.match(result.err, /not stopped/); assert.equal(readFileSync(file, 'utf8'), before) }
+    }
+  } finally { w.done() }
+})
+
 test('HF1 appends exactly one operator pr row after the original bytes, live and archived', () => {
   const w = world()
   try {

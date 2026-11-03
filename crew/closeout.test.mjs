@@ -60,6 +60,18 @@ function assertUnchanged(w) {
   assert.ok(!existsSync(join(w.archiveRoot, `dt-${LANE}`)), 'no archive destination')
 }
 
+test('a dead run with no pull request is refused as run-died naming crew record-pr, with nothing changed', () => {
+  const w = world({ rows: [{ event: 'stage-start', stage: 'build' }] })
+  try {
+    writeFileSync(join(w.leaf, 'task', 'run.pid'), '123\n')
+    const r = close(w, { alive: (pid) => pid === 123 ? false : null })
+    assert.equal(r.status, 1)
+    assert.match(r.err, /run-died.*pid 123.*crew record-pr demo --pr <url>/)
+    assert.equal(r.calls.length, 0)
+    assertUnchanged(w)
+  } finally { w.done() }
+})
+
 test('CL1-CL3 a merged clean lane loses worktree and branch and moves to the archive, in order', () => {
   const w = world()
   try {

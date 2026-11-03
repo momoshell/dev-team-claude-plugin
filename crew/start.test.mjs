@@ -12,6 +12,30 @@ import { resolveAgents } from './agents.mjs'
 import { PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS } from './acp/provider.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
+test('an existing crew lane directory is refused before any worktree is made', async () => {
+  const { deps, calls } = fakes({ exists: (path) => path === '/home/.crew/dt-b1/b1' })
+  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), /\/home\/\.crew\/dt-b1\/b1/)
+  assert.deepEqual(effects(calls), [])
+})
+
+test('a failed detached launch is a StartRefusal that names the left worktree', async () => {
+  for (const result of [null, 0, -1, 1.5, new Error('spawn')]) {
+    const { deps } = fakes()
+    deps.spawnDetached = () => { if (result instanceof Error) throw result; return result }
+    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), (e) => e instanceof StartRefusal && e.message.includes('/repo/dt-b1') && e.message.includes('branch b1'))
+  }
+})
+
+test('a started lane records its run pid, and a failed pid write only logs', async () => {
+  for (const fail of [false, true]) {
+    const { deps, calls } = fakes({ write: (kind, path) => { if (fail && path.endsWith('/run.pid')) throw new Error('disk') } })
+    const result = await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
+    assert.equal(result.pid, 4242)
+    assert.equal(written(calls, '/task/run.pid')?.[2], '4242\n')
+    assert.equal(calls.some(([kind, line]) => kind === 'log' && line.includes('run pid not recorded')), fail)
+  }
+})
+
 const AGENTS = fileURLToPath(new URL('./agents/', import.meta.url))
 
 const BRIEF = `---

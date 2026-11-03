@@ -8,12 +8,13 @@
 // The start stands on the brief parser and the agent definitions alone. It refuses before any
 // git call when the brief is not P1 or the definitions do not resolve.
 import { spawn, spawnSync } from 'node:child_process'
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ISSUE_SOURCE, parseBrief } from './protocols.mjs'
 import { resolveAgents } from './agents.mjs'
+import { writeRunPid } from './run-pid.mjs'
 
 const HOME = dirname(dirname(fileURLToPath(import.meta.url)))
 const LEAN = join(HOME, 'crew', 'lean.mjs')
@@ -45,12 +46,13 @@ function logStdout(line) {
 }
 
 const defaultDeps = () => ({
-  readFileSync, existsSync, mkdirSync, writeFileSync, openSync, closeSync, resolveAgents,
-  spawnSync: (file, args, options) => spawnSync(file, args, { encoding: 'utf8', ...options }),
+  readFileSync, existsSync, mkdirSync, writeFileSync, rmSync, openSync, closeSync, resolveAgents,
+  spawnSync: (file, args, options) => spawnSync(file, args, { encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024, ...options }),
   spawnDetached: (file, args, { cwd, log, env }) => {
     const out = openSync(log, 'a')
     try {
       const child = spawn(file, args, { cwd, env, detached: true, stdio: ['ignore', out, out] })
+      child.on('error', () => {})
       child.unref()
       return child.pid
     } finally { closeSync(out) }
@@ -86,6 +88,8 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
   checkout ??= git(d, process.cwd(), ['rev-parse', '--show-toplevel'])
   if (!checkout) throw Object.assign(new StartRefusal('not inside a git checkout; pass --checkout <dir>'), { exitCode: 2 })
   const worktree = join(dirname(checkout), `dt-${lane}`)
+  const crewDir = join(d.crewRoot, `dt-${lane}`, lane)
+  if (d.existsSync(crewDir)) throw new StartRefusal(`crew lane directory ${crewDir} already exists; pick another lane name or close that lane out`)
   if (d.existsSync(worktree)) throw new StartRefusal(`worktree ${worktree} already exists; pick another lane name or close that lane out`)
   const remoteHead = git(d, checkout, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
   if (!remoteHead) throw new StartRefusal('cannot read origin/HEAD; repair it with git remote set-head origin --auto')
@@ -115,7 +119,6 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
 
   // The lean loop has no boot: the crew directory holds the member metadata `crew show` reads
   // and the spec the detached bridge runs, and the bridge plays each turn itself.
-  const crewDir = join(d.crewRoot, `dt-${lane}`, lane)
   const taskDir = join(crewDir, 'task')
   const specPath = join(taskDir, 'lean.json')
   const members = Object.fromEntries(Object.entries(resolved.seats)
@@ -134,7 +137,14 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
   } catch (cause) {
     throw new StartRefusal(`cannot record lean lane ${lane} in ${crewDir}: ${cause.code ?? cause.message}; the worktree ${worktree} and branch ${lane} are left for inspection`, { cause })
   }
-  const pid = d.spawnDetached(process.execPath, [LEAN, specPath], { cwd: worktree, log, env: process.env })
+  let pid
+  try {
+    pid = d.spawnDetached(process.execPath, [LEAN, specPath], { cwd: worktree, log, env: process.env })
+    if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('no valid pid')
+  } catch (cause) {
+    throw new StartRefusal(`cannot launch lane ${lane}; the worktree ${worktree} and branch ${lane} are left for inspection`, { cause })
+  }
+  if (!writeRunPid(taskDir, pid, d)) logLine('crew start: run pid not recorded; finish, record-pr and closeout cannot prove this run dead')
   logLine(`crew start: lane=${lane} loop=lean tier=${tier} shape=${fields.shape} closes=${fields.closes ?? 'none'} pid=${pid}`)
   logLine(`  worktree ${worktree}`)
   logLine(`  brief    ${brief}`)

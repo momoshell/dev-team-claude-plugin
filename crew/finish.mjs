@@ -13,7 +13,7 @@
 // a build), `finish-running` (a run re-entered or claimed the lane after its stop), `finish-published` and
 // `finish-committed` (the build is committed and cannot be proven to be the unpublished HEAD), `finish-no-build`
 // (no schema-valid done or insufficient builder envelope in the journal). A claim whose run is provably gone is
-// taken over. A committed, unpushed build at HEAD, as committed or as the journal-recorded one-commit rebase,
+// taken over; a provably dead open tail is stopped as `run-died`. A committed, unpushed build at HEAD, as committed or as the journal-recorded one-commit rebase,
 // is uncommitted and recorded as `finish-uncommit` before launch; a rebased build is reset onto its rebase base.
 // The PR's measured subject, body and notes have issue tokens rewritten as in openPullRequest; issue numbers ride
 // only on trailer lines.
@@ -29,6 +29,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { FINISH_REVIEW_ROUNDS, composeLanePrBody, openPullRequest, runSuite, withoutIssueTokens } from './checks.mjs'
 import { TIERS, validateEnvelope } from './protocols.mjs'
+import { deadRun, probeAlive, writeRunPid } from './run-pid.mjs'
 
 const HOME = dirname(dirname(fileURLToPath(import.meta.url)))
 const LEAN = join(HOME, 'crew', 'lean.mjs')
@@ -49,15 +50,16 @@ export class FinishRefusal extends Error {
 
 const defaultDeps = () => ({
   readFileSync, readdirSync, existsSync, statSync, mkdirSync, writeFileSync, appendFileSync, rmSync, openPullRequest, run: runSuite,
-  alive: (pid) => { try { process.kill(pid, 0); return true } catch (error) { return error?.code === 'ESRCH' ? false : null } },
+  alive: probeAlive,
   git: (cwd, args) => {
-    const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 60_000 })
+    const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024 })
     return { status: r.status === 0 && !r.error ? 'green' : 'red', stdout: r.stdout ?? '' }
   },
   spawnDetached: (file, args, { cwd, log, env }) => {
     const out = openSync(log, 'a')
     try {
       const child = spawn(file, args, { cwd, env, detached: true, stdio: ['ignore', out, out] })
+      child.on('error', () => {})
       child.unref()
       return child.pid
     } finally { closeSync(out) }
@@ -147,7 +149,7 @@ function finishFor(rows, stopped, before, plan) {
 }
 
 // Writes finish.json and spawns the detached run; a launch that fails releases the claim, so the lane can be retried.
-function launch(d, { crewRoot, taskDir, spec, finish, claim }) {
+function launch(d, { crewRoot, taskDir, spec, finish, claim, recoveryPid }) {
   const specPath = join(taskDir, 'finish.json')
   const started = join(crewRoot, 'briefs', 'started')
   const log = join(started, `${spec.id}.run.log`)
@@ -155,12 +157,22 @@ function launch(d, { crewRoot, taskDir, spec, finish, claim }) {
   try {
     d.mkdirSync(started, { recursive: true })
     d.writeFileSync(specPath, `${JSON.stringify({ ...spec, shape: 'finish', finish }, null, 2)}\n`)
-    pid = d.spawnDetached(process.execPath, [LEAN, specPath], { cwd: spec.cwd, log })
+    // Clear the old proof before spawning: a crash before the new pid is written leaves
+    // the lane unproven and requires manual recovery, rather than risking a live run.
+    d.rmSync(join(taskDir, 'run.pid'), { force: true })
+    try {
+      pid = d.spawnDetached(process.execPath, [LEAN, specPath], { cwd: spec.cwd, log })
+      if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('no valid pid')
+    } catch (error) {
+      if (recoveryPid) writeRunPid(taskDir, recoveryPid, d)
+      throw error
+    }
   } catch (error) {
     try { d.rmSync(claim, { force: true }) } catch { /* the launch error is the one reported */ }
     throw error
   }
-  if (Number.isSafeInteger(pid) && pid > 0) try { d.writeFileSync(claim, `${pid}\n`) } catch { /* the detached run may already be active */ }
+  writeRunPid(taskDir, pid, d)
+  try { d.writeFileSync(claim, `${pid}\n`) } catch { /* the detached run may already be active */ }
   d.log(`crew finish: lane=${spec.id} stop=${finish.stop.reason} findings=${finish.findings.length} pid=${pid}`)
   d.log(`  worktree ${spec.cwd}`)
   d.log(`  log      ${log}`)
@@ -202,10 +214,11 @@ export function finishLane({ lane, root, deps = {} }) {
   const { taskDir, spec, rows, recordedTier } = loadLane(d, lane, crewRoot)
   requireWorktree(d, spec)
 
-  const stopped = rows.findLast((row) => row.event === 'verdict' && row.status === 'stopped')
+  const died = deadRun({ rows, taskDir, readFileSync: d.readFileSync, alive: d.alive })
+  const stopped = died ? { event: 'verdict', status: 'stopped', stage: null, reason: 'run-died', observation: died } : rows.findLast((row) => row.event === 'verdict' && row.status === 'stopped')
   if (!stopped) throw new FinishRefusal('finish-premise', `lane ${lane} has not stopped`)
   // A stop the loop writes after a stage closed carries stage null, so the stage it stopped in is the last one started.
-  const stopAt = rows.lastIndexOf(stopped)
+  const stopAt = died ? rows.length : rows.lastIndexOf(stopped)
   const stoppedIn = rows.slice(0, stopAt).findLast((row) => row.event === 'stage-start')?.stage ?? stopped.stage
   if ([stopped.stage, stoppedIn].some((stage) => stage === 'plan' || stage === 'baseline')) throw new FinishRefusal('finish-premise', `lane ${lane} stopped in the ${stoppedIn} stage, before any build`)
   // A row after the stop means a run has re-entered the lane since: a second finish would race it.
@@ -236,6 +249,7 @@ export function finishLane({ lane, root, deps = {} }) {
   if (!rows.some((row) => row.event === 'envelope' && row.role === 'builder' && Array.isArray(row.defects) && row.defects.length === 0 && ['done', 'insufficient'].includes(row.parsed?.status) && row.parsed.id === row.id)) throw new FinishRefusal('finish-no-build', `lane ${lane} has no schema-valid done or insufficient builder envelope in its journal`)
 
   const finish = finishFor(rows, stopped, stopAt, planFor(d, lane, taskDir, recordedTier, rows))
+  if (died) finish.recoveredStopAt = stopAt
   const claim = claimStop(d, lane, taskDir, stopAt)
   try {
     // A previous claimant may have finished while this call was probing the remote.
@@ -256,7 +270,7 @@ export function finishLane({ lane, root, deps = {} }) {
     try { d.rmSync(claim, { force: true }) } catch { /* the validation, reset or journal error is the one reported */ }
     throw error
   }
-  return launch(d, { crewRoot, taskDir, spec, finish, claim })
+  return launch(d, { crewRoot, taskDir, spec, finish, claim, recoveryPid: died?.pid })
 }
 
 const NOTES_HEADING = '## Operator notes'
@@ -290,12 +304,20 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
   if (rows.slice(readyAt + 1).some((row) => row.event === 'finish-decision')) throw new FinishRefusal('finish-decided', `lane ${lane} already has a decision on this finish run`)
   const ready = rows[readyAt]
   if (choice === 'return' && typeof file !== 'string') throw new FinishRefusal('finish-unreadable', '--return needs a guidance file')
-  let stopped, priorReviewRounds
+  let stopped, priorReviewRounds, recoveredStopAt
   if (choice === 'return') {
     stopped = rows.slice(0, readyAt).findLast((row) => row.event === 'verdict' && row.status === 'stopped')
+    let previous
+    try { previous = JSON.parse(d.readFileSync(join(taskDir, 'finish.json'), 'utf8')).finish } catch { /* older finishes may have no spec */ }
+    if (previous?.stop?.reason === 'run-died' && Number.isSafeInteger(previous.recoveredStopAt)
+      && previous.recoveredStopAt >= 0 && previous.recoveredStopAt <= readyAt) {
+      recoveredStopAt = previous.recoveredStopAt
+      stopped = { reason: 'run-died', observation: previous.stop.observation }
+    }
     if (!stopped) throw new FinishRefusal('finish-premise', `lane ${lane} has no stop before its finish-ready row`)
-    // Count journal reviews and the ready row, never less than either source.
-    const sinceStop = rows.slice(rows.lastIndexOf(stopped) + 1, readyAt)
+    // Count from the earlier historical stop when present, never discarding reviews on recovery.
+    const historicalStop = rows.slice(0, readyAt).findLastIndex((row) => row.event === 'verdict' && row.status === 'stopped')
+    const sinceStop = rows.slice(Math.min(historicalStop >= 0 ? historicalStop + 1 : readyAt, recoveredStopAt ?? readyAt), readyAt)
     const journalReviews = Math.max(
       sinceStop.filter((row) => row.event === 'verdict' && row.status === 'reviewed').length,
       sinceStop.filter((row) => row.event === 'envelope' && row.role === 'reviewer').length,
@@ -341,6 +363,7 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
     const plan = planFor(d, lane, taskDir, recordedTier, rows)
     const finish = {
       ...finishFor(rows, stopped, readyAt, plan),
+      ...(recoveredStopAt === undefined ? {} : { recoveredStopAt }),
       guidance: notes,
       priorReviewRounds,
     }

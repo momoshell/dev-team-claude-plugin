@@ -176,6 +176,34 @@ test('viz injects the caller cwd as DEVTEAM_INTAKE_CHECKOUT unless preset', () =
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+test('where and update refuse arguments they do not read with exit 2 and run nothing', () => {
+  const root = scratch('argv')
+  try {
+    const { home } = gitHome(root)
+    const head = git(home, 'rev-parse', 'HEAD')
+    for (const args of [['where', 'extra'], ['update', '--bogus'], ['update', '--force', '--force']]) {
+      const out = crew(args, { cwd: root, env: { CREW_HOME: home } })
+      assert.equal(out.status, 2)
+      assert.match(out.stderr, /^usage: crew /)
+      assert.equal(out.stdout, '')
+      assert.equal(git(home, 'rev-parse', 'HEAD'), head)
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('a failed git step in update prints one crew update line and no stack', () => {
+  const root = scratch('git-failure')
+  try {
+    const { home } = gitHome(root)
+    git(home, 'remote', 'set-url', 'origin', join(root, 'missing.git'))
+    const out = crew(['update', '--force'], { cwd: root, env: { CREW_HOME: home } })
+    assert.equal(out.status, 1)
+    assert.ok(/^crew update: git fetch/.test(out.stderr))
+    assert.doesNotMatch(out.stderr, /\n\s+at /)
+    assert.equal(out.stderr.trim().split('\n').length, 1)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('where prints the home, branch and head', () => {
   const root = scratch('where')
   try {

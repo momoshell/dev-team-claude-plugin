@@ -218,7 +218,7 @@ async function refProblem(git, name) {
   return checked.status === 'green' ? null : unmeasured(checked.status === 'red' ? 'invalid-input' : checked.reason)
 }
 
-function parseStatus(stdout) {
+export function parseStatus(stdout) {
   const parts = stdout.split('\0')
   if (parts.at(-1) === '') parts.pop()
   const entries = []

@@ -65,8 +65,8 @@ const deps = {
   spawnSync: () => ({ status: 0, stdout: 'origin/main' }),
   spawnDetached: () => { writeSync(3, 'started\\n'); return 4242 }, crewRoot: '/virtual/crew',
 }
-const argv = invalid ? ['/d/b1.md', '--check', '--loop', 'lean'] :
-  ['/d/b1.md', '--checkout', '/virtual/' + 'x'.repeat(1024 * 1024) + '/checkout', '--loop', 'lean']
+const argv = invalid ? ['/d/b1.md', '--check'] :
+  ['/d/b1.md', '--checkout', '/virtual/' + 'x'.repeat(1024 * 1024) + '/checkout']
 process.exitCode = await main(argv, deps)
 `
 
@@ -160,10 +160,11 @@ test('--check validates the brief and the agent definitions and starts nothing',
   assert.match(calls.at(-1)[1], /brief ok lane=b1 tier=build shape=standard closes=1961/)
 })
 
-test('without origin/HEAD the lane branches from main', async () => {
+test('without a readable origin/HEAD the start is refused before any worktree is made', async () => {
   const { deps, calls } = fakes({ originHead: null })
-  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
-  assert.deepEqual(spawned(calls, 'worktree')[2], ['-C', '/repo/checkout', 'worktree', 'add', '-b', 'b1', '/repo/dt-b1', 'main'])
+  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), /origin\/HEAD.*git remote set-head origin --auto/)
+  assert.equal(spawned(calls, 'worktree'), undefined)
+  assert.equal(calls.some(([kind]) => ['write', 'mkdir', 'detached'].includes(kind)), false)
 })
 
 test('an existing worktree or a failed worktree add stops the start and launches nothing', async () => {
@@ -178,14 +179,14 @@ test('an existing worktree or a failed worktree add stops the start and launches
 test('main reports usage, refusals and success as exit codes', async () => {
   assert.equal(await main([], fakes().deps), 2)
   assert.equal(await main(['a.md', 'b.md'], fakes().deps), 2)
-  assert.equal(await main(['/d/b1.md', '--check', '--loop', 'lean'], fakes().deps), 0)
-  assert.equal(await main(['/d/b1.md', '--checkout', '/repo/checkout', '--loop', 'lean'], fakes({ worktreeStatus: 1 }).deps), 1)
+  assert.equal(await main(['/d/b1.md', '--check'], fakes().deps), 0)
+  assert.equal(await main(['/d/b1.md', '--checkout', '/repo/checkout'], fakes({ worktreeStatus: 1 }).deps), 1)
 })
 
 // MUTATION: resolve the checkout before --check and a brief cannot be validated outside a repo.
 test('--check works outside a git checkout; a real start there is refused', async () => {
-  assert.equal(await main(['/d/b1.md', '--check', '--loop', 'lean'], fakes({ inGit: false }).deps), 0)
-  assert.equal(await main(['/d/b1.md', '--loop', 'lean'], fakes({ inGit: false }).deps), 2)
+  assert.equal(await main(['/d/b1.md', '--check'], fakes({ inGit: false }).deps), 0)
+  assert.equal(await main(['/d/b1.md'], fakes({ inGit: false }).deps), 2)
 })
 
 // MUTATION: drop the bound-issue slot and the run brief carries no bound issue.
@@ -207,9 +208,9 @@ const LEAN = fileURLToPath(new URL('./lean.mjs', import.meta.url))
 const leanLaunch = (calls) => calls.find(([kind, , args]) => kind === 'detached' && args[0] === LEAN)
 
 // MUTATION: force the lean decision false and the lane detaches crew run, with no spec or lean members.
-test('--loop lean detaches the bridge on a measured spec and boots nothing', async () => {
+test('start detaches the bridge on a measured spec and boots nothing', async () => {
   const { deps, calls } = fakes()
-  const result = await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps })
+  const result = await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
   const launch = leanLaunch(calls)
   assert.deepEqual(launch.slice(1, 3), [process.execPath, [LEAN, '/home/.crew/dt-b1/b1/task/lean.json']])
   assert.equal(launch[3].cwd, '/repo/dt-b1')
@@ -228,17 +229,17 @@ test('--loop lean detaches the bridge on a measured spec and boots nothing', asy
   assert.deepEqual(Object.keys(members), Object.keys(seats))
   for (const [role, cell] of Object.entries(seats)) assert.deepEqual(members[role], { agent: cell.agent, model: `${cell.provider}/${cell.id}`, transport: 'lean-acp' })
   const unbound = fakes({ brief: BRIEF.replace('closes: 1961', 'closes: null') })
-  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps: unbound.deps })
+  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: unbound.deps })
   assert.deepEqual(JSON.parse(written(unbound.calls, '/task/lean.json')[2]).closes, [])
 })
 
 // MUTATION: ignore fields.suite and a cargo brief runs npm test; always use it and a brief without suite gets no command.
 test('a brief suite line is the lean spec suite, split on whitespace; without one the suite is npm test (SB5, SB6)', async () => {
   const cargo = fakes({ brief: BRIEF.replace('out_of_scope:', 'suite: cargo test -p power-api\nout_of_scope:') })
-  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps: cargo.deps })
+  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: cargo.deps })
   assert.deepEqual(JSON.parse(written(cargo.calls, '/task/lean.json')[2]).suite, { command: 'cargo', args: ['test', '-p', 'power-api'], timeoutMs: 1800000 })
   const plain = fakes()
-  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps: plain.deps })
+  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: plain.deps })
   assert.deepEqual(JSON.parse(written(plain.calls, '/task/lean.json')[2]).suite, { command: 'npm', args: ['test'], timeoutMs: 1800000 })
 })
 
@@ -252,13 +253,16 @@ test('crew start writes the brief generated paths and regenerate command into th
   }
 })
 
-test('main forwards --loop lean and defaults to lean', async () => {
-  const lean = fakes()
-  assert.equal(await main(['/d/b1.md', '--loop', 'lean', '--checkout', '/repo/checkout'], lean.deps), 0)
-  assert.ok(leanLaunch(lean.calls))
-  const plain = fakes()
-  await main(['/d/b1.md', '--checkout', '/repo/checkout'], plain.deps)
-  assert.ok(leanLaunch(plain.calls))
+test('main reads only --check and --checkout: --loop, an unknown flag, a duplicate or a missing value is usage', async () => {
+  for (const argv of [['a.md', '--loop', 'lean'], ['a.md', '--bogus'], ['a.md', '--check', '--check'], ['a.md', '--checkout', 'x', '--checkout', 'y'], ['a.md', '--checkout'], ['a.md', '--checkout', '--check'], [], ['a.md', 'b.md']]) {
+    const f = fakes()
+    const { code, stderr } = await mainWithStderr(argv, f.deps)
+    assert.equal(code, 2, argv.join(' '))
+    assert.equal(stderr, 'usage: crew start <brief.md> [--check] [--checkout <dir>]\n')
+    assert.deepEqual(effects(f.calls), [])
+  }
+  assert.equal(await main(['a.md', '--check'], fakes().deps), 0)
+  assert.equal(await main(['a.md', '--checkout', '/repo/checkout'], fakes().deps), 0)
 })
 
 // A start with no --loop is the lean loop, whether it comes through startLane or main.
@@ -272,23 +276,6 @@ test('(SW1) a start with no --loop, from startLane or main, runs the lean loop',
     assert.ok(written(calls, '/lean.json'))
     assert.equal(spawned(calls, 'boot'), undefined)
     assert.equal(spawned(calls, 'run'), undefined)
-  }
-})
-
-// MUTATION: accept any loop value and --loop old starts a lane instead of being refused as usage.
-test('(SW3) invalid --loop values and malformed argv are refused as usage', async () => {
-  for (const argv of [['/d/b1.md', '--loop'], ['/d/b1.md', '--loop', ''], ['/d/b1.md', '--loop', 'stepped'], ['/d/b1.md', '--loop', 'old'], ['/d/b1.md', '--loop', 'lean', '--loop', 'lean'], ['/d/b1.md', '--loop', '--check'], ['--loop', 'old'], ['--loop', 'lean'], ['/d/b1.md', '--lean']]) {
-    const refused = fakes()
-    assert.equal((await mainWithStderr(argv, refused.deps)).code, 2, argv.join(' '))
-    assert.deepEqual(effects(refused.calls), [], argv.join(' '))
-  }
-  for (const loop of ['bogus', 'old', 'other']) {
-    const { deps, calls } = fakes()
-    const { code, stderr } = await mainWithStderr(['/d/b1.md', '--loop', loop], deps)
-    assert.equal(code, 2)
-    if (loop !== 'other') assert.equal(stderr, 'usage: crew start <brief.md> [--check] [--checkout <dir>] [--loop lean]\n')
-    assert.deepEqual(effects(calls), [])
-    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop, deps: fakes().deps }), (error) => error instanceof StartRefusal && error.exitCode === 2 && /--loop takes lean, got/.test(error.message))
   }
 })
 
@@ -307,7 +294,7 @@ test('a stepped brief is refused by main --check and startLane before effects', 
       assert.equal(code, 1)
       assert.match(stderr, /not a P1 brief:[\s\S]*shape is one of standard, finish/)
     } else {
-      await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps }), /not a P1 brief:[\s\S]*shape is one of standard, finish/)
+      await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), /not a P1 brief:[\s\S]*shape is one of standard, finish/)
     }
     assert.deepEqual(effects(calls), [])
   }
@@ -326,7 +313,7 @@ test('(LS2) a lean --check in a child process loads no old driver, roster or cre
   writeFileSync(brief, BRIEF)
   writeFileSync(tracer, `import { registerHooks } from 'node:module'\nimport { appendFileSync } from 'node:fs'\nregisterHooks({ load(url, context, next) { appendFileSync(${JSON.stringify(trace)}, url + '\\n'); return next(url, context) } })\n`)
   const start = fileURLToPath(new URL('./start.mjs', import.meta.url))
-  const child = spawnSync(process.execPath, ['--import', tracer, start, brief, '--check', '--loop', 'lean'], { encoding: 'utf8' })
+  const child = spawnSync(process.execPath, ['--import', tracer, start, brief, '--check'], { encoding: 'utf8' })
   assert.equal(child.status, 0, child.stderr)
   const loaded = readFileSync(trace, 'utf8')
   assert.match(loaded, /crew\/start\.mjs/)
@@ -335,7 +322,7 @@ test('(LS2) a lean --check in a child process loads no old driver, roster or cre
 
 test('(LS3, LS5) a lean start keeps the member shape and writes no roster', async () => {
   const run = fakes()
-  const result = await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps: run.deps })
+  const result = await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: run.deps })
   assert.equal(result.pid, 4242)
   assert.equal(leanLaunch(run.calls).length > 0, true)
   assert.equal(spawned(run.calls, 'boot'), undefined)
@@ -349,10 +336,10 @@ test('(LS3, LS5) a lean start keeps the member shape and writes no roster', asyn
 
 test('a lean start refuses before any effect when the agent definitions do not resolve or the brief is not P1', async () => {
   const bad = fakes({ resolve: () => { throw new Error('agent definitions are refused: empty') } })
-  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps: bad.deps }), (error) => error instanceof StartRefusal && /agent definitions/.test(error.message))
+  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: bad.deps }), (error) => error instanceof StartRefusal && /agent definitions/.test(error.message))
   assert.deepEqual(bad.calls.filter(([kind]) => kind !== 'log'), [])
   const defect = fakes({ brief: BRIEF.replace('shape: standard', 'tier: build\nshape: standard') })
-  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps: defect.deps }), /tier is not a brief field/)
+  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: defect.deps }), /tier is not a brief field/)
   assert.deepEqual(defect.calls.filter(([kind]) => kind !== 'log'), [])
 })
 
@@ -362,7 +349,7 @@ test('a denied lean metadata write stops the launch and names the left worktree'
     // mkdir 1 and write 1 are the brief snapshot (lean writes no roster); the lean directory and its two files follow.
     const seen = { mkdir: 0, write: 0 }
     const { deps, calls } = fakes({ write: (kind) => { if (++seen[kind] === at && kind === failing) throw Object.assign(new Error('EPERM injected'), { code: 'EPERM' }) } })
-    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps }), (error) => error instanceof StartRefusal && error.message.includes('EPERM') && /worktree \/repo\/dt-b1 and branch b1 are left for inspection/.test(error.message), `${failing} ${at}`)
+    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), (error) => error instanceof StartRefusal && error.message.includes('EPERM') && /worktree \/repo\/dt-b1 and branch b1 are left for inspection/.test(error.message), `${failing} ${at}`)
     assert.equal(calls.some(([kind]) => kind === 'detached'), false, `${failing} ${at}`)
   }
 })
@@ -387,7 +374,7 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
   const envelope = (role, id) => {
     const n = Number(id.split('.').at(-1))
     const own = answers[`${role}.${n}`]
-    const details = role === 'planner' ? { subject: 'fix(crew): publish measured lane results', tests: [{ file: 'lib.test.mjs', title: 'works' }], plan_path: join(spec.taskDir, 'plan.md'), gate_path: join(spec.taskDir, 'gate.mjs'), acceptance: ['RV1'], mutations: [LEAN_MUTATION], ...(scope === undefined ? {} : { files_in_scope: scope }) }
+    const details = role === 'planner' ? { subject: 'fix(crew): publish measured lane results', tests: [{ file: 'lib.test.mjs', title: 'works' }], plan_path: join(spec.taskDir, 'plan.md'), ...(scope === undefined ? {} : { files_in_scope: scope }) }
       : role === 'builder' ? { summary: 'built', ...(tier === 'mechanical' ? { subject: 'docs(crew): fix typo' } : {}), tests: [{ file: 'lib.test.mjs', title: 'works' }], notes: `builder turn ${n}` }
       : role === 'lead' ? { decision: 'bounce', target: 'builder' }
       : { verdict: reviews[review] ?? 'pass', findings: reviews[review++] === 'changes-needed' ? [{ id: 'F1', severity: 'must-fix', location: 'a:1', summary: 'redo-this', trigger: 'bad input' }] : [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['a'], complete: true }, ...(review > 1 ? { closed: [{ id: 'F1', evidence: 'fixed' }] } : {}) }
@@ -474,6 +461,17 @@ test("a raised lane's later turns run the judge tier definition", async () => {
 })
 
 const terminal = (logs) => logs.map((line) => JSON.parse(line)).filter((row) => row.event === 'loop-result')
+
+test('a thrown loop and a failing journal reach the result and the loop-result line with their described errors', async () => {
+  for (const mode of ['throw', 'journal']) {
+    const f = mode === 'journal' ? leanFixture({ loopDeps: { journal: async () => { throw EPERM } } }) : leanFixture()
+    if (mode === 'throw') f.options.loopDeps = Object.defineProperty({}, 'run', { enumerable: true, get() { throw EPERM } })
+    const result = await f.go()
+    if (mode === 'throw') assert.deepEqual(result, { status: 'stopped', reason: 'runner-threw', pr: null, error: { code: 'EPERM', message: 'denied' } })
+    else { assert.ok(result.journal.unwritten > 0); assert.deepEqual(result.journal.error, { code: 'EPERM', message: 'denied' }) }
+    assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
+  }
+})
 
 // MUTATION: send a request without the role's definition, effort, prompt or recording and a seat turn loses it.
 test('every turn gets its role definition, the complete brief and P2, and its own recording', async () => {
@@ -770,7 +768,7 @@ test('an expired real seat turn reads its late invalid envelope and reruns once 
         const late = () => {
           mkdirSync(f.spec.taskDir, { recursive: true })
           writeFileSync(returnPath, JSON.stringify({ role: 'planner', id: envelopeId, status: 'done', summary: 'late',
-            details: { plan_path: join(f.spec.taskDir, 'plan.md'), gate_path: join(f.spec.taskDir, 'gate.mjs'), acceptance: ['RV1'], mutations: [LEAN_MUTATION] } }))
+            details: { plan_path: join(f.spec.taskDir, 'plan.md') } }))
         }
         const client = {
           start() {}, initialize() {}, newSession() {}, setMode() {},
@@ -836,7 +834,7 @@ async function oneTurn(turn, { withFile = true, deps = {} } = {}) {
       try { input.deps.appendFileSync(input.sessionFile, `${JSON.stringify({ update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'chunk' } } })}\n`, 'utf8') } catch {}
       if (withFile) {
         mkdirSync(f.spec.taskDir, { recursive: true })
-        writeFileSync(path, JSON.stringify({ role: 'planner', id, status: 'done', summary: 'x', details: { subject: 'fix(crew): publish measured lane results', plan_path: 'p', gate_path: 'g', acceptance: ['RV1'], mutations: [LEAN_MUTATION] } }))
+        writeFileSync(path, JSON.stringify({ role: 'planner', id, status: 'done', summary: 'x', details: { subject: 'fix(crew): publish measured lane results', plan_path: 'p' } }))
       }
       return turn
     },
@@ -960,7 +958,7 @@ async function retryRun(refusals, { oversleep = 0 } = {}) {
       if (refusal) return { stopReason: null, usage: null, refusal }
       mkdirSync(f.spec.taskDir, { recursive: true })
       if (input.definition.role === 'planner') for (const name of ['plan.md', 'gate.mjs']) writeFileSync(join(f.spec.taskDir, name), '')
-      const details = input.definition.role === 'planner' ? { subject: 'fix(crew): publish measured lane results', tests: [{ file: 'lib.test.mjs', title: 'works' }], plan_path: 'plan.md', gate_path: 'gate.mjs', acceptance: ['RV1'], mutations: [LEAN_MUTATION] }
+      const details = input.definition.role === 'planner' ? { subject: 'fix(crew): publish measured lane results', tests: [{ file: 'lib.test.mjs', title: 'works' }], plan_path: 'plan.md' }
         : input.definition.role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }] } : { verdict: 'pass', findings: [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['a'], complete: true } }
       writeFileSync(path, JSON.stringify({ role: input.definition.role, id, status: 'done', summary: 'x', details }))
       return { stopReason: 'end_turn', usage: { input_tokens: 1 }, refusal: null }
@@ -1041,7 +1039,7 @@ test("a refused attempt's envelope is not accepted when its retry writes none", 
       const id = /^Envelope id: (.+)$/m.exec(input.prompt)[1]
       if (sessions.length === 1) {
         mkdirSync(f.spec.taskDir, { recursive: true })
-        const details = { subject: 'fix(crew): publish measured lane results', tests: [{ file: 'lib.test.mjs', title: 'works' }], plan_path: 'p', gate_path: 'g', acceptance: ['RV1'], mutations: [LEAN_MUTATION] }
+        const details = { subject: 'fix(crew): publish measured lane results', tests: [{ file: 'lib.test.mjs', title: 'works' }], plan_path: 'p' }
         writeFileSync(path, JSON.stringify({ role: 'planner', id, status: 'done', summary: 'stale', details }))
         return { stopReason: null, usage: null, refusal: { code: -32000, errorKind: 'overloaded', message: 'overloaded' } }
       }
@@ -1091,7 +1089,7 @@ test('a schema-refused builder envelope gets one fresh repair-only turn at the s
     const n = turns[role] = (turns[role] ?? 0) + 1
     mkdirSync(f.spec.taskDir, { recursive: true })
     if (role === 'planner') for (const name of ['plan.md', 'gate.mjs']) writeFileSync(join(f.spec.taskDir, name), '')
-    const value = { role, id, status: 'done', summary: 'fixture', details: role === 'planner' ? { subject: 'fix(crew): publish measured lane results', tests: [{ file: 'lib.test.mjs', title: 'works' }], plan_path: join(f.spec.taskDir, 'plan.md'), gate_path: join(f.spec.taskDir, 'gate.mjs'), acceptance: ['RV1'], mutations: [LEAN_MUTATION] } : role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }], ...(n === 1 ? { gaps: [] } : {}) } : { verdict: 'pass', findings: [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['a'], complete: true } } }
+    const value = { role, id, status: 'done', summary: 'fixture', details: role === 'planner' ? { subject: 'fix(crew): publish measured lane results', tests: [{ file: 'lib.test.mjs', title: 'works' }], plan_path: join(f.spec.taskDir, 'plan.md') } : role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }], ...(n === 1 ? { gaps: [] } : {}) } : { verdict: 'pass', findings: [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['a'], complete: true } } }
     mkdirSync(f.spec.taskDir, { recursive: true })
     writeFileSync(path, JSON.stringify(value))
     return { stopReason: 'end_turn', usage: null, refusal: null }
@@ -1273,7 +1271,7 @@ test('the planner prompt example is a valid P2 envelope carrying a subject', asy
 // MUTATION: invent the subject in startLane and the published source is not the brief's.
 test('a started lean spec reaches the PR with its exact P1 source and measured body', async () => {
   const { deps, calls } = fakes()
-  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps })
+  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
   const spec = JSON.parse(written(calls, '/task/lean.json')[2])
   const seen = {}
   const loopDeps = {

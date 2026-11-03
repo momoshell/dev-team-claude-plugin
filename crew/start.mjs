@@ -1,4 +1,4 @@
-// crew start <brief.md> [--check] [--checkout <dir>] [--loop lean]
+// crew start <brief.md> [--check] [--checkout <dir>]
 //
 // The lean entry (ADR-052 phase 1): one P1 brief in, one running lane out. It checks the
 // brief, creates the lane worktree and starts the run detached, handing the brief to the
@@ -14,7 +14,6 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseBrief } from './protocols.mjs'
 import { resolveAgents } from './agents.mjs'
-import { SLOT_ENV } from './reclaim.mjs'
 
 const HOME = dirname(dirname(fileURLToPath(import.meta.url)))
 const LEAN = join(HOME, 'crew', 'lean.mjs')
@@ -67,10 +66,9 @@ function suiteSpec(suite) {
   return { command, args, timeoutMs: 1800000 }
 }
 
-export async function startLane({ briefPath, checkout, check = false, loop, deps = {} }) {
+export async function startLane({ briefPath, checkout, check = false, deps = {} }) {
   const d = { ...defaultDeps(), ...deps }
   const logLine = (line) => { try { d.log(line) } catch { /* Instrumentation must not affect the start. */ } }
-  if (loop !== undefined && loop !== 'lean') throw Object.assign(new StartRefusal(`--loop takes lean, got ${JSON.stringify(loop)}`), { exitCode: 2 })
   const lane = laneName(briefPath)
   const text = d.readFileSync(briefPath, 'utf8')
   const { fields, defects } = parseBrief(text)
@@ -86,7 +84,9 @@ export async function startLane({ briefPath, checkout, check = false, loop, deps
   if (!checkout) throw Object.assign(new StartRefusal('not inside a git checkout; pass --checkout <dir>'), { exitCode: 2 })
   const worktree = join(dirname(checkout), `dt-${lane}`)
   if (d.existsSync(worktree)) throw new StartRefusal(`worktree ${worktree} already exists; pick another lane name or close that lane out`)
-  const base = (git(d, checkout, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']) || 'origin/main').replace(/^origin\//, '')
+  const remoteHead = git(d, checkout, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
+  if (!remoteHead) throw new StartRefusal('cannot read origin/HEAD; repair it with git remote set-head origin --auto')
+  const base = remoteHead.replace(/^origin\//, '')
   if (git(d, checkout, ['worktree', 'add', '-b', lane, worktree, base]) === null) throw new StartRefusal(`git worktree add -b ${lane} ${worktree} ${base} failed in ${checkout}`)
 
   // The run reads a snapshot, so editing the draft cannot change a running lane.
@@ -100,9 +100,6 @@ export async function startLane({ briefPath, checkout, check = false, loop, deps
   }
 
   const log = join(started, `${lane}.run.log`)
-  // No suite slot queue (ADR-052 D9, operator 2026-10-25): the slots are shared with every
-  // project on the host, and a lane that waited out the 30-minute ceiling ran unslotted anyway.
-  const env = { ...process.env, [SLOT_ENV.capacity]: '0' }
 
   // The lean loop has no boot: the crew directory holds the member metadata `crew show` reads
   // and the spec the detached bridge runs, and the bridge plays each turn itself.
@@ -125,7 +122,7 @@ export async function startLane({ briefPath, checkout, check = false, loop, deps
   } catch (cause) {
     throw new StartRefusal(`cannot record lean lane ${lane} in ${crewDir}: ${cause.code ?? cause.message}; the worktree ${worktree} and branch ${lane} are left for inspection`, { cause })
   }
-  const pid = d.spawnDetached(process.execPath, [LEAN, specPath], { cwd: worktree, log, env })
+  const pid = d.spawnDetached(process.execPath, [LEAN, specPath], { cwd: worktree, log, env: process.env })
   logLine(`crew start: lane=${lane} loop=lean tier=${tier} shape=${fields.shape} closes=${fields.closes ?? 'none'} pid=${pid}`)
   logLine(`  worktree ${worktree}`)
   logLine(`  brief    ${brief}`)
@@ -136,20 +133,26 @@ export async function startLane({ briefPath, checkout, check = false, loop, deps
 }
 
 export async function main(argv = process.argv.slice(2), deps = {}) {
-  const check = argv.includes('--check')
-  const at = argv.indexOf('--checkout')
-  const flagAt = argv.indexOf('--loop')
-  const valued = new Set([...(at >= 0 ? [at, at + 1] : []), ...(flagAt >= 0 ? [flagAt, flagAt + 1] : [])])
-  const rest = argv.filter((arg, index) => arg !== '--check' && !valued.has(index))
-  const badLoop = flagAt >= 0 && (argv[flagAt + 1] !== 'lean' || argv.indexOf('--loop', flagAt + 1) >= 0)
-  if (rest.length !== 1 || rest[0].startsWith('--') || (at >= 0 && !argv[at + 1]) || badLoop) {
-    process.stderr.write('usage: crew start <brief.md> [--check] [--checkout <dir>] [--loop lean]\n')
+  const FLAGS = { '--check': { value: false }, '--checkout': { value: true } }
+  const flags = {}, rest = []
+  let bad = false
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]
+    if (!arg.startsWith('-')) { rest.push(arg); continue }
+    if (!Object.hasOwn(FLAGS, arg) || Object.hasOwn(flags, arg)) { bad = true; break }
+    if (FLAGS[arg].value) {
+      if (!argv[i + 1] || argv[i + 1].startsWith('--')) { bad = true; break }
+      flags[arg] = argv[++i]
+    } else flags[arg] = true
+  }
+  if (bad || rest.length !== 1) {
+    process.stderr.write('usage: crew start <brief.md> [--check] [--checkout <dir>]\n')
     return 2
   }
   // --check needs no checkout, and a real start finds one only after the brief passes.
-  const checkout = at >= 0 ? resolve(argv[at + 1]) : null
+  const checkout = flags['--checkout'] ? resolve(flags['--checkout']) : null
   try {
-    await startLane({ briefPath: resolve(rest[0]), checkout, check, loop: flagAt >= 0 ? argv[flagAt + 1] : undefined, deps })
+    await startLane({ briefPath: resolve(rest[0]), checkout, check: flags['--check'] ?? false, deps })
     return 0
   } catch (error) {
     if (!(error instanceof StartRefusal)) throw error

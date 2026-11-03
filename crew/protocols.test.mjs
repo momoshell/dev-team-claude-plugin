@@ -44,6 +44,14 @@ test('suite is an optional command line: absent is defect-free, a string parses,
   }
 })
 
+test('a suite or regenerate line with a quote or backslash is refused', () => {
+  for (const key of ['suite', 'regenerate']) for (const char of ['"', "'", '\\']) {
+    const fields = key === 'suite' ? { suite: `npm ${char}test` } : { generated: '[a]', regenerate: `npm ${char}test` }
+    assert.ok(parseBrief(brief(fields)).defects.some((d) => d.includes(`${key} is split on whitespace`) && d.includes('without a shell')))
+  }
+  assert.deepEqual(parseBrief(brief({ suite: '"npm test"' })).defects, [])
+})
+
 test('generated and regenerate are an optional pair: both parse, either alone, an empty list or a non-literal path is refused', () => {
   const valid = parseBrief(brief({ generated: '[gen.txt, dist/]', regenerate: 'npm run generate' }))
   assert.deepEqual(valid.defects, [])
@@ -336,7 +344,7 @@ test('P2 refuses a role that is not the expected one', () => {
 })
 
 test('P2 planner details need no acceptance and may carry a one-line judge reason (PD3)', () => {
-  for (const extra of [{}, { judge: 'touches crew/loop.mjs' }, { acceptance: null, gate_path: null, gate_cmd: 4, mutations: 'legacy' }]) {
+  for (const extra of [{}, { judge: 'touches crew/loop.mjs' }]) {
     const value = envelope('planner'); Object.assign(value.details, extra)
     assert.deepEqual(validateEnvelope('planner', value).defects, [])
   }
@@ -348,7 +356,7 @@ test('P2 planner details need no acceptance and may carry a one-line judge reaso
 
 // MUTATION: bypass DETAIL_RULES for subject and a malformed, overlong or control-bearing subject is accepted.
 test('P2 planner details may carry the context its builder arms read, and refuse it malformed', () => {
-  const full = envelope('planner'); Object.assign(full.details, { files_in_scope: ['crew/a.mjs'], validation_lane: 'node --test crew/a.test.mjs', gate_cmd: 'node gate.mjs' })
+  const full = envelope('planner'); Object.assign(full.details, { files_in_scope: ['crew/a.mjs'], validation_lane: 'node --test crew/a.test.mjs' })
   assert.deepEqual(validateEnvelope('planner', full).defects, [])
   assert.deepEqual(validateEnvelope('planner', envelope('planner')).defects, [], 'the fields are optional')
   for (const [key, bad] of [['files_in_scope', []], ['files_in_scope', 'a.mjs'], ['files_in_scope', ['a.mjs', '']], ['files_in_scope', [3]], ['validation_lane', ''], ['validation_lane', 5]]) {
@@ -388,10 +396,11 @@ test('P2 a refused subject names every accepted type', () => {
 })
 
 // MUTATION: reject archived planner keys or accept builder mutations.
-test('P2 accepts legacy planner fields without validating them and refuses builder mutations', () => {
+test('legacy planner fields are accepted only from an archived return', () => {
   const planner = envelope('planner')
   Object.assign(planner.details, { acceptance: null, gate_path: null, gate_cmd: 4, mutations: 'legacy' })
-  assert.deepEqual(validateEnvelope('planner', planner).defects, [])
+  for (const key of ['acceptance', 'gate_path', 'gate_cmd', 'mutations']) assert.ok(validateEnvelope('planner', planner).defects.includes(`details.${key} is not a field of planner details`))
+  assert.deepEqual(validateEnvelope('planner', planner, { archived: true }).defects, [])
   const builder = envelope('builder'); builder.details.mutations = []
   assert.ok(refusedFor('builder', builder, 'details.mutations is not a field').length)
 })

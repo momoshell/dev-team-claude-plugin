@@ -95,6 +95,9 @@ export function parseBrief(text) {
     return file !== '' && !file.startsWith('/') && !/[\\\0*?\[\]]/.test(file) && file.split('/').every((part) => part !== '' && part !== '.' && part !== '..' && part.toLowerCase() !== '.git')
   }))) defects.push('generated is a nonempty list of literal repo-relative paths')
   if (Object.hasOwn(fields, 'regenerate') && (typeof fields.regenerate !== 'string' || fields.regenerate.trim() === '' || fields.regenerate.includes('\0'))) defects.push('regenerate is a nonempty command line')
+  for (const key of ['suite', 'regenerate']) {
+    if (typeof fields[key] === 'string' && /["'\\]/.test(fields[key])) defects.push(`${key} is split on whitespace and run without a shell: quotes and backslashes are refused`)
+  }
   const { repeated } = sections(body)
   if (repeated.length) defects.push(`the body repeats ${[...new Set(repeated)].join(', ')}; the driver reads only the first`)
   // `closes` is the only issue binding; crew start writes it into the driver's bound-issue slot.
@@ -309,7 +312,7 @@ export function validateEnvelope(role, envelope, { archived = false, prior = [] 
         if (optional.includes(key)) {
           if (!DETAIL_RULES[key][0](details[key])) defects.push(`details.${key} ${DETAIL_RULES[key][1]}`)
         }
-        else if (!required.includes(key) && !(LEGACY_DETAIL_KEYS[role] ?? []).includes(key)) defects.push(`details.${key} is not a field of ${role} details`)
+        else if (!required.includes(key) && !(archived && (LEGACY_DETAIL_KEYS[role] ?? []).includes(key))) defects.push(`details.${key} is not a field of ${role} details`)
       }
       for (const key of required) {
         if (!Object.hasOwn(details, key)) { if (!archived || !(ARCHIVED_OPTIONAL[role] ?? []).includes(key)) defects.push(`details.${key} is required`); continue }

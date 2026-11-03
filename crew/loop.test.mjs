@@ -228,6 +228,19 @@ test('every rebase the loop runs carries the spec generated declaration, none wh
   }
 })
 
+// MUTATION: restore the mechanical skip at the commit gate.
+test('a mechanical lane stops dirty-worktree when the suite leaves a file or moves the checked tree, and commits nothing', async () => {
+  for (const mode of ['file', 'tree']) {
+    let trees = 0
+    const f = fakes({ spec: { tier: 'mechanical' }, paths: mode === 'file' ? 'M  lib.mjs\0?? coverage/lcov.info\0' : undefined,
+      checkedTree: () => ({ ...green(), stdout: (mode === 'tree' && trees++ ? 'f' : 'e').repeat(40) }),
+      edit: (v) => { if (v.role === 'builder') v.details.subject = 'fix: mechanical'; return v } })
+    assert.deepEqual(await f.go(), stopped('dirty-worktree'))
+    assert.equal(f.calls.includes('commit'), false)
+    assert.ok(f.calls.indexOf('checked-tree') < f.calls.indexOf('suite'))
+  }
+})
+
 test('a mechanical lane runs rebase, build, proof and suite with no plan, review or lead, and publishes under the builder\'s subject', async () => {
   for (const mode of ['none', 'test', 'repair']) {
     const f = fakes({ spec: { tier: 'mechanical' }, unseated: ['planner', 'reviewer', 'lead'], edit: (v, r) => {
@@ -238,7 +251,7 @@ test('a mechanical lane runs rebase, build, proof and suite with no plan, review
       return v
     } })
     assert.equal((await f.go()).status, 'done', mode)
-    assert.deepEqual(f.calls.slice(1), ['fetch', 'rebase', 'seat:builder', ...(mode === 'repair' ? ['seat:builder'] : []), ...(mode === 'none' ? [] : ['proof']), 'review-paths', 'suite-stage', 'suite', 'paths', 'commit', 'fetch', 'rebase', 'publish'])
+    assert.deepEqual(f.calls.slice(1), ['fetch', 'rebase', 'seat:builder', ...(mode === 'repair' ? ['seat:builder'] : []), ...(mode === 'none' ? [] : ['proof']), 'review-paths', 'suite-stage', 'checked-tree', 'suite', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase', 'publish'])
     assert.equal(f.seen.publish.title, 'docs(crew): fix typo')
     assert.match(f.seen.publish.body, mode === 'none' ? /proof: none, mechanical lane, not reviewed/ : /proof: lib.test.mjs.*red on the old source, green on the build/)
     assert.equal(f.seen.publish.body.match(/mechanical lane, not reviewed/g)?.length, 1, mode)
@@ -356,7 +369,7 @@ const BODY = ['Source: "issue 12"', '', '## Measurements', '- proof: lib.test.mj
 const LANE = '\n\n## Lane\n- Wall time: 0 s before publication; publication unmeasured.\n- Rounds: planner 1, builder 1, reviewer 1, tech-lead 0.\n- Suite repairs: 0.\n- Lead consults: 0.'
 test('a planner judge reason raises a build lane to judge before the build (PD4)', async () => {
   for (const mode of ['judge', 'none', 'throw']) {
-    const f = fakes({ spec: { acceptance: ['A1'] }, throwJudge: mode === 'throw', edit: (v) => { if (v.role === 'planner') { v.details.acceptance = ['A1']; if (mode !== 'none') v.details.judge = 'needs review' } return v } })
+    const f = fakes({ spec: { acceptance: ['A1'] }, throwJudge: mode === 'throw', edit: (v) => { if (v.role === 'planner') { if (mode !== 'none') v.details.judge = 'needs review' } return v } })
     const result = await f.go()
     assert.equal(result.status, mode === 'throw' ? 'stopped' : 'done')
     assert.deepEqual(f.tiers, mode === 'none' ? ['build'] : ['build', 'judge'])
@@ -374,7 +387,7 @@ test('a protected path in files_in_scope or the diff raises the lane to judge, a
     ['lib.mjs', ['crew/loop.mjs'], 'build', true, 'judge'], ['crew/lean.mjs', null, 'build', false, 'build'],
     ['crew/loop.mjs', null, 'judge', false, 'judge'],
   ]) {
-    const f = fakes({ spec: { tier: initial, acceptance: ['A1'] }, reviewPaths: ` M ${path}\0`, edit: (v) => { if (v.role === 'planner') { v.details.acceptance = ['A1']; if (scope) v.details.files_in_scope = scope } return v } })
+    const f = fakes({ spec: { tier: initial, acceptance: ['A1'] }, reviewPaths: ` M ${path}\0`, edit: (v) => { if (v.role === 'planner') { if (scope) v.details.files_in_scope = scope } return v } })
     assert.equal((await f.go()).status, 'done')
     assert.deepEqual(f.tiers, raised ? ['build', 'judge'] : [initial])
     assert.equal(f.requests.find((r) => r.role === 'builder').tier, builderTier)
@@ -573,7 +586,6 @@ test('a measured suite timeout under an override stops the lane with no commit, 
   for (const effect of ['paths', 'commit', 'publish']) assert.equal(f.calls.includes(effect), false, effect)
 })
 
-// MUTATION: skip the baseline acceptance branch and a green baseline lets the builder start.
 
 const gaps = (v) => ({ ...v, details: { ...v.details, gaps: [] } })
 const nth = (role, turn, edit) => (v, r) => (r.role === role && Number(r.id.split('.').at(-1)) === turn ? edit(v) : v)
@@ -619,7 +631,7 @@ test('a repaired envelope that is refused again stops the lane with no third tur
     const f = fakes({ edit: (v, r) => (r.role === 'builder' ? (r.repair ? edit(v) : gaps(v)) : v) })
     assert.deepEqual(await f.go(), stopped('envelope-refused'), name)
     assert.equal(count(f, 'builder'), 2, name)
-    assert.equal(f.calls.includes('gate'), false, name)
+    assert.equal(f.calls.includes('proof'), false, name)
     assert.equal(count(f, 'lead'), 0, name)
   }
   for (const [name, options, reason] of [
@@ -634,7 +646,7 @@ test('a repaired envelope that is refused again stops the lane with no third tur
     }
     assert.deepEqual(await f.go(), stopped(reason), name)
     assert.equal(name === 'seat failure' ? dispatched : count(f, 'builder'), name === 'seat failure' ? 3 : 2, name)
-    assert.equal(f.calls.includes('gate'), false, name)
+    assert.equal(f.calls.includes('proof'), false, name)
   }
   // a refused repair of the lead is a lead refusal
   const lead = fakes({ edit: (v) => (v.role === 'planner' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v.role === 'lead' ? gaps(v) : v) })
@@ -669,7 +681,7 @@ test('a repair does not launder an unproven original and must itself prove its r
     })
     assert.deepEqual(await f.go(), stopped('envelope-refused'), `turn ${unproven}`)
     assert.equal(count(f, 'builder'), 2)
-    assert.equal(f.calls.includes('gate'), false)
+    assert.equal(f.calls.includes('proof'), false)
   }
   const both = fakes({
     edit: (v, r) => (r.role === 'builder' && !r.repair ? gaps(v) : v),
@@ -698,12 +710,12 @@ test('a refused, unreadable, empty or stale envelope stops the lane and a lead a
     const f = fakes({ lead: 'accept', ...options })
     assert.deepEqual(await f.go(), stopped(reason), name)
     assert.equal(count(f, 'lead'), 0, name)
-    assert.equal(f.calls.includes('baseline'), false, name)
+    assert.equal(f.calls.includes('fetch'), false, name)
     assert.equal(count(f, 'builder'), 0, name)
   }
   const stale = fakes({ edit: (v, r) => r.role === 'builder' ? { ...v, id: 'lane.planner.1' } : v })
   assert.deepEqual(await stale.go(), stopped('envelope-refused'))
-  assert.equal(stale.calls.includes('gate'), false)
+  assert.equal(stale.calls.includes('proof'), false)
 })
 
 // MUTATION: drop the changes-needed branch and the findings never reach a second build.
@@ -734,7 +746,7 @@ test('from round 2 the reviewer hears the earlier findings, and a return that dr
   assert.equal((await malformed.go()).status, 'done')
 })
 
-test('changes-needed carries the exact findings to the next build and repeats gate, proof and review before the suite', async () => {
+test('changes-needed carries the exact findings to the next build and repeats proof and review before the suite', async () => {
   const f = fakes({ review: 1 })
   assert.equal((await f.go()).status, 'done')
   const builders = f.requests.filter((r) => r.role === 'builder')
@@ -817,7 +829,7 @@ test('an unseated, refusing or insufficient lead stops without recursion', async
 
 // MUTATION: drop the overall proof decision and a surviving or incomplete proof reaches review.
 
-// MUTATION: trust a non-green gate and the review and commit run on a build that does not pass.
+// MUTATION: trust a non-green proof and the review and commit run on a build that does not pass.
 
 // MUTATION: skip the suite decision and a red or unmeasured suite still commits.
 test('a red, unmeasured or malformed-green suite never commits', async () => {
@@ -884,7 +896,7 @@ test('a mechanical suite red goes straight to one builder fix before the suite r
     assert.equal(builderTurns(f).length, 2)
     assert.deepEqual(builderTurns(f)[1].feedback[0].outputTail, [SPEC_OUT])
     assert.match(builderTurns(f)[1].feedback[0].summary, /suite is red after your change/)
-    assert.deepEqual(f.calls.slice(f.calls.indexOf('suite'), f.calls.lastIndexOf('suite') + 1), ['suite', 'seat:builder', 'proof', 'review-paths', 'suite-stage', 'suite'])
+    assert.deepEqual(f.calls.slice(f.calls.indexOf('suite'), f.calls.lastIndexOf('suite') + 1), ['suite', 'seat:builder', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'suite'])
     assert.equal(f.calls.includes('publish'), after.status === 'green')
   }
 })
@@ -937,8 +949,8 @@ test('a suite red on both runs gives the builder one repair turn whose feedback 
   assert.equal(count(spent, 'lead'), 0)
 })
 
-// MUTATION: skip the fresh gate, proof, review or suite after the repair and an unproven green is published.
-test('after a suite repair the gate, proof, review and suite run again, then the lane commits and opens its PR with every measurement', async () => {
+// MUTATION: skip the fresh proof, review or suite after the repair and an unproven green is published.
+test('after a suite repair the proof, review and suite run again, then the lane commits and opens its PR with every measurement', async () => {
   const f = sequenced([redRun(1), redRun(2), green()], { spec: finishSpec() })
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: null })
   const at = f.calls.lastIndexOf('seat:builder')
@@ -1044,13 +1056,34 @@ test('a stage whose work throws still ends in the journal and the lane stops run
   const ends = f.rows.filter((r) => r.event === 'stage-start' || r.event === 'stage-end')
   assert.deepEqual(ends.map((r) => [r.event, r.stage]), [['stage-start', 'plan'], ['stage-end', 'plan']])
   assert.equal(typeof ends[1].outcome.threw.message, 'string')
-  assert.equal(f.calls.includes('baseline'), false)
+})
+
+test('a failing journal append leaves the lane outcome unchanged and the result carries the unwritten count and the described error', async () => {
+  for (const mode of ['sync', 'async', 'reject']) for (const stoppedRun of [false, true]) {
+    let count = 0
+    const error = Object.assign(new Error('first failure'), { code: 'EPERM' })
+    const next = () => ++count === 1 ? error : new Error('later failure')
+    const journal = mode === 'sync' ? () => { throw next() } : mode === 'async' ? async () => { throw next() } : () => Promise.reject(next())
+    const options = stoppedRun ? { proof: { status: 'unmeasured', reason: 'timeout', rows: [] } } : {}
+    const expected = await fakes(options).go()
+    const result = await fakes({ ...options, journal }).go()
+    assert.deepEqual({ status: result.status, reason: result.reason, pr: result.pr }, expected)
+    assert.deepEqual(result.journal, { unwritten: count, error: { code: 'EPERM', message: 'first failure' } })
+    assert.ok(count > 0)
+  }
+  const result = await fakes({ journal: () => { throw Object.create(null) } }).go()
+  assert.deepEqual(result.journal.error, { code: null, message: 'unprintable error' })
+})
+
+test('every loop-only stop reason is emitted by the loop source', () => {
+  const source = readFileSync(fileURLToPath(new URL('./loop.mjs', import.meta.url)), 'utf8').replace(/export const LOOP_REASONS = Object\.freeze\(\[[\s\S]*?\]\)/, '')
+  for (const reason of LOOP_REASONS.filter((r) => !CHECK_REASONS.includes(r))) assert.ok(source.includes(`'${reason}'`), reason)
 })
 
 // MUTATION: drop the journal call and the lane leaves no observation record.
 test('the journal carries each envelope, verdict, check, commit and PR observation and a failing journal changes nothing', async () => {
   const f = fakes()
-  const success = await f.go()
+  await f.go()
   const events = (name) => f.rows.filter((r) => r.event === name)
   assert.deepEqual(events('envelope').map((r) => [r.role, r.id, r.parsed.status, r.defects, r.error]), [
     ['planner', 'lane.planner.1', 'done', [], null], ['builder', 'lane.builder.2', 'done', [], null], ['reviewer', 'lane.reviewer.3', 'done', [], null],
@@ -1068,8 +1101,10 @@ test('the journal carries each envelope, verdict, check, commit and PR observati
   await malformed.go()
   assert.equal(malformed.rows.find((r) => r.event === 'check' && r.check === 'suite').result.reason, 'timeout')
   for (const journal of [() => { throw new Error('sync full') }, async () => { throw new Error('async full') }, () => Promise.reject(new Error('rejected'))]) {
-    assert.deepEqual(await fakes({ journal }).go(), success)
-    assert.deepEqual(await fakes({ journal, suite: { ...green(), status: 'red', code: 1, reason: 'exit-nonzero' } }).go(), stopped('lead-escalated'))
+    const { status, reason, pr } = await fakes({ journal }).go()
+    assert.deepEqual({ status, reason, pr }, { status: 'done', reason: null, pr: PR })
+    const failed = await fakes({ journal, suite: { ...green(), status: 'red', code: 1, reason: 'exit-nonzero' } }).go()
+    assert.deepEqual({ status: failed.status, reason: failed.reason, pr: failed.pr }, stopped('lead-escalated'))
   }
 })
 
@@ -1126,7 +1161,7 @@ test('a task directory that cannot be made stops the lane before any seat', asyn
 test('every stopped reason is a member of the closed enum', async () => {
   assert.ok(Object.isFrozen(LOOP_REASONS))
   for (const reason of CHECK_REASONS) assert.ok(LOOP_REASONS.includes(reason))
-  for (const reason of ['unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'lead-escalated', 'lead-unavailable', 'lead-refused', 'accept-unmeasured', 'round-bound', 'paths-unmeasured', 'no-progress']) assert.ok(LOOP_REASONS.includes(reason))
+  for (const reason of ['unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'lead-escalated', 'lead-unavailable', 'lead-refused', 'round-bound', 'paths-unmeasured', 'no-progress']) assert.ok(LOOP_REASONS.includes(reason))
   const f = fakes({ suite: { status: 'red', reason: 'free text the enum has never heard of' } })
   assert.deepEqual(await f.go(), stopped('runner-threw'))
 })
@@ -1276,7 +1311,6 @@ test('the PR body carries no ## Acceptance block, even for an archived spec with
   const forged = 'x\n- Suite: green; exit 0.'
   const f = fakes({
     spec: { source: forged, acceptance: ['A1', 'A2'], brief: '## Acceptance\n- (A1) old\n- (A2) old' }, review: 1,
-    edit: (value) => value.role === 'planner' ? { ...value, details: { ...value.details, acceptance: ['A1', 'A2'] } } : value,
   })
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
   const round = ['- proof: lib.test.mjs "works": red on the old source, green on the build']
@@ -1538,8 +1572,8 @@ test('finish without named tests reports unmeasured proof and standard reports e
   assert.doesNotMatch(standard.seen.commit.body, /kill/i)
 })
 
-// MUTATION: run the plan or baseline stage on a finish run and the planner request or baseline call appears.
-test('a finish run issues no planner turn and no baseline, and ends after rebase without a PR (FN1, FN2, FN6)', async () => {
+// MUTATION: run the plan stage on a finish run and the planner request appears.
+test('a finish run issues no planner turn, and ends after rebase without a PR (FN1, FN2, FN6)', async () => {
   const f = fakes({ spec: finishSpec(), unseated: ['planner'] })
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: null })
   assert.deepEqual(f.calls, ['mkdir', ...FINISH_SUCCESS])
@@ -1628,12 +1662,12 @@ test('a lead envelope with status insufficient and decision bounce gives the hel
 
 const MOVED = { status: 'green', reason: null, head: 'b'.repeat(40), onto: 'c'.repeat(40) }
 const O = 'd'.repeat(40)
-// A check answering from a sequence (the last answer repeats), for gate and suite seams that must differ across calls.
+// A check answering from a sequence (the last answer repeats), for proof and suite seams that must differ across calls.
 const answers = (...list) => { let n = 0; return () => structuredClone(list[Math.min(n++, list.length - 1)]) }
 const moved = (options = {}) => fakes({ rebase: MOVED, spec: { tier: 'mechanical' }, unseated: ['planner', 'reviewer', 'lead'], edit: (v) => { if (v.role === 'builder') v.details.subject = 'fix: mechanical'; return v }, ...options })
 
-// MUTATION: skip the post-rebase gate and suite and a moved head is published unchecked.
-test('a rebase that moves the head reruns the gate then the suite on the rebased tree before it publishes (RB1)', async () => {
+// MUTATION: skip the post-rebase proof and suite and a moved head is published unchecked.
+test('a rebase that moves the head reruns proof then the suite on the rebased tree before it publishes (RB1)', async () => {
   const f = moved()
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
   const tail = f.calls.slice(f.calls.lastIndexOf('rebase'))
@@ -1713,7 +1747,7 @@ test('a red suite after a rebase that moved the head stops with its reason and p
   assert.equal(g.rows.some((r) => r.event === 'finish-ready'), false)
 })
 
-// MUTATION: drop the post-rebase clean-tree check and a gate or suite that edits the tree publishes bytes no commit holds.
+// MUTATION: drop the post-rebase clean-tree check and proof or suite that edits the tree publishes bytes no commit holds.
 test('a post-rebase check that dirties the tree or moves HEAD stops a mechanical lane before it publishes (PT1)', async () => {
   for (const options of [{ cleanStatus: ' M lib.mjs\0' }, { cleanStatus: '?? extra.mjs\0' }, { cleanHead: 'c'.repeat(40) }]) {
     const f = moved(options)
@@ -1781,8 +1815,8 @@ test('a build or judge lane whose publishing rebase drops its commit as already 
   }
 })
 
-// MUTATION: rerun after every rebase and an unchanged head pays an extra gate and suite run.
-test('a rebase that leaves the head unchanged runs the gate and the suite once (RB3)', async () => {
+// MUTATION: rerun after every rebase and an unchanged head pays an extra proof and suite run.
+test('a rebase that leaves the head unchanged runs proof and the suite once (RB3)', async () => {
   const f = fakes()
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
   assert.equal(f.calls.filter((c) => c === 'suite').length, 1)
@@ -1897,7 +1931,7 @@ test('the PR body reports wall time, rounds per role, suite repairs and lead con
   }
 })
 
-// A planner's plan_path and gate_path must name existing regular files inside the task dir.
+// A planner's plan_path must name an existing regular file inside the task dir.
 const pathed = (details) => (v) => (v.role === 'planner' ? { ...v, details: { ...v.details, ...details } } : v)
 const regular = async (path) => {
   if (!['/virtual/task/plan.md', '/virtual/task/gate.mjs', '/virtual/outside.mjs', '/virtual/task-sibling/gate.mjs', '/virtual/task/link.mjs'].includes(path)) {
@@ -1914,7 +1948,7 @@ test('a planner return whose plan_path is missing, a directory or carries a line
     assert.deepEqual(await f.go(), stopped('envelope-refused'), plan_path)
     assert.equal(count(f, 'planner'), 2)
     assert.ok(f.requests[1].repair.defects.some((d) => d.includes('plan_path')))
-    assert.ok(!f.calls.includes('baseline') && !f.calls.includes('seat:builder'))
+    assert.ok(!f.calls.includes('seat:builder'))
   }
   // a file that really carries the suffix in its name is still a citation, not a path
   const named = fakes({ edit: pathed({ plan_path: '/virtual/task/plan.md:1-42' }), deps: { stat: async () => ({ isFile: () => true }) } })
@@ -1927,7 +1961,7 @@ test('a planner return whose plan_path is missing, a directory or carries a line
 
 // MUTATION: force the validity predicate false and an accepted return is refused.
 test('a planner return naming existing task-dir files is accepted, a relative path is read against the task dir, and a repair costs no round (PP3)', async () => {
-  const f = fakes({ edit: pathed({ plan_path: 'plan.md', gate_path: './gate.mjs' }), deps: { stat: regular } })
+  const f = fakes({ edit: pathed({ plan_path: 'plan.md' }), deps: { stat: regular } })
   assert.equal((await f.go()).status, 'done')
   assert.equal(count(f, 'planner'), 1)
   assert.equal(f.requests[1].planPath, '/virtual/task/plan.md')

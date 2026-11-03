@@ -1661,6 +1661,44 @@ test('a finish run issues no planner turn, and ends after rebase without a PR (F
   assert.equal(f.rows.findIndex((r) => r.event === 'finish-ready') > f.rows.findLastIndex((r) => r.stage === 'rebase'), true)
 })
 
+// MUTATION: flip isFinish && in the guard for a planner bounce from a finish builder.
+test('a finish lead bounce to the planner is asked again with no planner to route to, and a last consult stops for the operator without another builder turn', async () => {
+  for (const mode of ['finish', 'last', 'build', 'judge']) {
+    let builds = 0, leads = 0
+    const finish = mode === 'finish' || mode === 'last'
+    const f = fakes({
+      spec: finish ? finishSpec() : { tier: mode },
+      ...(finish ? { unseated: ['planner'] } : {}),
+      ...(mode === 'last' ? { bounds: { lead: 1 } } : {}),
+      lead: 'bounce',
+      edit: (v) => {
+        if (v.role === 'builder' && ++builds === 1) return { ...v, status: 'insufficient', summary: 'gap' }
+        if (v.role === 'lead') v.details.target = ++leads === 1 || mode === 'last' ? 'planner' : 'builder'
+        return v
+      },
+    })
+    const result = await f.go()
+    const roles = f.requests.map((r) => r.role)
+    const consults = f.requests.filter((r) => r.role === 'lead')
+    for (const request of consults) assert.deepEqual(request.feedback[0].targets, finish ? ['builder'] : ['builder', 'planner'], mode)
+    if (mode === 'last') {
+      assert.deepEqual(result, stopped('lead-escalated'))
+      assert.deepEqual(roles, ['builder', 'lead'])
+      assert.match(f.rows.findLast((r) => r.event === 'verdict').observation.question, /gap/)
+    } else if (finish) {
+      assert.equal(result.status, 'done')
+      assert.deepEqual(roles.slice(0, 4), ['builder', 'lead', 'lead', 'builder'])
+      assert.ok(!roles.includes('planner'))
+      const feedback = consults[1].feedback[0].feedback[0]
+      assert.equal(feedback.id, 'finish-no-planner')
+      assert.match(feedback.summary, /finish run has no planner.*bounce to builder.*escalate naming the plan gap/i)
+    } else {
+      assert.equal(result.status, 'done')
+      assert.deepEqual(roles.slice(0, 5), ['planner', 'builder', 'lead', 'planner', 'builder'])
+    }
+  }
+})
+
 // MUTATION: start the first builder feedback empty and the stop reason and findings never reach it.
 test('the finish builder first hears the stop reason with its observation, then the open findings; seat ids start past the stopped lane', async () => {
   const f = fakes({ spec: finishSpec(), unseated: ['planner'] })

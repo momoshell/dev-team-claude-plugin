@@ -42,6 +42,11 @@ test('LD2: a builder insufficient goes to the lead, and a planner revision narro
   has(body('crew/agents/planner.md'), 'When a revision answers a builder finding that a criterion cannot be met, narrow or drop that criterion rather than add mechanism to keep it.')
 })
 
+// MUTATION: drop the finish targets sentence from the lead charter.
+test('LD3: the lead charter says a finish run lists only builder in targets and has no planner to route to', () => {
+  has(body('crew/agents/lead.md'), 'The consult lists the seats you can route to in `targets`; a finish run lists only `builder`, so a plan gap there is an escalate naming it, never a `planner` bounce.')
+})
+
 // MUTATION: restore return boilerplate or remove a builder loop rule.
 test('CH1: the builder charter keeps the rules the loop depends on', () => {
   const charter = body('crew/agents/builder.md')

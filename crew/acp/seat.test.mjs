@@ -783,6 +783,24 @@ test('a refused set_mode starts no prompt and still tears the client down', () =
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+// MUTATION: drop the client?.spawned term.
+test('S2-17 a start that fails after spawn keeps the runtime unless teardown is proven', () => {
+  for (const outcome of ['unproven', 'failed', 'proven']) {
+    const root = scratchDir('acp-seat-start-failure-')
+    try {
+      assert.throws(() => runAcpSeat({
+        definition: { agent: 'claude', model: 'anthropic/claude-opus-4-6', effort: 'high', role: 'reviewer', skills: [], writes: 'task-dir' },
+        cwd: root, taskDir: root, prompt: 'x', sessionFile: join(root, 'session.jsonl'),
+        binaries: { claudeAcp: BIN, claude: BIN },
+        deps: { runtimeRoot: root, clientFactory: () => ({
+          spawned: true, start() { throw new Error('start failed') }, close() { return { outcome } },
+        }) },
+      }), /start failed/)
+      assert.equal(runtimes(root).size, outcome === 'proven' ? 0 : 1, outcome)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }
+})
+
 test('task-dir seats deny Edit and NotebookEdit even when the explicit tools list Edit', () => {
   for (const definition of [{ writes: 'task-dir' }, { writes: 'task-dir', tools: ['Read', 'Edit'] }]) {
     use('claude-turn', { definition }, (run) => {

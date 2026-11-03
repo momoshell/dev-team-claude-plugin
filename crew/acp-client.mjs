@@ -23,7 +23,8 @@ export const ACP_REFUSALS = Object.freeze([
   'acp-malformed-frame', 'acp-protocol-mismatch', 'acp-spawn-failed', 'acp-session-busy',
   'acp-session-cancelled', 'acp-unresolvable-reservation', 'acp-request-timeout', 'acp-prompt-write-timeout', 'acp-seat-closed',
 ])
-export const ACP_REQUEST_TIMEOUT_MS = 600000
+export const ACP_SETUP_TIMEOUT_MS = 180000
+export const ACP_FIFO_WAIT_MS = 10000
 export const ACP_WRITE_DEADLINE_MS = 30000
 export const ACP_POLL_MS = 25
 export const ACP_PS_TIMEOUT_MS = 1000
@@ -86,29 +87,31 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
   let rest = Buffer.alloc(0)
   let closed = false
   let closeResult = null
+  let setupDeadline = null
 
   function log(row) { try { journal(row) } catch { /* instrumentation is never load-bearing */ } }
-  function writeFrame(frame) {
+  function writeFrame(frame, setupLimit = null) {
     const encoded = Buffer.from(`${JSON.stringify(frame)}\n`)
     let written = 0
     const deadline = now() + ACP_WRITE_DEADLINE_MS
     while (written < encoded.length) {
+      if (setupLimit != null && now() >= setupLimit && setupLimit <= deadline) throw Object.assign(acpRefuse('acp-request-timeout', `acp seat ${role} could not write ${frame.method} within the setup budget`), { bytesWritten: written })
       if (now() >= deadline) throw Object.assign(acpRefuse('acp-prompt-write-timeout', `acp seat ${role} could not write a complete prompt frame`), { bytesWritten: written })
       try {
         const count = writeFd(fd, encoded, written, encoded.length - written)
         if (typeof count !== 'number') return
         if (count > 0) written += count
-        else sleep(ACP_POLL_MS)
+        else sleep(Math.max(0, Math.min(ACP_POLL_MS, deadline - now(), (setupLimit ?? Infinity) - now())))
       } catch (error) {
-        if (error?.code === 'EAGAIN' || error?.code === 'EWOULDBLOCK') { sleep(ACP_POLL_MS); continue }
+        if (error?.code === 'EAGAIN' || error?.code === 'EWOULDBLOCK') { sleep(Math.max(0, Math.min(ACP_POLL_MS, deadline - now(), (setupLimit ?? Infinity) - now()))); continue }
         if (error && typeof error === 'object') error.bytesWritten = written
         throw error
       }
     }
   }
-  function send(frame) {
+  function send(frame, setupLimit = null) {
     if (torn > 0) throw Object.assign(acpRefuse('acp-prompt-write-timeout', `acp seat ${role} holds a torn frame (${torn} bytes); no further frame can be written`), { bytesWritten: 0 })
-    try { return writeFrame(frame) } catch (error) {
+    try { return writeFrame(frame, setupLimit) } catch (error) {
       if (error?.bytesWritten > 0) torn = error.bytesWritten
       throw error
     }
@@ -146,14 +149,17 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
       throw acpRefuse('acp-spawn-failed', `acp seat ${role} could not spawn: ${err?.message || err}`)
     }
     store.advance(handle, PHASES.RUNNING, { pid: child.pid })
-    for (let i = 0; i < 20 && fd == null; i += 1) {
-      try { fd = open(paths.fifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK) } catch { sleep(ACP_POLL_MS) }
+    const fifoDeadline = now() + ACP_FIFO_WAIT_MS
+    while (fd == null) {
+      try { fd = open(paths.fifo, fsConstants.O_RDWR | fsConstants.O_NONBLOCK) } catch {
+        if (now() >= fifoDeadline) break
+        sleep(ACP_POLL_MS)
+        if (now() >= fifoDeadline) break
+      }
     }
     if (fd == null) {
-      const pgid = Number(child?.pid)
-      if (Number.isSafeInteger(pgid) && pgid > 1) { try { kill(-pgid, 'SIGTERM') } catch {} }
-      try { store.clear(handle) } catch {}
-      throw acpRefuse('acp-spawn-failed', `acp fifo did not appear for seat ${role}`)
+      const teardown = close()
+      throw Object.assign(acpRefuse('acp-spawn-failed', `acp fifo did not appear for seat ${role} within ${ACP_FIFO_WAIT_MS} ms (teardown ${teardown.outcome})`), { teardown })
     }
     return { pid: child.pid }
   }
@@ -178,23 +184,23 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     return { sink: kind, kind, update }
   }
 
-  function answerPermission(frame) {
+  function answerPermission(frame, setupLimit = null) {
     const options = Array.isArray(frame.params?.options) ? frame.params.options : []
     const chosen = onPermission ? onPermission({ sessionId: frame.params?.sessionId ?? null, toolCall: frame.params?.toolCall ?? null, options }) : null
     const fallback = options.find((o) => o?.kind === 'reject_once') || null
     const optionId = chosen ?? fallback?.optionId ?? null
     log({ at: now(), acp_permission: { role, policy: chosen == null ? 'no-lead' : 'injected', optionId, tool: frame.params?.toolCall?.kind ?? null } })
-    if (optionId == null) return send({ jsonrpc: '2.0', id: frame.id, result: { outcome: { outcome: 'cancelled' } } })
-    return send({ jsonrpc: '2.0', id: frame.id, result: { outcome: { outcome: 'selected', optionId } } })
+    if (optionId == null) return send({ jsonrpc: '2.0', id: frame.id, result: { outcome: { outcome: 'cancelled' } } }, setupLimit)
+    return send({ jsonrpc: '2.0', id: frame.id, result: { outcome: { outcome: 'selected', optionId } } }, setupLimit)
   }
 
-  function deliver(item) {
+  function deliver(item, setupLimit = null) {
     const { type, frame } = item
     if (type === 'response') { responses.set(frame.id, frame); return }
     if (type === 'request') {
-      if (frame.method === 'session/request_permission') return answerPermission(frame)
+      if (frame.method === 'session/request_permission') return answerPermission(frame, setupLimit)
       log({ at: now(), acp_unknown_request: { role, method: frame.method } })
-      return send({ jsonrpc: '2.0', id: frame.id, error: { code: METHOD_NOT_FOUND, message: `acp client does not implement ${frame.method}` } })
+      return send({ jsonrpc: '2.0', id: frame.id, error: { code: METHOD_NOT_FOUND, message: `acp client does not implement ${frame.method}` } }, setupLimit)
     }
     if (frame.method !== 'session/update') {
       log({ at: now(), acp_unknown_notification: { role, method: frame.method } })
@@ -207,7 +213,7 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     return undefined
   }
 
-  function pump() {
+  function pump(setupLimit = null) {
     if (!exists(paths.stream)) return
     const buffer = read(paths.stream)
     const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(String(buffer), 'utf8')
@@ -218,23 +224,23 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     rest = tail
     const staged = []
     for (const line of lines) if (line.trim().length) staged.push(stage(line))
-    for (const item of staged) deliver(item)
+    for (const item of staged) deliver(item, setupLimit)
   }
 
   function request(method, params) {
     seq += 1
     const id = seq
-    send({ jsonrpc: '2.0', id, method, params })
-    const deadline = now() + ACP_REQUEST_TIMEOUT_MS
+    setupDeadline ??= now() + ACP_SETUP_TIMEOUT_MS
+    send({ jsonrpc: '2.0', id, method, params }, setupDeadline)
     for (;;) {
-      pump()
+      pump(setupDeadline)
       if (responses.has(id)) { const frame = responses.get(id); responses.delete(id); return frame }
       if (hasExitMarker()) {
-        pump()
+        pump(setupDeadline)
         if (responses.has(id)) { const frame = responses.get(id); responses.delete(id); return frame }
         throw acpRefuse('acp-seat-closed', `acp seat ${role} exited before answering ${method}`)
       }
-      if (now() > deadline) throw acpRefuse('acp-request-timeout', `acp seat ${role} did not answer ${method}`)
+      if (now() >= setupDeadline) throw acpRefuse('acp-request-timeout', `acp seat ${role} did not answer ${method}`)
       sleep(ACP_POLL_MS)
     }
   }
@@ -394,5 +400,5 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     return result
   }
 
-  return { start, initialize, newSession, setMode, beginPrompt, pollPrompt, cancelPrompt, cancel, close, hasExitMarker, get sessionId() { return session.id } }
+  return { start, initialize, newSession, setMode, beginPrompt, pollPrompt, cancelPrompt, cancel, close, hasExitMarker, get spawned() { return child != null }, get sessionId() { return session.id } }
 }

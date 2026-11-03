@@ -1022,6 +1022,18 @@ test('every reviewer turn receives the paths git reports at that round, both ren
   assert.equal(rounds.requests.filter((r) => r.role !== 'reviewer').some((r) => 'changedPaths' in r), false)
 })
 
+test('a protected path the suite writes after the review-time path check stops the lane before the commit', async () => {
+  for (const spec of [{ tier: 'mechanical' }, {}]) {
+    const f = fakes({ spec, unseated: spec.tier ? ['planner', 'reviewer', 'lead'] : [], paths: ' M lib.mjs\0 M crew/loop.mjs\0',
+      edit: (v) => { if (v.role === 'builder') v.details.subject = 'docs(crew): fix typo'; return v } })
+    assert.deepEqual(await f.go(), stopped('dirty-worktree'), spec.tier ?? 'build')
+    assert.equal(f.calls.includes('commit'), false)
+    assert.equal(f.rows.some((r) => r.event === 'tier-raised'), false)
+  }
+  const raised = fakes({ reviewPaths: ' M crew/loop.mjs\0', paths: ' M crew/loop.mjs\0' })
+  assert.equal((await raised.go()).status, 'done')
+})
+
 // MUTATION: dispatch the reviewer anyway when the status read is unusable and the review runs on an unmeasured path set.
 test('a reviewer path read that is denied, interrupted, non-green or malformed stops before the reviewer, suite and commit', async () => {
   const bad = (fields) => ({ reviewResult: { ...green(), stdout: ' M a.mjs\0', ...fields } })

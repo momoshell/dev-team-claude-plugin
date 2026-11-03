@@ -538,6 +538,9 @@ export async function runLoop(spec, deps = {}) {
     const status = await stage('paths', () => callCheck('paths', d.run, { cwd, command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs }, { command: true }))
     const files = status.status === 'green' && typeof status.stdout === 'string' ? parseChangedPaths(status.stdout) : null
     if (!files) return stop('paths-unmeasured', status)
+    // A protected path first seen after the review-time check (the suite wrote it) never met the raise: never commit it.
+    const unraised = protectedPaths(files).filter((path) => !protectedPaths(changedPaths).includes(path))
+    if (unraised.length) return stop('dirty-worktree', { paths: unraised })
 
     const committed = await stage('commit', () => callCheck('commit', d.commitChanges, {
       cwd, files, subject, body, closes: spec.closes ?? [], refs: spec.refs ?? [], timeoutMs,

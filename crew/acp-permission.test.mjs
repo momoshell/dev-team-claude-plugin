@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { PERMISSION_POLICIES, PERMISSION_REFUSALS, permitQuestion, settlePermission, permissionHandler, readOnlyCommand, readOnlyCommandResult, panelPermission } from './acp-permission.mjs'
+import { PERMISSION_POLICIES, PERMISSION_REFUSALS, permitQuestion, settlePermission, permissionHandler, readOnlyCommand, readOnlyCommandResult } from './acp-permission.mjs'
+import * as permission from './acp-permission.mjs'
 
 const toolCall = { title: 'shell', kind: 'execute', rawInput: { command: 'echo hi' } }
 const options = [
@@ -10,14 +11,10 @@ const options = [
 ]
 const settle = (extra = {}) => settlePermission({ toolCall, options, ...extra })
 
-test('P1 deny policy wins even over allow policy', () => {
-  assert.equal(settle({ policy: { autoDeny: ['shell'], autoApprove: ['execute'] } }).optionId, 'reject')
-})
-test('P2 allow policy picks allow-once', () => {
-  assert.equal(settle({ policy: { autoApprove: ['execute'] } }).optionId, 'allow')
-})
-test('roster deny row has exactly its six non-lead keys', () => {
-  assert.deepEqual(settle({ policy: { autoDeny: ['shell'] } }).row, { kind: 'permission', tool: 'execute', title: 'shell', option_kind: 'reject_once', option: 'reject', policy: 'roster' })
+// MUTATION: restore the autoDeny branch.
+test('settlePermission ignores a roster policy and takes the lead answer', () => {
+  assert.equal(settle({ policy: { autoDeny: ['shell'] }, lead: () => ({ policy: 'roster', verdict: 'allow' }) }).optionId, 'allow')
+  assert.equal('panelPermission' in permission, false)
 })
 test('P3 invokes lead exactly once with permit payload', () => {
   let calls = 0
@@ -66,12 +63,6 @@ test('reject-always is used when reject-once is unavailable', () => {
   const result = settlePermission({ toolCall, options: [{ kind: 'reject_always', optionId: 'deny-all' }], lead: () => { throw Error('must not call') } })
   assert.equal(result.optionId, 'deny-all')
 })
-test('allow_always is never selected and allow policy falls back to rejection', () => {
-  const allowAlways = [{ kind: 'reject_once', optionId: 'deny' }, { kind: 'allow_always', optionId: 'all' }]
-  assert.equal(settlePermission({ toolCall, options: allowAlways, policy: { autoApprove: ['shell'] } }).optionId, 'deny')
-  assert.equal(settlePermission({ toolCall, options, policy: { autoApprove: ['shell'] } }).optionId, 'allow')
-  assert.equal(settlePermission({ toolCall, options: [options[0]], policy: { autoApprove: ['shell'] } }).optionId, 'reject')
-})
 test('AT6 lead allow_always decision maps to allow_once or reject and answered stays raw', () => {
   const first = settle({ lead: () => ({ details: { decision: 'always' } }) })
   assert.equal(first.optionId, 'allow')
@@ -81,10 +72,6 @@ test('AT6 lead allow_always decision maps to allow_once or reject and answered s
   const second = settlePermission({ toolCall, options: onlyAlways, lead: () => ({ details: { decision: 'all' } }) })
   assert.equal(second.optionId, 'deny')
   assert.equal(second.row.answered, 'all')
-})
-test('AT6 roster autoApprove with only allow_always offered selects reject', () => {
-  const onlyAlways = [{ kind: 'reject_once', optionId: 'deny' }, { kind: 'allow_always', optionId: 'all' }]
-  assert.equal(settlePermission({ toolCall, options: onlyAlways, policy: { autoApprove: ['shell'] } }).optionId, 'deny')
 })
 test('Claude option IDs are accepted as IDs, not ACP kinds', () => {
   assert.equal(settle({ lead: () => ({ details: { decision: 'allow' } }) }).optionId, 'allow')
@@ -129,7 +116,6 @@ const CHAINS = ['git status --short && git diff --stat && git diff -- crew/loop.
 test('RC1 chains of read-only commands are allowed', () => {
   for (const command of CHAINS) {
     assert.equal(readOnlyCommand(command), true, command)
-    assert.equal(panelPermission({ kind: 'execute', rawInput: { command } }).verdict, 'allow', command)
   }
 })
 
@@ -167,21 +153,4 @@ test('RC4 the refusal names the first non-read-only segment and not later ones',
 test('RV1-1 rejects git grep pager option aliases', () => {
   for (const command of ['git grep -lOrm foo', 'git grep --open=rm foo', 'git grep --open-files=rm foo'])
     assert.equal(readOnlyCommand(command), false, command)
-})
-
-test('B4 panel execute decisions are roster-attributed and only allow_once can approve', () => {
-  const approve = panelPermission({ kind: 'execute', rawInput: { command: 'git diff' } })
-  const refuse = panelPermission({ kind: 'execute', rawInput: { command: 'git diff > f' } })
-  const mutation = panelPermission({ title: 'write', kind: 'other' })
-  assert.deepEqual(approve, { policy: 'roster', verdict: 'allow' })
-  assert.deepEqual(refuse, { policy: 'roster', verdict: 'reject' })
-  assert.deepEqual(mutation, { policy: 'roster', verdict: 'reject' })
-  for (const answer of [approve, refuse, mutation]) {
-    const result = settlePermission({ toolCall, options, lead: () => answer })
-    assert.equal(result.row.policy, 'roster')
-    assert.equal(Object.hasOwn(result.row, 'answered'), false)
-    assert.equal(result.optionId, answer.verdict === 'allow' ? 'allow' : 'reject')
-  }
-  assert.equal(settlePermission({ toolCall, options: [options[0], options[2]], lead: () => approve }).optionId, 'reject')
-  assert.equal(settlePermission({ toolCall, options, lead: () => ({ decision: 'allow' }) }).row.policy, 'lead')
 })

@@ -1,10 +1,9 @@
 import { test } from 'node:test'
-import { execFileSync } from 'node:child_process'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
 import { scratchDir } from '../test/helpers.mjs'
 import assert from 'node:assert/strict'
 import {
-  cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync,
+  existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, resolve as resolvePath } from 'node:path'
@@ -125,6 +124,18 @@ test('markdown memory rejects parent and absolute links with outside-dir drops',
   } finally { clean(dir); rmSync(outside, { force: true }); rmSync(absolute, { force: true }) }
 })
 
+// MUTATION: restore the lint wrapper on propose.
+test('openMemory propose writes a delta without a run-fact lint', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-memory-run-fact-'))
+  try {
+    assert.doesNotThrow(() => memory.openMemory({ dir }).propose({ name: 'run-fact', description: 'd', type: 'project', body: 'PR #219 merged.' }))
+    assert.equal(readFileSync(join(dir, 'run-fact.md'), 'utf8').endsWith('PR #219 merged.'), true)
+    assert.equal('lintMemoryDelta' in memory, false)
+    assert.equal('MemoryLintError' in memory, false)
+    assert.equal('RUN_FACT_RULES' in memory, false)
+  } finally { clean(dir) }
+})
+
 test('propose round trips a memory body and index line through context', () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-memory-propose-'))
   try {
@@ -139,62 +150,7 @@ test('propose round trips a memory body and index line through context', () => {
   } finally { clean(dir) }
 })
 
-test('propose rejects a delta that restates a run fact and writes nothing', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'crew-memory-propose-lint-'))
-  try {
-    const mem = memory.openMemory({ dir })
-    const samples = [
-      ['adw-id', 'The run 550e8400-e29b-41d4-a716-446655440000 escalated after review.'],
-      ['suite-count', 'Suite ran 638/638 green on this task.'],
-      ['pr-outcome', 'PR #219 merged after review.'],
-      ['token-cost', 'The seat burned 1.2M tokens on that run.'],
-      ['commit-sha', 'Landed as commit 9b31896 on main.'],
-    ]
-    const indexPath = join(dir, 'MEMORY.md')
-    for (const [rule, body] of samples) {
-      const name = `run-fact-${rule}`
-      let err
-      assert.throws(
-        () => mem.propose({ name, description: 'a run fact', type: 'project', body }),
-        (thrown) => {
-          err = thrown
-          return /bin\/crew\.mjs/.test(thrown.message)
-        },
-      )
-      assert.equal(err.code, 'run-fact')
-      assert.equal(existsSync(join(dir, `${name}.md`)), false)
-      const index = existsSync(indexPath) ? readFileSync(indexPath, 'utf8') : ''
-      assert.doesNotMatch(index, new RegExp(`\\]\\(${name}\\.md\\)`))
-    }
-    assert.deepEqual(readdirSync(dir), [])
-  } finally { clean(dir) }
-})
-
-test('reconcile rejects a run-fact delta', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'crew-memory-reconcile-lint-'))
-  try {
-    const mem = memory.openMemory({ dir })
-    const name = 'run-fact-reconcile'
-    let err
-    assert.throws(
-      () => mem.reconcile({
-        name,
-        description: 'a run fact',
-        type: 'project',
-        body: 'PR #219 merged after review.',
-      }),
-      (thrown) => {
-        err = thrown
-        return /bin\/crew\.mjs/.test(thrown.message)
-      },
-    )
-    assert.equal(err.code, 'run-fact')
-    assert.equal(existsSync(join(dir, `${name}.md`)), false)
-    assert.equal(existsSync(join(dir, 'MEMORY.md')), false)
-  } finally { clean(dir) }
-})
-
-test('judgment deltas pass the lint unchanged', () => {
+test('propose writes judgment deltas unchanged', () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-memory-judgment-'))
   try {
     const mem = memory.openMemory({ dir, budgetBytes: 10000 })
@@ -214,27 +170,7 @@ test('judgment deltas pass the lint unchanged', () => {
   } finally { clean(dir) }
 })
 
-test('lintMemoryDelta is a pure verdict', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'crew-memory-pure-lint-'))
-  try {
-    const verdict = memory.lintMemoryDelta({
-      name: 'sample',
-      description: 'sample',
-      body: 'The run 550e8400-e29b-41d4-a716-446655440000 escalated.',
-    })
-    assert.equal(verdict.ok, false)
-    assert.equal(verdict.findings[0].rule, 'adw-id')
-    assert.match(verdict.findings[0].query, /bin\/crew\.mjs/)
-    assert.match(verdict.reason, /bin\/crew\.mjs/)
-    assert.deepEqual(
-      memory.lintMemoryDelta({ body: "Deny-only is the pi seat's tool posture." }),
-      { ok: true, findings: [] },
-    )
-    assert.deepEqual(readdirSync(dir), [])
-  } finally { clean(dir) }
-})
-
-test('gc and context do not lint', () => {
+test('gc and context leave a planted run-fact entry unchanged', () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-memory-read-lint-'))
   try {
     const indexPath = join(dir, 'MEMORY.md')
@@ -389,33 +325,6 @@ test('gc dry run reports without mutating MEMORY.md', () => {
 })
 
 // MUTATION: point the emitted queries at a relative or deleted script.
-test('P5 emitted queries resolve to the lean crew CLI and its show and lanes verbs', async () => {
-  const result = memory.lintMemoryDelta({ body: 'PR #219 merged. 400 tokens. Suite ran 5/6 green.' })
-  const expected = fileURLToPath(new URL('../bin/crew.mjs', import.meta.url))
-  const verbs = new Set(result.findings.map(({ query }) => query.includes(' show ') ? 'show' : 'lanes'))
-  assert.deepEqual([...verbs].sort(), ['lanes', 'show'])
-  const argvOf = (query) => execFileSync('/bin/sh', ['-c', 'eval "set -- $1"; printf \'%s\\0\' "$@"', '_', query], { encoding: 'utf8' }).split('\0').filter(Boolean)
-  for (const { query } of result.findings) {
-    const [, cli, verb] = argvOf(query.replace(' <lane>', ''))
-    assert.equal(cli, expected)
-    assert.equal(isAbsolute(cli), true)
-    assert.equal(existsSync(cli), true)
-    assert.ok(['show', 'lanes'].includes(verb))
-  }
-  const copied = scratchDir("memory path ' with space-")
-  assert.match(copied, /memory path ' with space-/)
-  mkdirSync(join(copied, 'crew'), { recursive: true })
-  mkdirSync(join(copied, 'bin'), { recursive: true })
-  cpSync(new URL('./memory.mjs', import.meta.url), join(copied, 'crew/memory.mjs'))
-  cpSync(new URL('./memory-md.mjs', import.meta.url), join(copied, 'crew/memory-md.mjs'))
-  cpSync(new URL('../bin/crew.mjs', import.meta.url), join(copied, 'bin/crew.mjs'))
-  const copiedMemory = await import(pathToFileURL(join(copied, 'crew/memory.mjs')).href)
-  const copiedQuery = copiedMemory.lintMemoryDelta({ body: 'PR #219 merged.' }).findings[0].query
-  const copiedCli = argvOf(copiedQuery.replace(' <lane>', '').replace(' --all', ''))[1]
-  assert.equal(copiedCli, realpathSync(join(copied, 'bin/crew.mjs')))
-  assert.equal(existsSync(copiedCli), true)
-})
-
 // MUTATION: delete .claude/dev-team/memory/MEMORY.md or unlink an entry and the planner boots with less or no team memory.
 test('the shipped team memory store renders every indexed entry within the default budget', () => {
   const dir = fileURLToPath(new URL('../.claude/dev-team/memory/', import.meta.url))

@@ -2,93 +2,21 @@ import { readFileSync as fsReadFileSync, realpathSync, existsSync, cpSync, mkdir
 import { isAbsolute, join, basename, dirname } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
-import { ARMS_CONFIG_FILE, CLAUDE_ADVISED_ROLES, CLAUDE_ARMS, armsPluginDir, claudeArmsOf, writeArmsPlugin } from './claude-arms.mjs'
 
 const require = createRequire(import.meta.url)
 let sharedFffSearchProgram
 
-export const PANE_USAGE_SETTINGS = fileURLToPath(new URL('./claude-usage.settings.json', import.meta.url))
-
-// crew/adapters/adapter-claude.mjs — ACP launch and capability profile for Claude seats.
-const INVARIANT = Object.freeze({
-  prompt_file: true, tool_deny: true, unattended: true,
-  // The Task tool is available in every claude transport; the seats that need
-  // fan-out discovery carry it in their allowlist (crew.mjs SEAT_DEFAULTS).
-  subagents: true,
-  // claude --effort <low|medium|high|xhigh|max> (verified against the
-  // installed CLI 2026-08-13) — the roster's effort dimension is enforceable.
-  effort: true,
-  // The claude CLI takes a full model id and has no checkout-pinned
-  // provider-config seam, so a local-provider cell cannot be honoured here.
-  local_provider: false,
-  mcp_servers: true,
-})
+export const CLAUDE_SEAT_SETTINGS = fileURLToPath(new URL('./claude-usage.settings.json', import.meta.url))
 
 const NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills: [], advisor: false, mcp_servers: [] })
 const FFF_MCP_NAME = 'fff'
 const FFF_MCP_BIN = '/opt/homebrew/bin/fff-mcp'
-const FFF_HOOK_COMMAND = 'if [ "$CREW_FFF" != "1" ]; then exit 0; fi; exec "$CREW_FFF_NODE" "$CREW_FFF_HOOK"'
 export const FFF_HOOK_PATH = fileURLToPath(import.meta.url)
 
 export function hasFffGrant(grants = NO_GRANTS) {
   return Array.isArray(grants?.mcp_servers) && grants.mcp_servers.some((server) => (
     server?.name === FFF_MCP_NAME && server?.command?.bin === FFF_MCP_BIN
   ))
-}
-
-export function hasFffPreToolUseHook(settings) {
-  try {
-    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return false
-    const entries = settings.hooks?.PreToolUse
-    if (!Array.isArray(entries)) return false
-    return entries.some((entry) => (
-      entry?.matcher === 'Bash'
-      && Array.isArray(entry.hooks)
-      && entry.hooks.some((hook) => hook?.type === 'command' && hook.command === FFF_HOOK_COMMAND)
-    ))
-  } catch {
-    return false
-  }
-}
-
-// Skill isolation for granted seats: dropping --disable-slash-commands lets a
-// granted seat load its plugin skills, but bundled CLI skills would leak in
-// beside them. These settings keys are that seat's only no-leak mechanism.
-// Probe: claude --setting-sources project --settings <copy of this file> --plugin-dir <seat plugin>,
-// then read the system/init frame's skills list — only granted names may appear.
-// Blind spot: a future CLI may ship a non-bundled built-in skill this override
-// list does not name; re-measure from a seat init frame, never assume clear.
-export function hasSkillGrant(grants = NO_GRANTS) {
-  return Array.isArray(grants?.skills) && grants.skills.length > 0
-}
-
-export function hasSkillIsolationSettings(settings) {
-  try {
-    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return false
-    return settings?.disableBundledSkills === true
-      && settings.skillOverrides?.design === 'off'
-      && settings.skillOverrides?.doctor === 'off'
-      && settings.skillOverrides?.['plugin-authoring'] === 'off'
-  } catch { return false }
-}
-
-function loadFffSettings({ settings, settingsDocument, readSettings, settingsReader } = {}) {
-  try {
-    let source
-    if (settings !== undefined) source = settings
-    else if (settingsDocument !== undefined) source = settingsDocument
-    else if (typeof readSettings === 'function') source = readSettings(PANE_USAGE_SETTINGS)
-    else if (typeof settingsReader === 'function') source = settingsReader(PANE_USAGE_SETTINGS)
-    else source = fsReadFileSync(PANE_USAGE_SETTINGS, 'utf8')
-    if (Buffer.isBuffer(source)) source = source.toString('utf8')
-    if (typeof source === 'string') {
-      if (!source.trim()) return undefined
-      return JSON.parse(source)
-    }
-    return source
-  } catch {
-    return undefined
-  }
 }
 
 function fffEnvironment(grants = NO_GRANTS) {
@@ -180,27 +108,6 @@ function runHook() {
 
 if (invokedDirectly()) runHook()
 
-export function capabilitiesFor({ transport, grants = NO_GRANTS, settings: injectedSettings, settingsDocument, readSettings, settingsReader } = {}) {
-  const p = transport === 'acp' ? ACP_PROFILE : null
-  if (!p) throw new Error(`adapter-claude: no capability profile for transport "${transport}" (shipped: acp) — refusing a guessed passthrough`)
-  const settings = (hasFffGrant(grants) || hasSkillGrant(grants))
-    ? loadFffSettings({ settings: injectedSettings, settingsDocument, readSettings, settingsReader })
-    : undefined
-  if (hasFffGrant(grants) && !hasFffPreToolUseHook(settings)) {
-    throw Object.assign(
-      new Error(`adapter-claude cannot enforce the fff Bash hook from ${PANE_USAGE_SETTINGS} — refusing to boot a silently weaker seat [grant-unsupported]`),
-      { reason: 'grant-unsupported' },
-    )
-  }
-  if (hasSkillGrant(grants) && !hasSkillIsolationSettings(settings)) {
-    throw Object.assign(
-      new Error(`adapter-claude cannot isolate bundled skills from ${PANE_USAGE_SETTINGS} — refusing to boot a seat whose granted skills would leak [grant-unsupported]`),
-      { reason: 'grant-unsupported' },
-    )
-  }
-  return Object.freeze({ ...INVARIANT, ...p })
-}
-
 function allowedTools(tools, grants = NO_GRANTS) {
   return [...new Set([...String(tools || '').split(','), ...(grants?.tools || [])].filter(Boolean))].join(',')
 }
@@ -219,21 +126,12 @@ function deniedTools(deny, grants = NO_GRANTS) {
 }
 
 function assertSupportedGrants(grants = NO_GRANTS) {
-  if ((grants?.extensions?.length ?? 0) > 0) {
+  if ((grants?.extensions?.length ?? 0) > 0 || grants?.advisor === true) {
     throw Object.assign(
-      new Error(`adapter-claude cannot express extension grants ${JSON.stringify({ extensions: grants.extensions })} — refusing to boot a silently weaker seat [grant-unsupported]`),
+      new Error(`adapter-claude cannot express grants ${JSON.stringify({ extensions: grants.extensions, advisor: grants.advisor })} — refusing to boot a silently weaker seat [grant-unsupported]`),
       { reason: 'grant-unsupported' },
     )
   }
-}
-
-// ACP seats carry the arms in CLAUDE_ARMS as plugin hooks (ADR-052 Amendment 2); every other extension is still refused.
-function acpArms(grants = NO_GRANTS, role) {
-  const { arms, unsupported } = claudeArmsOf(grants)
-  const refuse = (why) => Object.assign(new Error(`adapter-claude cannot express ${why} — refusing to boot a silently weaker seat [grant-unsupported]`), { reason: 'grant-unsupported' })
-  if (unsupported.length) throw refuse(`extension grants ${JSON.stringify({ extensions: unsupported })} over ACP (it carries ${CLAUDE_ARMS.join(', ')})`)
-  if (arms.includes('advisor') && !CLAUDE_ADVISED_ROLES.includes(role)) throw refuse(`the advisor arm of seat ${role}`)
-  return arms
 }
 
 export function skillsPluginDir({ taskDir, role } = {}) {
@@ -346,25 +244,6 @@ export function writeSeatSkills({ taskDir, role, grants } = {}, deps = {}) {
   }, null, 2))
 }
 
-// The plugin that runs a claude ACP seat's arms. taskDir is the per-seat runtime; the hooks keep their state in the lane.
-export function writeSeatArms({ taskDir, role, grants, cwd, env = {} } = {}, deps = {}) {
-  const arms = acpArms(grants, role)
-  if (arms.length === 0) return
-  assertInsideTaskDir(armsPluginDir({ taskDir, role }), taskDir, deps)
-  writeArmsPlugin({ taskDir, role, arms, cwd, fff: hasFffGrant(grants), laneTaskDir: env.CREW_TASK_DIR, layout: env.CREW_CONTEXT_LAYOUT }, deps)
-}
-
-function assertArmsMaterialised({ taskDir, role, arms }) {
-  if (arms.length === 0) return
-  const root = armsPluginDir({ taskDir, role })
-  if (!existsSync(join(root, ARMS_CONFIG_FILE)) || !existsSync(join(root, 'hooks', 'hooks.json'))) {
-    throw Object.assign(
-      new Error(`adapter-claude arms not materialised at ${JSON.stringify(root)} — refusing to boot a silently weaker seat [grant-unsupported]`),
-      { reason: 'grant-unsupported' },
-    )
-  }
-}
-
 export function assertSkillsMaterialised({ taskDir, role, grants } = {}) {
   const skills = grants?.skills || []
   if (skills.length === 0) return
@@ -399,19 +278,10 @@ export function modelString({ provider, id, localProviders }) {
   return id
 }
 
-const ACP_PROFILE = Object.freeze({ interjection: 'turn', abort: 'cancel', session_resume: true, durable_cursor: 'protocol', reassign: false, permission_requests: true })
-
-export const ACP_BINARY = 'claude-agent-acp'
-
-// armHooks is the lean seat's opt-in (crew/acp/seat.mjs, which also writes the plugin with writeSeatArms). Without it the launch
-// keeps the old ACP transport's rule (crew/acp-io.mjs): extension grants refuse, advisor is not read, no arms plugin.
 export function acpLaunch(spec = {}) {
-  const { bin, claudeBin, cwd, model, tools, deny, effort, promptFile, role, taskDir, grants = NO_GRANTS, configDir, env = {}, armHooks = false } = spec
-  let arms = []
-  if (armHooks === true) arms = acpArms(grants, role)
-  else assertSupportedGrants(grants)
+  const { bin, claudeBin, cwd, model, tools, deny, effort, promptFile, role, taskDir, grants = NO_GRANTS, configDir, env = {} } = spec
+  assertSupportedGrants(grants)
   assertSkillsMaterialised({ role, taskDir, grants })
-  assertArmsMaterialised({ role, taskDir, arms })
   assertNoLocalProvider(configDir)
   if (typeof bin !== 'string' || !bin || !isAbsolute(bin)) {
     throw new Error(`adapter-claude.acpLaunch: bin must be a nonempty ABSOLUTE ACP path, got ${JSON.stringify(bin)}`)
@@ -436,7 +306,6 @@ export function acpLaunch(spec = {}) {
   const acpTools = hasSkills ? [...acpAllowedTools.filter((tool) => tool !== 'Skill'), 'Skill'] : acpAllowedTools
   const plugins = [
     ...(hasSkills ? [{ type: 'local', path: skillsPluginDir({ taskDir, role }) }] : []),
-    ...(arms.length > 0 ? [{ type: 'local', path: armsPluginDir({ taskDir, role }) }] : []),
   ]
   return {
     bin,
@@ -448,7 +317,7 @@ export function acpLaunch(spec = {}) {
       mcpServers: [],
       _meta: { claudeCode: { options: {
         model,
-        settingSources: ['project'], settings: PANE_USAGE_SETTINGS,
+        settingSources: ['project'], settings: CLAUDE_SEAT_SETTINGS,
         ...(hasMcpServers ? { mcpServers } : {}),
         strictMcpConfig: true,
         allowedTools: acpTools,
@@ -459,6 +328,5 @@ export function acpLaunch(spec = {}) {
         extraArgs: { ...(effort ? { effort } : {}), 'append-system-prompt-file': promptFile },
       } } },
     },
-    policy: { autoDeny: [], autoApprove: [], escalate: ['edit', 'execute', 'delete', 'move', 'fetch'] },
   }
 }

@@ -13,9 +13,18 @@ import {
 } from './acp-client.mjs'
 import { seatCommandPath } from './acp/wire.mjs'
 
+// MUTATION: re-add reprove.
+test('acpClient exposes no prompt, resumeSession or reprove', () => {
+  const root = scratchDir('acp-client-surface-')
+  try {
+    const client = acpClient({ launch: { bin: '/unused', args: [] }, dir: join(root, 'acp'), cwd: root, role: 'builder' })
+    for (const name of ['prompt', 'resumeSession', 'reprove']) assert.equal(name in client, false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 // MUTATION: disable the request exit-marker branch
 test('requests fail promptly on seat exit but consume final responses', () => {
-  for (const method of ['initialize', 'session/new', 'session/resume', 'session/set_mode', 'session/prompt']) {
+  for (const method of ['initialize', 'session/new', 'session/set_mode']) {
     for (const mode of ['lost', 'queued', 'race', 'alive']) {
       const root = scratchDir('acp-exit-'), dir = join(root, 'acp'), commandRoot = join(root, 'commands')
       const paths = acpSeatPaths(dir, 'reviewer', commandRoot)
@@ -45,7 +54,7 @@ test('requests fail promptly on seat exit but consume final responses', () => {
         if (method !== 'initialize') client.initialize()
         if (!['initialize', 'session/new'].includes(method)) client.newSession()
         const at = clock
-        const run = () => method === 'initialize' ? client.initialize() : method === 'session/new' ? client.newSession() : method === 'session/resume' ? client.resumeSession('s') : method === 'session/set_mode' ? client.setMode('default') : client.prompt([{ type: 'text', text: 'x' }])
+        const run = () => method === 'initialize' ? client.initialize() : method === 'session/new' ? client.newSession() : client.setMode('default')
         if (mode === 'lost') {
           assert.throws(run, (error) => error.reason === 'acp-seat-closed' && error.message.includes('reviewer') && error.message.includes(method))
           assert.ok(clock - at < 10000)
@@ -243,10 +252,9 @@ function replay(name, options = {}) {
   out.sessionId = api.newSession({ cwd: firstCwd, mcpServers: [], _meta: firstMeta })
   if (mode) api.setMode(mode)
   try {
-    if (options.nonblocking === true) {
-      out.promptId = api.beginPrompt(firstPrompt)
-      out.outcome = api.pollPrompt(out.promptId)
-    } else out.outcome = api.prompt(firstPrompt)
+    out.promptId = api.beginPrompt(firstPrompt)
+    out.outcome = api.pollPrompt(out.promptId)
+    if (!options.nonblocking) for (let polls = 0; polls < 100 && !out.outcome; polls += 1) out.outcome = api.pollPrompt(out.promptId)
   } catch (err) { out.promptError = err }
   if (!options.keepOpen) out.teardown = api.close()
   return out
@@ -311,7 +319,7 @@ test('a cancelled session refuses another prompt without sending a frame', () =>
   const run = replay('pi-cancel.ndjson', { cancelOnFirstUpdate: true })
   try {
     const before = run.sent.length
-    assert.throws(() => run.api.prompt([{ type: 'text', text: 'again' }]), (err) => err.reason === 'acp-session-cancelled')
+    assert.throws(() => run.api.beginPrompt([{ type: 'text', text: 'again' }]), (err) => err.reason === 'acp-session-cancelled')
     assert.equal(run.sent.length, before)
   } finally { forget(run) }
 })
@@ -614,9 +622,9 @@ test('E1', () => {
   }
 })
 
-// MUTATION RV1-1: deleting the rmdir binding leaves the empty runtime dirs after close and reprove.
+// MUTATION RV1-1: deleting the rmdir binding leaves the empty runtime dirs after close.
 test('RV1-1 runtime cleanup removes role and lane dirs only after proven ACP death', () => {
-  for (const delayed of [false, true]) {
+  {
     const root = scratchDir('acp-runtime-cleanup-')
     const acpRoot = join(root, 'acp')
     const runtimeRoot = join(root, 'seat-runtime')
@@ -636,15 +644,9 @@ test('RV1-1 runtime cleanup removes role and lane dirs only after proven ACP dea
     try {
       api.start()
       writeFileSync(paths.fifo, '')
-      if (!delayed) { writeFileSync(paths.exit, '0'); groupGone = true }
+      writeFileSync(paths.exit, '0'); groupGone = true
       const closed = api.close()
-      if (delayed) {
-        assert.notEqual(closed.outcome, 'proven')
-        for (const path of [paths.fifo, dirname(paths.fifo), dirname(dirname(paths.fifo))]) assert.equal(existsSync(path), true)
-        writeFileSync(paths.exit, '0')
-        groupGone = true
-        assert.equal(api.reprove(50).outcome, 'proven')
-      } else assert.equal(closed.outcome, 'proven')
+      assert.equal(closed.outcome, 'proven')
       for (const path of [paths.fifo, dirname(paths.fifo), dirname(dirname(paths.fifo))]) assert.equal(existsSync(path), false)
     } finally { rmSync(root, { recursive: true, force: true }) }
   }
@@ -733,12 +735,6 @@ test('RW3 the exit marker alone never proves a teardown: a live, EPERM or unknow
       assert.deepEqual(run.signals, ['SIGTERM', 'SIGKILL'], group)
       for (const path of [run.paths.fifo, join(dirname(run.paths.dir), '.builder.active.json')]) assert.equal(existsSync(path), true, group)
       assert.deepEqual(run.api.close(), closed, 'a second close repeats the first')
-      assert.notEqual(run.api.reprove(100).outcome, 'proven', group)
-      assert.equal(existsSync(run.paths.fifo), true, group)
-      run.end()
-      assert.equal(run.api.reprove(100).outcome, 'proven', `${group}: ESRCH permits a later proof`)
-      assert.equal(existsSync(run.paths.fifo), false, group)
-      assert.equal(existsSync(join(dirname(run.paths.dir), '.builder.active.json')), false, group)
     } finally { run.cleanup() }
   }
 })
@@ -792,62 +788,8 @@ function writeHarness(writeOverride, clock = () => Date.now(), sleep = () => {})
     seatCommandRoot: join(root, 'seat-runtime'),
   } })
   api.start(); api.initialize(); api.newSession()
-  return { api, root, received, journal, prompt(text) { return api.prompt([{ type: 'text', text }]) }, cleanup() { api.close(); rmSync(root, { recursive: true, force: true }) } }
+  return { api, root, received, journal, prompt(text) { return api.pollPrompt(api.beginPrompt([{ type: 'text', text }])) }, cleanup() { api.close(); rmSync(root, { recursive: true, force: true }) } }
 }
-
-test('AR1 resumes with the explicit session cwd', () => {
-  // MUTATION: removing cwd from the resume request must fail this assertion.
-  const f = writeHarness(([fd, buffer, offset, length], receive) => { receive(buffer.subarray(offset, offset + length)); return length })
-  try {
-    const params = { cwd: join(f.root, 'different-cwd') }
-    const id = f.api.newSession(params)
-    f.api.resumeSession(id)
-    const created = f.received.filter((frame) => frame.method === 'session/new').at(-1).params
-    const resumed = f.received.filter((frame) => frame.method === 'session/resume').at(-1).params
-    assert.equal(created.cwd, params.cwd)
-    assert.notEqual(created.cwd, f.root)
-    assert.equal(resumed.cwd, params.cwd)
-  } finally { f.cleanup() }
-})
-
-test('AR2 resumes with configured MCP servers', () => {
-  // MUTATION: removing mcpServers from the resume request must fail this assertion.
-  const f = writeHarness(([fd, buffer, offset, length], receive) => { receive(buffer.subarray(offset, offset + length)); return length })
-  try {
-    const servers = [{ name: 'tools', command: '/bin/false', args: [], env: [] }]
-    const id = f.api.newSession({ mcpServers: servers })
-    f.api.resumeSession(id)
-    assert.deepEqual(f.received.filter((frame) => frame.method === 'session/new').at(-1).params.mcpServers, servers)
-    assert.deepEqual(f.received.filter((frame) => frame.method === 'session/resume').at(-1).params.mcpServers, servers)
-  } finally { f.cleanup() }
-})
-
-test('AR3 resumes with claudeCode metadata', () => {
-  // MUTATION: removing metadata from the resume request must fail this assertion.
-  const f = writeHarness(([fd, buffer, offset, length], receive) => { receive(buffer.subarray(offset, offset + length)); return length })
-  try {
-    const meta = { claudeCode: { options: { model: 'test-model', allowedTools: ['Read'], plugins: [{ type: 'local', path: '/acp-resume/plugin' }] } } }
-    const id = f.api.newSession({ _meta: meta })
-    f.api.resumeSession(id)
-    assert.deepEqual(f.received.filter((frame) => frame.method === 'session/new').at(-1).params._meta, meta)
-    assert.deepEqual(f.received.filter((frame) => frame.method === 'session/resume').at(-1).params._meta, meta)
-  } finally { f.cleanup() }
-})
-
-test('AR4 resumes with defaults and no metadata', () => {
-  // MUTATION: adding default _meta to resume params must fail this exact-frame assertion.
-  const f = writeHarness(([fd, buffer, offset, length], receive) => { receive(buffer.subarray(offset, offset + length)); return length })
-  try {
-    const id = f.api.newSession()
-    f.api.resumeSession(id)
-    const expected = { cwd: f.root, mcpServers: [] }
-    assert.deepEqual(f.received.filter((frame) => frame.method === 'session/new').at(-1).params, expected)
-    const resumed = f.received.filter((frame) => frame.method === 'session/resume').at(-1).params
-    assert.equal(resumed.sessionId, id)
-    const { sessionId, ...resumedParams } = resumed
-    assert.deepEqual(resumedParams, expected)
-  } finally { f.cleanup() }
-})
 
 test('W1 short writes reassemble one complete 70KB prompt frame', () => {
   let chunks = 0
@@ -892,7 +834,7 @@ test('W3 real FIFO child delivers 70KB prompt and is always reaped', () => {
   let out
   try {
     writeFileSync(agent, `import readline from 'node:readline'; import {appendFileSync} from 'node:fs'; const stream=${JSON.stringify(join(acpRoot, 'builder', 'stream.jsonl'))}; for await (const line of readline.createInterface({input:process.stdin})) { const f=JSON.parse(line); appendFileSync(stream, JSON.stringify({jsonrpc:'2.0',id:f.id,result:f.method==='initialize'?{protocolVersion:1}:f.method==='session/new'?{sessionId:'s'}:{stopReason:'end_turn'}})+'\\n') }`)
-    writeFileSync(client, `import {acpClient} from ${JSON.stringify(pathToFileURL(join(REGISTER_ROOT, 'crew/acp-client.mjs')).href)}; const c=acpClient({launch:{bin:process.execPath,args:[${JSON.stringify(agent)}]},dir:${JSON.stringify(acpRoot)},cwd:${JSON.stringify(root)},deps:{seatCommandRoot:${JSON.stringify(join(root, 'seat-runtime'))}}});try{c.start();c.initialize();c.newSession();if(c.prompt([{type:'text',text:'x'.repeat(70000)}]).stopReason!=='end_turn')process.exitCode=2}catch(e){console.error(e);process.exitCode=3}finally{c.close()}`)
+    writeFileSync(client, `import {acpClient} from ${JSON.stringify(pathToFileURL(join(REGISTER_ROOT, 'crew/acp-client.mjs')).href)}; const c=acpClient({launch:{bin:process.execPath,args:[${JSON.stringify(agent)}]},dir:${JSON.stringify(acpRoot)},cwd:${JSON.stringify(root)},deps:{seatCommandRoot:${JSON.stringify(join(root, 'seat-runtime'))}}});try{c.start();c.initialize();c.newSession();const id=c.beginPrompt([{type:'text',text:'x'.repeat(70000)}]);let r=null;const deadline=Date.now()+15000;while(!r&&Date.now()<deadline){r=c.pollPrompt(id);if(!r)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,20)}if(r?.stopReason!=='end_turn')process.exitCode=2}catch(e){console.error(e);process.exitCode=3}finally{c.close()}`)
     trackProcessGroupFile(join(acpRoot, 'builder', 'pgid'))
     out = spawnSync(process.execPath, [client], { timeout: 20000, encoding: 'utf8' })
     assert.equal(out.status, 0, `real FIFO child status=${out.status} signal=${out.signal}; stderr=${out.stderr}`)
@@ -1069,9 +1011,8 @@ test('BZ1 real-process witness — a TERM-ignoring sleep proves dead after SIGKI
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('reprove re-proves an unproven close once death is observable', () => {
-  // MUTATION: revert `return probeBounded(ACP_KILL_PROOF_MS, pgid)` to the baseline single probe and the
-  // final proven assertion reddens; break the reservation clear and the second start keeps throwing busy.
+test('an unproven close keeps the reservation so a second start refuses busy', () => {
+  // MUTATION: clear the reservation when the close is unproven, and the second start stops refusing busy.
   const root = scratchDir('acp-reprove-')
   const reproveRuntime = scratchDir('acp-runtime-')
   try {
@@ -1080,9 +1021,7 @@ test('reprove re-proves an unproven close once death is observable', () => {
     writeFileSync(join(acpRoot, 'builder', 'stream.jsonl'), '')
     writeFileSync(join(acpRoot, 'builder', 'pgid'), '901')
     let clock = 0
-    let dead = false
     const kill = (pid, sig) => {
-      if (sig === 0 && dead) { const err = new Error('no such process'); err.code = 'ESRCH'; throw err }
       if (sig === 0) { const err = new Error('operation not permitted'); err.code = 'EPERM'; throw err }
       return true
     }
@@ -1110,17 +1049,6 @@ test('reprove re-proves an unproven close once death is observable', () => {
     let busy = null
     try { acpClient({ launch, dir: acpRoot, cwd: root, role: 'builder', deps }).start() } catch (err) { busy = err }
     assert.equal(busy?.reason, 'acp-session-busy')
-    const still = first.reprove(50)
-    assert.notEqual(still.outcome, 'proven')
-    dead = true
-    const reproven = first.reprove(50)
-    assert.equal(reproven.outcome, 'proven')
-    assert.equal(existsSync(fifo), false)
-    assert.equal(existsSync(dirname(fifo)), false)
-    assert.equal(existsSync(dirname(dirname(fifo))), false)
-    let secondError = null
-    try { acpClient({ launch, dir: acpRoot, cwd: root, role: 'builder', deps }).start() } catch (err) { secondError = err }
-    assert.equal(secondError, null)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 test('AT5 fifo failure signals the group, clears the reservation, and refuses acp-spawn-failed', () => {

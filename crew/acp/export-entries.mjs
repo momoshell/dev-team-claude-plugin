@@ -3,11 +3,6 @@
 import { extname } from 'node:path'
 
 export const CODE_EXTENSIONS = Object.freeze(['.js', '.mjs', '.ts'])
-const INCLUDE_EXPORT_FROM_SUFFIX = true
-const MULTILINE_EXPORT_LISTS = true
-const INCLUDE_ALL_LIST_MEMBERS = true
-const INCLUDE_DEFAULT_EXPORT = true
-const RESOLVE_LOCAL_LIST_BODIES = true
 const UNSUPPORTED_EXPORT_FORMS = Object.freeze(['var', 'star', 'interface'])
 const EXPORTED_DECLARATION = /^export\s+(?:(?:async)\s+)?(function|const|let|class|var|interface)\s+([A-Za-z_$][\w$]*)/gm
 const EXPORTED_DEFAULT = /^export\s+default\b/gm
@@ -301,11 +296,10 @@ function scanExportListEnd(source, masked, start) {
   if (open < 0) return null
   const close = matchingDelimiter(masked, open)
   if (close < 0) return null
-  if (!MULTILINE_EXPORT_LISTS && source.slice(open + 1, close).includes('\n')) return null
   let end = close + 1
   let cursor = skipLexicalWhitespace(masked, end)
   const hasFrom = wordAt(masked, cursor, `from`)
-  const from = hasFrom && INCLUDE_EXPORT_FROM_SUFFIX
+  const from = hasFrom
   if (from) {
     cursor = skipSourceTrivia(source, cursor + 4)
     if (cursor < 0) return null
@@ -508,7 +502,6 @@ export function exportedSymbolEntries(source) {
   }
 
   for (const match of masked.matchAll(EXPORTED_DEFAULT)) {
-    if (!INCLUDE_DEFAULT_EXPORT) continue
     const start = match.index
     const end = declarationEnd(source, masked, start, 'default')
     if (end === null) continue
@@ -523,8 +516,7 @@ export function exportedSymbolEntries(source) {
     const signatureSpan = spanFor(source, start, scanned.end, lineOf)
     const signature = source.slice(start, scanned.end).trim()
     const members = splitExportMembers(source, masked, start + masked.slice(start).indexOf('{') + 1, scanned.close)
-    const selected = INCLUDE_ALL_LIST_MEMBERS ? members : members.slice(0, 1)
-    for (const part of selected) {
+    for (const part of members) {
       const item = part.trim()
       if (!item) continue
       const alias = item.match(/^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/)
@@ -533,7 +525,7 @@ export function exportedSymbolEntries(source) {
       const name = alias ? alias[2] : plain?.[1]
       if (!local || !name) continue
       let bodySpan = null
-      if (RESOLVE_LOCAL_LIST_BODIES && !scanned.from) {
+      if (!scanned.from) {
         const matches = locals.get(local) || []
         if (matches.length === 1) bodySpan = matches[0].span
       }

@@ -6,7 +6,7 @@ import { join } from 'node:path'
 
 import { createReadGate } from './readgate.ts'
 import {
-  FFF_HOOK_PATH, PANE_USAGE_SETTINGS, capabilitiesFor as claudeCapabilitiesFor, fffHookDecision,
+  FFF_HOOK_PATH, CLAUDE_SEAT_SETTINGS, fffHookDecision,
   acpLaunch as claudeAcpLaunch,
 } from '../../adapters/adapter-claude.mjs'
 import { scratchDir } from '../../../test/helpers.mjs'
@@ -19,7 +19,7 @@ const BUILDER_DENY = 'Task,Agent,Workflow'
 const NO_GRANT = { tools: [], extensions: [], agents: [], skills: [], advisor: false, mcp_servers: [] }
 
 function hookCommand() {
-  const settings = JSON.parse(readFileSync(PANE_USAGE_SETTINGS, 'utf8'))
+  const settings = JSON.parse(readFileSync(CLAUDE_SEAT_SETTINGS, 'utf8'))
   return settings.hooks.PreToolUse[0].hooks[0].command
 }
 
@@ -91,7 +91,7 @@ test('B1 ungranted claude Bash search remains untouched', () => {
   const { CREW_FFF, CREW_FFF_NODE, CREW_FFF_HOOK } = launch.env
   const fffEnv = { CREW_FFF, CREW_FFF_NODE, CREW_FFF_HOOK }
   assert.deepEqual(fffEnv, { CREW_FFF: '0', CREW_FFF_NODE: '', CREW_FFF_HOOK: '' })
-  assert.equal(launch.sessionParams._meta.claudeCode.options.settings, PANE_USAGE_SETTINGS)
+  assert.equal(launch.sessionParams._meta.claudeCode.options.settings, CLAUDE_SEAT_SETTINGS)
 
   const root = scratchDir('fff-hostile-hook-')
   const marker = join(root, 'hostile-ran')
@@ -165,31 +165,4 @@ test('RV1-1 quoted and escaped direct fff searches remain withheld', () => {
     assert.equal(decision?.hookSpecificOutput?.permissionDecision, 'deny', command)
     assert.match(decision?.hookSpecificOutput?.permissionDecisionReason || '', new RegExp(claudeReplacement), command)
   }
-})
-
-test('D1 claude fff grant refuses boot when its hook is absent', () => {
-  const grants = fffGrant()
-  const valid = JSON.parse(readFileSync(PANE_USAGE_SETTINGS, 'utf8'))
-  const drifted = structuredClone(valid)
-  drifted.hooks.PreToolUse[0].hooks[0].command += ' '
-  const cases = [
-    ['hook-less', { settings: { hooks: {} } }],
-    ['empty', { settings: '' }],
-    ['malformed', { settings: '{' }],
-    ['unreadable', { readSettings: () => { throw new Error('EPERM') } }],
-    ['command-drifted', { settings: drifted }],
-  ]
-  for (const [label, injected] of cases) {
-    assert.throws(
-      () => claudeCapabilitiesFor({ transport: 'acp', grants, ...injected }),
-      (error) => error.reason === 'grant-unsupported', label,
-    )
-  }
-  assert.doesNotThrow(() => claudeCapabilitiesFor({ transport: 'acp', grants, settings: valid }))
-  let reads = 0
-  assert.doesNotThrow(() => claudeCapabilitiesFor({
-    transport: 'acp', grants: { tools: [], extensions: [], agents: [], skills: [], advisor: false, mcp_servers: [] },
-    readSettings: () => { reads += 1; throw new Error('must not read') },
-  }))
-  assert.equal(reads, 0)
 })

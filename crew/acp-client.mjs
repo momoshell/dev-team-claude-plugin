@@ -75,7 +75,7 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     evidencePolicies: { [EVIDENCE_KINDS.PGID]: (_role, marker) => marker?.evidence || null },
   })
 
-  const session = { id: null, cancelled: false, params: null }
+  const session = { id: null, cancelled: false }
   const responses = new Map()
   let torn = 0
   let seq = 0
@@ -253,16 +253,7 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     const sessionParams = { cwd: params.cwd ?? cwd, mcpServers: params.mcpServers ?? [], ...(meta ? { _meta: meta } : {}) }
     const frame = request('session/new', sessionParams)
     if (frame.error) throw acpRefuse('acp-protocol-mismatch', `acp seat ${role} refused session/new: ${frame.error.message}`)
-    session.params = sessionParams
     session.id = frame.result?.sessionId ?? null
-    return session.id
-  }
-
-  function resumeSession(sessionId) {
-    const frame = request('session/resume', { sessionId, ...session.params })
-    if (frame.error) throw acpRefuse('acp-protocol-mismatch', `acp seat ${role} refused session/resume: ${frame.error.message}`)
-    session.id = sessionId
-    session.cancelled = false
     return session.id
   }
 
@@ -270,19 +261,6 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     const frame = request('session/set_mode', { sessionId: session.id, modeId })
     if (frame.error) throw acpRefuse('acp-protocol-mismatch', `acp seat ${role} refused session/set_mode: ${frame.error.message}`)
     return frame.result ?? null
-  }
-
-  function prompt(blocks) {
-    if (session.cancelled) throw acpRefuse('acp-session-cancelled', `acp session ${session.id} was cancelled and accepts no further prompt`)
-    const frame = request('session/prompt', { sessionId: session.id, prompt: blocks })
-    if (frame.error) {
-      const refusal = { code: frame.error.code ?? null, message: frame.error.message ?? null, errorKind: frame.error?.data?.errorKind ?? null, ...(typeof frame.error?.data?.errorMessage === 'string' ? { errorMessage: frame.error.data.errorMessage } : {}) }
-      log({ at: now(), acp_turn_refused: { role, ...refusal } })
-      return { stopReason: null, usage: null, refusal }
-    }
-    const stopReason = typeof frame.result?.stopReason === 'string' ? frame.result.stopReason : null
-    if (stopReason === 'cancelled') session.cancelled = true
-    return { stopReason, usage: turnUsage(frame.result), refusal: null }
   }
 
   const pendingPrompts = new Set()
@@ -332,9 +310,7 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
   }
 
   function groupAllZombie(pgid) {
-    // Same notion of death as statIsZombie (crew/seat-io.mjs:240): a Z state means the kernel
-    // holds the exit status for an unreaped parent. Importing it would close the cycle
-    // acp-client -> seat-io (crew/seat-io.mjs:23) -> acp-io -> acp-client, so it is inlined here.
+    // A Z state means the kernel holds the exit status for an unreaped parent.
     let result = null
     try {
       result = spawnSyncFn('ps', ['-A', '-o', 'pgid=,stat='], { encoding: 'utf8', timeout: ACP_PS_TIMEOUT_MS })
@@ -420,21 +396,5 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     return result
   }
 
-  function reprove(windowMs = ACP_KILL_PROOF_MS) {
-    if (!closed) return close()
-    if (closeResult?.outcome === 'proven') return closeResult
-    const pgid = Number(child?.pid)
-    if (!Number.isSafeInteger(pgid) || pgid <= 1) return closeResult
-    const proof = probeBounded(windowMs, pgid)
-    if (proof.liveness === LIVENESS.DEAD) {
-      if (handle) { try { store.clear(handle) } catch {} }
-      try { if (exists(paths.fifo)) unlink(paths.fifo) } catch {}
-      removeRuntimeDirs(handle != null)
-    }
-    closeResult = { outcome: teardownOutcome(proof.liveness), reason: proof.reason }
-    log({ at: now(), acp_teardown: { role, ...closeResult } })
-    return closeResult
-  }
-
-  return { start, initialize, newSession, resumeSession, setMode, prompt, beginPrompt, pollPrompt, cancelPrompt, cancel, close, reprove, hasExitMarker, get sessionId() { return session.id } }
+  return { start, initialize, newSession, setMode, beginPrompt, pollPrompt, cancelPrompt, cancel, close, hasExitMarker, get sessionId() { return session.id } }
 }

@@ -4,7 +4,8 @@ import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
 import { cpSync, mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, realpathSync, statSync, symlinkSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { request } from 'node:http'
 import { runInNewContext } from 'node:vm'
 import { createServer, connect } from 'node:net'
 import { spawn, spawn as spawnProcess, spawnSync } from 'node:child_process'
@@ -51,6 +52,43 @@ function announceDetails(child) {
   })
 }
 const SERVER_SCRIPT = join(ROOT, 'visualizer', 'server', 'server.mjs')
+
+// MUTATION: restore text += chunk in body()
+test('S3-1 a JSON body split inside a multibyte character reaches the route intact', async () => {
+  let seen
+  const agents = { proposeAgent: async (input) => { seen = input; return { ok: true, diff: null, refusals: [] } } }
+  const started = await startInProcess({}, { agents })
+  try {
+    const payload = Buffer.from(JSON.stringify({ name: 'future-agent', entry: { note: '€uro' } }))
+    const cut = payload.indexOf(Buffer.from('€')) + 1
+    const status = await new Promise((resolve, reject) => {
+      const req = request(`${started.base}/api/agents/propose`, { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': payload.length } }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)) })
+      req.on('error', reject)
+      req.write(payload.subarray(0, cut))
+      setTimeout(() => req.end(payload.subarray(cut)), 50)
+    })
+    assert.equal(status, 200)
+    assert.equal(seen.entry.note, '€uro')
+  } finally { await stopInProcess(started.server) }
+})
+
+// MUTATION: read DEVTEAM_INTAKE_CHECKOUT in defaults()
+test('DEVTEAM_VIZ_CHECKOUT sets the default checkout and the retired intake name is not read', () => {
+  const current = process.env.DEVTEAM_VIZ_CHECKOUT, retired = process.env.DEVTEAM_INTAKE_CHECKOUT
+  try {
+    process.env.DEVTEAM_VIZ_CHECKOUT = '/tmp/viz-checkout'
+    delete process.env.DEVTEAM_INTAKE_CHECKOUT
+    assert.equal(parseCliArgs([]).checkout, resolve('/tmp/viz-checkout'))
+    delete process.env.DEVTEAM_VIZ_CHECKOUT
+    process.env.DEVTEAM_INTAKE_CHECKOUT = '/tmp/old'
+    assert.equal(parseCliArgs([]).checkout, resolve(process.cwd()))
+  } finally {
+    if (current === undefined) delete process.env.DEVTEAM_VIZ_CHECKOUT
+    else process.env.DEVTEAM_VIZ_CHECKOUT = current
+    if (retired === undefined) delete process.env.DEVTEAM_INTAKE_CHECKOUT
+    else process.env.DEVTEAM_INTAKE_CHECKOUT = retired
+  }
+})
 
 test('RO1', () => {
   // MUTATION: invert the no-.git decision; this fake no-git checkout must refuse.
@@ -272,7 +310,7 @@ test('state-writing routes refuse CORS simple requests before reading the body',
   mkdirSync(checkout, { recursive: true })
   let server
   try {
-    server = await startServer(join(dir, 'ledger.db'), join(dir, 'visualizer.db'), null, null, { DEVTEAM_INTAKE_CHECKOUT: checkout })
+    server = await startServer(join(dir, 'ledger.db'), join(dir, 'visualizer.db'), null, null, { DEVTEAM_VIZ_CHECKOUT: checkout })
     const port = Number(new URL(server.base).port)
     for (const route of WRITE_ROUTES) {
       const response = await rawRequest({
@@ -296,7 +334,7 @@ test('state-writing routes refuse foreign JSON origins before writing state', as
   mkdirSync(checkout, { recursive: true })
   let server
   try {
-    server = await startServer(join(dir, 'ledger.db'), join(dir, 'visualizer.db'), null, null, { DEVTEAM_INTAKE_CHECKOUT: checkout })
+    server = await startServer(join(dir, 'ledger.db'), join(dir, 'visualizer.db'), null, null, { DEVTEAM_VIZ_CHECKOUT: checkout })
     const port = Number(new URL(server.base).port)
     for (const route of WRITE_ROUTES) {
       const response = await rawRequest({
@@ -335,7 +373,6 @@ test('B1 agents page proposal endpoints are diff-only', async () => {
     assert.equal(agent.status, 200); assert.equal(agent.json.ok, true); assert.ok(agent.json.diff); assert.deepEqual(agent.json.refusals, []); assert.equal(Object.hasOwn(agent.json, 'target_path'), false); assert.equal(Object.hasOwn(agent.json, 'after_text'), false)
     const skills = await post('/api/skills/propose', { role: 'builder', skills: ['frontend-svelte'] })
     assert.equal(skills.status, 200); assert.equal(skills.json.ok, true); assert.match(skills.json.diff, /crew\/capabilities\.json/); assert.deepEqual(skills.json.refusals, [])
-    assert.equal((await post('/api/prompts/propose', { role: 'builder', text: '# replacement charter\n' })).status, 405)
     assert.equal(treeDigest(fixture.checkout), checkoutBefore)
     assert.equal(treeDigest(fixture.crewRoot), crewBefore)
     for (const [path, body] of [['/api/agents/propose', '{ not json'], ['/api/skills/propose', JSON.stringify({ role: 'builder', skills: 'frontend-svelte' })]]) {
@@ -433,12 +470,6 @@ test('prompts-page:C1', async () => {
         assert.equal(prompt.recipients_reason, null)
       }
     }
-    const response = await json(server.base, '/api/prompts/propose', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ role: 'builder', text: '# replacement charter\\n' }),
-    })
-    assert.equal(response.status, 405)
     assert.equal(treeDigest(fixture.checkout), checkoutBefore)
     assert.equal(treeDigest(fixture.crewRoot), crewBefore)
   } finally {
@@ -1117,7 +1148,7 @@ test('LH4', () => {
 // ---- b1410: the visualizer no longer reads the ledger or any old-path module ----
 const DROPPED_ROUTES = ['/api/returns', '/api/roster', '/api/roster/pick', '/api/roster/propose', '/api/roster/agent/propose', '/api/roster/ladder', '/api/roster/ladder/stage', '/api/roster/ladder/compose', '/api/roster/ladder/apply',
   '/api/workflows', '/api/workflows/propose', '/api/workflows/editor', '/api/workflows/save', '/api/workflows/library', '/api/workflows/preview', '/api/prepared-tasks', '/api/assurances', '/api/assurances/preview', '/api/assurances/propose',
-  '/api/prompt-library', '/api/prompt-library/preview', '/api/prompt-library/save', '/api/cell-health', '/api/run-set', '/api/intake', '/api/intake/brake', '/api/seat-teardowns', '/api/cell-attribution', '/api/triage']
+  '/api/prompts/propose', '/api/prompt-library', '/api/prompt-library/preview', '/api/prompt-library/save', '/api/cell-health', '/api/run-set', '/api/intake', '/api/intake/brake', '/api/seat-teardowns', '/api/cell-attribution', '/api/triage']
 
 function leanLane(crewRoot, id, rows = [{ event: 'run-start', at: Date.now() }, { event: 'stage-start', stage: 'plan' }]) {
   const laneDir = join(crewRoot, `dt-${id}`, id)
@@ -1127,12 +1158,10 @@ function leanLane(crewRoot, id, rows = [{ event: 'run-start', at: Date.now() }, 
   writeFileSync(join(laneDir, 'task', 'journal.jsonl'), rows.map(row => JSON.stringify(row)).join('\n') + '\n')
 }
 
-test('VC2 the route table holds no ledger ops-pane, roster, ladder, workflow, prepared-task, assurance or prompt-library route', () => {
+// MUTATION: re-add '/api/prompts/propose': [] to ROUTE_PARAMS
+test('route tombstones: every removed server.mjs route is unregistered and has no handler', async () => {
   for (const route of DROPPED_ROUTES) assert.equal(Object.hasOwn(ROUTE_PARAMS, route), false, `${route} must not be in ROUTE_PARAMS`)
   for (const route of ['/api/sessions', '/api/events', '/api/journal', '/api/seat-sessions', '/api/agents', '/api/agents/propose', '/api/agent-library', '/api/skill-library', '/api/model-catalog', '/api/health', '/api/plugin-write-mode']) assert.ok(Object.hasOwn(ROUTE_PARAMS, route), `${route} stays`)
-})
-
-test('VC2 a dropped route answers 404 on GET and 405 on POST, never a handler', async () => {
   const crewRoot = scratchDir('visualizer-dropped-routes-')
   let started
   try {
@@ -1144,6 +1173,7 @@ test('VC2 a dropped route answers 404 on GET and 405 on POST, never a handler', 
       assert.equal(get.status, 404, `GET ${route}`)
       const post = await json(started.base, route, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
       assert.equal(post.status, 405, `POST ${route}`)
+      assert.equal(post.allow, 'GET', `POST ${route} allow`)
     }
   } finally {
     await stopInProcess(started?.server)
@@ -1292,27 +1322,16 @@ test('TR1 proposeAgent accepts the acp transport and refuses retired transports'
   }
 })
 
-test('HL1 /api/health reports readonly false with the server\'s write list', async () => {
+// MUTATION: restore the ledger constant in the health payload
+test('/api/health answers schema, crew_root, readonly false and the write list only', async () => {
   const started = await startInProcess({})
   try {
     const response = await json(started.base, '/api/health')
+    assert.equal(response.status, 200)
+    assert.deepEqual(Object.keys(response.json).sort(), ['crew_root', 'readonly', 'schema', 'writes'])
     assert.equal(response.json.readonly, false)
     assert.ok(Array.isArray(response.json.writes) && response.json.writes.length > 0)
   } finally { await stopInProcess(started.server) }
-})
-
-test('/api/health reports the removed ledger as unreadable with a reason, not a probe or a zero', async () => {
-  let started
-  try {
-    started = await startInProcess({})
-    const response = await json(started.base, '/api/health')
-    assert.equal(response.status, 200)
-    assert.equal(response.json.ledger.readable, false)
-    assert.match(response.json.ledger.absent, /ledger source removed/)
-    assert.equal(Object.hasOwn(response.json, 'returns_readonly'), false)
-  } finally {
-    await stopInProcess(started?.server)
-  }
 })
 
 test('VC1 no module under visualizer/server imports crew/ or scripts/ except protocols and agents', () => {

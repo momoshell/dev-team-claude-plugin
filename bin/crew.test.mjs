@@ -210,20 +210,20 @@ test('update refuses while a process runs from the home, and --force goes ahead'
   }
 })
 
-test('viz injects the caller cwd as DEVTEAM_INTAKE_CHECKOUT unless preset', () => {
+test('viz injects the caller cwd as DEVTEAM_VIZ_CHECKOUT unless preset', () => {
   const root = scratch('viz')
   try {
     const home = fakeHome(join(root, 'home'))
     mkdirSync(join(home, 'visualizer', 'server'), { recursive: true })
-    writeFileSync(join(home, 'visualizer', 'server', 'server.mjs'), 'process.stdout.write(JSON.stringify({ env: process.env.DEVTEAM_INTAKE_CHECKOUT ?? null, cwd: process.cwd() }))\n')
+    writeFileSync(join(home, 'visualizer', 'server', 'server.mjs'), 'process.stdout.write(JSON.stringify({ env: process.env.DEVTEAM_VIZ_CHECKOUT ?? null, cwd: process.cwd() }))\n')
     const caller = join(root, 'caller')
     mkdirSync(caller, { recursive: true })
     const clean = { ...process.env }
-    delete clean.DEVTEAM_INTAKE_CHECKOUT
+    delete clean.DEVTEAM_VIZ_CHECKOUT
     const unset = crew(['viz'], { cwd: caller, env: { ...clean, CREW_HOME: home } })
     assert.equal(unset.status, 0, unset.stderr)
     assert.deepEqual(JSON.parse(unset.stdout), { env: caller, cwd: home })
-    const preset = crew(['viz'], { cwd: caller, env: { ...clean, CREW_HOME: home, DEVTEAM_INTAKE_CHECKOUT: '/preset/checkout' } })
+    const preset = crew(['viz'], { cwd: caller, env: { ...clean, CREW_HOME: home, DEVTEAM_VIZ_CHECKOUT: '/preset/checkout' } })
     assert.equal(preset.status, 0, preset.stderr)
     assert.equal(JSON.parse(preset.stdout).env, '/preset/checkout')
   } finally { rmSync(root, { recursive: true, force: true }) }

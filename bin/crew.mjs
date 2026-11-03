@@ -118,7 +118,7 @@ export function main(argv = process.argv.slice(2), env = process.env) {
       return 1
     }
   }
-  if (verb === 'viz') { const vizEnv = env.DEVTEAM_INTAKE_CHECKOUT ? env : { ...env, DEVTEAM_INTAKE_CHECKOUT: process.cwd() }; return run(process.execPath, ['--env-file-if-exists=.env.local', 'visualizer/server/server.mjs', ...rest], { cwd: home, env: vizEnv }) }
+  if (verb === 'viz') { const vizEnv = env.DEVTEAM_VIZ_CHECKOUT ? env : { ...env, DEVTEAM_VIZ_CHECKOUT: process.cwd() }; return run(process.execPath, ['--env-file-if-exists=.env.local', 'visualizer/server/server.mjs', ...rest], { cwd: home, env: vizEnv }) }
   const entry = Object.hasOwn(ENTRY, verb) ? ENTRY[verb] : null
   if (entry) return run(process.execPath, [join(home, entry), ...rest])
   process.stderr.write(`crew: unknown verb ${JSON.stringify(verb ?? '')}; expected start, show, record-pr, closeout, finish, lanes, viz, where or update\n`)

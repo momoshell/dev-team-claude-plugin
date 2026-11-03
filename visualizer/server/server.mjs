@@ -24,7 +24,7 @@ const schema = 2
 const DEFAULT_PORT = 4488
 
 function defaults() {
-  return { port: portFromEnv(), host: '127.0.0.1', crewRoot: process.env.DEVTEAM_CREW_ROOT || join(homedir(), '.crew'), checkout: resolve(process.env.DEVTEAM_INTAKE_CHECKOUT || process.cwd()) }
+  return { port: portFromEnv(), host: '127.0.0.1', crewRoot: process.env.DEVTEAM_CREW_ROOT || join(homedir(), '.crew'), checkout: resolve(process.env.DEVTEAM_VIZ_CHECKOUT || process.cwd()) }
 }
 // A refusal cause, tagged so the CLI guard can map it to exit 2 without
 // conflating it with an unexpected internal throw (mapped to 1). Exit codes
@@ -78,7 +78,6 @@ export const ROUTE_PARAMS = Object.freeze({
   '/api/agents': [],
   '/api/agents/propose': [],
   '/api/skills/propose': [],
-  '/api/prompts/propose': [],
   '/api/model-catalog': [],
   '/api/model-catalog/key': [],
   '/api/health': [],
@@ -204,16 +203,19 @@ function windowBound(label, value) {
 
 const BODY_TOO_LARGE = 'body_too_large'
 async function body(req, limit = 4096) {
-  let text = ''
+  const chunks = []
+  let size = 0
   for await (const chunk of req) {
-    text += chunk
-    if (Buffer.byteLength(text) > limit) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    chunks.push(bytes)
+    size += bytes.length
+    if (size > limit) {
       const error = new Error(`body too large (max ${limit} bytes)`)
       error.code = BODY_TOO_LARGE
       throw error
     }
   }
-  return JSON.parse(text || '{}')
+  return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')
 }
 function staticResponse(req, res) {
   if (!existsSync(DIST)) {
@@ -573,7 +575,7 @@ export function startServer(options = {}) {
       }
       if (url.pathname === '/api/health') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
-        return json(res, 200, { schema, ...journal.health(), readonly: false, writes: SERVER_WRITES, ledger: { readable: false, absent: 'ledger source removed: the visualizer no longer reads the ledger' } })
+        return json(res, 200, { schema, ...journal.health(), readonly: false, writes: SERVER_WRITES })
       }
       if (url.pathname.startsWith('/api/')) return method === 'GET' ? json(res, 404, { schema, error: 'not found' }) : json(res, 405, { schema, error: 'not found' }, { allow: 'GET' })
       if (method !== 'GET' && method !== 'HEAD') return res.writeHead(405, { allow: 'GET, HEAD' }).end()

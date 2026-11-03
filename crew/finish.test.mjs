@@ -759,7 +759,7 @@ test('--accept leaves the PR with the measured text, issue tokens stripped and i
     writeFileSync(specPath, JSON.stringify({ ...JSON.parse(readFileSync(specPath, 'utf8')), closes: [91], refs: [92] }))
     writeFileSync(join(r.f.taskDir, 'journal.jsonl'), `${rows(r).map((row) => JSON.stringify(row.event === 'finish-ready' ? { ...row, subject, body: 'Fixes #42.' } : row)).join('\n')}\n`)
     const g = ghLane({ open })
-    return { r, g, deps: { run: g.run, log: () => {}, openPullRequest: (input) => openPullRequest(input, { run: g.run }) } }
+    return { r, g, deps: { run: g.run, log: () => {}, openPullRequest: (input) => { assert.equal(Object.hasOwn(input, 'refs'), false); return openPullRequest(input, { run: g.run }) } } }
   }
   const created = lane(false)
   try {
@@ -769,7 +769,7 @@ test('--accept leaves the PR with the measured text, issue tokens stripped and i
     const edit = created.g.gh('edit')
     assert.deepEqual(edit.slice(0, 3), ['pr', 'edit', '18'])
     assert.equal(argOf(edit, '--title'), 'fix: repair issue 42')
-    assert.equal(argOf(edit, '--body'), 'Fixes issue 42.\n\n## Operator notes\n\nsee issue 42\n\nCloses: #91\nRefs: #92')
+    assert.equal(argOf(edit, '--body'), 'Fixes issue 42.\n\n## Operator notes\n\nsee issue 42\n\nCloses: #91')
     assert.equal(rows(created.r).at(-2).event, 'pr')
   } finally { cleanup(created.r.f) }
 
@@ -783,7 +783,7 @@ test('--accept leaves the PR with the measured text, issue tokens stripped and i
     const edit = reused.g.gh('edit')
     assert.deepEqual(edit.slice(0, 3), ['pr', 'edit', '18'])
     assert.equal(argOf(edit, '--title'), 'fix: repair issue 42')
-    assert.equal(argOf(edit, '--body'), 'Fixes issue 42.\n\n## Operator notes\n\nnew notes issue 42\n\nCloses: #91\nRefs: #92')
+    assert.equal(argOf(edit, '--body'), 'Fixes issue 42.\n\n## Operator notes\n\nnew notes issue 42\n\nCloses: #91')
     assert.equal(rows(reused.r).at(-1).notesSha256, createHash('sha256').update('new notes #42').digest('hex'))
   } finally { cleanup(reused.r.f) }
 
@@ -792,7 +792,7 @@ test('--accept leaves the PR with the measured text, issue tokens stripped and i
   try {
     writeFileSync(join(plain.r.f.taskDir, 'journal.jsonl'), `${rows(plain.r).map((row) => JSON.stringify(row.event === 'finish-ready' ? { ...row, subject: 'fix: plain', body: 'plain body' } : row)).join('\n')}\n`)
     await decideFinish({ lane: 'lane9', root: plain.r.f.root, choice: 'accept', deps: plain.deps })
-    assert.equal(argOf(plain.g.gh('edit'), '--body'), 'plain body\n\nCloses: #91\nRefs: #92')
+    assert.equal(argOf(plain.g.gh('edit'), '--body'), 'plain body\n\nCloses: #91')
   } finally { cleanup(plain.r.f) }
 
   // A reused PR that cannot be updated records nothing and leaves the lane retryable.

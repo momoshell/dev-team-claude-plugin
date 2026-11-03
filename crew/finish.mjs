@@ -343,15 +343,14 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
       if (typeof ready.subject !== 'string' || typeof ready.body !== 'string') throw new FinishRefusal('finish-not-ready', `lane ${lane}'s finish-ready row carries no measured subject and body`)
       const body = notes === null ? ready.body : `${ready.body}\n\n${NOTES_HEADING}\n\n${notes}`
       const closes = spec.closes ?? []
-      const refs = spec.refs ?? []
       // The checkout must still be the commit the finish run measured: the body reports that run, not a later commit.
       // openPullRequest has no expected head, so a HEAD that is unreadable or different publishes nothing.
       const head = await d.run({ cwd: spec.cwd, command: 'git', args: ['rev-parse', 'HEAD'], timeoutMs: 60_000 })
       if (head?.status !== 'green' || String(head.stdout ?? '').trim() !== ready.head) throw new FinishRefusal('finish-head-moved', `lane ${lane}'s checkout is not measured at the finish run's head ${ready.head}; nothing was published`)
-      const published = await d.openPullRequest({ cwd: spec.cwd, branch: spec.branch, base: spec.base, title: ready.subject, body, closes, refs })
+      const published = await d.openPullRequest({ cwd: spec.cwd, branch: spec.branch, base: spec.base, title: ready.subject, body, closes })
       if (published?.status !== 'green' || !isObject(published.pr)) throw new FinishRefusal('finish-publish', `the pull request did not open: ${published?.reason ?? 'unmeasured'}`)
       // A reused PR has its own text; apply the same issue-token rewriting as openPullRequest.
-      const edited = await d.run({ cwd: spec.cwd, command: 'gh', args: ['pr', 'edit', String(published.pr.number), '--title', withoutIssueTokens(ready.subject), '--body', composeLanePrBody({ body, closes, refs })], timeoutMs: 60_000 })
+      const edited = await d.run({ cwd: spec.cwd, command: 'gh', args: ['pr', 'edit', String(published.pr.number), '--title', withoutIssueTokens(ready.subject), '--body', composeLanePrBody({ body, closes, refs: [] })], timeoutMs: 60_000 })
       if (edited?.status !== 'green') throw new FinishRefusal('finish-publish', `the pull request ${published.pr.number} (${published.pr.url ?? 'no url'}) is open but could not be updated with the measured text, and is not recorded: ${edited?.reason ?? 'unmeasured'}`)
       d.appendFileSync(journal, `${JSON.stringify({ event: 'pr', lane, stage: 'publish', pr: published.pr })}\n`)
       decision()

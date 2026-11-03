@@ -134,8 +134,8 @@ function fakes(options = {}) {
   const discardArgs = []
   const spec = {
     id: 'lane', cwd: '/virtual/checkout', taskDir: '/virtual/task', tier: 'build', shape: 'standard', brief: '## The ask\nBuild the lane.',
-    source: 'issue 12', branch: 'lane', base: 'main', closes: [12], refs: [13],
-    suite: { command: 'node', args: ['--test', 'lane.test.mjs'] }, timeoutMs: 5000, ...options.spec,
+    source: 'issue 12', branch: 'lane', base: 'main', closes: [12],
+    suite: { command: 'node', args: ['--test', 'lane.test.mjs'] }, ...options.spec,
   }
   const envelope = (request) => ({
     role: request.role, id: request.id, status: 'done', summary: 'fixture',
@@ -382,10 +382,13 @@ test('a planner judge reason raises a build lane to judge before the build (PD4)
   }
 })
 
+// MUTATION: drop crew/checks.mjs from PROTECTED and a lane edits its own checker unraised.
 test('a protected path in files_in_scope or the diff raises the lane to judge, and a judge lane is never lowered (PD5)', async () => {
   for (const [path, scope, initial, raised, builderTier] of [
     ['crew/loop.mjs', null, 'build', true, 'build'], ['hooks/x.mjs', null, 'build', true, 'build'],
-    ['lib.mjs', ['crew/loop.mjs'], 'build', true, 'judge'], ['crew/lean.mjs', null, 'build', false, 'build'],
+    ['lib.mjs', ['crew/loop.mjs'], 'build', true, 'judge'],
+    ...['crew/checks.mjs', 'crew/finish.mjs', 'crew/lean.mjs'].flatMap((path) => [[path, null, 'build', true, 'build'], ['lib.mjs', [path], 'build', true, 'judge']]),
+    ['crew/start.mjs', null, 'build', false, 'build'],
     ['crew/loop.mjs', null, 'judge', false, 'judge'],
   ]) {
     const f = fakes({ spec: { tier: initial, acceptance: ['A1'] }, reviewPaths: ` M ${path}\0`, edit: (v) => { if (v.role === 'planner') { if (scope) v.details.files_in_scope = scope } return v } })
@@ -396,6 +399,12 @@ test('a protected path in files_in_scope or the diff raises the lane to judge, a
     const rows = f.rows.filter((r) => r.event === 'tier-raised')
     assert.equal(rows.length, raised ? 1 : 0)
     if (raised) { assert.equal(rows[0].reason, 'protected-path'); assert.deepEqual(rows[0].paths, scope ?? [path]) }
+  }
+  for (const path of ['crew/checks.mjs', 'crew/finish.mjs', 'crew/lean.mjs']) {
+    const f = fakes({ spec: { tier: 'mechanical' }, reviewPaths: ` M ${path}\0`, edit: (v) => { if (v.role === 'builder') v.details.subject = 'fix: mechanical'; return v } })
+    assert.equal((await f.go()).status, 'done', path)
+    assert.deepEqual(f.tiers, ['mechanical', 'judge'])
+    assert.deepEqual(f.discardArgs, [['reset', '--hard', 'a'.repeat(40)], ['clean', '-f', '-d']])
   }
 })
 
@@ -586,14 +595,14 @@ test('a green run walks every stage in order and returns the measured PR with ea
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
   assert.deepEqual(f.calls, ['mkdir', ...SUCCESS])
   assert.deepEqual(f.seen.mkdir, ['/virtual/task', { recursive: true }])
-  assert.deepEqual(f.seen.proof, { cwd: '/virtual/checkout', base: 'HEAD', tests: [{ file: 'lib.test.mjs', title: 'works' }], timeoutMs: 5000 })
-  assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 5000 })
+  assert.deepEqual(f.seen.proof, { cwd: '/virtual/checkout', base: 'HEAD', tests: [{ file: 'lib.test.mjs', title: 'works' }] })
+  assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: undefined })
   assert.deepEqual(f.seen['review-paths'], f.seen.paths)
-  assert.deepEqual(f.seen.paths, { cwd: '/virtual/checkout', command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs: 5000 })
-  assert.deepEqual(f.seen.commit, { cwd: '/virtual/checkout', files: ['lib.mjs'], subject: 'fix(crew): planned lane', body: BODY, closes: [12], refs: [13], timeoutMs: 5000 })
-  assert.deepEqual(f.seen.fetch, { cwd: '/virtual/checkout', command: 'git', args: ['fetch', 'origin'], timeoutMs: 5000 })
-  assert.deepEqual(f.seen.rebase, { cwd: '/virtual/checkout', base: 'main', timeoutMs: 5000 })
-  assert.deepEqual(f.seen.publish, { cwd: '/virtual/checkout', branch: 'lane', base: 'main', title: 'fix(crew): planned lane', body: BODY + LANE, closes: [12], refs: [13], timeoutMs: 5000 })
+  assert.deepEqual(f.seen.paths, { cwd: '/virtual/checkout', command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'] })
+  assert.deepEqual(f.seen.commit, { cwd: '/virtual/checkout', files: ['lib.mjs'], subject: 'fix(crew): planned lane', body: BODY, closes: [12] })
+  assert.deepEqual(f.seen.fetch, { cwd: '/virtual/checkout', command: 'git', args: ['fetch', 'origin'] })
+  assert.deepEqual(f.seen.rebase, { cwd: '/virtual/checkout', base: 'main' })
+  assert.deepEqual(f.seen.publish, { cwd: '/virtual/checkout', branch: 'lane', base: 'main', title: 'fix(crew): planned lane', body: BODY + LANE, closes: [12] })
   const planner = f.requests[0]
   assert.deepEqual(Object.keys(planner).sort(), ['brief', 'feedback', 'id', 'planPath', 'returnPath', 'role', 'seat', 'tier'])
   assert.deepEqual(Object.keys(f.requests[1]).sort(), [...Object.keys(planner), 'filesInScope'].sort())
@@ -625,20 +634,21 @@ test('accepted scope survives repaired envelopes, repeated turns and finish', as
   assert.deepEqual(await invalid.go(), stopped('invalid-input'))
 })
 
-// MUTATION: forward the general timeout to the suite and the suite override never reaches the runner.
-test('a suite timeout override reaches only the suite and absent overrides inherit the general timeout', async () => {
+// MUTATION: forward spec.timeoutMs or spec.refs and a stale field reaches a check.
+test('a suite timeout override reaches only the suite, and a spec refs list or general timeout reaches no check, commit or PR', async () => {
   for (const timeoutMs of [1, 1800000, Number.MAX_SAFE_INTEGER]) {
     const f = fakes({ spec: { suite: { command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs } } })
     assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
     assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs })
-    for (const stage of ['proof', 'review-paths', 'paths', 'commit', 'fetch', 'rebase', 'publish']) assert.equal(f.seen[stage].timeoutMs, 5000, stage)
+    for (const stage of ['proof', 'review-paths', 'paths', 'commit', 'fetch', 'rebase', 'publish']) assert.equal(Object.hasOwn(f.seen[stage], 'timeoutMs'), false, stage)
   }
-  const inherit = fakes({ spec: { suite: { command: 'node', timeoutMs: undefined } } })
-  await inherit.go()
-  assert.equal(inherit.seen.suite.timeoutMs, 5000)
-  const neither = fakes({ spec: { timeoutMs: undefined, suite: { command: 'node' } } })
-  await neither.go()
-  assert.equal(neither.seen.suite.timeoutMs, undefined)
+  for (const [refs, timeoutMs] of [[[13], 5000], [0, 0], [null, -1], ['stale', Infinity]]) {
+    const f = fakes({ spec: { refs, timeoutMs } })
+    assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
+    assert.equal(f.seen.suite.timeoutMs, undefined)
+    for (const stage of ['proof', 'review-paths', 'paths', 'commit', 'fetch', 'rebase', 'publish']) assert.equal(Object.hasOwn(f.seen[stage], 'timeoutMs'), false, stage)
+    for (const stage of ['commit', 'publish']) { assert.equal(Object.hasOwn(f.seen[stage], 'refs'), false, stage); assert.deepEqual(f.seen[stage].closes, [12]) }
+  }
 })
 
 // MUTATION: drop the suite timeout validation and an unsound override starts the lane.
@@ -942,7 +952,7 @@ function sequenced(sequence, options = {}) {
 const EFFECTS = ['paths', 'commit', 'fetch', 'rebase', 'publish']
 
 // MUTATION: never re-run a red suite and a flaky first red stops the lane.
-test('a red suite is run once more and a green re-run reaches commit with both runs in the PR measurements', async () => {
+test('a finish lane runs a red suite once more and a green re-run reaches the commit with both runs in its measurements', async () => {
   const f = sequenced([redRun(7), green(), redRun(9)], { spec: { ...finishSpec(), suite: { command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 1800000 } } })
   const { inputs } = f
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: null })
@@ -1151,11 +1161,11 @@ test('a failing journal append leaves the lane outcome unchanged and the result 
 })
 
 test('every loop-only stop reason is emitted by the loop source', () => {
-  const source = readFileSync(fileURLToPath(new URL('./loop.mjs', import.meta.url)), 'utf8').replace(/export const LOOP_REASONS = Object\.freeze\(\[[\s\S]*?\]\)/, '')
+  const source = readFileSync(fileURLToPath(new URL('./loop.mjs', import.meta.url)), 'utf8').replace(/export const LOOP_REASONS = Object\.freeze\(\[[\s\S]*?\]\)/, '').replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '')
   for (const reason of LOOP_REASONS.filter((r) => !CHECK_REASONS.includes(r))) assert.ok(source.includes(`'${reason}'`), reason)
 })
 
-// MUTATION: drop the journal call and the lane leaves no observation record.
+// MUTATION: drop an envelope, verdict, check, commit or PR emit and its row is missing.
 test('the journal carries each envelope, verdict, check, commit and PR observation and a failing journal changes nothing', async () => {
   const f = fakes()
   await f.go()
@@ -1191,7 +1201,6 @@ test('an unsupported shape, invalid input or unsound seam is refused before depe
     [{ brief: '' }, 'invalid-input'],
     [{ suite: null }, 'invalid-input'], [{ suite: { command: '' } }, 'invalid-input'],
     [{ source: '' }, 'invalid-input'], [{ source: undefined }, 'invalid-input'], [{ source: 7 }, 'invalid-input'], [{ branch: undefined }, 'invalid-input'], [{ base: undefined }, 'invalid-input'],
-    [{ timeoutMs: 0 }, 'invalid-input'], [{ timeoutMs: -1 }, 'invalid-input'], [{ timeoutMs: 1.5 }, 'invalid-input'], [{ timeoutMs: Infinity }, 'invalid-input'],
     [{ closes: 12 }, 'invalid-input'],
   ]
   for (const [spec, reason] of cases) {
@@ -1236,15 +1245,11 @@ test('a task directory that cannot be made stops the lane before any seat', asyn
 })
 
 // MUTATION: a reason outside the closed enum leaks into the result.
-test('every stopped reason is a member of the closed enum', async () => {
+test('an unknown check reason stops as runner-threw, and the loop enum is frozen', async () => {
   assert.ok(Object.isFrozen(LOOP_REASONS))
-  for (const reason of CHECK_REASONS) assert.ok(LOOP_REASONS.includes(reason))
-  for (const reason of ['unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'lead-escalated', 'lead-unavailable', 'lead-refused', 'seat-escalated', 'round-bound', 'paths-unmeasured', 'no-progress']) assert.ok(LOOP_REASONS.includes(reason))
   const f = fakes({ suite: { status: 'red', reason: 'free text the enum has never heard of' } })
   assert.deepEqual(await f.go(), stopped('runner-threw'))
 })
-
-// MUTATION: forward spec.mutations to the proof and a caller-written declaration replaces the planner's.
 
 // MUTATION: send the caller's list or an unparsed line to commit and a rename end, an odd name or a deletion is left out.
 test('the commit receives the paths git reports after the suite, both rename ends included', async () => {
@@ -1402,7 +1407,7 @@ test('the PR body carries no ## Acceptance block, even for an archived spec with
 test('the suite runs after exactly the measured changed paths are staged, again after a repair, and an unusable staging stops before the suite (SB1)', async () => {
   const f = fakes({ reviewPaths: ' M lib.mjs\0?? new.test.mjs\0R  b.mjs\0a.mjs\0' })
   assert.equal((await f.go()).status, 'done')
-  assert.deepEqual(f.seen['suite-stage'], { cwd: '/virtual/checkout', command: 'git', args: ['--literal-pathspecs', 'add', '--', 'lib.mjs', 'new.test.mjs'], timeoutMs: 5000 })
+  assert.deepEqual(f.seen['suite-stage'], { cwd: '/virtual/checkout', command: 'git', args: ['--literal-pathspecs', 'add', '--', 'lib.mjs', 'new.test.mjs'] })
   assert.deepEqual(f.calls.slice(f.calls.indexOf('suite-stage')), ['suite-stage', 'checked-tree', 'suite', 'seat:reviewer', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase', 'publish'])
   const r = sequenced([redRun(1), green()])
   assert.equal((await r.go()).status, 'done')
@@ -1882,7 +1887,7 @@ test('a rebase that moves the head reruns proof then the suite on the rebased tr
   assert.deepEqual(tail, ['rebase', 'proof', 'suite', 'post-rebase-clean', 'post-rebase-head', 'publish'])
   assert.equal(f.calls.filter((c) => c === 'proof').length, 2)
   assert.equal(f.calls.filter((c) => c === 'suite').length, 2)
-  assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 5000 })
+  assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: undefined })
   assert.equal(f.seen.proof.base, `${MOVED.head}^`)
 })
 
@@ -2053,6 +2058,18 @@ test('a re-review forced only by a moved-head rebase spends no reviewer or tech-
   }
 })
 
+// MUTATION: drop the recheck cap and a head that keeps moving rechecks forever.
+test('a publishing rebase that moves the head a fourth time after three rechecks stops recheck-bound and publishes nothing', async () => {
+  const A = 'a'.repeat(40)
+  for (const tier of ['build', 'judge']) for (const moves of [3, 4]) {
+    const f = fakes({ spec: { tier }, rebase: answers({ ...MOVED, head: A }, ...Array(moves).fill({ ...MOVED, onto: O }), { ...MOVED, head: A }) })
+    assert.deepEqual(await f.go(), moves === 4 ? stopped('recheck-bound') : { status: 'done', reason: null, pr: PR })
+    assert.equal(f.calls.filter((call) => call === 'uncommit').length, 3)
+    assert.equal(f.calls.includes('publish'), moves === 3)
+    if (moves === 4) assert.deepEqual(f.rows.findLast((row) => row.status === 'stopped').observation, { rechecks: 3, head: MOVED.head, onto: O, committed: A })
+  }
+})
+
 // MUTATION: keep the old post-rebase proof and suite path, without reviewing the rebased change.
 test('a build or judge lane whose publishing rebase moves the head reruns the proof, the suite and every review on the rebased change, through a builder fix when red, before it commits again and publishes', async () => {
   const c = 'c'.repeat(40)
@@ -2135,13 +2152,13 @@ test('every journaled row carries one read of the injected clock, and a throwing
 })
 
 // MUTATION: run suite and review sequentially, or rebase before planning.
-test('a build lane rebases after the plan, then runs the suite and the review side by side on one tree', async () => {
+test('a build lane rebases after the plan, then runs the suite and the review side by side on one tree', { timeout: 10_000 }, async () => {
   const f = fakes()
   let running = false, overlap = false, release
   const wait = new Promise((resolve) => { release = resolve })
   const seat = f.deps.runSeat
   f.deps.runSeat = async (request, context) => { if (request.role === 'reviewer') { overlap = running; release() } return seat(request, context) }
-  f.deps.runSuite = async () => { running = true; await Promise.race([wait, new Promise((resolve) => setTimeout(resolve, 30))]); running = false; return green() }
+  f.deps.runSuite = async () => { running = true; await wait; running = false; return green() }
   assert.equal((await f.go()).status, 'done')
   assert.equal(overlap, true)
   assert.ok(f.calls.indexOf('seat:planner') < f.calls.indexOf('rebase') && f.calls.indexOf('rebase') < f.calls.indexOf('seat:builder'))

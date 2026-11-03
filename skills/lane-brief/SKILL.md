@@ -68,7 +68,7 @@ Field rules (the validator refuses anything else):
 - `source`: the issue or the request the lane starts from.
 - `closes`: one issue number, or `null`. It is the only issue binding: `crew start` writes it into the run
   brief's bound-issue header, and the merged PR closes it. Quote the operator's words verbatim, `#N` included: a quoted `#N` binds nothing. Elsewhere in the body, write "issue 1961" or "PR 1968".
-- `mechanical` (optional): write `mechanical: true` only when the issue shows no behaviour to judge and names none of the protected paths: `crew/loop.mjs`, `crew/proof.mjs`, `crew/proof-reporter.mjs`, `crew/protocols.mjs`, `crew/acp/grants.mjs`, `hooks/`, `crew/agents/`, `.github/workflows/`, and `docs/adr/` (ADR-055 §7). Without it the lane runs the build loop. Judge is reached only by the planner's `judge` reason or a path raise. A `tier` line is refused.
+- `mechanical` (optional): write `mechanical: true` only when the issue shows no behaviour to judge and names none of the protected paths: `crew/loop.mjs`, `crew/checks.mjs`, `crew/finish.mjs`, `crew/lean.mjs`, `crew/proof.mjs`, `crew/proof-reporter.mjs`, `crew/protocols.mjs`, `crew/acp/grants.mjs`, `hooks/`, `crew/agents/`, `.github/workflows/`, and `docs/adr/` (ADR-055 §7). Without it the lane runs the build loop. Judge is reached only by the planner's `judge` reason or a path raise. A `tier` line is refused.
 - `shape`: `standard` only. `finish` is not started from a brief.
 - `out_of_scope` (optional): what the lane must not change. Absent means none.
 - `suite` (optional): the command line the lean lane runs as its suite, for example `suite: cargo test -p power-api`.

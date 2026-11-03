@@ -518,7 +518,7 @@ export async function runLoop(spec, deps = {}) {
       }
       break
     }
-    const measurements = [...proofLines, suiteLine]
+    const measurements = [...proofLines, suiteLine, ...(tier === 'mechanical' && namedTests.length ? ['- Review: none, mechanical lane, not reviewed.'] : [])]
     const finishLines = !isFinish ? [] : [
       '## Finish',
       `- Stop: ${oneLine(fin.stop.reason)}${fin.stop.observation == null ? '' : `: ${oneLine(JSON.stringify(fin.stop.observation))}`}`,

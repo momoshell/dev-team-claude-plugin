@@ -103,6 +103,7 @@ test('a mechanical lane runs rebase, build, proof and suite with no plan, review
     assert.deepEqual(f.calls.slice(1), ['fetch', 'rebase', 'seat:builder', ...(mode === 'repair' ? ['seat:builder'] : []), ...(mode === 'none' ? [] : ['proof']), 'review-paths', 'suite-stage', 'suite', 'paths', 'commit', 'fetch', 'rebase', 'publish'])
     assert.equal(f.seen.publish.title, 'docs(crew): fix typo')
     assert.match(f.seen.publish.body, mode === 'none' ? /proof: none, mechanical lane, not reviewed/ : /proof: lib.test.mjs.*red on the old source, green on the build/)
+    assert.equal(f.seen.publish.body.match(/mechanical lane, not reviewed/g)?.length, 1, mode)
     if (mode === 'repair') assert.match(f.requests[1].repair.defects.join(' '), /details.subject is required on a mechanical lane/)
   }
 })

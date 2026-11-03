@@ -29,7 +29,7 @@ function cleanEnv() {
   return env
 }
 
-// lean: POSIX process groups only; add verified lineage tracking if escaped groups become required
+// shortcut: POSIX process groups only; add verified lineage tracking if escaped groups become required
 function signalGroup(child, signal) {
   if (!Number.isSafeInteger(child.pid) || child.pid <= 1) return false
   try { process.kill(-child.pid, signal); return true } catch { return false }
@@ -289,7 +289,7 @@ async function restoreCheckout(git, cwd, before, indexBefore) {
   return problems
 }
 
-// lean: one writer per checkout; add an explicit checkout lease before concurrent writers
+// shortcut: one writer per checkout; add an explicit checkout lease before concurrent writers
 // Commits exactly the listed files that changed. Anything staged beside them stays staged, and a failed commit leaves HEAD, index and tree as found.
 export async function commitChanges(spec = {}, deps = {}) {
   return guarded(async () => {

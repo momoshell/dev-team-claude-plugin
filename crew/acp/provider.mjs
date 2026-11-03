@@ -99,7 +99,7 @@ export function acpTextReset(text, at) {
   const minute = Number(match[2] ?? 0)
   let formatter
   try { formatter = new Intl.DateTimeFormat('en-GB', { timeZone: match[4], hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }) } catch { return no() }
-  // lean: 72-hour minute scan for rare ACP refusals; offset-based zone resolution if measured refusal volume makes this costly
+  // shortcut: 72-hour minute scan for rare ACP refusals; offset-based zone resolution if measured refusal volume makes this costly
   const first = Math.floor(at / 60000) * 60000 + 60000
   for (let i = 0; i < 72 * 60; i += 1) {
     const instant = first + i * 60000

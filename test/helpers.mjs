@@ -58,7 +58,7 @@ for (const stream of [process.stdout, process.stderr]) {
 // pgid file the seat shell writes later; where the group is spawned in a
 // child process, register the pgid FILE and it is read at drain time, before
 // the scratch dirs that hold it are removed.
-// lean: entries outlive the test's own reap, so a pgid recycled before the drain is SIGKILLed; release the entry in the finally reap if pid wrap within one file run is ever observed
+// shortcut: entries outlive the test's own reap, so a pgid recycled before the drain is SIGKILLed; release the entry in the finally reap if pid wrap within one file run is ever observed
 const PROCESS_GROUPS = new Set()
 function readTrackedPgid(file) {
   try {
@@ -312,7 +312,7 @@ export function childTracker(after, assert) {
 // function — a tokenizer, a classifier, a normaliser — belong here rather than in a list
 // of examples somebody thought of; the quoted-whitespace defect Sol found on #1400 sat in
 // exactly the input a list did not have.
-// lean: no shrinking; add a halving shrinker when a failing input is too large to read.
+// shortcut: no shrinking; add a halving shrinker when a failing input is too large to read.
 export function forAll(generate, property, { runs = 200, seed = 0x9e3779b9 } = {}) {
   let state = seed >>> 0 || 1
   const random = () => {

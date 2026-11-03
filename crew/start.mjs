@@ -12,7 +12,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync,
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { parseBrief } from './protocols.mjs'
+import { ISSUE_SOURCE, parseBrief } from './protocols.mjs'
 import { resolveAgents } from './agents.mjs'
 
 const HOME = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -27,7 +27,11 @@ export function laneName(briefPath) {
   return lane
 }
 
-export function runBrief(text, closes) {
+export function runBrief(text, closes, ask = null) {
+  if (ask !== null) {
+    const quote = ask.trimEnd().split(/\r?\n/).map((line) => line.trim() ? `> ${line}` : '>').join('\n')
+    text = text.replace(/^([^\S\r\n]*---[^\S\r\n]*\r?\n[\s\S]*?\r?\n[^\S\r\n]*---[^\S\r\n]*\r?\n)/, (front) => `${front}## The ask\n\n${quote}\n\n`)
+  }
   return `# Task\n${closes ? `<!-- crew:bound-issue #${closes} -->\n` : ''}\n${text}`
 }
 
@@ -73,7 +77,6 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
   const text = d.readFileSync(briefPath, 'utf8')
   const { fields, defects } = parseBrief(text)
   if (defects.length) throw new StartRefusal(`brief ${briefPath} is not a P1 brief:\n- ${defects.join('\n- ')}`)
-  const run = runBrief(text, fields.closes)
   if (fields.shape === 'finish') throw new StartRefusal('shape finish starts from an escalated lane, not a new brief; crew start runs standard only')
   const tier = fields.mechanical === true ? 'mechanical' : 'build'
   let resolved
@@ -87,6 +90,15 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
   const remoteHead = git(d, checkout, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
   if (!remoteHead) throw new StartRefusal('cannot read origin/HEAD; repair it with git remote set-head origin --auto')
   const base = remoteHead.replace(/^origin\//, '')
+  let ask = null
+  const issue = ISSUE_SOURCE.exec(fields.source)
+  if (issue) {
+    const result = d.spawnSync('gh', ['issue', 'view', issue[1], '--json', 'body', '--jq', '.body'], { cwd: checkout })
+    if (result.status !== 0) throw new StartRefusal(`cannot read the body of issue ${issue[1]}: ${result.error?.message || String(result.stderr ?? '').trim() || `gh exited with status ${result.status}`}`)
+    if (!String(result.stdout ?? '').trim()) throw new StartRefusal(`issue ${issue[1]} has an empty body`)
+    ask = String(result.stdout)
+  }
+  const run = runBrief(text, fields.closes, ask)
   if (git(d, checkout, ['worktree', 'add', '-b', lane, worktree, base]) === null) throw new StartRefusal(`git worktree add -b ${lane} ${worktree} ${base} failed in ${checkout}`)
 
   // The run reads a snapshot, so editing the draft cannot change a running lane.

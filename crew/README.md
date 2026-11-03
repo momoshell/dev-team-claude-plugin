@@ -25,7 +25,7 @@ the brief, the task directory, the lane journal and every seat's session file.
 
 **Agents do the work; code keeps it correct.** A lane starts from one P1 brief
 (`source`, `closes`, `shape`, `out_of_scope`, optional `mechanical`, `suite`, `generated` and `regenerate`; the
-body is the ask). `crew/loop.mjs` runs it:
+body has the quoted operator ask and Context pointers, or Context pointers alone for an issue; `crew start` quotes the issue body as the ask). `crew/loop.mjs` runs it:
 
 ```
 build:      plan -> rebase -> build -> per-test proof -> (full suite || review) -> PR

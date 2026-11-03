@@ -20,14 +20,14 @@ closes: 1961
 shape: standard
 out_of_scope: the visualizer
 ---
-## The ask
+## Context
 
-Refuse roster edits that cannot boot.
+- \`crew/agents.mjs\`
 `
 
 // Every effect is a recorded call; nothing touches git, the disk or a process. The agent
 // resolution is injected too; the default resolves the committed definitions.
-function fakes({ brief = BRIEF, exists = () => false, worktreeStatus = 0, originHead = 'origin/main', inGit = true, resolve = (tier) => resolveAgents(tier), write = () => {} } = {}) {
+function fakes({ brief = BRIEF, exists = () => false, worktreeStatus = 0, originHead = 'origin/main', inGit = true, issueBody = 'Refuse roster edits that cannot boot.\n', resolve = (tier) => resolveAgents(tier), write = () => {} } = {}) {
   const calls = []
   const deps = {
     readFileSync: () => brief,
@@ -37,6 +37,7 @@ function fakes({ brief = BRIEF, exists = () => false, worktreeStatus = 0, origin
     writeFileSync: (path, text) => { calls.push(['write', path, text]); write('write', path, text) },
     spawnSync: (file, args, options) => {
       calls.push(['spawn', file, args, options?.cwd ?? null])
+      if (file === 'gh') return issueBody === null ? { status: 1, stdout: '' } : { status: 0, stdout: issueBody }
       if (file === 'git' && args.includes('symbolic-ref')) return originHead ? { status: 0, stdout: `${originHead}\n` } : { status: 1, stdout: '' }
       if (file === 'git' && args.includes('worktree')) return { status: worktreeStatus, stdout: '' }
       if (file === 'git' && args.includes('rev-parse')) return inGit ? { status: 0, stdout: '/repo/checkout\n' } : { status: 128, stdout: '' }
@@ -196,6 +197,62 @@ test('the run brief carries the header and the bound-issue slot when closes is s
   assert.equal(runBrief(BRIEF.replace('closes: 1961', 'closes: null'), null).split('\n')[1], '')
 })
 
+test('an issue brief starts with the issue body quoted as its ask, and an unreadable or empty issue refuses before the worktree', async () => {
+  const issueBody = 'First $& line\n  \n## Not a heading\n  last line  \n'
+  const f = fakes({ issueBody })
+  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps })
+  const calls = f.calls
+  const gh = calls.filter(([kind, file]) => kind === 'spawn' && file === 'gh')
+  assert.deepEqual(gh, [['spawn', 'gh', ['issue', 'view', '1961', '--json', 'body', '--jq', '.body'], '/repo/checkout']])
+  assert.ok(calls.indexOf(spawned(calls, 'symbolic-ref')) < calls.indexOf(gh[0]))
+  assert.ok(calls.indexOf(gh[0]) < calls.indexOf(spawned(calls, 'worktree')))
+  const expected = runBrief(BRIEF, 1961).replace('---\n## Context', () => '---\n## The ask\n\n> First $& line\n>\n> ## Not a heading\n>   last line\n\n## Context')
+  assert.equal(written(calls, '/briefs/started/b1.md')[2], expected)
+  assert.equal(JSON.parse(written(calls, '/task/lean.json')[2]).brief, expected)
+  const spaced = fakes({ brief: BRIEF.replace('---\n## Context', '---  \n## Context') })
+  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: spaced.deps })
+  assert.match(written(spaced.calls, '/briefs/started/b1.md')[2], /---  \n## The ask\n\n> Refuse/)
+  for (const [result, message] of [
+    [{ status: null, error: new Error('spawnSync gh ENOENT') }, /issue 1961: spawnSync gh ENOENT/],
+    [{ status: 1, stderr: 'authentication required\n' }, /issue 1961: authentication required/],
+    [{ status: 1 }, /issue 1961: gh exited with status 1/],
+    ...['', ' \n\t'].map((stdout) => [{ status: 0, stdout }, /issue 1961 has an empty body/]),
+  ]) {
+    const failed = fakes()
+    const spawnSync = failed.deps.spawnSync
+    failed.deps.spawnSync = (file, args, options) => file === 'gh' ? (spawnSync(file, args, options), result) : spawnSync(file, args, options)
+    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: failed.deps }), (error) => error instanceof StartRefusal && message.test(error.message))
+    assert.equal(spawned(failed.calls, 'worktree'), undefined)
+    assert.equal(failed.calls.some(([kind]) => ['mkdir', 'write', 'detached'].includes(kind)), false)
+  }
+  const operatorBrief = BRIEF.replace('source: issue 1961', 'source: operator request').replace('## Context', '## The ask\n\n> Do this.\n\n## Context')
+  for (const [brief, check] of [[operatorBrief, false], [BRIEF, true], [operatorBrief, true]]) {
+    const run = fakes({ brief })
+    await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps: run.deps })
+    assert.equal(run.calls.some(([kind, file]) => kind === 'spawn' && file === 'gh'), false)
+    if (!check) assert.equal(JSON.parse(written(run.calls, '/task/lean.json')[2]).brief, runBrief(brief, 1961))
+  }
+})
+
+// MUTATION: restore the body-wide #N guard and the start refuses the source's words.
+test('an operator brief starts with its quoted ask verbatim, #N included, and binds only closes', async () => {
+  for (const closes of [null, 1961]) {
+    const brief = BRIEF.replace('source: issue 1961', 'source: operator request')
+      .replace('closes: 1961', `closes: ${closes}`)
+      .replace('## Context', '## The ask\n\n> Fix #42 after PR #7.\n\n## Context')
+    const f = fakes({ brief })
+    await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps }))
+    assert.equal(f.calls.some(([kind, file]) => kind === 'spawn' && file === 'gh'), false)
+    const snapshot = written(f.calls, '/briefs/started/b1.md')[2]
+    const spec = JSON.parse(written(f.calls, '/task/lean.json')[2])
+    assert.equal(snapshot, runBrief(brief, closes))
+    assert.equal(spec.brief, snapshot)
+    assert.ok(snapshot.includes('> Fix #42 after PR #7.'))
+    assert.deepEqual(snapshot.match(/^<!-- crew:bound-issue .* -->$/gm) ?? [], closes ? ['<!-- crew:bound-issue #1961 -->'] : [])
+    assert.deepEqual(spec.closes, closes ? [closes] : [])
+  }
+})
+
 // stderr of main, captured; the exit code is returned beside it.
 async function mainWithStderr(argv, deps) {
   let stderr = ''
@@ -220,7 +277,7 @@ test('start detaches the bridge on a measured spec and boots nothing', async () 
   assert.equal(result.pid, 4242)
   const spec = JSON.parse(written(calls, '/task/lean.json')[2])
   assert.deepEqual(spec, {
-    id: 'b1', cwd: '/repo/dt-b1', taskDir: '/home/.crew/dt-b1/b1/task', tier: 'build', shape: 'standard', brief: runBrief(BRIEF, 1961),
+    id: 'b1', cwd: '/repo/dt-b1', taskDir: '/home/.crew/dt-b1/b1/task', tier: 'build', shape: 'standard', brief: runBrief(BRIEF, 1961, 'Refuse roster edits that cannot boot.\n'),
     source: 'issue 1961', branch: 'b1', base: 'main', closes: [1961], suite: { command: 'npm', args: ['test'], timeoutMs: 1800000 },
   })
   assert.equal(spec.timeoutMs, undefined)

@@ -799,7 +799,7 @@ test('a committed, unpublished build at HEAD on the lane branch is uncommitted a
     } finally { cleanup(f) }
   }
   // A prior finish can complete while this caller is probing the remote, before it reclaims the old stop.
-  for (const mode of ['journal', 'head', 'head-red']) {
+  for (const mode of ['journal', 'head', 'head-red', 'branch']) {
     const f = fixture({ rows: [{ event: 'run-start' }, builderRow, { event: 'commit', head }, { event: 'verdict', stage: 'rebase', status: 'stopped', reason: 'rebase-conflict' }] })
     try {
       const journal = join(f.taskDir, 'journal.jsonl'), calls = []
@@ -817,7 +817,8 @@ test('a committed, unpublished build at HEAD on the lane branch is uncommitted a
             probed = true
             return { status: 'green', stdout: '' }
           }
-          if (args[0] === 'symbolic-ref') return { status: 'green', stdout: 'lane9\n' }
+          // 'branch': the operator switches to another branch at the same commit while the remote is probed.
+          if (args[0] === 'symbolic-ref') return { status: 'green', stdout: probed && mode === 'branch' ? 'other\n' : 'lane9\n' }
           return { status: probed && mode === 'head-red' ? 'red' : 'green', stdout: probed && mode === 'head' ? 'b'.repeat(40) : head }
         },
       })

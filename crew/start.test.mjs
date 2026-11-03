@@ -862,6 +862,33 @@ test('a refused ACP turn is read after the turn: a valid return is accepted, an 
   }
 })
 
+// MUTATION: ignore the relayed skill rows when a refused turn leaves a valid return.
+test('a refused ACP turn with a valid return must prove its required skills', async () => {
+  const planner = join(AGENTS, 'planner.md')
+  const load = JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'tool_call', toolCallId: 'r1', title: 'Skill', kind: 'other', status: 'in_progress', rawInput: { skill: 'crew-skills-planner:alpha' }, _meta: { claudeCode: { toolName: 'Skill' } } } })
+  const loaded = JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'tool_call_update', toolCallId: 'r1', status: 'completed' } })
+  for (const proven of [false, true]) {
+    const rows = []
+    const f = leanFixture({ deps: { readFileSync: (path, ...args) => {
+      const text = readFileSync(path, ...args)
+      return path === planner ? text.replace('advisor: null', 'advisor: null\nskills: ["alpha"]\nrequires: ["alpha"]') : text
+    } }, loopDeps: { journal: async (row) => rows.push(row) } })
+    const answered = f.options.runAcpSeat
+    f.options.runAcpSeat = async (input) => {
+      const turn = await answered(input)
+      if (input.definition.role !== 'planner') return turn
+      if (proven) input.deps.appendFileSync(input.sessionFile, `${load}\n${loaded}\n`, 'utf8')
+      return { stopReason: null, refusal: { code: -32603, errorKind: 'incomplete_tool_call', message: 'Claude ended the turn without returning results for tool calls' } }
+    }
+    const result = await f.go()
+    assert.equal(result.status, proven ? 'done' : 'stopped')
+    if (!proven) {
+      assert.equal(result.reason, 'envelope-refused')
+      assert.ok(rows.some((r) => r.event === 'envelope' && r.defects.includes('required-skills-unproven')))
+    }
+  }
+})
+
 // MUTATION: drop the missing-stop-reason clause and a turn that never measured a stop is accepted on its envelope.
 test('an ACP turn with no stop reason (null, empty, absent, no turn at all) is read and rerun once', async () => {
   for (const turn of [{ stopReason: null, usage: null, refusal: null }, { stopReason: '', usage: null, refusal: null }, { usage: null, refusal: null }, undefined, null]) {

@@ -241,10 +241,12 @@ const ARCHIVED_OPTIONAL = Object.freeze({ planner: ['tests'], reviewer: ['requir
 const LEGACY_DETAIL_KEYS = Object.freeze({
   planner: ['acceptance', 'gate_path', 'gate_cmd', 'mutations'],
 })
+const SUBJECT_TYPES = Object.freeze(['chore', 'ci', 'crew', 'docs', 'feat', 'fix', 'merge', 'perf', 'refactor', 'revert', 'spike', 'test', 'wip', 'workflow'])
+const SUBJECT_PATTERN = new RegExp(String.raw`^(?:${SUBJECT_TYPES.join('|')})(?:\([A-Za-z0-9][A-Za-z0-9._/-]*\))?!?: \S(?:.*\S)?$`)
 const DETAIL_RULES = {
   subject: [(v) => typeof v === 'string' && v.length <= 72 && !/[\x00-\x1f\x7f]/.test(v)
-    && /^(?:chore|ci|crew|docs|feat|fix|merge|perf|refactor|revert|spike|test|wip|workflow)(?:\([A-Za-z0-9][A-Za-z0-9._/-]*\))?!?: \S(?:.*\S)?$/.test(v),
-  'is a conventional-commit subject of at most 72 characters: type(scope): summary'],
+    && SUBJECT_PATTERN.test(v),
+  `is a conventional-commit subject of at most 72 characters: type(scope): summary, type one of ${SUBJECT_TYPES.join(', ')}`],
   plan_path: [nonempty, 'is a nonempty string'],
   files_in_scope: [(v) => Array.isArray(v) && v.length > 0 && v.every(nonempty), 'is a nonempty list of nonempty strings'],
   validation_lane: [nonempty, 'is a nonempty string'],

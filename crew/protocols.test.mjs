@@ -362,6 +362,17 @@ test('P2 planner subject is a conventional-commit subject of at most 72 characte
   }
 })
 
+// MUTATION: revert the subject defect to the type-less text.
+test('P2 a refused subject names every accepted type', () => {
+  const types = ['chore', 'ci', 'crew', 'docs', 'feat', 'fix', 'merge', 'perf', 'refactor', 'revert', 'spike', 'test', 'wip', 'workflow']
+  for (const role of ['planner', 'builder']) {
+    const value = envelope(role); value.details.subject = 'build(deps): bump undici'
+    const defect = refusedFor(role, value, 'details.subject ')[0]
+    assert.ok(defect, role)
+    assert.deepEqual(defect.split('type one of ')[1]?.split(', '), types)
+  }
+})
+
 // MUTATION: reject archived planner keys or accept builder mutations.
 test('P2 accepts legacy planner fields without validating them and refuses builder mutations', () => {
   const planner = envelope('planner')

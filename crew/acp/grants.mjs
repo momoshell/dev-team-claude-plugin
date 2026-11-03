@@ -271,20 +271,15 @@ function registeredMcpServer(register, name) {
   return null
 }
 
-// The seat's own role grant and its adapter overlay come first, so a role that defines an agent gets its own
-// definition; the other roles fill in only names the seat does not define (the reviewer's scout falls back
-// to the planner's pi overlay).
+// The seat's own role and adapter overlay first, then every other role: a seat gets its own definition of a
+// name, and a name it does not define falls back (the reviewer's scout comes from the planner's pi overlay).
 function registeredAgents(register, role, agent) {
-  const named = new Map()
   const roles = register?.roles ?? {}
   const own = Object.hasOwn(roles, role) ? roles[role] : null
-  const ownGroups = own ? [own, ...(agent && Object.hasOwn(own.by_agent ?? {}, agent) ? [own.by_agent[agent]] : [])] : []
-  for (const group of ownGroups) for (const grant of group?.agents ?? []) if (!named.has(grant.name)) named.set(grant.name, grant)
-  for (const spec of Object.values(roles)) {
-    for (const group of [spec, ...Object.values(spec?.by_agent ?? {})]) {
-      for (const grant of group?.agents ?? []) if (!named.has(grant.name)) named.set(grant.name, grant)
-    }
-  }
+  const ownOverlay = own && Object.hasOwn(own.by_agent ?? {}, agent) ? own.by_agent[agent] : null
+  const groups = [own, ownOverlay, ...Object.values(roles).flatMap((spec) => [spec, ...Object.values(spec?.by_agent ?? {})])]
+  const named = new Map()
+  for (const group of groups) for (const grant of group?.agents ?? []) if (!named.has(grant.name)) named.set(grant.name, grant)
   return [...named.values()]
 }
 

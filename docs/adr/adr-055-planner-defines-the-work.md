@@ -254,6 +254,9 @@ Code holds the rule:
   envelope. The lead routes it to `builder` (unfinished work, same plan), `planner` (a real gap) or `escalate`
   (a §12 case only). A mechanical lane keeps the §7 restart. Lanes b1493, b1502 and b1504 stopped `round-bound`
   after builder `insufficient` returns.
+- Amended 2026-11-03 (b1500, b1509): lead consults have separate full bounds for build, review and moved-head
+  recheck. On standard build and judge lanes, the first reviewer turn forced only by a moved-head rebase spends no
+  round; on judge the tech-lead turn is free too. Finish recheck reviews still spend a round under the finish review cap.
 - The lead's last consult is marked last. A spent lead bound stops for the operator as `lead-escalated`, with a
   question drawn from the held envelope and the lead's decision, never a bare `round-bound`. `no-progress` still
   stops in code.

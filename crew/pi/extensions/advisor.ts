@@ -37,11 +37,10 @@ export const TRIPWIRE_MANIFEST_FILE = 'advisor-manifest.json'
 export const ADVISED_ROLES = Object.freeze(new Set(['builder']))
 
 export const SCOPE_BREACH = 'scope-breach'
-export const TRIPWIRE_TOUCH = 'tripwire-touch'
 export const REPEATED_FAILURE = 'repeated-failure'
 export const GROWTH_DIVERGENCE = 'growth-divergence'
-export const TIER0_KINDS = Object.freeze([SCOPE_BREACH, TRIPWIRE_TOUCH, REPEATED_FAILURE, GROWTH_DIVERGENCE])
-// Separate from the four mechanical kinds: a model finding is not a predicate.
+export const TIER0_KINDS = Object.freeze([SCOPE_BREACH, REPEATED_FAILURE, GROWTH_DIVERGENCE])
+// Separate from the three mechanical kinds: a model finding is not a predicate.
 export const TIER1_FINDING = 'tier1-finding'
 export const TRIGGERS = Object.freeze(['tier0-note', 'cadence', 'diff-growth', 'pre-return'])
 
@@ -212,7 +211,6 @@ function manifestText({ taskDir, readFile }) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null
     if (value.schema_version !== ADVISOR_CONFIG_VERSION) return null
     if (epochMilliseconds(value.run_started_at) === null) return null
-    if (value.tripwires !== undefined && (!Array.isArray(value.tripwires) || !value.tripwires.every((item) => typeof item === 'string'))) return null
     const rawCell = value.cell
     const cellKeys = ['provider', 'id', 'agent', 'effort', 'model']
     const cell = rawCell && typeof rawCell === 'object' && !Array.isArray(rawCell)
@@ -224,7 +222,7 @@ function manifestText({ taskDir, readFile }) {
       ? value.tests.slice(0, CRITERIA_MAX).map(({ file, title }) => ({ file: boundText(file, TEST_CAP_BYTES), title: boundText(title, TEST_CAP_BYTES) })) : []
     return {
       schema_version: value.schema_version, run_started_at: value.run_started_at,
-      tripwires: (value.tripwires ?? []).map((item) => boundTarget(item)), criteria, tests, cell,
+      criteria, tests, cell,
       // A present cell that fails the allowlist is NOT a null (tier-0-only) cell.
       cell_invalid: rawCell != null && cell === null,
     }
@@ -311,7 +309,7 @@ export function loadContext({ taskDir, deps = {}, env = process.env } = {}) {
   if (!manifest) {
     return {
       files_in_scope: [], validation_lane: null, scope_source: 'absent',
-      tripwires: [], tripwires_source: 'absent', criteria: [], tests: [], run_started_at: null, cell: null,
+      criteria: [], tests: [], run_started_at: null, cell: null,
     }
   }
   const planner = plannerReturn({ taskDir, manifest, deps, env })
@@ -319,8 +317,7 @@ export function loadContext({ taskDir, deps = {}, env = process.env } = {}) {
     files_in_scope: planner.files_in_scope,
     validation_lane: planner.validation_lane,
     scope_source: planner.source,
-    tripwires: manifest.tripwires,
-    tripwires_source: 'manifest', criteria: manifest.criteria, tests: manifest.tests,
+    criteria: manifest.criteria, tests: manifest.tests,
     run_started_at: manifest.run_started_at, cell: manifest.cell,
   }
 }
@@ -818,7 +815,6 @@ function systemPrompt(trigger, context) {
 function noteTextForTier0(kind, target, signature, role) {
   if (kind === REPEATED_FAILURE) return `Repeated validation failure at ${target || 'an unknown location'}: ${signature || 'the same failure signature recurred'}`
   if (kind === SCOPE_BREACH) return `The ${role} seat touched ${target || 'an unknown path'} outside the declared scope.`
-  if (kind === TRIPWIRE_TOUCH) return `The ${role} seat touched the declared tripwire ${target || 'an unknown path'}.`
   return 'The repository growth crossed the measured divergence threshold.'
 }
 
@@ -933,8 +929,6 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
         scope_source: fresh.scope_source,
         scope_count: fresh.files_in_scope.length,
         lane_available: typeof fresh.validation_lane === 'string' && fresh.validation_lane.length > 0,
-        tripwires_source: fresh.tripwires_source,
-        tripwires_count: fresh.tripwires.length,
       }
       appendAdvisorRow('advisor_context', row)
       contextRowEpoch = freshKey
@@ -1159,9 +1153,6 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       const matcher = scopeMatcher(current.files_in_scope)
       if (target && current.scope_source !== 'absent' && !matcher(target) && !inTaskDir(inputPath(input))) {
         if (emitTier0({ kind: SCOPE_BREACH, target, targetKind: 'file' })) queue(id, 'tier0-note')
-      }
-      if (target && current.tripwires_source !== 'absent' && current.tripwires.includes(target)) {
-        if (emitTier0({ kind: TRIPWIRE_TOUCH, target, targetKind: 'file' })) queue(id, 'tier0-note')
       }
       if (calls % CADENCE_CALLS === 0) queue(id, 'cadence')
     } else if (calls % CADENCE_CALLS === 0) {

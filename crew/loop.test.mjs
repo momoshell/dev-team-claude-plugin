@@ -522,7 +522,10 @@ test("the lead's last consult is marked last, and a spent lead bound stops for t
   } })
   assert.deepEqual(await reask.go(), stopped('lead-escalated'))
   assert.equal(reask.requests.find((r) => r.role === 'lead').feedback[0].last, true)
-  assert.match(reask.rows.findLast((r) => r.event === 'verdict').observation.question, /planner/)
+  // MUTATION: drop held from the lead request and the current planner escalation is labelled an earlier return.
+  const reasked = reask.rows.findLast((r) => r.event === 'verdict').observation.question
+  assert.match(reasked, /planner/)
+  assert.doesNotMatch(reasked, /last return:/)
 })
 
 test('a lead bounce names its target: planner revises the plan from the builder\'s envelope, builder keeps building', async () => {

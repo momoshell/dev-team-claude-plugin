@@ -57,7 +57,7 @@ not free.
 | 027 | Multi-process seq allocation is parent-owned, persisted-before-emission | ratified 2026-08-11 | below |
 | 028 | Substrate discipline is a PreToolUse guard that denies only on positive evidence | ratified 2026-08-12 | below |
 | 029 | Headless observability and interjection: the pane-parity matrix for piped seats | superseded by ADR-052 | [full document](adr-029-headless-observability-interjection.md) |
-| 030 | Acceptance authorship: the planner may draft the gate, but only a proof accepts it | ratified 2026-08-14 | [full document](adr-030-acceptance-authorship.md) |
+| 030 | Acceptance authorship: the planner may draft the gate, but only a proof accepts it | superseded by ADR-055, was ratified 2026-08-14 | [full document](adr-030-acceptance-authorship.md) |
 | 031 | The Node 20 CI leg is dropped; the repo declares an engines floor pinned to `NODE_FLOOR` | ratified 2026-08-16 | below |
 | 032 | The cell breaker refuses an open cell at boot; it does not walk a failback chain | ratified 2026-08-16 | below |
 | 033 | Transport follows the mode: a piped seat inside a cmux workspace is refused | ratified 2026-08-16 | below |
@@ -65,24 +65,24 @@ not free.
 | 035 | Run configuration is five independent axes; `--variant`/`--tier` retire after one release window | superseded by ADR-052 | [full document](adr-035-run-configuration-axes.md) |
 | 036 | ACP is the headless seat transport; the envelope stays the record | **written 2026-08-31 by #792** | [full document](adr-036-acp-seat-transport.md) |
 | 037 | Local models: the LAN trust boundary, band admission by ratified evidence, and zero cost counted but never reported as savings | ratified 2026-08-30 | [full document](adr-037-local-models.md) |
-| 038 | The protected floor forces proof on the changed surface, not plan-time adversary rounds | ratified 2026-09-01 | [full document](adr-038-floor-forces-proof-not-rounds.md) |
+| 038 | The protected floor forces proof on the changed surface, not plan-time adversary rounds | superseded by ADR-055, was ratified 2026-09-01 | [full document](adr-038-floor-forces-proof-not-rounds.md) |
 | 039 | `review_only` is an execution shape with a structured-findings envelope; "no findings" is a measured outcome | **proposed 2026-09-02, never written** | below |
 | 040 | Anchor pins are repaired after the merge, not inside the lane | superseded by ADR-052 | [full document](adr-040-anchor-pins-repaired-after-merge.md) |
 | 041 | Claims at plan-accept: the accepted plan's scope is the write claim | **withdrawn 2026-09-12 by [ADR-043](adr-043-worktrees-are-the-isolation.md)** | [full document](adr-041-claims-at-plan-accept.md) |
+| 042 | Split the test suites, not the driver | superseded by ADR-052 | [full document](adr-042-split-the-suites-not-the-driver.md) |
 | 043 | Worktrees are the isolation; a fence is never a lock | ratified 2026-09-12 | [full document](adr-043-worktrees-are-the-isolation.md) |
 | 044 | Declared topologies name hand-written executor paths; stage declarations are not programs | superseded by ADR-052 | [full document](adr-044-declared-topologies-name-executor-paths.md) |
 | 045 | Scope is context, not enforcement: a lane may write any file | ratified 2026-09-15 | [full document](adr-045-scope-is-context-not-enforcement.md) |
 | 046 | Suite policy is a ledger fact, so every suite-run decision is stamped, ingested and rated | superseded by ADR-052 | [full document](adr-046-suite-policy-is-a-ledger-fact.md) |
 | 047 | The advisor is a roster seat: its model is picked from the roster and consulted through an adapter | **ratified 2026-09-27, amended 2026-10-10 (Amendment 1: judge ships the terra advisor), 2026-10-16 (Amendment 2: build and judge ship the sol advisor)**, operator decision | [full document](adr-047-the-advisor-is-a-roster-seat.md) |
-| 048 | Ordered build steps: valid 2+ chunk plans default to ordered in-lane steps; explicit full forces single-brief | **ratified 2026-09-27, amended 2026-10-02, amended 2026-10-03**, operator decision | [full document](adr-048-ordered-build-steps.md) |
-| 049 | Builder edits: answer a failed edit with the file's own text before adding a new edit tool | **ratified 2026-09-29, amended 2026-10-18 (Amendment 1: the A/B window starts at PR 1860)**, operator decision | [full document](adr-049-builder-edit-assist.md) |
+| 048 | Ordered build steps: valid 2+ chunk plans default to ordered in-lane steps; explicit full forces single-brief | superseded by ADR-055, was **ratified 2026-09-27, amended 2026-10-02, amended 2026-10-03**, operator decision | [full document](adr-048-ordered-build-steps.md) |
+| 049 | Builder edits: answer a failed edit with the file's own text before adding a new edit tool | superseded by ADR-055, was **ratified 2026-09-29, amended 2026-10-18 (Amendment 1: the A/B window starts at PR 1860)**, operator decision | [full document](adr-049-builder-edit-assist.md) |
 | 050 | Seat skills are selected at dispatch, granted lazily, and their loads are measured | ratified 2026-10-16, operator decision | [full document](adr-050-seat-skills-are-granted-not-pasted.md) |
 | 051 | Escalated lanes are finished by a `finish` shape: the builder codes, Sol reviews, the operator decides | ratified 2026-10-16, amended 2026-10-17 (Amendment 1), lane 1 built, operator decision | [full document](adr-051-finish-shape.md) |
 | 052 | Agents do the work; code keeps it correct | ratified 2026-10-24, amended 2026-10-24 (Amendment 1), 2026-10-26 (Amendment 2), operator decision | [full document](adr-052-agents-do-the-work.md) |
 | 053 | Build first, prove after: the builder writes the acceptance tests and the loop proves them | proposed 2026-11-01, rejected by ADR-055 on its own measurement (2026-11-02) | [full document](adr-053-build-first-prove-after.md) |
 | 054 | Each tier runs its own loop, and every stage earns its place | proposed 2026-11-01, operator direction; §2–§4 amended by ADR-055 | [full document](adr-054-each-tier-runs-its-own-loop.md) |
 | 055 | The planner defines the work, code checks red and green, the reviewer judges | builder (§3) and planner (§2) parts ratified 2026-11-03, loops (§6) proposed | [full document](adr-055-planner-defines-the-work.md) |
-| 042 | Split the test suites, not the driver | superseded by ADR-052 | [full document](adr-042-split-the-suites-not-the-driver.md) |
 
 ### The 014–019 tangle, recorded so nobody re-derives it
 

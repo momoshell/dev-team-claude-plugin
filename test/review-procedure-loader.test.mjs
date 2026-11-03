@@ -116,3 +116,12 @@ test('RP1: the procedure judges the plan criteria and returns the reviewer envel
   assert.match(text, /envelope/)
   assert.doesNotMatch(text, /Changes|validation-lane|review\.md/)
 })
+
+// MUTATION: RP2 restores "The loop runs the proof and suite, in parallel with this review on a build lane."
+test('RP2: step 2 orders the proof before review and runs only the suite beside it on build', () => {
+  const text = readFileSync(join(ROOT, '.agents/skills/review-procedure/SKILL.md'), 'utf8')
+  const step = text.split('\n2. ')[1].split('\n3. ')[0].replace(/\s+/g, ' ')
+  assert.doesNotMatch(step, /proof and (the )?suite, in parallel/i)
+  assert.match(step, /proved[^.]*before this review/i)
+  assert.match(step, /Only the suite runs beside this review, and only on a build lane/)
+})

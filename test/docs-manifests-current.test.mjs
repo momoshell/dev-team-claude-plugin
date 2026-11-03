@@ -183,6 +183,22 @@ test('DM10: lane prose names the current seats, loop and arms', () => {
   assert.equal((advisor.match(/adr-047-the-advisor-is-a-roster-seat\.md/g) ?? []).length, 1)
 })
 
+// MUTATION: DM11 restores row 030's status to "ratified 2026-08-14".
+test('DM11: ADR-055 supersedes 030, 038, 048 and 049 in the index', () => {
+  const rows = index()
+  for (const id of ['030', '038', '048', '049']) {
+    assert.match(plain(rows.get(id) ?? ''), /^superseded\b/, id)
+    assert.equal(target(rows.get(id)), 'adr-055', id)
+  }
+})
+
+// MUTATION: DM12 moves the 042 row back after 055.
+test('DM12: index rows are in ADR number order', () => {
+  const ids = [...index().keys()]
+  assert.ok(ids.length)
+  assert.deepEqual(ids, [...ids].sort((a, b) => Number(a) - Number(b)))
+})
+
 test('ancillary prose describes the current runtime and marks history', () => {
   const conventions = read('docs/conventions.md')
   assert.match(conventions, /2026-08-02 \(a literal NUL/)

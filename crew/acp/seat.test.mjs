@@ -1293,7 +1293,7 @@ const refusedBeforeClient = (arms, lane, options = {}) => {
 
 // MUTATION: disable the pi advisor role predicate
 test('pi refuses unsupported advisor roles before client construction', () => {
-  for (const role of ['reviewer', 'lead', 'tech-lead', undefined]) {
+  for (const role of ['planner', 'reviewer', 'lead', 'tech-lead', undefined]) {
     const probe = armLaunch('pi', role, { advisor: advisorArm })
     leanLane(probe.taskDir)
     assert.throws(() => probe.run(), (error) => error.reason === 'grant-unsupported' && /advisor/.test(error.message) && error.message.includes(role ?? 'seat'))
@@ -1303,7 +1303,7 @@ test('pi refuses unsupported advisor roles before client construction', () => {
     bare.run()
     assert.equal(bare.created.length, 1)
   }
-  for (const role of ['builder', 'planner']) {
+  for (const role of ['builder']) {
     const probe = armLaunch('pi', role, { advisor: advisorArm })
     leanLane(probe.taskDir)
     probe.run()
@@ -1330,6 +1330,47 @@ test('the shipped mechanical builder launches without a plan while the planned b
   }
 })
 
+// MUTATION: drop the criteria field from the manifest
+test('the advisor manifest carries the accepted plan criteria and named tests, and nothing from the brief', () => {
+  const probe = armLaunch('pi', 'builder', contextArms, { briefText: 'Tripwire tests:\n- a.test.mjs · t\nBroad keys\n## Acceptance\n- (A1) x\n' })
+  leanLane(probe.taskDir, { details: { ...laneDetails, tests: [{ file: 'a.test.mjs', title: 'T1' }] } })
+  writeFileSync(join(probe.taskDir, 'plan.md'), '## Criteria\n1. first\nignored\n2. second\n## Tasks\n1. outside\n')
+  probe.run()
+  const manifest = JSON.parse(readFileSync(join(probe.taskDir, 'advisor-manifest.json'), 'utf8'))
+  assert.deepEqual(manifest.criteria, ['1. first', '2. second'])
+  assert.deepEqual(manifest.tests, [{ file: 'a.test.mjs', title: 'T1' }])
+  assert.equal('tripwires' in manifest, false)
+  assert.equal('acceptance_items' in manifest, false)
+})
+
+test('a large advisor basis stays within the manifest read cap', () => {
+  for (const text of ['x', '\u0001']) {
+    const probe = armLaunch('pi', 'builder', { advisor: advisorArm })
+    const tests = Array.from({ length: 32 }, (_, i) => ({ file: `a${i}.test.mjs`, title: text.repeat(200) }))
+    leanLane(probe.taskDir, { details: { ...laneDetails, tests } })
+    writeFileSync(join(probe.taskDir, 'plan.md'), `## Criteria\n${Array.from({ length: 60 }, (_, i) => `${i + 1}. ${text.repeat(996)}`).join('\n')}\n`)
+    assert.doesNotThrow(() => probe.run())
+    const raw = readFileSync(join(probe.taskDir, 'advisor-manifest.json'), 'utf8')
+    const manifest = JSON.parse(raw)
+    assert.ok(Buffer.byteLength(raw) <= 65_536)
+    assert.equal(probe.created.length, 1)
+    assert.ok(manifest.criteria?.length > 0)
+    assert.equal(manifest.tests.length, 32)
+    assert.deepEqual(advisorContext({ taskDir: probe.taskDir, env: {} }).files_in_scope, ['a.mjs'])
+  }
+})
+
+// MUTATION: take tests only when the accepted plan is readable
+test('an advisor-only seat whose accepted plan is unreadable boots with no criteria and keeps the named tests', () => {
+  const probe = armLaunch('pi', 'builder', { advisor: advisorArm })
+  leanLane(probe.taskDir, { details: { ...laneDetails, plan_path: 'missing.md', tests: [{ file: 'a.test.mjs', title: 'T1' }] } })
+  assert.doesNotThrow(() => probe.run())
+  assert.equal(probe.created.length, 1)
+  const manifest = JSON.parse(readFileSync(join(probe.taskDir, 'advisor-manifest.json'), 'utf8'))
+  assert.deepEqual(manifest.criteria, [])
+  assert.deepEqual(manifest.tests, [{ file: 'a.test.mjs', title: 'T1' }])
+})
+
 test('a lean pi builder declaring advisor and skeletonread launches with both on the lane layout', () => {
   const probe = armLaunch('pi', 'builder', contextArms, { briefText: 'Tripwire tests:\n- a.test.mjs · tripwire\nBroad keys\n## Acceptance\n- (A1) first item\nnot an item\n- (A2) second item\n## Next\n- (A3) outside\n' })
   const anchor = Date.now() - 60_000
@@ -1344,8 +1385,8 @@ test('a lean pi builder declaring advisor and skeletonread launches with both on
   const manifest = JSON.parse(readFileSync(join(probe.taskDir, 'advisor-manifest.json'), 'utf8'))
   assert.equal(manifest.schema_version, 1)
   assert.equal(manifest.run_started_at, anchor, 'the manifest is dated by the lane start, never the seat start')
-  assert.deepEqual(manifest.tripwires, ['a.test.mjs'])
-  assert.deepEqual(manifest.acceptance_items, ['(A1) first item', '(A2) second item'])
+  assert.deepEqual(manifest.criteria, [])
+  assert.deepEqual(manifest.tests, [])
   assert.deepEqual(manifest.cell, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'high', model: 'openai/gpt-6.1-sol' })
   assert.equal(existsSync(join(probe.taskDir, 'advisor-manifest.json.tmp')), false)
   const replanned = armLaunch('pi', 'builder', contextArms)

@@ -1,12 +1,21 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'; import { ROOT, leanLaneFixture, scratchDir } from '../../../test/helpers.mjs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'; import { ROOT, leanLaneFixture, scratchDir } from '../../../test/helpers.mjs'
 
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as mod from './subagent.ts'
 import * as adapter from '../../adapters/adapter-pi.mjs'
+
+// MUTATION: restore the crew/drive.mjs citation
+test('subagent.ts and advisor.ts cite only crew files that exist', () => {
+  for (const name of ['subagent.ts', 'advisor.ts']) {
+    const source = readFileSync(new URL(`./${name}`, import.meta.url), 'utf8')
+    for (const [path] of source.matchAll(/crew\/[\w./-]+\.(?:mjs|ts|json)/g)) assert.ok(existsSync(join(ROOT, path)), path)
+    if (name === 'advisor.ts') assert.doesNotMatch(source, /\b(roster|ledger|endpoint)\b/i)
+  }
+})
 
 const EXTENSION = fileURLToPath(new URL('./subagent.ts', import.meta.url))
 const FINDINGS = {
@@ -90,6 +99,7 @@ async function drive(extension, {
 } = {}) {
   const root = sharedRoot || scratchDir('subagent-suite-')
   const taskDir = join(root, 'task')
+  mkdirSync(taskDir, { recursive: true })
   let definitionPath = defFile === undefined ? join(ROOT, 'crew/pi/agents/scout.json') : defFile
   if (defBody !== undefined) {
     definitionPath = join(root, 'scout.json')
@@ -153,7 +163,7 @@ async function drive(extension, {
     return value
   })
   const readJournal = () => {
-    const path = join(dirname(taskDir), 'journal.jsonl')
+    const path = join(taskDir, 'journal.jsonl')
     return existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter(Boolean) : []
   }
   const fire = (timer) => { timer.fired = true; timer.fn() }
@@ -548,8 +558,8 @@ test('cleanup removes the prompt file and its temp dir on every path', async () 
 // Budget refusals interpolate `at ${path}`. Every assertion in this block
 // therefore uses a sentence this file owns or structured data; no refusal
 // assertion may match a bare token that can occur in a filesystem path.
-test('the spawn counter path is beside the task directory', () => {
-  assert.equal(mod.spawnCountPathFrom('/tmp/example-run/task'), '/tmp/example-run/subagent-spawns.json')
+test('the spawn counter path is inside the task directory', () => {
+  assert.equal(mod.spawnCountPathFrom('/tmp/example-run/task'), '/tmp/example-run/task/subagent-spawns.json')
 })
 
 test('an absent spawn counter starts at zero while other read errors refuse', () => {
@@ -593,7 +603,7 @@ test('reserveSpawn increments the counter before allowing a child', () => {
     budget: 4,
   })
   assert.equal(reserved.count, 4)
-  assert.equal(writtenPath, '/tmp/example-run/subagent-spawns.json')
+  assert.equal(writtenPath, '/tmp/example-run/task/subagent-spawns.json')
   assert.equal(writtenBody, '{"spawns":4}\n')
   assert.equal(writtenOptions.mode, 0o600)
 })
@@ -601,6 +611,7 @@ test('reserveSpawn increments the counter before allowing a child', () => {
 test('the budget refusal fires', async () => {
   const root = scratchDir('subagent-budget-refusal-')
   const taskDir = join(root, 'task')
+  mkdirSync(taskDir, { recursive: true })
   writeFileSync(mod.spawnCountPathFrom(taskDir), `${JSON.stringify({ spawns: mod.SUBAGENT_SPAWN_BUDGET })}\n`)
   const run = await driven(mod, {
     root,
@@ -623,6 +634,7 @@ test('the budget refusal fires', async () => {
 test('the last allowance spawns and the next does not', async () => {
   const root = scratchDir('subagent-budget-last-')
   const taskDir = join(root, 'task')
+  mkdirSync(taskDir, { recursive: true })
   const counter = mod.spawnCountPathFrom(taskDir)
   writeFileSync(counter, `${JSON.stringify({ spawns: mod.SUBAGENT_SPAWN_BUDGET - 1 })}\n`)
   const first = await driven(mod, { root })
@@ -639,6 +651,7 @@ test('a corrupt spawn counter refuses rather than resetting', async () => {
   for (const bytes of ['not json', '{"spawns":"3"}', '{"spawns":-1}', '{"spawns":1.5}', '{}']) {
     const root = scratchDir('subagent-budget-corrupt-')
     const taskDir = join(root, 'task')
+    mkdirSync(taskDir, { recursive: true })
     const counter = mod.spawnCountPathFrom(taskDir)
     writeFileSync(counter, bytes)
     const run = await driven(mod, { root })
@@ -676,6 +689,7 @@ test('depth and the budget are independent bounds', async () => {
 
   const spentRoot = scratchDir('subagent-budget-depth-')
   const spentTaskDir = join(spentRoot, 'task')
+  mkdirSync(spentTaskDir, { recursive: true })
   writeFileSync(mod.spawnCountPathFrom(spentTaskDir), `${JSON.stringify({ spawns: mod.SUBAGENT_SPAWN_BUDGET })}\n`)
   const budget = await driven(mod, { root: spentRoot })
   assert.equal(budget.calls.length, 0)
@@ -685,6 +699,7 @@ test('depth and the budget are independent bounds', async () => {
 test('the refusal is bounded and payload-free', async () => {
   const root = scratchDir('subagent-budget-payload-')
   const taskDir = join(root, 'task')
+  mkdirSync(taskDir, { recursive: true })
   writeFileSync(mod.spawnCountPathFrom(taskDir), `${JSON.stringify({ spawns: mod.SUBAGENT_SPAWN_BUDGET })}\n`)
   const taskMarker = 'TASK_PAYLOAD_MARKER'
   const agentMarker = 'AGENT_NAME_PAYLOAD_MARKER'
@@ -831,17 +846,11 @@ test('a lean lane counts its spawns inside its task dir and leaves the parent bu
   assert.match(mod.reserveSpawn({ taskDir: lane.taskDir, env: lane.env, readFile: readFileSync, writeFile: writeFileSync }).error, /spent its subagent spawn budget/)
 })
 
-test('the old layout keeps its counter and journal beside the task dir without a lane layout', () => {
-  const lane = leanLaneFixture()
-  assert.equal(mod.spawnCountPathFrom(lane.taskDir), join(lane.parent, 'subagent-spawns.json'))
-  assert.equal(mod.journalPathFrom(lane.taskDir, { CREW_TASK_DIR: lane.taskDir }), join(lane.parent, 'journal.jsonl'))
-  assert.equal(mod.reserveSpawn({ taskDir: lane.taskDir, env: {}, readFile: readFileSync, writeFile: writeFileSync }).count, 1)
-  assert.equal(existsSync(join(lane.taskDir, 'subagent-spawns.json')), false)
-})
 
 // --- scout nudge ---------------------------------------------------------
 function nudgeFixture(overrides = {}) {
   const taskDir = join(scratchDir('scout-nudge-'), 'task')
+  mkdirSync(taskDir, { recursive: true })
   const env = { CREW_ROLE: 'planner', CREW_TASK_DIR: taskDir }
   const sends = []
   const nudge = mod.createScoutNudge({ env, send: (message, options) => sends.push({ message, options }), now: () => '2026-10-29T00:00:00.000Z', ...overrides })

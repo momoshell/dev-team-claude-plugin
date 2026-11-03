@@ -11,7 +11,7 @@ import { AGENT_ROLES, validateEnvelope } from '../protocols.mjs'
 import * as claudeAdapter from '../adapters/adapter-claude.mjs'
 import * as piAdapter from '../adapters/adapter-pi.mjs'
 import { CONTEXT_LAYOUT_ENV, LEAN_LAYOUT, journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../pi/context-layout.mjs'
-import { ADVISED_ROLES, loadContext as advisorContext } from '../pi/extensions/advisor.ts'
+import { ADVISED_ROLES, READ_CAP_BYTES, boundText, loadContext as advisorContext } from '../pi/extensions/advisor.ts'
 import { loadAcceptedContext } from '../pi/extensions/skeletonread.ts'
 
 const ROLE = 'seat'
@@ -164,30 +164,16 @@ const epochMs = (value) => {
   return Number.isFinite(parsed) ? parsed : null
 }
 
-// The Tripwire tests section of the brief, as the old path's advisorManifest reads it (crew/crew.mjs).
-function briefTripwires(briefText) {
-  const lines = String(briefText ?? '').split(/\r?\n/)
-  const marker = lines.findIndex((line) => line.trim().toLowerCase() === 'tripwire tests:')
-  const tripwires = []
-  if (marker >= 0) for (let i = marker + 1; i < lines.length; i += 1) {
-    const line = lines[i].trim()
-    if (/^broad keys\b/i.test(line)) break
-    const match = /^-\s+(.+?)\s+·/.exec(line)
-    if (match && match[1].trim()) tripwires.push(match[1].trim())
-  }
-  return tripwires
-}
-
-// The brief's `## Acceptance` items (`- (ID) text`), id kept, so the pre-return consult can check the change against them.
-function briefAcceptanceItems(briefText) {
-  const lines = String(briefText ?? '').split(/\r?\n/)
-  const start = lines.findIndex((line) => /^##\s+acceptance\s*$/i.test(line.trim()))
+// Extract numbered criteria up to the next section.
+function planCriteria(text) {
+  const lines = String(text ?? '').split(/\r?\n/)
+  const start = lines.findIndex((line) => /^## Criteria\s*$/.test(line.trim()))
+  if (start < 0) return []
   const items = []
-  if (start >= 0) for (let i = start + 1; i < lines.length; i += 1) {
-    const line = lines[i].trim()
+  for (const raw of lines.slice(start + 1)) {
+    const line = raw.trim()
     if (/^##\s/.test(line)) break
-    const match = /^-\s+(\(.+?\).*)$/.exec(line)
-    if (match) items.push(match[1].trim())
+    if (/^\d+\.\s+\S/.test(line)) items.push(line)
   }
   return items
 }
@@ -203,13 +189,13 @@ function advisorCellOf(advisor) {
 // What a lean seat's context arms need, read from the lane's own task dir and nowhere else: the lane's run-start
 // anchor (written once by the loop, never per seat) and, past the planner, the planner's current return. A seat that
 // cannot be given them is refused here, before it starts, rather than booted with arms that read nothing.
-function laneContext({ arms, role, laneTaskDir, workdir, definition, briefText, deps }) {
+function laneContext({ arms, role, laneTaskDir, workdir, definition, deps }) {
   const refusal = (why) => { throw refuse('grant-unsupported', `seat ${role} declares ${arms.join(', ')}, which read the lane context, and ${why} — refusing to boot a silently weaker seat`) }
   if (!laneTaskDir) return refusal('it has no task dir')
   const layout = { [CONTEXT_LAYOUT_ENV]: LEAN_LAYOUT }
   const read = deps.readFileSync ?? readFileSync
   let journal
-  try { journal = read(journalPathOf(laneTaskDir, layout), 'utf8') } catch { return refusal(`the lane journal ${journalPathOf(laneTaskDir, layout)} is unreadable`) }
+  try { journal = read(journalPathOf(laneTaskDir), 'utf8') } catch { return refusal(`the lane journal ${journalPathOf(laneTaskDir)} is unreadable`) }
   let anchor = null
   for (const line of String(journal).split('\n')) {
     let row
@@ -219,13 +205,13 @@ function laneContext({ arms, role, laneTaskDir, workdir, definition, briefText, 
     if (at !== null) anchor = at
   }
   if (anchor === null) return refusal('the lane journal has no run-start')
+  let planner = null
   if (role !== 'planner') {
     const needs = [...new Set(arms.flatMap((arm) => CONTEXT_ARMS[arm]))]
-    let planner = null
     try {
-      const dir = plannerReturnsDirOf(laneTaskDir, layout)
+      const dir = plannerReturnsDirOf(laneTaskDir)
       const candidates = readdirSync(dir)
-        .map((name) => ({ name, number: plannerReturnNumber(name, layout) }))
+        .map((name) => ({ name, number: plannerReturnNumber(name) }))
         .filter((entry) => entry.number !== null && statSync(join(dir, entry.name)).mtimeMs >= anchor)
         .sort((a, b) => b.number - a.number)
       for (const candidate of candidates) {
@@ -244,7 +230,19 @@ function laneContext({ arms, role, laneTaskDir, workdir, definition, briefText, 
   if (!arms.includes('advisor')) return
   const cell = advisorCellOf(definition.advisor)
   if (!cell) return refusal('the advisor cell is not a pi provider/id with an effort')
-  const manifest = { schema_version: ADVISOR_MANIFEST_VERSION, generated_at: new Date().toISOString(), task: basename(dirname(laneTaskDir)), run_started_at: anchor, tripwires: briefTripwires(briefText), acceptance_items: briefAcceptanceItems(briefText), cell }
+  const accepted = role !== 'planner' ? loadAcceptedContext({ taskDir: laneTaskDir, cwd: workdir, env: layout }) : null
+  const criteria = planCriteria(accepted?.plan_text)
+  const tests = Array.isArray(planner?.details?.tests) ? planner.details.tests.filter((test) => nonempty(test?.file) && nonempty(test?.title)).map(({ file, title }) => ({ file, title })) : []
+  const manifest = { schema_version: ADVISOR_MANIFEST_VERSION, generated_at: new Date().toISOString(), task: basename(dirname(laneTaskDir)), run_started_at: anchor, criteria, tests, cell }
+  if (Buffer.byteLength(JSON.stringify(manifest)) > READ_CAP_BYTES) {
+    // Match the reader's bounds first; JSON escaping can still expand the result beyond its read cap.
+    manifest.criteria = criteria.slice(0, 32).map((item) => boundText(item, 512))
+    manifest.tests = tests.slice(0, 32).map(({ file, title }) => ({ file: boundText(file, 256), title: boundText(title, 256) }))
+    while (Buffer.byteLength(JSON.stringify(manifest)) > READ_CAP_BYTES && (manifest.criteria.length || manifest.tests.length)) {
+      if (manifest.criteria.length) manifest.criteria.pop()
+      else manifest.tests.pop()
+    }
+  }
   const target = join(laneTaskDir, ADVISOR_MANIFEST)
   try {
     ;(deps.writeFileSync ?? writeFileSync)(`${target}.tmp`, JSON.stringify(manifest))
@@ -255,7 +253,7 @@ function laneContext({ arms, role, laneTaskDir, workdir, definition, briefText, 
   if (role !== 'planner' && advisorContext({ taskDir: laneTaskDir, env: { [CONTEXT_LAYOUT_ENV]: LEAN_LAYOUT, CREW_TASK_DIR: laneTaskDir } }).scope_source === 'absent') refusal(`the advisor cannot read the lane's planner return`)
 }
 
-export function runAcpSeat({ definition, cwd, taskDir, prompt, briefText, sessionFile, binaries = {}, deps = {} }) {
+export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, binaries = {}, deps = {} }) {
   if (!definition || typeof definition !== 'object') throw new Error('definition must be an object')
   if (!['claude', 'pi'].includes(definition.agent)) throw new Error(`unsupported agent: ${definition.agent}`)
   if (!nonempty(cwd)) throw new Error('cwd must be a nonempty string')
@@ -302,7 +300,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, briefText, sessio
   const append = deps.appendFileSync ?? appendFileSync
   const real = deps.realpathSync ?? realpathSync
   const laneTaskDir = nonempty(taskDir) ? resolve(taskDir) : null
-  if (contextArms.length) laneContext({ arms: contextArms, role, laneTaskDir, workdir, definition, briefText, deps })
+  if (contextArms.length) laneContext({ arms: contextArms, role, laneTaskDir, workdir, definition, deps })
   const workRoot = canonicalRoot(workdir, real)
   const taskRoot = laneTaskDir ? canonicalRoot(laneTaskDir, real) : null
   // lean.mjs records every turn under <taskDir>/lean; a seat never edits the record of a turn.

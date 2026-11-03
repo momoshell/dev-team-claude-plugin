@@ -8,6 +8,14 @@ import { PassThrough } from 'node:stream'
 import * as advisor from './advisor.ts'
 import { piRpcSeatParts } from '../../adapters/adapter-pi.mjs'
 import { leanLaneFixture, scratchDir } from '../../../test/helpers.mjs'
+// MUTATION: add planner back to ADVISED_ROLES
+test('advisor.ts carries no HTTP endpoint, cell classifier or planner-advisor surface', () => {
+  for (const name of ['probeEndpoint', 'readBoundedBody', 'classifyAdvisorCell', 'advisorCell', 'ADVISOR_ENDPOINT_ENV', 'ADVISOR_MODEL_ENV', 'PROBE_TIMEOUT_MS', 'PLANNER_SYSTEM_PROMPT']) assert.equal(name in advisor, false)
+  const source = readFileSync(new URL('./advisor.ts', import.meta.url), 'utf8')
+  for (const text of ['CREW_ADVISOR_ENDPOINT', 'CREW_ADVISOR_MODEL', 'fetch(']) assert.ok(!source.includes(text))
+  assert.deepEqual([...advisor.ADVISED_ROLES], ['builder'])
+  assert.deepEqual(advisor.UNAVAILABLE_REASONS, ['role-unsupported', 'manifest-cell-invalid'])
+})
 function fixture() {
   const root = scratchDir('advisor-test-')
   const taskDir = join(root, 'task')
@@ -18,7 +26,7 @@ function fixture() {
   writeFileSync(join(taskDir, advisor.TRIPWIRE_MANIFEST_FILE), JSON.stringify({
     schema_version: 1, run_started_at: 1, tripwires: ['lib/widget.test.mjs'], cell: { provider: 'provider', id: 'model', agent: 'pi', effort: 'medium', model: 'provider/model' },
   }))
-  writeFileSync(join(returns, 'd1.planner.json'), JSON.stringify({ details: { files_in_scope: ['lib/'], validation_lane: 'npm test' } }))
+  writeFileSync(join(taskDir, 'plan.md'), '# plan\n'); writeFileSync(join(taskDir, 'planner-1.json'), JSON.stringify({ role: 'planner', id: 'lane.planner.1', status: 'done', summary: 'fixture', details: { subject: 'fix(crew): advisor fixture', plan_path: 'plan.md', tests: [], files_in_scope: ['lib/'], validation_lane: 'npm test' } }))
   return { root, taskDir, tree }
 }
 
@@ -33,7 +41,7 @@ function sink() {
 function env(over = {}) {
   return {
     CREW_ADVISOR: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: '/tmp/advisor-test/task',
-    CREW_ADVISOR_ENDPOINT: 'http://127.0.0.1:11434/v1', CREW_ADVISOR_MODEL: 'qwen3-coder', ...over,
+    ...over,
   }
 }
 
@@ -52,26 +60,6 @@ const result = (id, toolName, input, text, isError = false) => ({
 
 const call = (id, toolName, input) => ({ type: 'tool_call', toolCallId: id, toolName, input })
 
-function fetcher(reply = { class: 'edge-path', severity: 'medium', claim: 'the read path answers EPERM', evidence: ['lib/widget.mjs:2'] }) {
-  const posts = []
-  const fn = async (_url, init = {}) => {
-    if (!init.method) return { status: 200 }
-    posts.push({ init, body: init.body })
-    const body = JSON.stringify({ choices: [{ message: { content: JSON.stringify(reply) } }] })
-    return {
-      status: 200, ok: true,
-      headers: { get: () => String(Buffer.byteLength(body)) },
-      body: { getReader: () => {
-        let done = false
-        return { read: async () => done ? { done: true } : (done = true, { done: false, value: Buffer.from(body) }), cancel: async () => {} }
-      } },
-    }
-  }
-  fn.posts = posts
-  return fn
-}
-
-
 function fakeChild({ exitCode = 0, invalid = false, hang = false } = {}) {
   const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kills = []
   child.stdin = { end(value) { if (hang) return; setImmediate(() => {
@@ -86,15 +74,15 @@ function fakeChild({ exitCode = 0, invalid = false, hang = false } = {}) {
 }
 
 async function runManifestConsult({ cell = { provider: 'local', id: 'advisor-v1', agent: 'pi', effort: 'high', model: 'local/advisor-v1' }, childOptions = {}, envExtra = {}, timerDeps = {}, resolveBinary = () => ({ command: '/fake/pi', args: [] }) } = {}) {
-  const f = fixture(); const journal = sink(); let argv; let spawned = 0; let fetched = 0
+  const f = fixture(); const journal = sink(); let argv; let spawned = 0
   const manifestPath = join(f.taskDir, advisor.TRIPWIRE_MANIFEST_FILE)
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')); manifest.cell = cell
   writeFileSync(manifestPath, JSON.stringify(manifest))
-  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_ENDPOINT: undefined, ...envExtra }), deps: {
+  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, ...envExtra }), deps: {
     cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile, readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
     binaryDeps: {}, resolveBinary,
     spawn: (_bin, args) => { argv = args; spawned++; return fakeChild(childOptions) },
-    fetchFn: async () => { fetched++; throw new Error('fetch must not run') }, ...timerDeps,
+    ...timerDeps,
   } })
   const source = join(f.tree, 'lib/widget.mjs')
   a.onToolResult(result('ground', 'read', { path: source, offset: 1 }, 'lib/widget.mjs:2: grounded condition'), {})
@@ -103,12 +91,12 @@ async function runManifestConsult({ cell = { provider: 'local', id: 'advisor-v1'
   a.onToolCall(call('fire', 'write', change), {})
   a.onToolResult(result('fire', 'write', change, 'ok'), {})
   await a.settled()
-  return { f, journal, a, argv, spawned, fetched }
+  return { f, journal, a, argv, spawned }
 }
 
 // MUTATION: make a false advisor_boot append fatal again
 test('advisor attaches when boot journaling fails', async () => {
-  for (const role of ['builder', 'planner']) for (const mode of ['throw', 'false', 'ok']) {
+  for (const role of ['builder']) for (const mode of ['throw', 'false', 'ok']) {
     const p = pi(), rows = []
     await advisor.attachAdvisor(p, { env: env({ CREW_ROLE: role }), deps: {
       readFile() { throw Object.assign(new Error('missing'), { code: 'ENOENT' }) },
@@ -127,7 +115,6 @@ test('advisor attaches when boot journaling fails', async () => {
 test('ADR47-L2 A1 child argv disables tools and context files', async () => { const r = await runManifestConsult(); assert.deepEqual(r.argv.slice(0, 13), ['-p','--mode','json','--no-session','--model','local/advisor-v1','--thinking','high','--no-tools','--no-context-files','--no-extensions','--no-skills','--append-system-prompt']); assert.equal(r.argv.length,14) })
 test('ADR47-L2 A2 child model comes from manifest rather than environment', async () => { const r = await runManifestConsult({ envExtra: { CREW_ADVISOR_MODEL: 'env/wrong' } }); assert.equal(r.argv[r.argv.indexOf('--model') + 1], 'local/advisor-v1') })
 test('ADR47-L2 A3 child thinking uses manifest effort', async () => { const r = await runManifestConsult(); assert.equal(r.argv[r.argv.indexOf('--thinking') + 1], 'high') })
-test('ADR47-L2 B1 endpoint environment never invokes fetch', async () => { const r = await runManifestConsult({ envExtra: { CREW_ADVISOR_ENDPOINT: 'http://127.0.0.1:9999' } }); assert.equal(r.fetched, 0); assert.equal(r.spawned, 1) })
 test('ADR47-L2 C1 null-cell attach still emits an injected tripwire tier-zero note', async () => {
   const f = fixture()
   const manifestPath = join(f.taskDir, advisor.TRIPWIRE_MANIFEST_FILE)
@@ -167,19 +154,6 @@ test('ADR47-L2 D1 consult audit carries manifest identity', async () => { const 
 test('ADR47-L2 D2 usage audit carries manifest identity', async () => { const r=await runManifestConsult(); const row=r.journal.rows.find(x=>x.advisor_usage).advisor_usage; assert.deepEqual([row.provider,row.model_id,row.agent,row.effort,row.model],['local','advisor-v1','pi','high','local/advisor-v1']) })
 test('ADR47-L2 E1 cadence consult retains ordinal 25 after calls 26 and 27', async () => { const f=fixture(); const journal=sink(); const manifest=JSON.parse(readFileSync(join(f.taskDir,advisor.TRIPWIRE_MANIFEST_FILE))); manifest.cell={provider:'local',id:'advisor-v1',agent:'pi',effort:'high',model:'local/advisor-v1'}; writeFileSync(join(f.taskDir,advisor.TRIPWIRE_MANIFEST_FILE),JSON.stringify(manifest)); let spawned=0; const a=advisor.createAdvisor({env:env({CREW_TASK_DIR:f.taskDir}),deps:{cwd:f.tree,taskDir:f.taskDir,appendFile:journal.appendFile,readFile:(p)=>readFileSync(p,'utf8'),fileMtime:()=>2,resolveBinary:()=>({command:'/fake/pi'}),spawn:()=>{spawned++;return fakeChild()}}}); a.onToolResult(result('ground','read',{path:join(f.tree,'lib/widget.mjs')},'lib/widget.mjs:2: grounded'),{}); for(let i=1;i<=27;i++) a.onToolCall(call(String(i),'read',{}),{}); a.onToolResult(result('25','read',{},'ok'),{}); await a.settled(); const notes=journal.rows.filter(x=>x.advisor_note?.tier===1&&x.advisor_note.outcome!=='skipped').map(x=>x.advisor_note); assert.equal(spawned,1); assert.equal(notes.length,1); assert.equal(notes[0].call_ordinal,25); rmSync(f.root,{recursive:true,force:true}) })
 test('ADR47-L2 E2 tier zero note stamps its firing call ordinal', async () => { const r=await runManifestConsult(); const note=r.journal.rows.find(x=>x.advisor_note?.tier===0)?.advisor_note; assert.equal(note.call_ordinal,1) })
-test('RV1-1 guard C1 null-cell attach preserves tripwire tier-zero behavior', async () => {
-  const f = fixture(); const manifestPath = join(f.taskDir, advisor.TRIPWIRE_MANIFEST_FILE)
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')); manifest.cell = null
-  writeFileSync(manifestPath, JSON.stringify(manifest))
-  const journal = sink(); const p = pi()
-  await advisor.attachAdvisor(p, { env: { CREW_ADVISOR: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: f.taskDir }, deps: {
-    taskDir: f.taskDir, cwd: f.tree, appendFile: journal.appendFile,
-    readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
-  } })
-  p.handlers.find(([event]) => event === 'tool_call')[1](call('guard-c1', 'write', { path: join(f.tree, 'lib/widget.test.mjs'), content: 'test' }), {})
-  assert.equal(journal.rows.find((row) => row.advisor_note?.tier === 0)?.advisor_note.outcome, 'injected')
-  rmSync(f.root, { recursive: true, force: true })
-})
 test('RV1-1 guard C2 null-cell cadence writes no tier-one notes', async () => {
   const f = fixture(); const manifestPath = join(f.taskDir, advisor.TRIPWIRE_MANIFEST_FILE)
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')); manifest.cell = null
@@ -191,14 +165,6 @@ test('RV1-1 guard C2 null-cell cadence writes no tier-one notes', async () => {
   for (let i = 1; i <= 25; i++) { a.onToolCall(call(`guard-c2-${i}`, 'read', {}), {}); a.onToolResult(result(`guard-c2-${i}`, 'read', {}, 'ok'), {}) }
   await a.settled()
   assert.equal(journal.rows.some((row) => row.advisor_note?.tier === 1), false)
-  rmSync(f.root, { recursive: true, force: true })
-})
-test('RV1-1 guard C3 grant attaches without manifest or model environment', async () => {
-  const f = fixture(); rmSync(join(f.taskDir, advisor.TRIPWIRE_MANIFEST_FILE))
-  const journal = sink(); const p = pi()
-  await advisor.attachAdvisor(p, { env: { CREW_ADVISOR: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: f.taskDir }, deps: { taskDir: f.taskDir, appendFile: journal.appendFile } })
-  assert.deepEqual(p.handlers.map(([event]) => event).sort(), ['tool_call', 'tool_result'])
-  assert.equal(journal.rows.find((row) => row.advisor_boot)?.advisor_boot.outcome, 'attached')
   rmSync(f.root, { recursive: true, force: true })
 })
 // Kills: `cell_invalid` forced false (or the attach check deleted). A present cell that fails
@@ -220,23 +186,6 @@ test('a malformed manifest cell refuses attach while an explicit null cell attac
     }
     rmSync(f.root, { recursive: true, force: true })
   }
-})
-test('RV1-1 guard E1 cadence note keeps ordinal 25 across later issued calls', async () => {
-  const f = fixture(); const journal = sink(); let spawned = 0
-  const a = advisor.createAdvisor({ env: { CREW_ADVISOR: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: f.taskDir }, deps: {
-    taskDir: f.taskDir, cwd: f.tree, appendFile: journal.appendFile,
-    readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
-    resolveBinary: () => ({ command: '/fake/pi' }), spawn: () => { spawned++; return fakeChild() },
-  } })
-  a.onToolResult(result('guard-ground', 'read', { path: join(f.tree, 'lib/widget.mjs') }, 'lib/widget.mjs:2: grounded'), {})
-  for (let i = 1; i <= 27; i++) a.onToolCall(call(String(i), 'read', {}), {})
-  a.onToolResult(result('25', 'read', {}, 'ok'), {})
-  await a.settled()
-  const notes = journal.rows.filter((row) => row.advisor_note?.tier === 1 && row.advisor_note.outcome !== 'skipped').map((row) => row.advisor_note)
-  assert.equal(spawned, 1)
-  assert.equal(notes.length, 1)
-  assert.equal(notes[0].call_ordinal, 25)
-  rmSync(f.root, { recursive: true, force: true })
 })
 
 test('result-time repeated-failure notes and queued triggers retain the result call ordinal', async () => {
@@ -373,34 +322,13 @@ const sharedAdvisorCells = Object.freeze([
   { endpoint: '', model: 'qwen3-coder' },
 ])
 
-test('extension admits the canonical LAN endpoint/model cell', () => {
-  assert.deepEqual(advisor.classifyAdvisorCell(sharedAdvisorCells[1]), {
-    endpoint: 'http://10.112.20.20:8080/v1', model: 'qwen3-coder',
-  })
-})
 
-test('B1 extension retains exact refusal reasons for invalid cells', () => {
-  const refusals = [
-    [sharedAdvisorCells[4], { reason: 'endpoint-not-local' }],
-    [sharedAdvisorCells[5], { reason: 'endpoint-credentials' }],
-    [sharedAdvisorCells[6], { reason: 'endpoint-not-local' }],
-    [sharedAdvisorCells[7], { reason: 'model-unset' }],
-    [sharedAdvisorCells[8], { reason: 'model-unsafe' }],
-    [sharedAdvisorCells[9], { reason: 'model-unsafe' }],
-  ]
-  for (const [cell, expected] of refusals) assert.deepEqual(advisor.classifyAdvisorCell(cell), expected)
-})
 
-test('RV1-1 extension classifies an unset endpoint without roster membership as model-unsafe', () => {
-  assert.deepEqual(advisor.classifyAdvisorCell(sharedAdvisorCells[9]), { reason: 'model-unsafe' })
-})
 
 test('D1 extension and boot refusal vocabularies retain exact frozen ordered values', () => {
   assert.equal(Object.isFrozen(advisor.UNAVAILABLE_REASONS), true)
   assert.deepEqual(advisor.UNAVAILABLE_REASONS, [
-    'role-unsupported', 'endpoint-unset', 'endpoint-not-local',
-    'endpoint-credentials', 'model-unset', 'model-unsafe', 'endpoint-dead',
-    'manifest-cell-invalid',
+    'role-unsupported', 'manifest-cell-invalid',
   ])
 })
 
@@ -414,7 +342,7 @@ test('attach is default-off, refuses wrong roles, and journals before handlers',
   const live = sink(); const order = []; const p = pi()
   p.on = (event, handler) => { order.push(`on:${event}`); p.handlers.push([event, handler]) }
   await advisor.attachAdvisor(p, { env: env(), deps: {
-    ...live, appendFile: (path, text) => { order.push('append'); live.appendFile(path, text) }, fetchFn: fetcher(),
+    ...live, appendFile: (path, text) => { order.push('append'); live.appendFile(path, text) },
   } })
   assert.equal(order[0], 'append')
   assert.deepEqual(p.handlers.map(([event]) => event).sort(), ['tool_call', 'tool_result'])
@@ -474,11 +402,11 @@ test('RV1-1 tier-zero steer is stripped from a later consult delta', async () =>
 })
 
 test('AD5 tier-zero notes are deterministic and tier one is journal-first', async () => {
-  const f = fixture(); const journal = sink(); const sends = []; const fetchFn = fetcher()
+  const f = fixture(); const journal = sink(); const sends = []
   const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir }), deps: {
     cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile,
     readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
-    fetchFn, spawn: () => fakeChild(), send: (message, options) => sends.push({ message, options }),
+    spawn: () => fakeChild(), send: (message, options) => sends.push({ message, options }),
   } })
   const outside = join(f.tree, 'outside.mjs'); writeFileSync(outside, 'a\n')
   const input = { path: outside, edits: [{ oldText: 'a', newText: 'aa' }] }
@@ -615,10 +543,10 @@ test('every delta source is redacted before it is stored, sent or frozen', async
 
   assert.deepEqual(dirtyRows[0].redacted, { 'github-token': 1 })
 
-  const cleanFixture = fixture(); const cleanJournal = sink(); const cleanFetch = fetcher()
+  const cleanFixture = fixture(); const cleanJournal = sink()
   const cleanAdvisor = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: cleanFixture.taskDir }), deps: {
     cwd: cleanFixture.tree, taskDir: cleanFixture.taskDir, appendFile: cleanJournal.appendFile,
-    readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2, fetchFn: cleanFetch,
+    readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
   } })
   try {
     const path = join(cleanFixture.tree, 'outside-clean.mjs'); const content = 'const clean = 1\n'
@@ -648,7 +576,7 @@ test('A1', async () => {
     child.kill = () => true
     return child
   }
-  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_ENDPOINT: undefined, CREW_ADVISOR_MODEL: 'provider/model' }), deps: {
+  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_MODEL: 'provider/model' }), deps: {
     cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile,
     readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
     resolveBinary: () => ({ command: '/stub/pi', args: [] }), spawn,
@@ -672,16 +600,6 @@ test('A1', async () => {
   rmSync(f.root, { recursive: true, force: true })
 })
 
-test('model-only attach uses the supplied roster catalog without probing or resolving pi', async () => {
-  const f = fixture(); const journal = sink(); const p = pi(); let probes = 0; let spawned = 0
-  await advisor.attachAdvisor(p, { env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_ENDPOINT: '', CREW_ADVISOR_MODEL: 'provider/model', CREW_ADVISOR_MODELS: { 'provider/model': {} } }), deps: {
-    ...journal, taskDir: f.taskDir, fetchFn: async () => { probes++; return { status: 200 } },
-    resolveBinary: () => { spawned++; throw new Error('must not resolve during attach') }, spawn: () => { spawned++; throw new Error('must not spawn during attach') },
-  } })
-  assert.deepEqual(p.handlers.map(([event]) => event).sort(), ['tool_call', 'tool_result'])
-  assert.equal(probes, 0); assert.equal(spawned, 0)
-  rmSync(f.root, { recursive: true, force: true })
-})
 
 test('RV1-1 rpc advisor activation uses the manifest cell, not a roster env catalog', async () => {
   const f = fixture(); const journal = sink(); const p = pi()
@@ -689,7 +607,7 @@ test('RV1-1 rpc advisor activation uses the manifest cell, not a roster env cata
   assert.equal(seatEnv.CREW_ADVISOR, '1')
   assert.equal(Object.hasOwn(seatEnv, 'CREW_ADVISOR_MODEL'), false)
   assert.equal(Object.hasOwn(seatEnv, 'CREW_ADVISOR_MODELS'), false)
-  await advisor.attachAdvisor(p, { env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_ENDPOINT: undefined, CREW_ADVISOR_MODEL: undefined }), deps: { ...journal, taskDir: f.taskDir } })
+  await advisor.attachAdvisor(p, { env: env({ CREW_TASK_DIR: f.taskDir }), deps: { ...journal, taskDir: f.taskDir } })
   assert.equal(p.handlers.length, 2)
   rmSync(f.root, { recursive: true, force: true })
 })
@@ -708,7 +626,7 @@ test('RV1-3 journals stale child consult usage before suppressing stale notes', 
     child.stdin = { end() { finish = () => { child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: JSON.stringify({ class: 'edge-path', severity: 'low', claim: 'stale finding', evidence: ['lib/widget.mjs:2'] }), usage: { input: 4, output: 2 } } }) + '\n'); child.emit('close', 0) } } }
     child.kill = () => true; return child
   }
-  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_ENDPOINT: undefined, CREW_ADVISOR_MODEL: 'provider/model' }), deps: {
+  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_MODEL: 'provider/model' }), deps: {
     cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile, readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
     resolveBinary: () => ({ command: '/stub/pi', args: [] }), spawn,
   } })
@@ -739,7 +657,7 @@ test('A3 clockfree pi-child timeout, oversize output and invalid frames are clos
       child.kill = () => true
       return child
     }
-    const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_ENDPOINT: undefined, CREW_ADVISOR_MODEL: 'provider/model' }), deps: {
+    const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_MODEL: 'provider/model' }), deps: {
       cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile, readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
       resolveBinary: () => ({ command: '/stub/pi', args: [] }), spawn, consultTimeoutMs: 5, setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout,
     } })
@@ -756,23 +674,16 @@ test('A3 clockfree pi-child timeout, oversize output and invalid frames are clos
   }
 })
 
-test('A2 retired endpoint no longer selects fetch transport', async () => {
-  const r = await runManifestConsult({ envExtra: { CREW_ADVISOR_ENDPOINT: 'http://127.0.0.1:11434/v1' } })
-  assert.equal(r.fetched, 0)
-  assert.equal(r.spawned, 1)
-  assert.equal(r.journal.rows.some((row) => row.advisor_usage), true)
-  rmSync(r.f.root, { recursive: true, force: true })
-})
 
 test('A3', async () => {
-  const f = fixture(); const journal = sink(); const fetchFn = fetcher(); const inputs = []
+  const f = fixture(); const journal = sink(); const inputs = []
   const childSpawn = (bin, args) => {
     const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
     child.stdin = { end(value) { inputs.push(value); setImmediate(() => { child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: JSON.stringify({ class: 'edge-path', severity: 'low', claim: 'Guard at lib/widget.mjs:2 misses the null path.', evidence: ['lib/widget.mjs:2'] }) } }) + '\n'); child.emit('close', 0) }) } }; child.kill = () => true; return child
   }
-  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_ENDPOINT: undefined, CREW_ADVISOR_MODEL: 'provider/model' }), deps: {
+  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_MODEL: 'provider/model' }), deps: {
     cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile, readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
-    fetchFn, spawn: childSpawn, resolveBinary: () => ({ command: '/stub/pi', args: [] }),
+    spawn: childSpawn, resolveBinary: () => ({ command: '/stub/pi', args: [] }),
   } })
   const path = join(f.tree, 'lib', 'widget.mjs')
   const trigger = (id, target) => {
@@ -797,40 +708,29 @@ test('A3', async () => {
   rmSync(f.root, { recursive: true, force: true })
 })
 
-test('planner seat with grant is advised', async () => {
-  const f = fixture(); const journal = sink(); const p = pi(); const fetchFn = fetcher()
-  await advisor.attachAdvisor(p, { env: env({ CREW_ROLE: 'planner', CREW_TASK_DIR: f.taskDir }), deps: {
-    ...journal, taskDir: f.taskDir, fetchFn,
-  } })
-  assert.deepEqual(p.handlers.map(([event]) => event).sort(), ['tool_call', 'tool_result'])
-  assert.equal(journal.rows.some((row) => row.advisor_boot?.role === 'planner'), true)
-  assert.equal(fetchFn.posts.length, 0)
-})
 
 test('B1 lead seat remains role-unsupported', async () => {
-  const f = fixture(); const journal = sink(); const p = pi(); let probes = 0
+  const f = fixture(); const journal = sink(); const p = pi()
   await assert.rejects(
     () => advisor.attachAdvisor(p, { env: env({ CREW_ROLE: 'lead', CREW_TASK_DIR: f.taskDir }), deps: {
-      ...journal, taskDir: f.taskDir, fetchFn: async () => { probes += 1; return { status: 200 } },
+      ...journal, taskDir: f.taskDir,
     } }),
     (err) => { assert.equal(err.reason, 'role-unsupported'); return true },
   )
-  assert.equal(probes, 0)
   assert.equal(p.handlers.length, 0)
   assert.equal(journal.rows[0]?.advisor_unavailable?.reason, 'role-unsupported')
 })
 
 test('C1 no-write seats remain role-unsupported', async () => {
   for (const role of ['tech-lead', 'reviewer']) {
-    const f = fixture(); const journal = sink(); const p = pi(); let probes = 0
+    const f = fixture(); const journal = sink(); const p = pi()
     await assert.rejects(
       () => advisor.attachAdvisor(p, { env: env({ CREW_ROLE: role, CREW_TASK_DIR: f.taskDir }), deps: {
-        ...journal, taskDir: f.taskDir, fetchFn: async () => { probes += 1; return { status: 200 } },
+        ...journal, taskDir: f.taskDir,
       } }),
       (err) => { assert.equal(err.reason, 'role-unsupported'); return true },
     )
-    assert.equal(probes, 0)
-    assert.equal(p.handlers.length, 0)
+      assert.equal(p.handlers.length, 0)
     assert.equal(journal.rows[0]?.advisor_unavailable?.reason, 'role-unsupported')
   }
 })
@@ -862,15 +762,13 @@ test('D1 builder advisor behavior remains grounded in the manifest-cell child', 
 
 test('E1 unset grant has a live no-journaling witness', async () => {
   for (const role of ['builder', 'planner', 'lead', 'tech-lead', 'reviewer']) {
-    const f = fixture(); const p = pi(); let appends = 0; let probes = 0
+    const f = fixture(); const p = pi(); let appends = 0
     const values = env({ CREW_ROLE: role, CREW_TASK_DIR: f.taskDir }); delete values.CREW_ADVISOR
     await advisor.attachAdvisor(p, { env: values, deps: {
       taskDir: f.taskDir,
       appendFile: () => { appends += 1 },
-      fetchFn: async () => { probes += 1; return { status: 200 } },
     } })
     assert.equal(appends, 0, role)
-    assert.equal(probes, 0, role)
     assert.equal(p.handlers.length, 0, role)
   }
 })
@@ -878,65 +776,22 @@ test('E1 unset grant has a live no-journaling witness', async () => {
 test('F1 advisor refusal and judgment vocabularies remain frozen', () => {
   assert.equal(Object.isFrozen(advisor.UNAVAILABLE_REASONS), true)
   assert.deepEqual(advisor.UNAVAILABLE_REASONS, [
-    'role-unsupported', 'endpoint-unset', 'endpoint-not-local',
-    'endpoint-credentials', 'model-unset', 'model-unsafe', 'endpoint-dead',
-    'manifest-cell-invalid',
+    'role-unsupported', 'manifest-cell-invalid',
   ])
   assert.equal(Object.isFrozen(advisor.JUDGMENT_CLASSES), true)
   assert.deepEqual(advisor.JUDGMENT_CLASSES, ['edge-path', 'over-claim'])
 })
 
-test('G1 planner receives plan and gate judgment context from the pi child', async () => {
-  const f = fixture()
-  assert.equal(existsSync(join(f.taskDir, advisor.TRIPWIRE_MANIFEST_FILE)), true)
-  assert.equal(existsSync(join(f.root, 'returns')), true)
-  const plannerEnv = env({ CREW_ROLE: 'planner', CREW_TASK_DIR: f.taskDir })
 
-  const planPath = join(f.taskDir, 'plan.md')
-  const gatePath = join(f.taskDir, 'gate.mjs')
-  writeFileSync(planPath, '# Plan\n- handle empty output\n')
-  writeFileSync(gatePath, 'export const gate = true\n')
-  writeFileSync(join(f.taskDir, 'private.md'), 'must not be sent\n')
-  const journal = sink(); let childInput = ''
-  const a = advisor.createAdvisor({ env: plannerEnv, deps: {
-    cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile,
-    readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
-    spawn: () => { const child = fakeChild(); const end = child.stdin.end; child.stdin.end = (value) => { childInput = value; end(value) }; return child },
-  } })
-  const planInput = { path: planPath, content: readFileSync(planPath, 'utf8') }
-  a.onToolResult(result('plan', 'write', planInput, 'ok'), {})
-  const gateInput = { path: gatePath, edits: [{ oldText: 'x', newText: readFileSync(gatePath, 'utf8') }] }
-  a.onToolResult(result('gate', 'edit', gateInput, 'ok'), {})
-  for (const [id, path] of [
-    ['private', join(f.taskDir, 'private.md')],
-    ['nested', join(f.taskDir, 'nested', 'plan.md')],
-    ['escape', join(f.taskDir, '..', 'escape.md')],
-  ]) {
-    a.onToolResult(result(id, 'read', { path, offset: 1 }, 'not planner context'), {})
-  }
-  const failureInput = { command: 'npm test' }
-  for (const id of ['planner-failure-1', 'planner-failure-2']) {
-    a.onToolCall(call(id, 'bash', failureInput), {})
-    a.onToolResult(result(id, 'bash', failureInput, 'not ok 1 - planner failure (4ms)', true), {})
-  }
-  await a.settled()
-  const user = JSON.parse(childInput)
-  const labels = [...new Set(user.delta.flatMap((entry) => String(entry.text).split('\n')
-    .map((line) => /^([^:]+(?:\/[^:]+)*):\d+: /.exec(line)?.[1]).filter(Boolean)))]
-  assert.deepEqual(labels.sort(), ['task/gate.mjs', 'task/plan.md'])
-  assert.equal(user.delta.some((entry) => String(entry.text).includes('private.md')), false)
-  assert.equal(user.delta.some((entry) => String(entry.text).includes('escape.md')), false)
-})
-
-test('I1 extension role gate admits builder and planner only', async () => {
+test('I1 extension role gate admits builder only', async () => {
   const roles = ['builder', 'planner', 'lead', 'tech-lead', 'reviewer']
-  const expected = [true, true, false, false, false]
+  const expected = [true, false, false, false, false]
   const extension = []
   for (const role of roles) {
     const f = fixture(); const p = pi(); const journal = sink(); const values = env({ CREW_ROLE: role, CREW_TASK_DIR: f.taskDir })
     try {
       await advisor.attachAdvisor(p, { env: values, deps: {
-        ...journal, taskDir: f.taskDir, fetchFn: async () => ({ status: 200 }),
+        ...journal, taskDir: f.taskDir,
       } })
       extension.push(true)
     } catch (error) {
@@ -947,14 +802,6 @@ test('I1 extension role gate admits builder and planner only', async () => {
   assert.deepEqual(extension, expected)
 })
 
-test('K1 planner edge-path gloss fits plan and gate', () => {
-  assert.equal(advisor.BUILDER_SYSTEM_PROMPT, 'Review the builder delta for exactly two judgment classes: edge-path (checklist B1: answer EPERM, unknown, interrupted, and empty paths) and over-claim (checklist B2: record no verdict stronger than what was measured). Return JSON alone: one object or an array of 1 to 4 objects, with no prose, no code fence, no wrapper key and no second object on another line. Each object has exactly the four keys class, severity, claim and evidence. class must be one of edge-path, over-claim. severity must be one of low, medium, high. claim must be a non-empty string of at most 500 UTF-8 bytes. evidence must be an array of 1 to 5 strings, each at most 200 UTF-8 bytes and exactly a bare path:line (no range, no prose, no whitespace or colon in the path; decimal line number). The first evidence item must cite a line shown in the delta. Do not copy the example\'s evidence unless that line is shown in the delta. Example reply: {"class":"edge-path","severity":"low","claim":"The empty input path is not handled.","evidence":["src/widget.mjs:12"]} If neither class applies, return [] alone.')
-  assert.equal(advisor.PLANNER_SYSTEM_PROMPT, 'Review the planner delta for exactly two judgment classes: edge-path (a plan or gate omits or mishandles a required boundary, failure case, or acceptance path) and over-claim (a Ground truth citation that does not hold at the ref where the plan was written). Return JSON alone: one object or an array of 1 to 4 objects, with no prose, no code fence, no wrapper key and no second object on another line. Each object has exactly the four keys class, severity, claim and evidence. class must be one of edge-path, over-claim. severity must be one of low, medium, high. claim must be a non-empty string of at most 500 UTF-8 bytes. evidence must be an array of 1 to 5 strings, each at most 200 UTF-8 bytes and exactly a bare path:line (no range, no prose, no whitespace or colon in the path; decimal line number). The first evidence item must cite a line shown in the delta. Do not copy the example\'s evidence unless that line is shown in the delta. Example reply: {"class":"edge-path","severity":"low","claim":"The empty input path is not handled.","evidence":["src/widget.mjs:12"]} If neither class applies, return [] alone.')
-  assert.match(advisor.PLANNER_SYSTEM_PROMPT, /plan or gate omits or mishandles a required boundary, failure case, or acceptance path/)
-  assert.match(advisor.PLANNER_SYSTEM_PROMPT, /Ground truth citation that does not hold at the ref where the plan was written/)
-  assert.doesNotMatch(advisor.PLANNER_SYSTEM_PROMPT, /EPERM, unknown, interrupted, and empty paths/)
-  assert.deepEqual(advisor.JUDGMENT_CLASSES, ['edge-path', 'over-claim'])
-})
 
 function manualTimers(consultTimeoutMs) {
   const armed = []
@@ -965,10 +812,10 @@ function manualTimers(consultTimeoutMs) {
 }
 
 function childConsult({ childSpawn, extraDeps = {} }) {
-  const f = fixture(); const journal = sink(); const fetchFn = fetcher()
-  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_ENDPOINT: undefined, CREW_ADVISOR_MODEL: 'provider/model' }), deps: {
+  const f = fixture(); const journal = sink()
+  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_MODEL: 'provider/model' }), deps: {
     cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile, readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
-    fetchFn, spawn: childSpawn, resolveBinary: () => ({ command: '/stub/pi', args: [] }), ...extraDeps,
+    spawn: childSpawn, resolveBinary: () => ({ command: '/stub/pi', args: [] }), ...extraDeps,
   } })
   const run = async () => {
     const path = join(f.tree, 'lib', 'widget.mjs')
@@ -1278,7 +1125,7 @@ async function adDrive(reply, { noCell = false, denyAppend = false } = {}) {
     schema_version: 1, run_started_at: 1, tripwires: [],
     ...(noCell ? {} : { cell: { provider: 'local', id: 'advisor', agent: 'pi', effort: 'medium', model: 'local/advisor' } }),
   }))
-  writeFileSync(join(root, 'returns/d1.planner.json'), JSON.stringify({ details: { files_in_scope: ['lib/'], validation_lane: 'npm test' } }))
+  writeFileSync(join(taskDir, 'plan.md'), '# plan\n'); writeFileSync(join(taskDir, 'planner-1.json'), JSON.stringify({ role: 'planner', id: 'lane.planner.1', status: 'done', summary: 'fixture', details: { subject: 'fix(crew): advisor fixture', plan_path: 'plan.md', tests: [], files_in_scope: ['lib/'], validation_lane: 'npm test' } }))
   let spawned = 0
   const seat = advisor.createAdvisor({ env: { CREW_ADVISOR: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: taskDir }, deps: {
     taskDir, cwd: tree, fileMtime: () => 2, readFile: (p) => readFileSync(p, 'utf8'), diffSize: () => null,
@@ -1361,7 +1208,7 @@ test('AD5 a tier-zero note is journaled first and then sent as a steer', async (
 
 // MUTATION AS1: replace the severity interpolation with an invalid value.
 test('AS1 both role prompts carry the complete constant-backed reply contract', () => {
-  const prompts = [advisor.BUILDER_SYSTEM_PROMPT, advisor.PLANNER_SYSTEM_PROMPT]
+  const prompts = [advisor.BUILDER_SYSTEM_PROMPT]
   const clauses = [
     'Return JSON alone: one object or an array of 1 to 4 objects, with no prose, no code fence, no wrapper key and no second object on another line.',
     'Each object has exactly the four keys class, severity, claim and evidence.',
@@ -1406,7 +1253,7 @@ test('AS2 malformed reply shapes are rejected and mapped to prompt clauses', () 
 
 // MUTATION AS3: make the embedded example severity invalid.
 test('AS3 both prompt examples validate as objects and one-element arrays', () => {
-  for (const prompt of [advisor.BUILDER_SYSTEM_PROMPT, advisor.PLANNER_SYSTEM_PROMPT]) {
+  for (const prompt of [advisor.BUILDER_SYSTEM_PROMPT]) {
     const marker = 'Example reply: '
     const index = prompt.lastIndexOf(marker)
     assert.notEqual(index, -1)
@@ -1456,7 +1303,7 @@ async function rjDrive(reply, { mode = 'reply', digest, repeated = false } = {})
     schema_version: 1, run_started_at: 1, tripwires: [],
     cell: { provider: 'local', id: 'advisor', agent: 'pi', effort: 'medium', model: 'local/advisor' },
   }))
-  writeFileSync(join(root, 'returns/d1.planner.json'), JSON.stringify({ details: { files_in_scope: ['lib/'], validation_lane: 'npm test' } }))
+  writeFileSync(join(taskDir, 'plan.md'), '# plan\n'); writeFileSync(join(taskDir, 'planner-1.json'), JSON.stringify({ role: 'planner', id: 'lane.planner.1', status: 'done', summary: 'fixture', details: { subject: 'fix(crew): advisor fixture', plan_path: 'plan.md', tests: [], files_in_scope: ['lib/'], validation_lane: 'npm test' } }))
   let timeoutFn, childIndex = 0
   const deps = {
     taskDir, cwd: tree, fileMtime: () => 2, readFile: p => readFileSync(p, 'utf8'), diffSize: () => null,
@@ -1598,7 +1445,6 @@ test('TS3 only a literal empty JSON array is treated as no-finding', async () =>
 test('TS4 both advisor prompts instruct the no-finding reply', () => {
   const sentence = 'If neither class applies, return [] alone.'
   assert.equal(advisor.BUILDER_SYSTEM_PROMPT.includes(sentence), true)
-  assert.equal(advisor.PLANNER_SYSTEM_PROMPT.includes(sentence), true)
 })
 
 test('a lean lane gives the advisor its scope from the lane planner return written before the seat, dated by the lane start', () => {
@@ -1620,16 +1466,6 @@ test('a lean lane gives the advisor its scope from the lane planner return writt
   assert.equal(advisor.loadContext({ taskDir: lane.taskDir, env: lane.env }).scope_source, 'planner-return-12')
 })
 
-test('the advisor keeps the old layout without a lane layout and journals a lean lane in the lane journal', () => {
-  const lane = leanLaneFixture()
-  assert.equal(advisor.journalPathFrom(lane.taskDir), join(lane.parent, 'journal.jsonl'))
-  assert.equal(advisor.returnsDirFrom(lane.taskDir), join(lane.parent, 'returns'))
-  assert.equal(advisor.journalPathFrom(lane.taskDir, lane.env), join(lane.taskDir, 'journal.jsonl'))
-  assert.equal(advisor.returnsDirFrom(lane.taskDir, lane.env), lane.taskDir)
-  writeFileSync(join(lane.parent, 'advisor-manifest.json'), '{}')
-  writeFileSync(join(lane.taskDir, 'advisor-manifest.json'), JSON.stringify({ schema_version: 1, run_started_at: lane.at, tripwires: [], cell: null }))
-  assert.equal(advisor.loadContext({ taskDir: lane.taskDir, env: { CREW_TASK_DIR: lane.taskDir } }).files_in_scope[0], 'FOREIGN')
-})
 
 // A deferred consult: the host hands the prepared request to a detached worker (runTier1Consult) on a fresh advisor.
 async function deferredDrive({ replyClaim = 'the deferred consult found the edge' } = {}) {
@@ -1641,7 +1477,7 @@ async function deferredDrive({ replyClaim = 'the deferred consult found the edge
     schema_version: 1, run_started_at: 1, tripwires: [],
     cell: { provider: 'local', id: 'advisor', agent: 'pi', effort: 'medium', model: 'local/advisor' },
   }))
-  writeFileSync(join(root, 'returns/d1.planner.json'), JSON.stringify({ details: { files_in_scope: ['lib/'], validation_lane: 'npm test' } }))
+  writeFileSync(join(taskDir, 'plan.md'), '# plan\n'); writeFileSync(join(taskDir, 'planner-1.json'), JSON.stringify({ role: 'planner', id: 'lane.planner.1', status: 'done', summary: 'fixture', details: { subject: 'fix(crew): advisor fixture', plan_path: 'plan.md', tests: [], files_in_scope: ['lib/'], validation_lane: 'npm test' } }))
   let spawned = 0
   const base = {
     taskDir, cwd: tree, fileMtime: () => 2, readFile: p => readFileSync(p, 'utf8'), diffSize: () => null,
@@ -1781,13 +1617,14 @@ test('AS1 a pi-seat write to the lane return file is never a scope breach; a wri
 
 // ---- diff-growth and pre-return triggers -------------------------------------------------------------------------
 function triggerSeat({ severity = 'high', claim = 'must-fix: the empty path is unhandled', evidence = ['lib/widget.mjs:1'], hang = false, extraDeps = {}, manifest = null } = {}) {
-  const f = fixture(); const journal = sink(); const diff = { lines: 0, entries: [] }; let spawned = 0; const payloads = []
+  const f = fixture(); const journal = sink(); const diff = { lines: 0, entries: [] }; let spawned = 0; const payloads = []; const prompts = []
   if (manifest) writeFileSync(join(f.taskDir, advisor.TRIPWIRE_MANIFEST_FILE), JSON.stringify({ schema_version: 1, run_started_at: 1, tripwires: [], cell: { provider: 'provider', id: 'model', agent: 'pi', effort: 'medium', model: 'provider/model' }, ...manifest }))
   const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir }), deps: {
     cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile, readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
     diffSize: () => null, diffLines: () => ({ lines: diff.lines, entries: diff.entries, text: diff.entries.join('\n') }),
     resolveBinary: () => ({ command: '/fake/pi', args: [] }),
-    spawn: () => {
+    spawn: (_bin, args) => {
+      prompts.push(readFileSync(args.at(-1), 'utf8'))
       spawned += 1
       const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => true
       child.stdin = { end(value) { payloads.push(JSON.parse(value)); if (hang) return; setImmediate(() => {
@@ -1798,7 +1635,7 @@ function triggerSeat({ severity = 'high', claim = 'must-fix: the empty path is u
     }, ...extraDeps,
   } })
   const ground = () => a.onToolResult({ toolCallId: 'g', toolName: 'read', input: { path: join(f.tree, 'lib/widget.mjs') }, content: [{ type: 'text', text: 'a' }] }, {})
-  return { f, journal, diff, a, ground, payloads, spawned: () => spawned, ret: join(f.taskDir, 'builder-1.json') }
+  return { f, journal, diff, a, ground, payloads, prompts, spawned: () => spawned, ret: join(f.taskDir, 'builder-1.json') }
 }
 
 for (const severity of ['medium', 'high']) test(`a ${severity} diff-growth finding is delivered and never refuses the call it rides on or a later write`, async () => {
@@ -2139,20 +1976,38 @@ test('PW1 the pre-return window grounds removed lines at their old path and line
   assert.ok(packed.entries[0].includes('a.mjs:300: '))
 })
 
-test('PW2 a pre-return consult carries the brief acceptance items; an invalid list is dropped and the consult still runs', async () => {
-  const items = ['(PW1) first', '(PW2) second']
-  const s = triggerSeat({ manifest: { acceptance_items: [...items, ' '] } })
+// MUTATION: send acceptance_items instead of criteria
+test('PW2 a pre-return consult carries the accepted plan criteria and named tests and asks for a check against them', async () => {
+  const items = ['1. WHEN a THE b SHALL c']
+  const tests = [{ file: 'a.test.mjs', title: 'T' }]
+  const s = triggerSeat({ manifest: { criteria: [...items, ' '], tests } })
   try {
     s.ground()
     await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
-    assert.deepEqual(s.payloads[0].acceptance_items, items)
+    assert.deepEqual(s.payloads[0].criteria, items)
+    assert.deepEqual(s.payloads[0].tests, tests)
+    assert.match(s.prompts[0], /criteria/)
+    assert.ok(!s.prompts[0].includes(advisor.PRE_RETURN_NO_BASIS))
   } finally { rmSync(s.f.root, { recursive: true, force: true }) }
-  const bad = triggerSeat({ manifest: { acceptance_items: [1, 'x'] } })
+  const bad = triggerSeat({ manifest: { criteria: [1] } })
   try {
     bad.ground()
     await bad.a.onToolCall(call('r1', 'write', { path: bad.ret, content: '{}\n' }), {})
-    assert.deepEqual(bad.payloads[0].acceptance_items, [])
+    assert.deepEqual(bad.payloads[0].criteria, [])
   } finally { rmSync(bad.f.root, { recursive: true, force: true }) }
+})
+
+// MUTATION: always use PRE_RETURN_NOTE
+test('PW2 a pre-return consult with no criteria or tests says there is nothing to check against', async () => {
+  const s = triggerSeat()
+  try {
+    s.ground()
+    await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}' }), {})
+    assert.equal(typeof advisor.PRE_RETURN_NO_BASIS, 'string')
+    assert.ok(s.prompts[0].includes(advisor.PRE_RETURN_NO_BASIS))
+    assert.equal(consultRow(s).criteria_count, 0)
+    assert.equal(consultRow(s).tests_count, 0)
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
 })
 
 test('PW3 a pre-return diff over the byte budget is packed within it, names the files left out, and records its window', async () => {
@@ -2207,7 +2062,7 @@ test('PW4 a diff-growth consult keeps the small window: at most DELTA_ENTRIES en
     assert.ok(payload)
     assert.ok(payload.delta.length <= advisor.DELTA_ENTRIES)
     assert.ok(payload.delta.every((entry) => Buffer.byteLength(entry.text, 'utf8') <= advisor.DELTA_ENTRY_CAP_BYTES))
-    assert.equal('acceptance_items' in payload, false)
+    assert.equal('criteria' in payload, false)
     assert.equal('window_bytes' in s.journal.rows.find((row) => row.advisor_consult?.trigger === 'diff-growth').advisor_consult, false)
   } finally { rmSync(s.f.root, { recursive: true, force: true }) }
 })
@@ -2247,11 +2102,11 @@ test('PW3 git output over the cap is stated as an incomplete window and names th
 
 test('PW2 and PW3 a diff git cannot read still gives the pre-return consult its acceptance items, a stated gap and a window row', async () => {
   const items = ['(PW1) first']
-  const s = triggerSeat({ manifest: { acceptance_items: items }, extraDeps: { diffLines: () => null } })
+  const s = triggerSeat({ manifest: { criteria: items }, extraDeps: { diffLines: () => null } })
   try {
     s.ground()
     await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
-    assert.deepEqual(s.payloads[0].acceptance_items, items)
+    assert.deepEqual(s.payloads[0].criteria, items)
     assert.deepEqual(s.payloads[0].omitted_files, [advisor.PRE_RETURN_UNAVAILABLE])
     const row = consultRow(s)
     assert.equal(row.window_bytes, 0); assert.equal(row.window_entries, 0)

@@ -10,7 +10,7 @@ const RUN_AT = 1_000_000_000_000
 function fixture({ source = null, plan = '', scope = ['src/target.mjs'], maxLines = '3', role = 'builder' } = {}) {
   const root = scratchDir('skeleton-read-')
   const taskDir = join(root, 'task')
-  const returnsDir = join(root, 'returns')
+  const returnsDir = taskDir
   const sourcePath = join(root, 'src', 'target.mjs')
   mkdirSync(join(taskDir), { recursive: true })
   mkdirSync(returnsDir, { recursive: true })
@@ -19,17 +19,17 @@ function fixture({ source = null, plan = '', scope = ['src/target.mjs'], maxLine
   writeFileSync(sourcePath, body)
   const planPath = join(taskDir, 'plan.md')
   writeFileSync(planPath, plan)
-  writeFileSync(join(root, 'journal.jsonl'), `${JSON.stringify({ event: 'run-start', at: RUN_AT })}\n`)
+  writeFileSync(join(taskDir, 'journal.jsonl'), `${JSON.stringify({ event: 'run-start', at: RUN_AT })}\n`)
   const mtimes = new Map()
   const putReturn = (number, envelope, mtime = RUN_AT + 100) => {
-    const path = join(returnsDir, `d${number}.planner.json`)
+    const path = join(returnsDir, `planner-${number}.json`)
     writeFileSync(path, JSON.stringify(envelope))
     mtimes.set(path, mtime)
     return path
   }
   const envelope = {
-    assignment_id: 'd1', role: 'planner', status: 'done',
-    details: { plan_path: planPath, files_in_scope: scope, validation_lane: 'node --test', gate_cmd: 'node gate.mjs' },
+    id: 'lane.planner.1', role: 'planner', status: 'done', summary: 'fixture',
+    details: { subject: 'fix(crew): skeleton fixture', tests: [], plan_path: planPath, files_in_scope: scope, validation_lane: 'node --test', gate_cmd: 'node gate.mjs' },
   }
   putReturn(1, envelope)
   const deps = {
@@ -55,13 +55,13 @@ function latestEnvelope(f, number, marker, mtime = 250) {
   const planPath = join(f.taskDir, `plan-${number}.md`)
   writeFileSync(planPath, `${marker}\nsrc/target.mjs:2-3\n`)
   return f.putReturn(number, {
-    assignment_id: `d${number}`, role: 'planner', status: 'done',
-    details: { plan_path: planPath, files_in_scope: ['src/target.mjs'], validation_lane: 'node --test', gate_cmd: 'node gate.mjs' },
+    id: `lane.planner.${number}`, role: 'planner', status: 'done', summary: 'fixture',
+    details: { subject: 'fix(crew): skeleton fixture', tests: [], plan_path: planPath, files_in_scope: ['src/target.mjs'], validation_lane: 'node --test', gate_cmd: 'node gate.mjs' },
   }, mtime)
 }
 
 function staleAndCurrentEnvelopes(f) {
-  f.mtimes.set(join(f.returnsDir, 'd1.planner.json'), RUN_AT - 100)
+  f.mtimes.set(join(f.returnsDir, 'planner-1.json'), RUN_AT - 100)
   latestEnvelope(f, 9, 'stale-marker', RUN_AT - 50)
   latestEnvelope(f, 2, 'latest-marker', RUN_AT + 200)
 }
@@ -87,7 +87,7 @@ test('SRA2', () => {
 test('RV1-1 walks an oversized journal backward to the last run start', () => {
   const f = fixture({ plan: 'src/target.mjs:2-3\n' })
   const noise = JSON.stringify({ event: 'seat-liveness', payload: 'x'.repeat(300 * 1024) })
-  writeFileSync(join(f.root, 'journal.jsonl'), `${JSON.stringify({ event: 'run-start', at: RUN_AT })}\n${noise}\n`)
+  writeFileSync(join(f.taskDir, 'journal.jsonl'), `${JSON.stringify({ event: 'run-start', at: RUN_AT })}\n${noise}\n`)
 
   const context = mod.loadAcceptedContext({ taskDir: f.taskDir, cwd: f.root })
   assert.equal(context?.planner_number, 1)
@@ -232,14 +232,4 @@ test('a lean lane accepts its own planner return: citations come from the lane p
   assert.equal(mod.loadAcceptedContext({ taskDir: lane.taskDir, cwd, env: lane.env }), null, 'the newest return is unusable and fails closed')
   rmSync(join(lane.taskDir, 'journal.jsonl'))
   assert.equal(mod.loadAcceptedContext({ taskDir: lane.taskDir, cwd, env: lane.env }), null, 'no fallback to the parent journal')
-})
-
-test('the old layout keeps its flat returns beside the task dir when no lane layout is named', () => {
-  const lane = leanLaneFixture()
-  const cwd = join(lane.parent, 'checkout')
-  mkdirSync(cwd)
-  writeFileSync(join(cwd, 'a.mjs'), 'one\ntwo\n')
-  const context = mod.loadAcceptedContext({ taskDir: lane.taskDir, cwd, env: { CREW_TASK_DIR: lane.taskDir } })
-  assert.equal(context.planner_number, 88)
-  assert.deepEqual(context.files_in_scope, ['FOREIGN'])
 })

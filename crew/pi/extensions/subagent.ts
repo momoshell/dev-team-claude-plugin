@@ -186,13 +186,13 @@ export const CHILD_TIMEOUT_MS = 10 * 60 * 1000
 // (planner, tech-lead, reviewer) run at most about three rounds each, so the
 // busiest seat has roughly 4 x 3 = 12 warranted spawns in a run; 24 is that
 // with a doubling of headroom for a scout that has to be re-asked.
-// The ceiling side: a builder seat waits 2400s (crew/drive.mjs:48) and a child
+// The ceiling side: a builder seat waits 2400s (crew/acp/seat.mjs) and a child
 // may run for CHILD_TIMEOUT_MS, so wall-clock alone already bounds a SLOW loop
 // at about four children. This budget exists for the FAST loop — a child that
 // fails in a second costs a full spawn each time and a 2400s wait buys
 // thousands of them, which is exactly the unbounded fan-out #696 names.
 // A STATED DEFAULT, revisable when measured again — the SUBSTRATE_GRACE_MS
-// posture (crew/seat-io.mjs:44-52).
+// posture (crew/acp/seat.mjs).
 export const SUBAGENT_SPAWN_BUDGET = 24
 
 // The outcome a budget refusal carries in its subagent_usage row. Distinct from
@@ -214,7 +214,7 @@ export const FINDINGS_ERROR_CODES = Object.freeze([
   'finding-evidence-invalid', 'finding-confidence-invalid', 'gaps-invalid',
 ])
 
-// Same spirit as validateCapabilities (crew/crew.mjs:140-218): returns codes,
+// Same spirit as validateCapabilities (crew/acp/grants.mjs): returns codes,
 // never throws. DELIBERATELY payload-free and index-free, and deduped by the
 // caller: a payload with 50k unknown keys, or an unknown key whose NAME is 50KB,
 // must not be able to grow the model-visible refusal by one byte. Interpolating
@@ -315,7 +315,7 @@ export function resolveDefCell(cell: any, { resolveModel, localProviders, path }
   return { model: resolved, effort }
 }
 
-// The four refusal classes and the wording of grantsFor (crew/crew.mjs:284-303),
+// The four refusal classes and the wording of grantsFor (crew/acp/grants.mjs),
 // so the two validators cannot drift apart silently.
 export function loadAgentDefinition(grant: any, deps: any = {}): any {
   const readFile = deps.readFile || readFileSync
@@ -394,7 +394,7 @@ export function resolvePiBinary(deps: any = {}): any {
 }
 
 // THE shared rule: which pi frame carries a SEAT'S OWN spend. It lives here and,
-// character for character, in crew/headless-rpc.mjs, and the two are
+// character for character, in crew/acp/seat.mjs, and the two are
 // pinned equal over one fixture table by the cross-file test in
 // crew/pi/extensions/subagent.test.mjs. Make either side disagree and that test
 // goes red: a comment in a third place is not a coupling.
@@ -427,7 +427,7 @@ export function carriesOwnSpend(frame: any): boolean {
 //
 // message_end carries the spend; turn_end and agent_end REPLAY it, and
 // message_update is cumulative — folding any of them double-counts
-// (crew/headless-rpc.mjs:100-102). agent-loop.js:551 also emits a message_end
+// (crew/acp/seat.mjs). agent-loop.js:551 also emits a message_end
 // whose message.role is 'toolResult': that is a nested tool's spend, not the
 // child's, so the role filter is load-bearing.
 export function createStreamReducer() {
@@ -499,7 +499,7 @@ export function lastAssistantText(lines: any[]): string {
   return reduceAll(lines).text()
 }
 
-// crew/crew.mjs:488-492 + crew/child.mjs:94 — the journal sits beside the task dir.
+// The journal sits inside the task dir.
 // The LAST line of defence on model-visible refusal text, applied in the single
 // result constructor so it covers every refusal class that exists now and every
 // one added later. The schema class is payload-free by construction (above), but
@@ -530,11 +530,11 @@ export function boundAgentName(name: string): string {
 }
 
 export function journalPathFrom(taskDir: string, env?: any): string {
-  return journalPathOf(taskDir, env)
+  return journalPathOf(taskDir)
 }
 
 export function spawnCountPathFrom(taskDir: string, env?: any): string {
-  return spawnCountPathOf(taskDir, env, SPAWN_COUNT_FILE)
+  return spawnCountPathOf(taskDir, SPAWN_COUNT_FILE)
 }
 
 // A sentinel, so the unparseable branch is one decidable line rather than a

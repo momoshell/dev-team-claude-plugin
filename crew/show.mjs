@@ -70,7 +70,7 @@ export function showLane({ lane, role, json = false, deps = {} }) {
     }
   }
   const stat = (path) => attempt(path, d.statSync)
-  // lean: whole-session buffering; stream incrementally if recordings outgrow CLI memory
+  // shortcut: whole-session buffering; stream incrementally if recordings outgrow CLI memory
   const text = (path) => attempt(path, (file) => d.readFileSync(file, 'utf8'))
 
   const laneDir = join(d.crewRoot, `dt-${lane}`)

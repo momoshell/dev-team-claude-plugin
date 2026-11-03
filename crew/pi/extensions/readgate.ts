@@ -670,7 +670,7 @@ export function createReadGate(options = {}) {
             ids.add(call.id)
           }
           const refusals = []
-          // lean: scan pending refusals per parent result; index by parent if nested-call volume grows
+          // shortcut: scan pending refusals per parent result; index by parent if nested-call volume grows
           for (const [id, refusal] of softRefusals) if (refusal.parent === event.toolCallId) refusals.push([id, refusal])
           const refusalIds = new Set(refusals.map(([id]) => id))
           const presentIds = new Set(calls.map((call) => call.id))

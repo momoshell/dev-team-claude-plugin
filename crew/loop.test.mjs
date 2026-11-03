@@ -1771,6 +1771,7 @@ test('a mechanical stop after a rebase that moved the head is finishable: crew f
         if (args[0] === 'rev-parse' && args[1] === 'HEAD') return { status: 'green', stdout: head }
         if (args[0] === 'rev-parse') return { status: variant === 'parent-red' ? 'red' : 'green', stdout: variant === 'parent-moved' ? O : { [`${MOVED.head}^`]: MOVED.onto, [`${MOVED.onto}^`]: O }[args[1]] ?? '' }
         if (args[0] === 'ls-remote') return { status: 'green', stdout: variant === 'pushed' ? `${MOVED.head}\trefs/heads/lane\n` : '' }
+        if (args[0] === 'symbolic-ref') return { status: 'green', stdout: 'lane\n' }
         return { status: 'green', stdout: '' }
       },
       spawnDetached: (...args) => { spawned.push(args); return 4242 },

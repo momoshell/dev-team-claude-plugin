@@ -193,6 +193,11 @@ function claimStop(d, lane, taskDir, at) {
   return claim
 }
 
+const onLaneBranch = (d, spec) => {
+  const branch = d.git(spec.cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
+  return branch?.status === 'green' && typeof spec.branch === 'string' && String(branch.stdout ?? '').trim() === spec.branch
+}
+
 export function finishLane({ lane, root, deps = {} }) {
   const d = { ...defaultDeps(), ...deps }
   const crewRoot = root ?? d.crewRoot
@@ -225,6 +230,7 @@ export function finishLane({ lane, root, deps = {} }) {
       undo = { head: now, onto: rebased.onto, committed: head }
     }
     if (!undo) throw new FinishRefusal('finish-committed', `lane ${lane}'s committed build is not the checkout HEAD`)
+    if (!onLaneBranch(d, spec)) throw new FinishRefusal('finish-committed', `lane ${lane}'s checkout is not on its branch ${spec.branch}`)
     const remote = d.git(spec.cwd, ['ls-remote', '--heads', 'origin', `refs/heads/${spec.branch}`])
     if (remote?.status !== 'green' || String(remote.stdout ?? '').trim() !== '') throw new FinishRefusal('finish-committed', `lane ${lane}'s remote branch exists or could not be checked`)
   }
@@ -241,6 +247,8 @@ export function finishLane({ lane, root, deps = {} }) {
     if (standing) {
       const local = d.git(spec.cwd, ['rev-parse', 'HEAD'])
       if (local?.status !== 'green' || String(local.stdout ?? '').trim() !== undo.head) throw new FinishRefusal('finish-committed', `lane ${lane}'s committed build is not the checkout HEAD`)
+      // The reset moves whichever branch is checked out: another branch at the same commit must never be reset.
+      if (!onLaneBranch(d, spec)) throw new FinishRefusal('finish-committed', `lane ${lane}'s checkout is not on its branch ${spec.branch}`)
       if (d.git(spec.cwd, ['reset', '--soft', undo.onto])?.status !== 'green') throw new FinishRefusal('finish-committed', `lane ${lane}'s committed build could not be reset`)
       try { d.appendFileSync(join(taskDir, 'journal.jsonl'), `${JSON.stringify({ event: 'finish-uncommit', lane, ...undo })}\n`) } catch (error) {
         throw new FinishRefusal('finish-unreadable', `cannot record finish-uncommit for lane ${lane}: ${error?.code ?? error?.message}`)

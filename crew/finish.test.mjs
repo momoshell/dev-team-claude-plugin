@@ -763,15 +763,16 @@ test('--return on a finish run that spent its three review rounds is refused as 
 })
 
 // MUTATION: skip the HEAD equality check and a moved checkout is reset off its own build.
-test('a committed, unpublished build at HEAD is uncommitted and finished; a moved, pushed or unprobed one is still finish-committed', () => {
+test('a committed, unpublished build at HEAD on the lane branch is uncommitted and finished; a moved, pushed, unprobed or other-branch checkout is still finish-committed', () => {
   const head = 'a'.repeat(40)
-  for (const mode of ['success', 'retry', 'moved', 'pushed', 'head-red', 'remote-red', 'reset-red']) {
+  for (const mode of ['success', 'retry', 'moved', 'pushed', 'head-red', 'remote-red', 'reset-red', 'other-branch', 'detached']) {
     const f = fixture({ rows: [{ event: 'run-start' }, builderRow, { event: 'commit', head }, { event: 'verdict', stage: 'rebase', status: 'stopped', reason: 'rebase-conflict' }] })
     try {
       const calls = []
       const gitProbe = (cwd, args) => {
         calls.push(args)
         if (args[0] === 'rev-parse') return { status: mode === 'head-red' ? 'red' : 'green', stdout: mode === 'moved' ? 'b'.repeat(40) : head }
+        if (args[0] === 'symbolic-ref') return mode === 'detached' ? { status: 'red', stdout: '' } : { status: 'green', stdout: mode === 'other-branch' ? 'other\n' : 'lane9\n' }
         if (args[0] === 'ls-remote') return { status: mode === 'remote-red' ? 'red' : 'green', stdout: mode === 'pushed' ? `${head}\trefs/heads/lane9\n` : '' }
         return { status: mode === 'reset-red' ? 'red' : 'green', stdout: '' }
       }
@@ -816,6 +817,7 @@ test('a committed, unpublished build at HEAD is uncommitted and finished; a move
             probed = true
             return { status: 'green', stdout: '' }
           }
+          if (args[0] === 'symbolic-ref') return { status: 'green', stdout: 'lane9\n' }
           return { status: probed && mode === 'head-red' ? 'red' : 'green', stdout: probed && mode === 'head' ? 'b'.repeat(40) : head }
         },
       })

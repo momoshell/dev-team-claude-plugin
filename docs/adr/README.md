@@ -81,7 +81,7 @@ not free.
 | 052 | Agents do the work; code keeps it correct | ratified 2026-10-24, amended 2026-10-24 (Amendment 1), 2026-10-26 (Amendment 2), operator decision | [full document](adr-052-agents-do-the-work.md) |
 | 053 | Build first, prove after: the builder writes the acceptance tests and the loop proves them | proposed 2026-11-01, rejected by ADR-055 on its own measurement (2026-11-02) | [full document](adr-053-build-first-prove-after.md) |
 | 054 | Each tier runs its own loop, and every stage earns its place | proposed 2026-11-01, operator direction; §2–§4 amended by ADR-055 | [full document](adr-054-each-tier-runs-its-own-loop.md) |
-| 055 | The planner defines the work, code checks red and green, the reviewer judges | proposed 2026-11-02, operator direction | [full document](adr-055-planner-defines-the-work.md) |
+| 055 | The planner defines the work, code checks red and green, the reviewer judges | builder (§3) and planner (§2) parts ratified 2026-11-03, loops (§6) proposed | [full document](adr-055-planner-defines-the-work.md) |
 | 042 | Split the test suites, not the driver | superseded by ADR-052 | [full document](adr-042-split-the-suites-not-the-driver.md) |
 
 ### The 014–019 tangle, recorded so nobody re-derives it

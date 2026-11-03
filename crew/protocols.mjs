@@ -4,7 +4,7 @@
 // one field per line, with JSON for objects and object lists. Import-free, so the new
 // path never loads the old one.
 
-export const BRIEF_FIELDS = Object.freeze(['source', 'closes', 'tier', 'shape', 'out_of_scope', 'suite'])
+export const BRIEF_FIELDS = Object.freeze(['source', 'closes', 'mechanical', 'shape', 'out_of_scope', 'suite'])
 export const TIERS = Object.freeze(['mechanical', 'build', 'judge'])
 export const SHAPES = Object.freeze(['standard', 'finish'])
 export const AGENT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
@@ -73,14 +73,18 @@ export function parseBrief(text) {
     if (!pair) { defects.push(`frontmatter line is not key: value: ${JSON.stringify(line)}`); continue }
     // ADR-055 §1: the planner, not the brief, writes criteria.
     if (pair[1] === 'acceptance') { defects.push('acceptance is not a brief field: the planner writes the criteria (ADR-055 §1)'); continue }
+    if (pair[1] === 'tier') { defects.push('tier is not a brief field: use mechanical: true for a mechanical lane (ADR-055 §1)'); continue }
     if (!BRIEF_FIELDS.includes(pair[1])) { defects.push(`unknown field ${pair[1]}; the fields are ${BRIEF_FIELDS.join(', ')}`); continue }
     fields[pair[1]] = value(pair[2])
   }
-  for (const key of BRIEF_FIELDS) if (key !== 'suite' && !Object.hasOwn(fields, key)) defects.push(`missing field ${key}`)
+  for (const key of BRIEF_FIELDS) if (!['suite', 'mechanical'].includes(key) && !Object.hasOwn(fields, key)) defects.push(`missing field ${key}`)
   const body = lines.slice(end + 1).join('\n')
   if (typeof fields.source !== 'string' || !fields.source) defects.push('source names the issue or operator command the lane starts from')
   if (fields.closes !== null && !(Number.isSafeInteger(fields.closes) && fields.closes > 0)) defects.push('closes is null or one issue number')
-  if (!TIERS.includes(fields.tier)) defects.push(`tier is one of ${TIERS.join(', ')}`)
+  if (Object.hasOwn(fields, 'mechanical')) {
+    if (fields.mechanical === 'true') fields.mechanical = true
+    else defects.push('mechanical is true, or the field is absent')
+  }
   if (!SHAPES.includes(fields.shape)) defects.push(`shape is one of ${SHAPES.join(', ')}`)
   if (typeof fields.out_of_scope !== 'string' || !fields.out_of_scope) defects.push('out_of_scope says what the lane must not change')
   if (Object.hasOwn(fields, 'suite') && (typeof fields.suite !== 'string' || fields.suite.trim() === '')) defects.push('suite is a command line (for example: suite: cargo test -p power-api)')
@@ -227,7 +231,7 @@ const DETAIL_KEYS = Object.freeze({
 // Fields a role may carry beyond its required ones. A planner states the context the builder's arms read.
 const OPTIONAL_DETAIL_KEYS = Object.freeze({
   planner: ['files_in_scope', 'validation_lane', 'judge', 'question'],
-  builder: ['tests', 'notes', 'question'],
+  builder: ['tests', 'notes', 'question', 'subject'],
   reviewer: ['question', 'closed', 'findings_omitted'],
   'tech-lead': ['question', 'closed', 'findings_omitted'],
   lead: ['question', 'target'],

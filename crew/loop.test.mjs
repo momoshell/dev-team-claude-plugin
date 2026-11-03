@@ -20,6 +20,7 @@ const MUTATION = { check: 'A1', file: 'lib.mjs', find: 'old', replace: 'new' }
 function fakes(options = {}) {
   const calls = [], rows = [], requests = [], tiers = [], seen = {}, returns = new Map(), writes = new Map()
   let reviewTurns = 0, secondTurns = 0, reviewReads = 0
+  const discardArgs = []
   const spec = {
     id: 'lane', cwd: '/virtual/checkout', taskDir: '/virtual/task', tier: 'build', shape: 'standard', brief: '## The ask\nBuild the lane.',
     source: 'issue 12', branch: 'lane', base: 'main', closes: [12], refs: [13],
@@ -44,7 +45,7 @@ function fakes(options = {}) {
     return typeof result === 'function' ? result(input) : structuredClone(result)
   }
   const deps = {
-    resolveAgents: (tier) => { tiers.push(tier); if (tier === 'judge' && options.throwJudge) throw new Error('judge unavailable'); const roles = ['planner', 'builder', 'reviewer', 'lead', ...(tier === 'judge' ? ['tech-lead'] : [])].filter((role) => !(options.unseated ?? []).includes(role)); return { seats: Object.fromEntries(roles.map((role) => [role, { agent: 'pi', provider: 'test', id: role, effort: tier === 'judge' ? 'xhigh' : 'high', ...(options.bounds?.[role] ? { rounds: options.bounds[role] } : {}) }])), advisor: null } },
+    resolveAgents: (tier) => { tiers.push(tier); if (tier === 'judge' && options.throwJudge) throw new Error('judge unavailable'); const roles = ['planner', 'builder', 'reviewer', 'lead', ...(tier === 'judge' ? ['tech-lead'] : [])].filter((role) => !(spec.tier === 'mechanical' && tier !== 'mechanical' ? [] : options.unseated ?? []).includes(role)); return { seats: Object.fromEntries(roles.map((role) => [role, { agent: 'pi', provider: 'test', id: role, effort: tier === 'judge' ? 'xhigh' : 'high', ...(options.bounds?.[role] ? { rounds: options.bounds[role] } : {}) }])), advisor: null } },
     mkdir: async (path, opts) => { calls.push('mkdir'); seen.mkdir = [path, opts] },
     readFile: async (path) => {
       if (options.readError) throw Object.assign(new Error('denied'), { code: options.readError })
@@ -74,9 +75,10 @@ function fakes(options = {}) {
     runSuite: measured('suite', options.suite ?? green()),
     commitChanges: measured('commit', options.commit ?? { status: 'green', reason: null, head: 'a'.repeat(40), files: ['lib.mjs'] }),
     // the status probe right after a suite measures the commit's paths, any other measures the reviewer's
-    run: (input) => input.args.includes('add') ? measured('suite-stage', options.stageResult ?? green())(input)
+    run: (input) => input.args.includes('reset') || input.args.includes('clean') ? (discardArgs.push(input.args), measured('discard', options.discard ?? green())(input))
+      : input.args.includes('add') ? measured('suite-stage', options.stageResult ?? green())(input)
       : input.args.includes('rev-parse') ? measured('post-rebase-head', () => ({ ...green(), stdout: options.cleanHead ?? `${(options.rebase ?? {}).head ?? 'a'.repeat(40)}\n` }))(input)
-      : input.args.includes('status') && calls.includes('rebase') ? measured('post-rebase-clean', () => ({ ...green(), stdout: options.cleanStatus ?? '' }))(input)
+      : input.args.includes('status') && calls.includes('commit') && calls.includes('rebase') ? measured('post-rebase-clean', () => ({ ...green(), stdout: options.cleanStatus ?? '' }))(input)
       : input.args.includes('status')
       ? (['suite', 'seat:tech-lead'].includes(calls.at(-1))
         ? measured('paths', options.pathsResult ?? (() => ({ ...green(), stdout: options.paths ?? ' M lib.mjs\0' })))
@@ -86,8 +88,69 @@ function fakes(options = {}) {
     openPullRequest: measured('publish', options.publish ?? { status: 'green', reason: null, pr: PR }),
     ...options.deps,
   }
-  return { spec, deps, calls, rows, requests, tiers, seen, writes, go: () => runLoop(spec, deps) }
+  return { spec, deps, calls, rows, requests, tiers, seen, writes, discardArgs, go: () => runLoop(spec, deps) }
 }
+test('a mechanical lane runs rebase, build, proof and suite with no plan, review or lead, and publishes under the builder\'s subject', async () => {
+  for (const mode of ['none', 'test', 'repair']) {
+    const f = fakes({ spec: { tier: 'mechanical' }, unseated: ['planner', 'reviewer', 'lead'], edit: (v, r) => {
+      if (v.role === 'builder') {
+        if (mode !== 'repair' || r.repair) v.details.subject = 'docs(crew): fix typo'
+        if (mode === 'none') v.details.tests = []
+      }
+      return v
+    } })
+    assert.equal((await f.go()).status, 'done', mode)
+    assert.deepEqual(f.calls.slice(1), ['fetch', 'rebase', 'seat:builder', ...(mode === 'repair' ? ['seat:builder'] : []), ...(mode === 'none' ? [] : ['proof']), 'review-paths', 'suite-stage', 'suite', 'paths', 'commit', 'fetch', 'rebase', 'publish'])
+    assert.equal(f.seen.publish.title, 'docs(crew): fix typo')
+    assert.match(f.seen.publish.body, mode === 'none' ? /proof: none, mechanical lane, not reviewed/ : /proof: lib.test.mjs.*red on the old source, green on the build/)
+    assert.equal(f.seen.publish.body.match(/mechanical lane, not reviewed/g)?.length, 1, mode)
+    if (mode === 'repair') assert.match(f.requests[1].repair.defects.join(' '), /details.subject is required on a mechanical lane/)
+  }
+})
+
+test('a mechanical lane discards its build and restarts from planning: as judge on a protected path, as build on a builder insufficient', async () => {
+  for (const mode of ['path', 'insufficient', 'discard-reset', 'discard-clean']) {
+    let builds = 0
+    const f = fakes({ spec: { tier: 'mechanical' }, unseated: ['planner', 'reviewer', 'lead'], bounds: { builder: 1 },
+      reviewPaths: mode === 'path' || mode.startsWith('discard-') ? [' M crew/loop.mjs\0', ' M lib.mjs\0'] : undefined,
+      discard: mode.startsWith('discard-') ? (input) => input.args.includes(mode.slice(8)) ? { ...green(), status: 'red', reason: 'exit-nonzero', code: 1 } : green() : undefined,
+      edit: (v) => {
+        if (v.role === 'builder') { builds++; if (builds === 1 && mode === 'insufficient') v.status = 'insufficient'; else if (builds === 1) v.details.subject = 'docs(crew): fix typo' }
+        return v
+      },
+    })
+    const result = await f.go()
+    if (mode.startsWith('discard-')) { assert.equal(result.reason, 'exit-nonzero'); assert.equal(f.requests.some((r) => r.role === 'planner'), false); continue }
+    assert.equal(result.status, 'done', mode)
+    assert.deepEqual(f.discardArgs, [['reset', '--hard', 'a'.repeat(40)], ['clean', '-f', '-d']])
+    assert.ok(f.calls.lastIndexOf('discard') < f.calls.indexOf('seat:planner'))
+    assert.deepEqual(f.requests.map((r) => r.role), mode === 'path' ? ['builder', 'planner', 'builder', 'reviewer', 'tech-lead'] : ['builder', 'planner', 'builder', 'reviewer'])
+    const row = f.rows.find((r) => r.event === 'tier-raised')
+    assert.deepEqual([row.from, row.to, row.reason], ['mechanical', mode === 'path' ? 'judge' : 'build', mode === 'path' ? 'protected-path' : 'builder-insufficient'])
+    const planner = f.requests.find((r) => r.role === 'planner')
+    assert.equal(planner.feedback[0].id, 'mechanical-restart')
+    assert.equal(planner.feedback[0].reason, row.reason)
+    if (mode === 'path') assert.deepEqual(planner.feedback[0].paths, ['crew/loop.mjs'])
+    else assert.equal(planner.feedback[0].envelope.status, 'insufficient')
+    assert.deepEqual(f.requests.filter((r) => r.role === 'builder')[1].feedback, [])
+    assert.equal(f.requests.filter((r) => r.role === 'builder')[1].tier, row.to)
+  }
+  let builds = 0
+  const repair = sequenced([redRun(), green()], { spec: { tier: 'mechanical' }, edit: (v) => {
+    if (v.role === 'builder') {
+      builds++
+      if (builds === 1) v.details.subject = 'docs(crew): fix typo'
+      if (builds === 2 || builds === 3) { v.status = 'insufficient'; v.details.summary = `gap ${builds}` }
+    }
+    return v
+  } })
+  assert.equal((await repair.go()).status, 'done')
+  assert.deepEqual(repair.requests.map((r) => r.role), ['builder', 'builder', 'planner', 'builder', 'planner', 'builder', 'reviewer'])
+  const next = repair.requests.filter((r) => r.role === 'builder')
+  assert.deepEqual(next[2].feedback, [])
+  assert.deepEqual(next[3].feedback.map((item) => item.id), ['plan-revised'])
+})
+
 test('a judge lane runs the tech-lead second review after the reviewer passes and the suite is green, a raised lane too, and a build or finish lane never does', async () => {
   for (const mode of ['judge', 'planner', 'path', 'build', 'finish']) {
     const f = fakes({
@@ -670,6 +733,23 @@ const SPEC_OUT = ['ℹ failing tests:', 'test at skills/qa-test-writing/exhibits
 const TAP_OUT = ['not ok 1 - exhibit census remains current', '  ---', "  location: '/virtual/checkout/skills/ux/exhibits.test.mjs:73:1'", '  ...'].join('\n')
 const redOut = (stdout) => ({ ...redRun(1), stdout })
 const builderTurns = (f) => f.requests.filter((r) => r.role === 'builder')
+test('a mechanical suite red goes straight to one builder fix before the suite runs again', async () => {
+  for (const after of [green(), redOut(TAP_OUT)]) {
+    const f = sequenced([redOut(SPEC_OUT), after, green()], { spec: { tier: 'mechanical' }, unseated: ['planner', 'reviewer', 'lead'], edit: (v) => {
+      if (v.role === 'builder') v.details.subject = 'docs(crew): fix typo'
+      return v
+    } })
+    const result = await f.go()
+    assert.equal(result.status, after.status === 'green' ? 'done' : 'stopped')
+    if (after.status === 'red') assert.equal(result.reason, 'exit-nonzero')
+    assert.equal(builderTurns(f).length, 2)
+    assert.deepEqual(builderTurns(f)[1].feedback[0].outputTail, [SPEC_OUT])
+    assert.match(builderTurns(f)[1].feedback[0].summary, /suite is red after your change/)
+    assert.deepEqual(f.calls.slice(f.calls.indexOf('suite'), f.calls.lastIndexOf('suite') + 1), ['suite', 'seat:builder', 'proof', 'review-paths', 'suite-stage', 'suite'])
+    assert.equal(f.calls.includes('publish'), after.status === 'green')
+  }
+})
+
 // MUTATION: omit scope on a suite-repair turn.
 test('suite repair keeps the accepted scope', async () => {
   const scope = ['src/widget.svelte']
@@ -941,6 +1021,18 @@ test('every reviewer turn receives the paths git reports at that round, both ren
   assert.deepEqual(rounds.seen.commit.files, ['commit-only.mjs'])
   assert.deepEqual(rounds.calls.filter((c) => c.endsWith('paths')), ['review-paths', 'review-paths', 'paths'])
   assert.equal(rounds.requests.filter((r) => r.role !== 'reviewer').some((r) => 'changedPaths' in r), false)
+})
+
+test('a protected path the suite writes after the review-time path check stops the lane before the commit', async () => {
+  for (const spec of [{ tier: 'mechanical' }, {}]) {
+    const f = fakes({ spec, unseated: spec.tier ? ['planner', 'reviewer', 'lead'] : [], paths: ' M lib.mjs\0 M crew/loop.mjs\0',
+      edit: (v) => { if (v.role === 'builder') v.details.subject = 'docs(crew): fix typo'; return v } })
+    assert.deepEqual(await f.go(), stopped('dirty-worktree'), spec.tier ?? 'build')
+    assert.equal(f.calls.includes('commit'), false)
+    assert.equal(f.rows.some((r) => r.event === 'tier-raised'), false)
+  }
+  const raised = fakes({ reviewPaths: ' M crew/loop.mjs\0', paths: ' M crew/loop.mjs\0' })
+  assert.equal((await raised.go()).status, 'done')
 })
 
 // MUTATION: dispatch the reviewer anyway when the status read is unusable and the review runs on an unmeasured path set.

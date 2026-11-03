@@ -60,6 +60,24 @@ test('a lane the loop raised to judge is finished on the judge tier', () => {
   }
 })
 
+test('a lane raised from mechanical is finished on the highest tier it was raised to', () => {
+  for (const [initial, raises, expected] of [
+    ['mechanical', [], 'mechanical'], ['mechanical', ['build'], 'build'],
+    ['mechanical', ['build', 'judge'], 'judge'], ['judge', ['build'], 'judge'],
+  ]) {
+    const f = fixture()
+    try {
+      const path = join(f.taskDir, 'lean.json')
+      const spec = JSON.parse(readFileSync(path, 'utf8'))
+      writeFileSync(path, JSON.stringify({ ...spec, tier: initial }))
+      const journal = join(f.taskDir, 'journal.jsonl')
+      writeFileSync(journal, readFileSync(journal, 'utf8') + raises.map((to) => JSON.stringify({ event: 'tier-raised', to }) + '\n').join(''))
+      run(f).go()
+      assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).tier, expected)
+    } finally { cleanup(f) }
+  }
+})
+
 // MUTATION: skip the build check and a lane with no accepted builder envelope is finished anyway.
 test('a lane with no qualifying builder envelope is refused as finish-no-build', () => {
   const f = fixture({ builder: false })

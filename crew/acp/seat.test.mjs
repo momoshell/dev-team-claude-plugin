@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { ROOT, scratchDir } from '../../test/helpers.mjs'
 import { runAcpSeat } from './seat.mjs'
+import { parseAgent } from '../protocols.mjs'
 import { PANE_USAGE_SETTINGS } from '../adapters/adapter-claude.mjs'
 import { loadAcceptedContext } from '../pi/extensions/skeletonread.ts'
 import { loadContext as advisorContext } from '../pi/extensions/advisor.ts'
@@ -1307,6 +1308,25 @@ test('pi refuses unsupported advisor roles before client construction', () => {
     leanLane(probe.taskDir)
     probe.run()
     assert.equal(probe.created.length, 1)
+  }
+})
+
+test('the shipped mechanical builder launches without a plan while the planned builder still requires one', () => {
+  const { fields, defects } = parseAgent(readFileSync(join(ROOT, 'crew', 'agents', 'builder.md'), 'utf8'))
+  assert.deepEqual(defects, [])
+  for (const tier of ['mechanical', 'build']) {
+    const effective = { ...fields, ...fields.tiers?.[tier] }
+    const probe = armLaunch('pi', 'builder', { extensions: effective.extensions, advisor: effective.advisor })
+    leanLane(probe.taskDir, { details: null })
+    if (tier === 'mechanical') {
+      assert.doesNotThrow(() => probe.run())
+      assert.equal(probe.created.length, 1)
+    } else {
+      assert.throws(() => probe.run(), { reason: 'grant-unsupported' })
+      leanLane(probe.taskDir)
+      probe.run()
+      assert.equal(probe.created.length, 1)
+    }
   }
 })
 

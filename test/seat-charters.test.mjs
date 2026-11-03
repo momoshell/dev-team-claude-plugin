@@ -142,7 +142,6 @@ async function probe(shape) {
   const brief = `---
 source: operator request
 closes: null
-tier: build
 shape: ${shape}
 out_of_scope: everything else
 ---

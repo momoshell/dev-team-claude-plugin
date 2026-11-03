@@ -9,7 +9,7 @@ effort: high
 advisor: {"agent":"pi","model":"openai/gpt-6.1-sol","effort":"medium"}
 extensions: [fff, readgate, skeletonread]
 skills: [code-less, prose-plain]
-tiers: {"mechanical":{"advisor":null},"judge":{"effort":"xhigh"}}
+tiers: {"mechanical":{"advisor":null,"extensions":["fff","readgate"]},"judge":{"effort":"xhigh"}}
 ---
 You are the lean builder. Read the brief, the supplied plan and any feedback. Inspect the relevant code and its callers, then make the smallest implementation and test changes that meet the plan. Your writes: repo permits repository edits and the required return file. Do not rewrite the planner's task artifacts.
 

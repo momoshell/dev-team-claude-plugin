@@ -24,12 +24,15 @@ the brief, the task directory, the lane journal and every seat's session file.
 ## The model
 
 **Agents do the work; code keeps it correct.** A lane starts from one P1 brief
-(`source`, `closes`, `tier`, `shape`, `out_of_scope`, optional `suite`; the
+(`source`, `closes`, `shape`, `out_of_scope`, optional `mechanical` and `suite`; the
 body is the ask). `crew/loop.mjs` runs it:
 
 ```
-plan -> build -> per-test proof -> review -> full suite -> judge second review -> commit -> rebase -> PR
+standard:   plan -> build -> per-test proof -> review -> full suite -> judge second review -> commit -> rebase -> PR
+mechanical: rebase -> build -> per-test proof -> full suite -> commit -> rebase -> PR
 ```
+
+A brief may choose `mechanical: true` for a change with no behaviour to judge. With no named test, its PR states `proof: none, mechanical lane, not reviewed`; the operator reviews the diff before merging. Protected paths restart it as judge, and builder insufficiency restarts it as build.
 
 The lane name is the brief's file name. `crew start` runs the `standard` shape
 only; `finish` (ADR-051) is the second entry path, started by `crew finish` from
@@ -38,7 +41,7 @@ validated against a closed protocol (P2) and refused if it does not parse, and
 the loop adds no other gate: no host-load gate, no dispatch-time baseline, no
 measurement that holds work. Writing the record never throws into the caller.
 
-ADR-055 §12 routes an escalation without `details.question` back to the same seat. A builder's `insufficient` goes to the planner for revision; a lead bounce targets the builder or planner. Repeated failures with the same evidence stop as `no-progress` without a seat decision. The planner's P2 `details.tests` alone decides whether P3 proof is required; an empty list means no criterion is machine-checked.
+ADR-055 §12 routes an escalation without `details.question` back to the same seat. A builder's `insufficient` goes to the planner for revision; a lead bounce targets the builder or planner. Repeated failures with the same evidence stop as `no-progress` without a seat decision. On build and judge lanes the planner's P2 `details.tests` decides whether P3 proof is required; an empty list means no criterion is machine-checked. A mechanical builder may name no test.
 
 Seat definitions are `crew/agents/<role>.md`; their frontmatter is the only
 place a seat's model, agent (`claude` or `pi`), effort, skills, `requires`

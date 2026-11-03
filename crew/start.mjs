@@ -77,9 +77,10 @@ export async function startLane({ briefPath, checkout, check = false, loop, deps
   if (defects.length) throw new StartRefusal(`brief ${briefPath} is not a P1 brief:\n- ${defects.join('\n- ')}`)
   const run = runBrief(text, fields.closes)
   if (fields.shape === 'finish') throw new StartRefusal('shape finish starts from an escalated lane, not a new brief; crew start runs standard only')
+  const tier = fields.mechanical === true ? 'mechanical' : 'build'
   let resolved
-  try { resolved = d.resolveAgents(fields.tier) } catch (cause) { throw new StartRefusal(`cannot resolve the agent definitions: ${cause.message}`, { cause }) }
-  if (check) { logLine(`crew start: brief ok lane=${lane} tier=${fields.tier} shape=${fields.shape} closes=${fields.closes ?? 'none'}`); return { lane, fields, checked: true } }
+  try { resolved = d.resolveAgents(tier) } catch (cause) { throw new StartRefusal(`cannot resolve the agent definitions: ${cause.message}`, { cause }) }
+  if (check) { logLine(`crew start: brief ok lane=${lane} tier=${tier} shape=${fields.shape} closes=${fields.closes ?? 'none'}`); return { lane, fields, checked: true } }
 
   checkout ??= git(d, process.cwd(), ['rev-parse', '--show-toplevel'])
   if (!checkout) throw Object.assign(new StartRefusal('not inside a git checkout; pass --checkout <dir>'), { exitCode: 2 })
@@ -112,7 +113,7 @@ export async function startLane({ briefPath, checkout, check = false, loop, deps
     .filter(([, cell]) => cell)
     .map(([role, cell]) => [role, { agent: cell.agent, model: `${cell.provider}/${cell.id}`, transport: 'lean-acp' }]))
   const spec = {
-    id: lane, cwd: worktree, taskDir, tier: fields.tier, shape: fields.shape, brief: run,
+    id: lane, cwd: worktree, taskDir, tier, shape: fields.shape, brief: run,
     source: fields.source, branch: lane, base, closes: fields.closes === null ? [] : [fields.closes],
     suite: fields.suite === undefined ? { command: 'npm', args: ['test'], timeoutMs: 1800000 } : suiteSpec(fields.suite),
   }
@@ -124,7 +125,7 @@ export async function startLane({ briefPath, checkout, check = false, loop, deps
     throw new StartRefusal(`cannot record lean lane ${lane} in ${crewDir}: ${cause.code ?? cause.message}; the worktree ${worktree} and branch ${lane} are left for inspection`, { cause })
   }
   const pid = d.spawnDetached(process.execPath, [LEAN, specPath], { cwd: worktree, log, env })
-  logLine(`crew start: lane=${lane} loop=lean tier=${fields.tier} shape=${fields.shape} closes=${fields.closes ?? 'none'} pid=${pid}`)
+  logLine(`crew start: lane=${lane} loop=lean tier=${tier} shape=${fields.shape} closes=${fields.closes ?? 'none'} pid=${pid}`)
   logLine(`  worktree ${worktree}`)
   logLine(`  brief    ${brief}`)
   logLine(`  log      ${log}`)

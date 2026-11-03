@@ -55,8 +55,9 @@ There are two ways to use it:
   `qa-test-writing`, `test-economy`, `test-strength`, `backend-node`, `frontend-svelte`, `ui-design`, `devops`, `ux`, `code-less`, `prose-plain`)
   work in any repo. Most repos stop here. The plugin registers no hooks.
 - **The crew runtime.** Lanes need one clone of this repo, node 26 or newer
-  (`engines` in `package.json`), and a crew root (`~/.crew`, or
-  `DEVTEAM_CREW_ROOT`). Run the runtime from the clone and point it at the
+  (`engines` in `package.json`). Lanes keep their state under `~/.crew`.
+  The visualizer alone reads `DEVTEAM_CREW_ROOT` to serve journals from another root.
+  Run the runtime from the clone and point it at the
   target with `--checkout`. Seats run over ACP; no terminal
   multiplexer is needed.
 
@@ -78,6 +79,7 @@ before its first lane.
   protocols), `acp/` and `acp-client.mjs` (the ACP seat transport), and the
   verbs `show`, `finish`, `record-pr`, `closeout` and `lanes`. Seat definitions
   and instructions are delivered from `crew/agents/*.md`.
+- **`agents/`** — operator-side agents: `agents/brief-writer.md` turns an issue or command into a P1 brief.
 - **`skills/`, `commands/`** — the operating knowledge as Claude Code surfaces.
   The knowledge skills (`pr-review`, `qa-test-writing`, `test-economy`, `test-strength`, `backend-node`,
   `frontend-svelte`, `ui-design`, `devops`, `ux`, `code-less`, `prose-plain`)
@@ -129,6 +131,4 @@ npm run viz:serve
 ```
 
 `.env.local` and other environment files are ignored by Git; `.env.example`
-is the only committed template. The roster UI can save or replace this one
-variable in `.env.local`, or connect with a temporary key for the current
-server process. Clearing a temporary key restores the saved environment key.
+is the only committed template.

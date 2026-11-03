@@ -53,7 +53,7 @@ out_of_scope: the visualizer
 ---
 ## The ask
 
-> Check whether roster edits can boot.
+> Check whether an edited seat definition can boot.
 
 ## Context
 

@@ -1566,6 +1566,25 @@ test('a build lane rebases after the plan, then runs the suite and the review si
   assert.ok(rows.filter((r) => r.event === 'envelope').every((r) => r.stage === 'review'))
 })
 
+// MUTATION: return on the first sibling to end and the lane stops while the other stage is still running.
+test('a build lane waits for both parallel stages before it stops on an unmeasured suite or a halted reviewer', async () => {
+  const later = () => new Promise((resolve) => setTimeout(resolve, 30))
+  const unmeasured = fakes()
+  let reviewEnded = false
+  const seat = unmeasured.deps.runSeat
+  unmeasured.deps.runSeat = async (request, context) => { if (request.role !== 'reviewer') return seat(request, context); await later(); const out = await seat(request, context); reviewEnded = true; return out }
+  unmeasured.deps.runSuite = async () => timeoutRun()
+  assert.deepEqual(await unmeasured.go(), stopped('timeout'))
+  assert.equal(reviewEnded, true)
+  assert.equal(count(unmeasured, 'builder'), 1)
+  const halted = fakes({ seatThrows: 'reviewer' })
+  let suiteEnded = false
+  halted.deps.runSuite = async () => { await later(); suiteEnded = true; return green() }
+  assert.equal((await halted.go()).status, 'stopped')
+  assert.equal(suiteEnded, true)
+  assert.equal(halted.calls.includes('commit'), false)
+})
+
 // MUTATION: discard either red result or skip a check after the fix.
 test('a build lane hands the builder the red suite and the review findings in one fix turn, then proves, runs the suite and reviews again', async () => {
   const f = sequenced([redOut(SPEC_OUT), green()], { review: 1 })

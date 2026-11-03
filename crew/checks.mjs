@@ -365,17 +365,19 @@ export async function rebaseBranch(spec = {}, deps = {}) {
       }
     }
     if (target === null) return red('rebase-failed', { detail: `${base} is neither a local nor a remote-tracking branch` })
+    // Every step below uses the resolved commit, never the ref: lanes share origin/<base>, and a fetch by another lane
+    // between the resolve and the rebase would move it under this one.
     // An ignored file the base tracks can be overwritten by a rebase, and an abort does not bring it back.
     const ignored = await git(['ls-files', '-z', '--others', '--ignored', '--exclude-standard'])
-    const tracked = await git(['ls-tree', '-r', '-z', '--name-only', target])
+    const tracked = await git(['ls-tree', '-r', '-z', '--name-only', onto])
     if (ignored.status !== 'green' || tracked.status !== 'green') return unmeasured('rebase-failed', { detail: 'ignored or base paths could not be listed' })
     const baseFiles = new Set(tracked.stdout.split('\0').filter(Boolean))
     const colliding = ignored.stdout.split('\0').filter((path) => path !== '' && baseFiles.has(path))
     if (colliding.length > 0) return red('dirty-worktree', { detail: 'ignored files the base tracks would be overwritten', paths: colliding })
-    const outcome = await git([...NO_HOOKS, '-c', 'rebase.autoStash=false', 'rebase', target])
+    const outcome = await git([...NO_HOOKS, '-c', 'rebase.autoStash=false', 'rebase', onto])
     if (outcome.status === 'green') {
       const after = await readCheckout(git, cwd)
-      const onBase = await git(['merge-base', '--is-ancestor', target, 'HEAD'])
+      const onBase = await git(['merge-base', '--is-ancestor', onto, 'HEAD'])
       if (!after.problem && after.busy.length === 0 && after.status === '' && after.branch === before.branch && onBase.status === 'green') return { status: 'green', reason: null, head: after.head, onto }
       return unmeasured('rebase-failed', { detail: 'the rebase exited 0 but the checkout could not be proven clean and on its base' })
     }

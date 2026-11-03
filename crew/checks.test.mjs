@@ -444,6 +444,29 @@ test('rebaseBranch reports the base commit it rebased onto, and a lane commit al
   }
 })
 
+test('rebaseBranch rebases onto the base commit it resolved, even when the base ref moves before the rebase runs', async () => {
+  const cwd = laneRepo()
+  writeFileSync(join(cwd, 'a.txt'), 'lane\n')
+  git(cwd, 'commit', '-qam', 'lane')
+  const resolved = git(cwd, 'rev-parse', 'main').trim()
+  git(cwd, 'checkout', '-q', '-b', 'newer', 'main')
+  writeFileSync(join(cwd, 'outside.txt'), 'another lane fetched this\n')
+  git(cwd, 'commit', '-qam', 'newer base')
+  const newer = git(cwd, 'rev-parse', 'HEAD').trim()
+  git(cwd, 'checkout', '-q', 'lane')
+  let moved = false
+  const run = async (spec) => {
+    const result = await runSuite(spec)
+    if (!moved && spec.args.includes('rev-parse') && spec.args.includes('refs/heads/main^{commit}')) { moved = true; git(cwd, 'update-ref', 'refs/heads/main', newer) }
+    return result
+  }
+  const result = await rebaseBranch({ cwd, base: 'main' }, { run })
+  assert.equal(moved, true)
+  assert.equal(result.status, 'green')
+  assert.equal(result.onto, resolved)
+  assert.equal(git(cwd, 'rev-parse', 'HEAD^').trim(), resolved)
+})
+
 test('rebaseBranch reports every conflicting path, aborts, and leaves the checkout as found', async () => {
   const cwd = conflictLane()
   const before = snapshot(cwd)

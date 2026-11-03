@@ -42,6 +42,9 @@ export function leanStageStatus(value) {
   return {label:value ? displayName(value) : 'Outcome not recorded',tone:'quiet'}
 }
 export function leanOutcome(run = {}) {
+  if (run.status==='ready-for-operator') return {headline:'Ready for an operator decision',next:'Use crew finish <lane> to accept, return or abandon.',tone:'attention',icon:'alert'}
+  if (run.status==='returned') return {headline:'Returned; no new run recorded',next:'Inspect the recorded decision before continuing.',tone:'attention',icon:'alert'}
+  if (run.status==='abandoned') return {headline:'Task abandoned by an operator',next:'Inspect the recorded decision; the lane stays in Needs attention until it is archived.',tone:'attention',icon:'alert'}
   if (run.status==='done') return {headline:run.hand_finished?'Task finished by an operator':'Task finished',next:run.pr?'Review the recorded pull request and its checks. Merge status is not recorded here.':'Inspect the recorded stages and outputs before accepting the result.',tone:'ok',icon:'check'}
   if (run.status==='stopped') return {headline:'Task stopped',next:'Inspect the recorded reason and latest checks before deciding how to continue.',tone:'attention',icon:'pause'}
   if (['failed','error'].includes(run.status)) return {headline:'Task failed',next:'Inspect the failed stage and its evidence before retrying.',tone:'fail',icon:'alert'}

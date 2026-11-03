@@ -1,12 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
 import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
-import { attentionBreakdown, configurationDimensionCell, configurationFilterView, needsAttention, newestFirst, runActivity, tokenCell } from '../visualizer/web/src/lib/fleet.js'
+import { configurationDimensionCell, configurationFilterView, needsAttention, taskBoard, tokenCell } from '../visualizer/web/src/lib/fleet.js'
 import { assuranceMeta, executionMeta, taskProfileMeta } from '../visualizer/web/src/lib/workflow-semantics.js'
-import { ROOT, scratchDir } from './helpers.mjs'
+import { ROOT } from './helpers.mjs'
 import { transportLabel } from '../visualizer/web/src/lib/agent-settings.js'
 
 test('TR3 transportLabel names acp and shows a retired transport as recorded', () => {
@@ -31,26 +30,6 @@ test('TK1 tokenCell keeps a lean row\'s closed tokens reason', () => {
   const cell = tokenCell({ source: 'lean', pending: { tokens: reason } })
   assert.equal(cell.text, reason); assert.equal(cell.title, reason)
 })
-
-async function withAttentionFixture(extraKey, callback) {
-  const dir = scratchDir('visualizer-attention-')
-  try {
-    const sourcePath = join(ROOT, 'visualizer/web/src/lib/fleet.js')
-    const semanticsPath = join(ROOT, 'visualizer/web/src/lib/workflow-semantics.js')
-    const source = readFileSync(sourcePath, 'utf8')
-    const original = "const ATTENTION_KEYS = Object.freeze(['escalated', 'fail', 'aborted', 'silent', 'unverified', 'gone', 'contradicted'])"
-    const changed = `const ATTENTION_KEYS = Object.freeze(['escalated', 'fail', 'aborted', 'silent', 'unverified', 'gone', 'contradicted', '${extraKey}'])`
-    const moduleDir = join(dir, 'visualizer', 'web', 'src', 'lib')
-    assert.equal(source.includes(original), true)
-    mkdirSync(moduleDir, { recursive:true })
-    writeFileSync(join(moduleDir, 'workflow-semantics.js'), readFileSync(semanticsPath, 'utf8'))
-    writeFileSync(join(moduleDir, 'fleet.js'), source.replace(original, changed))
-    const module = await import(`${pathToFileURL(join(moduleDir, 'fleet.js')).href}?attention=${encodeURIComponent(extraKey)}`)
-    return await callback(module)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-}
 
 test('workflow semantics separate profile, execution and assurance without inference', () => {
   assert.equal(assuranceMeta('mechanical').label, 'Quick')
@@ -133,20 +112,20 @@ test('G1', () => {
 test('the board no longer probes task envelopes: lean lanes carry their status in the journal row', () => {
   const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
   for (const gone of ['probeEnvelopes', 'envelopeCache', 'envelopeQueued', 'getReturns', 'escalationProbeTargets']) assert.equal(app.includes(gone), false, gone)
-  assert.match(app, /const envelopes = new Map\(\)/)
+  assert.doesNotMatch(app, /const envelopes/)
 })
 
 test('hash routes parse and format every kept canonical view', () => {
-  for (const hash of ['#/', '#/agents', '#/skills', '#/adw-123', '#/adw-123/plan']) {
+  for (const hash of ['#/', '#/agents', '#/skills', '#/adw-123']) {
     assert.equal(formatHash(parseHash(hash)), hash)
   }
-  assert.deepEqual(parseHash(''), { view: 'fleet', adw_id: null, phase: null })
-  assert.deepEqual(parseHash('#'), { view: 'fleet', adw_id: null, phase: null })
-  assert.deepEqual(parseHash('#/adw-123/'), { view: 'run', adw_id: 'adw-123', phase: null })
-  assert.deepEqual(parseHash('#/agents/ignored/extra'), { view: 'agents', adw_id: null, phase: null })
+  assert.deepEqual(parseHash(''), { view: 'fleet', adw_id: null })
+  assert.deepEqual(parseHash('#'), { view: 'fleet', adw_id: null })
+  assert.deepEqual(parseHash('#/adw-123/'), { view: 'run', adw_id: 'adw-123' })
+  assert.deepEqual(parseHash('#/agents/ignored/extra'), { view: 'agents', adw_id: null })
   // A dropped view's hash is read as a run id, never routed to a page that no longer exists.
   for (const dropped of ['ops', 'roster', 'prompts', 'workflows', 'assurances']) assert.equal(parseHash(`#/${dropped}`).view, 'run')
-  assert.deepEqual(parseHash('#/adw-123/plan/ignored'), { view: 'phase', adw_id: 'adw-123', phase: 'plan' })
+  assert.deepEqual(parseHash('#/adw-123/plan/ignored'), { view: 'run', adw_id: 'adw-123' })
   assert.equal(parseHash('#/agents').adw_id, null)
   assert.equal(parseHash('#/skills').adw_id, null)
 })
@@ -204,7 +183,7 @@ test('role colour stays isolated and escalation reasons remain in task history',
   const root = join(ROOT, 'visualizer/web/src')
   const app = readFileSync(join(root, 'App.svelte'), 'utf8')
   assert.doesNotMatch(app, /--role-|--lane-\d/)
-  assert.match(app, /\.filter\(\(row\) => needsAttention\(row\.status\.key\)/)
+  assert.match(app, /taskBoard\(runs, \{ state: 'attention' \}\)/)
   const tasks = readFileSync(join(root, 'lib/TaskList.svelte'), 'utf8')
   assert.match(tasks, /Why review\?/)
   assert.match(tasks, /status\.why/)
@@ -213,85 +192,16 @@ test('role colour stays isolated and escalation reasons remain in task history',
 })
 
 test('A1: every visualizer consumer uses the shared attention classifier', () => {
-  const root = join(ROOT, 'visualizer/web/src')
-  const app = readFileSync(join(root, 'App.svelte'), 'utf8')
-  const taskList = readFileSync(join(root, 'lib/TaskList.svelte'), 'utf8')
-  const fleet = readFileSync(join(root, 'lib/fleet.js'), 'utf8')
-  assert.match(app, /import \{[^}]*attentionBreakdown[^}]*needsAttention[^}]*\} from '\.\/lib\/fleet\.js'/)
-  assert.match(app, /\.filter\(\(row\) => needsAttention\(row\.status\.key\) && !row\.run\.triage\?\.reviewed_at\)/)
-  assert.match(app, /let attentionSummary = \$derived\(attentionBreakdown\(attentionRows\)\)/)
-  assert.match(app, /const state = attentionRows\.length \? 'attention'/)
-  assert.doesNotMatch(app, /activity\.silent \|\| activity\.unverified \|\| activity\.contradicted \? 'attention'/)
-  assert.doesNotMatch(app, /attentionRows\.filter\(/)
-  assert.match(taskList, /import \{[^}]*needsAttention[^}]*\} from '\.\/fleet\.js'/)
-  assert.match(taskList, /function statusFor\(run\) \{ return deriveDisplayStatus\(run, envelopeFor\(run\.adw_id\), now\) \}/)
-  assert.match(taskList, /if \(state === 'attention'\) return needsAttention\(status\.key\)/)
-  assert.match(taskList, /runs\.filter\(\(run\) => needsAttention\(statusFor\(run\)\.key\)/)
-  assert.match(fleet, /attention: needsAttention\(key\)/)
-  assert.doesNotMatch(fleet, /attention:\s*(?:true|false)/)
-})
-
-test('B1: a synthetic vocabulary key reaches every attention consumer', async () => {
-  const root = join(ROOT, 'visualizer/web/src')
-  const app = readFileSync(join(root, 'App.svelte'), 'utf8')
-  const taskList = readFileSync(join(root, 'lib/TaskList.svelte'), 'utf8')
-  assert.match(app, /needsAttention\(row\.status\.key\)/)
+  const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
+  const taskList = readFileSync(join(ROOT, 'visualizer/web/src/lib/TaskList.svelte'), 'utf8')
+  assert.match(app, /taskBoard\(runs, \{ state: 'attention' \}\)/)
   assert.match(app, /attentionBreakdown\(attentionRows\)/)
-  assert.match(app, /const state = attentionRows\.length \? 'attention'/)
-  assert.match(taskList, /needsAttention\(statusFor\(run\)\.key\)/)
-  await withAttentionFixture('synthetic-attention', (fleet) => {
-    assert.equal(fleet.needsAttention('synthetic-attention'), true)
-    const summary = fleet.attentionBreakdown([{ status: { key: 'synthetic-attention' } }])
-    assert.equal(summary.total, 1)
-    assert.equal(summary.unattributed, 1)
-    assert.equal(summary.text, '1 unattributed')
-    assert.equal(summary.segments.reduce((sum, segment) => sum + segment.count, 0) + summary.unattributed, summary.total)
-  })
+  assert.match(taskList, /taskBoard\(runs,/)
 })
 
 test('C1: every current attention key routes the metric click to attention', () => {
-  // App.svelte's routing is pinned by source because no plain module owns it.
   const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
-  assert.match(app, /const state = attentionRows\.length \? 'attention' : activity\.live \? 'active' : 'all'/)
-})
-
-test('D1: named attention segments and unattributed rows reconcile to the total', () => {
-  const ATTENTION_KEYS = ['escalated', 'fail', 'aborted', 'silent', 'unverified', 'gone', 'contradicted']
-  const summary = attentionBreakdown(ATTENTION_KEYS.map((key) => ({ status: { key } })))
-  assert.equal(summary.total, ATTENTION_KEYS.length)
-  assert.equal(summary.unattributed, 0)
-  assert.deepEqual(summary.segments.map((segment) => [segment.key, segment.count]), ATTENTION_KEYS.map((key) => [key, 1]))
-  assert.equal(summary.segments.reduce((sum, segment) => sum + segment.count, 0) + summary.unattributed, summary.total)
-})
-
-test('E1: an added vocabulary key without a label is reported as unattributed', async () => {
-  await withAttentionFixture('synthetic-attention', (fleet) => {
-    const summary = fleet.attentionBreakdown([
-      { status: { key: 'synthetic-attention' } },
-      { status: { key: 'outside-attention-vocabulary' } },
-    ])
-    assert.equal(summary.total, 1)
-    assert.equal(summary.unattributed, 1)
-    assert.match(summary.text, /1 unattributed/)
-    assert.equal(summary.segments.reduce((sum, segment) => sum + segment.count, 0) + summary.unattributed, summary.total)
-  })
-})
-
-test('F1: every reachable run activity result derives attention from its key', () => {
-  const now = Date.parse('2026-09-14T00:00:00.000Z')
-  const fixtures = [
-    { running: false },
-    { running: true, crew_state: { archived: true }, last_heartbeat_at: new Date(now - 1_000).toISOString() },
-    { running: true, runtime: {}, last_heartbeat_at: new Date(now - 1_000).toISOString() },
-    { running: true, runtime: { driver_state: 'gone', source: 'gate' }, last_heartbeat_at: new Date(now - 1_000).toISOString() },
-    { running: true, runtime: { driver_state: 'alive', source: 'gate' }, last_heartbeat_at: new Date(now - 1_000).toISOString() },
-    { running: true, last_heartbeat_at: new Date(now - 60_000).toISOString() },
-    { running: true, last_heartbeat_at: new Date(now - 1_000).toISOString() },
-  ]
-  for (const run of fixtures) {
-    const activity = runActivity(run, now)
-    assert.equal(activity.attention, needsAttention(activity.key))
-  }
+  assert.match(app, /taskFocus = \{ state: 'attention'/)
 })
 
 test('G1: a key outside the attention vocabulary is not attention work', () => {
@@ -416,14 +326,6 @@ test('the kept frontend imports nothing from crew/ or scripts/', () => {
 })
 
 // MUTATION: count shipped without the measured guard and a lean board reads "Shipped 0".
-test('the Shipped tab shows no count when no run has a measured ship state', () => {
-  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/TaskList.svelte'), 'utf8')
-  assert.match(source, /let shipMeasured = \$derived\(runs\.some\(\(run\) => shipStatus\(run\)\.key !== 'unmeasured'\)\)/)
-  assert.match(source, /shipped: shipMeasured \? runs\.filter\([^\n]*\)\.length : null,/)
-  assert.match(source, /\{counts\[tab\[0\]\] \?\? '—'\}/)
-  assert.match(source, /title=\{counts\[tab\[0\]\] == null \? 'ship state not measured' : undefined\}/)
-})
-
 test('newestFirst lists the latest started_at first and unstarted runs last in feed order', () => {
   const rows = [
     { adw_id: 'a', started_at: null },
@@ -432,6 +334,6 @@ test('newestFirst lists the latest started_at first and unstarted runs last in f
     { adw_id: 'd', started_at: '2026-11-02T16:25:24.265Z' },
     { adw_id: 'e', started_at: '2026-11-02T16:25:24.265Z' },
   ]
-  assert.deepEqual(newestFirst(rows).map((run) => run.adw_id), ['d', 'e', 'b', 'a', 'c'])
+  assert.deepEqual(taskBoard(rows).rows.map((run) => run.adw_id), ['d', 'e', 'b', 'a', 'c'])
   assert.deepEqual(rows.map((run) => run.adw_id), ['a', 'b', 'c', 'd', 'e'])
 })

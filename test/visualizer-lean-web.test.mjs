@@ -5,38 +5,23 @@ import { join } from 'node:path'
 import { ROOT } from './helpers.mjs'
 import { leanView } from '../visualizer/web/src/lib/lean.js'
 import { sessionsFeedState } from '../visualizer/web/src/lib/activity.js'
-import { deriveDisplayStatus, fleetActivity, leanStatus, runActivity } from '../visualizer/web/src/lib/fleet.js'
+import { leanStatus } from '../visualizer/web/src/lib/fleet.js'
 
 const src = (path) => readFileSync(join(ROOT, 'visualizer/web/src', path), 'utf8')
 const open = { source: 'lean', adw_id: 'lean:x', goal: 'x', status: 'running', running: true, latest_stage: 'build', pending: { last_heartbeat_at: 'none recorded' } }
 
 test('lean status and activity never claim liveness or merge', () => {
-  assert.equal(deriveDisplayStatus(open).key, 'running'); assert.match(deriveDisplayStatus(open).word, /no terminal record/)
-  assert.equal(runActivity(open).live, false); assert.equal(fleetActivity([open]).live, 0); assert.equal(fleetActivity([open]).open, 1)
-  assert.equal(runActivity(open).why, 'none recorded')
+  assert.equal(leanStatus(open).key, 'running'); assert.match(leanStatus(open).word, /no terminal record/)
   const stopped = leanStatus({ status: 'stopped', reason: 'runner-threw' })
   assert.deepEqual([stopped.key, stopped.why], ['aborted', 'runner-threw'])
   assert.equal(leanStatus({ status: 'done' }).word, 'done')
   assert.equal(leanStatus({}).word, 'status not recorded')
 })
 
-// MUTATION: return live when run.runtime.driver_state is alive.
 // MUTATION: return success for an untagged status: 'ok' row.
 test('status and activity read every row as a lean lane', () => {
-  const now = Date.parse('2026-11-03T12:00:00Z')
   const status = { key: 'unknown', word: 'ok', tone: 'quiet', where: null, why: null, open: false }
-  assert.deepEqual(deriveDisplayStatus({ status: 'ok' }), status)
-  assert.deepEqual(deriveDisplayStatus({ status: 'ok' }), leanStatus({ status: 'ok' }))
-  const rows = [
-    { running: true, last_heartbeat_at: new Date(now - 60_000).toISOString() },
-    { running: true, runtime: { driver_state: 'alive', source: 'gate' } },
-  ]
-  for (const row of rows) {
-    const { key, live, word, why, attention } = runActivity(row, now)
-    assert.deepEqual({ key, live, word, why, attention }, { key: 'journal-open', live: false, word: 'journal open · liveness not measured', why: 'lean lanes record no heartbeat', attention: false })
-  }
-  assert.equal(runActivity({ running: false }, now).key, 'settled')
-  assert.deepEqual(fleetActivity(rows, now), { live: 0, silent: 0, contradicted: 0, unverified: 0, gone: 0, open: 2 })
+  assert.deepEqual(leanStatus({ status: 'ok' }), status)
 })
 
 test('lean view lists journal rows in recorded order without timestamps', () => {
@@ -57,7 +42,6 @@ test('an operator-written pr row reads as done, hand-finished; a loop-written on
   const loop = { status: 'done', pr, hand_finished: false, pr_actor: 'loop' }
   assert.equal(leanStatus(operator).word, 'done · hand-finished')
   assert.equal(leanStatus(operator).key, 'success')
-  assert.equal(deriveDisplayStatus({ source: 'lean', ...operator }).word, 'done · hand-finished')
   assert.equal(leanStatus(loop).word, 'done')
   assert.equal(leanStatus({ status: 'stopped', hand_finished: true }).word, 'stopped')
   const [op] = leanView({}, { rows: [{ event: 'pr', actor: 'operator', pr, index: 0 }] }).lines

@@ -10,12 +10,6 @@ export function modelPreference(metadata = '') {
   if(raw.includes(' #')) return {value:raw,editable:false}
   return {value:raw,editable:true}
 }
-export function configuredModels(payload) {
-  return [...new Map((Array.isArray(payload?.models)?payload.models:[])
-    .filter(row=>typeof row.provider==='string' && row.provider && typeof row.id==='string' && row.id)
-    .map(row=>[`${row.provider}/${row.id}`,{key:`${row.provider}/${row.id}`,provider:row.provider,id:row.id}])).values()]
-    .sort((a,b)=>a.key.localeCompare(b.key))
-}
 export function setModelPreference(metadata,value,models) {
   if(!modelPreference(metadata).editable) throw new Error('This file uses a complex model setting. Keep it in Additional frontmatter.')
   if(value!=='' && !models.some(model=>model.key===value)) throw new Error('Choose a model from the configured roster.')

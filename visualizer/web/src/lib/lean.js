@@ -3,7 +3,7 @@
 import { leanStatus } from './fleet.js'
 
 // Journal rows → recorded-order lines. No time is read or invented.
-export function journalLines(rows = []) {
+function journalLines(rows = []) {
   return (Array.isArray(rows) ? rows : []).map((row) => {
     const stage = row.stage ?? '—'
     let detail = ''

@@ -1,4 +1,4 @@
-export function diffLineKind(line) {
+function diffLineKind(line) {
   const value = String(line || '')
   if (/^(diff --git |index |--- |\+\+\+ |@@ |\\ No newline)/.test(value)) return 'meta'
   if (value.startsWith('+')) return 'addition'

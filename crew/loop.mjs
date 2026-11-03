@@ -271,12 +271,14 @@ export async function runLoop(spec, deps = {}) {
         const attempt = async (asked) => {
           let failure = null
           let parsed = null
-          let recording = null
-          try { recording = await d.runSeat(asked, { emit }) } catch (error) { failure = { reason: 'seat-unmeasured', error: describe(error) } }
-          let raw = null
-          if (!failure) {
-            try { raw = await d.readFile(returnPath, 'utf8') } catch (error) { failure = { reason: 'seat-unmeasured', error: describe(error) } }
+          let recording = null, turnError = null, routed = false
+          try { recording = await d.runSeat(asked, { emit }) } catch (error) {
+            turnError = describe(error)
+            recording = error?.recording ?? null
+            routed = typeof error?.providerKind === 'string'
           }
+          let raw = null
+          try { raw = await d.readFile(returnPath, 'utf8') } catch (error) { failure = { reason: 'seat-unmeasured', error: describe(error) } }
           if (!failure && (typeof raw !== 'string' || raw.trim() === '')) failure = { reason: 'seat-unmeasured', error: { code: null, message: 'the seat returned an empty file' } }
           if (!failure) {
             try { parsed = JSON.parse(raw) } catch (error) { failure = { reason: 'envelope-refused', error: describe(error) } }
@@ -284,18 +286,27 @@ export async function runLoop(spec, deps = {}) {
           const checked = failure ? { envelope: null, defects: [] } : validateEnvelope(role, parsed, { prior: (role === 'reviewer' ? priorFindings : role === 'tech-lead' ? secondFindings : []).map((finding) => finding?.id) })
           if (!isFinish && tier === 'mechanical' && role === 'builder' && checked.envelope?.status === 'done' && checked.envelope.details && !Object.hasOwn(checked.envelope.details, 'subject')) checked.defects.push('details.subject is required on a mechanical lane for the commit and PR')
           if (role === 'planner' && checked.envelope && checked.defects.length === 0) checked.defects.push(...await artifactDefects(checked.envelope.details))
-          return { failure, parsed, recording, checked }
+          return { failure, parsed, recording, checked, turnError, routed }
         }
-        const observe = (a) => emit('envelope', { role, id, returnPath, parsed: a.parsed, defects: a.checked.defects, error: a.failure?.error ?? null })
-        // A file that parsed but failed the schema gets a bounded repair turn; any other failure is final.
+        const observe = (a) => emit('envelope', { role, id, returnPath, parsed: a.parsed, defects: a.checked.defects, error: a.failure?.error ?? null, turnError: a.turnError })
         const attempts = [await attempt(request)]
-        let latest = attempts[0]
-        while (!latest.failure && latest.checked.defects.length > 0 && attempts.length <= MAX_ENVELOPE_REPAIRS) {
-          await observe(latest)
-          latest = await attempt({ ...request, repair: { defects: [...latest.checked.defects] } })
+        let latest = attempts[0], rerun = false, repairs = 0, asked = request
+        for (;;) {
+          const acceptable = !latest.failure && latest.checked.defects.length === 0 && latest.checked.envelope?.id === id
+          if (latest.turnError && !acceptable && !latest.routed && !rerun) {
+            await observe(latest)
+            rerun = true
+            asked = { ...asked, rerun: { error: latest.turnError } }
+          } else if (!latest.turnError && !latest.failure && latest.checked.defects.length > 0 && repairs < MAX_ENVELOPE_REPAIRS) {
+            await observe(latest)
+            repairs += 1
+            asked = { ...request, repair: { defects: [...latest.checked.defects] } }
+          } else break
+          latest = await attempt(asked)
           attempts.push(latest)
         }
         let { failure, parsed, checked } = latest
+        const returnValid = !failure && checked.defects.length === 0 && checked.envelope?.id === id
         // The proof reads the rows the runner relayed for each turn, after the schema and id are sound;
         // a repair turn never launders the work that came before it.
         if (!failure && checked.defects.length === 0 && checked.envelope?.id === id) {
@@ -306,7 +317,8 @@ export async function runLoop(spec, deps = {}) {
           }
         }
         const valid = checked.defects.length === 0 && checked.envelope?.id === id
-        await emit('envelope', { role, id, returnPath, parsed, defects: checked.defects, error: failure?.error ?? null })
+        await emit('envelope', { role, id, returnPath, parsed, defects: checked.defects, error: failure?.error ?? null, turnError: latest.turnError })
+        if (latest.turnError && !returnValid) failure = { reason: 'seat-unmeasured', error: latest.turnError }
         if (!failure && !valid) failure = { reason: 'envelope-refused', defects: checked.defects }
         if (failure) return { halt: await stop(role === 'lead' ? 'lead-refused' : failure.reason, { role, id, ...failure }) }
         last[role] = checked.envelope
@@ -326,7 +338,7 @@ export async function runLoop(spec, deps = {}) {
         if (checked.envelope.status === 'done') return { envelope: checked.envelope }
         held = { reason: checked.envelope.status, envelope: checked.envelope }
       }
-      if (singleTurn && !(role === 'builder' && !isFinish && tier === 'mechanical' && held.envelope?.status === 'insufficient')) return { halt: await stop('round-bound', { role, ...held }) }
+      if (singleTurn && !(role === 'builder' && !isFinish && tier === 'mechanical' && held.envelope && ['insufficient', 'escalate'].includes(held.envelope.status))) return { halt: await stop('round-bound', { role, ...held }) }
       // The lead is never consulted about itself: no recursion, an unusable lead turn ends the lane.
       if (role === 'lead') return { halt: await stop(held.envelope ? 'lead-refused' : 'round-bound', held) }
       if (held.envelope) {
@@ -351,9 +363,15 @@ export async function runLoop(spec, deps = {}) {
       if (decided.halt) return decided
       if (decided.decision === 'accept') return { envelope: held.envelope }
       if (!isFinish && role === 'builder' && decided.target === 'planner') {
-        const revised = await replan(held.envelope ?? last.builder ?? null, decided.summary)
+        const mechanical = tier === 'mechanical'
+        // ADR-055 §7 and §12: a planner bounce spends the planner's round, or restarts a mechanical lane.
+        if (!mechanical) seats.planner = { ...seats.planner, rounds: Math.max(seats.planner.rounds ?? DEFAULT_ROUNDS, rounds.planner + 1) }
+        const revised = mechanical
+          ? await restart('build', 'lead-bounce-planner', { envelope: held.envelope ?? last.builder ?? null, lead: decided.summary })
+          : await replan(held.envelope ?? last.builder ?? null, decided.summary)
         if (revised.halt) return revised
-        feedback = [{ id: 'plan-revised', plan_path: planPath }, ...given]
+        if (mechanical) { singleTurn = false; given = [] }
+        feedback = mechanical ? [] : [{ id: 'plan-revised', plan_path: planPath }, ...given]
       }
       // bounce: exactly one more turn for this role, beyond its bound only if the bound is spent; the counter keeps its history
       seats[role] = { ...seats[role], rounds: Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }
@@ -369,7 +387,7 @@ export async function runLoop(spec, deps = {}) {
     if (asked.halt) return asked
     const { decision, target, question } = asked.envelope.details
     if (decision === 'escalate') return { halt: await stop('lead-escalated', { role, ...held, question }) }
-    if (decision === 'accept' && !held.envelope) return { halt: await stop('accept-unmeasured', { role, ...held }) }
+    if (decision === 'accept' && !held.envelope) return { decision: 'bounce', target: role, summary: asked.envelope.summary }
     return { decision, target, summary: asked.envelope.summary }
   }
   const replan = async (envelope, lead) => {

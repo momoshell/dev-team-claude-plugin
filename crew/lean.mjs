@@ -137,9 +137,12 @@ export async function runLean(spec, deps = {}) {
     ...deps,
   }
 
+  const prompts = new Map()
   const runSeat = async (request, { emit }) => {
     const { definition, source, charters, memory } = definitionFor(request, request.tier ?? spec.tier, d)
     const { role, id } = request
+    let recording = { definition, recorded: null, cwd: spec.cwd }
+    try {
     let sectionText = ''
     if (!request.repair) {
       if (memory === true) {
@@ -150,9 +153,12 @@ export async function runLean(spec, deps = {}) {
         else sectionText = section
       }
     }
-    const prompt = request.repair ? repairPromptFor({ request, spec }) : promptFor({ request, spec, source, charters, body: definition.body, section: sectionText })
+    const baseStem = request.repair ? `${id}.repair` : id
+    const prompt = request.rerun && prompts.has(baseStem) ? prompts.get(baseStem) : request.repair ? repairPromptFor({ request, spec }) : promptFor({ request, spec, source, charters, body: definition.body, section: sectionText })
+    if (request.rerun) prompts.delete(baseStem)
+    else prompts.set(baseStem, prompt)
     d.mkdirSync(join(spec.taskDir, 'lean', role), { recursive: true })
-    const stem = request.repair ? `${id}.repair` : id
+    const stem = `${baseStem}${request.rerun ? '.rerun' : ''}`
     // A provider failure is retried in a fresh ACP session inside the shared bounds. The issued id,
     // prompt and definition stay the same; each attempt records to its own session file.
     let attempts = 0, waitedMs = 0
@@ -175,11 +181,17 @@ export async function runLean(spec, deps = {}) {
       if (recordError) throw recordError
       // The runtime writes the one turn row of every turn, accepted or not.
       guardedAppend(sessionFile, `${JSON.stringify({ type: 'turn', stopReason: turn?.stopReason ?? null, usage: turn?.usage ?? null, refusal: turn?.refusal ?? null })}\n`, 'utf8')
-      // A refused or unmeasured turn fails here, before the loop reads an envelope the seat never earned.
+      // The loop reads the issued return even when this turn fails. Skill proof trusts only the
+      // relayed copy, and only while the session file still matches it.
+      const recorded = relayed.join('')
+      let intact = false
+      try { intact = d.readFileSync(sessionFile, 'utf8') === header + recorded } catch { /* unreadable is not intact */ }
+      recording = { definition, recorded: intact ? recorded : null, cwd: spec.cwd }
       if (turn?.refusal || !turn?.stopReason) {
         const failure = Object.assign(new Error(turn?.refusal?.message ?? 'ACP seat turn returned no stop reason'), { code: turn?.refusal?.code ?? null, errorKind: turn?.refusal?.errorKind ?? null })
         if (!turn?.refusal) throw failure
         const kind = acpProviderFailureKind(turn?.refusal?.errorKind, turn?.refusal?.errorMessage)
+        if (kind !== null) failure.providerKind = kind
         const at = d.now()
         const reset = kind === 'rate_limit' ? acpTextReset(turn.refusal.message, at) : null
         const decision = providerRetryDecision({ kind, reset, attempts, waitedMs, at })
@@ -191,15 +203,17 @@ export async function runLean(spec, deps = {}) {
         // The refused attempt's envelope was never earned: the replacement must write its own or leave none.
         if (request.returnPath) d.rmSync(request.returnPath, { force: true })
         attempts += 1
+        recording = { definition, recorded: null, cwd: spec.cwd }
         continue
       }
-      // Trusted runtime context for the loop's required-skill proof; never read from the seat's envelope.
-      // The proof reads the relayed copy, and only while the file on disk is still exactly what was
-      // relayed: a seat that removed, blocked or rewrote its own recording proves nothing.
-      const recorded = relayed.join('')
-      let intact = false
-      try { intact = d.readFileSync(sessionFile, 'utf8') === header + recorded } catch { /* unreadable is not intact */ }
-      return { definition, recorded: intact ? recorded : null, cwd: spec.cwd }
+      return recording
+    }
+    } catch (error) {
+      if (!error || typeof error !== 'object' || !Object.isExtensible(error)) {
+        error = Object.assign(new Error(String(error?.message ?? error)), { code: error?.code ?? null, providerKind: error?.providerKind })
+      }
+      error.recording = recording
+      throw error
     }
   }
 

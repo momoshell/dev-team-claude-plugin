@@ -740,10 +740,10 @@ test('the wait_s a seat receives is the effective definition value, tier overrid
   assert.equal((await planned({ readFileSync: edit(/tiers: .*/, 'wait_s: 7\ntiers: {"build":{"wait_s":3}}') })).wait_s, 3)
 })
 
-// MUTATION: read the return file after a failed seat and an envelope written during an expired turn's teardown is accepted.
-test('an expired real seat turn stops the lane as seat-unmeasured and its late envelope is never read', async () => {
+// MUTATION: skip the return read or the rerun after a deadline and the late invalid envelope is not evaluated twice.
+test('an expired real seat turn reads its late invalid envelope and reruns once before stopping', async () => {
   const planner = join(AGENTS, 'planner.md')
-  let clock = 0, returnPath, envelopeId, reads = 0, laterSeats = 0
+  let clock = 0, returnPath, envelopeId, reads = 0, rerun
   const f = leanFixture({
     deps: {
       readFileSync: (path, ...args) => {
@@ -751,7 +751,7 @@ test('an expired real seat turn stops the lane as seat-unmeasured and its late e
         return path === planner ? text.replace('writes: task-dir', 'writes: task-dir\nwait_s: 2') : text
       },
       runAcpSeat: (input) => {
-        if (returnPath) { laterSeats++; throw new Error('no later seat may run') }
+        if (returnPath) { rerun = input; throw new Error('rerun failed') }
         returnPath = /^Return path: (.+)$/m.exec(input.prompt)[1]
         envelopeId = /^Envelope id: (.+)$/m.exec(input.prompt)[1]
         const late = () => {
@@ -775,8 +775,10 @@ test('an expired real seat turn stops the lane as seat-unmeasured and its late e
   assert.equal(result.status, 'stopped')
   assert.equal(result.reason, 'seat-unmeasured')
   assert.equal(existsSync(returnPath), true)
-  assert.equal(reads, 0)
-  assert.equal(laterSeats, 0)
+  assert.equal(reads, 2)
+  assert.equal(rerun.definition.role, 'planner')
+  assert.ok(rerun.prompt.includes(`Envelope id: ${envelopeId}\n`))
+  assert.ok(rerun.prompt.includes(`Return path: ${returnPath}\n`))
   assert.equal(clock, 2000)
   assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
 })
@@ -805,7 +807,7 @@ test('a Claude seat authored with an empty tools list stops the lane as seat-unm
   })
   const result = await f.go()
   assert.deepEqual(result, { status: 'stopped', reason: 'seat-unmeasured', pr: null })
-  assert.deepEqual(refusals, ['ACP_EMPTY_TOOLS'])
+  assert.deepEqual(refusals, ['ACP_EMPTY_TOOLS', 'ACP_EMPTY_TOOLS'])
   assert.equal(spawned.length, 0)
   assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
 })
@@ -836,36 +838,38 @@ async function oneTurn(turn, { withFile = true, deps = {} } = {}) {
   return { f, result, reads: () => reads, verdicts, rows }
 }
 
-// MUTATION: drop the refusal clause of the turn check and a refused turn falls through to the envelope read.
-test('a refused ACP turn stops the lane as seat-unmeasured with the provider cause, never reading the envelope, even one that exists', async () => {
-  const refusals = [
-    { code: -32000, message: 'account out of credits', errorKind: 'billing_error' },
-    { code: null, message: 'quota exhausted', errorKind: null },
-  ]
-  for (const refusal of refusals) {
-    for (const [stopReason, usage] of [[null, null], ['end_turn', { input_tokens: 3 }]]) {
-      for (const withFile of [true, false]) {
-        const label = `${refusal.message} ${stopReason} ${withFile}`
-        const run = await oneTurn({ stopReason, usage, refusal }, { withFile })
-        assert.deepEqual(run.result, { status: 'stopped', reason: 'seat-unmeasured', pr: null }, label)
-        assert.equal(run.reads(), 0, label)
-        assert.equal(run.f.requests.length, 1, label)
-        assert.equal(run.verdicts.length, 1, label)
-        assert.deepEqual(run.verdicts[0].observation.error, { code: refusal.code, message: refusal.message }, label)
-        assert.deepEqual(run.rows.at(-1), { type: 'turn', stopReason, usage, refusal }, label)
-        assert.equal(run.rows.length, 3, label)
-      }
-    }
+// MUTATION: refuse to read the return after an ACP refusal, or rerun a provider-routed failure.
+test('a refused ACP turn is read after the turn: a valid return is accepted, an invalid one gets one rerun session, a provider-routed refusal none', async () => {
+  for (const mode of ['valid', 'invalid', 'rate_limit', 'authentication_failed']) {
+    const f = leanFixture({ acp: async (input) => {
+      const role = input.definition.role
+      const id = /^Envelope id: (.+)$/m.exec(input.prompt)[1]
+      const path = /^Return path: (.+)$/m.exec(input.prompt)[1]
+      mkdirSync(f.spec.taskDir, { recursive: true })
+      if (role === 'planner') writeFileSync(join(f.spec.taskDir, 'plan.md'), '')
+      const details = role === 'planner' ? { subject: 'fix(crew): planned', plan_path: 'plan.md', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
+        : role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
+        : { verdict: 'pass', findings: [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['a'], complete: true } }
+      writeFileSync(path, role === 'planner' && mode !== 'valid' ? '{' : JSON.stringify({ role, id, status: 'done', summary: 'ok', details }))
+      return role === 'planner' ? { stopReason: null, refusal: { code: -32603, errorKind: mode === 'valid' || mode === 'invalid' ? 'incomplete_tool_call' : mode, message: 'Claude ended the turn without returning results for tool calls' } } : { stopReason: 'end_turn' }
+    } })
+    const result = await f.go()
+    assert.equal(result.status, mode === 'valid' ? 'done' : 'stopped', mode)
+    if (mode !== 'valid') assert.equal(result.reason, 'seat-unmeasured')
+    const planners = f.requests.filter((r) => r.definition.role === 'planner')
+    assert.equal(planners.length, mode === 'invalid' ? 2 : 1)
+    if (mode === 'invalid') { assert.equal(planners[1].sessionFile, f.sessionOf('planner', 1).replace('.jsonl', '.rerun.jsonl')); assert.equal(planners[1].prompt, planners[0].prompt) }
   }
 })
 
 // MUTATION: drop the missing-stop-reason clause and a turn that never measured a stop is accepted on its envelope.
-test('an ACP turn with no stop reason (null, empty, absent, no turn at all) is unmeasured before any envelope read', async () => {
+test('an ACP turn with no stop reason (null, empty, absent, no turn at all) is read and rerun once', async () => {
   for (const turn of [{ stopReason: null, usage: null, refusal: null }, { stopReason: '', usage: null, refusal: null }, { usage: null, refusal: null }, undefined, null]) {
     const run = await oneTurn(turn)
     const label = JSON.stringify(turn) ?? 'undefined'
     assert.deepEqual(run.result, { status: 'stopped', reason: 'seat-unmeasured', pr: null }, label)
-    assert.equal(run.reads(), 0, label)
+    assert.ok(run.reads() > 0, label)
+    assert.equal(run.f.requests.length, 2, label)
     assert.deepEqual(run.verdicts[0].observation.error, { code: null, message: 'ACP seat turn returned no stop reason' }, label)
     assert.deepEqual(run.rows.at(-1), { type: 'turn', stopReason: turn?.stopReason ?? null, usage: null, refusal: null }, label)
   }
@@ -881,11 +885,13 @@ test('a denied turn-row append still fails the seat and names the recording erro
     }
     const turnRow = await oneTurn(refused, { deps: { appendFileSync: deny('"type":"turn"', code) } })
     assert.deepEqual(turnRow.result, { status: 'stopped', reason: 'seat-unmeasured', pr: null }, code)
-    assert.equal(turnRow.reads(), 0, code)
+    assert.ok(turnRow.reads() > 0, code)
+    assert.equal(turnRow.f.requests.length, 2, code)
     assert.equal(turnRow.verdicts[0].observation.error.code, code)
     const earlier = await oneTurn(refused, { deps: { appendFileSync: (...args) => { if (String(args[1]).includes('chunk')) throw Object.assign(new Error('first'), { code }); return deny('"type":"turn"', 'EIO')(...args) } } })
     assert.equal(earlier.verdicts[0].observation.error.code, code)
-    assert.equal(earlier.reads(), 0, code)
+    assert.ok(earlier.reads() > 0, code)
+    assert.equal(earlier.f.requests.length, 2, code)
   }
 })
 
@@ -966,8 +972,8 @@ test('pi overload and WebSocket failures retry in a fresh session; unknown and r
   }
   for (const message of ['Operation aborted', 'unrecognised', 'Codex error: The usage limit has been reached']) {
     const stopped = await retryRun([refusal(message)])
-    assert.deepEqual(stopped.result, { status: 'stopped', reason: 'seat-unmeasured', pr: null })
-    assert.deepEqual([stopped.sleeps.length, stopped.sessions.length], [0, 1])
+    assert.equal(stopped.result.status, message.includes('usage limit') ? 'stopped' : 'done')
+    assert.deepEqual([stopped.sleeps.length, stopped.sessions.length], [0, message.includes('usage limit') ? 1 : 4])
   }
 })
 
@@ -1114,13 +1120,13 @@ test('a tier override applies and an unseating override refuses the turn', async
 })
 
 // MUTATION: append to an existing recording instead of creating it exclusively and an old turn is overwritten or mixed.
-test('a recording that already exists is never reused: the turn stops before the seat starts', async () => {
+test('a recording that already exists is never reused: the turn reruns in a fresh session', async () => {
   const f = leanFixture()
   mkdirSync(join(f.spec.taskDir, 'lean', 'planner'), { recursive: true })
   writeFileSync(f.sessionOf('planner', 1), 'earlier turn\n')
   const result = await f.go()
-  assert.deepEqual(result, { status: 'stopped', reason: 'seat-unmeasured', pr: null })
-  assert.equal(f.requests.length, 0)
+  assert.equal(result.status, 'done')
+  assert.equal(f.requests[0].sessionFile, f.sessionOf('planner', 1).replace('.jsonl', '.rerun.jsonl'))
   assert.equal(readFileSync(f.sessionOf('planner', 1), 'utf8'), 'earlier turn\n')
   assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
 })
@@ -1137,12 +1143,14 @@ test('a denied recording directory or initial write stops the turn before the se
 })
 
 // MUTATION: pass the bridge's append straight through and the seat's swallowed recording failure goes unseen.
-test('a recording append that fails, even once, stops the turn although the seat swallowed it', async () => {
+test('a recording append that fails is recorded even when the seat swallowed it', async () => {
   let appends = 0
-  const f = leanFixture({ deps: { appendFileSync: (...args) => { if (++appends === 1) throw EPERM; return appendFileSyncReal(...args) } } })
+  const rows = []
+  const f = leanFixture({ deps: { appendFileSync: (...args) => { if (++appends === 1) throw EPERM; return appendFileSyncReal(...args) } }, loopDeps: { journal: async (row) => rows.push(row) } })
   const result = await f.go()
-  assert.deepEqual(result, { status: 'stopped', reason: 'seat-unmeasured', pr: null })
-  assert.equal(f.requests.length, 1)
+  assert.equal(result.status, 'done')
+  assert.equal(rows.find((row) => row.event === 'envelope' && row.role === 'planner').turnError.code, EPERM.code)
+  assert.equal(f.requests.filter((r) => r.definition.role === 'planner').length, 1)
   assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
 })
 
@@ -1156,7 +1164,7 @@ test('a permission row whose append fails stops the turn like any other recordin
   }
   const f = leanFixture({ acp, deps: { appendFileSync: (path, text, ...rest) => { if (text.includes('"kind":"permission"')) throw EPERM; return appendFileSyncReal(path, text, ...rest) } } })
   assert.deepEqual(await f.go(), { status: 'stopped', reason: 'seat-unmeasured', pr: null })
-  assert.equal(f.requests.length, 1)
+  assert.equal(f.requests.length, 2)
 })
 
 // MUTATION: treat a thrown or rejected turn as returned and the loop reads a missing envelope as success.

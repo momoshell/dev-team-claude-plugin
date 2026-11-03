@@ -99,7 +99,7 @@ const roster = {
         "provider": "openai",
         "id": "gpt-6.1-sol",
         "agent": "pi",
-        "effort": "xhigh"
+        "effort": "high"
       },
       "tech-lead": {
         "provider": "anthropic",

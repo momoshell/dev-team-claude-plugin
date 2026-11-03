@@ -135,7 +135,7 @@ The judge loop's second review is the tech-lead's. It drops ADR-038's mutation o
    `docs/adr/`.
 
 Code raises a lane and never lowers one. A build lane raised after its build continues on the judge loop from the
-proof. A mechanical lane has no plan, so when it is raised, or its builder returns `insufficient`, it restarts from
+proof. A mechanical lane has no plan, so when it is raised, its builder returns `insufficient`, or the lead bounces its builder to the planner, it restarts from
 planning: as `judge` when raised, as `build` otherwise, and its first build is discarded.
 
 ### 8. What is removed
@@ -246,7 +246,9 @@ Code holds the rule:
   without one is a bounce to the same seat.
 - A builder `insufficient` goes to the planner on every tier, as §7 already does for a mechanical lane. The build
   continues on the revised plan.
-- A lead bounce names its target, `builder` or `planner`.
+- A lead bounce names its target, `builder` or `planner`. A bounce to a spent planner is the planner's round.
+- An `accept` with nothing to accept is a bounce to the held seat.
+- A return written before a turn error is read and validated in full. An absent or invalid return gets one rerun; a provider failure keeps its bounded retry instead.
 
 The charter lines (the builder's statuses and `files_in_scope`, the lead's escalation list) apply at once. The code parts
 land with the wave-2 planner lane.
@@ -270,8 +272,7 @@ reports the lanes it has, with that denominator.
   network outage were rerun): high caught 14 of 30 (old 9 of 30), xhigh 12 of 30 (old 14 of 30). Every return met
   §5's shape (0 of 60 defects under the strict validator). Tokens rose: high 13.6M against 9.4M (+44%), xhigh 20.2M
   against 12.9M (+57%). No cell caught b1402, b1416 or b1441, old or new. At N = 30 neither difference is significant.
-  The contract is not worse at high; xhigh costs more and caught no more in this sample, so whether judge lanes keep
-  the reviewer at xhigh is open.
+  Decided 2026-11-03: judge lanes run the reviewer at high; the tech-lead's second review stays at xhigh.
 - **Builder (first 10 lanes):** test lines as a share of code lines added (the 18 corpus lanes: 804 of 1196, 67%), tests
   named per lane, tests red on the old source and green on the build out of tests named, and builder tokens. Lanes
   differ in size from the corpus, so the share is compared, not raw lines. The §3 rules stay if the share falls. The

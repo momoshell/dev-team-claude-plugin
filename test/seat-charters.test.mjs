@@ -25,6 +25,11 @@ const rungs = [
   '6. Only then: the minimum code that works.',
 ]
 
+// MUTATION: remove the no-envelope accept bounce rule.
+test('LD1: the lead charter makes an accept with nothing to accept a bounce', () => {
+  has(body('crew/agents/lead.md'), "When the held seat's bound is spent with no envelope, there is nothing to accept: an `accept` is a bounce to that seat.")
+})
+
 // MUTATION: remove the named plan gap or permit size and effort as reasons.
 test('SC1: both charters define insufficient', () => {
   for (const role of ['builder', 'planner']) {

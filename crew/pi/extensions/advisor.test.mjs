@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import * as advisor from './advisor.ts'
-import { piRpcSeatParts } from '../../adapters/adapter-pi.mjs'
+import { piSeatParts } from '../../adapters/adapter-pi.mjs'
 import { leanLaneFixture, scratchDir } from '../../../test/helpers.mjs'
 // MUTATION: add planner back to ADVISED_ROLES
 test('advisor.ts carries no HTTP endpoint, cell classifier or planner-advisor surface', () => {
@@ -603,7 +603,7 @@ test('A1', async () => {
 
 test('RV1-1 rpc advisor activation uses the manifest cell, not a roster env catalog', async () => {
   const f = fixture(); const journal = sink(); const p = pi()
-  const { env: seatEnv } = piRpcSeatParts({ role: 'builder', model: 'provider/model', promptFile: '/tmp/prompt', tools: '', deny: '', taskDir: f.taskDir, grants: { tools: [], extensions: [], agents: [], skills: [], advisor: true }, advisorCell: null })
+  const { env: seatEnv } = piSeatParts({ role: 'builder', model: 'provider/model', promptFile: '/tmp/prompt', tools: '', deny: '', taskDir: f.taskDir, grants: { tools: [], extensions: [], agents: [], skills: [], advisor: true } })
   assert.equal(seatEnv.CREW_ADVISOR, '1')
   assert.equal(Object.hasOwn(seatEnv, 'CREW_ADVISOR_MODEL'), false)
   assert.equal(Object.hasOwn(seatEnv, 'CREW_ADVISOR_MODELS'), false)

@@ -681,7 +681,7 @@ setTimeout(() => process.exit(3), 60000).unref()
   return path
 }
 
-test('end to end: the unchanged acp-client drives the bridge and the real extension through gated turns', () => {
+test('end to end: acp-client drives the bridge and the real extension through gated turns', () => {
   const dir = scratchDir('acp-e2e-')
   const recordPath = join(dir, 'record.json')
   const seatRoot = join(dir, 'acp')
@@ -702,9 +702,20 @@ test('end to end: the unchanged acp-client drives the bridge and the real extens
     api.start()
     assert.equal(api.initialize().protocolVersion, ACP_PROTOCOL_VERSION)
     assert.equal(api.newSession(), 'host-session')
-    const first = api.prompt([{ type: 'text', text: 'run it' }])
+    const prompt = (text) => {
+      const id = api.beginPrompt([{ type: 'text', text }])
+      const deadline = Date.now() + 30000
+      let result = null
+      while (!result && Date.now() < deadline) {
+        result = api.pollPrompt(id)
+        if (!result) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20)
+      }
+      assert.ok(result, `prompt ${text} timed out`)
+      return result
+    }
+    const first = prompt('run it')
     assert.deepEqual(first, { stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 2, cachedReadTokens: 0, cachedWriteTokens: 0, totalTokens: 3 }, refusal: null })
-    const second = api.prompt([{ type: 'text', text: 'again' }])
+    const second = prompt('again')
     assert.equal(second.stopReason, 'end_turn')
     assert.deepEqual(asked, [
       { toolCallId: 'call-e2e', kinds: PERMISSION_OPTIONS.map((o) => o.kind) },

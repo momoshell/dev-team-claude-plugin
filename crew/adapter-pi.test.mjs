@@ -4,25 +4,20 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs'
-import { settlePermission } from './acp-permission.mjs'
 import { delimiter, dirname, join, basename } from 'node:path'
-import { acpLaunch, piRpcSeatParts, capabilitiesFor, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_BUILTIN_EXTENSION_TOOLS, PI_MCP_SERVER_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION } from './adapters/adapter-pi.mjs'
+import { acpLaunch, modelString, translateDeny, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_FIRST_PARTY_EXTENSION_TOOLS, PI_BUILTIN_EXTENSION_TOOLS, PI_MCP_SERVER_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION } from './adapters/adapter-pi.mjs'
 import * as pi from './adapters/adapter-pi.mjs'
 import { ROOT } from '../test/helpers.mjs'
 import { childArgs, resolvePiBinary } from './pi/extensions/subagent.ts'
 
-// MUTATION: restore PROFILES.pane and capabilitiesFor('pane') resolves.
-test('the pi adapter resolves only the acp profile and ships no pane builder or router', () => {
-  for (const transport of ['pane', 'headless-rpc', 'headless-json', undefined]) {
-    assert.throws(() => capabilitiesFor({ transport }), (error) => error.message.includes(String(transport)))
-  }
-  const profile = capabilitiesFor({ transport: 'acp' })
-  assert.equal(profile.abort, 'cancel')
-  assert.equal(profile.session_resume, false)
-  assert.equal(profile.permission_requests, true)
-  assert.equal(profile.subagents, false)
-  assert.equal(capabilitiesFor({ transport: 'acp', grants: { agents: [{ name: 'scout' }] } }).subagents, true)
-  for (const name of ['seatCommand', 'shellSingleQuote', 'piExtensionOperand', 'routerAttemptUrl', 'ROUTER_ATTEMPT_URL_ENV', 'PI_ADVISOR_ENV', 'PI_ADVISOR_ENDPOINT_ENV', 'PI_ADVISOR_MODEL_ENV']) assert.equal(name in pi, false, name)
+const piSeatParts = (...args) => pi.piSeatParts(...args)
+
+// MUTATION: restore policy in acpLaunch.
+test('the pi adapter ships no capability profile, advisor cell, mcp path or launch policy', () => {
+  for (const name of ['capabilitiesFor', 'advisorLaunchCell', 'mcpConfigPath', 'piRpcSeatParts']) assert.equal(name in pi, false)
+  assert.equal(typeof pi.piSeatParts, 'function')
+  assert.equal(Object.hasOwn(pi.acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'x', promptFile: '/p', cwd: '/tmp', env: {} }), 'policy'), false)
+  assert.throws(() => pi.piActivatedTools({ extensions: ['/vendor/pkg/index.ts'], vendorExtensions: [{ package: 'vendor', tools: ['t'], entries: ['/vendor/pkg/index.ts'] }] }), /unknown-registering-extension/)
 })
 
 // Seat tool boundaries the pi seat command must translate (the retired driver's seat defaults).
@@ -46,25 +41,25 @@ test('K7 and K8 MCP tools are pinned and unknown servers refuse', () => {
 })
 test('K15 and K16 MCP selects the deterministic rpc agent directory', () => {
   // MUTATION: restore configDir as the agent directory.
-  const grants = { extensions: ['builtin:mcp'], mcpServers: [{ name: 'fff' }] }
+  const grants = { extensions: ['builtin:mcp'], mcp_servers: [{ name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }] }
   const expected = '/tmp/task/pi-agent/builder'
-  const rpc = piRpcSeatParts({ role: 'builder', taskDir: '/tmp/task', configDir: '/legacy', model: 'm', promptFile: 'p', grants })
+  const rpc = piSeatParts({ role: 'builder', taskDir: '/tmp/task', configDir: '/legacy', model: 'm', promptFile: 'p', grants })
   assert.equal(rpc.env.PI_CODING_AGENT_DIR, expected)
 })
 test('K17 ACP launch retains deterministic agent directory', () => {
   // MUTATION: override the launch env with spec.configDir.
-  const launch = acpLaunch({ role: 'builder', taskDir: '/tmp/task', configDir: '/legacy', bin: '/opt/pi', model: 'm', promptFile: 'p', grants: { extensions: ['builtin:mcp'], mcpServers: [{ name: 'fff' }] } })
+  const launch = acpLaunch({ role: 'builder', taskDir: '/tmp/task', configDir: '/legacy', bin: '/opt/pi', model: 'm', promptFile: 'p', grants: { extensions: ['builtin:mcp'], mcp_servers: [{ name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }] } })
   assert.equal(launch.env.PI_CODING_AGENT_DIR, '/tmp/task/pi-agent/builder')
 })
 
 test('ADR047 M1 legacy cellless grant now loads extension and strips inherited rpc env', () => {
-  const rpc = piRpcSeatParts({ model: 'sonnet', promptFile: '/tmp/prompt', deny: '', grants: { advisor: true }, advisorCell: null, env: { CREW_ADVISOR_MODEL: 'inherited' } })
+  const rpc = piSeatParts({ model: 'sonnet', promptFile: '/tmp/prompt', deny: '', grants: { advisor: true }, advisorCell: null, env: { CREW_ADVISOR_MODEL: 'inherited' } })
   assert.equal(rpc.args.includes(PI_ADVISOR_EXTENSION), true)
   assert.equal(Object.hasOwn(rpc.env, 'CREW_ADVISOR_MODEL'), false)
 })
 test('ADR047 M2 advisor cell transports canonical model and provenance', () => {
   const cell = { model: 'anthropic/claude-sonnet-5', models: { 'anthropic/claude-sonnet-5': {} } }
-  const rpc = piRpcSeatParts({ model: 'sonnet', promptFile: '/tmp/prompt', deny: '', grants: { advisor: true }, advisorCell: cell })
+  const rpc = piSeatParts({ model: 'sonnet', promptFile: '/tmp/prompt', deny: '', grants: { advisor: true }, advisorCell: cell })
   assert.equal(rpc.args.includes(PI_ADVISOR_EXTENSION), true)
   assert.equal(Object.hasOwn(rpc.env, 'CREW_ADVISOR_MODEL'), false)
   assert.equal(Object.keys(rpc.env).filter((key) => key.startsWith('CREW_ADVISOR')).join(','), 'CREW_ADVISOR')
@@ -72,27 +67,27 @@ test('ADR047 M2 advisor cell transports canonical model and provenance', () => {
 
 test('ADR47-L2 G1 null-cell advisor grant loads extension in rpc', () => {
   const grants = { advisor: true }
-  const rpc = piRpcSeatParts({ model: 'sonnet', promptFile: 'p', grants, advisorCell: null, env: {} })
+  const rpc = piSeatParts({ model: 'sonnet', promptFile: 'p', grants, advisorCell: null, env: {} })
   assert.ok(rpc.args.includes(PI_ADVISOR_EXTENSION))
 })
 
 test('ADR47-L2 G2 rpc and acp expose only advisor activation env', () => {
   const grants = { advisor: true, tools: [], extensions: [], agents: [], skills: [] }
   const cell = { model: 'provider/model', endpoint: 'http://sentinel.invalid' }
-  const rpc = piRpcSeatParts({ model: 'sonnet', promptFile: 'p', grants, advisorCell: cell, env: { CREW_ADVISOR_MODEL: 'inherited', CREW_ADVISOR_SENTINEL: 'secret' } })
+  const rpc = piSeatParts({ model: 'sonnet', promptFile: 'p', grants, advisorCell: cell, env: { CREW_ADVISOR_MODEL: 'inherited', CREW_ADVISOR_SENTINEL: 'secret' } })
   const acp = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'sonnet', promptFile: 'p', cwd: '/tmp', grants, advisorCell: cell, env: {} })
   assert.deepEqual(Object.keys(rpc.env).filter((key) => key.startsWith('CREW_ADVISOR')), ['CREW_ADVISOR'])
   assert.deepEqual(Object.keys(acp.env).filter((key) => key.startsWith('CREW_ADVISOR')), ['CREW_ADVISOR'])
 })
 
-// MUTATION: drop && key !== 'CREW_PI_AGENTS' from the piRpcSeatParts passthrough filter, or drop the grants agents spread, and this test reddens.
+// MUTATION: drop && key !== 'CREW_PI_AGENTS' from the piSeatParts passthrough filter, or drop the grants agents spread, and this test reddens.
 test('PI_AGENTS inherited value is stripped and the grant-built value wins across rpc and ACP', () => {
   const evil = '[{"name":"evil","def":"/x.json"}]'
-  const rpc = piRpcSeatParts({ model: 'sonnet', promptFile: '/tmp/p', env: { SENTINEL: 'yes', CREW_PI_AGENTS: evil } })
+  const rpc = piSeatParts({ model: 'sonnet', promptFile: '/tmp/p', env: { SENTINEL: 'yes', CREW_PI_AGENTS: evil } })
   assert.deepEqual(rpc.env, { SENTINEL: 'yes', CREW_FFF: '0' })
   const acp = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'sonnet', promptFile: '/tmp/p', cwd: '/tmp', env: { SENTINEL: 'yes', CREW_PI_AGENTS: evil } })
   assert.equal(acp.env.CREW_PI_AGENTS, undefined)
-  const granted = piRpcSeatParts({ model: 'sonnet', promptFile: '/tmp/p', env: { CREW_PI_AGENTS: evil }, grants: { tools: [], extensions: ['/repo/crew/pi/extensions/subagent.ts'], agents: [{ name: 'scout', def: '/scout.json' }], skills: [] } })
+  const granted = piSeatParts({ model: 'sonnet', promptFile: '/tmp/p', env: { CREW_PI_AGENTS: evil }, grants: { tools: [], extensions: ['/repo/crew/pi/extensions/subagent.ts'], agents: [{ name: 'scout', def: '/scout.json' }], skills: [] } })
   assert.equal(granted.env.CREW_PI_AGENTS, JSON.stringify([{ name: 'scout', def: '/scout.json' }]))
 })
 
@@ -142,7 +137,6 @@ test('ACP launch matrix, grants, all-denied policy, and refusal paths', () => {
         ...(autoDeny.length ? ['--exclude-tools', autoDeny.join(',')] : []), '--no-context-files', '--no-extensions', '--no-skills'],
       env: { SENTINEL: 'yes', CREW_FFF: '0', CREW_PI_BIN: spec.bin, CREW_ACP_GATED_TOOLS: escalate.join(',') },
       sessionParams: { cwd: '/tmp', mcpServers: [] },
-      policy: { autoDeny, autoApprove: role === 'builder' ? escalate : [], escalate: role === 'builder' ? [] : escalate },
     }, role)
   }
 
@@ -161,7 +155,6 @@ test('ACP launch matrix, grants, all-denied policy, and refusal paths', () => {
 
   // No Claude deny name maps to pi's ACP-only powershell gate; it remains gated.
   const allDenied = acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'x', promptFile: '/p', cwd: '/tmp', env: {}, deny: 'Bash,Edit,Write' })
-  assert.deepEqual(allDenied.policy, { autoDeny: ['bash', 'edit', 'write'], autoApprove: [], escalate: ['powershell'] })
   assert.equal(allDenied.env.CREW_ACP_GATED_TOOLS, 'powershell')
   assert.deepEqual(allDenied.args.slice(allDenied.args.indexOf('--exclude-tools'), allDenied.args.indexOf('--exclude-tools') + 2), ['--exclude-tools', 'bash,edit,write'])
   for (const name of ['Task', 'Agent', 'Workflow']) assert.doesNotThrow(() => acpLaunch({ bin: '/opt/pi/dist/cli.js', model: 'x', promptFile: '/p', cwd: '/tmp', env: {}, deny: name }))
@@ -170,24 +163,10 @@ test('ACP launch matrix, grants, all-denied policy, and refusal paths', () => {
 })
 
 test('SI4 granted pi RPC seats disable skill discovery before explicit grants', () => {
-  // MUTATION: drop --no-skills from piRpcSeatParts.
-  const { args } = piRpcSeatParts({ model: 'sonnet', promptFile: '/tmp/prompt', deny: '', env: {}, grants: { skills: ['/granted/code-less.md'] } })
+  // MUTATION: drop --no-skills from piSeatParts.
+  const { args } = piSeatParts({ model: 'sonnet', promptFile: '/tmp/prompt', deny: '', env: {}, grants: { skills: ['/granted/code-less.md'] } })
   assert.equal(args.filter((arg) => arg === '--no-skills').length, 1)
   assert.deepEqual(args.slice(-3), ['--no-skills', '--skill', '/granted/code-less.md'])
-})
-
-test('builder ACP roster approvals bypass lead while reviewer gated writes consult lead', () => {
-  const builder = acpLaunch({ bin: '/opt/pi/dist/cli.js', role: 'builder', deny: 'Task' }).policy
-  const reviewer = acpLaunch({ bin: '/opt/pi/dist/cli.js', role: 'reviewer', deny: 'Task' }).policy
-  const options = [{ kind: 'reject_once', optionId: 'reject' }, { kind: 'allow_once', optionId: 'allow' }]
-  let calls = 0
-  for (const title of ['bash', 'edit', 'write']) {
-    const result = settlePermission({ toolCall: { title, kind: 'execute' }, options, policy: builder, lead: () => { calls++; return { decision: 'reject' } } })
-    assert.equal(result.optionId, 'allow')
-    assert.equal(result.row.policy, 'roster')
-  }
-  settlePermission({ toolCall: { title: 'write', kind: 'edit' }, options, policy: reviewer, lead: () => { calls++; return { decision: 'reject' } } })
-  assert.equal(calls, 1)
 })
 
 test('ACP C4 a submit extension grant is refused: lean seats have no submit tool', () => {
@@ -200,7 +179,7 @@ test('PI_BUILTIN_TOOLS and every seat activator stay pinned to pi\'s complete bu
   assert.deepEqual(PI_BUILTIN_TOOLS, expected)
   let count = 0
   for (const shape of seatShapes()) {
-    const { args } = piRpcSeatParts(shape)
+    const { args } = piSeatParts(shape)
     assert.equal(args[args.indexOf('--tools') + 1], expected.join(','))
     count++
   }
@@ -218,7 +197,7 @@ test('pi extension activation declares tools, preserves passive entries, and ref
   assert.deepEqual(piActivatedTools({ extensions: ['/repo/crew/pi/extensions/readgate.ts'] }), PI_BUILTIN_TOOLS)
 
   assert.throws(
-    () => piRpcSeatParts({
+    () => piSeatParts({
       role: 'planner', model: 'sonnet', promptFile: '/tmp/prompt.md', tools: '', deny: '', taskDir: '/tmp', bootBrief: 'boot',
       grants: { tools: [], extensions: ['/repo/crew/pi/extensions/unknown-registering-extension.ts'], agents: [], skills: [], advisor: false },
     }),
@@ -269,24 +248,17 @@ test('pi extension activation declares tools, preserves passive entries, and ref
 
 test('C1P keeps the subagent-only rpc activator', () => {
   const extension = join(ROOT, 'crew/pi/extensions/subagent.ts')
-  const { args } = piRpcSeatParts({ model: 'openai-codex/x', promptFile: '/tmp/prompt.md', grants: { extensions: [extension], agents: [{ name: 'scout', def: '/scout.json' }] } })
+  const { args } = piSeatParts({ model: 'openai-codex/x', promptFile: '/tmp/prompt.md', grants: { extensions: [extension], agents: [{ name: 'scout', def: '/scout.json' }] } })
   assert.equal(args[args.indexOf('--tools') + 1], `${PI_BUILTIN_TOOLS.join(',')},agent`)
   assert.equal(args[args.indexOf('-e') + 1], extension)
   assert.doesNotMatch(args[args.indexOf('--tools') + 1], /retrieve|,lab(?:$|,)/)
 })
 
 test('E1 and H1 activate shipped rpc tools in extension order', () => {
-  const builder = piRpcSeatParts({ grants: { extensions: ['/repo/crew/pi/extensions/skeletonread.ts'] } }).args
+  const builder = piSeatParts({ grants: { extensions: ['/repo/crew/pi/extensions/skeletonread.ts'] } }).args
   assert.equal(builder[builder.indexOf('--tools') + 1], `${PI_BUILTIN_TOOLS.join(',')},retrieve`)
-  const planner = piRpcSeatParts({ grants: { tools: ['Task'], extensions: ['/repo/crew/pi/extensions/subagent.ts', '/repo/crew/pi/extensions/readgate.ts'], agents: [{ name: 'scout', def: '/scout.json' }] } }).args
+  const planner = piSeatParts({ grants: { tools: ['Task'], extensions: ['/repo/crew/pi/extensions/subagent.ts', '/repo/crew/pi/extensions/readgate.ts'], agents: [{ name: 'scout', def: '/scout.json' }] } }).args
   assert.equal(planner[planner.indexOf('--tools') + 1], `${PI_BUILTIN_TOOLS.join(',')},Task,agent`)
-})
-
-test('J1 preserves folded vendor tools and command shape', () => {
-  const extension = '/vendor/pkg/index.ts'
-  const { args } = piRpcSeatParts({ grants: { tools: ['vendor-tool'], extensions: [extension], vendor_extensions: [{ package: 'vendor', tools: ['vendor-tool'], entries: [extension] }] } })
-  assert.equal(args[args.indexOf('--tools') + 1], `${PI_BUILTIN_TOOLS.join(',')},vendor-tool`)
-  assert.equal(args[args.indexOf('-e') + 1], extension)
 })
 
 test('PI_BUILTIN_TOOLS matches pi\'s bundle when pi is installed', (t) => {
@@ -315,7 +287,7 @@ test('PI_BUILTIN_TOOLS matches pi\'s bundle when pi is installed', (t) => {
 test('--provider never appears in any composed pi seat command', () => {
   let count = 0
   for (const shape of seatShapes()) {
-    const { args } = piRpcSeatParts(shape)
+    const { args } = piSeatParts(shape)
     assert.equal(args.some((arg) => arg === '--provider' || String(arg).startsWith('--provider=')), false)
     count++
   }
@@ -324,7 +296,7 @@ test('--provider never appears in any composed pi seat command', () => {
 
 test('the model id reaches pi whole, unnarrowed', () => {
   for (const model of MODELS) {
-    const { args } = piRpcSeatParts([...seatShapes()].find((candidate) => candidate.model === model))
+    const { args } = piSeatParts([...seatShapes()].find((candidate) => candidate.model === model))
     assert.equal(args[args.indexOf('--model') + 1], model)
   }
 })
@@ -332,7 +304,7 @@ test('the model id reaches pi whole, unnarrowed', () => {
 test('both deny branches are exercised by the seat matrix', () => {
   let excluded = 0; let omitted = 0
   for (const shape of seatShapes()) {
-    const { args } = piRpcSeatParts(shape); const translated = translateDeny(shape.deny)
+    const { args } = piSeatParts(shape); const translated = translateDeny(shape.deny)
     if (translated.includes('edit') && args[args.indexOf('--exclude-tools') + 1] === 'edit') excluded++
     if (translated.length === 0 && !args.includes('--exclude-tools')) omitted++
   }
@@ -342,7 +314,7 @@ test('both deny branches are exercised by the seat matrix', () => {
 test('both effort branches are exercised by the seat matrix', () => {
   let thinkingHigh = 0; let noThinking = 0
   for (const shape of seatShapes()) {
-    const { args } = piRpcSeatParts(shape)
+    const { args } = piSeatParts(shape)
     if (args.includes('--thinking') && args[args.indexOf('--thinking') + 1] === 'high') thinkingHigh++
     if (!args.includes('--thinking')) noThinking++
   }
@@ -382,9 +354,9 @@ test('modelString refuses undeclared Object.prototype providers with a local reg
 test('the seat\'s claude-named `tools` allowlist cannot influence a composed pi seat command', () => {
   let count = 0
   for (const shape of seatShapes()) {
-    const reference = piRpcSeatParts(shape)
+    const reference = piSeatParts(shape)
     assert.equal(reference.args[reference.args.indexOf('--tools') + 1], PI_BUILTIN_TOOLS.join(','))
-    for (const tools of ['', 'Read', 'Bash,Write,Edit,Glob,Grep', 'NoSuchTool,Read', undefined]) assert.deepEqual(piRpcSeatParts({ ...shape, tools }), reference)
+    for (const tools of ['', 'Read', 'Bash,Write,Edit,Glob,Grep', 'NoSuchTool,Read', undefined]) assert.deepEqual(piSeatParts({ ...shape, tools }), reference)
     count++
   }
   assert.ok(count >= ROLE_ORDER.length * MODELS.length * EFFORTS.length)
@@ -396,7 +368,7 @@ test('--exclude-tools is the pi seat\'s only tool boundary, and unmapped deny na
   for (const role of ROLE_ORDER) {
     const shape = [...seatShapes()].find((candidate) => candidate.role === role)
     const translated = translateDeny(SEAT_DEFAULTS[role].deny)
-    const { args } = piRpcSeatParts(shape)
+    const { args } = piSeatParts(shape)
     if (translated.length) assert.equal(args[args.indexOf('--exclude-tools') + 1], translated.join(','))
     else assert.equal(args.includes('--exclude-tools'), false)
   }
@@ -404,20 +376,12 @@ test('--exclude-tools is the pi seat\'s only tool boundary, and unmapped deny na
 
 test('ungranted pi seats disable extension and skill discovery across the full seat matrix', () => {
   for (const shape of seatShapes()) {
-    const { args } = piRpcSeatParts(shape)
+    const { args } = piSeatParts(shape)
     assert.ok(args.includes('--no-extensions'))
     assert.ok(args.includes('--no-skills'))
     assert.equal(args.includes('-e'), false)
     assert.equal(args.includes('--skill'), false)
     assert.equal(args[args.indexOf('--tools') + 1], PI_BUILTIN_TOOLS.join(','))
-  }
-
-  const granted = { agents: [{ name: 'scout', def: '/tmp/scout.json' }] }
-  const empty = { agents: [] }
-  assert.equal(capabilitiesFor({ transport: 'acp', grants: granted }).subagents, true)
-  assert.equal(capabilitiesFor({ transport: 'acp', grants: empty }).subagents, false)
-  for (const transport of ['headless-json', 'unknown', undefined]) {
-    assert.throws(() => capabilitiesFor({ transport, grants: granted }), (err) => err.message.includes(String(transport)))
   }
 
   const binary = resolvePiBinary({ argv: ['/abs/node', '/abs/pi/dist/cli.js'], execPath: '/abs/node', existsSync: () => true })
@@ -433,7 +397,7 @@ test('ungranted pi seats disable extension and skill discovery across the full s
 })
 
 test('granted pi seats append deduped activators and checkout-pinned extension, skill, and config paths', () => {
-  const { args, env } = piRpcSeatParts({ ...[...seatShapes()][0], grants: { tools: ['read', 'task', 'task'], extensions: ['/checkout/crew/pi/extensions/readgate.ts'], skills: ['/checkout/crew/pi/skills/scout.md'], agents: [], advisor: false }, configDir: '/checkout/crew/pi' })
+  const { args, env } = piSeatParts({ ...[...seatShapes()][0], grants: { tools: ['read', 'task', 'task'], extensions: ['/checkout/crew/pi/extensions/readgate.ts'], skills: ['/checkout/crew/pi/skills/scout.md'], agents: [], advisor: false }, configDir: '/checkout/crew/pi' })
   assert.equal(args[args.indexOf('--tools') + 1], `${PI_BUILTIN_TOOLS.join(',')},task`)
   assert.ok(args.includes('--no-extensions'))
   assert.equal(args[args.indexOf('-e') + 1], '/checkout/crew/pi/extensions/readgate.ts')
@@ -446,8 +410,8 @@ test('granted pi seats append deduped activators and checkout-pinned extension, 
 test('a passive extension-only grant adds exactly one operand without changing seat posture', () => {
   const shape = { model: 'sonnet', promptFile: '/tmp/role-builder.md', deny: 'Edit,NotebookEdit' }
   const grants = { tools: [], extensions: ['/repo/crew/pi/extensions/readgate.ts'], agents: [], skills: [], advisor: false }
-  const plain = piRpcSeatParts({ ...shape, grants: { ...grants, extensions: [] } })
-  const granted = piRpcSeatParts({ ...shape, grants })
+  const plain = piSeatParts({ ...shape, grants: { ...grants, extensions: [] } })
+  const granted = piSeatParts({ ...shape, grants })
   assert.equal(granted.args.filter((arg) => arg === '-e').length, 1)
   const index = granted.args.indexOf('-e')
   assert.equal(granted.args[index + 1], grants.extensions[0])
@@ -457,8 +421,8 @@ test('a passive extension-only grant adds exactly one operand without changing s
 
 test('GA1', () => {
   const shape = { model: 'sonnet', promptFile: '/tmp/role-builder.md', deny: 'Task,Agent' }
-  const plain = piRpcSeatParts({ ...shape, grants: { extensions: [] } })
-  const granted = piRpcSeatParts({ ...shape, grants: { extensions: [SKELETONREAD_EXTENSION] } })
+  const plain = piSeatParts({ ...shape, grants: { extensions: [] } })
+  const granted = piSeatParts({ ...shape, grants: { extensions: [SKELETONREAD_EXTENSION] } })
   const index = granted.args.indexOf('--tools') + 1
   assert.equal(granted.args[index], `${PI_BUILTIN_TOOLS.join(',')},${RETRIEVE_TOOL}`)
   assert.equal(granted.args[granted.args.indexOf('-e') + 1], SKELETONREAD_EXTENSION)
@@ -470,7 +434,7 @@ test('GA1', () => {
 
 test('a granted pi tool cannot widen the deny boundary', () => {
   const shape = [...seatShapes()].find((candidate) => candidate.role === 'planner')
-  const { args } = piRpcSeatParts({ ...shape, deny: 'Edit,NotebookEdit', grants: { tools: ['edit'], extensions: [], skills: [], agents: [], advisor: false } })
+  const { args } = piSeatParts({ ...shape, deny: 'Edit,NotebookEdit', grants: { tools: ['edit'], extensions: [], skills: [], agents: [], advisor: false } })
   assert.ok(args[args.indexOf('--tools') + 1].split(',').includes('edit'))
   assert.equal(args[args.indexOf('--exclude-tools') + 1], 'edit')
 })
@@ -506,8 +470,8 @@ test('legacy F1: mcp_servers do not alter the seat command', () => {
     tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [],
     mcp_servers: [],
   }
-  const baseline = piRpcSeatParts({ ...shape, grants: normal })
-  const withMcp = piRpcSeatParts({
+  const baseline = piSeatParts({ ...shape, grants: normal })
+  const withMcp = piSeatParts({
     ...shape,
     grants: {
       ...normal,
@@ -522,14 +486,14 @@ test('NP7 the grant decides CREW_FFF for rpc and acp, and readgate points at nat
   const { createReadGate } = await import('./pi/extensions/readgate.ts')
   const grants = { tools: [], extensions: ['builtin:mcp'], agents: [], skills: [], advisor: false, mcp_servers: [{ name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }] }
   const base = { role: 'builder', taskDir: '/np/task', model: 'openai-codex/model', promptFile: '/np/role.md', bootBrief: 'boot', env: {}, grants }
-  const parts = piRpcSeatParts(base)
+  const parts = piSeatParts(base)
   assert.equal(parts.env.CREW_FFF, '1')
   assert.equal(parts.env.PI_CODING_AGENT_DIR, '/np/task/pi-agent/builder')
   assert.equal(acpLaunch({ ...base, bin: '/np/pi', cwd: '/np/checkout' }).env.PI_CODING_AGENT_DIR, '/np/task/pi-agent/builder')
   const ungranted = { ...base, grants: { ...grants, extensions: [], mcp_servers: [] } }
-  assert.equal(piRpcSeatParts(ungranted).env.CREW_FFF, '0')
+  assert.equal(piSeatParts(ungranted).env.CREW_FFF, '0')
   const hostile = { ...ungranted, env: { CREW_FFF: '1' } }
-  assert.equal(piRpcSeatParts(hostile).env.CREW_FFF, '0')
+  assert.equal(piSeatParts(hostile).env.CREW_FFF, '0')
   const gate = createReadGate({ env: parts.env, hasUnquotedPipe: () => false })
   for (const [program, replacement] of [['grep', 'mcp__fff__grep'], ['find', 'mcp__fff__find_files']]) {
     const result = gate.onToolCall({ toolName: 'bash', input: { command: `${program} needle` } }, { cwd: '/np/checkout' })

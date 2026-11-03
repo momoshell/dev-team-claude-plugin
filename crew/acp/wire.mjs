@@ -12,7 +12,7 @@ export function shq(value) {
 
 export const SEAT_COMMAND_FILE = 'cmd.fifo'
 // Keep FIFOs outside crew/task trees: BSD recursive grep blocks opening them.
-// Headless-rpc keys by crew dir, ACP by task dir. The key is a readable prefix
+// The key is a readable prefix
 // (at most 48 chars, so it stays under NAME_MAX) plus 128 bits of the
 // resolved-path hash, which keeps same-named lanes apart. The full path is at
 // most len(root) + len(role) + 101 bytes; FIFOs have no sun_path limit.

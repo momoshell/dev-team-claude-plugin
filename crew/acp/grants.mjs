@@ -2,9 +2,7 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import { join, dirname, resolve as resolvePath } from 'node:path'
-import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { isDeepStrictEqual } from 'node:util'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -126,15 +124,6 @@ function cloneJson(value) {
   return JSON.parse(JSON.stringify(value))
 }
 
-function reservedNonSeatProviderKeys(schema) {
-  const localProvider = schema?.properties?.local_providers?.patternProperties?.['^[a-z0-9-]+$']
-  const providerRef = localProvider?.$ref
-  if (!providerRef) return new Set()
-  return new Set(Object.entries(schema?.properties || {})
-    .filter(([key, declaration]) => key !== 'local_providers' && declaration?.$ref === providerRef)
-    .map(([key]) => key))
-}
-
 // The register is runtime policy: grant paths resolve against this checkout,
 // not the target checkout. The shipped file carries the role-level claude Task
 // fan-out grant and, adapter-scoped under the planner's by_agent.pi overlay,
@@ -167,22 +156,6 @@ export function loadCapabilities({ path = CAPABILITIES_PATH, schemaPath = CAPABI
   if (errors.length) {
     throw refuse('register-invalid', `runtime capability register ${path} failed schema validation under the runtime-policy rule: ${errors.slice(0, 3).join('; ')}`)
   }
-  const reservedNonSeatProviders = reservedNonSeatProviderKeys(schema)
-  for (const key of Object.keys(value.local_providers || {})) {
-    const isReservedNonSeatProvider = reservedNonSeatProviders.has(key)
-    if (!isReservedNonSeatProvider) continue
-    const currentDeclarationPath = `$.${key}`
-    throw refuse('local-provider-reserved', `runtime capability register ${path} declares ${JSON.stringify(key)} as a reserved non-seat provider under local_providers — move the declaration to ${currentDeclarationPath} under the runtime-policy rule`)
-  }
-  const duplicate = (list, where) => {
-    const seen = new Set()
-    for (const grant of list || []) {
-      if (seen.has(grant?.package)) {
-        throw refuse('register-invalid', `runtime capability register ${path} declares vendor extension package ${JSON.stringify(grant.package)} twice under ${where} — a duplicate package makes the grant ambiguous under the runtime-policy rule`)
-      }
-      seen.add(grant?.package)
-    }
-  }
   const duplicateMcp = (list, where) => {
     const seen = new Set()
     for (const server of list || []) {
@@ -202,11 +175,9 @@ export function loadCapabilities({ path = CAPABILITIES_PATH, schemaPath = CAPABI
     }
   }
   for (const [role, spec] of Object.entries(value?.roles || {})) {
-    duplicate(spec?.vendor_extensions, `roles.${role}`)
     duplicateMcp(spec?.mcp_servers, `roles.${role}`)
     validateMcp(spec?.mcp_servers, `roles.${role}`)
     for (const [agent, overlay] of Object.entries(spec?.by_agent || {})) {
-      duplicate(overlay?.vendor_extensions, `roles.${role}.by_agent.${agent}`)
       duplicateMcp(overlay?.mcp_servers, `roles.${role}.by_agent.${agent}`)
       validateMcp(overlay?.mcp_servers, `roles.${role}.by_agent.${agent}`)
     }
@@ -243,56 +214,7 @@ export function pathMessage(reason, seat, kind, expected, found, path) {
   return refuse(reason, `seat ${seat} ${kind} expected ${expected}, found ${found}, at ${path}`)
 }
 
-// A vendor extension lives in HOST state, so the register names the PACKAGE
-// and where the host keeps it is resolved here — never written into a register
-// that ships to other checkouts. An explicit CREW_PI_VENDOR_ROOT wins because
-// it is the root an operator selected on purpose; PI_CODING_AGENT_DIR covers a
-// configured pi install, and the final arm is pi's default root. Each arm is
-// normalized so a relative override cannot depend on the driver's cwd.
-// grantsFor runs in the DRIVER: PI_CODING_AGENT_DIR here is the driver's
-// environment, not the value seatCommand later composes.
-export const VENDOR_ROOT_ENV = 'CREW_PI_VENDOR_ROOT'
 export const PI_AGENT_DIR_ENV = 'PI_CODING_AGENT_DIR'
-
-export function vendorRoots({ env = process.env, home = homedir() } = {}) {
-  const named = (value) => typeof value === 'string' && value.trim() !== ''
-  const override = env?.[VENDOR_ROOT_ENV]
-  if (named(override)) return [resolvePath(override.trim())]
-  const agentDir = env?.[PI_AGENT_DIR_ENV]
-  if (named(agentDir)) return [resolvePath(join(agentDir.trim(), 'npm', 'node_modules'))]
-  return [resolvePath(join(home, '.pi', 'agent', 'npm', 'node_modules'))]
-}
-
-export function resolveVendorExtension(grant, { roots = vendorRoots(), exists = existsSync, readFile = readFileSync, role = 'unknown' } = {}) {
-  const dir = roots.map((root) => join(root, ...String(grant.package).split('/'))).find((one) => pathExists(exists, join(one, 'package.json')))
-  if (!dir) throw pathMessage('vendor-extension-missing', role, `vendor extension grant ${grant.package}`, 'an installed package declaring its own pi extension entry', 'not installed', roots.join(', '))
-  const manifestPath = join(dir, 'package.json')
-  let manifest
-  try { manifest = JSON.parse(String(readFile(manifestPath, 'utf8'))) } catch (err) {
-    throw pathMessage('vendor-extension-missing', role, `vendor extension grant ${grant.package}`, 'a readable package manifest', `unreadable (${err.message})`, manifestPath)
-  }
-  const declared = manifest?.pi?.extensions
-  if (!Array.isArray(declared) || declared.length === 0) throw pathMessage('vendor-extension-missing', role, `vendor extension grant ${grant.package}`, 'a non-empty pi.extensions array in the package manifest', JSON.stringify(manifest?.pi?.extensions), manifestPath)
-  // Every entry, not the first: pi's loader iterates the whole pi.extensions
-  // array, and resolving only a prefix would boot a silently weaker bundle.
-  // Fail closed on a partial bundle: pi skips missing entries, but a grant
-  // that half-resolves delivers a bundle nobody authorised.
-  // Blankness is trimmed; resolution is not: pi admits an existing untrimmed
-  // entry, so only whitespace declares nothing and the path is joined verbatim.
-  const entries = declared.map((relative) => {
-    if (typeof relative !== 'string' || relative.trim() === '') throw pathMessage('vendor-extension-missing', role, `vendor extension grant ${grant.package}`, 'every declared pi.extensions entry to be a non-blank path', JSON.stringify(relative), manifestPath)
-    const entry = resolvePath(join(dir, relative))
-    if (!pathExists(exists, entry)) throw pathMessage('vendor-extension-missing', role, `vendor extension grant ${grant.package}`, 'every declared pi extension entry to exist', 'missing', entry)
-    return entry
-  })
-  return Object.freeze({ package: grant.package, tools: Object.freeze([...grant.tools]), entries: Object.freeze(entries) })
-}
-
-function mergeVendor(base, overlay) {
-  const out = new Map(base.map((grant) => [grant.package, grant]))
-  for (const grant of overlay) out.set(grant.package, grant)
-  return [...out.values()]
-}
 
 function mergeAgents(base, overlay) {
   const out = new Map(base.map((grant) => [grant.name, grant]))
@@ -307,11 +229,8 @@ export function mergeMcpServers(base = [], overlay = []) {
 }
 
 // #403 — the ADAPTER dimension. A role grant may carry `by_agent`, an overlay
-// keyed by the RESOLVED adapter name (crew/crew.mjs:800), merged OVER the role
-// grant. An adapter with no entry gets the role grant and nothing else, which
-// is why the default claude planner is byte-identical after a pi-only grant
-// lands — it never receives an extension it cannot express
-// (crew/adapters/adapter-claude.mjs:65-72), rather than being filtered later.
+// keyed by the resolved adapter name, merged over the role grant.
+// An adapter with no entry gets the role grant and nothing else.
 // tools/advisor/requires are role-level ONLY and no overlay can move them.
 function agentSpec(register, role, agent) {
   const spec = register?.roles && Object.hasOwn(register.roles, role) ? register.roles[role] : null
@@ -323,13 +242,12 @@ function agentSpec(register, role, agent) {
     extensions: [...new Set([...spec.extensions, ...(overlay.extensions || [])])],
     skills: [...new Set([...spec.skills, ...(overlay.skills || [])])],
     agents: mergeAgents(spec.agents, overlay.agents || []),
-    vendor_extensions: mergeVendor(spec.vendor_extensions || [], overlay.vendor_extensions || []),
     mcp_servers: mergeMcpServers(spec.mcp_servers || [], overlay.mcp_servers || []),
   }
 }
 
-export function grantsFor(register, role, { root = REGISTER_ROOT, exists = existsSync, readFile = readFileSync, agent = null, vendorRoots: roots = vendorRoots() } = {}) {
-  const spec = agentSpec(register, role, agent)
+export function grantsFor(register, role, { root = REGISTER_ROOT, exists = existsSync, readFile = readFileSync } = {}) {
+  const spec = register?.roles && Object.hasOwn(register.roles, role) ? register.roles[role] : null
   if (!spec) throw refuse('register-invalid', `runtime capability register has no grant for unknown role ${JSON.stringify(role)} under the runtime-policy rule`)
 
   const extensions = spec.extensions.map((relativePath) => {
@@ -368,47 +286,6 @@ export function grantsFor(register, role, { root = REGISTER_ROOT, exists = exist
     return { name: grant.name, def: path }
   })
 
-  // A vendor grant may be declared OPTIONAL (#956). The package lives in HOST
-  // state, so an absent one downgrades THIS seat rather than ending the run,
-  // and the downgrade is recorded rather than inferred from a shorter list.
-  // Only the register's own vendor-extension-missing refusal is absorbed: any
-  // other error is a defect in this module and still throws.
-  const vendor = []
-  const vendorWithheld = []
-  for (const grant of spec.vendor_extensions || []) {
-    try {
-      vendor.push(resolveVendorExtension(grant, { roots, exists, readFile, role }))
-    } catch (err) {
-      // MUTATION D1: widen this to treat every grant as optional and a REQUIRED
-      // absent grant boots a silently weaker seat instead of refusing — the
-      // "making everything optional cannot pass as a fix" arm of ask 4.
-      const optional = grant.optional === true
-      // MUTATION A1: make this condition always fire and an OPTIONAL absent
-      // grant ends the run again — the 52-failure behaviour this issue removes.
-      if (!optional || err?.reason !== 'vendor-extension-missing') throw err
-      vendorWithheld.push({ package: grant.package, tools: [...grant.tools], reason: err.reason, detail: err.message })
-    }
-  }
-
-  // A vendor grant carries its OWN tool names and they are backed against the
-  // package's declared tools, not against the role's list — so repeating a name
-  // in `tools` grants nothing and is a redundant declaration. It is refused
-  // rather than absorbed: the fold below concatenates, so absorbing it would
-  // return a list with duplicates to a frozen contract, and a consumer that
-  // counts rather than sets would be wrong. Both adapters happen to dedupe
-  // today (crew/adapters/adapter-pi.mjs:236, adapter-claude.mjs:68), which is
-  // exactly why this would otherwise go unnoticed until something new consumed
-  // the list. The register's posture is that a grant says each thing once.
-  // Include withheld grants too, so duplicate declarations do not depend on host package state.
-  for (const one of [...vendor, ...vendorWithheld]) {
-    for (const tool of one.tools) {
-      if (spec.tools.includes(tool)) {
-        throw refuse('unknown-grant', `seat ${role} declares vendor tool ${JSON.stringify(tool)} on ${JSON.stringify(one.package)} and also lists it under tools; a vendor grant carries its own tool names, so remove the duplicate from tools`)
-      }
-    }
-  }
-
-  const grantedTools = [...spec.tools, ...vendor.flatMap((one) => one.tools)]
   const mcp_servers = (spec.mcp_servers || []).map((server) => ({
     name: server.name,
     command: server.command === null
@@ -417,10 +294,8 @@ export function grantsFor(register, role, { root = REGISTER_ROOT, exists = exist
     url: server.url,
   }))
   return deepFreeze({
-    tools: grantedTools,
-    extensions: [...extensions, ...vendor.flatMap((one) => one.entries)],
-    vendor_extensions: vendor,
-    vendor_withheld: vendorWithheld,
+    tools: [...spec.tools],
+    extensions,
     agents, skills,
     advisor: spec.advisor, requires: [...spec.requires],
     mcp_servers,
@@ -478,73 +353,12 @@ export function armGrants({ role, agent, extensions = [] }, { register = loadCap
   if (fanout && agents.length === 0) {
     throw refuse('unknown-grant', `seat ${role} asks for subagent but the register declares no agent definition for it`)
   }
-  const narrow = { roles: { [role]: { tools: [], extensions: paths, agents, skills: [], advisor: false, requires: [], mcp_servers, vendor_extensions: [] } } }
-  return grantsFor(narrow, role, { root, exists, readFile, agent: null, vendorRoots: [] })
-}
-
-export function relativeGrantMatches(declared, resolved) {
-  const declaration = String(declared).replaceAll('\\', '/')
-  const candidate = String(resolved).replaceAll('\\', '/')
-  return candidate === declaration || candidate.endsWith(`/${declaration}`)
-}
-
-export function assertGrantsBacked(role, grants, register, { agent = null, vendorRoots: roots = vendorRoots(), exists = existsSync, readFile = readFileSync } = {}) {
-  const spec = agentSpec(register, role, agent)
-  if (!spec) throw refuse('unknown-grant', `seat ${role} has grants but no matching register role`)
-  // Caller-supplied vendor entries never build skip-sets: each package, tool,
-  // and entry is independently re-resolved from the REGISTER declaration.
-  const vendorTools = new Set()
-  const vendorEntries = new Set()
-  for (const vendor of grants?.vendor_extensions || []) {
-    const declared = (spec.vendor_extensions || []).find((one) => one.package === vendor.package)
-    if (!declared) throw refuse('unknown-grant', `seat ${role} has unregistered vendor extension grant ${JSON.stringify(vendor.package)}`)
-    const resolved = resolveVendorExtension(declared, { roots, exists, readFile, role })
-    for (const tool of vendor.tools || []) {
-      if (!resolved.tools.includes(tool)) throw refuse('unknown-grant', `seat ${role} has unregistered vendor tool grant ${JSON.stringify(tool)} on ${JSON.stringify(vendor.package)}`)
-      vendorTools.add(tool)
-    }
-    for (const entry of vendor.entries || []) {
-      if (!resolved.entries.includes(entry)) throw refuse('unknown-grant', `seat ${role} has unregistered vendor extension entry ${JSON.stringify(entry)} on ${JSON.stringify(vendor.package)}`)
-    }
-    for (const entry of resolved.entries) vendorEntries.add(entry)
-  }
-  for (const tool of grants?.tools || []) {
-    if (vendorTools.has(tool)) continue
-    if (!spec.tools.includes(tool)) throw refuse('unknown-grant', `seat ${role} has unregistered tool grant ${JSON.stringify(tool)}`)
-  }
-  for (const extension of grants?.extensions || []) {
-    if (vendorEntries.has(extension)) continue
-    if (!spec.extensions.some((declared) => relativeGrantMatches(declared, extension))) {
-      throw refuse('unknown-grant', `seat ${role} has unregistered extension grant ${JSON.stringify(extension)}`)
-    }
-  }
-  for (const skill of grants?.skills || []) {
-    if (!spec.skills.some((declared) => relativeGrantMatches(declared, skill))) {
-      throw refuse('unknown-grant', `seat ${role} has unregistered skill grant ${JSON.stringify(skill)}`)
-    }
-  }
-  for (const agent of grants?.agents || []) {
-    if (!spec.agents.some((declared) => declared.name === agent.name && relativeGrantMatches(declared.def, agent.def))) {
-      throw refuse('unknown-grant', `seat ${role} has unregistered agent grant ${JSON.stringify(agent)}`)
-    }
-  }
-  for (const server of grants?.mcp_servers || []) {
-    const declared = (spec.mcp_servers || []).find((one) => one.name === server?.name)
-    if (!declared) {
-      throw refuse('unknown-grant', `seat ${role} has unregistered MCP server grant ${JSON.stringify(server?.name)}`)
-    }
-    if (!isDeepStrictEqual(server, declared)) {
-      throw refuse('unknown-grant', `seat ${role} has changed MCP server grant ${JSON.stringify(server?.name)} that is not backed by the register`)
-    }
-  }
-  if (grants?.advisor === true && spec.advisor !== true) {
-    throw refuse('unknown-grant', `seat ${role} has unregistered advisor grant`)
-  }
-  return grants
+  const narrow = { roles: { [role]: { tools: [], extensions: paths, agents, skills: [], advisor: false, requires: [], mcp_servers } } }
+  return grantsFor(narrow, role, { root, exists, readFile })
 }
 
 export const EMPTY_GRANTS = deepFreeze({
-  tools: [], extensions: [], vendor_extensions: [], vendor_withheld: [], agents: [], skills: [], advisor: false, requires: [], mcp_servers: [],
+  tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [], mcp_servers: [],
 })
 
 export const SUBAGENT_EXTENSION = 'crew/pi/extensions/subagent.ts'

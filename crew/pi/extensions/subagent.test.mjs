@@ -769,14 +769,14 @@ test('the granted pi seat activates the agent tool and transports the allowlist'
     skills: [],
     advisor: false,
   }
-  const command = adapter.piRpcSeatParts({
+  const command = adapter.piSeatParts({
     role: 'planner', model: 'anthropic/claude-opus-5', promptFile: '/tmp/prompt.md',
     deny: 'Edit,Write,Bash', taskDir: '/tmp/task', effort: 'high', grants,
   })
   assert.ok(command.args[command.args.indexOf('--tools') + 1].split(',').includes('agent'))
   assert.equal(command.args[command.args.indexOf('-e') + 1], 'crew/pi/extensions/subagent.ts')
   assert.equal(command.env.CREW_PI_AGENTS, JSON.stringify(grants.agents))
-  const bare = adapter.piRpcSeatParts({
+  const bare = adapter.piSeatParts({
     role: 'planner', model: 'anthropic/claude-opus-5', promptFile: '/tmp/prompt.md',
     deny: 'Edit', taskDir: '/tmp/task', env: { CREW_PI_AGENTS: 'hostile' },
   })
@@ -790,8 +790,6 @@ test('the shipped scout bundle loads and declares subagents', () => {
     agents: [{ name: 'scout', def: join(ROOT, 'crew/pi/agents/scout.json') }],
   }
   assert.equal(mod.loadAgentDefinition(grants.agents[0]).error, undefined)
-  assert.equal(adapter.capabilitiesFor({ transport: 'acp', grants }).subagents, true)
-  assert.equal(adapter.capabilitiesFor({ transport: 'acp' }).subagents, false)
   assert.equal(basename(grants.agents[0].def), 'scout.json')
 })
 

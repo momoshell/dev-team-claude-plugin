@@ -108,29 +108,14 @@ export function readOnlyCommandResult(command) {
   return closeSegment(command.length) ?? { allowed: true, reason: null }
 }
 
-export function panelPermission(toolCall) {
-  const mutating = ['edit', 'write', 'delete', 'move']
-  if (mutating.some((value) => toolCall?.kind === value || toolCall?.title === value))
-    return { policy: 'roster', verdict: 'reject' }
-  if (toolCall?.kind === 'execute')
-    return { policy: 'roster', verdict: readOnlyCommand(toolCall?.rawInput?.command) ? 'allow' : 'reject' }
-  return null
-}
-
-export function settlePermission({ request, toolCall = request?.toolCall, options = request?.options, policy = {}, lead, log = () => {} }) {
+export function settlePermission({ request, toolCall = request?.toolCall, options = request?.options, lead, log = () => {} }) {
   const reject = options.find((o) => o.kind === 'reject_once') ?? options.find((o) => o.kind === 'reject_always')
   if (!reject) throw Object.assign(new Error('permission-no-reject-option'), { reason: 'permission-no-reject-option' })
 
-  const allow = options.find((o) => o.kind === 'allow_once')
-  const keys = [toolCall?.title, toolCall?.kind].filter((key) => typeof key === 'string')
-  policy = { autoDeny: policy.autoDeny ?? [], autoApprove: policy.autoApprove ?? [] }
   let selected
   let source
   let answered
-  if (keys.some((key) => policy.autoDeny.includes(key))) selected = reject
-  else if (keys.some((key) => policy.autoApprove.includes(key))) selected = allow ?? reject
-  if (selected) source = 'roster'
-  else if (lead == null) { selected = reject; source = 'no-lead' }
+  if (lead == null) { selected = reject; source = 'no-lead' }
   else {
     source = 'lead'
     const payload = { question: 'permit', tool_call: toolCall, options: options.map((o) => o.optionId), text: permitQuestion({ toolCall, options }) }
@@ -166,10 +151,10 @@ export function settlePermission({ request, toolCall = request?.toolCall, option
   return { optionId: selected.optionId, row }
 }
 
-export function permissionHandler({ policy, lead, log } = {}) {
+export function permissionHandler({ lead, log } = {}) {
   return ({ toolCall, options }) => {
     try {
-      return settlePermission({ toolCall, options, policy, lead, log }).optionId
+      return settlePermission({ toolCall, options, lead, log }).optionId
     } catch (err) {
       if (err?.reason === 'permission-no-reject-option') {
         try { log?.({ kind: 'permission', reason: 'permission-no-reject-option' }) } catch { /* journal is advisory */ }

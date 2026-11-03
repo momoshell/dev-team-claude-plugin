@@ -6,8 +6,7 @@
       "providers": [
         "openai",
         "anthropic",
-        "meta",
-        "llama-swap"
+        "meta"
       ],
       "transports": [
         "acp"
@@ -244,18 +243,5 @@
         }
       }
     }
-  },
-  "local_providers": {
-    "llama-swap": {
-      "settings": "crew/pi/settings.json",
-      "pi_provider": "llama-swap",
-      "base_url": "http://10.112.20.20:8080/v1"
-    }
-  },
-  "narrator": {
-    "settings": "crew/pi/settings.json",
-    "pi_provider": "llama-swap",
-    "base_url": "http://10.112.20.20:8080/v1",
-    "model": "qwen3.8-27b"
   }
 }

@@ -39,26 +39,6 @@ function normalDeps(deps) {
   }
 }
 
-function appendLine(path, record, d) {
-  d.writeFileSync(path, `\n${JSON.stringify(record)}\n`, { flag: 'a' })
-}
-
-function readOverrides(path, d) {
-  if (!d.existsSync(path)) return []
-  let text
-  try { text = d.readFileSync(path, 'utf8') } catch { return [] }
-  const out = []
-  for (const line of String(text).split('\n')) {
-    if (!line.trim()) continue
-    try { out.push(JSON.parse(line)) } catch { /* torn or corrupt records are inert */ }
-  }
-  return out
-}
-
-function validAttestation(a) {
-  return a && a.quiesced === true && typeof a.method === 'string' && a.method.trim() !== ''
-}
-
 function ownerState(owner, d) {
   if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) return LIVENESS.UNKNOWN
   // This function USED to short-circuit `owner.pid === d.pid` to ALIVE. That
@@ -98,12 +78,10 @@ function finiteNow(now) {
 }
 
 
-export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, deps = {}, _lockOnly = false }) {
+export function reclaimStore({ dir, actor, evidencePolicies = {}, deps = {} }) {
   const d = normalDeps(deps)
   const lockDir = join(dir, 'locks')
-  const overridePath = join(dir, 'overrides.jsonl')
-  // The store directory is initialized once so lock and marker creation can be
-  // exclusive; headless allocation still creates each run directory separately.
+  // The store directory is initialized once so lock and marker creation can be exclusive.
   d.mkdirSync(dir, { recursive: true })
   d.mkdirSync(lockDir, { recursive: true })
   function lockPath(name, fence) { return join(lockDir, `${name}.lock.${fence}`) }
@@ -130,15 +108,6 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
       if (!(epoch < fence)) continue
       try { d.unlinkSync(lockPath(name, epoch)) } catch {}
     }
-  }
-  function matchingLockOverride(name, cur) {
-    if (!cur) return false
-    return readOverrides(overridePath, d).some((r) => {
-      if (r?.kind !== 'lock' || r.name !== name || !validAttestation(r.attestation)) return false
-      if (r.fence !== cur.fence || !r.identity) return false
-      if (r.identity.kind === 'token') return cur.record?.token === r.identity.value
-      return r.identity.kind === 'digest' && cur.raw != null && digest(cur.raw) === r.identity.value
-    })
   }
   function ownerForLock(cur) {
     return cur?.record ? ownerState(cur.record.owner, d) : LIVENESS.UNKNOWN
@@ -175,8 +144,8 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
       return false
     }
   }
-  function acquire(name, { deadlineMs = LOCK_ATTEMPTS * LOCK_INTERVAL_MS } = {}) {
-    if (typeof deadlineMs !== 'number' || !Number.isFinite(deadlineMs) || deadlineMs < 0) throw new TypeError('deadlineMs must be a finite non-negative number')
+  function acquire(name) {
+    const deadlineMs = LOCK_ATTEMPTS * LOCK_INTERVAL_MS
     const startedAt = finiteNow(d.now)
     const maxAttempts = Math.ceil(deadlineMs / LOCK_INTERVAL_MS) + 1
     let attempts = 0
@@ -199,8 +168,7 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
     }
     while (true) {
       const cur = current(name)
-      const overridden = matchingLockOverride(name, cur)
-      if (cur && !overridden) {
+      if (cur) {
         if (!cur.record) return failure('unresolvable', cur)
         if (cur.record.released !== true && ownerForLock(cur) !== LIVENESS.DEAD) {
           const stopped = contention(cur)
@@ -241,11 +209,11 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
   function checkFence(handle) {
     if (!handle?.name) return false
     const cur = current(handle.name)
-    return !!(cur && cur.fence === handle.fence && cur.record?.token === handle.token && cur.record.released !== true && !matchingLockOverride(handle.name, cur))
+    return !!(cur && cur.fence === handle.fence && cur.record?.token === handle.token && cur.record.released !== true)
   }
   function release(handle) { return releaseEpoch(handle) }
-  function withLock(name, fn, options = {}) {
-    const result = acquire(name, options)
+  function withLock(name, fn) {
+    const result = acquire(name)
     if (!result.ok) {
       const holder = result.holder
       const err = new Error(`reclaim lock unavailable: ${name} reason=${result.reason} pid=${holder?.pid ?? 'unknown'} actor=${holder?.actor ?? 'unknown'} fence=${holder?.fence ?? 'unknown'} waited_ms=${result.waited_ms}`)
@@ -257,44 +225,23 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
     }
     try { return fn(result.handle) } finally { release(result.handle) }
   }
-  function overrideLock(name, input = {}) {
-    const cur = current(name)
-    if (!input.actor || !input.reason || !validAttestation(input.attestation)) throw new Error('invalid lock override attestation')
-    if (!cur || cur.fence !== input.fence) throw new Error('lock override fence mismatch')
-    const identity = input.token != null ? { kind: 'token', value: input.token } : input.digest != null ? { kind: 'digest', value: input.digest } : null
-    if (!identity || (identity.kind === 'token' && cur.record?.token !== identity.value) || (identity.kind === 'digest' && (cur.raw == null || digest(cur.raw) !== identity.value))) throw new Error('lock override identity mismatch')
-    appendLine(overridePath, { at: d.now(), actor: input.actor, reason: input.reason, kind: 'lock', name, fence: cur.fence, identity, attestation: input.attestation }, d)
-  }
-
-  if (_lockOnly) return { acquire, release, checkFence, withLock, overrideLock }
-
   const phases = { allowed: [PHASES.RESERVED, PHASES.SPAWNING, PHASES.RUNNING], preEffect: PHASES.RESERVED }
-  const engine = reservationEngine({ dir, actor, pathFor: (key) => join(dir, `.${key}.active.json`), lockNameFor: markerLockName, phases, completionProof: (key, marker) => {
-    if (!marker || !((typeof marker.reservation_id === 'string' && phases.allowed.includes(marker.phase)) || (['starting', 'running'].includes(marker.phase) && typeof marker.role === 'string'))) return false
-    if (typeof marker.id !== 'string' || !/^d\d+$/.test(marker.id) || (marker.key ?? marker.role) !== key) return false
-    return marker.exit === join(dir, marker.id, 'exit') && d.existsSync(marker.exit)
-  }, evidencePolicy: (key, marker) => {
-    if (marker?.evidence?.kind === EVIDENCE_KINDS.PGID && typeof marker.id === 'string' && /^d\d+$/.test(marker.id) && marker.evidence.file === join(dir, marker.id, 'pgid')) return marker.evidence
+  const engine = reservationEngine({ dir, phases, evidencePolicy: (key, marker) => {
     const kind = marker?.evidence?.kind
     if (kind && typeof evidencePolicies[kind] === 'function') {
       try { return evidencePolicies[kind](key, marker) || null } catch { return null }
     }
-    // Registered probes are a compatibility seam for surfaces that predate
-    // per-kind validators; new surfaces should provide evidencePolicies.
-    if (kind && probes[kind]) return marker.evidence
     return null
-  }, probes, deps: d, lock: { withLock, checkFence } })
+  }, deps: d, lock: { withLock, checkFence } })
 
-  return { reserve: engine.reserve, advance: engine.advance, clear: engine.clear, reconcile: engine.reconcile, override: engine.override, probeEvidence: engine.probeEvidence, acquire, release, checkFence, withLock, overrideLock }
+  return { reserve: engine.reserve, advance: engine.advance, clear: engine.clear, probeEvidence: engine.probeEvidence }
 }
 
-function reservationEngine({ dir, actor, pathFor, lockNameFor, phases, completionProof = () => null, evidencePolicy = () => null, probes = {}, deps = {}, lock = null, overrides = {} }) {
+function reservationEngine({ dir, phases, evidencePolicy, deps, lock }) {
   const d = normalDeps(deps)
-  const withStore = lock || reclaimStore({ dir, actor, probes, deps: d, _lockOnly: true })
-  const withLock = withStore.withLock
-  const checkFence = withStore.checkFence
-  const pathOf = pathFor || ((key) => join(dir, `.${key}.active.json`))
-  const lockOf = lockNameFor || markerLockName
+  const { withLock, checkFence } = lock
+  const pathOf = (key) => join(dir, `.${key}.active.json`)
+  const lockOf = markerLockName
   const allowed = phases?.allowed || []
   const validPhase = (phase) => allowed.includes(phase)
   const probeMap = { [EVIDENCE_KINDS.PGID]: (evidence) => {
@@ -303,7 +250,7 @@ function reservationEngine({ dir, actor, pathFor, lockNameFor, phases, completio
     try { number = Number(String(d.readFileSync(evidence.file, 'utf8')).trim()) } catch { return LIVENESS.UNKNOWN }
     if (!Number.isSafeInteger(number) || number <= 0) return LIVENESS.UNKNOWN
     try { d.kill(-number, 0); return LIVENESS.ALIVE } catch (err) { return err?.code === 'ESRCH' ? LIVENESS.DEAD : err?.code === 'EPERM' ? LIVENESS.ALIVE : LIVENESS.UNKNOWN }
-  }, ...probes }
+  } }
   function probeEvidence(evidence) {
     if (!evidence || typeof evidence.kind !== 'string' || !probeMap[evidence.kind]) return LIVENESS.UNKNOWN
     try { const result = probeMap[evidence.kind](evidence); return Object.values(LIVENESS).includes(result) ? result : LIVENESS.UNKNOWN } catch { return LIVENESS.UNKNOWN }
@@ -318,36 +265,21 @@ function reservationEngine({ dir, actor, pathFor, lockNameFor, phases, completio
   function identityFor(key, item) {
     return item.marker && typeof item.marker.reservation_id === 'string' ? { key, reservation_id: item.marker.reservation_id } : item.raw != null ? { key, digest: digest(item.raw) } : { key, digest: '' }
   }
-  const overrideKind = overrides.kind || 'reservation'
-  const overrideAttested = overrides.attested === true
-  function overrideMatches(key, item) {
-    if (item.raw == null) return false
-    return readOverrides(join(dir, 'overrides.jsonl'), d).some((record) => {
-      if (record?.kind !== overrideKind || record.key !== key || !record.identity) return false
-      if (overrideAttested && !validAttestation(record.attestation)) return false
-      if (record.identity.kind === 'reservation_id') return item.marker?.reservation_id === record.identity.value
-      return record.identity.kind === 'digest' && digest(item.raw) === record.identity.value
-    })
-  }
-  function ownerAlive(marker) { return ownerState(marker?.owner || (marker && marker.ownerPid ? { pid: marker.ownerPid } : null), d) }
+  function ownerAlive(marker) { return ownerState(marker?.owner, d) }
   function verdictOf(key, item) {
     if (item.raw == null && !item.unreadable) return { verdict: VERDICTS.FREE, marker: null, handle: null }
-    if (!item.marker) return { verdict: overrideMatches(key, item) ? VERDICTS.RECLAIMABLE : VERDICTS.UNRESOLVABLE, marker: null, handle: identityFor(key, item) }
-    let complete = false
-    try { complete = completionProof(key, item.marker) === true } catch { complete = false }
-    if (complete) return { verdict: VERDICTS.RECLAIMABLE, marker: item.marker, handle: identityFor(key, item) }
+    if (!item.marker) return { verdict: VERDICTS.UNRESOLVABLE, marker: null, handle: identityFor(key, item) }
     const evidence = (() => { try { return evidencePolicy(key, item.marker) } catch { return null } })()
     const evidenceState = probeEvidence(evidence)
     if (evidenceState === LIVENESS.ALIVE) return { verdict: VERDICTS.BUSY, marker: item.marker, handle: identityFor(key, item) }
     if (ownerAlive(item.marker) === LIVENESS.ALIVE) return { verdict: VERDICTS.BUSY, marker: item.marker, handle: identityFor(key, item) }
     if (typeof item.marker.reservation_id !== 'string' || !validPhase(item.marker.phase)) {
       const value = VERDICTS.UNRESOLVABLE
-      return { verdict: overrideMatches(key, item) ? VERDICTS.RECLAIMABLE : value, marker: item.marker, handle: identityFor(key, item) }
+      return { verdict: value, marker: item.marker, handle: identityFor(key, item) }
     }
     if (evidenceState === LIVENESS.DEAD || (phases.preEffect != null && item.marker.phase === phases.preEffect)) return { verdict: VERDICTS.RECLAIMABLE, marker: item.marker, handle: identityFor(key, item) }
-    return { verdict: overrideMatches(key, item) ? VERDICTS.RECLAIMABLE : VERDICTS.UNRESOLVABLE, marker: item.marker, handle: identityFor(key, item) }
+    return { verdict: VERDICTS.UNRESOLVABLE, marker: item.marker, handle: identityFor(key, item) }
   }
-  function reconcile(key) { return verdictOf(key, readMarker(key)) }
   function markerIdentityMatches(item, handle) {
     if (!item.raw || !handle || handle.key == null) return false
     if (handle.reservation_id != null) return item.marker?.reservation_id === handle.reservation_id
@@ -412,14 +344,7 @@ function reservationEngine({ dir, actor, pathFor, lockNameFor, phases, completio
       throw err
     }
   }
-  function override(key, input = {}) {
-    if (!input.actor) throw new Error('override actor required')
-    const item = readMarker(key)
-    const identity = input.reservation_id != null ? { kind: 'reservation_id', value: input.reservation_id } : input.digest != null ? { kind: 'digest', value: input.digest } : null
-    if (!identity || !markerIdentityMatches(item, { key, ...input })) throw new Error('reservation override identity mismatch')
-    appendLine(join(dir, 'overrides.jsonl'), { at: d.now(), actor: input.actor, reason: input.reason, kind: 'reservation', key, identity, marker: item.marker }, d)
-  }
-  return { reserve, advance, clear, reconcile, override, probeEvidence }
+  return { reserve, advance, clear, probeEvidence }
 }
 
 export const SLOT_ENV = Object.freeze({ capacity: 'CREW_SUITE_SLOTS' })

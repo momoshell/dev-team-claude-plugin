@@ -2,13 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.internal/crew/capabilities.schema.json",
   "title": "checkout-pinned crew capability register",
-  "description": "Closed, runtime-owned grants. The register is the single place that says which seats may fan out, and a grant must carry everything the seat's command line needs: tools: [\"Task\"] for a claude seat, an extension and an agent definition together for a pi seat. A grant may name a package the HOST installed, and such a vendor grant must carry its tool names. Skill grants stay empty until checkout-pinned pi assets arrive, and advisor is reserved for a later runtime slice. The coding-agent adapter inventory under coding_agents is distinct from role/overlay agents subagent grants; JSON has no comments, so this description records that collision explicitly.",
+  "description": "Closed, runtime-owned grants. The coding-agent inventory is distinct from role and overlay agent grants.",
   "type": "object",
   "required": [
     "schema_version",
     "updated_at",
     "roles",
-    "local_providers",
     "coding_agents"
   ],
   "additionalProperties": false,
@@ -56,48 +55,9 @@
           "$ref": "#/$defs/grant"
         }
       }
-    },
-    "local_providers": {
-      "type": "object",
-      "patternProperties": {
-        "^[a-z0-9-]+$": {
-          "$ref": "#/$defs/localprovider"
-        }
-      },
-      "additionalProperties": false
-    },
-    "narrator": {
-      "$ref": "#/$defs/localprovider"
     }
   },
   "$defs": {
-    "localprovider": {
-      "type": "object",
-      "required": [
-        "settings",
-        "pi_provider",
-        "base_url"
-      ],
-      "additionalProperties": false,
-      "properties": {
-        "settings": {
-          "$ref": "#/$defs/relpath"
-        },
-        "pi_provider": {
-          "type": "string",
-          "pattern": "^[a-z0-9-]+$"
-        },
-        "base_url": {
-          "type": "string",
-          "pattern": "^https?://"
-        },
-        "model": {
-          "type": "string",
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$",
-          "description": "Narrator chat streams completion progress. The request refuses transfer below 1 byte per second for 60 seconds, uses a 10-second connection timeout, and retains a 300-second absolute backstop. A 2026-09-13 transport probe of gpt-oss-20b observed first streamed bytes at 28.345s and completion at 29.305s; prior non-streaming measurements were 6.6s for gpt-oss-20b, 12.6s for qwen3.8-27b, and 35.2s warm / 44.0s cold for gemma4-31b. Choose a model whose initial silent interval stays below the 60-second stall window; once bytes arrive, continued progress rather than total duration governs acceptance. Any stall, connection failure, or absolute timeout degrades to the code-composed body."
-        }
-      }
-    },
     "codingagent": {
       "type": "object",
       "required": [
@@ -266,10 +226,6 @@
             ]
           }
         },
-        "vendor_extensions": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/vendorgrant" }
-        },
         "mcp_servers": {
           "type": "array",
           "items": { "$ref": "#/$defs/mcpserver" }
@@ -300,10 +256,6 @@
         "skills": {
           "type": "array",
           "items": { "$ref": "#/$defs/relpath" }
-        },
-        "vendor_extensions": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/vendorgrant" }
         },
         "mcp_servers": {
           "type": "array",
@@ -343,29 +295,6 @@
           "type": ["string", "null"],
           "pattern": "^https?://"
         }
-      }
-    },
-    "vendorgrant": {
-      "type": "object",
-      "required": [
-        "package",
-        "tools"
-      ],
-      "additionalProperties": false,
-      "properties": {
-        "package": {
-          "type": "string",
-          "pattern": "^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$"
-        },
-        "tools": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "type": "string",
-            "pattern": "^[A-Za-z0-9_-]+$"
-          }
-        },
-        "optional": { "type": "boolean" }
       }
     },
     "agentgrant": {

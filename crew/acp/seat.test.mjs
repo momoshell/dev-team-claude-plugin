@@ -9,7 +9,7 @@ import { basename, dirname, join, relative, resolve } from 'node:path'
 import { ROOT, scratchDir } from '../../test/helpers.mjs'
 import { runAcpSeat } from './seat.mjs'
 import { parseAgent } from '../protocols.mjs'
-import { PANE_USAGE_SETTINGS } from '../adapters/adapter-claude.mjs'
+import * as claude from '../adapters/adapter-claude.mjs'
 import { loadAcceptedContext } from '../pi/extensions/skeletonread.ts'
 import { loadContext as advisorContext } from '../pi/extensions/advisor.ts'
 
@@ -217,7 +217,7 @@ test('every lean Claude seat launches with the plain-string system prompt asking
         assert.equal(meta.claudeCode.options.model, 'claude-opus-4-6')
         assert.equal(meta.claudeCode.options.extraArgs.effort, 'high')
         assert.deepEqual(meta.claudeCode.options.settingSources, [])
-        assert.equal(meta.claudeCode.options.settings, PANE_USAGE_SETTINGS)
+        assert.equal(meta.claudeCode.options.settings, claude.CLAUDE_SEAT_SETTINGS)
       })
     }
   }
@@ -817,7 +817,7 @@ test('a Claude seat reads no setting source, so a permissive target checkout can
           assert.equal(run.error, undefined, label)
           const options = sessionNew(run).params._meta.claudeCode.options
           assert.deepEqual(options.settingSources, [], label)
-          assert.equal(options.settings, PANE_USAGE_SETTINGS, label)
+          assert.equal(options.settings, claude.CLAUDE_SEAT_SETTINGS, label)
           if (!grant) return assert.equal(Object.hasOwn(options, 'plugins'), false, label)
           assert.equal(options.plugins.length, 1, label)
           assert.equal(options.plugins[0].type, 'local', label)
@@ -1261,11 +1261,7 @@ test('a claude seat refuses the arms it cannot carry before a client: subagent, 
   assert.equal(armed('claude', 'builder', { advisor: null, extensions: [] }).created.length, 1)
 })
 
-test('a claude seat granted readgate launches with the arms plugin; one granted nothing launches without', () => {
-  const { launch } = armed('claude', 'builder', { extensions: ['readgate'] })
-  const [plugin, ...others] = claudeOptions(launch).plugins
-  assert.deepEqual(others, [])
-  assert.match(plugin.path, /\/claude-arms\/builder$/)
+test('a claude seat granted nothing launches without plugins', () => {
   assert.equal(Object.hasOwn(claudeOptions(armed('claude', 'builder', {}).launch), 'plugins'), false)
 })
 
@@ -1438,40 +1434,36 @@ test('a lean pi seat granted the advisor refuses without a pi cell or a written 
   assert.equal(existsSync(join(failing.taskDir, 'advisor-manifest.json')), false)
 })
 
-test('a lean claude builder declaring advisor and skeletonread launches with both on the lane layout', () => {
-  const probe = armLaunch('claude', 'builder', contextArms, { briefText: 'Tripwire tests:\n- a.test.mjs · tripwire\nBroad keys\n' })
-  const anchor = Date.now() - 60_000
-  leanLane(probe.taskDir, { anchor })
-  probe.run()
-  const [launch] = probe.created
-  assert.equal(launch.env.CREW_CONTEXT_LAYOUT, 'lean')
-  assert.equal(launch.env.CREW_TASK_DIR, probe.taskDir)
-  const config = JSON.parse(readFileSync(join(claudeOptions(launch).plugins[0].path, 'config.json'), 'utf8'))
-  assert.deepEqual(config.arms, ['skeletonread', 'advisor'])
-  assert.equal(config.lane_task_dir, probe.taskDir)
-  assert.ok(config.state_dir.startsWith(join(probe.taskDir, 'claude-arms')), 'what the hooks keep lives in the lane, not in the disposable runtime')
-  const manifest = JSON.parse(readFileSync(join(probe.taskDir, 'advisor-manifest.json'), 'utf8'))
-  assert.equal(manifest.run_started_at, anchor)
-  assert.deepEqual(manifest.cell, { provider: 'openai', id: 'gpt-6.1-sol', agent: 'pi', effort: 'high', model: 'openai/gpt-6.1-sol' })
+// MUTATION: admit extensions, or compute contextArms for claude.
+test('a claude seat refuses readgate, skeletonread and an advisor before a client', () => {
+  for (const arms of [{ extensions: ['readgate'] }, { extensions: ['skeletonread'] }, { advisor: advisorArm }]) {
+    const probe = armLaunch('claude', 'builder', arms, { briefText: 'Tripwire tests:\n- a.test.mjs · tripwire\nBroad keys\n' })
+    leanLane(probe.taskDir)
+    assert.throws(() => probe.run(), { reason: 'grant-unsupported' })
+    assert.equal(probe.created.length, 0)
+    assert.deepEqual(readdirSync(probe.runtimeRoot), [])
+    assert.equal(existsSync(join(probe.taskDir, 'advisor-manifest.json')), false)
+  }
 })
 
-test('a claude seat with context arms refuses before a client when the lane has no run-start of its own or a usable planner return', () => {
-  const refusedClaude = (arms, lane) => {
-    const probe = armLaunch('claude', 'builder', arms)
-    lane(probe.taskDir)
-    assert.throws(() => probe.run(), { reason: 'grant-unsupported' }, JSON.stringify(arms))
-    assert.equal(probe.created.length, 0, 'a refused seat constructs no client')
-    assert.deepEqual(readdirSync(probe.runtimeRoot), [], 'a refused seat leaves no runtime')
-  }
-  for (const arms of [{ advisor: advisorArm }, { extensions: ['skeletonread'] }]) {
-    refusedClaude(arms, (taskDir) => {
-      writeFileSync(join(dirname(taskDir), 'journal.jsonl'), `${JSON.stringify({ event: 'run-start', at: 1, run_id: 'foreign' })}\n`)
-      leanLane(taskDir, { anchor: null })
-    })
-    refusedClaude(arms, (taskDir) => leanLane(taskDir, { details: null }))
-  }
-  // Arms that read no lane context need none.
-  assert.equal(armed('claude', 'builder', { extensions: ['readgate'] }).created.length, 1)
+const claudeSpec = (grants = {}) => {
+  const dir = scratchDir('acp-seat-claude-launch-')
+  return { bin: BIN, claudeBin: BIN, cwd: dir, model: 'claude-opus-4-6', tools: 'Read', deny: '', effort: 'high', promptFile: join(dir, 'p.md'), writableDirs: [dir], env: {}, role: 'builder', taskDir: dir, grants: { tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [], mcp_servers: [], ...grants } }
+}
+
+// MUTATION: drop the advisor refusal.
+test('claude acpLaunch refuses an advisor grant it cannot carry', () => {
+  assert.throws(() => claude.acpLaunch(claudeSpec({ advisor: true })), { reason: 'grant-unsupported' })
+  assert.equal(typeof claude.acpLaunch(claudeSpec()), 'object')
+})
+
+// MUTATION: restore policy in acpLaunch.
+test('the claude adapter ships no arms, capability profile or launch policy', () => {
+  for (const name of ['capabilitiesFor', 'ACP_BINARY', 'PANE_USAGE_SETTINGS', 'writeSeatArms', 'hasFffPreToolUseHook', 'hasSkillIsolationSettings']) assert.equal(name in claude, false)
+  assert.equal(typeof claude.CLAUDE_SEAT_SETTINGS, 'string')
+  assert.equal(existsSync(claude.CLAUDE_SEAT_SETTINGS), true)
+  assert.equal(existsSync(join(ROOT, 'crew/adapters/claude-arms.mjs')), false)
+  assert.equal(Object.hasOwn(claude.acpLaunch(claudeSpec()), 'policy'), false)
 })
 
 test('every native extension reaches a pi launch as its checkout extension with its tool; none declared loads none', () => {

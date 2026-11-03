@@ -1,19 +1,17 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { isAbsolute, join, resolve as resolvePath } from 'node:path'
 import {
-  CAPABILITY_REFUSALS, EMPTY_GRANTS, PI_AGENT_DIR_ENV, REGISTER_ROOT, SUBAGENT_EXTENSION, armGrants, assertGrantsBacked,
-  grantsFor, loadCapabilities, mergeMcpServers, pathExists, pathMessage, refuse, resolveVendorExtension,
-  resolvedGrantPath, validateCapabilities, vendorRoots,
+  CAPABILITY_REFUSALS, PI_AGENT_DIR_ENV, REGISTER_ROOT, SUBAGENT_EXTENSION, armGrants,
+  grantsFor, loadCapabilities, mergeMcpServers, pathExists, pathMessage, refuse,
+  resolvedGrantPath, validateCapabilities,
 } from './grants.mjs'
 import { parseAgent } from '../protocols.mjs'
 import { BriefUsageError, exportEntries } from './export-entries.mjs'
-import { parseAssignment } from './assignment.mjs'
-import { scratchDir } from '../../test/helpers.mjs'
-import { logLine } from './log.mjs'
+import * as grants from './grants.mjs'
 
-const role = (over = {}) => ({ tools: ['Read'], extensions: [], agents: [], skills: [], advisor: false, requires: [], mcp_servers: [], vendor_extensions: [], ...over })
+const role = (over = {}) => ({ tools: ['Read'], extensions: [], agents: [], skills: [], advisor: false, requires: [], mcp_servers: [], ...over })
 const never = () => { throw new Error('unreadable') }
 
 test('refuse stamps a closed reason and rejects an unknown one', () => {
@@ -71,21 +69,40 @@ test('path helpers resolve, probe and phrase refusals', () => {
   assert.equal(err.message, 'seat builder extension grant expected a path, found missing, at /p [extension-missing]')
 })
 
-test('vendorRoots uses the explicit, configured, then default arms', () => {
-  assert.equal(PI_AGENT_DIR_ENV, 'PI_CODING_AGENT_DIR')
-  assert.deepEqual(vendorRoots({ env: { CREW_PI_VENDOR_ROOT: 'rel', PI_CODING_AGENT_DIR: '/c/pi' }, home: '/h' }), [resolvePath('rel')])
-  assert.deepEqual(vendorRoots({ env: { PI_CODING_AGENT_DIR: '/c/pi' }, home: '/h' }), ['/c/pi/npm/node_modules'])
-  assert.deepEqual(vendorRoots({ env: {}, home: '/h' }), ['/h/.pi/agent/npm/node_modules'])
+// MUTATION: restore local_providers in the schema.
+test('the register declares no local provider or narrator and the schema refuses both', () => {
+  const source = JSON.parse(readFileSync(join(REGISTER_ROOT, 'crew/capabilities.json'), 'utf8'))
+  const shipped = loadCapabilities()
+  for (const key of ['local_providers', 'narrator']) assert.equal(Object.hasOwn(shipped, key), false)
+  assert.equal(shipped.coding_agents.pi.providers.includes('llama-swap'), false)
+  for (const [key, value] of [['local_providers', {}], ['narrator', { settings: 'x', pi_provider: 'p', base_url: 'http://x' }]]) {
+    const register = structuredClone(source)
+    register[key] = value
+    assert.throws(() => loadCapabilities({ register }), { reason: 'register-invalid' })
+  }
 })
 
-test('resolveVendorExtension resolves every declared entry and refuses a missing package', () => {
-  const grant = { package: '@x/y', tools: ['t1'] }
-  const files = { '/v/@x/y/package.json': JSON.stringify({ pi: { extensions: ['a.js', 'b.js'] } }), '/v/@x/y/a.js': '', '/v/@x/y/b.js': '' }
-  const resolved = resolveVendorExtension(grant, { roots: ['/v'], exists: (p) => p in files, readFile: (p) => files[p] })
-  assert.deepEqual(resolved.entries, ['/v/@x/y/a.js', '/v/@x/y/b.js'])
-  assert.deepEqual(resolved.tools, ['t1'])
-  assert.equal(Object.isFrozen(resolved), true)
-  assert.throws(() => resolveVendorExtension(grant, { roots: ['/v'], exists: () => false }), (err) => err.reason === 'vendor-extension-missing')
+// MUTATION: restore vendor_extensions in the grant schema.
+test('loadCapabilities refuses every vendor extension declaration on a role or an overlay', () => {
+  const source = JSON.parse(readFileSync(join(REGISTER_ROOT, 'crew/capabilities.json'), 'utf8'))
+  const grant = { package: 'vendor', tools: ['t'] }
+  for (const [overlay, duplicate] of [[false, false], [false, true], [true, false], [true, true]]) {
+    const register = structuredClone(source)
+    const target = overlay ? ((register.roles.builder.by_agent ??= {}).pi ??= {}) : register.roles.builder
+    target.vendor_extensions = duplicate ? [grant, grant] : [grant]
+    assert.throws(() => loadCapabilities({ register }), { reason: 'register-invalid' })
+  }
+  const schema = JSON.parse(readFileSync(join(REGISTER_ROOT, 'crew/capabilities.schema.json'), 'utf8'))
+  assert.equal(schema.$defs.vendorgrant, undefined)
+})
+
+// MUTATION: restore vendorRoots.
+test('the seat path ships no vendor grants, grant backing check, assignment parser or log helper', () => {
+  for (const name of ['assertGrantsBacked', 'resolveVendorExtension', 'vendorRoots', 'VENDOR_ROOT_ENV']) assert.equal(name in grants, false)
+  for (const value of [grants.armGrants({ role: 'builder', agent: 'pi', extensions: [] }, { root: REGISTER_ROOT, exists: () => true }), grants.EMPTY_GRANTS])
+    for (const key of ['vendor_extensions', 'vendor_withheld']) assert.equal(Object.hasOwn(value, key), false)
+  for (const name of ['assignment.mjs', 'log.mjs']) assert.equal(existsSync(join(REGISTER_ROOT, 'crew/acp', name)), false)
+  assert.equal(PI_AGENT_DIR_ENV, 'PI_CODING_AGENT_DIR')
 })
 
 test('mergeMcpServers lets the overlay replace by name', () => {
@@ -98,33 +115,23 @@ test('mergeMcpServers lets the overlay replace by name', () => {
 test('grantsFor resolves valid grants and fails closed on missing paths', () => {
   const register = { roles: { builder: role({ extensions: ['crew/pi/e.js'], skills: ['crew/pi/s.md'], agents: [{ name: 'Explore', def: 'crew/pi/a.json' }] }) } }
   const readFile = () => JSON.stringify({ name: 'Explore', prompt: 'go' })
-  const grants = grantsFor(register, 'builder', { root: '/r', exists: () => true, readFile, vendorRoots: [] })
+  const grants = grantsFor(register, 'builder', { root: '/r', exists: () => true, readFile })
   assert.deepEqual(grants.extensions, [resolvePath('/r/crew/pi/e.js')])
   assert.deepEqual(grants.skills, [resolvePath('/r/crew/pi/s.md')])
   assert.deepEqual(grants.agents, [{ name: 'Explore', def: resolvePath('/r/crew/pi/a.json') }])
   assert.deepEqual(grants.tools, ['Read'])
   assert.equal(Object.isFrozen(grants.extensions), true)
   const refused = (over, reason) => assert.throws(
-    () => grantsFor({ roles: { builder: role(over) } }, 'builder', { root: '/r', exists: () => false, readFile, vendorRoots: [] }),
+    () => grantsFor({ roles: { builder: role(over) } }, 'builder', { root: '/r', exists: () => false, readFile }),
     (err) => err.reason === reason && /at /.test(err.message),
   )
   refused({ extensions: ['crew/pi/nope.js'] }, 'extension-missing')
   refused({ skills: ['crew/pi/nope.md'] }, 'unknown-skill')
   assert.throws(() => grantsFor(register, 'nobody', { root: '/r' }), (err) => err.reason === 'register-invalid')
   assert.throws(
-    () => grantsFor(register, 'builder', { root: '/r', exists: () => true, readFile: () => '{not-json', vendorRoots: [] }),
+    () => grantsFor(register, 'builder', { root: '/r', exists: () => true, readFile: () => '{not-json' }),
     (err) => err.reason === 'agent-def-invalid',
   )
-})
-
-test('assertGrantsBacked passes backed grants and refuses unregistered ones', () => {
-  const register = { roles: { builder: role({ extensions: ['crew/pi/e.js'] }) } }
-  const grants = grantsFor(register, 'builder', { root: '/r', exists: () => true, vendorRoots: [] })
-  assert.equal(assertGrantsBacked('builder', grants, register, { vendorRoots: [] }), grants)
-  assert.throws(() => assertGrantsBacked('builder', { ...grants, tools: ['Bash'] }, register, { vendorRoots: [] }), (err) => err.reason === 'unknown-grant')
-  assert.throws(() => assertGrantsBacked('builder', { ...grants, extensions: ['/r/other.js'] }, register, { vendorRoots: [] }), (err) => err.reason === 'unknown-grant')
-  assert.throws(() => assertGrantsBacked('ghost', EMPTY_GRANTS, register), (err) => err.reason === 'unknown-grant')
-  assert.equal(Object.isFrozen(EMPTY_GRANTS), true)
 })
 
 test('armGrants arms native extensions and fff, and refuses what it cannot back', () => {
@@ -195,34 +202,4 @@ test('BriefUsageError carries its name and reason', () => {
   assert.equal(err.reason, 'wrong-type')
   assert.equal(err instanceof Error, true)
   assert.equal(new BriefUsageError('x').reason, 'missing-line')
-})
-
-test('parseAssignment reads only the exact assignment head and refuses unsafe or mismatched input', () => {
-  const head = (over = {}) => {
-    const { id = 'p1', done = 'p1', returnPath = '/Users/x/.crew/demo/returns/run-1/d1.planner.json', runId = ' Add top-level JSON field "run_id":"run-1" to your ReturnEnvelope.', brief = '/Users/x/.crew/demo/task/brief-planner.md' } = over
-    return `ASSIGNMENT ${id}: read your brief at ${brief}. Task dir: /Users/x/.crew/demo/task. Write your ReturnEnvelope to ${returnPath}${runId} then print exactly: CREW-DONE planner ${done}`
-  }
-  const expected = { id: 'p1', role: 'planner', returnPath: '/Users/x/.crew/demo/returns/run-1/d1.planner.json', taskDir: '/Users/x/.crew/demo/task', runId: 'run-1' }
-  assert.deepEqual(parseAssignment(head()), expected)
-  assert.deepEqual(parseAssignment(`${head()}\nsecond line is ignored`), expected)
-  assert.equal(parseAssignment(head({ runId: '' })).runId, null)
-  assert.equal(parseAssignment(''), null)
-  assert.equal(parseAssignment(null), null)
-  assert.equal(parseAssignment(head({ done: 'p2' })), null)
-  assert.equal(parseAssignment(head({ runId: ' Add top-level JSON field "run_id":"other" to your ReturnEnvelope.' })), null)
-  assert.equal(parseAssignment(head({ brief: '/Users/x/../brief.md' })), null)
-  assert.equal(parseAssignment(head({ id: '..', done: '..' })), null)
-})
-
-test('logLine appends one JSON line and never throws', () => {
-  const dir = scratchDir('lean-helpers-')
-  try {
-    const file = join(dir, 'nested', 'crew.log')
-    logLine(file, { a: 1 })
-    logLine(file, { b: 'two' })
-    assert.equal(readFileSync(file, 'utf8'), '{"a":1}\n{"b":"two"}\n')
-    const blocker = join(dir, 'blocker')
-    writeFileSync(blocker, 'x')
-    assert.equal(logLine(join(blocker, 'sub', 'crew.log'), { c: 3 }), undefined)
-  } finally { rmSync(dir, { recursive: true, force: true }) }
 })

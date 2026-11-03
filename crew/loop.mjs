@@ -1,8 +1,11 @@
 // Build: plan -> rebase -> build -> proof -> (suite || review) -> PR.
 // Judge: plan -> rebase -> build -> proof -> suite -> review -> second review -> PR.
-// Mechanical: rebase -> build -> proof -> suite -> PR. A fix turn repeats checks; build and judge never automatically rerun a red suite (ADR-055 §6).
-// Build and judge commit only the checked tree; a moved head puts the change on the new base and repeats every check, stopping if Git dropped it as upstream.
-// Mechanical and finish prove and test again after a moved head.
+// Finish: rebase -> builder triage -> proof -> review -> suite -> commit -> rebase. A base conflict stops before
+// any seat with the build uncommitted; a mechanical finish uses its brief and publishes nothing.
+// Mechanical: rebase -> build -> proof -> suite -> PR. A fix turn repeats checks; build and judge never
+// automatically rerun a red suite (ADR-055 §6).
+// Build, judge and finish commit only the checked tree; a moved head puts the change on the new base and repeats
+// every check, stopping if Git dropped it as upstream. Mechanical proves and tests again after a moved head.
 // Import-only: every effect (seat turn, filesystem,
 // check, git, journal) crosses an injected seam, and nothing here is wired to the boot path yet.
 // A seat's return is never trusted from the callback: the envelope is read back from the path
@@ -24,7 +27,7 @@ const MAX_ENVELOPE_REPAIRS = 1
 const PROOF_UNMEASURED = '- proof: unmeasured'
 export const LOOP_REASONS = Object.freeze([
   ...CHECK_REASONS, 'unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'lead-escalated', 'lead-unavailable',
-  'lead-refused', 'accept-unmeasured', 'round-bound', 'paths-unmeasured', 'no-progress',
+  'lead-refused', 'accept-unmeasured', 'round-bound', 'paths-unmeasured', 'no-progress', 'raise-needs-plan',
 ])
 
 const REQUIRED_ROLES = ['planner', 'builder', 'reviewer']
@@ -116,7 +119,7 @@ export async function runLoop(spec, deps = {}) {
   if (!sound) return refusal('invalid-input')
   const fin = spec.finish
   // A finish run re-enters a stopped lane with its accepted plan and open findings.
-  if (isFinish && !(fin && typeof fin === 'object' && [fin.planPath, fin.subject].every(text)
+  if (isFinish && !(fin && typeof fin === 'object' && text(fin.subject) && (fin.planPath === null || text(fin.planPath))
     && Array.isArray(fin.findings) && text(fin.stop?.reason)
     && Number.isSafeInteger(fin.turnOffset) && fin.turnOffset >= 0
     && (fin.filesInScope == null || strings(fin.filesInScope))
@@ -204,6 +207,8 @@ export async function runLoop(spec, deps = {}) {
   // ADR-055 §7: a raise replaces seats without widening existing round bounds.
   const raise = async (reason, detail, to = 'judge') => {
     if (TIERS.indexOf(tier) >= TIERS.indexOf(to)) return null
+    // A planless mechanical finish cannot be raised: the raised seats need a plan. The operator restarts it from its brief.
+    if (isFinish && planPath === null) return stop('raise-needs-plan', { reason, ...detail })
     let next
     try { next = d.resolveAgents(to)?.seats } catch (error) { return stop('seat-unmeasured', { reason, error: describe(error) }) }
     if (!requiredRoles(to).every((role) => next?.[role] && typeof next[role] === 'object') || !Object.values(next ?? {}).every((cell) => cell == null || (typeof cell === 'object' && bounded(cell)))) return stop('seat-unmeasured', { reason })
@@ -444,6 +449,45 @@ export async function runLoop(spec, deps = {}) {
       }
     }
 
+    if (isFinish) {
+      const status = await stage('base-paths', () => callCheck('base-paths', d.run, { cwd, command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'], timeoutMs }, { command: true }))
+      const files = status.status === 'green' && typeof status.stdout === 'string' ? parseChangedPaths(status.stdout) : null
+      if (files === null) return stop('paths-unmeasured', status)
+      const fetched = await stage('fetch', () => callCheck('fetch', d.run, { cwd, command: 'git', args: ['fetch', 'origin'], timeoutMs }, { command: true }))
+      if (fetched.status !== 'green') return stop(fetched.reason, fetched)
+      // An added-then-deleted entry is no part of the build (the work tree deleted it) and no commit can hold it, so it
+      // leaves the index before the snapshot; left there, the rebase refuses the checkout as dirty.
+      const dropped = worktreeRecords(status.stdout).filter((record) => record.startsWith('AD ')).map((record) => record.slice(3))
+      if (dropped.length) {
+        const unstaged = await stage('base-unstage', () => callCheck('base-unstage', d.run, { cwd, command: 'git', args: ['--literal-pathspecs', 'rm', '--cached', '--quiet', '--ignore-unmatch', '--', ...dropped], timeoutMs }, { command: true }))
+        if (unstaged.status !== 'green') return stop(unstaged.reason, unstaged)
+      }
+      const kept = files.filter((path) => !dropped.includes(path))
+      let wip
+      if (kept.length) {
+        wip = await stage('base-commit', () => callCheck('base-commit', d.commitChanges, { cwd, files: kept, subject: 'wip: crew finish base', timeoutMs }))
+        if (wip.status !== 'green' || !text(wip.head)) return stop(wip.reason ?? 'runner-threw', wip)
+      }
+      const rebased = await stage('rebase', () => callCheck('rebase', d.rebaseBranch, { cwd, base: spec.base, timeoutMs }))
+      const baseFailure = rebased.status !== 'green' ? rebased.reason
+        : typeof rebased.onto !== 'string' || !HEX_OID.test(rebased.onto) || !text(rebased.head) ? 'runner-threw'
+        : rebased.head === rebased.onto ? 'nothing-to-commit' : null
+      if (baseFailure) {
+        // A dropped snapshot (its patch already upstream) leaves the branch on the base with a clean tree: resetting to
+        // its old parent would rewind the lane off the base and stage the upstream change as local.
+        if (wip && baseFailure !== 'cleanup-unproven' && baseFailure !== 'nothing-to-commit') {
+          const restored = await stage('base-restore', () => callCheck('base-restore', d.run, { cwd, command: 'git', args: ['reset', '--soft', `${wip.head}^`], timeoutMs }, { command: true }))
+          if (restored.status !== 'green') return stop(restored.reason, restored)
+        }
+        return stop(baseFailure, rebased)
+      }
+      if (wip) {
+        const restored = await stage('base-restore', () => callCheck('base-restore', d.run, { cwd, command: 'git', args: ['reset', '--soft', rebased.onto], timeoutMs }, { command: true }))
+        if (restored.status !== 'green') return stop(restored.reason, restored)
+      }
+      rebasedHead = wip ? rebased.onto : rebased.head
+    }
+
     if (!isFinish && rebasedHead === null) {
       const fetched = await stage('fetch', () => callCheck('fetch', d.run, { cwd, command: 'git', args: ['fetch', 'origin'], timeoutMs }, { command: true }))
       if (fetched.status !== 'green') return stop(fetched.reason, fetched)
@@ -564,6 +608,14 @@ export async function runLoop(spec, deps = {}) {
           break
         }
 
+        if (stagePaths.length > 0) {
+          const staged = await stage('suite-stage', () => callCheck('suite-stage', d.run, { cwd, command: 'git', args: ['--literal-pathspecs', 'add', '--', ...stagePaths], timeoutMs }, { command: true }))
+          if (staged.status !== 'green') return stop(staged.reason, staged)
+        }
+        const tree = await readTree()
+        checkedTree = tree.status === 'green' && typeof tree.stdout === 'string' ? tree.stdout.trim() : ''
+        if (!HEX_OID.test(checkedTree)) return stop('paths-unmeasured', tree)
+
         // A finish review is capped outright: its bound ends the run, never a lead bounce into a fourth round.
         const reviewed = await stage('review', () => seatTurn('reviewer', priorFindings, { singleTurn: isFinish }))
         if (reviewed.halt) return reviewed.halt
@@ -572,8 +624,6 @@ export async function runLoop(spec, deps = {}) {
         finishReviews.push({ verdict: review.details.verdict, findings: review.details.findings })
         await emit('verdict', { status: 'reviewed', verdict: review.details.verdict, findings: review.details.findings })
         if (review.details.verdict === 'changes-needed') {
-          // The suite repair is one builder turn: a review that asks for more after it stops the lane.
-          if (repaired) return stop('round-bound', { role: 'reviewer', findings: review.details.findings })
           feedback = review.details.findings
           continue
         }
@@ -584,7 +634,7 @@ export async function runLoop(spec, deps = {}) {
 
       // The suite runs over the file set the commit will hold: the measured changed paths that need staging, and only those, are staged
       // so a test that lists tracked files sees a file the lane created.
-      if (stagePaths.length > 0) {
+      if (!isFinish && stagePaths.length > 0) {
         const staged = await stage('suite-stage', () => callCheck('suite-stage', d.run, { cwd, command: 'git', args: ['--literal-pathspecs', 'add', '--', ...stagePaths], timeoutMs }, { command: true }))
         if (staged.status !== 'green') return stop(staged.reason, staged)
       }
@@ -607,7 +657,7 @@ export async function runLoop(spec, deps = {}) {
             failingFiles: failures.files,
             ...(failures.tail.length ? { outputTail: failures.tail } : {}),
           }]
-          for (const role of isFinish || tier === 'mechanical' ? ['builder'] : ['builder', 'reviewer']) seats[role] = { ...seats[role], rounds: Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }
+          for (const role of isFinish || tier === 'mechanical' ? ['builder'] : ['builder', 'reviewer']) seats[role] = { ...seats[role], rounds: isFinish ? (seats[role].rounds ?? DEFAULT_ROUNDS) + 1 : Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }
           repairing = true
           repaired = true
           continue
@@ -620,7 +670,7 @@ export async function runLoop(spec, deps = {}) {
       }
       break
     }
-    measurements = [...proofLines, suiteLine, ...(tier === 'mechanical' && namedTests.length ? ['- Review: none, mechanical lane, not reviewed.'] : [])]
+    measurements = [...proofLines, suiteLine, ...(!isFinish && tier === 'mechanical' && namedTests.length ? ['- Review: none, mechanical lane, not reviewed.'] : [])]
     const finishLines = !isFinish ? [] : [
       '## Finish',
       `- Stop: ${oneLine(fin.stop.reason)}${fin.stop.observation == null ? '' : `: ${oneLine(JSON.stringify(fin.stop.observation))}`}`,
@@ -650,7 +700,7 @@ export async function runLoop(spec, deps = {}) {
     // A protected path first seen after the review-time check (the suite wrote it) never met the raise: never commit it.
     const unraised = protectedPaths(files).filter((path) => !protectedPaths(changedPaths).includes(path))
     if (unraised.length) return stop('dirty-worktree', { paths: unraised })
-    if (!isFinish && tier !== 'mechanical') {
+    if (isFinish || tier !== 'mechanical') {
       // Only an added-then-deleted path remains unstaged after suite-stage; all other work-tree changes are new.
       const reviewed = new Set(worktreeRecords(reviewStatus).filter((record) => record.startsWith('AD ')))
       if (worktreeRecords(status.stdout).some((record) => !reviewed.has(record))) return stop('dirty-worktree', status)
@@ -672,7 +722,7 @@ export async function runLoop(spec, deps = {}) {
     rebased = await stage('rebase', () => callCheck('rebase', d.rebaseBranch, { cwd, base: spec.base, timeoutMs }))
     if (rebased.status !== 'green' || !text(rebased.head)) return stop(rebased.reason ?? 'runner-threw', rebased)
 
-    if (rebased.head !== committed.head && !isFinish && tier !== 'mechanical') {
+    if (rebased.head !== committed.head && (isFinish || tier !== 'mechanical')) {
       if (typeof rebased.onto !== 'string' || !HEX_OID.test(rebased.onto)) return stop('runner-threw', rebased)
       if (rebased.head === rebased.onto) return stop('nothing-to-commit', { head: rebased.head, onto: rebased.onto, committed: committed.head })
       const uncommitted = await stage('uncommit', () => callCheck('uncommit', d.run, { cwd, command: 'git', args: ['reset', '--soft', rebased.onto], timeoutMs }, { command: true }))

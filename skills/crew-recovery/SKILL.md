@@ -24,10 +24,15 @@ Read first, decide second, remove last.
 
 ## Finish it
 
-`crew finish <lane>` re-enters a stopped lane in its own worktree, on its
-uncommitted build, and runs builder triage, the builder's named tests, review, suite,
-commit and rebase. It publishes nothing (`crew/finish.mjs`). When that run is
-ready, decide once:
+`crew finish <lane>` re-enters a stopped lane in its own worktree and rebases
+onto the current base, then runs builder triage, proof of the builder's named
+tests, review, suite, commit and rebase. A base conflict stops before any seat
+with the build left uncommitted. A mechanical lane is finished on its brief; one
+whose diff reaches a protected path stops `raise-needs-plan`, and you restart it
+from its brief as a build lane.
+Only the checked tree is committed; a rebase that moves the head repeats proof,
+review and suite on the new base. It publishes nothing (`crew/finish.mjs`).
+When that run is ready, decide once:
 
 - `crew finish <lane> --accept [--notes <file>]` publishes the PR the run
   measured. Merging stays yours.

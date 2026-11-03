@@ -523,7 +523,9 @@ test('LG1: builder gets accepted lane grants as bare whole skills', async () => 
       assert.deepEqual(definition.requires, [])
     }
   }
-  const f = leanFixture()
+  const f = leanFixture({ status: ['', 'M  src/a.mjs\0'], loopDeps: {
+    rebaseBranch: async () => ({ status: 'green', reason: null, head: 'a'.repeat(40), onto: 'c'.repeat(40) }),
+  } })
   f.spec.shape = 'finish'
   f.spec.finish = { planPath: 'plan', gatePath: 'gate', subject: 'fix: test', mutations: [LEAN_MUTATION], stop: { reason: 'stopped' }, findings: [], turnOffset: 3, filesInScope: ['outside/a.svelte'] }
   assert.equal((await f.go()).status, 'done')

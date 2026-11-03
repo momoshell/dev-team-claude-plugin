@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { PERMISSION_POLICIES, PERMISSION_REFUSALS, permitQuestion, settlePermission, permissionHandler, readOnlyCommand, readOnlyCommandResult } from './acp-permission.mjs'
+import { permissionHandler, readOnlyCommand, readOnlyCommandResult } from './acp-permission.mjs'
 import * as permission from './acp-permission.mjs'
 
 const toolCall = { title: 'shell', kind: 'execute', rawInput: { command: 'echo hi' } }
@@ -9,84 +9,18 @@ const options = [
   { kind: 'allow_once', name: 'Allow Once', optionId: 'allow' },
   { kind: 'allow_always', name: 'Allow Always', optionId: 'always' },
 ]
-const settle = (extra = {}) => settlePermission({ toolCall, options, ...extra })
-
-// MUTATION: restore the autoDeny branch.
-test('settlePermission ignores a roster policy and takes the lead answer', () => {
-  assert.equal(settle({ policy: { autoDeny: ['shell'] }, lead: () => ({ policy: 'roster', verdict: 'allow' }) }).optionId, 'allow')
-  assert.equal('panelPermission' in permission, false)
-})
-test('P3 invokes lead exactly once with permit payload', () => {
-  let calls = 0
-  settle({ lead: (payload) => { calls++; assert.equal(payload.question, 'permit'); return { details: { decision: 'allow' } } } })
-  assert.equal(calls, 1)
-})
-test('P4 accepts only a matching request optionId', () => {
-  assert.equal(settle({ lead: () => ({ details: { decision: 'bogus' } }) }).optionId, 'reject')
-})
-test('P5 no lead defaults to reject without invoking a lead', () => {
-  assert.equal(settle({ lead: null }).optionId, 'reject')
-  assert.deepEqual(settle({ lead: null }).row, { kind: 'permission', tool: 'execute', title: 'shell', option_kind: 'reject_once', option: 'reject', policy: 'no-lead' })
-})
-test('P6 escalation and invalid/non-string/throwing answers fail closed', () => {
-  for (const lead of [() => ({ details: { decision: 'escalate' } }), () => ({ details: { decision: 4 } }), () => { throw Error('failed') }])
-    assert.equal(settle({ lead }).optionId, 'reject')
-})
-test('P7 missing reject option refuses before lead or selection journal', () => {
-  let calls = 0
-  assert.throws(() => settlePermission({ toolCall, options: [{ kind: 'allow_once', optionId: 'allow' }], lead: () => calls++, log: () => calls++ }), { reason: 'permission-no-reject-option' })
-  assert.equal(calls, 0)
-})
-test('P8 result uses request optionId and exact permission row', () => {
-  const result = settle({ lead: () => ({ details: { decision: 'reject' } }) })
-  assert.equal(result.optionId, 'reject')
-  assert.deepEqual(result.row, { kind: 'permission', tool: 'execute', title: 'shell', option_kind: 'reject_once', option: 'reject', policy: 'lead', answered: 'reject' })
-})
-test('P9 journal failure does not change selected answer', () => {
-  assert.equal(settle({ policy: { autoDeny: ['shell'] }, log: () => { throw Error('journal') } }).optionId, 'reject')
-})
-test('P10 handler journals named refusal and returns null even when refusal logging fails', () => {
-  const handler = permissionHandler({ log: () => { throw Error('journal') } })
-  assert.equal(handler({ toolCall, options: [] }), null)
-})
-test('enums are frozen and exact', () => {
-  assert.deepEqual(PERMISSION_POLICIES, ['roster', 'lead', 'no-lead'])
-  assert.deepEqual(PERMISSION_REFUSALS, ['permission-no-reject-option'])
-  assert.equal(Object.isFrozen(PERMISSION_POLICIES), true)
-  assert.equal(Object.isFrozen(PERMISSION_REFUSALS), true)
-})
-test('permit question identifies call, options, required decision shape, and scope', () => {
-  const question = permitQuestion({ toolCall, options })
-  for (const text of ['shell', 'execute', '{"command":"echo hi"}', 'optionId=reject', 'reject_once', 'Deny', 'exactly one request optionId in details.decision', 'Out-of-task-scope calls must be rejected']) assert.ok(question.includes(text), text)
-})
-test('reject-always is used when reject-once is unavailable', () => {
-  const result = settlePermission({ toolCall, options: [{ kind: 'reject_always', optionId: 'deny-all' }], lead: () => { throw Error('must not call') } })
-  assert.equal(result.optionId, 'deny-all')
-})
-test('AT6 lead allow_always decision maps to allow_once or reject and answered stays raw', () => {
-  const first = settle({ lead: () => ({ details: { decision: 'always' } }) })
-  assert.equal(first.optionId, 'allow')
-  assert.equal(first.row.answered, 'always')
-  assert.equal(first.row.policy, 'lead')
-  const onlyAlways = [{ kind: 'reject_once', optionId: 'deny' }, { kind: 'allow_always', optionId: 'all' }]
-  const second = settlePermission({ toolCall, options: onlyAlways, lead: () => ({ details: { decision: 'all' } }) })
-  assert.equal(second.optionId, 'deny')
-  assert.equal(second.row.answered, 'all')
-})
-test('Claude option IDs are accepted as IDs, not ACP kinds', () => {
-  assert.equal(settle({ lead: () => ({ details: { decision: 'allow' } }) }).optionId, 'allow')
-})
-test('wrong-typed lead decision is journaled raw while rejecting', () => {
-  assert.deepEqual(settle({ lead: () => ({ details: { decision: 4 } }) }).row, { kind: 'permission', tool: 'execute', title: 'shell', option_kind: 'reject_once', option: 'reject', policy: 'lead', answered: 4 })
-})
-test('lead throw is recorded as null answer with lead source', () => {
-  assert.deepEqual(settle({ lead: () => { throw Error('no response') } }).row, { kind: 'permission', tool: 'execute', title: 'shell', option_kind: 'reject_once', option: 'reject', policy: 'lead', answered: null })
-})
-test('handler refusal logs refusal reason', () => {
-  let row
-  const handler = permissionHandler({ log: (entry) => { row = entry } })
-  assert.equal(handler({ toolCall, options: [] }), null)
-  assert.deepEqual(row, { kind: 'permission', reason: 'permission-no-reject-option' })
+// MUTATION: return allow_once regardless of permit
+test('permissionHandler allows only what permit approves and has no lead path', () => {
+  for (const [permit, choices, expected] of [
+    [() => true, options, 'allow'],
+    [() => false, options, 'reject'],
+    [() => 'yes', options, 'reject'],
+    [() => { throw Error('failed') }, options, 'reject'],
+    [() => true, [{ kind: 'reject_once', optionId: 'no' }, { kind: 'allow_always', optionId: 'all' }], 'no'],
+    [() => false, [{ kind: 'reject_always', optionId: 'no' }], 'no'],
+    [() => true, [], null],
+  ]) assert.equal(permissionHandler({ permit })({ toolCall, options: choices }), expected)
+  for (const name of ['PERMISSION_POLICIES', 'PERMISSION_REFUSALS', 'permitQuestion']) assert.equal(name in permission, false)
 })
 
 test('B1 read-only command allowlist accepts ten safe commands and pipelines', () => {

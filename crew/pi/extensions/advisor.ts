@@ -33,13 +33,12 @@ import { modelString } from '../../adapters/adapter-pi.mjs'
 export const ADVISOR_CONFIG_VERSION = 1
 export const ADVISOR_GRANT_ENV = 'CREW_ADVISOR'
 export const ADVISOR_MESSAGE_TYPE = 'crew-advisor'
-export const TRIPWIRE_MANIFEST_FILE = 'advisor-manifest.json'
+export const ADVISOR_MANIFEST_FILE = 'advisor-manifest.json'
 export const ADVISED_ROLES = Object.freeze(new Set(['builder']))
 
 export const SCOPE_BREACH = 'scope-breach'
 export const REPEATED_FAILURE = 'repeated-failure'
 export const GROWTH_DIVERGENCE = 'growth-divergence'
-export const TIER0_KINDS = Object.freeze([SCOPE_BREACH, REPEATED_FAILURE, GROWTH_DIVERGENCE])
 // Separate from the three mechanical kinds: a model finding is not a predicate.
 export const TIER1_FINDING = 'tier1-finding'
 export const TRIGGERS = Object.freeze(['tier0-note', 'cadence', 'diff-growth', 'pre-return'])
@@ -110,9 +109,6 @@ export const DIFF_MAX_BUFFER_BYTES = 16 * 1024 * 1024
 
 export const JUDGMENT_CLASSES = Object.freeze(['edge-path', 'over-claim'])
 export const SEVERITIES = Object.freeze(['low', 'medium', 'high'])
-export const UNAVAILABLE_REASONS = Object.freeze([
-  'role-unsupported', 'manifest-cell-invalid',
-])
 // A model id reaches a shell command line, so it is an allowlist, not a filter.
 // A consult's advisor_usage spend is measured ONLY IF every frame the shared reducer
 // counts as the child's own spend carries a complete usage: all four token classes
@@ -136,7 +132,6 @@ export const JUDGMENT_ERROR_CODES = Object.freeze([
   'class-invalid', 'severity-invalid', 'claim-invalid', 'evidence-invalid',
   'evidence-unanchored', 'no-grounded-delta', 'no-finding',
 ])
-export const SUPPRESSION_CODES = Object.freeze(['duplicate', 'content-free', 'one-per-update'])
 
 const DEFAULT_ROLE = 'builder'
 const DEFAULT_NOW = () => new Date().toISOString()
@@ -201,7 +196,7 @@ function epochMilliseconds(value) {
 
 function manifestText({ taskDir, readFile }) {
   if (!taskDir) return null
-  const path = join(String(taskDir || ''), TRIPWIRE_MANIFEST_FILE)
+  const path = join(String(taskDir || ''), ADVISOR_MANIFEST_FILE)
   let raw
   try { raw = readFile(path, 'utf8') } catch { return null }
   const text = Buffer.isBuffer(raw) ? raw.toString('utf8') : String(raw ?? '')
@@ -249,10 +244,6 @@ export function scopeMatcher(files) {
     const candidate = normalizePath(path)
     return entries.some((entry) => entry.endsWith('/') ? candidate.startsWith(entry) : candidate === entry)
   }
-}
-
-export function isTestFile(path) {
-  return /\.test\.(mjs|js|ts)$/.test(String(path || ''))
 }
 
 function plannerReturn({ taskDir, manifest, deps, env }) {

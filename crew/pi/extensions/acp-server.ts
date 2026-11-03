@@ -32,7 +32,6 @@ import { unlinkSync } from 'node:fs'
 import { readOnlyCommandResult } from '../../acp-permission.mjs'
 import { ACP_PROTOCOL_VERSION, ACP_STOP_REASONS, ACP_UPDATE_KINDS } from '../../acp-client.mjs'
 
-export const SOCKET_ENV = 'CREW_ACP_SOCKET'
 export const GATED_TOOLS_ENV = 'CREW_ACP_GATED_TOOLS'
 export const PERMISSION_TIMEOUT_ENV = 'CREW_ACP_PERMISSION_TIMEOUT_MS'
 export const DEFAULT_GATED_TOOLS = Object.freeze(['bash', 'edit', 'write', 'powershell'])
@@ -40,9 +39,7 @@ export const DEFAULT_PERMISSION_TIMEOUT_MS = 300000
 export const MAX_PARTIAL_FRAME_BYTES = 1024 * 1024
 export const PERMISSION_OPTIONS = Object.freeze([
   Object.freeze({ optionId: 'allow_once', name: 'Allow once', kind: 'allow_once' }),
-  Object.freeze({ optionId: 'allow_always', name: 'Always allow', kind: 'allow_always' }),
   Object.freeze({ optionId: 'reject_once', name: 'Reject', kind: 'reject_once' }),
-  Object.freeze({ optionId: 'reject_always', name: 'Always reject', kind: 'reject_always' }),
 ])
 
 const PARSE_ERROR = -32700
@@ -128,7 +125,6 @@ export default function acpServerExtension(pi: any) {
   let cancelledRun = false
   let permissionSeq = 0
   const permissions = new Map()
-  const decisions = new Map()
 
   const remember = (handlerCtx: any) => { if (handlerCtx) ctx = handlerCtx }
   const note = (text: string) => { try { process.stderr.write(`acp-server: ${text}\n`) } catch { /* never load-bearing */ } }
@@ -201,7 +197,6 @@ export default function acpServerExtension(pi: any) {
       const current = ctx?.sessionManager?.getSessionId?.()
       if (typeof current !== 'string' || !current) return fail(id, INTERNAL_ERROR, 'the running pi session has no id yet')
       sessionId = current
-      decisions.clear()
       const requested = Array.isArray(params.mcpServers) ? params.mcpServers.length : 0
       return reply(id, { sessionId, _meta: { mcpServers: { supported: false, requested } } })
     }
@@ -286,16 +281,13 @@ export default function acpServerExtension(pi: any) {
     remember(handlerCtx)
     if (cancelledRun) return { block: true, reason: 'ACP prompt cancelled' }
     if (!gated.has(event?.toolName)) return undefined
-    // Availability first: a cached allow never outlives the client that gave it.
+    // Permission requires a connected client.
     if (!client || client.destroyed) return { block: true, reason: 'ACP client unavailable' }
     if (!sessionId) return { block: true, reason: 'ACP session not established' }
     if (readOnlySeat && toolKindFor(event.toolName) === 'execute') {
       const verdict = readOnlyCommandResult(event.input?.command)
       if (!verdict.allowed) return { block: true, reason: verdict.reason }
     }
-    const cached = decisions.get(event.toolName)
-    if (cached === 'allow_always') return undefined
-    if (cached === 'reject_always') return { block: true, reason: 'ACP permission rejected (always)' }
     permissionSeq += 1
     const id = permissionSeq
     const answer: any = await new Promise((resolve) => {
@@ -313,8 +305,7 @@ export default function acpServerExtension(pi: any) {
     })
     if (!answer?.optionId) return { block: true, reason: answer?.failed || 'ACP permission unanswered' }
     const choice = answer.optionId
-    if (choice === 'allow_always' || choice === 'reject_always') decisions.set(event.toolName, choice)
-    if (choice === 'allow_once' || choice === 'allow_always') return undefined
+    if (choice === 'allow_once') return undefined
     return { block: true, reason: 'ACP permission rejected' }
   }
 

@@ -1203,7 +1203,7 @@ function armLaunch(agent, role, arms, { env = {}, ...options } = {}) {
     model: agent === 'pi' ? 'openai/gpt-6.1-sol' : 'anthropic/claude-opus-4-6', ...arms,
   }
   const run = () => runAcpSeat({
-    definition, cwd, taskDir, prompt: 'p', briefText: options.briefText, sessionFile: join(taskDir, 'session.jsonl'),
+    definition, cwd, taskDir, prompt: 'p', sessionFile: join(taskDir, 'session.jsonl'),
     binaries: { pi: BIN, claude: BIN, claudeAcp: BIN },
     deps: {
       // The fff server binary is a host install; the launch shape must not depend on this host having it.
@@ -1327,8 +1327,8 @@ test('the shipped mechanical builder launches without a plan while the planned b
 })
 
 // MUTATION: drop the criteria field from the manifest
-test('the advisor manifest carries the accepted plan criteria and named tests, and nothing from the brief', () => {
-  const probe = armLaunch('pi', 'builder', contextArms, { briefText: 'Tripwire tests:\n- a.test.mjs · t\nBroad keys\n## Acceptance\n- (A1) x\n' })
+test('the advisor manifest carries the accepted plan criteria and named tests', () => {
+  const probe = armLaunch('pi', 'builder', contextArms)
   leanLane(probe.taskDir, { details: { ...laneDetails, tests: [{ file: 'a.test.mjs', title: 'T1' }] } })
   writeFileSync(join(probe.taskDir, 'plan.md'), '## Criteria\n1. first\nignored\n2. second\n## Tasks\n1. outside\n')
   probe.run()
@@ -1368,7 +1368,7 @@ test('an advisor-only seat whose accepted plan is unreadable boots with no crite
 })
 
 test('a lean pi builder declaring advisor and skeletonread launches with both on the lane layout', () => {
-  const probe = armLaunch('pi', 'builder', contextArms, { briefText: 'Tripwire tests:\n- a.test.mjs · tripwire\nBroad keys\n## Acceptance\n- (A1) first item\nnot an item\n- (A2) second item\n## Next\n- (A3) outside\n' })
+  const probe = armLaunch('pi', 'builder', contextArms)
   const anchor = Date.now() - 60_000
   leanLane(probe.taskDir, { anchor })
   probe.run()
@@ -1437,7 +1437,7 @@ test('a lean pi seat granted the advisor refuses without a pi cell or a written 
 // MUTATION: admit extensions, or compute contextArms for claude.
 test('a claude seat refuses readgate, skeletonread and an advisor before a client', () => {
   for (const arms of [{ extensions: ['readgate'] }, { extensions: ['skeletonread'] }, { advisor: advisorArm }]) {
-    const probe = armLaunch('claude', 'builder', arms, { briefText: 'Tripwire tests:\n- a.test.mjs · tripwire\nBroad keys\n' })
+    const probe = armLaunch('claude', 'builder', arms)
     leanLane(probe.taskDir)
     assert.throws(() => probe.run(), { reason: 'grant-unsupported' })
     assert.equal(probe.created.length, 0)

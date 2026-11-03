@@ -53,7 +53,6 @@ import { StringDecoder } from 'node:string_decoder'
 import { appendFileSync, existsSync as nodeExists, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 // adapter-pi is this checkout's own module and itself imports only `node:url`,
 // so the file stays free of third-party dependencies; the granting seat of this
 // extension is a pi seat by construction, so adapter-pi IS the granting seat's adapter.
@@ -122,30 +121,6 @@ export function agentParams(allowlist: any[] = []): any {
       agent: { ...AGENT_PARAMS.properties.agent, enum: names },
     },
   }
-}
-
-export const FINDINGS_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['summary', 'findings'],
-  properties: {
-    summary: { type: 'string', minLength: 1 },
-    findings: {
-      type: 'array',
-      minItems: 1,
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['claim', 'evidence', 'confidence'],
-        properties: {
-          claim: { type: 'string', minLength: 1 },
-          evidence: { type: 'array', minItems: 1, items: { type: 'string', minLength: 1 } },
-          confidence: { enum: ['verified', 'assumed'] },
-        },
-      },
-    },
-    gaps: { type: 'array', items: { type: 'string' } },
-  },
 }
 
 // pi's stated limits for content returned TO THE MODEL
@@ -286,13 +261,7 @@ export function parseAgentAllowlist(raw: any): any[] {
   return parsed.filter((one) => one && typeof one.name === 'string' && typeof one.def === 'string')
 }
 
-const REGISTER_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'capabilities.json')
-function localProvidersFromRegister(deps: any = {}): any {
-  const read = deps.readRegister || readFileSync
-  try { return JSON.parse(String(read(REGISTER_PATH, 'utf8'))).local_providers || {} } catch { return {} }
-}
-
-export function resolveDefCell(cell: any, { resolveModel, localProviders, path }: any): any {
+export function resolveDefCell(cell: any, { resolveModel, path }: any): any {
   // MUTATION A6: recognising a bare string as something other than a string
   // collapses the named refusal into the generic shape error.
   if (typeof cell === 'string') {
@@ -309,7 +278,7 @@ export function resolveDefCell(cell: any, { resolveModel, localProviders, path }
   // MUTATION A8: returning no `error` here silently falls back to the parent
   // cell and SPAWNS — exactly the cost surprise #694 forbids.
   let resolved
-  try { resolved = resolveModel({ provider: cell.provider, id: cell.id, localProviders }) }
+  try { resolved = resolveModel({ provider: cell.provider, id: cell.id }) }
   catch (err: any) { return { error: `${err.message}, at ${path}` } }
   const effort = typeof cell.effort === 'string' && cell.effort.trim() ? cell.effort : undefined
   return { model: resolved, effort }
@@ -340,7 +309,6 @@ export function loadAgentDefinition(grant: any, deps: any = {}): any {
   if (definition.model !== undefined && definition.model !== null) {
     const cell = resolveDefCell(definition.model, {
       resolveModel: deps.modelString || modelString,
-      localProviders: deps.localProviders ?? localProvidersFromRegister(deps),
       path,
     })
     if (cell.error) return { error: cell.error }
@@ -477,26 +445,6 @@ export function createStreamReducer() {
     piUsage: () => (measured ? pi : null),
     text: () => text,
   }
-}
-
-// The three array-taking helpers below exist for direct unit tests. `execute`
-// drives the reducer itself and never builds a transcript array.
-function reduceAll(lines: any[]) {
-  const reducer = createStreamReducer()
-  for (const line of lines || []) reducer.push(line)
-  return reducer
-}
-
-export function foldUsage(lines: any[]): any {
-  return reduceAll(lines).usage()
-}
-
-export function foldPiUsage(lines: any[]): any {
-  return reduceAll(lines).piUsage()
-}
-
-export function lastAssistantText(lines: any[]): string {
-  return reduceAll(lines).text()
 }
 
 // The journal sits inside the task dir.
@@ -694,7 +642,7 @@ export function createAgentTool(deps: any = {}) {
         return refuseEarly(`refused: that agent is not granted to this seat; allowed: ${allowedNames}`)
       }
       const loaded = loadAgentDefinition(grant, {
-        readFile, modelString: deps.modelString, localProviders: deps.localProviders, readRegister: deps.readRegister,
+        readFile, modelString: deps.modelString,
       })
       if (loaded.error) return refuseEarly(`refused: ${loaded.error}`)
       const def = loaded.definition

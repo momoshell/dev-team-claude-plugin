@@ -356,6 +356,20 @@ test('loadAgentDefinition mirrors the register four refusal classes', () => {
   assert.deepEqual(defaults.definition.tools, ['read', 'grep', 'find', 'ls'])
 })
 
+// MUTATION: restore the register read
+test('loadAgentDefinition resolves a model cell without reading the capability register', () => {
+  let reads = 0
+  let argument
+  const loaded = mod.loadAgentDefinition({ name: 'scout', def: '/ok' }, {
+    readFile: () => JSON.stringify({ name: 'scout', prompt: 'p', model: { provider: 'anthropic', id: 'model' } }),
+    readRegister: () => { reads++; return '{}' },
+    modelString: (cell) => { argument = cell; return 'anthropic/model' },
+  })
+  assert.equal(loaded.definition.model, 'anthropic/model')
+  assert.equal(reads, 0)
+  assert.deepEqual(argument, { provider: 'anthropic', id: 'model' })
+})
+
 test('every pre-spawn refusal is bounded, payload-free, spawns nothing and journals nothing', async () => {
   const cap = mod.OUTPUT_CAP_BYTES
   const huge = 'A'.repeat(cap + 4096)
@@ -487,8 +501,8 @@ test('usage is a complete pi Usage or absent, never partial', async () => {
   for (const field of PI_COST_FIELDS) assert.equal(usage.cost[field], USAGE.cost[field])
   const totals = usage.input + usage.output + usage.cacheRead + usage.cacheWrite + usage.totalTokens + usage.cost.total
   assert.ok(Number.isFinite(totals))
-  assert.equal(mod.foldUsage([]), null)
-  assert.equal(mod.foldPiUsage([]), null)
+  assert.equal(mod.createStreamReducer().usage(), null)
+  assert.equal(mod.createStreamReducer().piUsage(), null)
   const absent = await driven(mod, { chunks: asChunks(childLines(FINDINGS, null)) })
   assert.equal(Object.hasOwn(absent.result, 'usage'), false)
   assert.equal(absent.result.details.usage, null)
@@ -824,7 +838,9 @@ test('the reducer folds what the rule claims', () => {
         billed_cache_write_tokens: usage.cacheWrite ?? 0, billed_cache_read_tokens: usage.cacheRead ?? 0,
       }
       : null
-    assert.deepEqual(mod.foldUsage([row.frame]), want, `subagent.ts folded: ${row.name}`)
+    const reducer = mod.createStreamReducer()
+    reducer.push(row.frame)
+    assert.deepEqual(reducer.usage(), want, `subagent.ts folded: ${row.name}`)
   }
 })
 

@@ -11,7 +11,7 @@ The `usage is a complete pi Usage or absent, never partial` test in
 `crew/pi/extensions/subagent.test.mjs` pins measured usage and omitted key
 absence with `Object.hasOwn`. An empty transcript should follow the absent path,
 not fabricate billing. Keep the getter, constructor and test together in review;
-`foldUsage` and `foldPiUsage` use the reducer. A partial record risks a TypeError
+`execute` and advisor.ts drive the reducer directly. A partial record risks a TypeError
 or poisoned aggregate; a fabricated zero makes a false accounting claim.
 
 An interrupted child and a failed usage parse after work starts remain unbacked

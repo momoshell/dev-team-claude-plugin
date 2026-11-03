@@ -71,6 +71,9 @@ any red check -> one builder fix turn with every red result -> back to prove (bo
 
 ### 3. Measurement before each loop is adopted
 
+*Replaced 2026-11-02 by ADR-055's "Measurement before ratifying": every loop is measured on its first 10 lanes, and
+the ADR-053 replay below no longer decides the build loop. The original text follows.*
+
 - **Build** first, on the ADR-053 replay of the 14 code corpus lanes with two arms: today's loop and the build loop
   above, both with a planner (operator decision 2026-11-01: the build tier keeps its plan). The build loop is adopted if
   it is not worse on blind diff pass and on known-defect findings.

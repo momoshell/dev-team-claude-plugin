@@ -355,9 +355,14 @@ export async function rebaseBranch(spec = {}, deps = {}) {
     if (before.branch === 'HEAD') return unmeasured('invalid-input', { detail: 'a detached HEAD has no lane branch to rebase' })
     // A bare name can resolve to a tag of the same name, so it is resolved to a branch: the remote-tracking
     // origin/<base> first, because a local base may lag it. The caller fetches before rebasing.
-    let target = null
+    let target = null, onto = null
     for (const ref of [`refs/remotes/origin/${base}`, `refs/remotes/${base}`, `refs/heads/${base}`]) {
-      if ((await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])).status === 'green') { target = ref; break }
+      const resolved = await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])
+      if (resolved.status === 'green') {
+        onto = resolved.stdout.trim()
+        if (!HEX_OID.test(onto)) return unmeasured('invalid-remote-data')
+        target = ref; break
+      }
     }
     if (target === null) return red('rebase-failed', { detail: `${base} is neither a local nor a remote-tracking branch` })
     // An ignored file the base tracks can be overwritten by a rebase, and an abort does not bring it back.
@@ -371,7 +376,7 @@ export async function rebaseBranch(spec = {}, deps = {}) {
     if (outcome.status === 'green') {
       const after = await readCheckout(git, cwd)
       const onBase = await git(['merge-base', '--is-ancestor', target, 'HEAD'])
-      if (!after.problem && after.busy.length === 0 && after.status === '' && after.branch === before.branch && onBase.status === 'green') return { status: 'green', reason: null, head: after.head }
+      if (!after.problem && after.busy.length === 0 && after.status === '' && after.branch === before.branch && onBase.status === 'green') return { status: 'green', reason: null, head: after.head, onto }
       return unmeasured('rebase-failed', { detail: 'the rebase exited 0 but the checkout could not be proven clean and on its base' })
     }
     const listed = outcome.status === 'red' ? await git(['diff', '--name-only', '--diff-filter=U', '-z']) : null

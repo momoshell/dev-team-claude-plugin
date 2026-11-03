@@ -425,6 +425,25 @@ test('rebaseBranch fast-forwards, and a rebase that is already current is green'
   assert.equal(again.head, moved.head)
 })
 
+// MUTATION: report the lane's old head as onto instead of the base commit.
+test('rebaseBranch reports the base commit it rebased onto, and a lane commit already on the base leaves the head there', async () => {
+  for (const dropped of [false, true]) {
+    const cwd = laneRepo()
+    writeFileSync(join(cwd, 'a.txt'), 'lane\n')
+    git(cwd, 'commit', '-qam', 'lane')
+    git(cwd, 'checkout', '-q', 'main')
+    if (dropped) git(cwd, 'cherry-pick', 'lane')
+    else { writeFileSync(join(cwd, 'outside.txt'), 'main\n'); git(cwd, 'commit', '-qam', 'main') }
+    const base = git(cwd, 'rev-parse', 'main').trim()
+    git(cwd, 'checkout', '-q', 'lane')
+    const result = await rebaseBranch({ cwd, base: 'main' })
+    assert.equal(result.status, 'green')
+    assert.equal(result.onto, base)
+    if (dropped) assert.equal(result.head, base)
+    else { assert.notEqual(result.head, base); assert.equal(git(cwd, 'rev-parse', 'HEAD^').trim(), base) }
+  }
+})
+
 test('rebaseBranch reports every conflicting path, aborts, and leaves the checkout as found', async () => {
   const cwd = conflictLane()
   const before = snapshot(cwd)

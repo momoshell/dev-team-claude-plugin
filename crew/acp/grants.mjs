@@ -221,7 +221,7 @@ export function grantsFor(register, role, { root = REGISTER_ROOT, exists = exist
     if (!pathExists(exists, path)) throw pathMessage('extension-missing', role, 'extension grant', 'an existing checkout-relative path', 'missing', path)
     return path
   })
-  const agents = (spec.agents ?? []).map((grant) => {
+  const agents = spec.agents.map((grant) => {
     const path = resolvedGrantPath(root, grant.def)
     let raw
     try {

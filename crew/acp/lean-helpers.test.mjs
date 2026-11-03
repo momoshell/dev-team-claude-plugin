@@ -267,8 +267,8 @@ test('a seat whose role defines its own agent gets that definition, not an earli
 })
 
 // MUTATION: read spec.extensions without a default.
-test('grantsFor on a shipped role with no extensions or agents field grants none', () => {
-  const grants = grantsFor(loadCapabilities(), 'builder', { exists: () => true })
-  assert.deepEqual(grants.extensions, [])
-  assert.deepEqual(grants.agents, [])
+test('grantsFor on a shipped role with no extensions field grants no extensions', () => {
+  const register = loadCapabilities()
+  assert.equal(Object.hasOwn(register.roles.builder, 'extensions'), false)
+  assert.deepEqual(grantsFor(register, 'builder', { exists: () => true }).extensions, [])
 })

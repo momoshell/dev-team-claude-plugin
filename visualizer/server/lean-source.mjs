@@ -115,7 +115,7 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
       let row
       try { row = JSON.parse(lines[i]) } catch { row = null }
       if (!isObject(row)) { out.skipped_malformed += 1; out.skipped_line_numbers.push(i + 1); continue }
-      out.rows.push({ ...row, index: out.rows.length, line_number: i + 1, channel: row.channel ?? null })
+      out.rows.push({ ...row, index: out.rows.length, line_number: i + 1 })
     }
     return out
   }

@@ -18,5 +18,5 @@ export function createJournalSource({ crewRoot = join(homedir(), '.crew'), lean 
     if (read.error) { result.degraded = true; result.error = read.error }
     return result
   }
-  return { readJournal, health: () => ({ crew_root: root, readonly: true }) }
+  return { readJournal, health: () => ({ crew_root: root }) }
 }

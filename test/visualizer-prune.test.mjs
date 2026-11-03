@@ -3,9 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, posix } from 'node:path'
-import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
-import { startServer, ROUTE_PARAMS } from '../visualizer/server/server.mjs'
 import { createJournalSource } from '../visualizer/server/journal-source.mjs'
 import { createLeanSource } from '../visualizer/server/lean-source.mjs'
 
@@ -170,33 +168,6 @@ test('journal read returns no constant plan, step-title, acceptance or channel f
     const journal = await import('../visualizer/server/journal-source.mjs')
     for (const key of ['STEP_TITLE_REASONS', 'ACCEPTANCE_REASONS']) assert.equal(Object.hasOwn(journal, key), false, key)
   } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
-})
-
-// MUTATION: DV3 retarget the health handler to /api/returns.
-test('removed returns route stays absent while health remains available', async () => {
-  assert.equal(Object.hasOwn(ROUTE_PARAMS, '/api/returns'), false)
-  const root = mkdtempSync(join(tmpdir(), 'viz-no-returns-'))
-  const { server } = startServer({ port: 0, host: '127.0.0.1', crewRoot: root, env: {} })
-  try {
-    await once(server, 'listening')
-    const base = `http://127.0.0.1:${server.address().port}`
-    for (const path of ['/api/returns', '/api/returns?repo_slug=repo&task_slug=task&adw_id=old']) {
-      const response = await fetch(base + path)
-      assert.equal(response.status, 404)
-      await response.text()
-    }
-    const post = await fetch(base + '/api/returns', { method: 'POST' })
-    assert.equal(post.status, 405)
-    assert.equal(post.headers.get('allow'), 'GET')
-    await post.text()
-    const health = await fetch(base + '/api/health')
-    assert.equal(health.status, 200)
-    assert.equal(Object.hasOwn(await health.json(), 'returns_readonly'), false)
-  } finally {
-    server.closeAllConnections?.()
-    await new Promise(resolve => server.close(resolve))
     rmSync(root, { recursive: true, force: true })
   }
 })

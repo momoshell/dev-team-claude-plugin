@@ -38,8 +38,8 @@ out_of_scope: the visualizer
 ---
 ## Context
 
-- `crew/agents.mjs` `resolveAgents`: what it already checks.
-- `test/visualizer-server.test.mjs`: the test that pins the current behaviour.
+- `crew/agents.mjs` `resolveAgents`
+- `test/visualizer-server.test.mjs`
 ```
 
 For an operator request:
@@ -57,11 +57,10 @@ out_of_scope: the visualizer
 
 ## Context
 
-- `crew/agents.mjs` `resolveAgents`: what it already checks.
+- `crew/agents.mjs` `resolveAgents`
 ```
 
-Context items are pointers only: start each list item with a code span, a Markdown link, `issue N` or `PR N`.
-Indented continuation lines belong to the item. Rules and criteria belong to the planner.
+Context items are bare pointers: each list item contains one or more code spans, Markdown links, `issue N` or `PR N`, separated by spaces or tabs. No prose or continuation lines. Rules and criteria belong to the planner.
 
 No acceptance ids or `## Acceptance` section: the planner writes the criteria (ADR-055 §1). A brief with an `acceptance` field is refused.
 Field rules (the validator refuses anything else):
@@ -71,7 +70,7 @@ Field rules (the validator refuses anything else):
   brief's bound-issue header, and the merged PR closes it. Quote the operator's words verbatim, `#N` included: a quoted `#N` binds nothing. Elsewhere in the body, write "issue 1961" or "PR 1968".
 - `mechanical` (optional): write `mechanical: true` only when the issue shows no behaviour to judge and names none of the protected paths: `crew/loop.mjs`, `crew/proof.mjs`, `crew/proof-reporter.mjs`, `crew/protocols.mjs`, `crew/acp/grants.mjs`, `hooks/`, `crew/agents/`, `.github/workflows/`, and `docs/adr/` (ADR-055 §7). Without it the lane runs the build loop. Judge is reached only by the planner's `judge` reason or a path raise. A `tier` line is refused.
 - `shape`: `standard` only. `finish` is not started from a brief.
-- `out_of_scope`: what the lane must not change.
+- `out_of_scope` (optional): what the lane must not change. Absent means none.
 - `suite` (optional): the command line the lean lane runs as its suite, for example `suite: cargo test -p power-api`.
   Absent, the lane runs `npm test`. The line is split on whitespace without a shell; quotes and backslashes are refused, so an argument cannot contain a space.
 - `generated` and `regenerate` (optional, declared together): list literal repo-relative tracked files or directories

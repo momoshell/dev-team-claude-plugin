@@ -15,7 +15,6 @@ import { createAgentsSource, proposeAgent, proposeSkills } from '../visualizer/s
 import { normalizeSkillsPage } from '../visualizer/web/src/lib/agents.js'
 import { ROOT, rawRequest, scratchDir, treeDigest } from './helpers.mjs'
 const require = createRequire(import.meta.url)
-const SKIP = false
 const children = new Set()
 after(() => { for (const child of children) { try { child.kill('SIGKILL') } catch {} } })
 async function json(base, path, options) {
@@ -224,7 +223,7 @@ function fixture(path, { filler = 0 } = {}) {
   return { done, live, pane }
 }
 
-test('raw request targets are refused without killing the visualizer', { skip: SKIP }, async () => {
+test('raw request targets are refused without killing the visualizer', async () => {
   for (const target of ['//', '///', '//?x=1']) {
     const dir = mkdtempSync(join(tmpdir(), 'visualizer-raw-target-'))
     let server
@@ -243,7 +242,7 @@ test('raw request targets are refused without killing the visualizer', { skip: S
   }
 })
 
-test('raw Host values are refused without killing the visualizer', { skip: SKIP }, async () => {
+test('raw Host values are refused without killing the visualizer', async () => {
   for (const hostValue of [']bad[', 'a:b:c', '%', 'ho st', '[::1', '@', 'x:99999999', 'a b']) {
     const dir = mkdtempSync(join(tmpdir(), 'visualizer-raw-host-'))
     let server
@@ -267,7 +266,7 @@ const WRITE_ROUTES = [
   { path: '/api/skills/propose', body: JSON.stringify({ role: 'builder', skills: [] }) },
 ]
 
-test('state-writing routes refuse CORS simple requests before reading the body', { skip: SKIP }, async () => {
+test('state-writing routes refuse CORS simple requests before reading the body', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'visualizer-cors-simple-'))
   const checkout = join(dir, 'checkout')
   mkdirSync(checkout, { recursive: true })
@@ -291,7 +290,7 @@ test('state-writing routes refuse CORS simple requests before reading the body',
   }
 })
 
-test('state-writing routes refuse foreign JSON origins before writing state', { skip: SKIP }, async () => {
+test('state-writing routes refuse foreign JSON origins before writing state', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'visualizer-cors-origin-'))
   const checkout = join(dir, 'checkout')
   mkdirSync(checkout, { recursive: true })
@@ -447,7 +446,7 @@ test('prompts-page:C1', async () => {
   }
 })
 
-test('the visualizer CLI announces a port through a symlinked repository path', { skip: SKIP }, async () => {
+test('the visualizer CLI announces a port through a symlinked repository path', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'visualizer-symlink-'))
   const link = join(dir, 'repo-link')
   const checkout = join(dir, 'checkout')
@@ -631,7 +630,7 @@ test('the model catalog endpoint persists a key only when explicitly requested',
   }
 })
 
-test('static responses refuse symlinks that leave web/dist', { skip: SKIP }, async () => {
+test('static responses refuse symlinks that leave web/dist', async () => {
   const dir = scratchDir('visualizer-static-outside-')
   const outside = join(dir, 'outside.txt')
   const dist = join(ROOT, 'visualizer', 'web', 'dist')
@@ -948,7 +947,7 @@ test('VL6 writeGuard refuses non-loopback peers and admits loopback spellings', 
   }
 })
 
-test('GR1', { skip: SKIP }, async () => {
+test('GR1', async () => {
   // MUTATION GR1: limiting the shared API guard to /api/journal leaks other route data.
   const dir = scratchDir('visualizer-api-host-guard-')
   let server
@@ -999,7 +998,7 @@ test('GR2', () => {
   assert.equal(hostGuard({ headers: { host: 'localhost' }, socket: { localPort: 80 } }, 'read'), null)
 })
 
-test('GR3', { skip: SKIP }, async () => {
+test('GR3', async () => {
   // MUTATION GR3: bypassing the shared guard for HEAD lets a hostile HEAD request escape.
   const dir = scratchDir('visualizer-api-host-head-')
   let server

@@ -145,6 +145,44 @@ test('DM7: README routes exactly match the server registry', () => {
   assert.equal(documented.filter(route => route === '/api/prompts/propose').length, 1)
 })
 
+// MUTATION: restore a retired convention to the binding list.
+test('DM8: conventions hold only the binding entries and the rest are archived', () => {
+  const text = read('docs/conventions.md')
+  assert.doesNotMatch(text, /guards are\s+vacuous unless proven by mutation|## Diff mutation proof/)
+  const entries = [...text.matchAll(/^- \*\*(\d{4}-\d{2}-\d{2})\*\*[^\n]*/gm)].map(m => m[0])
+  assert.equal(entries.length, 6)
+  for (const [date, phrase] of [['2026-08-01', 'Prefer structural impossibility'], ['2026-08-02', 'Concurrency-unsafe'], ['2026-08-02', 'A raw control character'], ['2026-08-08', "Verify a dispatched coder's commit"], ['2026-08-08', "When this repo (dev-team's own source)"], ['2026-09-15', 'The runtime stays dependency-free']]) assert.ok(entries.some(e => e.startsWith(`- **${date}**`) && e.includes(phrase)), phrase)
+  const archive = 'docs/archive/conventions-earlier-runtimes.md'
+  assert.ok(existsSync(resolve(root, archive)))
+  assert.match(read(archive), /"Never logs the secret"/)
+  assert.match(read(archive), /## Diff mutation proof/)
+  assert.ok(read('CLAUDE.md').includes(archive))
+})
+
+// MUTATION: restore the old manifest description.
+test('DM9: manifests describe the per-test proof, not gate-first acceptance', () => {
+  const plugin = json('.claude-plugin/plugin.json')
+  const description = json('.claude-plugin/marketplace.json').plugins.find(item => item.name === plugin.name).description
+  assert.equal(plugin.description, description)
+  assert.match(description, /per-test proof/)
+  assert.doesNotMatch(description, /gate-first|acceptance/i)
+})
+
+// MUTATION: restore the four-seat description or a retired feature map.
+test('DM10: lane prose names the current seats, loop and arms', () => {
+  const lane = read('skills/lane-brief/SKILL.md'), readme = read('README.md'), crew = read('crew/README.md')
+  assert.doesNotMatch(lane, /two different gates/)
+  assert.doesNotMatch(lane.match(/^out_of_scope:.*$/m)[0], /roster/)
+  assert.match(readme, /five seats/)
+  assert.match(readme, /tech-lead/)
+  assert.doesNotMatch(crew, /Mechanical and finish prove/)
+  assert.match(crew, /Build, judge and finish commit[\s\S]*?repeat every check/)
+  for (const name of ['Skeletonread', 'Subagent', 'Per-test proof']) assert.match(crew, new RegExp(`\\| ${name} \\|`))
+  const advisor = crew.match(/^\| Advisor \|.*$/m)[0]
+  assert.ok(advisor.includes('`crew/agents/builder.md`'))
+  assert.equal((advisor.match(/adr-047-the-advisor-is-a-roster-seat\.md/g) ?? []).length, 1)
+})
+
 test('ancillary prose describes the current runtime and marks history', () => {
   const conventions = read('docs/conventions.md')
   assert.match(conventions, /2026-08-02 \(a literal NUL/)

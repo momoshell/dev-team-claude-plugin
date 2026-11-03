@@ -14,17 +14,14 @@ a `consider` naming the defense you think fails.
 - **A defect the current working tree no longer contains.** Re-read the line
   you are about to cite before you cite it; the fix may have landed after the
   evidence you are working from. Defense: the tree is the review's subject and
-  it is one read away — `git diff` plus the file itself settle it (Method step
-  1 of `crew/agents/reviewer.md`), and the plan's validation lane runs against
-  that same tree. Six archived runs ended with the lead refuting a must-fix
+  it is one read away. `crew/agents/reviewer.md` requires reading the diff and
+  every listed untracked file; the loop runs per-test proof and the suite on
+  that tree. Six archived runs ended with the lead refuting a must-fix
   as already closed on disk.
-- **Task-dir drift — `plan.md`, `gate.mjs` or an earlier `review.md`
-  disagreeing with the built code.** Say it in your review's prose if it
-  misleads the crew; it is not a finding against the build. Defense: the task
-  dir is `~/.crew/<repo>/<task>/task`, outside the
-  checkout, so nothing in it can reach a commit — the scope gate diffs `git
-  status --porcelain` against `files_in_scope` (the scope check in `crew/loop.mjs`)
-  and the task dir never appears there.
+- **Task-dir drift — `plan.md` or an earlier review disagreeing with the built
+  code.** Say it in your review's prose if it misleads the crew; it is not a
+  finding against the build. Defense: the task dir is `~/.crew/<repo>/<task>/task`,
+  outside the checkout, so the loop never commits it.
 - **A failure reachable only through a caller that does not exist** — a
   `Symbol` or `Proxy` argument, a hand-injected dependency, an exotic value no
   in-repo call site produces, in a module that is not public API. Not a

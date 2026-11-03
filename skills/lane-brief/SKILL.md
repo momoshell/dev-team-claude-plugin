@@ -33,7 +33,7 @@ planner. The brief carries no file list, symbol index, tripwire list or baseline
 source: issue 1962
 closes: 1962
 shape: standard
-out_of_scope: the visualizer and the roster itself
+out_of_scope: the visualizer
 ---
 ## The ask
 
@@ -71,4 +71,4 @@ Field rules (the validator refuses anything else):
 - Point, do not paste. Name the files and functions to read; the planner opens them.
 - Say what must be true, not how to compare it. If an item compares against existing repo state, name the
   repo test that already makes that comparison.
-- One lane per brief. Split work that needs two different gates.
+- One lane per brief. Split work that needs different suites or loops.

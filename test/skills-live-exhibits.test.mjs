@@ -96,3 +96,22 @@ test('SX5', () => {
 test('SX6', () => {
   assert.ok(flat(section(read(falsification), 'Rulings persist across rounds')).includes("Do not report a variant that a recorded ruling's rationale already covers."))
 })
+
+// MUTATION: restore the retired mutation proof as the fix bar.
+test('SX7: falsification states the red-green proof, not mutation proof', () => {
+  const text = read(falsification)
+  for (const heading of ['The fix bar', 'For a hand review']) {
+    const part = flat(section(text, heading))
+    assert.match(part, /red on the old source/)
+    assert.match(part, /green on the build/)
+    assert.doesNotMatch(part, /vacuous unless proven by mutation|kill-mutation/i)
+  }
+})
+
+// MUTATION: remove the historical label from a retired proof mention.
+test('SX8: retired gate and mutation proof are labelled history', () => {
+  for (const file of [...docs(review), ...docs(qa)]) {
+    const units = read(file).split(/\n\s*\n|\n(?=\s*(?:[-*] |\|))/)
+    for (const unit of units) if (/acceptance gate|green-gate|\bthe gate\b|kill-mutation|proveMutations/i.test(unit)) assert.match(unit, /ADR-055/, file + ': ' + unit)
+  }
+})

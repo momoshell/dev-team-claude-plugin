@@ -36,7 +36,7 @@ place that runs the review flow.
   remedy is new machinery for a defect outside the changed behaviour is dropped
   — never one about vacuity or required proof, never an undeferred
   out-of-context repair, and never a must-fix (`references/falsification.md`).
-- The gate is a floor and review is the filter, not a second opinion (F6, F19).
+- Historically, the gate was a floor and review the filter (F6, F19); ADR-055 retired that gate.
 - **Two reviewers disagreeing on the same line is itself a finding**; record
   both positions and resolve it using `references/divergence.md`.
 - Never report a rate without its denominator. A measured yield is a claim about

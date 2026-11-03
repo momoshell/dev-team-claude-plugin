@@ -14,6 +14,6 @@ run one after the other, never two reviewers on one round, so there is no panel.
 Record disagreements according to `references/divergence.md`.
 
 Size the posture from the measured lanes: the first review bounces **68 of 194**
-ledger lanes (F3), and **42 of those 68** pass at round 2. The acceptance gate is
-green on **196 of 203** first rounds (F19). A second look buys the most where
-the gate is quietest.
+ledger lanes (F3), and **42 of those 68** pass at round 2. The historical acceptance gate retired by ADR-055 was
+green on **196 of 203** first rounds (F19). A second look was proposed where
+the gate was quietest.

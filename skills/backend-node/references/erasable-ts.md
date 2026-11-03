@@ -1,6 +1,6 @@
 # TypeScript that both loaders can erase
 
-Read `docs/conventions.md` for the decision. Keep `crew/pi/extensions/subagent.ts`
+Read `docs/archive/conventions-earlier-runtimes.md` for the 2026-08-20 decision. Keep `crew/pi/extensions/subagent.ts`
 erasable-syntax-only: its source header permits annotations, `interface`,
 `type`, `as`, and `satisfies`, but rejects `enum`, `namespace`, and parameter
 properties. jiti loads the extension directly without a build; Node's unflagged

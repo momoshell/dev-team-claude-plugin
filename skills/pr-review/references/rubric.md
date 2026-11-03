@@ -22,7 +22,7 @@ Then attack the high-yield families in the register's order (F9):
 - **Render joins:** inspect joins by array position and duplicate-key handling —
   **71% must-fix (10 of 14)**.
 
-The acceptance gate is green on **196 of 203** first build rounds (F19), yet a
+The historical acceptance gate retired by ADR-055 was green on **196 of 203** first build rounds (F19), yet a
 reviewer finds a must-fix in **65 of 188** green-gate runs (F6): review is the
 primary filter. Keep the baseline honest too: **140 of 269** reviews correctly
 find nothing (F5), so a finding quota would optimise against the measurement.

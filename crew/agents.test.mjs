@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync, writeFileSync, rmSync, cpSync, chmodSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { AGENT_ROLES, TIERS, parseAgent, validateEnvelope, ENVELOPE_FIELDS, ENVELOPE_STATUSES, REVIEW_VERDICTS, FINDING_SEVERITIES, LEAD_DECISIONS } from './protocols.mjs'
+import { AGENT_ROLES, TIERS, parseAgent, validateEnvelope, REVIEW_VERDICTS, FINDING_SEVERITIES, LEAD_DECISIONS } from './protocols.mjs'
 import { resolveAgents } from './agents.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
@@ -146,7 +146,7 @@ test('the five committed definitions parse clean with standalone lean charters',
   }
 })
 
-// MUTATION: add a key to a Details keys line, drop a vocabulary entry, or hand a loop stage to the seat and a body drifts from P2.
+// MUTATION: change a Details keys or vocabulary declaration, or hand a loop stage to a seat.
 test('lean charter declarations match the P2 schemas and loop ownership', () => {
   const vocabulary = {
     reviewer: [['Review verdicts', REVIEW_VERDICTS], ['Finding severities', FINDING_SEVERITIES]],
@@ -172,7 +172,7 @@ test('lean charter declarations match the P2 schemas and loop ownership', () => 
       assert.deepEqual(validateEnvelope(role, { role, id: 'probe', status: 'done', summary: 'probe', details: { summary: 'probe', ...optional } }).defects, [])
       detailKeys.push(...Object.keys(optional))
     }
-    for (const [label, expected] of [['Details keys', detailKeys], ['Envelope keys', ENVELOPE_FIELDS], ['Statuses', ENVELOPE_STATUSES], ...(vocabulary[role] ?? [])]) {
+    for (const [label, expected] of [['Details keys', detailKeys], ...(vocabulary[role] ?? [])]) {
       assert.deepEqual(declared(label), [...expected].sort(), `${role}: ${label}`)
     }
     assert.ok(body.includes(`writes: ${fields.writes}`), `${role}: write boundary`)

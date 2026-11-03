@@ -25,6 +25,13 @@ function fakeHome(root) {
   return root
 }
 
+function fakeBin(root, name, script) {
+  const dir = join(root, 'fakebin')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, name), `#!/bin/sh\n${script}\n`, { mode: 0o755 })
+  return dir
+}
+
 function crew(args, { cwd, env = {} }) {
   const result = spawnSync(process.execPath, [BIN, ...args], { cwd, env: { ...process.env, ...env }, encoding: 'utf8' })
   return { status: result.status, stdout: result.stdout, stderr: result.stderr }
@@ -66,6 +73,52 @@ test('an unknown or missing verb is refused with exit 2 and runs nothing', () =>
       assert.equal(out.stdout, '')
       assert.match(out.stderr, /^crew: unknown verb ".*"; expected start, show, record-pr, closeout, finish, lanes, viz, where or update$/m)
     }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+// MUTATION: replace Object.hasOwn(ENTRY, verb) with verb in ENTRY.
+test('a verb naming an Object.prototype member is refused as unknown with exit 2 and runs nothing', () => {
+  const root = scratch('prototype')
+  try {
+    const home = fakeHome(join(root, 'home'))
+    for (const verb of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+      const out = crew([verb], { cwd: root, env: { CREW_HOME: home } })
+      assert.equal(out.status, 2)
+      assert.equal(out.stdout, '')
+      assert.match(out.stderr, new RegExp(`^crew: unknown verb "${verb}"; expected start, show, record-pr, closeout, finish, lanes, viz, where or update$`, 'm'))
+      assert.doesNotMatch(out.stderr, /\n\s+at /)
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+// MUTATION: drop the result.error check in git().
+test('a git step whose output overflows maxBuffer is reported as exceeded output, not a git failure', () => {
+  const root = scratch('git-overflow')
+  try {
+    const dir = fakeBin(root, 'git', 'head -c 20000000 /dev/zero')
+    const out = crew(['where'], { cwd: root, env: { CREW_HOME: root, PATH: `${dir}:${process.env.PATH}` } })
+    assert.equal(out.status, 1)
+    assert.match(out.stderr, /^crew where: git log -1 --format=%h %s: output exceeded \d+ bytes\n$/)
+    assert.equal(out.stderr.trim().split('\n').length, 1)
+    assert.doesNotMatch(out.stderr, /\n\s+at /)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+// MUTATION: drop the result.error check in homeProcesses().
+test('update refuses when pgrep cannot run, rather than reading it as no processes', () => {
+  const root = scratch('pgrep-overflow')
+  try {
+    const { seed, origin, home } = gitHome(root)
+    const head = git(home, 'rev-parse', 'HEAD')
+    writeFileSync(join(seed, 'README'), 'two\n')
+    git(seed, 'commit', '-qam', 'two')
+    git(seed, 'push', '-q', origin, 'main')
+    const dir = fakeBin(root, 'pgrep', 'head -c 20000000 /dev/zero')
+    const out = crew(['update', '--force'], { cwd: root, env: { CREW_HOME: home, PATH: `${dir}:${process.env.PATH}` } })
+    assert.equal(out.status, 1)
+    assert.match(out.stderr, /^crew update: pgrep -fl .*: output exceeded \d+ bytes\n$/)
+    assert.equal(out.stderr.trim().split('\n').length, 1)
+    assert.equal(git(home, 'rev-parse', 'HEAD'), head)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

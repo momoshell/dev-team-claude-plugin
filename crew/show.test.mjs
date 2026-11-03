@@ -308,6 +308,26 @@ test('WL7 lean ACP turns list and render per role in numeric order, chunks joine
   assert.equal(fingerprint(crewRoot), before)
 })
 
+// MUTATION: restore the bare-turn regex and the repair, rerun and retry files are absent.
+test('WL7 lean ACP repair, rerun and retry session files list and render in the order they were recorded', () => {
+  const { crewRoot } = fixture()
+  const turns = ['1', '1.retry-1', '1.retry-2', '1.retry-10', '1.rerun', '1.rerun.retry-1', '1.repair', '1.repair.retry-1', '1.repair.rerun', '1.repair.rerun.retry-1', '2']
+  const raw = (turn) => chunk('agent_message_chunk', turn)
+  const dir = leanLane(crewRoot, 'lean6', [...turns].reverse().map((turn) => ['builder', turn, raw(turn)]))
+  put(join(dir, 'task/lean/builder/lean6.builder.1.bogus.jsonl'), 'ignored')
+  const rels = turns.map((turn) => `task/lean/builder/lean6.builder.${turn}.jsonl`)
+  assert.equal(showLane({ lane: 'lean6', deps: { crewRoot } }), [
+    'builder  pi  test/model  lean-acp',
+    ...rels.map((rel) => `  ${rel}`),
+    'reviewer  claude  claude-opus-5  lean-acp',
+    '  no session file recorded',
+    '',
+  ].join('\n'))
+  const text = showLane({ lane: 'lean6', role: 'builder', deps: { crewRoot } })
+  assert.deepEqual([...text.matchAll(/^=== (.+) ===$/gm)].map((match) => match[1]), rels)
+  assert.equal(showLane({ lane: 'lean6', role: 'builder', json: true, deps: { crewRoot } }), turns.map(raw).join(''))
+})
+
 test('WL7 lean ACP archives resolve, and absent, empty, malformed and unreadable recordings are told apart', () => {
   const { crewRoot } = fixture()
   leanLane(crewRoot, 'lean2', [['builder', 1, chunk('agent_message_chunk', 'archived')]], { suffix: '.archive-2026-10-24T16-59-50-798Z' })

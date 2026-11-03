@@ -216,7 +216,7 @@ test('an issue brief starts with the issue body quoted as its ask, and an unread
     [{ status: null, error: new Error('spawnSync gh ENOENT') }, /issue 1961: spawnSync gh ENOENT/],
     [{ status: 1, stderr: 'authentication required\n' }, /issue 1961: authentication required/],
     [{ status: 1 }, /issue 1961: gh exited with status 1/],
-    ...['', ' \n\t'].map((stdout) => [{ status: 0, stdout }, /issue 1961 has an empty body/]),
+    ...['', ' \n\t', '>\n> > \n', '---\n'].map((stdout) => [{ status: 0, stdout }, /issue 1961 has an empty body/]),
   ]) {
     const failed = fakes()
     const spawnSync = failed.deps.spawnSync

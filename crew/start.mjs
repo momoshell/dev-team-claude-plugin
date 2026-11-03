@@ -95,7 +95,7 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
   if (issue) {
     const result = d.spawnSync('gh', ['issue', 'view', issue[1], '--json', 'body', '--jq', '.body'], { cwd: checkout })
     if (result.status !== 0) throw new StartRefusal(`cannot read the body of issue ${issue[1]}: ${result.error?.message || String(result.stderr ?? '').trim() || `gh exited with status ${result.status}`}`)
-    if (!String(result.stdout ?? '').trim()) throw new StartRefusal(`issue ${issue[1]} has an empty body`)
+    if (!/[\p{L}\p{N}]/u.test(String(result.stdout ?? ''))) throw new StartRefusal(`issue ${issue[1]} has an empty body: no letter or digit`)
     ask = String(result.stdout)
   }
   const run = runBrief(text, fields.closes, ask)

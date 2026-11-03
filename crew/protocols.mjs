@@ -115,7 +115,8 @@ export function parseBrief(text) {
   const ask = parts.get('## The ask')
   if (issue && ask) defects.push('an issue brief has no ## The ask: crew start takes the issue body as the ask')
   if (!issue) {
-    if (!ask?.some((line) => line.replace(/^ {0,3}>[ \t]?/, '').trim())) defects.push("the body has no ## The ask; quote the operator's words there")
+    // Quote markers alone (`> >`) carry no ask: a quoted line counts once a letter or digit is left.
+    if (!ask?.some((line) => /[\p{L}\p{N}]/u.test(line.replace(/^ {0,3}>[ \t]?/, '')))) defects.push("the body has no ## The ask; quote the operator's words there")
     for (const line of ask ?? []) if (line.trim() && !/^ {0,3}>/.test(line)) defects.push(`## The ask quotes the source: every line starts with >: ${line}`)
   }
   const context = parts.get('## Context') ?? []

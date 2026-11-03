@@ -152,6 +152,7 @@ test('a brief body is the quoted source ask and ## Context pointers, and anythin
     [{ source: 'operator request' }, BODY, "the body has no ## The ask; quote the operator's words there"],
     [{ source: 'operator request' }, '## The ask\n\n' + BODY, "the body has no ## The ask; quote the operator's words there"],
     [{ source: 'operator request' }, '## The ask\n> \n>\n' + BODY, "the body has no ## The ask; quote the operator's words there"],
+    [{ source: 'operator request' }, '## The ask\n> >\n> > -\n' + BODY, "the body has no ## The ask; quote the operator's words there"],
     [{ source: 'operator request' }, '## The ask\nplain\n' + BODY, '## The ask quotes the source: every line starts with >: plain'],
     [{ source: 'operator request' }, '## The ask\n```\n> text\n```\n' + BODY, '## The ask quotes the source: every line starts with >: ```'],
     [{}, '', 'the body has no ## Context with at least one pointer'],

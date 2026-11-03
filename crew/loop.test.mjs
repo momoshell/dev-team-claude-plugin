@@ -1,11 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { git as repoGit, scratchDir } from '../test/helpers.mjs'
 import { CHECK_REASONS } from './checks.mjs'
+import { FinishRefusal, finishLane } from './finish.mjs'
 import { DEFAULT_ROUNDS, LOOP_REASONS, runLoop } from './loop.mjs'
 
 const PR = { number: 73, url: 'https://example.test/pr/73', state: 'OPEN', headRefName: 'lane', baseRefName: 'main' }
@@ -1745,6 +1746,50 @@ test('a red suite after a rebase that moved the head stops with its reason and p
   assert.deepEqual(await g.go(), stopped('exit-nonzero'))
   assert.equal(g.writes.size, 0)
   assert.equal(g.rows.some((r) => r.event === 'finish-ready'), false)
+})
+
+// MUTATION: skip the parent probe and a dropped build (HEAD is the base it was rebased onto) is reset off a base commit.
+test('a mechanical stop after a rebase that moved the head is finishable: crew finish uncommits the rebased build onto its base, and an unrelated, dropped, unprobed or pushed head is still finish-committed', async () => {
+  const red = { ...green(), status: 'red', code: 1, reason: 'exit-nonzero' }
+  for (const variant of ['suite', 'proof', 'publish', 'unrelated', 'parent-moved', 'parent-red', 'pushed', 'dropped']) {
+    const options = variant === 'proof'
+      ? { proof: answers({ status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }] }, { status: 'red', reason: 'proof-unproven', rows: [{ file: 'lib.test.mjs', title: 'works', proven: false }] }) }
+      : variant === 'publish' ? { publish: { status: 'red', reason: 'exit-nonzero' } }
+        : { suite: answers(green(), red), ...(variant === 'dropped' ? { rebase: { ...MOVED, head: MOVED.onto } } : {}) }
+    const f = moved(options)
+    assert.deepEqual(await f.go(), stopped(variant === 'proof' ? 'proof-unproven' : 'exit-nonzero'), variant)
+    const root = scratchDir(), task = join(root, 'dt-lane', 'lane', 'task'), journal = join(task, 'journal.jsonl')
+    mkdirSync(task, { recursive: true })
+    writeFileSync(join(task, 'lean.json'), JSON.stringify({ ...f.spec, cwd: root }))
+    const before = `${f.rows.map((row) => JSON.stringify(row)).join('\n')}\n`
+    writeFileSync(journal, before)
+    const calls = [], spawned = []
+    const head = variant === 'unrelated' ? O : variant === 'dropped' ? MOVED.onto : MOVED.head
+    const deps = {
+      git: (_cwd, args) => {
+        calls.push(args)
+        if (args[0] === 'rev-parse' && args[1] === 'HEAD') return { status: 'green', stdout: head }
+        if (args[0] === 'rev-parse') return { status: variant === 'parent-red' ? 'red' : 'green', stdout: variant === 'parent-moved' ? O : { [`${MOVED.head}^`]: MOVED.onto, [`${MOVED.onto}^`]: O }[args[1]] ?? '' }
+        if (args[0] === 'ls-remote') return { status: 'green', stdout: variant === 'pushed' ? `${MOVED.head}\trefs/heads/lane\n` : '' }
+        if (args[0] === 'symbolic-ref') return { status: 'green', stdout: 'lane\n' }
+        return { status: 'green', stdout: '' }
+      },
+      spawnDetached: (...args) => { spawned.push(args); return 4242 },
+      log: () => {},
+    }
+    if (['suite', 'proof', 'publish'].includes(variant)) {
+      assert.doesNotThrow(() => finishLane({ lane: 'lane', root, deps }), variant)
+      assert.deepEqual(calls.filter((args) => args[0] === 'reset'), [['reset', '--soft', MOVED.onto]], variant)
+      assert.deepEqual(JSON.parse(readFileSync(journal, 'utf8').trim().split('\n').at(-1)), { event: 'finish-uncommit', lane: 'lane', head: MOVED.head, onto: MOVED.onto, committed: 'a'.repeat(40) }, variant)
+      assert.equal(spawned.length, 1, variant)
+    } else {
+      assert.throws(() => finishLane({ lane: 'lane', root, deps }), (error) => error instanceof FinishRefusal && error.reason === 'finish-committed', variant)
+      assert.equal(spawned.length, 0, variant)
+      assert.deepEqual(calls.filter((args) => args[0] === 'reset'), [], variant)
+      assert.equal(readFileSync(journal, 'utf8'), before, variant)
+      assert.equal(readdirSync(task).some((name) => name.endsWith('.claim')), false, variant)
+    }
+  }
 })
 
 // MUTATION: drop the post-rebase clean-tree check and proof or suite that edits the tree publishes bytes no commit holds.

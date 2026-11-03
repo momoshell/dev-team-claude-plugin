@@ -14,7 +14,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { resolveAgents } from './agents.mjs'
 import {
-  CHECK_REASONS, commitChanges, openPullRequest, parseStatus, rebaseBranch, runSuite, validGenerated,
+  CHECK_REASONS, FINISH_REVIEW_ROUNDS, commitChanges, openPullRequest, parseStatus, rebaseBranch, runSuite, validGenerated,
 } from './checks.mjs'
 import { proveTests } from './proof.mjs'
 import { TIERS, validateEnvelope } from './protocols.mjs'
@@ -30,7 +30,6 @@ export const LOOP_REASONS = Object.freeze([
 
 const REQUIRED_ROLES = ['planner', 'builder', 'reviewer']
 const FINISH_ROLES = ['builder', 'reviewer']
-const FINISH_REVIEW_ROUNDS = 3
 const text = (v) => typeof v === 'string' && v !== ''
 const strings = (v) => Array.isArray(v) && v.every(text)
 const describe = (error) => ({ code: error?.code ?? null, message: String(error?.message ?? error) })

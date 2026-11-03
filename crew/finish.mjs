@@ -11,20 +11,23 @@
 // `--abandon` ends the lane unpublished. Each appends a `finish-decision` row; a lane takes one decision per ready.
 // Refused, with nothing written: `finish-worktree` (the worktree is gone), `finish-premise` (the lane never reached
 // a build), `finish-running` (a run re-entered or claimed the lane after its stop), `finish-published` and
-// `finish-committed` (the build is still committed; a successful `uncommit` undoes the commit), `finish-no-build`
-// (no schema-valid done or insufficient builder
-// envelope in the journal). The PR carries the measured subject and body, and the notes, exactly (the lane's issues
-// ride on trailer lines); gh pr edit restores that text where opening rewrote issue tokens or the PR was already open.
+// `finish-committed` (the build is committed and cannot be proven to be the unpublished HEAD), `finish-no-build`
+// (no schema-valid done or insufficient builder envelope in the journal). A claim whose run is provably gone is
+// taken over. A committed, unpushed build at HEAD, as committed or as the journal-recorded one-commit rebase,
+// is uncommitted and recorded as `finish-uncommit` before launch; a rebased build is reset onto its rebase base.
+// The PR's measured subject, body and notes have issue tokens rewritten as in openPullRequest; issue numbers ride
+// only on trailer lines.
 // A decision is refused as `finish-not-ready` (the last run did not end finish-ready), `finish-decided` (it already
 // has one), `finish-head-moved` (accept: the checkout is no longer the head the run measured) or `finish-publish`
-// (the PR did not open; nothing is recorded, so it can be retried).
-import { spawn } from 'node:child_process'
+// (the PR did not open; nothing is recorded, so it can be retried), or `finish-rounds-spent` (return has no review
+// rounds left).
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { openPullRequest, runSuite } from './checks.mjs'
+import { FINISH_REVIEW_ROUNDS, composeLanePrBody, openPullRequest, runSuite, withoutIssueTokens } from './checks.mjs'
 import { TIERS, validateEnvelope } from './protocols.mjs'
 import { SLOT_ENV } from './reclaim.mjs'
 
@@ -32,15 +35,26 @@ const HOME = dirname(dirname(fileURLToPath(import.meta.url)))
 const LEAN = join(HOME, 'crew', 'lean.mjs')
 const LANE = /^[a-z0-9][a-z0-9-]{0,62}$/
 
+export const FINISH_REASONS = Object.freeze([
+  'finish-unreadable', 'finish-worktree', 'finish-premise', 'finish-running', 'finish-published', 'finish-committed',
+  'finish-no-build', 'finish-not-ready', 'finish-decided', 'finish-head-moved', 'finish-publish', 'finish-rounds-spent',
+])
+
 export class FinishRefusal extends Error {
   constructor(reason, message) {
     super(message)
+    if (!FINISH_REASONS.includes(reason)) throw new TypeError(`unknown finish refusal: ${reason}`)
     this.reason = reason
   }
 }
 
 const defaultDeps = () => ({
   readFileSync, readdirSync, existsSync, statSync, mkdirSync, writeFileSync, appendFileSync, rmSync, openPullRequest, run: runSuite,
+  alive: (pid) => { try { process.kill(pid, 0); return true } catch (error) { return error?.code === 'ESRCH' ? false : null } },
+  git: (cwd, args) => {
+    const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 60_000 })
+    return { status: r.status === 0 && !r.error ? 'green' : 'red', stdout: r.stdout ?? '' }
+  },
   spawnDetached: (file, args, { cwd, log, env }) => {
     const out = openSync(log, 'a')
     try {
@@ -148,6 +162,7 @@ function launch(d, { crewRoot, taskDir, spec, finish, claim }) {
     try { d.rmSync(claim, { force: true }) } catch { /* the launch error is the one reported */ }
     throw error
   }
+  if (Number.isSafeInteger(pid) && pid > 0) try { d.writeFileSync(claim, `${pid}\n`) } catch { /* the detached run may already be active */ }
   d.log(`crew finish: lane=${spec.id} stop=${finish.stop.reason} findings=${finish.findings.length} pid=${pid}`)
   d.log(`  worktree ${spec.cwd}`)
   d.log(`  log      ${log}`)
@@ -159,10 +174,28 @@ function claimStop(d, lane, taskDir, at) {
   // The claim is exclusive and names the stop it finishes, so two calls before the run's first row cannot both spawn.
   const claim = join(taskDir, `finish-${at}.claim`)
   try { d.writeFileSync(claim, `${process.pid}\n`, { flag: 'wx' }) } catch (error) {
-    if (error?.code === 'EEXIST') throw new FinishRefusal('finish-running', `lane ${lane} is already being finished from this stop`)
-    throw new FinishRefusal('finish-unreadable', `cannot claim lane ${lane}: ${error?.code ?? error?.message}`)
+    if (error?.code !== 'EEXIST') throw new FinishRefusal('finish-unreadable', `cannot claim lane ${lane}: ${error?.code ?? error?.message}`)
+    const running = () => new FinishRefusal('finish-running', `lane ${lane} may still be running; claim ${claim}`)
+    let text, pid
+    try {
+      text = d.readFileSync(claim, 'utf8')
+      pid = Number(text.trim())
+      if (!/^\d+\n?$/.test(text) || !Number.isSafeInteger(pid) || pid <= 0 || d.alive(pid) !== false) throw running()
+    } catch { throw running() }
+    const lock = join(taskDir, `finish-${at}.reclaim`)
+    try { d.writeFileSync(lock, `${process.pid}\n`, { flag: 'wx' }) } catch { throw running() }
+    try {
+      if (d.readFileSync(claim, 'utf8') !== text || d.alive(pid) !== false) throw running()
+      d.rmSync(claim)
+      d.writeFileSync(claim, `${process.pid}\n`, { flag: 'wx' })
+    } catch { throw running() } finally { d.rmSync(lock, { force: true }) }
   }
   return claim
+}
+
+const onLaneBranch = (d, spec) => {
+  const branch = d.git(spec.cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
+  return branch?.status === 'green' && typeof spec.branch === 'string' && String(branch.stdout ?? '').trim() === spec.branch
 }
 
 export function finishLane({ lane, root, deps = {} }) {
@@ -180,15 +213,51 @@ export function finishLane({ lane, root, deps = {} }) {
   // A row after the stop means a run has re-entered the lane since: a second finish would race it.
   if (rows.slice(stopAt + 1).some((row) => row.event === 'stage-start' || row.event === 'finish-ready')) throw new FinishRefusal('finish-running', `lane ${lane} has run again since it stopped`)
 
-  // A published lane or a build still committed after the last successful uncommit cannot be finished.
   if (rows.some((row) => row.event === 'pr')) throw new FinishRefusal('finish-published', `lane ${lane} already has a recorded PR`)
   const lastCommit = rows.findLastIndex((row) => row.event === 'commit')
-  if (lastCommit >= 0 && !rows.slice(lastCommit + 1).some((row) => row.event === 'stage-end' && row.stage === 'uncommit' && row.outcome?.status === 'green')) throw new FinishRefusal('finish-committed', `lane ${lane} already committed its build`)
+  const standing = lastCommit >= 0 && !rows.slice(lastCommit + 1).some((row) => row.event === 'finish-uncommit' || (row.event === 'stage-end' && row.stage === 'uncommit' && row.outcome?.status === 'green'))
+  const head = rows[lastCommit]?.head
+  let undo
+  if (standing) {
+    const local = d.git(spec.cwd, ['rev-parse', 'HEAD'])
+    const now = String(local?.stdout ?? '').trim()
+    const rebased = rows.slice(lastCommit + 1, stopAt).findLast((row) => row.event === 'stage-end' && row.stage === 'rebase' && row.outcome?.status === 'green')?.outcome
+    if (local?.status === 'green' && typeof head === 'string' && head && now === head) {
+      undo = { head, onto: `${head}^` }
+    } else if (local?.status === 'green' && typeof head === 'string' && head && typeof rebased?.head === 'string' && rebased.head && typeof rebased.onto === 'string' && rebased.onto && now === rebased.head) {
+      const parent = d.git(spec.cwd, ['rev-parse', `${now}^`])
+      if (parent?.status !== 'green' || String(parent.stdout ?? '').trim() !== rebased.onto) throw new FinishRefusal('finish-committed', `lane ${lane}'s rebased build is not one commit on its rebase base`)
+      undo = { head: now, onto: rebased.onto, committed: head }
+    }
+    if (!undo) throw new FinishRefusal('finish-committed', `lane ${lane}'s committed build is not the checkout HEAD`)
+    if (!onLaneBranch(d, spec)) throw new FinishRefusal('finish-committed', `lane ${lane}'s checkout is not on its branch ${spec.branch}`)
+    const remote = d.git(spec.cwd, ['ls-remote', '--heads', 'origin', `refs/heads/${spec.branch}`])
+    if (remote?.status !== 'green' || String(remote.stdout ?? '').trim() !== '') throw new FinishRefusal('finish-committed', `lane ${lane}'s remote branch exists or could not be checked`)
+  }
 
   if (!rows.some((row) => row.event === 'envelope' && row.role === 'builder' && Array.isArray(row.defects) && row.defects.length === 0 && ['done', 'insufficient'].includes(row.parsed?.status) && row.parsed.id === row.id)) throw new FinishRefusal('finish-no-build', `lane ${lane} has no schema-valid done or insufficient builder envelope in its journal`)
 
   const finish = finishFor(rows, stopped, stopAt, planFor(d, lane, taskDir, recordedTier, rows))
   const claim = claimStop(d, lane, taskDir, stopAt)
+  try {
+    // A previous claimant may have finished while this call was probing the remote.
+    const current = loadLane(d, lane, crewRoot)
+    if (JSON.stringify(current.rows) !== JSON.stringify(rows) || JSON.stringify(current.spec) !== JSON.stringify(spec) || current.recordedTier !== recordedTier) throw new FinishRefusal('finish-running', `lane ${lane} changed while claiming its stop`)
+    requireWorktree(d, spec)
+    if (standing) {
+      const local = d.git(spec.cwd, ['rev-parse', 'HEAD'])
+      if (local?.status !== 'green' || String(local.stdout ?? '').trim() !== undo.head) throw new FinishRefusal('finish-committed', `lane ${lane}'s committed build is not the checkout HEAD`)
+      // The reset moves whichever branch is checked out: another branch at the same commit must never be reset.
+      if (!onLaneBranch(d, spec)) throw new FinishRefusal('finish-committed', `lane ${lane}'s checkout is not on its branch ${spec.branch}`)
+      if (d.git(spec.cwd, ['reset', '--soft', undo.onto])?.status !== 'green') throw new FinishRefusal('finish-committed', `lane ${lane}'s committed build could not be reset`)
+      try { d.appendFileSync(join(taskDir, 'journal.jsonl'), `${JSON.stringify({ event: 'finish-uncommit', lane, ...undo })}\n`) } catch (error) {
+        throw new FinishRefusal('finish-unreadable', `cannot record finish-uncommit for lane ${lane}: ${error?.code ?? error?.message}`)
+      }
+    }
+  } catch (error) {
+    try { d.rmSync(claim, { force: true }) } catch { /* the validation, reset or journal error is the one reported */ }
+    throw error
+  }
   return launch(d, { crewRoot, taskDir, spec, finish, claim })
 }
 
@@ -198,13 +267,6 @@ function readText(d, file, what) {
   try { return d.readFileSync(file, 'utf8') } catch (error) {
     throw new FinishRefusal('finish-unreadable', `cannot read ${what} ${file}: ${error?.code ?? error?.message}`)
   }
-}
-
-// The PR text is the measured text, character for character, plus the lane's issues on trailer lines.
-function prBody(body, closes, refs) {
-  const open = refs.filter((issue) => !closes.includes(issue))
-  const trailers = [...closes.map((issue) => `Closes: #${issue}`), ...(open.length ? [`Refs: ${open.map((issue) => `#${issue}`).join(', ')}`] : [])]
-  return [body, trailers.join('\n')].filter((block) => block !== '').join('\n\n')
 }
 
 // One decision per ready row: the claim is exclusive and taken before any effect, so overlapping decisions cannot both act.
@@ -230,6 +292,19 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
   if (rows.slice(readyAt + 1).some((row) => row.event === 'finish-decision')) throw new FinishRefusal('finish-decided', `lane ${lane} already has a decision on this finish run`)
   const ready = rows[readyAt]
   if (choice === 'return' && typeof file !== 'string') throw new FinishRefusal('finish-unreadable', '--return needs a guidance file')
+  let stopped, priorReviewRounds
+  if (choice === 'return') {
+    stopped = rows.slice(0, readyAt).findLast((row) => row.event === 'verdict' && row.status === 'stopped')
+    if (!stopped) throw new FinishRefusal('finish-premise', `lane ${lane} has no stop before its finish-ready row`)
+    // Count journal reviews and the ready row, never less than either source.
+    const sinceStop = rows.slice(rows.lastIndexOf(stopped) + 1, readyAt)
+    const journalReviews = Math.max(
+      sinceStop.filter((row) => row.event === 'verdict' && row.status === 'reviewed').length,
+      sinceStop.filter((row) => row.event === 'envelope' && row.role === 'reviewer').length,
+    )
+    priorReviewRounds = Math.max(journalReviews, Number.isSafeInteger(ready.reviewRounds) && ready.reviewRounds >= 0 ? ready.reviewRounds : 0)
+    if (priorReviewRounds >= FINISH_REVIEW_ROUNDS) throw new FinishRefusal('finish-rounds-spent', `lane ${lane} has spent its finish review rounds`)
+  }
 
   const claim = claimDecision(d, lane, taskDir, readyAt)
   try {
@@ -255,9 +330,8 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
       if (head?.status !== 'green' || String(head.stdout ?? '').trim() !== ready.head) throw new FinishRefusal('finish-head-moved', `lane ${lane}'s checkout is not measured at the finish run's head ${ready.head}; nothing was published`)
       const published = await d.openPullRequest({ cwd: spec.cwd, branch: spec.branch, base: spec.base, title: ready.subject, body, closes, refs })
       if (published?.status !== 'green' || !isObject(published.pr)) throw new FinishRefusal('finish-publish', `the pull request did not open: ${published?.reason ?? 'unmeasured'}`)
-      // Every returned PR gets the measured text: openPullRequest rewrites issue tokens ("#42" -> "issue 42"), and a PR it
-      // found rather than created (reused, or opened by someone else between its lookup and its create) has its own text.
-      const edited = await d.run({ cwd: spec.cwd, command: 'gh', args: ['pr', 'edit', String(published.pr.number), '--title', ready.subject, '--body', prBody(body, closes, refs)], timeoutMs: 60_000 })
+      // A reused PR has its own text; apply the same issue-token rewriting as openPullRequest.
+      const edited = await d.run({ cwd: spec.cwd, command: 'gh', args: ['pr', 'edit', String(published.pr.number), '--title', withoutIssueTokens(ready.subject), '--body', composeLanePrBody({ body, closes, refs })], timeoutMs: 60_000 })
       if (edited?.status !== 'green') throw new FinishRefusal('finish-publish', `the pull request ${published.pr.number} (${published.pr.url ?? 'no url'}) is open but could not be updated with the measured text, and is not recorded: ${edited?.reason ?? 'unmeasured'}`)
       d.appendFileSync(journal, `${JSON.stringify({ event: 'pr', lane, stage: 'publish', pr: published.pr })}\n`)
       decision()
@@ -266,17 +340,7 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
     }
 
     // return: the same finish spec the first pass had, plus the guidance, with the review rounds already spent.
-    const stopped = rows.slice(0, readyAt).findLast((row) => row.event === 'verdict' && row.status === 'stopped')
-    if (!stopped) throw new FinishRefusal('finish-premise', `lane ${lane} has no stop before its finish-ready row`)
     const plan = planFor(d, lane, taskDir, recordedTier, rows)
-    // Rounds spent: the journal's own count of reviews since the stop (a ready row from before the count was recorded has none),
-    // never less than the ready row's own count. Unknown history is never read as zero.
-    const sinceStop = rows.slice(rows.lastIndexOf(stopped) + 1, readyAt)
-    const journalReviews = Math.max(
-      sinceStop.filter((row) => row.event === 'verdict' && row.status === 'reviewed').length,
-      sinceStop.filter((row) => row.event === 'envelope' && row.role === 'reviewer').length,
-    )
-    const priorReviewRounds = Math.max(journalReviews, Number.isSafeInteger(ready.reviewRounds) && ready.reviewRounds >= 0 ? ready.reviewRounds : 0)
     const finish = {
       ...finishFor(rows, stopped, readyAt, plan),
       guidance: notes,

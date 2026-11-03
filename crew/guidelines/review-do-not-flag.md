@@ -1,7 +1,9 @@
 # Reviewer guidelines — do not flag
 
-Repo-owned judgment data. The reviewer's procedure loads this file; the
-charter names it and does not restate it.
+Repo-owned judgment data for the `/review` command's procedure only:
+`commands/review.md` follows `.agents/skills/review-procedure/SKILL.md`, which
+loads this file. No lane seat receives it; a lane reviewer works from
+`crew/agents/reviewer.md`, which does not name it.
 
 ## Do not flag
 

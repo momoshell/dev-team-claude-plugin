@@ -1,11 +1,13 @@
 ## Posture by tier
 
 One reviewer per round is the standing posture. The lane's tier (`mechanical`,
-`build` or `judge`, `TIERS` in `crew/protocols.mjs`) sets the reviewer's effort:
-`crew/agents/reviewer.md` raises it at the judge tier. A write surface that
-touches the loop's own enforcement (`crew/loop.mjs`, `crew/checks.mjs`,
-`crew/acp/grants.mjs`, `hooks/`) belongs at the judge tier; decide that when
-planning, never after the build.
+`build` or `judge`, `TIERS` in `crew/protocols.mjs`) picks the seats, but
+`crew/agents/reviewer.md` declares no `tiers` key, so the reviewer runs the same
+model and effort at every tier. A write surface that matches `PROTECTED` in
+`crew/loop.mjs` belongs at the judge tier. Decide that when planning. The loop
+raises the lane at plan acceptance from `files_in_scope`, and the loop also raises
+it after the build from the changed paths (a mechanical lane restarts at judge),
+so a late raise is a backstop, not the plan.
 
 The tech-lead seat (`crew/agents/tech-lead.md`) is the judge loop's automatic
 second review, after the reviewer passes and the suite is green. It uses the

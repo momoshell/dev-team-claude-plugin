@@ -1,17 +1,3 @@
-export const PERMISSION_POLICIES = Object.freeze(['roster', 'lead', 'no-lead'])
-export const PERMISSION_REFUSALS = Object.freeze(['permission-no-reject-option'])
-
-export function permitQuestion({ toolCall, options }) {
-  return [
-    `Permit tool call: ${toolCall?.title ?? ''}`,
-    `Kind: ${toolCall?.kind ?? ''}`,
-    `Input: ${JSON.stringify(toolCall?.rawInput)}`,
-    ...options.map((o) => `Option: optionId=${o.optionId}, kind=${o.kind}, name=${o.name}`),
-    'Out-of-task-scope calls must be rejected.',
-    'Provide exactly one request optionId in details.decision.',
-  ].join('\n')
-}
-
 export function readOnlyCommand(command) {
   return readOnlyCommandResult(command).allowed
 }
@@ -108,58 +94,21 @@ export function readOnlyCommandResult(command) {
   return closeSegment(command.length) ?? { allowed: true, reason: null }
 }
 
-export function settlePermission({ request, toolCall = request?.toolCall, options = request?.options, lead, log = () => {} }) {
+export function settlePermission({ toolCall, options, permit }) {
   const reject = options.find((o) => o.kind === 'reject_once') ?? options.find((o) => o.kind === 'reject_always')
   if (!reject) throw Object.assign(new Error('permission-no-reject-option'), { reason: 'permission-no-reject-option' })
-
-  let selected
-  let source
-  let answered
-  if (lead == null) { selected = reject; source = 'no-lead' }
-  else {
-    source = 'lead'
-    const payload = { question: 'permit', tool_call: toolCall, options: options.map((o) => o.optionId), text: permitQuestion({ toolCall, options }) }
-    let decision
-    try {
-      const answer = lead(payload)
-      if (answer?.policy === 'roster' && (answer.verdict === 'allow' || answer.verdict === 'reject')) {
-        source = answer.policy
-        selected = answer.verdict === 'allow' ? options.find((o) => o.kind === 'allow_once') ?? reject : reject
-      } else {
-        decision = answer?.decision ?? answer?.details?.decision
-      }
-    } catch {
-      decision = null
-    }
-    if (source !== 'roster') {
-      answered = decision ?? null
-      const match = options.find((o) => o.optionId === decision)
-      selected = match?.kind === 'allow_always' ? options.find((o) => o.kind === 'allow_once') ?? reject : match ?? reject
-    }
-  }
-
-  const row = {
-    kind: 'permission',
-    tool: toolCall?.kind ?? null,
-    title: toolCall?.title ?? null,
-    option_kind: selected.kind,
-    option: selected.optionId,
-    policy: source,
-    ...(source === 'lead' ? { answered: answered ?? null } : {}),
-  }
-  try { log(row) } catch { /* journal is advisory */ }
-  return { optionId: selected.optionId, row }
+  let allowed = false
+  try { allowed = permit(toolCall) === true } catch { /* fail closed */ }
+  const selected = allowed ? options.find((o) => o.kind === 'allow_once') ?? reject : reject
+  return { optionId: selected.optionId }
 }
 
-export function permissionHandler({ lead, log } = {}) {
+export function permissionHandler({ permit } = {}) {
   return ({ toolCall, options }) => {
     try {
-      return settlePermission({ toolCall, options, lead, log }).optionId
+      return settlePermission({ toolCall, options, permit }).optionId
     } catch (err) {
-      if (err?.reason === 'permission-no-reject-option') {
-        try { log?.({ kind: 'permission', reason: 'permission-no-reject-option' }) } catch { /* journal is advisory */ }
-        return null
-      }
+      if (err?.reason === 'permission-no-reject-option') return null
       throw err
     }
   }

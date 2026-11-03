@@ -11,7 +11,7 @@ import { AGENT_ROLES, validateEnvelope } from '../protocols.mjs'
 import * as claudeAdapter from '../adapters/adapter-claude.mjs'
 import * as piAdapter from '../adapters/adapter-pi.mjs'
 import { CONTEXT_LAYOUT_ENV, LEAN_LAYOUT, journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../pi/context-layout.mjs'
-import { ADVISED_ROLES, READ_CAP_BYTES, boundText, loadContext as advisorContext } from '../pi/extensions/advisor.ts'
+import { ADVISOR_MANIFEST_FILE, ADVISOR_CONFIG_VERSION, SAFE_MODEL, ADVISED_ROLES, READ_CAP_BYTES, boundText, loadContext as advisorContext } from '../pi/extensions/advisor.ts'
 import { loadAcceptedContext } from '../pi/extensions/skeletonread.ts'
 
 const ROLE = 'seat'
@@ -61,10 +61,6 @@ const CONTEXT_ARMS = Object.freeze({
   skeletonread: ['files_in_scope', 'plan_path'],
 })
 const CONTEXT_EXTENSIONS = Object.freeze(['skeletonread'])
-const ADVISOR_MANIFEST = 'advisor-manifest.json'
-const ADVISOR_MANIFEST_VERSION = 1
-// advisor.ts SAFE_MODEL: the spellings its manifest reader accepts for a cell.
-const SAFE_CELL_VALUE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/
 
 const nonempty = (value) => typeof value === 'string' && value !== ''
 
@@ -182,7 +178,7 @@ function advisorCellOf(advisor) {
   const model = advisor?.model
   if (advisor?.agent !== 'pi' || typeof model !== 'string' || !MODEL.test(model) || !EFFORTS.includes(advisor.effort)) return null
   const cell = { provider: model.slice(0, model.indexOf('/')), id: model.slice(model.indexOf('/') + 1), agent: advisor.agent, effort: advisor.effort, model }
-  return Object.values(cell).every((value) => SAFE_CELL_VALUE.test(value)) ? cell : null
+  return Object.values(cell).every((value) => SAFE_MODEL.test(value)) ? cell : null
 }
 
 // What a lean seat's context arms need, read from the lane's own task dir and nowhere else: the lane's run-start
@@ -232,7 +228,7 @@ function laneContext({ arms, role, laneTaskDir, workdir, definition, deps }) {
   const accepted = role !== 'planner' ? loadAcceptedContext({ taskDir: laneTaskDir, cwd: workdir, env: layout }) : null
   const criteria = planCriteria(accepted?.plan_text)
   const tests = Array.isArray(planner?.details?.tests) ? planner.details.tests.filter((test) => nonempty(test?.file) && nonempty(test?.title)).map(({ file, title }) => ({ file, title })) : []
-  const manifest = { schema_version: ADVISOR_MANIFEST_VERSION, generated_at: new Date().toISOString(), task: basename(dirname(laneTaskDir)), run_started_at: anchor, criteria, tests, cell }
+  const manifest = { schema_version: ADVISOR_CONFIG_VERSION, generated_at: new Date().toISOString(), task: basename(dirname(laneTaskDir)), run_started_at: anchor, criteria, tests, cell }
   if (Buffer.byteLength(JSON.stringify(manifest)) > READ_CAP_BYTES) {
     // Match the reader's bounds first; JSON escaping can still expand the result beyond its read cap.
     manifest.criteria = criteria.slice(0, 32).map((item) => boundText(item, 512))
@@ -242,7 +238,7 @@ function laneContext({ arms, role, laneTaskDir, workdir, definition, deps }) {
       else manifest.tests.pop()
     }
   }
-  const target = join(laneTaskDir, ADVISOR_MANIFEST)
+  const target = join(laneTaskDir, ADVISOR_MANIFEST_FILE)
   try {
     ;(deps.writeFileSync ?? writeFileSync)(`${target}.tmp`, JSON.stringify(manifest))
     ;(deps.renameSync ?? renameSync)(`${target}.tmp`, target)
@@ -341,7 +337,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
     if (writes === 'repo') return inside(target, workRoot) || inside(target, taskRoot)
     return false
   }
-  const decide = permissionHandler({ lead: ({ tool_call }) => ({ policy: 'roster', verdict: seatPermission(tool_call) ? 'allow' : 'reject' }) })
+  const decide = permissionHandler({ permit: seatPermission })
   function onPermission({ sessionId, toolCall, options }) {
     let optionId = null
     try { optionId = decide({ toolCall, options }) } catch { /* an undecidable request is cancelled */ }

@@ -88,10 +88,15 @@ async function harness({ env = {}, connect = true, sessionId = () => SESSION } =
     throw new Error(`no ${what} within ${ms}ms`)
   }
   const request = async (id, method, params) => { send({ jsonrpc: '2.0', id, method, params }); return wait((f) => f.id === id && !f.method, `${method} response`) }
+  let flushId = 0
+  const flush = async () => {
+    const reply = await request(`flush-${++flushId}`, 'crew/flush', {})
+    assert.equal(reply.error?.code, -32601)
+  }
   const answer = (req, optionId) => send({ jsonrpc: '2.0', id: req.id, result: { outcome: { outcome: 'selected', optionId } } })
   const permissionRequests = () => frames.filter((f) => f.method === 'session/request_permission')
   const close = () => { try { client?.destroy() } catch {} emit('session_shutdown', { reason: 'quit' }) }
-  return { ctx, emit, frames, send, wait, request, answer, permissionRequests, prompts, open, close, socketPath, get client() { return client } }
+  return { ctx, emit, frames, send, wait, request, flush, answer, permissionRequests, prompts, open, close, socketPath, get client() { return client } }
 }
 
 async function withSession(options = {}) {
@@ -124,7 +129,7 @@ test('P2', async () => {
     for (let i = 0; i < 100 && !h.prompts.length; i += 1) await sleep(5)
     assert.deepEqual(h.prompts, [[{ type: 'text', text: 'hello' }]])
     h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop', usage: { input: 10, output: 5, cacheRead: 2, cacheWrite: 1, totalTokens: 18, cost: { total: 0 } } }] })
-    await sleep(100)
+    await h.flush()
     assert.equal(h.frames.some((f) => f.id === 5), false, 'session/prompt must not resolve on agent_end')
     h.emit('agent_before_settle', { outcome: 'completed' })
     h.emit('agent_settled')
@@ -132,7 +137,7 @@ test('P2', async () => {
     assert.equal(done.result.stopReason, 'end_turn')
     assert.ok(ACP_STOP_REASONS.includes(done.result.stopReason))
     assert.deepEqual(done.result.usage, { inputTokens: 10, outputTokens: 5, cachedReadTokens: 2, cachedWriteTokens: 1, totalTokens: 18 })
-    await sleep(50)
+    await h.flush()
     assert.equal(h.frames.filter((f) => f.id === 5).length, 1)
   } finally { h.close() }
 })
@@ -144,14 +149,14 @@ test('P3', async () => {
     for (let i = 0; i < 100 && !h.prompts.length; i += 1) await sleep(5)
     // Exactly the frame crew/acp-client.mjs cancel() writes: a notification, no id.
     h.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: SESSION } })
-    await sleep(20)
+    await h.flush()
     assert.equal(h.frames.some((f) => f.id === 5), false, 'cancellation is answered only after settlement')
     assert.equal(h.ctx.aborts, 1, 'session/cancel must call ctx.abort once')
     h.emit('agent_before_settle', { outcome: 'aborted' })
     h.emit('agent_settled')
     const done = await h.wait((f) => f.id === 5, 'cancelled prompt response')
     assert.equal(done.result.stopReason, 'cancelled')
-    await sleep(100)
+    await h.flush()
     assert.equal(h.frames.filter((f) => f.id === 5).length, 1, 'the aborted run settling must not answer twice')
     assert.equal(h.frames.some((f) => f.error && f.id === null), false, 'the notification must not be answered as an invalid request')
   } finally { h.close() }
@@ -163,7 +168,7 @@ test('a cancel that lands during pi prompt preflight still stops the run and blo
     h.ctx.idle = true
     h.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'x' }] } })
     h.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: SESSION } })
-    await sleep(20)
+    await h.flush()
     assert.equal(h.frames.some((f) => f.id === 5), false, 'preflight cancellation remains unanswered without agent_settled')
     h.ctx.idle = false
     h.emit('agent_start')
@@ -177,7 +182,7 @@ test('a cancel that lands during pi prompt preflight still stops the run and blo
     h.emit('agent_settled')
     const done = await h.wait((f) => f.id === 5, 'cancelled prompt response')
     assert.equal(done.result.stopReason, 'cancelled')
-    await sleep(50)
+    await h.flush()
     assert.equal(h.frames.filter((f) => f.id === 5).length, 1)
     h.send({ jsonrpc: '2.0', id: 7, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'z' }] } })
     for (let i = 0; i < 100 && h.prompts.length < 2; i += 1) await sleep(5)
@@ -205,7 +210,7 @@ test('C1', async () => {
     h.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'cancel me' }] } })
     await h.wait(() => h.prompts.length === 1, 'first prompt')
     h.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: SESSION } })
-    await sleep(20)
+    await h.flush()
     assert.equal(h.frames.some((frame) => frame.id === 5), false)
     h.emit('agent_before_settle', { outcome: 'aborted' })
     h.emit('agent_settled')
@@ -222,13 +227,13 @@ test('C2', async () => {
     h.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'cancel me' }] } })
     await h.wait(() => h.prompts.length === 1, 'first prompt')
     h.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: SESSION } })
-    await sleep(20)
+    await h.flush()
     assert.equal(h.frames.filter((frame) => frame.id === 5).length, 0, 'no answer before the aborted run settles')
     h.emit('agent_before_settle', { outcome: 'aborted' })
     h.emit('agent_settled')
     await h.wait((frame) => frame.id === 5, 'cancelled response')
     h.emit('agent_settled')
-    await sleep(30)
+    await h.flush()
     assert.equal(h.frames.filter((frame) => frame.id === 5).length, 1)
   } finally { h.close() }
 })
@@ -241,7 +246,7 @@ test('P4', async () => {
     assert.equal(req.params.sessionId, SESSION)
     assert.equal(req.params.toolCall.toolCallId, 'call-p4-1')
     assert.equal(req.params.toolCall.kind, 'execute')
-    assert.deepEqual(req.params.options.map((o) => o.kind), ['allow_once', 'allow_always', 'reject_once', 'reject_always'])
+    assert.deepEqual(req.params.options.map((o) => o.kind), ['allow_once', 'reject_once'])
     assert.equal(await settle(pending, 100), 'still-pending', 'the gated call must wait for the answer')
     h.answer(req, 'reject_once')
     const result = await settle(pending)
@@ -258,16 +263,21 @@ test('P4', async () => {
   } finally { h.close() }
 })
 
-test('P5', async () => {
-  const h = await withSession({ env: { CREW_ACP_PERMISSION_TIMEOUT_MS: '1500' } })
+// MUTATION: restore the allow_always option
+test('permission offers allow_once and reject_once only, asks on every gated call and refuses an always answer', async () => {
+  const h = await withSession()
   try {
-    const first = h.emit('tool_call', bashCall('call-p5-1'))
-    const req = await h.wait((f) => f.method === 'session/request_permission', 'permission request')
-    h.answer(req, 'allow_always')
+    const first = h.emit('tool_call', bashCall('first'))
+    const req = await h.wait((f) => f.method === 'session/request_permission', 'first request')
+    assert.deepEqual(req.params.options.map((o) => o.kind), ['allow_once', 'reject_once'])
+    h.answer(req, 'allow_once')
     assert.equal(await settle(first), undefined)
-    const second = await settle(h.emit('tool_call', bashCall('call-p5-2')), 500)
-    assert.equal(second, undefined, 'allow_always must let the next bash call run')
-    assert.equal(h.permissionRequests().length, 1, 'allow_always must not ask a second time')
+    for (const choice of ['allow_always', 'reject_always']) {
+      const pending = h.emit('tool_call', bashCall(choice))
+      const next = await h.wait((f) => f.method === 'session/request_permission' && f.params.toolCall.toolCallId === choice, 'next request')
+      h.answer(next, choice)
+      assert.deepEqual(await settle(pending), { block: true, reason: 'ACP permission answer invalid' })
+    }
   } finally { h.close() }
 })
 
@@ -466,26 +476,6 @@ test('session/update carries text and thinking deltas and tool input/result unde
   } finally { h.close() }
 })
 
-test('permission: reject_always is cached per tool and allow_always does not cross tools', async () => {
-  const h = await withSession({ env: { CREW_ACP_PERMISSION_TIMEOUT_MS: '1500' } })
-  try {
-    const first = h.emit('tool_call', bashCall('call-c1'))
-    h.answer(await h.wait((f) => f.method === 'session/request_permission', 'bash request'), 'reject_always')
-    assert.equal((await settle(first))?.block, true)
-    assert.equal((await settle(h.emit('tool_call', bashCall('call-c2')), 500))?.block, true)
-    assert.equal(h.permissionRequests().length, 1, 'reject_always must not ask again')
-    const edit = h.emit('tool_call', { toolCallId: 'call-c3', toolName: 'edit', input: {} })
-    const editReq = await h.wait((f) => f.method === 'session/request_permission' && f.params.toolCall.toolCallId === 'call-c3', 'edit request')
-    assert.equal(editReq.params.toolCall.kind, 'edit')
-    h.answer(editReq, 'allow_always')
-    assert.equal(await settle(edit), undefined)
-    const write = h.emit('tool_call', { toolCallId: 'call-c4', toolName: 'write', input: {} })
-    const writeReq = await h.wait((f) => f.method === 'session/request_permission' && f.params.toolCall.toolCallId === 'call-c4', 'write request')
-    h.answer(writeReq, 'allow_once')
-    assert.equal(await settle(write), undefined)
-  } finally { h.close() }
-})
-
 test('permission fails closed: timeout, cancelled, an unknown option, an error answer and a disconnect all block', async () => {
   const h = await withSession({ env: { CREW_ACP_PERMISSION_TIMEOUT_MS: '60' } })
   try {
@@ -511,16 +501,7 @@ test('permission fails closed: timeout, cancelled, an unknown option, an error a
     assert.deepEqual(await settle(orphan), { block: true, reason: 'ACP client disconnected' })
     assert.deepEqual(await settle(g.emit('tool_call', bashCall('call-after'))), { block: true, reason: 'ACP client unavailable' })
   } finally { g.close() }
-  // A cached allow_always never outlives the client that gave it.
-  const k = await withSession()
-  try {
-    const first = k.emit('tool_call', bashCall('call-k1'))
-    k.answer(await k.wait((f) => f.method === 'session/request_permission', 'permission request'), 'allow_always')
-    assert.equal(await settle(first), undefined)
-    k.client.destroy()
-    for (let i = 0; i < 100; i += 1) { if ((await settle(k.emit('tool_call', bashCall('probe')), 50))?.block) break; await sleep(5) }
-    assert.deepEqual(await settle(k.emit('tool_call', bashCall('call-k2'))), { block: true, reason: 'ACP client unavailable' })
-  } finally { k.close() }
+
 })
 
 test('framing: a parse error is answered, frames beyond the cap in one chunk are served, one client only, split UTF-8 survives', async () => {

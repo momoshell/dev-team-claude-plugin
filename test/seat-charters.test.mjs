@@ -99,6 +99,19 @@ test('LG4: builder and reviewer read every lane grant', () => {
   has(body('crew/agents/reviewer.md'), 'Read every skill granted for the lane before reviewing.')
 })
 
+// MUTATION: drop the mechanical insufficient sentence.
+test('SC6: the builder charter covers the mechanical lane', () => {
+  const charter = body('crew/agents/builder.md')
+  for (const text of [
+    'A mechanical lane has no plan: the brief is the plan, and the prompt carries no plan path.',
+    'Name a test only when you wrote one; a mechanical lane requires none.',
+    'Add `details.subject`, the conventional-commit subject for the commit and the PR: `type(scope): summary`, at most 72 characters.',
+    'On a mechanical lane, `insufficient` means the brief cannot be done as a mechanical change: say why. The lane restarts as build and your build is discarded.',
+    'Details keys: `summary`, `tests`, `notes`, and on a mechanical lane `subject`.',
+    '`insufficient` means a named gap in the plan: say what is wrong or missing, and where.',
+  ]) has(charter, text)
+})
+
 // MUTATION: remove prose-plain from the builder base skills list.
 test('PP1: lean builder and reviewer deliver their skills through the ACP launch and prompt', () => {
   const dir = mkdtempSync(join(tmpdir(), 'charter-delivery-'))

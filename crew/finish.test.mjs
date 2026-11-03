@@ -686,8 +686,8 @@ test('--return on a legacy ready row counts the finish reviews already in the jo
   } finally { cleanup(r.f) }
 })
 
-// MUTATION: reload the planner's declarations on return and a replacement the ready run proved is lost.
-test('--return carries the mutation declarations the ready run proved', async () => {
+// MUTATION: carry mutations or gatePath into the finish spec on return.
+test('--return writes no mutation declarations or gate path into finish.json', async () => {
   const proven = [{ ...MUTATION, find: 'older' }]
   const r = ready()
   try {

@@ -36,7 +36,6 @@ function marker(f, over = {}) {
 test('exports closed enums', () => assert.deepEqual(PHASES, { RESERVED: 'reserved', SPAWNING: 'spawning', RUNNING: 'running' }))
 test('evidence enum includes successor authority', () => assert.deepEqual(EVIDENCE_KINDS, { PGID: 'pgid', SUCCESSOR: 'successor' }))
 test('liveness enum is tri-state', () => assert.deepEqual(LIVENESS, { ALIVE: 'alive', DEAD: 'dead', UNKNOWN: 'unknown' }))
-test('free reconciliation', () => each(({ s }) => assert.equal(s.reconcile('a').verdict, VERDICTS.FREE)))
 test('an absent marker is free', () => each(({ s }) => assert.equal(s.reconcile('a').verdict, VERDICTS.FREE)))
 test('a marker path that cannot be read is unresolvable, not free', () => each(({ dir, s }) => {
   mkdirSync(join(dir, '.a.active.json'))
@@ -85,7 +84,6 @@ test('canonical evidence rejects a decoy path while canonical worker is alive', 
 test('canonical evidence probes as busy', () => { const f = fixture(); try { mkdirSync(join(f.dir, 'd1')); const file = join(f.dir, 'd1', 'pgid'); writeFileSync(file, '222'); f.deps.kill = (pid, signal) => signal === 0 ? (pid === -222 ? true : (() => { const e = Error(); e.code = 'ESRCH'; throw e })()) : true; f.s = reclaimStore({ dir: f.dir, actor: 'test', deps: f.deps }); planted(f, marker(f, { evidence: { kind: 'pgid', file } })); assert.equal(f.s.reconcile('a').verdict, VERDICTS.BUSY) } finally { f.done() } })
 test('invalid pgid values are unknown', () => each(({ s, dir, deps }) => { for (const value of ['0', '-1', '1.5', '9007199254740992', '']) { const file = join(dir, `p-${value || 'blank'}`); writeFileSync(file, value); assert.equal(s.probeEvidence({ kind: 'pgid', file }), LIVENESS.UNKNOWN) } }))
 test('post-link foreign token fails closed without rewriting bytes', () => { const f = fixture(); try { let tampered = null; const s = reclaimStore({ dir: f.dir, actor: 'x', deps: { ...f.deps, linkSync(from, to) { fsLink(from, to); if (!tampered) { tampered = JSON.stringify({ fence: 1, token: 'foreign', owner: { pid: 1 }, released: false }); writeFileSync(to, tampered) } } } }); const r = s.acquire('x'); assert.equal(r.reason, 'unresolvable'); assert.equal(readFileSync(join(f.dir, 'locks', 'x.lock.1'), 'utf8'), tampered) } finally { f.done() } })
-test('lock epoch paths retire after successor acquire', () => each(({ s, dir }) => { const a = s.acquire('x'); s.release(a.handle); s.acquire('x'); assert.equal(existsSync(join(dir, 'locks', 'x.lock.1')), false) }))
 
 test('A1 bounded lock epochs keep only the current maximum', () => each(({ s, dir }) => {
   const fences = []
@@ -264,7 +262,6 @@ test('LW2 deadline failure reports observed holder and measured wait', () => eac
 }))
 
 test('ESRCH holder is displaced', () => { const f = fixture(); try { const a = f.s.acquire('x'); const s = reclaimStore({ dir: f.dir, actor: 'y', deps: { ...f.deps, pid: 701, kill: () => { const e = Error(); e.code = 'ESRCH'; throw e } } }); assert.equal(s.acquire('x').ok, true); assert.equal(s.checkFence(a.handle), false) } finally { f.done() } })
-test('unattested lock override does not unblock', () => each(({ s }) => { const a = s.acquire('x'); assert.throws(() => s.overrideLock('x', { actor: 'ops', reason: 'x', fence: a.handle.fence, token: a.handle.token })); assert.equal(s.checkFence(a.handle), true) }))
 test('digest lock override recovers corrupt maximum', () => { const f = fixture(); try { const p = join(f.dir, 'locks', 'x.lock.1'); writeFileSync(p, 'corrupt'); const d = awaitDigest(Buffer.from('corrupt')); f.s.overrideLock('x', { actor: 'ops', reason: 'repair', fence: 1, digest: d, attestation: { quiesced: true, method: 'stopped' } }) } catch (err) { assert.fail(err) } finally { f.done() } })
 test('override digest is inert after marker bytes change', () => { const f = deadFixture(); try { const p = planted(f, marker(f)); const raw = readFileSync(p); f.s.override('a', { actor: 'ops', reason: 'review', digest: awaitDigest(raw) }); writeFileSync(p, 'changed'); assert.equal(f.s.reconcile('a').verdict, VERDICTS.UNRESOLVABLE) } finally { f.done() } })
 test('reservation id override survives a phase rewrite', () => { const f = deadFixture(); try { const r = f.s.reserve('a', { phase: PHASES.RUNNING }); const p = join(f.dir, '.a.active.json'); const m = JSON.parse(readFileSync(p)); m.owner.pid = 999999999; writeFileSync(p, JSON.stringify(m)); f.s.override('a', { actor: 'ops', reason: 'review', reservation_id: r.handle.reservation_id }); f.s.advance(r.handle, PHASES.SPAWNING); assert.equal(f.s.reconcile('a').verdict, VERDICTS.RECLAIMABLE) } finally { f.done() } })

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { git, scratchDir } from '../test/helpers.mjs'
 import { proveTests, testState } from './proof.mjs'
@@ -72,6 +72,68 @@ test('unsupported runners and symlinked paths are refused without outside writes
   const result = await proveTests({ cwd, tests: [{ file: 'x.ts', title: 'x' }, { file: 'link.mjs', title: 'x' }, { file: 'parent/a.test.mjs', title: 'x' }] })
   assert.deepEqual(result.rows.map((r) => r.reason), ['unsupported-runner', 'unsafe-path', 'unsafe-path'])
   assert.equal(readFileSync(join(outside, 'sentinel'), 'utf8'), 'keep')
+})
+
+// MUTATION: delete the tmp dir even when the worktree is kept.
+test('a worktree that cannot be removed is kept and reported as cleanup-unproven', async () => {
+  const cwd = scratchDir('proof-kept-'), tmp = scratchDir('proof-tmp-'), prior = process.env.TMPDIR
+  git(cwd, 'init', '-q'); writeFileSync(join(cwd, 'old'), 'base')
+  git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+  writeFileSync(join(cwd, 'kept.test.mjs'), "import test from 'node:test'\nimport { statSync, rmSync } from 'node:fs'\ntest('kept', () => { if (statSync('.git').isFile()) rmSync('.git') })\n")
+  try {
+    process.env.TMPDIR = tmp
+    const result = await proveTests({ cwd, tests: [{ file: 'kept.test.mjs', title: 'kept' }] })
+    assert.equal(result.status, 'unmeasured'); assert.equal(result.reason, 'cleanup-unproven')
+    assert.ok(existsSync(result.kept)); assert.ok(result.kept.endsWith('/base'))
+  } finally { if (prior === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = prior }
+})
+
+// MUTATION: return unmeasured('runner-threw') without rows.
+test('a throw inside proveTests is unmeasured runner-threw with the rows it had', async () => {
+  const cwd = scratchDir('proof-throw-'), tmp = scratchDir('proof-tmp-'), prior = process.env.TMPDIR
+  const tests = [{ file: 'x.test.mjs', title: 'x' }]
+  try {
+    process.env.TMPDIR = join(tmp, 'absent')
+    assert.deepEqual(await proveTests({ cwd, tests }), { status: 'unmeasured', reason: 'runner-threw', rows: [{ ...tests[0], base: { state: null, reason: 'not-run' }, build: { state: null, reason: 'not-run' }, proven: false, reason: null }] })
+  } finally { if (prior === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = prior }
+})
+
+// MUTATION: drop the line/column identity from proven.
+test('the same title at a different line on the old source does not prove', async () => {
+  const cwd = scratchDir('proof-line-')
+  git(cwd, 'init', '-q'); writeFileSync(join(cwd, 'v.mjs'), 'export const v = 1\n')
+  git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+  writeFileSync(join(cwd, 'v.mjs'), 'export const v = 2\n')
+  writeFileSync(join(cwd, 'v.test.mjs'), "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { v } from './v.mjs'\ntest(v === 1 ? 'x' : 'y', () => assert.equal(v, 2))\ntest(v === 2 ? 'x' : 'z', () => {})\n")
+  const result = await proveTests({ cwd, tests: [{ file: 'v.test.mjs', title: 'x' }] })
+  assert.equal(result.status, 'red'); assert.equal(result.reason, 'proof-unproven')
+  assert.equal(result.rows[0].base.state, 'red'); assert.equal(result.rows[0].build.state, 'green'); assert.equal(result.rows[0].proven, false)
+})
+
+// MUTATION: drop timeoutMs from the old-source testEvents call.
+test('the timeout reaches the old-source run and a hang is unmeasured timeout', { timeout: 20_000 }, async () => {
+  const cwd = scratchDir('proof-timeout-')
+  git(cwd, 'init', '-q'); writeFileSync(join(cwd, 'v.mjs'), 'export const v = 1\n')
+  git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+  writeFileSync(join(cwd, 'v.mjs'), 'export const v = 2\n')
+  writeFileSync(join(cwd, 'v.test.mjs'), "import test from 'node:test'\nimport { v } from './v.mjs'\ntest('hang', async () => { if (v === 1) { setInterval(() => {}, 1000); await new Promise(() => {}) } })\n")
+  const result = await proveTests({ cwd, tests: [{ file: 'v.test.mjs', title: 'hang' }], timeoutMs: 5_000 })
+  assert.equal(result.status, 'unmeasured'); assert.equal(result.reason, 'timeout'); assert.equal(result.rows[0].proven, false)
+  assert.equal(git(cwd, 'worktree', 'list').trim().split('\n').length, 1)
+})
+
+// MUTATION: only remove tmp when the worktree was added.
+test('a failed git worktree add is unmeasured, runs no test and leaves no temp dir', async () => {
+  const cwd = scratchDir('proof-add-'), tmp = scratchDir('proof-tmp-'), prior = process.env.TMPDIR
+  git(cwd, 'init', '-q'); writeFileSync(join(cwd, 'old'), 'base')
+  git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+  try {
+    process.env.TMPDIR = tmp
+    const result = await proveTests({ cwd, base: 'no-such-ref', tests: [{ file: 'x.test.mjs', title: 'x' }] })
+    assert.equal(result.status, 'unmeasured'); assert.equal(result.reason, 'exit-nonzero')
+    for (const row of result.rows) assert.equal(row.base.reason, 'not-run')
+    assert.deepEqual(readdirSync(tmp), [])
+  } finally { if (prior === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = prior }
 })
 
 test('proof imports only builtins and its pinned builtin-only check runner', () => {

@@ -375,8 +375,8 @@ test('validateArms accepts the closed vocabulary and the empty list, and refuses
   assert.throws(() => validateArms('fff'), /list/)
 })
 
-for (const [name, run] of [['builder', runBuilder], ['planner', runPlanner]]) {
-  test(`${name} replay refuses an unknown arm before preparing or starting a seat`, async () => {
+test('replays refuse an unknown arm before preparing or starting a seat', async () => {
+  for (const [name, run] of [['builder', runBuilder], ['planner', runPlanner]]) {
     for (const arms of [['nope'], ['fff', 'nope'], ['constructor'], ['__proto__']]) {
       let prepared = 0, seats = 0
       const out = fresh(name)
@@ -387,7 +387,10 @@ for (const [name, run] of [['builder', runBuilder], ['planner', runPlanner]]) {
       assert(existsSync(join(out, 'session.jsonl')) && existsSync(join(out, 'diff.patch')))
       assert(!existsSync(join(out, 'tree')))
     }
-  })
+  }
+})
+
+for (const [name, run] of [['builder', runBuilder], ['planner', runPlanner]]) {
   test(`${name} replay: a failing preparation is recorded and never reaches the seat`, async () => {
     for (const arms of [[], ['fff', 'readgate']]) {
       let seats = 0

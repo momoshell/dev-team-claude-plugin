@@ -479,6 +479,131 @@ test('rebaseBranch reports every conflicting path, aborts, and leaves the checko
   assert.equal(existsSync(join(cwd, '.git', 'rebase-merge')), false)
 })
 
+// MUTATION: skip the regenerate run and gen.txt keeps the base copy.
+test('rebaseBranch resolves conflicts only in declared generated paths with the base copy, completes the rebase, regenerates and commits the result on the lane tip', async () => {
+  for (const twice of [false, true]) {
+    const cwd = laneRepo({ 'gen.txt': 'generated:base\n', 'src.txt': 'base\n' })
+    writeFileSync(join(cwd, 'src.txt'), 'lane\n')
+    writeFileSync(join(cwd, 'gen.txt'), 'generated:lane\n')
+    git(cwd, 'commit', '-qam', 'lane')
+    if (twice) { writeFileSync(join(cwd, 'gen.txt'), 'generated:lane again\n'); git(cwd, 'commit', '-qam', 'generated again') }
+    git(cwd, 'checkout', '-q', 'main')
+    writeFileSync(join(cwd, 'gen.txt'), 'generated:main\n')
+    git(cwd, 'commit', '-qam', 'main')
+    const onto = git(cwd, 'rev-parse', 'HEAD').trim()
+    git(cwd, 'checkout', '-q', 'lane')
+    const generated = { paths: ['gen.txt'], command: process.execPath, args: ['-e', "const fs=require('fs'); if(fs.readFileSync('gen.txt','utf8')!=='generated:main\\n') process.exit(3); fs.writeFileSync('gen.txt','generated:'+fs.readFileSync('src.txt','utf8'))"] }
+    const result = await rebaseBranch({ cwd, base: 'main', generated })
+    assert.equal(result.status, 'green', JSON.stringify(result))
+    assert.equal(result.onto, onto)
+    assert.deepEqual(result.regenerated.paths, ['gen.txt'])
+    assert.equal(git(cwd, 'rev-parse', 'HEAD^').trim(), onto)
+    assert.equal(readFileSync(join(cwd, 'gen.txt'), 'utf8'), 'generated:lane\n')
+    assert.equal(readFileSync(join(cwd, 'src.txt'), 'utf8'), 'lane\n')
+    assert.equal(git(cwd, 'status', '--porcelain'), '')
+    assert.equal(existsSync(join(cwd, '.git', 'rebase-merge')), false)
+  }
+  const cwd = laneRepo({ 'gen.txt': 'base\n' })
+  writeFileSync(join(cwd, 'gen.txt'), 'lane\n')
+  git(cwd, 'commit', '-qam', 'lane only generated')
+  git(cwd, 'checkout', '-q', 'main')
+  writeFileSync(join(cwd, 'gen.txt'), 'main\n')
+  git(cwd, 'commit', '-qam', 'main')
+  const onto = git(cwd, 'rev-parse', 'HEAD').trim()
+  git(cwd, 'checkout', '-q', 'lane')
+  const result = await rebaseBranch({ cwd, base: 'main', generated: { paths: ['gen.txt'], command: process.execPath, args: ['-e', "require('fs').writeFileSync('gen.txt','rebuilt\\n')"] } })
+  assert.equal(result.status, 'green', JSON.stringify(result))
+  assert.equal(git(cwd, 'rev-parse', 'HEAD^').trim(), onto)
+  assert.equal(git(cwd, 'log', '-1', '--format=%s').trim(), 'lane only generated')
+  assert.equal(readFileSync(join(cwd, 'gen.txt'), 'utf8'), 'rebuilt\n')
+})
+
+// MUTATION: change every declared conflict to some and the mixed conflict runs the command.
+test('rebaseBranch with a generated declaration stops rebase-conflict on an undeclared conflict, a failed regenerate or leftover conflict markers, names which, and leaves the checkout as found', async () => {
+  for (const mode of ['undeclared-path', 'undeclared-change', 'regenerate-failed', 'conflict-markers', 'timeout', 'spawn-error', 'signal', 'cleanup-unproven']) {
+    const cwd = laneRepo({ 'gen.txt': 'base\n', 'outside.txt': 'base\n' })
+    writeFileSync(join(cwd, 'gen.txt'), 'lane\n')
+    if (mode === 'undeclared-path') writeFileSync(join(cwd, 'outside.txt'), 'lane\n')
+    git(cwd, 'commit', '-qam', 'lane')
+    git(cwd, 'checkout', '-q', 'main')
+    writeFileSync(join(cwd, 'gen.txt'), 'main\n')
+    if (mode === 'undeclared-path') writeFileSync(join(cwd, 'outside.txt'), 'main\n')
+    git(cwd, 'commit', '-qam', 'main')
+    git(cwd, 'checkout', '-q', 'lane')
+    const before = snapshot(cwd), bytes = readFileSync(join(cwd, 'gen.txt'), 'utf8')
+    const source = ['undeclared-path', 'undeclared-change'].includes(mode) ? "require('fs').writeFileSync('sentinel','x')" : mode === 'regenerate-failed' ? 'process.exit(1)' : "require('fs').writeFileSync('gen.txt','<<<<<<< ours\\n')"
+    const unknown = ['timeout', 'spawn-error', 'signal', 'cleanup-unproven'].includes(mode)
+    const run = through((spec) => unknown && spec.command === process.execPath ? FAKE_UNMEASURED(mode) : undefined)
+    const result = await rebaseBranch({ cwd, base: 'main', generated: { paths: ['gen.txt'], command: process.execPath, args: ['-e', source] } }, { run })
+    assert.equal(result.status, unknown ? 'unmeasured' : 'red', JSON.stringify(result))
+    assert.equal(result.reason, unknown ? mode : 'rebase-conflict', JSON.stringify(result))
+    if (!unknown) assert.equal(result.regenerate, mode === 'undeclared-change' ? 'undeclared-path' : mode)
+    if (mode === 'undeclared-path') assert.deepEqual(result.conflicts.sort(), ['gen.txt', 'outside.txt'])
+    if (mode === 'regenerate-failed') assert.equal(result.cause, 'exit-nonzero')
+    assert.deepEqual(snapshot(cwd), before)
+    assert.equal(readFileSync(join(cwd, 'gen.txt'), 'utf8'), bytes)
+    assert.equal(existsSync(join(cwd, 'sentinel')), false)
+  }
+  const calls = []
+  const invalid = await rebaseBranch({ cwd: '/unused', base: 'main', generated: { paths: ['../bad'], command: 'make', args: [] } }, { run: (spec) => { calls.push(spec) } })
+  assert.equal(invalid.reason, 'invalid-input')
+  assert.equal(invalid.status, 'unmeasured')
+  assert.deepEqual(calls, [])
+})
+
+// MUTATION: run the regenerate command in the checkout instead of the scratch worktree.
+test('rebaseBranch runs the regenerate command in a scratch worktree, so ignored files in the checkout survive a green or failed regenerate and are never committed', async () => {
+  for (const mode of ['green', 'failed', 'collision']) {
+    const cwd = laneRepo({ 'gen.txt': 'base\n', '.gitignore': '*.log\n' })
+    writeFileSync(join(cwd, 'gen.txt'), 'lane\n')
+    git(cwd, 'commit', '-qam', 'lane')
+    git(cwd, 'checkout', '-q', 'main')
+    writeFileSync(join(cwd, 'gen.txt'), 'main\n')
+    git(cwd, 'commit', '-qam', 'main')
+    git(cwd, 'checkout', '-q', 'lane')
+    const ignored = mode === 'collision' ? 'out.log' : 'keep.log'
+    writeFileSync(join(cwd, ignored), 'mine\n')
+    const before = snapshot(cwd)
+    const source = mode === 'collision'
+      ? "const fs=require('fs'); fs.writeFileSync('.gitignore',''); fs.writeFileSync('out.log','theirs'); fs.writeFileSync('gen.txt','rebuilt\\n')"
+      : `const fs=require('fs'); fs.writeFileSync('keep.log','theirs'); ${mode === 'failed' ? 'process.exit(1)' : "fs.writeFileSync('gen.txt','rebuilt\\n')"}`
+    const paths = mode === 'collision' ? ['gen.txt', '.gitignore', 'out.log'] : ['gen.txt']
+    const result = await rebaseBranch({ cwd, base: 'main', generated: { paths, command: process.execPath, args: ['-e', source] } })
+    assert.equal(result.status, mode === 'green' ? 'green' : 'red', JSON.stringify(result))
+    if (mode === 'green') {
+      assert.ok(!git(cwd, 'ls-tree', '-r', '--name-only', 'HEAD').split('\n').includes('keep.log'))
+      assert.equal(readFileSync(join(cwd, 'gen.txt'), 'utf8'), 'rebuilt\n')
+    } else {
+      assert.equal(result.reason, mode === 'failed' ? 'rebase-conflict' : 'dirty-worktree')
+      if (mode === 'failed') assert.equal(result.regenerate, 'regenerate-failed')
+      else assert.deepEqual(result.paths, ['out.log'])
+      assert.deepEqual(snapshot(cwd), before)
+    }
+    assert.equal(readFileSync(join(cwd, ignored), 'utf8'), 'mine\n')
+    assert.equal(git(cwd, 'worktree', 'list', '--porcelain').split('\n').filter((line) => line.startsWith('worktree ')).length, 1)
+  }
+  const cwd = laneRepo({ '.gitignore': '*.log\n' })
+  git(cwd, 'checkout', '-q', 'main')
+  mkdirSync(join(cwd, 'generated'))
+  writeFileSync(join(cwd, 'generated/gen.txt'), 'base\n')
+  git(cwd, 'add', '.')
+  git(cwd, 'commit', '-qm', 'generated base')
+  git(cwd, 'checkout', '-q', 'lane')
+  git(cwd, 'merge', '--ff-only', 'main')
+  writeFileSync(join(cwd, 'generated/gen.txt'), 'lane\n')
+  git(cwd, 'commit', '-qam', 'lane')
+  git(cwd, 'checkout', '-q', 'main')
+  writeFileSync(join(cwd, 'generated/gen.txt'), 'main\n')
+  git(cwd, 'commit', '-qam', 'main')
+  git(cwd, 'checkout', '-q', 'lane')
+  const source = "const fs=require('fs'), {execFileSync}=require('child_process'); fs.renameSync('generated/gen.txt','generated/out.log'); execFileSync('git',['add','-f','-A'])"
+  const result = await rebaseBranch({ cwd, base: 'main', generated: { paths: ['generated/'], command: process.execPath, args: ['-e', source] } })
+  assert.equal(result.status, 'green', JSON.stringify(result))
+  assert.ok(!git(cwd, 'ls-tree', '-r', '--name-only', 'HEAD').split('\n').includes('generated/out.log'))
+  assert.equal(existsSync(join(cwd, 'generated/out.log')), false)
+  assert.equal(git(cwd, 'worktree', 'list', '--porcelain').split('\n').filter((line) => line.startsWith('worktree ')).length, 1)
+})
+
 test('rebaseBranch refuses a dirty or busy checkout without starting a rebase', async () => {
   const calls = []
   const run = through((spec) => { calls.push(spec) })

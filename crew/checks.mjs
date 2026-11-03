@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 
 export const CHECK_REASONS = Object.freeze([
@@ -143,6 +144,12 @@ export function literalRelative(file) {
   if (file === '' || file.startsWith('/') || /[\\\0]/.test(file)) return false
   return file.split('/').every((part) => part !== '' && part !== '.' && part !== '..' && part.toLowerCase() !== '.git')
 }
+
+export const validGenerated = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+  && Array.isArray(v.paths) && v.paths.length > 0 && v.paths.every((path) => typeof path === 'string' && literalRelative(path.endsWith('/') ? path.slice(0, -1) : path) && !/[*?\[\]]/.test(path))
+  && typeof v.command === 'string' && v.command.trim() !== '' && !v.command.includes('\0')
+  && Array.isArray(v.args) && v.args.every((arg) => typeof arg === 'string' && !arg.includes('\0'))
+  && (v.timeoutMs === undefined || validTimeout(v.timeoutMs))
 
 const HEX_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 const ISSUE_TOKEN = /#(\d+)/g
@@ -343,9 +350,9 @@ export async function commitChanges(spec = {}, deps = {}) {
 // Rebases the lane onto `base`; a rebase that stops is aborted and the checkout proven back to where it started.
 export async function rebaseBranch(spec = {}, deps = {}) {
   return guarded(async () => {
-    const { cwd, base, timeoutMs = DEFAULT_TIMEOUT_MS } = spec ?? {}
+    const { cwd, base, generated, timeoutMs = DEFAULT_TIMEOUT_MS } = spec ?? {}
     deps ??= {}
-    if (typeof cwd !== 'string' || cwd === '' || !validTimeout(timeoutMs)) return unmeasured('invalid-input')
+    if (typeof cwd !== 'string' || cwd === '' || !validTimeout(timeoutMs) || (Object.hasOwn(spec ?? {}, 'generated') && !validGenerated(generated))) return unmeasured('invalid-input')
     const git = (args) => runCommand({ cwd, command: 'git', args, timeoutMs }, deps)
     const bad = await refProblem(git, base)
     if (bad) return bad
@@ -374,7 +381,155 @@ export async function rebaseBranch(spec = {}, deps = {}) {
     const baseFiles = new Set(tracked.stdout.split('\0').filter(Boolean))
     const colliding = ignored.stdout.split('\0').filter((path) => path !== '' && baseFiles.has(path))
     if (colliding.length > 0) return red('dirty-worktree', { detail: 'ignored files the base tracks would be overwritten', paths: colliding })
-    const outcome = await git([...NO_HOOKS, '-c', 'rebase.autoStash=false', 'rebase', onto])
+    const count = generated ? await git(['rev-list', '--count', `${onto}..${before.head}`]) : null
+    if (count && (count.status !== 'green' || !/^\d+$/.test(count.stdout.trim()))) return unmeasured('rebase-failed', { detail: 'lane commits could not be counted' })
+    let outcome = await git([...NO_HOOKS, '-c', 'rebase.autoStash=false', 'rebase', onto])
+    if (generated && outcome.status === 'red') {
+      const declared = (path) => generated.paths.some((entry) => entry.endsWith('/') ? path.startsWith(entry) : path === entry)
+      const conflicts = new Set()
+      let failure = null
+      for (let stops = 0; outcome.status === 'red' && stops < Number(count.stdout.trim()); stops++) {
+        const listed = await git(['diff', '--name-only', '--diff-filter=U', '-z'])
+        if (listed.status !== 'green') { failure = unmeasured('rebase-failed', { detail: 'the conflict list could not be read' }); break }
+        const paths = listed.stdout.split('\0').filter(Boolean)
+        if (!paths.length) break
+        for (const path of paths) conflicts.add(path)
+        if (!paths.every(declared)) { failure = red('rebase-conflict', { conflicts: paths, regenerate: 'undeclared-path' }); break }
+        for (const path of paths) {
+          const stages = await git(['--literal-pathspecs', 'ls-files', '--unmerged', '-z', '--', path])
+          if (stages.status !== 'green') { failure = notGreen(stages, 'rebase-failed'); break }
+          const hasOurs = stages.stdout.split('\0').some((entry) => /^[0-7]+ [0-9a-f]+ 2\t/.test(entry))
+          if (hasOurs) {
+            const ours = await git(['--literal-pathspecs', 'checkout', '--ours', '--', path])
+            if (ours.status !== 'green') { failure = notGreen(ours, 'rebase-failed'); break }
+          }
+          const staged = hasOurs ? await git(['--literal-pathspecs', 'add', '--', path]) : await git(['--literal-pathspecs', 'rm', '-f', '--ignore-unmatch', '--', path])
+          if (staged.status !== 'green') { failure = notGreen(staged, 'rebase-failed'); break }
+        }
+        if (failure) break
+        outcome = await git([...NO_HOOKS, '-c', 'core.editor=true', 'rebase', '--continue'])
+        if (outcome.status === 'red') {
+          const left = await git(['diff', '--name-only', '--diff-filter=U', '-z'])
+          const empty = await git(['diff', '--cached', '--quiet'])
+          if (left.status === 'green' && left.stdout === '' && empty.status === 'green') outcome = await git([...NO_HOOKS, 'rebase', '--skip'])
+        }
+      }
+      if (!failure && outcome.status === 'green' && conflicts.size) {
+        const rebased = await readCheckout(git, cwd)
+        let temp = null, tree = null, newHead = null
+        try {
+          if (rebased.problem) failure = notGreen(rebased.problem, 'rebase-failed')
+          else {
+            temp = realpathSync(mkdtempSync(join(tmpdir(), 'crew-regenerate-')))
+            tree = join(temp, 'tree')
+            const scratchGit = (args) => runCommand({ cwd: tree, command: 'git', args, timeoutMs }, deps)
+            const added = await git([...NO_HOOKS, 'worktree', 'add', '--detach', tree, rebased.head])
+            if (added.status !== 'green') failure = notGreen(added, 'rebase-failed')
+            else {
+              const regenerated = await runCommand({ cwd: tree, command: generated.command, args: generated.args, timeoutMs: generated.timeoutMs ?? DEFAULT_TIMEOUT_MS }, deps)
+              if (regenerated.status !== 'green') failure = regenerated.status === 'red'
+                ? red('rebase-conflict', { conflicts: [...conflicts], regenerate: 'regenerate-failed', cause: regenerated.reason })
+                : { ...regenerated, conflicts: [...conflicts] }
+              else {
+                const afterCommand = await readCheckout(scratchGit, tree)
+                let entries = !afterCommand.problem && afterCommand.head === rebased.head && afterCommand.branch === 'HEAD' && afterCommand.busy.length === 0 ? parseStatus(afterCommand.status) : null
+                let changed = entries?.flatMap((entry) => entry.from === null ? [entry.path] : [entry.path, entry.from])
+                if (!changed) failure = unmeasured('rebase-failed', { detail: 'regenerated paths could not be listed' })
+                else if (!changed.every(declared)) failure = red('rebase-conflict', { conflicts: [...conflicts], regenerate: 'undeclared-path' })
+                else {
+                  // A command may have force-staged ignored output; leave it in the disposable tree.
+                  for (const entry of entries.filter((item) => 'ARC'.includes(item.x))) {
+                    const ignored = await scratchGit(['check-ignore', '--no-index', '-q', '--', entry.path])
+                    if (ignored.status === 'green') {
+                      const unstaged = await scratchGit(['--literal-pathspecs', 'reset', '-q', 'HEAD', '--', entry.path])
+                      if (unstaged.status !== 'green') { failure = notGreen(unstaged, 'rebase-failed'); break }
+                    } else if (ignored.status !== 'red' || ignored.code !== 1) { failure = notGreen(ignored, 'rebase-failed'); break }
+                  }
+                  if (!failure) {
+                    const status = await scratchGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'])
+                    entries = status.status === 'green' ? parseStatus(status.stdout) : null
+                    changed = entries?.flatMap((entry) => entry.from === null ? [entry.path] : [entry.path, entry.from])
+                    if (!changed) failure = unmeasured('rebase-failed', { detail: 'regenerated paths could not be listed' })
+                  }
+                  if (!failure) {
+                    for (const path of new Set([...conflicts, ...changed])) {
+                      try {
+                        if (lstatSync(join(tree, path)).isFile() && /^(?:<<<<<<<|>>>>>>>)/m.test(readFileSync(join(tree, path), 'utf8'))) {
+                          failure = red('rebase-conflict', { conflicts: [...conflicts], regenerate: 'conflict-markers' }); break
+                        }
+                      } catch (error) { if (error?.code !== 'ENOENT') { failure = unmeasured('rebase-failed', { detail: `cannot read ${path}` }); break } }
+                    }
+                    if (!failure && changed.length) {
+                      const staged = await scratchGit(['add', '-A', '--', '.'])
+                      const commit = staged.status === 'green'
+                        ? await scratchGit([...NO_HOOKS, 'commit', ...(rebased.head === onto ? ['-C', before.head] : ['--amend', '--no-edit'])]) : staged
+                      if (commit.status !== 'green') failure = notGreen(commit, 'rebase-failed')
+                    }
+                    if (!failure) {
+                      const head = await scratchGit(['rev-parse', 'HEAD'])
+                      if (head.status !== 'green' || !HEX_OID.test(head.stdout.trim())) failure = unmeasured('rebase-failed', { detail: 'regenerated head could not be read' })
+                      else newHead = head.stdout.trim()
+                    }
+                  }
+                }
+              }
+            }
+          }
+        } catch (error) {
+          failure = unmeasured('rebase-failed', { error: describeError(error) })
+        } finally {
+          if (temp) {
+            if (tree) await git(['worktree', 'remove', '--force', tree])
+            try { rmSync(temp, { recursive: true, force: true }) } catch {}
+            await git(['worktree', 'prune'])
+            const worktrees = await git(['worktree', 'list', '--porcelain', '-z'])
+            if (existsSync(temp) || worktrees.status !== 'green' || worktrees.stdout.split('\0').includes(`worktree ${tree}`)) failure = unmeasured('cleanup-unproven', { cause: failure?.reason ?? null, detail: 'scratch worktree removal could not be proven' })
+          }
+        }
+        if (!failure) {
+          const added = await git(['diff-tree', '-r', '--name-only', '-z', '--diff-filter=A', rebased.head, newHead])
+          if (added.status !== 'green') failure = notGreen(added, 'rebase-failed')
+          else {
+            const paths = []
+            for (const path of added.stdout.split('\0').filter(Boolean)) {
+              const parts = path.split('/')
+              for (let i = 1; i <= parts.length; i++) {
+                try {
+                  const stat = lstatSync(join(cwd, ...parts.slice(0, i)))
+                  if (i === parts.length || !stat.isDirectory()) { paths.push(path); break }
+                } catch (error) {
+                  if (error?.code !== 'ENOENT') failure = unmeasured('rebase-failed', { detail: `cannot inspect ${path}` })
+                  break
+                }
+              }
+              if (failure) break
+            }
+            if (!failure && paths.length) failure = red('dirty-worktree', { paths })
+          }
+          if (!failure) {
+            const reset = await git(['reset', '-q', '--keep', newHead])
+            if (reset.status !== 'green') failure = notGreen(reset, 'rebase-failed')
+          }
+        }
+        if (!failure) {
+          const after = await readCheckout(git, cwd)
+          const onBase = await git(['merge-base', '--is-ancestor', onto, 'HEAD'])
+          if (!after.problem && after.head === newHead && after.busy.length === 0 && after.status === '' && after.branch === before.branch && onBase.status === 'green') return { status: 'green', reason: null, head: after.head, onto, regenerated: { paths: [...conflicts] } }
+          failure = unmeasured('rebase-failed', { detail: 'the regenerated checkout could not be proven clean and on its base' })
+        }
+      }
+      if (failure || conflicts.size) {
+        const result = failure ?? notGreen(outcome, 'rebase-failed')
+        const mid = await readCheckout(git, cwd)
+        if (mid.problem || mid.busy.some((name) => name.startsWith('rebase-'))) await git(['rebase', '--abort'])
+        // The command never ran in this checkout, so reset and clean leave its ignored files alone.
+        await git(['reset', '-q', '--hard', before.head])
+        await git(['clean', '-f', '-d'])
+        const final = await readCheckout(git, cwd)
+        return final.problem || final.busy.length || !sameCheckout(before, final) || result.reason === 'cleanup-unproven'
+          ? unmeasured('cleanup-unproven', { cause: result.reason, detail: 'the checkout is not proven back at its pre-rebase state' }) : result
+      }
+    }
     if (outcome.status === 'green') {
       const after = await readCheckout(git, cwd)
       const onBase = await git(['merge-base', '--is-ancestor', onto, 'HEAD'])

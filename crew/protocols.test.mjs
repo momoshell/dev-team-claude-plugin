@@ -203,16 +203,17 @@ const agent = (fields = {}, body = 'Read [the notes](../notes/planner.md).\n') =
 }
 const defectsOf = (fields, needle) => parseAgent(agent(fields)).defects.filter((d) => d.includes(needle))
 
-// MUTATION: add codemode or edit_assist back to AGENT_FIELDS.
-test('AR2/AR3 refuses retired agent fields as unknown', () => {
-  for (const field of ['codemode', 'edit_assist']) for (const value of [true, false]) {
-    assert.match(defectsOf({ [field]: value }, `unknown field ${field}`)[0], new RegExp(`^unknown field ${field};`))
+// MUTATION: add a retired field to AGENT_FIELDS or a retired extension to EXTENSIONS.
+test('AR2-AR4 refuses retired agent fields and extensions, accepts retained extensions', () => {
+  const rows = [
+    ...['codemode', 'edit_assist'].flatMap((field) => [true, false].map((value) => [{ [field]: value }, `unknown field ${field}`, new RegExp(`^unknown field ${field};`)])),
+    ...['lab', 'builderloop', 'reminders'].map((name) => [{ extensions: [name] }, 'extensions', ['extensions is a list drawn from readgate, skeletonread, subagent, fff']]),
+  ]
+  for (const [fields, needle, expected] of rows) {
+    const defects = defectsOf(fields, needle)
+    if (expected instanceof RegExp) assert.match(defects[0], expected)
+    else assert.deepEqual(defects, expected)
   }
-})
-
-// MUTATION: add each retired extension back to EXTENSIONS.
-test('AR4 refuses retired extensions and accepts retained extensions', () => {
-  for (const name of ['lab', 'builderloop', 'reminders']) assert.deepEqual(defectsOf({ extensions: [name] }, 'extensions'), ['extensions is a list drawn from readgate, skeletonread, subagent, fff'])
   assert.deepEqual(parseAgent(agent({ extensions: ['readgate', 'skeletonread', 'subagent', 'fff'] })).defects, [])
 })
 
@@ -371,7 +372,7 @@ test('P2 accepts every role and status, returning the input untouched', () => {
     assert.deepEqual(value, snapshot)
   }
   for (const decision of LEAD_DECISIONS) assert.deepEqual(validateEnvelope('lead', envelope('lead', { details: { decision, ...(decision === 'bounce' ? { target: 'builder' } : {}) } })).defects, [])
-  for (const verdict of REVIEW_VERDICTS) for (const role of ['reviewer', 'tech-lead']) assert.deepEqual(validateEnvelope(role, review([], verdict, role)).defects, [])
+  for (const verdict of REVIEW_VERDICTS) for (const role of ['reviewer', 'tech-lead']) assert.deepEqual(validateEnvelope(role, review(verdict === 'changes-needed' ? [finding()] : [], verdict, role)).defects, [])
 })
 
 test('P2 planner details require tests, a list of {file, title}, except on an archived return', () => {
@@ -527,8 +528,30 @@ test('P2 typed findings are accepted in every documented form', () => {
       if (disposition === 'auto-fix') entry.patch = '--- a/x\n+++ b/x\n'
       assert.deepEqual(validateEnvelope(role, review([entry], 'changes-needed', role)).defects, [], String(disposition))
     }
-    for (const severity of FINDING_SEVERITIES) assert.deepEqual(validateEnvelope(role, review([finding({ severity, trigger: 'input' })], 'changes-needed', role)).defects, [])
+    for (const severity of FINDING_SEVERITIES) assert.deepEqual(validateEnvelope(role, review([finding({ severity, trigger: 'input' })], severity === 'consider' ? 'pass' : 'changes-needed', role)).defects, [])
     assert.deepEqual(validateEnvelope(role, review([finding({ severity: 'must-fix', trigger: 'input' })], 'changes-needed', role)).defects, [])
+  }
+})
+
+// MUTATION: count any finding as actionable and a consider-only changes-needed validates clean.
+test('P2 a reviewer or tech-lead changes-needed must list a must-fix or should-fix finding', () => {
+  const defect = 'details.verdict is changes-needed but no finding is must-fix or should-fix'
+  for (const role of ['reviewer', 'tech-lead']) {
+    const consider = finding({ severity: 'consider' })
+    for (const [findings, status, options, expected] of [
+      [[], 'done', {}, [defect]],
+      [[consider], 'done', {}, [defect]],
+      [[consider, finding({ id: 'RV1-2' })], 'done', {}, []],
+      [[finding({ severity: 'must-fix', trigger: 'input' })], 'done', {}, []],
+      [[], 'done', { archived: true }, []],
+      [[], 'escalate', {}, []],
+      [[], 'insufficient', {}, []],
+    ]) {
+      const value = review(findings, 'changes-needed', role)
+      value.status = status
+      if (status === 'escalate') value.details.question = 'What should happen?'
+      assert.deepEqual(validateEnvelope(role, value, options).defects, expected, `${role} ${status} ${JSON.stringify(findings)}`)
+    }
   }
 })
 
@@ -600,6 +623,7 @@ test('P2 a reviewer pass carries no unmet requirement and follows a complete rev
     const result = envelope('reviewer'); result.details[key] = value
     assert.ok(validateEnvelope('reviewer', result).defects.some((d) => d.startsWith('details.verdict is pass')))
     result.details.verdict = 'changes-needed'
+    result.details.findings = [finding()]
     assert.deepEqual(validateEnvelope('reviewer', result).defects, [])
   }
 })

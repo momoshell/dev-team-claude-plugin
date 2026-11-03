@@ -6,7 +6,7 @@
 // live crew directory or, when that is gone, its newest archive. Nothing here launches a seat
 // or writes a file.
 //
-// Lean ACP seats record one JSONL per turn under task/lean/<role>/<lane>.<role>.<turn>.jsonl.
+// Lean ACP seats record JSONL under task/lean/<role>/<lane>.<role>.<turn>[.repair][.rerun][.retry-N].jsonl.
 import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -102,10 +102,12 @@ export function showLane({ lane, role, json = false, deps = {} }) {
 
   const sessionsOf = (name, transport) => {
     if (transport === 'lean-acp') {
-      const turn = new RegExp(`^[A-Za-z0-9._-]+\\.${name}\\.([0-9]+)\\.jsonl$`)
-      const turns = (attempt(join(crewDir, 'task', 'lean', name), d.readdirSync) ?? []).flatMap((file) => (turn.test(file) ? [[Number(file.match(turn)[1]), file]] : []))
-        .sort((a, b) => a[0] - b[0] || (a[1] < b[1] ? -1 : 1))
-      return { files: turns.map(([, file]) => ({ rel: `task/lean/${name}/${file}`, prompt: undefined })), reason: 'no session file recorded' }
+      const turn = new RegExp(`^[A-Za-z0-9._-]+\\.${name}\\.([0-9]+)(\\.repair)?(\\.rerun)?(?:\\.retry-([1-9][0-9]*))?\\.jsonl$`)
+      const turns = (attempt(join(crewDir, 'task', 'lean', name), d.readdirSync) ?? []).flatMap((file) => {
+        const match = file.match(turn)
+        return match ? [[Number(match[1]), (match[2] ? 2 : 0) + (match[3] ? 1 : 0), Number(match[4] ?? 0), file]] : []
+      }).sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2] || (a[3] < b[3] ? -1 : a[3] > b[3] ? 1 : 0))
+      return { files: turns.map(([, , , file]) => ({ rel: `task/lean/${name}/${file}`, prompt: undefined })), reason: 'no session file recorded' }
     }
     return { files: [], reason: `no session file: transport ${transport} records none this reads` }
   }

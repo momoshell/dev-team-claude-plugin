@@ -7,26 +7,32 @@ import { createHash } from 'node:crypto'
 import * as finishModule from './finish.mjs'
 import { FinishRefusal, decideFinish, finishLane, main } from './finish.mjs'
 import { openPullRequest } from './checks.mjs'
+import { LOOP_REASONS } from './loop.mjs'
+import { validateEnvelope } from './protocols.mjs'
 
 const FINDING = { id: 'R1', severity: 'must-fix', location: 'lib.mjs:1', summary: 'Fix the defect' }
 const MUTATION = { check: 'A1', file: 'lib.mjs', find: 'old', replace: 'new' }
-const STOP = { reason: 'mutations-survived', observation: { stage: 'mutations', detail: 'A1 survived' } }
+const STOP = { reason: 'round-bound', observation: { stage: 'review', detail: 'three review rounds spent' } }
 const PLANNER = {
   role: 'planner', id: 'lane9.planner.1', status: 'done', summary: 'planned',
-  details: { subject: 'fix(crew): planned lane', plan_path: '/t/plan.md', gate_path: '/t/gate.mjs', acceptance: ['A1'], mutations: [MUTATION], files_in_scope: ['src/widget.svelte'] },
+  details: { subject: 'fix(crew): planned lane', plan_path: '/t/plan.md', tests: [{ file: 'src/widget.test.mjs', title: 'widget renders' }], files_in_scope: ['src/widget.svelte'], validation_lane: 'node --test src/widget.test.mjs' },
+}
+const ARCHIVED_PLANNER = {
+  ...PLANNER,
+  details: { subject: 'fix(crew): planned lane', plan_path: '/t/plan-archived.md', gate_path: '/t/gate.mjs', acceptance: ['A1'], mutations: [MUTATION], files_in_scope: ['src/widget.svelte'] },
 }
 const BUILDER = { role: 'builder', id: 'lane9.builder.2', status: 'done', summary: 'built', details: { summary: 'built the change' } }
 const builderRow = { event: 'envelope', role: 'builder', id: BUILDER.id, parsed: BUILDER, defects: [], error: null }
 
 // A temp crew root holding one stopped lane; nothing is spawned and the worktree is a temp directory.
-function fixture({ stage = 'mutations', builder = true, worktree = true, review = 'changes-needed', rows = null } = {}) {
+function fixture({ stage = 'review', builder = true, worktree = true, review = 'changes-needed', rows = null } = {}) {
   const base = scratchDir('crew-finish-')
   const root = join(base, 'crew')
   const taskDir = join(root, 'dt-lane9', 'lane9', 'task')
   const cwd = join(base, 'worktree')
   mkdirSync(taskDir, { recursive: true })
   if (worktree) mkdirSync(cwd)
-  const spec = { id: 'lane9', cwd, taskDir, tier: 'build', shape: 'standard', brief: 'x', acceptance: ['A1'], source: 's', branch: 'lane9', base: 'main', closes: [], suite: { command: 'npm', args: ['test'] } }
+  const spec = { id: 'lane9', cwd, taskDir, tier: 'build', shape: 'standard', brief: 'x', source: 's', branch: 'lane9', base: 'main', closes: [], suite: { command: 'npm', args: ['test'] } }
   writeFileSync(join(taskDir, 'lean.json'), JSON.stringify(spec))
   writeFileSync(join(taskDir, 'planner-1.json'), JSON.stringify(PLANNER))
   const journal = rows ?? [
@@ -147,7 +153,16 @@ test('a lane with no qualifying builder envelope is refused as finish-no-build',
   }
 })
 
+test('finish fixtures use a current planner return and LOOP_REASONS stops', () => {
+  assert.deepEqual(validateEnvelope('planner', PLANNER).defects, [])
+  assert.ok(validateEnvelope('planner', ARCHIVED_PLANNER).defects.length > 0)
+  assert.deepEqual(validateEnvelope('planner', ARCHIVED_PLANNER, { archived: true }).defects, [])
+  // baseline-green is exempt: it belongs to the archived D6 case below.
+  for (const reason of [STOP.reason, 'round-bound', 'envelope-refused', 'lead-escalated', 'rebase-conflict']) assert.ok(LOOP_REASONS.includes(reason), reason)
+})
+
 // MUTATION: drop the stage test and a lane that never built is re-entered.
+// archived journal: the baseline stage is retired; D6 keeps the finish.mjs:210 refusal while old journals exist
 test('a lane that stopped in the plan or baseline stage, or never stopped, is refused as finish-premise', () => {
   for (const stage of ['plan', 'baseline']) {
     const f = fixture({ stage })
@@ -158,6 +173,7 @@ test('a lane that stopped in the plan or baseline stage, or never stopped, is re
 })
 
 // MUTATION: read the stage only from the stop row and a baseline stop, which the loop writes with stage null, is re-entered.
+// archived journal: the baseline stage is retired; D6 keeps the finish.mjs:210 refusal while old journals exist
 test('a baseline stop written after its stage closed is refused as finish-premise', () => {
   const f = fixture({ rows: [
     { event: 'run-start', stage: null },
@@ -170,7 +186,7 @@ test('a baseline stop written after its stage closed is refused as finish-premis
 
 // MUTATION: drop the after-stop check and a second finish races the one already running.
 test('a lane a run has re-entered since its stop is refused as finish-running', () => {
-  const stop = { event: 'verdict', stage: null, status: 'stopped', reason: 'mutations-survived' }
+  const stop = { event: 'verdict', stage: null, status: 'stopped', reason: 'round-bound' }
   for (const after of [{ event: 'stage-start', stage: 'build' }, { event: 'finish-ready', stage: null }]) {
     const f = fixture({ rows: [{ event: 'run-start', stage: null }, { event: 'stage-start', stage: 'build' }, builderRow, stop, after] })
     try { assert.equal(refusal(f)?.reason, 'finish-running', after.event) } finally { cleanup(f) }
@@ -192,7 +208,7 @@ test('a stopped lane with a build is finished: finish.json carries the stop, fin
   const f = fixture({ rows: [
     { event: 'run-start', stage: null },
     { event: 'envelope', role: 'planner', parsed: PLANNER, defects: [] },
-    ...['baseline', 'gate', 'mutations'].map((stage) => ({ event: 'stage-start', stage })),
+    ...['build', 'proof', 'review'].map((stage) => ({ event: 'stage-start', stage })),
     builderRow,
     { event: 'envelope', role: 'reviewer', parsed: { status: 'done' }, defects: [] },
     { event: 'verdict', stage: 'review', status: 'reviewed', verdict: 'changes-needed', findings: [FINDING] },
@@ -220,12 +236,12 @@ test('a stopped lane with a build is finished: finish.json carries the stop, fin
   } finally { cleanup(f) }
 })
 
-// MUTATION: pass { ...process.env, CREW_SUITE_SLOTS: '0' } as env.
-test('a finish run inherits the caller environment and sets no slot variable', () => {
+// MUTATION: pass any env in the spawn options.
+test('a finish run inherits the caller environment and passes no env of its own', () => {
   const f = fixture({ rows: [
     { event: 'run-start', stage: null },
     { event: 'envelope', role: 'planner', parsed: PLANNER, defects: [] },
-    ...['baseline', 'gate', 'mutations'].map((stage) => ({ event: 'stage-start', stage })),
+    ...['build', 'proof', 'review'].map((stage) => ({ event: 'stage-start', stage })),
     builderRow,
     { event: 'envelope', role: 'reviewer', parsed: { status: 'done' }, defects: [] },
     { event: 'verdict', stage: 'review', status: 'reviewed', verdict: 'changes-needed', findings: [FINDING] },
@@ -250,11 +266,11 @@ const replanRows = (accepted3) => {
     { event: 'envelope', role: 'planner', id: p3.id, parsed: p3, defects: accepted3 ? [] : ['details.tests is required'], error: null },
     { event: 'envelope', role: 'planner', id: p5.id, parsed: p5, defects: [], error: null },
     { event: 'verdict', stage: 'review', status: 'reviewed', verdict: 'changes-needed', findings: [FINDING] },
-    { event: 'verdict', stage: 'mutations', status: 'stopped', reason: STOP.reason, observation: STOP.observation },
+    { event: 'verdict', stage: 'review', status: 'stopped', reason: STOP.reason, observation: STOP.observation },
   ] }
 }
 
-test('a re-planned lane finishes on its latest accepted plan, and a plan without tests still finishes', () => {
+test('a re-planned lane finishes on its latest accepted plan', () => {
   for (const revised of [false, true]) {
     const replan = replanRows(true)
     const f = revised ? fixture({ rows: replan.rows }) : fixture()
@@ -267,6 +283,22 @@ test('a re-planned lane finishes on its latest accepted plan, and a plan without
       assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.planPath, revised ? '/t/plan-3.md' : '/t/plan.md')
     } finally { cleanup(f) }
   }
+})
+
+test('an archived planner return without tests, carrying gate_path, acceptance and mutations, still finishes on its plan', () => {
+  const f = fixture({ rows: [
+    { event: 'run-start', stage: null },
+    { event: 'envelope', role: 'planner', id: ARCHIVED_PLANNER.id, parsed: ARCHIVED_PLANNER, defects: [], error: null },
+    builderRow,
+    { event: 'verdict', stage: 'review', status: 'stopped', ...STOP },
+  ] })
+  try {
+    writeFileSync(join(f.taskDir, 'planner-1.json'), JSON.stringify(ARCHIVED_PLANNER))
+    run(f).go()
+    const finish = JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish
+    assert.equal(finish.planPath, '/t/plan-archived.md')
+    assert.deepEqual(finish.filesInScope, ['src/widget.svelte'])
+  } finally { cleanup(f) }
 })
 
 // MUTATION: choose planner files without the journal's acceptance.
@@ -429,7 +461,7 @@ function ready(extra = [], { before = [], legacy = false } = {}) {
     { event: 'run-start', stage: null },
     { event: 'envelope', role: 'planner', id: 'lane9.planner.1', parsed: PLANNER, defects: [], error: null },
     builderRow,
-    { event: 'verdict', stage: 'mutations', status: 'stopped', reason: STOP.reason, observation: STOP.observation },
+    { event: 'verdict', stage: 'review', status: 'stopped', reason: STOP.reason, observation: STOP.observation },
     { event: 'commit', stage: 'commit', head: 'a'.repeat(40) },
     ...before,
     legacy
@@ -711,6 +743,7 @@ test('--return writes no mutation declarations or gate path into finish.json', a
   const proven = [{ ...MUTATION, find: 'older' }]
   const r = ready()
   try {
+    writeFileSync(join(r.f.taskDir, 'planner-1.json'), JSON.stringify(ARCHIVED_PLANNER))
     const rows = r.rowsOf().map((row) => (row.event === 'finish-ready' ? { ...row, mutations: proven } : row))
     writeFileSync(join(r.f.taskDir, 'journal.jsonl'), `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
     const file = join(r.f.base, 'return.md')

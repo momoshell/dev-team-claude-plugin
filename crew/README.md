@@ -21,6 +21,8 @@ crew update [--force]                                # fast-forward the crew hom
 resolved), or `CREW_HOME` when set. State lives under `~/.crew/dt-<lane>/<lane>/`:
 the brief, the task directory, the lane journal and every seat's session file.
 
+`crew update` refuses unless the crew home is on branch `stable` with no tracked changes; `--force` only overrides the refusal when processes still run from the home.
+
 ## The model
 
 **Agents do the work; code keeps it correct.** A lane starts from one P1 brief
@@ -48,7 +50,7 @@ text and notes are rewritten; issue numbers appear only on trailer lines.
 Every loop is bounded, every envelope is
 validated against a closed protocol (P2) and refused if it does not parse, and
 the loop adds no other gate: no host-load gate, no dispatch-time baseline, no
-measurement that holds work. Writing the record never throws into the caller.
+measurement that holds work. Journal writes do not throw into the caller. A failed session-file write fails the turn because skill proof reads that recording (`lean.mjs`, `guardedAppend`).
 
 ADR-055 §12 routes an escalation without `details.question` back to the same seat. On build and judge, a builder's `insufficient` goes to the lead with its envelope; the lead routes it to the builder or planner, or escalates a §12 case. Mechanical insufficiency restarts as build. The lead's last consult is marked last; a spent lead bound stops for the operator with a question drawn from the held envelope and lead decision. Repeated failures with the same evidence stop as `no-progress` without a seat decision. On build and judge lanes the planner's P2 `details.tests` decides whether P3 proof is required; an empty list means no criterion is machine-checked. A mechanical builder may name no test.
 
@@ -121,8 +123,7 @@ Everything durable is a file; session chat is never the record.
 - `acp/`, `acp-client.mjs`, `acp-permission.mjs` — the ACP seat transport, grants and permission handling.
 - `skills-proof.mjs` — the required-skill proof.
 - `show.mjs`, `lanes.mjs`, `finish.mjs`, `record-pr.mjs`, `closeout.mjs` — the other verbs.
-- `reclaim.mjs` — token-fenced transition locks, the lease surface and parks, documented in
-  `docs/park-lease-protocol.md`.
+- `reclaim.mjs` — token-fenced locks and the per-seat reservation markers the ACP client takes (`reserve`, `advance`, `clear`, `probeEvidence`).
 - `adapters/adapter-*.mjs` — per-agent launch shapes for `claude` and `pi`.
 - `pi/extensions/` — the kept pi arms (readgate, skeletonread, subagent, advisor).
 - `memory.mjs` — lane memory.
@@ -135,3 +136,13 @@ Seats run unattended, so the enforced tool boundary is each seat's grants, not
 a prompt. Only the builder is granted repo writes; other seats write their
 envelope and task-dir artifacts. Worktree isolation separates lanes, not seats
 within a lane. The loop opens a PR after a green suite and never merges.
+
+## Environment
+
+| Variable | Read by | Default | Effect |
+|---|---|---|---|
+| `CREW_READGATE_MAX_LINES` | `pi/extensions/readgate.ts`, `pi/extensions/skeletonread.ts` | 350 | Sets the whole-read line limit and skeletonread's source-line threshold; it does not limit skeleton output. |
+| `CREW_READGATE_MAX_BYTES` | `pi/extensions/readgate.ts` | 24576 | Sets the read output byte cap and cat refusal threshold; directly handed files have an exception. |
+| `CREW_ACP_PERMISSION_TIMEOUT_MS` | `pi/extensions/acp-server.ts` | 300000 | Sets the permission request timeout in milliseconds. |
+| `CREW_ACP_BRIDGE_STARTUP_MS` | `pi/acp-bridge.mjs` | 120000 | Sets the ACP bridge startup timeout in milliseconds. |
+| `CREW_MEMORY_DIR` | `lean.mjs` | `<checkout>/.claude/dev-team/memory` | Selects the memory directory loaded for a seat. |

@@ -1,5 +1,10 @@
 # Plan: the lean runtime (ADR-052)
 
+> This historical plan is superseded by the shipped runtime in `crew/README.md`.
+> Deleted arms: codemode, lab, edit assist, claude-arms (`crew/adapters/claude-arms.mjs`),
+> lab-server (`crew/mcp/lab-server.mjs`), builderloop and reminders. Kept: advisor,
+> readgate, skeletonread, subagent, fff and memory.
+
 The goal: agents do the hard work, and code only keeps the harness correct. Sessions and subagents point a
 lane in the right direction and hand it its first context; the planner, builder and reviewer seats do the
 lane work with their skills. The core runtime goes from 92,321 lines to at most 10,000.

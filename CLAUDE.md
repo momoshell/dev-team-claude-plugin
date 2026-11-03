@@ -8,7 +8,7 @@ it has to rediscover it.
 
 `dev-team` — a Claude Code plugin whose subject is a **team runtime**. One brief
 starts a lane (`crew start`): a planner, builder and reviewer, and a lead on
-escalation, play their seats over ACP. Code only checks the result: each test the
+escalation, and a tech-lead gives judge lanes a second review. They play their seats over ACP. Code only checks the result: each test the
 builder names is red on the old source and green on the build, and the full suite
 is green. Then it commits and opens the PR (ADR-052, ADR-055). A stopped lane is
 finished with `crew finish`.
@@ -69,7 +69,9 @@ enforced by tests, not just preferred:
   still mutate code by hand to test its own tests; nothing requires it.
 - **Never report a rate without its denominator.**
 - **Instrumentation is never load-bearing.** Writing the lane journal and the
-  session files never throws into the caller.
+  session files does not normally throw into the caller. One exception: a failed
+  session-file write fails the turn, because the skill proof reads that recording
+  (`crew/lean.mjs`, `guardedAppend`).
 - **A blind spot is stated, not omitted.** Tools here print what they could not
   measure and refuse to call that a clear.
 

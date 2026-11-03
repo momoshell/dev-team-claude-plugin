@@ -318,24 +318,57 @@ test('VJ4 events: a non-lean lane states the removed ledger source as absent, ne
   })
 })
 
-test('LP1 LP2 a lane that ends pr then finish-decision is done with that pr; a trailing finish-ready still reads as running', async () => {
+test('LP1 LP2 a lane that ends pr then finish-decision accept is done with that pr', async () => {
   await withServer(async ({ crewRoot, get }) => {
     const pr = { number: 7, url: 'https://github.com/o/r/pull/7' }
     const ready = { event: 'finish-ready', status: 'ready-for-operator' }
     const stop = [{ event: 'verdict', stage: 'build', status: 'stopped', reason: 'seat-unmeasured' }, { event: 'stage-end', stage: 'build' }, ready]
     lane(crewRoot, 'lp-accepted', [...stop, { event: 'pr', stage: 'publish', pr }, { event: 'finish-decision', choice: 'accept' }])
-    lane(crewRoot, 'lp-ready', stop)
-    lane(crewRoot, 'lp-reject', [...stop, { event: 'finish-decision', choice: 'reject' }])
-    lane(crewRoot, 'lp-stale-pr', [{ event: 'pr', pr }, ...stop, { event: 'finish-decision', choice: 'reject' }])
     const runs = Object.fromEntries((await get('/api/sessions')).body.runs.map((run) => [run.goal, run]))
     assert.equal(runs['lp-accepted'].status, 'done')
     assert.equal(runs['lp-accepted'].running, false)
     assert.deepEqual(runs['lp-accepted'].pr, pr)
-    for (const name of ['lp-ready', 'lp-reject', 'lp-stale-pr']) {
-      assert.equal(runs[name].status, 'running')
-      assert.equal(runs[name].running, true)
-      assert.equal(runs[name].pr, null)
-    }
+  })
+})
+
+test('LS1 a lane\'s last finish-ready or finish-decision row decides ready-for-operator, abandoned, returned or done', async () => {
+  await withServer(async ({ crewRoot, get }) => {
+    const ready = { event: 'finish-ready' }, stop = { event: 'verdict', stage: 'build', status: 'stopped' }, pr = { number: 7 }
+    const decision = (lane, choice) => ({ event: 'finish-decision', lane, choice, notesSha256: null })
+    const cases = [
+      // MUTATION: read ready as running.
+      ['ready', [stop, ready], 'ready-for-operator', false, null],
+      // MUTATION: read abandon as running.
+      ['abandoned', [stop, ready, decision('abandoned', 'abandon')], 'abandoned', false, null],
+      // MUTATION: keep the stale PR on abandon.
+      ['stale', [{ event: 'pr', pr }, stop, ready, decision('stale', 'abandon')], 'abandoned', false, null],
+      // MUTATION: read return as running.
+      ['returned', [ready, decision('returned', 'return'), { event: 'run-start' }], 'returned', false, null],
+      // MUTATION: drop the later stage-start check.
+      ['ran', [ready, decision('ran', 'return'), { event: 'stage-start', stage: 'build' }], 'running', true, null],
+      // MUTATION: stop resolving accepted PRs.
+      ['accepted', [ready, { event: 'pr', pr }, decision('accepted', 'accept')], 'done', false, pr],
+    ]
+    for (const [name, rows] of cases) lane(crewRoot, name, rows)
+    const runs = Object.fromEntries((await get('/api/sessions')).body.runs.map((run) => [run.goal, run]))
+    for (const [name, , status, running, expectedPr] of cases) assert.deepEqual([runs[name].status, runs[name].running, runs[name].pr], [status, running, expectedPr], name)
+  })
+})
+
+test('LS2 a finish reading ends at the last recorded row time; an undated journal stays null with one reason', async () => {
+  const B = 1700000000000
+  await withServer(async ({ crewRoot, get }) => {
+    const rows = [{ event: 'run-start', at: B }, { event: 'stage-start', stage: 'build', at: B + 10 }, { event: 'finish-ready', at: B + 50 }]
+    lane(crewRoot, 'ready-timed', rows)
+    lane(crewRoot, 'abandoned-timed', [...rows, { event: 'finish-decision', lane: 'abandoned-timed', choice: 'abandon', notesSha256: null }])
+    lane(crewRoot, 'ready-undated', [{ event: 'run-start', at: B }, { event: 'finish-ready' }])
+    const runs = Object.fromEntries((await get('/api/sessions')).body.runs.map((run) => [run.goal, run]))
+    for (const name of ['ready-timed', 'abandoned-timed']) assert.deepEqual([runs[name].ended_at, runs[name].duration_ms], [new Date(B + 50).toISOString(), 50])
+    // MUTATION: set running true for ready-for-operator.
+    const undated = runs['ready-undated']
+    assert.deepEqual([undated.running, undated.ended_at, undated.duration_ms], [false, null, null])
+    assert.match(undated.pending.ended_at, /carry no timestamps/)
+    assert.match(undated.pending.duration_ms, /carry no timestamps/)
   })
 })
 

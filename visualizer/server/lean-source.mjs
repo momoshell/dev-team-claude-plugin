@@ -197,8 +197,16 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
       const ready = rows.findLastIndex((row) => row.event === 'finish-ready')
       if (tail?.event === 'pr' && isObject(tail.pr) && tail.index > ready) last = tail
     }
+    const terminalIndex = rows.findLastIndex((row) => row.event === 'finish-ready' || row.event === 'finish-decision')
+    const terminal = rows[terminalIndex]
     if (error || !rows.length) {
       reason = error ?? (skipped_malformed ? 'task journal has no readable rows' : 'task journal is empty')
+    } else if (terminal?.event === 'finish-ready') {
+      status = 'ready-for-operator'
+    } else if (terminal?.choice === 'abandon') {
+      status = 'abandoned'
+    } else if (terminal?.choice === 'return' && !rows.slice(terminalIndex + 1).some((row) => row.event === 'stage-start')) {
+      status = 'returned'
     } else if (last.event === VERDICT_EVENT) {
       status = nonEmpty(last.status) ? last.status : 'unknown'
       reason = typeof last.reason === 'string' ? last.reason : null

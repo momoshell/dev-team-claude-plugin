@@ -411,7 +411,7 @@ export function proposeAgent({ checkout = process.cwd(), name, entry, readFileSy
   const keys = Object.keys(value)
   for (const key of keys) if (!['providers', 'transports', 'adapter', 'refuses', 'availability'].includes(key)) refusals.push(refusal('entry-field', `entry field ${key} is not supported`))
   refusals.push(...validateStringArray(value.providers, 'providers', { minItems: 1, pattern: /^[a-z0-9][a-z0-9-]*$/ }))
-  refusals.push(...validateStringArray(value.transports, 'transports', { minItems: 1, vocabulary: ['pane', 'headless-json', 'headless-rpc'] }))
+  refusals.push(...validateStringArray(value.transports, 'transports', { minItems: 1, vocabulary: ['acp'] }))
   if (!validPath(value.adapter)) refusals.push(refusal('adapter-path', 'adapter must be a confined checkout-relative path'))
   else if (value.adapter !== `crew/adapters/adapter-${name}.mjs`) refusals.push(refusal('adapter-path', `adapter must match coding agent ${name}: crew/adapters/adapter-${name}.mjs`))
   refusals.push(...validateStringArray(value.refuses, 'refuses', { vocabulary: AGENT_REFUSALS }))

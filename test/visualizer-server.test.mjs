@@ -338,7 +338,7 @@ test('B1 agents page proposal endpoints are diff-only', async () => {
     assert.equal(view.json.prompts.length, 5)
     assert.equal(view.json.roles.find((row) => row.role === 'builder').cells['frontend-svelte'].last_seat_delivery, true)
     const post = (path, body) => json(server.base, path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
-    const agent = await post('/api/agents/propose', { name: 'future-agent', entry: { providers: ['openai'], transports: ['pane'], adapter: 'crew/adapters/adapter-future-agent.mjs', refuses: [], availability: 'proposal-stub' } })
+    const agent = await post('/api/agents/propose', { name: 'future-agent', entry: { providers: ['openai'], transports: ['acp'], adapter: 'crew/adapters/adapter-future-agent.mjs', refuses: [], availability: 'proposal-stub' } })
     assert.equal(agent.status, 200); assert.equal(agent.json.ok, true); assert.ok(agent.json.diff); assert.deepEqual(agent.json.refusals, []); assert.equal(Object.hasOwn(agent.json, 'target_path'), false); assert.equal(Object.hasOwn(agent.json, 'after_text'), false)
     const skills = await post('/api/skills/propose', { role: 'builder', skills: ['frontend-svelte'] })
     assert.equal(skills.status, 200); assert.equal(skills.json.ok, true); assert.match(skills.json.diff, /crew\/capabilities\.json/); assert.deepEqual(skills.json.refusals, [])
@@ -711,7 +711,7 @@ test('agents source separates plugin reads from target proposals compatibly', ()
     assert.equal(read.crew_root, path.resolve(target.crewRoot))
 
     assert.equal(source.proposePrompt, undefined)
-    const agent = source.proposeAgent({ name: 'future-agent', entry: { providers: ['openai'], transports: ['pane'], adapter: 'crew/adapters/adapter-future-agent.mjs', refuses: [], availability: 'proposal-stub' } })
+    const agent = source.proposeAgent({ name: 'future-agent', entry: { providers: ['openai'], transports: ['acp'], adapter: 'crew/adapters/adapter-future-agent.mjs', refuses: [], availability: 'proposal-stub' } })
     assert.equal(agent.ok, true)
     assert.equal(agent.target_path, join(target.checkout, 'crew', 'capabilities.json'))
     assert.equal(JSON.parse(agent.after_text).coding_agents.pi.display_name, 'Pi')
@@ -1275,6 +1275,25 @@ test('/api/events serves a lean lane from its journal and states absence for a n
     await stopInProcess(started?.server)
     rmSync(crewRoot, { recursive: true, force: true })
   }
+})
+
+test('TR1 proposeAgent accepts the acp transport and refuses retired transports', () => {
+  const entry = { providers: ['openai'], adapter: 'crew/adapters/adapter-future-agent.mjs', refuses: [], availability: 'proposal-stub' }
+  for (const transport of ['acp', 'pane', 'headless-json', 'headless-rpc']) {
+    const result = proposeAgent({ checkout: '/x', name: 'future-agent', entry: { ...entry, transports: [transport] }, readFileSync: () => JSON.stringify({ coding_agents: {} }) })
+    // MUTATION: allow retired transports or reject acp.
+    if (transport === 'acp') assert.equal(result.ok, true)
+    else { assert.equal(result.ok, false); assert.ok(result.refusals.some((r) => r.code === 'payload-shape')) }
+  }
+})
+
+test('HL1 /api/health reports readonly false with the server\'s write list', async () => {
+  const started = await startInProcess({})
+  try {
+    const response = await json(started.base, '/api/health')
+    assert.equal(response.json.readonly, false)
+    assert.ok(Array.isArray(response.json.writes) && response.json.writes.length > 0)
+  } finally { await stopInProcess(started.server) }
 })
 
 test('/api/health reports the removed ledger as unreadable with a reason, not a probe or a zero', async () => {

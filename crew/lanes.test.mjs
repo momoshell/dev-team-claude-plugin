@@ -109,7 +109,7 @@ test('a journal that cannot be read reports its unreadable-row count as null wit
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
-test('LP1 LP2 lanes shows the PR of an accepted finish and keeps a finish-ready lane waiting', () => {
+test('LP1 LP2 lanes shows the PR of an accepted finish and a finish-ready lane as ready-for-operator', () => {
   const home = realpathSync(scratchDir('lanes-'))
   try {
     const root = join(home, '.crew')
@@ -128,7 +128,7 @@ test('LP1 LP2 lanes shows the PR of an accepted finish and keeps a finish-ready 
     const accepted = rows.find((row) => row.lane === 'accepted'), waiting = rows.find((row) => row.lane === 'waiting')
     assert.equal(accepted.status, 'done')
     assert.equal(accepted.pr, PR)
-    assert.equal(waiting.status, 'running')
+    assert.equal(waiting.status, 'ready-for-operator')
     assert.equal(waiting.pr, null)
   } finally { rmSync(home, { recursive: true, force: true }) }
 })

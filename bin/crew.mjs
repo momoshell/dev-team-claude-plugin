@@ -24,6 +24,15 @@ export function crewHome(env = process.env, self = fileURLToPath(import.meta.url
 }
 
 const ENTRY = { start: 'crew/start.mjs', show: 'crew/show.mjs', 'record-pr': 'crew/record-pr.mjs', closeout: 'crew/closeout.mjs', finish: 'crew/finish.mjs', lanes: 'crew/lanes.mjs' }
+const MAX_BUFFER = 16 * 1024 * 1024
+const GIT_TIMEOUT_MS = 300_000
+const PGREP_TIMEOUT_MS = 10_000
+
+function spawnFailure(error, timeout) {
+  if (error.code === 'ENOBUFS') return `output exceeded ${MAX_BUFFER} bytes`
+  if (error.code === 'ETIMEDOUT') return `timed out after ${timeout} ms`
+  return error.message
+}
 
 function run(cmd, args, opts = {}) {
   const result = spawnSync(cmd, args, { stdio: 'inherit', ...opts })
@@ -32,7 +41,8 @@ function run(cmd, args, opts = {}) {
 }
 
 function git(home, args) {
-  const result = spawnSync('git', ['-C', home, ...args], { encoding: 'utf8' })
+  const result = spawnSync('git', ['-C', home, ...args], { encoding: 'utf8', timeout: GIT_TIMEOUT_MS, maxBuffer: MAX_BUFFER })
+  if (result.error) throw new Error(`git ${args.join(' ')}: ${spawnFailure(result.error, GIT_TIMEOUT_MS)}`)
   if (result.status !== 0) throw new Error(`git ${args.join(' ')}: ${(result.stderr || '').trim()}`)
   return result.stdout.trim()
 }
@@ -40,7 +50,10 @@ function git(home, args) {
 // Processes started from the home, other than this one and its parent shell:
 // lanes, drivers, the daemon and the visualizer all carry the home path in argv.
 export function homeProcesses(home, self = [process.pid, process.ppid]) {
-  const result = spawnSync('pgrep', ['-fl', `${home}/`], { encoding: 'utf8' })
+  const result = spawnSync('pgrep', ['-fl', `${home}/`], { encoding: 'utf8', timeout: PGREP_TIMEOUT_MS, maxBuffer: MAX_BUFFER })
+  if (result.error) throw new Error(`pgrep -fl ${home}/: ${spawnFailure(result.error, PGREP_TIMEOUT_MS)}`)
+  if (result.status === 1) return []
+  if (result.status !== 0) throw new Error(`pgrep -fl ${home}/: ${(result.stderr || '').trim() || `exit status ${result.status}`}`)
   return (result.stdout || '').split('\n').filter(Boolean)
     .filter((line) => !self.includes(Number(line.split(' ')[0])))
     .filter((line) => !line.includes(`${home}/bin/crew.mjs`))
@@ -106,7 +119,7 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     }
   }
   if (verb === 'viz') { const vizEnv = env.DEVTEAM_INTAKE_CHECKOUT ? env : { ...env, DEVTEAM_INTAKE_CHECKOUT: process.cwd() }; return run(process.execPath, ['--env-file-if-exists=.env.local', 'visualizer/server/server.mjs', ...rest], { cwd: home, env: vizEnv }) }
-  const entry = ENTRY[verb]
+  const entry = Object.hasOwn(ENTRY, verb) ? ENTRY[verb] : null
   if (entry) return run(process.execPath, [join(home, entry), ...rest])
   process.stderr.write(`crew: unknown verb ${JSON.stringify(verb ?? '')}; expected start, show, record-pr, closeout, finish, lanes, viz, where or update\n`)
   return 2

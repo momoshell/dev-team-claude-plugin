@@ -117,6 +117,12 @@ test('SC6: the builder charter covers the mechanical lane', () => {
   ]) has(charter, text)
 })
 
+// MUTATION: drop a type from the builder's subject sentence.
+test('SC7: the builder charter names the accepted subject types', () => {
+  const sentence = 'The type is one of `chore`, `ci`, `crew`, `docs`, `feat`, `fix`, `merge`, `perf`, `refactor`, `revert`, `spike`, `test`, `wip`, `workflow`.'
+  for (const role of ['builder', 'planner']) has(body(`crew/agents/${role}.md`), sentence)
+})
+
 // MUTATION: remove prose-plain from the builder base skills list.
 test('PP1: lean builder and reviewer deliver their skills through the ACP launch and prompt', () => {
   const dir = mkdtempSync(join(tmpdir(), 'charter-delivery-'))

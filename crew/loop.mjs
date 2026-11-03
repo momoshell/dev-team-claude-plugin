@@ -295,6 +295,8 @@ export async function runLoop(spec, deps = {}) {
           const acceptable = !latest.failure && latest.checked.defects.length === 0 && latest.checked.envelope?.id === id
           if (latest.turnError && !acceptable && !latest.routed && !rerun) {
             await observe(latest)
+            // The rerun replaces the thrown attempt; repairs still keep their original.
+            attempts.pop()
             rerun = true
             asked = { ...asked, rerun: { error: latest.turnError } }
           } else if (!latest.turnError && !latest.failure && latest.checked.defects.length > 0 && repairs < MAX_ENVELOPE_REPAIRS) {
@@ -338,6 +340,7 @@ export async function runLoop(spec, deps = {}) {
         if (checked.envelope.status === 'done') return { envelope: checked.envelope }
         held = { reason: checked.envelope.status, envelope: checked.envelope }
       }
+      // ADR-055 §12: a mechanical repair turn's insufficient restarts the lane and its escalate goes to the lead; round-bound would misreport an unspent bound.
       if (singleTurn && !(role === 'builder' && !isFinish && tier === 'mechanical' && held.envelope && ['insufficient', 'escalate'].includes(held.envelope.status))) return { halt: await stop('round-bound', { role, ...held }) }
       // The lead is never consulted about itself: no recursion, an unusable lead turn ends the lane.
       if (role === 'lead') return { halt: await stop(held.envelope ? 'lead-refused' : 'round-bound', held) }

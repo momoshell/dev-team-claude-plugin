@@ -45,6 +45,30 @@ test('a return read after a turn error is validated in full, required-skill proo
   }
 })
 
+// MUTATION: prove every attempt, the replaced thrown one included.
+test('a thrown first attempt with no recording never blocks a rerun that proves its required skills', async () => {
+  for (const proven of [true, false]) {
+    const definition = { agent: 'pi', requires: ['alpha'], skills: ['alpha'], writes: 'repo' }
+    const f = fakes({ recording: (r) => r.role === 'planner' ? { definition, rows: proven ? [LOAD, DONE] : [] } : null })
+    const run = f.deps.runSeat, planners = []
+    f.deps.runSeat = async (r) => {
+      if (r.role === 'planner') {
+        planners.push(r)
+        if (!r.rerun) throw Object.assign(new Error('turn failed'), { recording: { definition, recorded: null } })
+      }
+      return run(r)
+    }
+    const result = await f.go()
+    assert.equal(planners.length, 2)
+    assert.ok(planners[1].rerun)
+    assert.equal(result.status, proven ? 'done' : 'stopped')
+    if (!proven) {
+      assert.equal(result.reason, 'envelope-refused')
+      assert.ok(f.rows.some((r) => r.defects?.includes('required-skills-unproven')))
+    }
+  }
+})
+
 // MUTATION: stop immediately on a failed turn or rerun it without a bound.
 test('an absent or invalid return after a turn error gets one rerun of the turn, then the lane stops seat-unmeasured', async () => {
   for (const mode of ['absent', 'json', 'schema', 'id', 'twice', 'provider']) {
@@ -837,6 +861,24 @@ test('a mechanical suite red goes straight to one builder fix before the suite r
     assert.match(builderTurns(f)[1].feedback[0].summary, /suite is red after your change/)
     assert.deepEqual(f.calls.slice(f.calls.indexOf('suite'), f.calls.lastIndexOf('suite') + 1), ['suite', 'seat:builder', 'proof', 'review-paths', 'suite-stage', 'suite'])
     assert.equal(f.calls.includes('publish'), after.status === 'green')
+  }
+})
+
+// MUTATION: apply the single-turn bound to a mechanical repair escalation.
+test('a mechanical suite-repair escalation reaches the lead or reports it unavailable', async () => {
+  for (const seated of [false, true]) {
+    const f = sequenced([redRun(), green()], { spec: { tier: 'mechanical' }, unseated: ['planner', 'reviewer', ...(!seated ? ['lead'] : [])], edit: (v, req) => {
+      if (v.role === 'builder') {
+        v.details.subject = 'fix(crew): repair suite'
+        if (req.feedback.some((i) => i.id === 'suite-repair')) return { ...v, status: 'escalate', details: { ...v.details, question: 'Which fix?' } }
+      }
+      return v
+    } })
+    const result = await f.go()
+    assert.equal(result.status, 'stopped')
+    assert.equal(result.reason, seated ? 'lead-escalated' : 'lead-unavailable')
+    assert.equal(builderTurns(f).length, 2)
+    assert.equal(f.requests.filter((r) => r.role === 'lead').length, seated ? 1 : 0)
   }
 })
 

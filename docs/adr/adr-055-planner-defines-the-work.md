@@ -244,8 +244,13 @@ Code holds the rule:
 
 - An `escalate` from any seat carries `details.question`, the decision it needs from the operator. An `escalate`
   without one is a bounce to the same seat.
-- A builder `insufficient` goes to the planner on every tier, as §7 already does for a mechanical lane. The build
-  continues on the revised plan.
+- Amended 2026-11-03, operator direction: on build and judge, a builder `insufficient` goes to the lead with its
+  envelope. The lead routes it to `builder` (unfinished work, same plan), `planner` (a real gap) or `escalate`
+  (a §12 case only). A mechanical lane keeps the §7 restart. Lanes b1493, b1502 and b1504 stopped `round-bound`
+  after builder `insufficient` returns.
+- The lead's last consult is marked last. A spent lead bound stops for the operator as `lead-escalated`, with a
+  question drawn from the held envelope and the lead's decision, never a bare `round-bound`. `no-progress` still
+  stops in code.
 - A lead bounce names its target, `builder` or `planner`. A bounce to a spent planner is the planner's round.
 - An `accept` with nothing to accept is a bounce to the held seat.
 - A return written before a turn error is read and validated in full. An absent or invalid return gets one rerun; a provider failure keeps its bounded retry instead.

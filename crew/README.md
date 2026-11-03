@@ -50,7 +50,7 @@ validated against a closed protocol (P2) and refused if it does not parse, and
 the loop adds no other gate: no host-load gate, no dispatch-time baseline, no
 measurement that holds work. Writing the record never throws into the caller.
 
-ADR-055 §12 routes an escalation without `details.question` back to the same seat. A builder's `insufficient` goes to the planner for revision; a lead bounce targets the builder or planner. Repeated failures with the same evidence stop as `no-progress` without a seat decision. On build and judge lanes the planner's P2 `details.tests` decides whether P3 proof is required; an empty list means no criterion is machine-checked. A mechanical builder may name no test.
+ADR-055 §12 routes an escalation without `details.question` back to the same seat. On build and judge, a builder's `insufficient` goes to the lead with its envelope; the lead routes it to the builder or planner, or escalates a §12 case. Mechanical insufficiency restarts as build. The lead's last consult is marked last; a spent lead bound stops for the operator with a question drawn from the held envelope and lead decision. Repeated failures with the same evidence stop as `no-progress` without a seat decision. On build and judge lanes the planner's P2 `details.tests` decides whether P3 proof is required; an empty list means no criterion is machine-checked. A mechanical builder may name no test.
 
 Seat definitions are `crew/agents/<role>.md`; their frontmatter is the only
 place a seat's model, agent (`claude` or `pi`), effort, skills, `requires`

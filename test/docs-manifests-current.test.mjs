@@ -135,14 +135,16 @@ test('DM6: register introduction cites existing files', () => {
   for (const ref of refs) assert.ok(existsSync(resolve(root, ref)), ref)
 })
 
-// MUTATION: drop a registered route from the README.
+// MUTATION: drop a registered route from the README, or list one twice.
 test('DM7: README routes exactly match the server registry', () => {
   const block = read('visualizer/server/server.mjs').match(/export const ROUTE_PARAMS = Object\.freeze\(\{([\s\S]*?)\n\}\)/)[1]
   const registered = [...block.matchAll(/^\s*['"](\/api\/[^'"\n]+)['"]\s*:/gm)].map(match => match[1])
   const doc = read('visualizer/README.md')
   const documented = [...doc.matchAll(/`(\/api\/[^`\s]+)`/g)].map(match => match[1])
+  const listed = [...doc.match(/^Registered routes:[\s\S]*?\n\n/m)[0].matchAll(/`(\/api\/[^`\s]+)`/g)].map(match => match[1])
   assert.ok(registered.length)
   assert.deepEqual(sorted(documented), sorted(registered))
+  assert.deepEqual([...listed].sort(), [...registered].sort())
 })
 
 // MUTATION: restore a retired convention to the binding list.

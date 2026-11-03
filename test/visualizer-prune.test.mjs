@@ -10,11 +10,13 @@ import { createJournalSource } from '../visualizer/server/journal-source.mjs'
 import { createLeanSource } from '../visualizer/server/lean-source.mjs'
 
 function exportAudit(files, entries) {
-  const sources = {}, exports = {}, edges = {}, unresolved = new Set(), orphans = []
+  const sources = {}, uses = {}, exports = {}, edges = {}, unresolved = new Set(), orphans = []
   for (const [file, text] of Object.entries(files)) {
     let source = file.endsWith('.svelte') ? [...text.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map(match => match[1]).join('\n') : text
     source = source.replace(/\/\*[\s\S]*?\*\/|^\s*\/\/.*$/gm, '')
     sources[file] = source
+    // A Svelte template uses imports outside <script>, so a binding's use is counted over the whole file.
+    uses[file] = file.endsWith('.svelte') ? text.replace(/\/\*[\s\S]*?\*\/|^\s*\/\/.*$/gm, '') : source
     exports[file] = new Set()
     if (/\.(?:js|mjs)$/.test(file)) {
       for (const match of source.matchAll(/^\s*export\s+(?:async\s+)?(?:function\s*\*?|const|let|var|class)\s+([\w$]+)/gm)) exports[file].add(match[1])
@@ -39,10 +41,14 @@ function exportAudit(files, entries) {
       if (!base.startsWith('web/src/') && !base.startsWith('server/')) continue
       const target = ['', '.js', '.svelte', '.mjs'].map(ext => base + ext).find(path => Object.hasOwn(files, path))
       if (!target) { unresolved.add(`${file} -> ${spec}`); continue }
-      const names = [...(clause.match(/\{([^}]*)\}/)?.[1] ?? '').split(',').map(item => item.trim().split(/\s+as\s+/)[0]).filter(Boolean)]
+      const bindings = (clause.match(/\{([^}]*)\}/)?.[1] ?? '').split(',').map(item => item.trim()).filter(Boolean).map(item => {
+        const [name, local = name] = item.split(/\s+as\s+/)
+        return { name, local }
+      })
+      const names = bindings.map(binding => binding.name)
       const all = /\*\s+as\s+\w+/.test(clause)
       for (const name of names) if (!exports[target].has(name)) unresolved.add(`${file}:${name}`)
-      edges[file].push({ target, names, all })
+      edges[file].push({ target, names, bindings, all })
     }
   }
   const seen = new Set(), todo = [...entries]
@@ -55,7 +61,11 @@ function exportAudit(files, entries) {
   const called = new Set()
   for (const file of seen) for (const edge of edges[file] ?? []) {
     if (file === edge.target) continue
-    for (const name of edge.all ? exports[edge.target] : edge.names) called.add(`${edge.target}:${name}`)
+    if (edge.all) { for (const name of exports[edge.target]) called.add(`${edge.target}:${name}`); continue }
+    // An import is a call only when the importing file uses the binding beyond the import itself.
+    for (const { name, local } of edge.bindings) {
+      if ([...uses[file].matchAll(new RegExp(`(?<![\\w$])${local.replaceAll('$', '\\$')}(?![\\w$])`, 'g'))].length > 1) called.add(`${edge.target}:${name}`)
+    }
   }
   const web = Object.keys(files).filter(file => file.startsWith('web/src/') && /\.(?:js|svelte)$/.test(file))
   const unreachable = web.filter(file => !seen.has(file)).sort()
@@ -66,20 +76,21 @@ function exportAudit(files, entries) {
 // MUTATION: add export const UNUSED_PROBE = 1 to visualizer/web/src/lib/route.js.
 // MUTATION: seed the walk from every module instead of entries.
 // MUTATION: count references inside the exporting module as callers.
+// MUTATION: count an imported binding as a call without a use beyond the import.
 test('every web export has a production caller', () => {
   const entries = ['web/src/main.js', 'server/server.mjs']
   const fixture = {
-    'web/src/main.js': "import { used } from './lib/a.js'",
-    'web/src/lib/a.js': 'function helper() {}\nexport function used() { helper(); selfOnly() }\nexport function selfOnly() {}\nexport const onlyByD = 1',
+    'web/src/main.js': "import { used, idle as quiet } from './lib/a.js'\nused()",
+    'web/src/lib/a.js': 'function helper() {}\nexport function used() { helper(); selfOnly() }\nexport function selfOnly() {}\nexport function idle() {}\nexport const onlyByD = 1',
     'web/src/lib/b.js': "import { fromC } from './c.js'\nexport const fromB = fromC",
     'web/src/lib/c.js': "import { fromB } from './b.js'\nexport const fromC = fromB",
     'web/src/lib/d.js': "import { onlyByD, missing } from './a.js'\nimport './gone.js'\nconst lonely = 1\nexport const fromD = onlyByD",
     'web/src/lib/e.js': 'export const shared = 1',
-    'server/server.mjs': "import { shared } from '../web/src/lib/e.js'",
+    'server/server.mjs': "import { shared } from '../web/src/lib/e.js'\nconsole.log(shared)",
   }
   assert.deepEqual(exportAudit(fixture, entries), {
     unreachable: ['web/src/lib/b.js', 'web/src/lib/c.js', 'web/src/lib/d.js'],
-    uncalled: ['web/src/lib/a.js:onlyByD', 'web/src/lib/a.js:selfOnly', 'web/src/lib/b.js:fromB', 'web/src/lib/c.js:fromC', 'web/src/lib/d.js:fromD'],
+    uncalled: ['web/src/lib/a.js:idle', 'web/src/lib/a.js:onlyByD', 'web/src/lib/a.js:selfOnly', 'web/src/lib/b.js:fromB', 'web/src/lib/c.js:fromC', 'web/src/lib/d.js:fromD'],
     unresolved: ['web/src/lib/d.js -> ./gone.js', 'web/src/lib/d.js:missing'],
     orphans: ['web/src/lib/d.js:lonely'],
   })

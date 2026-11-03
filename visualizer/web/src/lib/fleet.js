@@ -1,6 +1,5 @@
 import { assuranceMeta, executionMeta, taskProfileMeta } from './workflow-semantics.js'
 
-const SILENT_AFTER_MS = 30_000
 const TOKEN_FIELDS = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
 
 function finiteNumber(value) {
@@ -53,7 +52,7 @@ export function configurationDimensionCell(run = {}, dimension) {
 }
 
 // The task board lists the newest start first; a run with no parseable started_at keeps its feed order after the rest.
-export function newestFirst(runs = []) {
+function newestFirst(runs = []) {
   const started = (run) => { const ms = Date.parse(run?.started_at); return Number.isFinite(ms) ? ms : null }
   return (Array.isArray(runs) ? runs : []).map((run, index) => ({ run, index, ms: started(run) }))
     .sort((a, b) => (a.ms === null) - (b.ms === null) || (b.ms ?? 0) - (a.ms ?? 0) || a.index - b.index)
@@ -78,17 +77,23 @@ export function configurationFilterView(runs = [], selections = {}) {
   return { dimensions, rows, excluded }
 }
 
-const TONES = { running: 'busy', reviewed: 'busy', done: 'ok', stopped: 'aborted' }
-const KEYS = { running: 'running', reviewed: 'running', done: 'success', stopped: 'aborted' }
+const STATUS = Object.freeze({
+  running: { key: 'running', tone: 'busy' }, reviewed: { key: 'running', tone: 'busy' },
+  done: { key: 'success', tone: 'ok' }, stopped: { key: 'aborted', tone: 'aborted' },
+  'ready-for-operator': { key: 'ready', tone: 'serious', word: 'ready for operator' },
+  returned: { key: 'returned', tone: 'serious', word: 'returned · no new run' },
+  escalated: { key: 'escalated', tone: 'serious' }, abandoned: { key: 'abandoned', tone: 'serious' },
+})
 
 // A lean "running" is an open journal, not a measured live process.
 export function leanStatus(run = {}) {
   const status = typeof run.status === 'string' ? run.status : 'unknown'
-  const key = KEYS[status] ?? 'unknown'
+  const meta = Object.hasOwn(STATUS, status) ? STATUS[status] : null
+  const key = meta?.key ?? 'unknown'
   const open = status === 'running' || status === 'reviewed'
-  const word = status === 'running' ? 'open · no terminal record' : status === 'unknown' ? 'status not recorded' : status === 'done' && run.hand_finished === true ? 'done · hand-finished' : status
+  const word = status === 'running' ? 'open · no terminal record' : status === 'unknown' ? 'status not recorded' : status === 'done' && run.hand_finished === true ? 'done · hand-finished' : meta?.word ?? status
   const why = typeof run.reason === 'string' && run.reason ? run.reason : null
-  return { key, word, tone: TONES[status] ?? 'quiet', where: null, why, open }
+  return { key, word, tone: meta?.tone ?? 'quiet', where: null, why, open }
 }
 
 const SHIP_STATUS_META = Object.freeze({
@@ -108,94 +113,37 @@ export function shipStatus(run = {}) {
   return { ...meta, reason: ship.stale === true ? `${reason} (cached ship state is stale.)` : reason }
 }
 
-function driverObservation(run = {}) {
-  const runtime = run?.runtime && typeof run.runtime === 'object' ? run.runtime : {}
-  const state = ['alive', 'gone', 'unknown'].includes(runtime.driver_state) ? runtime.driver_state : 'unknown'
-  const source = typeof runtime.source === 'string' && runtime.source.trim() ? runtime.source : null
-  const reason_code = typeof runtime.reason_code === 'string' && runtime.reason_code.trim() ? runtime.reason_code : null
-  return {
-    state,
-    source,
-    reason_code,
-    observed_at: runtime.observed_at ?? null,
-    measured: source !== null,
-    text: source === null ? 'not observed' : `${state} · ${source}`,
-  }
-}
-
-// #953 · TL7 — ONE list of the status keys that mean an operator must look at this run. It
-// was hard-coded in App.svelte:52 and TaskList.svelte:25,:57, which is exactly how a key
-// minted in this module reaches neither. Those two consumers ask this predicate.
-const ATTENTION_KEYS = Object.freeze(['escalated', 'fail', 'aborted', 'silent', 'unverified', 'gone', 'contradicted'])
-export function needsAttention(statusKey) { return ATTENTION_KEYS.includes(statusKey) }
-
 const ATTENTION_SEGMENT_LABELS = Object.freeze({
-  escalated: 'escalated',
-  fail: 'failed',
-  aborted: 'aborted',
-  silent: 'stale',
-  unverified: 'unverified',
-  gone: 'gone',
-  contradicted: 'contradicted',
+  ready: 'ready for operator', returned: 'returned', escalated: 'escalated', aborted: 'stopped', abandoned: 'abandoned',
 })
+const ATTENTION_KEYS = Object.keys(ATTENTION_SEGMENT_LABELS)
+export function needsAttention(key) { return ATTENTION_KEYS.includes(key) }
 
 export function attentionBreakdown(rows = []) {
   const counts = new Map()
-  let total = 0
-  let unattributed = 0
   for (const row of Array.isArray(rows) ? rows : []) {
     const key = row?.status?.key
-    if (!needsAttention(key)) continue
-    total += 1
-    const label = ATTENTION_SEGMENT_LABELS[key]
-    if (!label) { unattributed += 1; continue }
-    counts.set(key, (counts.get(key) ?? 0) + 1)
+    if (needsAttention(key)) counts.set(key, (counts.get(key) ?? 0) + 1)
   }
-  const segments = ATTENTION_KEYS.filter((key) => ATTENTION_SEGMENT_LABELS[key]).map((key) => ({ key, label: ATTENTION_SEGMENT_LABELS[key], count: counts.get(key) ?? 0 }))
-  const parts = segments.filter((segment) => segment.count > 0).map((segment) => `${segment.count} ${segment.label}`)
-  if (unattributed > 0) parts.push(`${unattributed} unattributed`)
-  return { total, segments, unattributed, text: parts.join(' · ') }
+  const segments = ATTENTION_KEYS.map((key) => ({ key, label: ATTENTION_SEGMENT_LABELS[key], count: counts.get(key) ?? 0 }))
+  const total = segments.reduce((sum, segment) => sum + segment.count, 0)
+  const text = segments.filter((segment) => segment.count > 0).map((segment) => `${segment.count} ${segment.label}`).join(' · ')
+  return { total, segments, text }
 }
 
-function runActivityResult(key, values) {
-  return { key, ...values, attention: needsAttention(key) }
-}
-
-export function runActivity(run = {}) {
-  const open = run.running === true
-  return runActivityResult(open ? 'journal-open' : 'settled', { live: false, heartbeat: heartbeatCell(run, 0), driver: driverObservation(run), word: open ? 'journal open · liveness not measured' : 'settled', tone: 'quiet', why: open ? (run.pending?.last_heartbeat_at ?? 'lean lanes record no heartbeat') : null })
-}
-
-export function fleetActivity(runs = [], now = Date.now()) {
-  const summary = { live: 0, silent: 0, contradicted: 0, unverified: 0, gone: 0, open: 0 }
-  for (const run of Array.isArray(runs) ? runs : []) {
-    const activity = runActivity(run, now)
-    if (activity.key === 'live') summary.live += 1
-    if (activity.key === 'silent') summary.silent += 1
-    // #953 · TL7 — counted ONCE, in its own bucket. Round 7 incremented `silent` too, and
-    // every consumer that counts `silent` calls the row a stale heartbeat.
-    if (activity.key === 'contradicted') summary.contradicted += 1
-    if (activity.key === 'unverified') summary.unverified += 1
-    if (activity.key === 'gone') summary.gone += 1
-    if (run?.running) summary.open += 1
+export function taskBoard(runs = [], { state = 'all', query = '', showArchived = false } = {}) {
+  const visible = newestFirst(runs).filter((run) => showArchived || run.archived !== true)
+  const predicates = {
+    all: () => true,
+    open: (run) => run.running === true,
+    finished: (run) => run.running !== true && leanStatus(run).key !== 'unknown',
+    attention: (run) => needsAttention(leanStatus(run).key),
   }
-  return summary
-}
-
-export function deriveDisplayStatus(run = {}) {
-  return leanStatus(run)
-}
-
-function heartbeatCell(run = {}, now = Date.now()) {
-  let age = finiteNumber(run?.heartbeat_age_ms)
-  if (age == null && run?.last_heartbeat_at != null) {
-    const timestamp = Date.parse(String(run.last_heartbeat_at))
-    if (Number.isFinite(timestamp) && Number.isFinite(now)) age = now - timestamp
-  }
-  if (age == null) return absenceMark(run?.pending?.last_heartbeat_at)
-  const seconds = Math.round(age / 1000)
-  if (age <= SILENT_AFTER_MS) return { text: `${seconds}s ago`, stale: false, dashed: false, age_ms: age }
-  return { text: `silent ${seconds}s`, stale: true, dashed: false, age_ms: age }
+  const counts = Object.fromEntries(Object.entries(predicates).map(([key, predicate]) => [key, visible.filter(predicate).length]))
+  const needle = query.trim().toLowerCase()
+  const rows = visible.filter(predicates[state] ?? predicates.all).filter((run) =>
+    !needle || [run.goal, run.repo_slug, run.adw_id, run.status, run.tier, run.shape, run.latest_stage].some((value) => String(value ?? '').toLowerCase().includes(needle)))
+  return { counts, rows }
 }
 
 export function tokenCell(run = {}) {

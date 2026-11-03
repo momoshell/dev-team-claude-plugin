@@ -64,7 +64,7 @@ export function sections(body, { includeFences = false } = {}) {
 
 // Returns { fields, body, defects }. An empty defects list is a brief code can start.
 export function parseBrief(text) {
-  const lines = String(text ?? '').split('\n')
+  const lines = String(text ?? '').replace(/\r\n/g, '\n').split('\n')
   if (lines[0]?.trim() !== '---') return { fields: null, body: null, defects: ['the brief does not open with a --- frontmatter block'] }
   const end = lines.findIndex((line, index) => index > 0 && line.trim() === '---')
   if (end < 0) return { fields: null, body: null, defects: ['the frontmatter block is never closed with ---'] }

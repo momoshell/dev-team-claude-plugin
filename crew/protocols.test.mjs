@@ -28,6 +28,19 @@ test('a brief with no acceptance field and no ## Acceptance section parses with 
   assert.equal(parseBrief(brief({ closes: 'null' })).fields.closes, null)
 })
 
+// MUTATION: drop the CRLF normalisation in parseBrief and every frontmatter and Context line is refused.
+test('a brief saved with CRLF line endings parses as its LF form', () => {
+  const lf = brief({ source: 'operator request', closes: 'null' }, '## The ask\n\n> Do it.\n\n' + BODY + '- PR 34\n')
+  const parsed = parseBrief(lf)
+  const crlf = parseBrief(lf.replace(/\n/g, '\r\n'))
+  assert.deepEqual(crlf.defects, [])
+  assert.deepEqual(crlf.fields, parsed.fields)
+  assert.deepEqual(crlf.body, parsed.body)
+
+  const invalid = brief({}, BODY + '- see `x`\n')
+  assert.deepEqual(parseBrief(invalid.replace(/\n/g, '\r\n')).defects, parseBrief(invalid).defects)
+})
+
 // MUTATION: add stepped back to SHAPES.
 test('AR1 refuses the retired stepped shape', () => {
   assert.deepEqual(parseBrief(brief({ shape: 'stepped' })).defects, ['shape is one of standard, finish'])

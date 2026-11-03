@@ -49,6 +49,8 @@ only issue binding. An issue brief has no ask; `crew start` quotes
 the issue body as the ask in the run brief. The planner names brief text taken as a constraint and why it binds; the
 reviewer flags criteria based only on brief text that is not the source's words or an operator decision.
 
+Amended 2026-11-03, operator decision: Context items are bare pointers; `out_of_scope` is optional, and absent means none.
+
 ### 2. The planner defines the work
 
 `plan.md` takes Kiro's shape, trimmed:

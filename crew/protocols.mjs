@@ -80,7 +80,7 @@ export function parseBrief(text) {
     if (!BRIEF_FIELDS.includes(pair[1])) { defects.push(`unknown field ${pair[1]}; the fields are ${BRIEF_FIELDS.join(', ')}`); continue }
     fields[pair[1]] = value(pair[2])
   }
-  for (const key of BRIEF_FIELDS) if (!['suite', 'mechanical', 'generated', 'regenerate'].includes(key) && !Object.hasOwn(fields, key)) defects.push(`missing field ${key}`)
+  for (const key of BRIEF_FIELDS) if (!['out_of_scope', 'suite', 'mechanical', 'generated', 'regenerate'].includes(key) && !Object.hasOwn(fields, key)) defects.push(`missing field ${key}`)
   const body = lines.slice(end + 1).join('\n')
   if (typeof fields.source !== 'string' || !fields.source) defects.push('source names the issue or operator command the lane starts from')
   if (fields.closes !== null && !(Number.isSafeInteger(fields.closes) && fields.closes > 0)) defects.push('closes is null or one issue number')
@@ -89,7 +89,7 @@ export function parseBrief(text) {
     else defects.push('mechanical is true, or the field is absent')
   }
   if (!SHAPES.includes(fields.shape)) defects.push(`shape is one of ${SHAPES.join(', ')}`)
-  if (typeof fields.out_of_scope !== 'string' || !fields.out_of_scope) defects.push('out_of_scope says what the lane must not change')
+  if (Object.hasOwn(fields, 'out_of_scope') && (typeof fields.out_of_scope !== 'string' || !fields.out_of_scope)) defects.push('out_of_scope says what the lane must not change')
   if (Object.hasOwn(fields, 'suite') && (typeof fields.suite !== 'string' || fields.suite.trim() === '')) defects.push('suite is a command line (for example: suite: cargo test -p power-api)')
   if (Object.hasOwn(fields, 'generated') !== Object.hasOwn(fields, 'regenerate')) defects.push('generated and regenerate must be declared together')
   if (Object.hasOwn(fields, 'generated') && !(Array.isArray(fields.generated) && fields.generated.length > 0 && fields.generated.every((path) => {
@@ -120,14 +120,11 @@ export function parseBrief(text) {
     for (const line of ask ?? []) if (line.trim() && !/^ {0,3}>/.test(line)) defects.push(`## The ask quotes the source: every line starts with >: ${line}`)
   }
   const context = parts.get('## Context') ?? []
-  let pointer = false, hasItem = false
+  let hasItem = false
   for (const line of context) {
     if (!line.trim()) continue
-    if (/^ {0,3}[-*] +/.test(line)) {
-      hasItem = true
-      pointer = /^ {0,3}[-*] +(?:`[^`]+`|\[[^\]]+\]\([^)]+\)|(?:issue|PR) [1-9]\d*\b)/.test(line)
-    } else if (!/^[ \t]/.test(line) || !pointer) pointer = false
-    if (!pointer) defects.push(`## Context holds only pointers: each item opens with a code span, a [link](url), issue N or PR N: ${line}`)
+    if (/^ {0,3}[-*] +/.test(line)) hasItem = true
+    if (!/^ {0,3}[-*] +(?:`[^`]+`|\[[^\]]+\]\([^)]+\)|(?:issue|PR) [1-9]\d*)(?:[ \t]+(?:`[^`]+`|\[[^\]]+\]\([^)]+\)|(?:issue|PR) [1-9]\d*))*[ \t]*$/.test(line)) defects.push(`## Context holds only bare pointers: each item is one or more code spans, [links](url), issue N or PR N, with no other text: ${line}`)
   }
   if (!hasItem) defects.push('the body has no ## Context with at least one pointer')
   // Quoted ask lines are the source's words and bind nothing; only `closes` reaches the bound-issue slot.

@@ -44,6 +44,14 @@ test('suite is an optional command line: absent is defect-free, a string parses,
   }
 })
 
+// MUTATION: require out_of_scope like the other fields and an absent field is refused.
+test('out_of_scope is optional: absent parses with no defects and no field, an empty value is refused', () => {
+  const absent = parseBrief(brief({ out_of_scope: undefined }))
+  assert.deepEqual(absent.defects, [])
+  assert.equal(Object.hasOwn(absent.fields, 'out_of_scope'), false)
+  assert.deepEqual(parseBrief(brief({ out_of_scope: '' })).defects, ['out_of_scope says what the lane must not change'])
+})
+
 test('a suite or regenerate line with a quote or backslash is refused', () => {
   for (const key of ['suite', 'regenerate']) for (const char of ['"', "'", '\\']) {
     const fields = key === 'suite' ? { suite: `npm ${char}test` } : { generated: '[a]', regenerate: `npm ${char}test` }
@@ -141,7 +149,7 @@ test('a brief body is the quoted source ask and ## Context pointers, and anythin
   const operator = '## The ask\n\n> Do this.\n>\n> And that.\n\n' + BODY
   for (const [fields, body] of [
     [{}, BODY],
-    [{ source: 'operator request' }, operator + '- [docs](https://example.com)\n  continuation\n* issue 12\n- PR 34\n'],
+    [{ source: 'operator request' }, operator + '- [docs](https://example.com)\n* issue 12\n- PR 34\n'],
   ]) assert.deepEqual(parseBrief(brief(fields, body)).defects, [])
   for (const [fields, body, defect] of [
     [{}, BODY + '\n## Rules\n', 'the body holds only ## The ask and ## Context: ## Rules'],
@@ -156,10 +164,22 @@ test('a brief body is the quoted source ask and ## Context pointers, and anythin
     [{ source: 'operator request' }, '## The ask\nplain\n' + BODY, '## The ask quotes the source: every line starts with >: plain'],
     [{ source: 'operator request' }, '## The ask\n```\n> text\n```\n' + BODY, '## The ask quotes the source: every line starts with >: ```'],
     [{}, '', 'the body has no ## Context with at least one pointer'],
-    [{}, '## Context\nplain\n', '## Context holds only pointers: each item opens with a code span, a [link](url), issue N or PR N: plain'],
-    [{}, BODY + '- Never break the boot.\n', '## Context holds only pointers: each item opens with a code span, a [link](url), issue N or PR N: - Never break the boot.'],
-    [{}, BODY + '```\ntext\n```\n', '## Context holds only pointers: each item opens with a code span, a [link](url), issue N or PR N: ```'],
+    [{}, '## Context\nplain\n', '## Context holds only bare pointers: each item is one or more code spans, [links](url), issue N or PR N, with no other text: plain'],
+    [{}, BODY + '- Never break the boot.\n', '## Context holds only bare pointers: each item is one or more code spans, [links](url), issue N or PR N, with no other text: - Never break the boot.'],
+    [{}, BODY + '```\ntext\n```\n', '## Context holds only bare pointers: each item is one or more code spans, [links](url), issue N or PR N, with no other text: ```'],
   ]) assert.ok(parseBrief(brief(fields, body)).defects.includes(defect), defect)
+})
+
+// MUTATION: drop the end anchor and prose after a pointer passes.
+test('## Context items are bare pointers: prose after a pointer or a continuation line is refused (ADR-055 §1)', () => {
+  for (const line of ['- `crew/protocols.mjs` `parseBrief` ', '- [docs](https://example.com)', '* issue 12', '- PR 34', '- `a`\tPR 34']) {
+    assert.deepEqual(parseBrief(brief({}, `## Context\n${line}\n`)).defects, [], line)
+  }
+  for (const line of ['- `crew/agents.mjs`: what it checks.', '- PR 34 and more', '  continuation', '- see `x`', 'plain', '```']) {
+    assert.deepEqual(parseBrief(brief({}, BODY + line + '\n')).defects, [
+      `## Context holds only bare pointers: each item is one or more code spans, [links](url), issue N or PR N, with no other text: ${line}`,
+    ], line)
+  }
 })
 
 // P5, the agent definition.

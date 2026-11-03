@@ -3,14 +3,12 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join, dirname, resolve as resolvePath } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { SUBAGENT_EXTENSION } from '../adapters/adapter-pi.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
 export const CAPABILITY_REFUSALS = Object.freeze([
-  'register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported',
-  'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-provider-undeclared',
-  'local-endpoint-dead', 'grant-contradicts-deny', 'vendor-extension-missing',
-  'agent-unresolved', 'agent-provider-unsupported', 'agent-unavailable', 'local-provider-reserved',
+  'register-invalid', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'agent-def-invalid',
 ])
 const CAPABILITIES_PATH = join(HERE, '..', 'capabilities.json')
 const CAPABILITIES_SCHEMA_PATH = join(HERE, '..', 'capabilities.schema.json')
@@ -125,10 +123,8 @@ function cloneJson(value) {
 }
 
 // The register is runtime policy: grant paths resolve against this checkout,
-// not the target checkout. The shipped file carries the role-level claude Task
-// fan-out grant and, adapter-scoped under the planner's by_agent.pi overlay,
-// the checkout-pinned pi subagent assets (#403); advisor runtime behavior
-// remains reserved and default-off (#294).
+// not the target checkout. The register carries agent definitions and MCP
+// servers, including the planner's pi scout definition.
 export function loadCapabilities({ path = CAPABILITIES_PATH, schemaPath = CAPABILITIES_SCHEMA_PATH, register = null } = {}) {
   let schema
   try {
@@ -216,36 +212,6 @@ export function pathMessage(reason, seat, kind, expected, found, path) {
 
 export const PI_AGENT_DIR_ENV = 'PI_CODING_AGENT_DIR'
 
-function mergeAgents(base, overlay) {
-  const out = new Map(base.map((grant) => [grant.name, grant]))
-  for (const grant of overlay) out.set(grant.name, grant)
-  return [...out.values()]
-}
-
-export function mergeMcpServers(base = [], overlay = []) {
-  const out = new Map((base || []).map((server) => [server.name, server]))
-  for (const server of overlay || []) out.set(server.name, server)
-  return [...out.values()]
-}
-
-// #403 — the ADAPTER dimension. A role grant may carry `by_agent`, an overlay
-// keyed by the resolved adapter name, merged over the role grant.
-// An adapter with no entry gets the role grant and nothing else.
-// tools/advisor/requires are role-level ONLY and no overlay can move them.
-function agentSpec(register, role, agent) {
-  const spec = register?.roles && Object.hasOwn(register.roles, role) ? register.roles[role] : null
-  if (!spec) return null
-  const overlay = agent && spec.by_agent && Object.hasOwn(spec.by_agent, agent) ? spec.by_agent[agent] : null
-  if (!overlay) return spec
-  return {
-    ...spec,
-    extensions: [...new Set([...spec.extensions, ...(overlay.extensions || [])])],
-    skills: [...new Set([...spec.skills, ...(overlay.skills || [])])],
-    agents: mergeAgents(spec.agents, overlay.agents || []),
-    mcp_servers: mergeMcpServers(spec.mcp_servers || [], overlay.mcp_servers || []),
-  }
-}
-
 export function grantsFor(register, role, { root = REGISTER_ROOT, exists = existsSync, readFile = readFileSync } = {}) {
   const spec = register?.roles && Object.hasOwn(register.roles, role) ? register.roles[role] : null
   if (!spec) throw refuse('register-invalid', `runtime capability register has no grant for unknown role ${JSON.stringify(role)} under the runtime-policy rule`)
@@ -253,11 +219,6 @@ export function grantsFor(register, role, { root = REGISTER_ROOT, exists = exist
   const extensions = spec.extensions.map((relativePath) => {
     const path = resolvedGrantPath(root, relativePath)
     if (!pathExists(exists, path)) throw pathMessage('extension-missing', role, 'extension grant', 'an existing checkout-relative path', 'missing', path)
-    return path
-  })
-  const skills = spec.skills.map((relativePath) => {
-    const path = resolvedGrantPath(root, relativePath)
-    if (!pathExists(exists, path)) throw pathMessage('unknown-skill', role, 'skill grant', 'an existing checkout-relative path', 'missing', path)
     return path
   })
   const agents = spec.agents.map((grant) => {
@@ -293,16 +254,9 @@ export function grantsFor(register, role, { root = REGISTER_ROOT, exists = exist
       : { bin: server.command.bin, args: [...server.command.args] },
     url: server.url,
   }))
-  return deepFreeze({
-    tools: [...spec.tools],
-    extensions,
-    agents, skills,
-    advisor: spec.advisor, requires: [...spec.requires],
-    mcp_servers,
-  })
+  return deepFreeze({ extensions, agents, mcp_servers })
 }
 
-const LEAN_FFF_BIN = '/opt/homebrew/bin/fff-mcp'
 // ADR-055 §8 retired the other MCP arm.
 const LEAN_MCP_ARMS = Object.freeze(['fff'])
 
@@ -317,9 +271,7 @@ function registeredMcpServer(register, name) {
   return null
 }
 
-function registeredAgents(register, role, agent) {
-  const own = agentSpec(register, role, agent)?.agents ?? []
-  if (own.length > 0) return own
+function registeredAgents(register) {
   const named = new Map()
   for (const spec of Object.values(register?.roles ?? {})) {
     for (const group of [spec, ...Object.values(spec?.by_agent ?? {})]) {
@@ -340,7 +292,8 @@ export function armGrants({ role, agent, extensions = [] }, { register = loadCap
     if (LEAN_MCP_ARMS.includes(name)) {
       const server = registeredMcpServer(register, name)
       if (!server) throw refuse('unknown-grant', `seat ${role} extension ${JSON.stringify(name)} has no MCP server in the register`)
-      if (!pathExists(exists, LEAN_FFF_BIN)) throw pathMessage('extension-missing', role, 'fff MCP server', 'an installed fff-mcp binary', 'missing', LEAN_FFF_BIN)
+      const bin = server.command?.bin
+      if (typeof bin !== 'string' || !bin.trim() || !pathExists(exists, bin)) throw pathMessage('extension-missing', role, 'fff MCP server', 'an installed fff-mcp binary', 'missing', bin ?? 'no command')
       mcp_servers.push(server)
     } else if (/^[a-z]+$/.test(name)) {
       paths.push(`crew/pi/extensions/${name}.ts`)
@@ -349,16 +302,10 @@ export function armGrants({ role, agent, extensions = [] }, { register = loadCap
     }
   }
   const fanout = agent === 'pi' && paths.includes(SUBAGENT_EXTENSION)
-  const agents = fanout ? registeredAgents(register, role, agent) : []
+  const agents = fanout ? registeredAgents(register) : []
   if (fanout && agents.length === 0) {
     throw refuse('unknown-grant', `seat ${role} asks for subagent but the register declares no agent definition for it`)
   }
-  const narrow = { roles: { [role]: { tools: [], extensions: paths, agents, skills: [], advisor: false, requires: [], mcp_servers } } }
+  const narrow = { roles: { [role]: { extensions: paths, agents, mcp_servers } } }
   return grantsFor(narrow, role, { root, exists, readFile })
 }
-
-export const EMPTY_GRANTS = deepFreeze({
-  tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [], mcp_servers: [],
-})
-
-export const SUBAGENT_EXTENSION = 'crew/pi/extensions/subagent.ts'

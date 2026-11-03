@@ -40,71 +40,20 @@
   },
   "roles": {
     "lead": {
-      "tools": [],
-      "extensions": [],
       "agents": [],
-      "skills": [],
-      "advisor": false,
-      "requires": [],
-      "mcp_servers": [],
-      "by_agent": {
-        "pi": {
-          "skills": [],
-          "mcp_servers": [
-            {
-              "name": "fff",
-              "command": {
-                "bin": "/opt/homebrew/bin/fff-mcp",
-                "args": []
-              },
-              "url": null
-            }
-          ]
-        },
-        "claude": {
-          "skills": [],
-          "mcp_servers": [
-            {
-              "name": "fff",
-              "command": {
-                "bin": "/opt/homebrew/bin/fff-mcp",
-                "args": []
-              },
-              "url": null
-            }
-          ]
-        }
-      }
+      "mcp_servers": []
     },
     "planner": {
-      "tools": [
-        "Task"
-      ],
-      "extensions": [],
       "agents": [],
-      "skills": [],
-      "advisor": false,
-      "requires": [
-        "subagents"
-      ],
       "mcp_servers": [],
       "by_agent": {
         "pi": {
-          "extensions": [
-            "crew/pi/extensions/subagent.ts",
-            "crew/pi/extensions/readgate.ts"
-          ],
-          "mcp_servers": [{ "name": "fff", "command": { "bin": "/opt/homebrew/bin/fff-mcp", "args": [] }, "url": null }],
-          "skills": [],
           "agents": [
             {
               "name": "scout",
               "def": "crew/pi/agents/scout.json"
             }
-          ]
-        },
-        "claude": {
-          "skills": [],
+          ],
           "mcp_servers": [
             {
               "name": "fff",
@@ -119,129 +68,16 @@
       }
     },
     "builder": {
-      "tools": [],
-      "extensions": [],
       "agents": [],
-      "skills": [],
-      "advisor": true,
-      "requires": [],
-      "mcp_servers": [],
-      "by_agent": {
-        "pi": {
-          "mcp_servers": [
-            {
-              "name": "fff",
-              "command": {
-                "bin": "/opt/homebrew/bin/fff-mcp",
-                "args": []
-              },
-              "url": null
-            }
-          ],
-          "extensions": [
-            "crew/pi/extensions/readgate.ts",
-            "crew/pi/extensions/skeletonread.ts"
-          ],
-          "skills": []
-        },
-        "claude": {
-          "skills": [],
-          "mcp_servers": [
-            {
-              "name": "fff",
-              "command": {
-                "bin": "/opt/homebrew/bin/fff-mcp",
-                "args": []
-              },
-              "url": null
-            }
-          ]
-        }
-      }
+      "mcp_servers": []
     },
     "reviewer": {
-      "tools": [
-        "Task"
-      ],
-      "extensions": [],
       "agents": [],
-      "skills": [],
-      "advisor": false,
-      "requires": [],
-      "mcp_servers": [],
-      "by_agent": {
-        "pi": {
-          "extensions": [],
-          "skills": [
-            "skills/code-less/SKILL.md"
-          ],
-          "mcp_servers": [
-            {
-              "name": "fff",
-              "command": {
-                "bin": "/opt/homebrew/bin/fff-mcp",
-                "args": []
-              },
-              "url": null
-            }
-          ]
-        },
-        "claude": {
-          "skills": [
-            "skills/code-less/SKILL.md"
-          ],
-          "mcp_servers": [
-            {
-              "name": "fff",
-              "command": {
-                "bin": "/opt/homebrew/bin/fff-mcp",
-                "args": []
-              },
-              "url": null
-            }
-          ]
-        }
-      }
+      "mcp_servers": []
     },
     "tech-lead": {
-      "tools": [],
-      "extensions": [],
       "agents": [],
-      "skills": [],
-      "advisor": false,
-      "requires": [],
-      "mcp_servers": [],
-      "by_agent": {
-        "pi": {
-          "extensions": [
-            "crew/pi/extensions/readgate.ts"
-          ],
-          "skills": [],
-          "mcp_servers": [
-            {
-              "name": "fff",
-              "command": {
-                "bin": "/opt/homebrew/bin/fff-mcp",
-                "args": []
-              },
-              "url": null
-            }
-          ]
-        },
-        "claude": {
-          "skills": [],
-          "mcp_servers": [
-            {
-              "name": "fff",
-              "command": {
-                "bin": "/opt/homebrew/bin/fff-mcp",
-                "args": []
-              },
-              "url": null
-            }
-          ]
-        }
-      }
+      "mcp_servers": []
     }
   }
 }

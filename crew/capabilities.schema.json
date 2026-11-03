@@ -174,56 +174,15 @@
     "grant": {
       "type": "object",
       "required": [
-        "tools",
-        "extensions",
         "agents",
-        "skills",
-        "advisor",
-        "requires",
         "mcp_servers"
       ],
       "additionalProperties": false,
       "properties": {
-        "tools": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "pattern": "^[A-Za-z0-9_-]+$"
-          }
-        },
-        "extensions": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/relpath"
-          }
-        },
         "agents": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/agentgrant"
-          }
-        },
-        "skills": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/relpath"
-          }
-        },
-        "advisor": {
-          "type": "boolean"
-        },
-        "requires": {
-          "type": "array",
-          "items": {
-            "enum": [
-              "prompt_file",
-              "tool_deny",
-              "unattended",
-              "subagents",
-              "effort",
-              "session_resume",
-              "reassign"
-            ]
           }
         },
         "mcp_servers": {
@@ -245,17 +204,9 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "extensions": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/relpath" }
-        },
         "agents": {
           "type": "array",
           "items": { "$ref": "#/$defs/agentgrant" }
-        },
-        "skills": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/relpath" }
         },
         "mcp_servers": {
           "type": "array",

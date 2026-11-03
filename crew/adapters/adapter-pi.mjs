@@ -9,20 +9,13 @@ import { join, isAbsolute } from 'node:path'
 // 2026-10-16 against muse-spark-1.3-contributor and muse-wonder-1.0-contributor).
 export const PI_PROVIDERS = Object.freeze({ openai: 'openai-codex', anthropic: 'anthropic', meta: 'meta' })
 
-// An OWN-property lookup on BOTH halves (#739): a bare bracket read reaches
-// Object.prototype, so a roster provider named `toString` or `constructor`
-// resolved to a function — truthy — and modelString synthesized
-// `function toString() { [native code] }/<id>` instead of taking the refusal
-// below. An OWN property is still honoured even when its name collides
-// with a prototype member, and a null-prototype register behaves identically.
+// An own-property lookup prevents Object.prototype names from resolving as providers (#739).
 const own = (obj, key) => Boolean(obj) && typeof obj === 'object' && Object.hasOwn(obj, key)
 
-export function modelString({ provider, id, localProviders }) {
-  const p = own(PI_PROVIDERS, provider)
-    ? PI_PROVIDERS[provider]
-    : own(localProviders, provider) ? localProviders[provider]?.pi_provider : undefined
+export function modelString({ provider, id }) {
+  const p = own(PI_PROVIDERS, provider) ? PI_PROVIDERS[provider] : undefined
   if (!p) {
-    const known = Object.keys({ ...PI_PROVIDERS, ...(localProviders || {}) })
+    const known = Object.keys(PI_PROVIDERS)
     throw new Error(`adapter-pi: no pi provider for roster provider "${provider}" (known: ${known.join(', ')}) — refusing a guessed passthrough: pi synthesizes phantom models on narrowed lookups`)
   }
   return `${p}/${id}`
@@ -160,7 +153,7 @@ export function piSeatAgentDir({ taskDir, role } = {}) {
 }
 
 function piFffEnv(grants) {
-  const granted = grants?.extensions?.includes('builtin:mcp') && grants?.mcp_servers?.some((server) => server?.name === 'fff' && server?.command?.bin === '/opt/homebrew/bin/fff-mcp')
+  const granted = grants?.extensions?.includes('builtin:mcp') && grants?.mcp_servers?.some((server) => server?.name === 'fff')
   return { CREW_FFF: granted ? '1' : '0' }
 }
 
@@ -176,8 +169,8 @@ function isPiSeatWithheldEnvKey(key) { return key.startsWith('CREW_ADVISOR') || 
 export function piSeatSpawnEnv(inherited = {}, seatEnv = {}) { const env = { ...inherited, ...seatEnv }; for (const key of Object.keys(inherited)) if (isPiSeatWithheldEnvKey(key) && !Object.hasOwn(seatEnv, key)) env[key] = undefined; return env }
 
 export function piSeatParts(spec = {}) {
-  const { model, effort, promptFile, deny, env = {}, grants = NO_GRANTS, configDir, role, taskDir } = spec
-  const agentDir = hasPiAgentDir(grants) ? piSeatAgentDir({ taskDir, role }) : configDir
+  const { model, effort, promptFile, deny, env = {}, grants = NO_GRANTS, role, taskDir } = spec
+  const agentDir = hasPiAgentDir(grants) ? piSeatAgentDir({ taskDir, role }) : undefined
   const piDeny = translateDeny(deny)
   const advisor = grants?.advisor === true
   const extensions = [...new Set([...(grants?.extensions || []), ...(advisor ? [PI_ADVISOR_EXTENSION] : [])])]

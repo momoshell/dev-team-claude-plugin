@@ -28,9 +28,12 @@ the brief, the task directory, the lane journal and every seat's session file.
 body is the ask). `crew/loop.mjs` runs it:
 
 ```
-standard:   plan -> build -> per-test proof -> review -> full suite -> judge second review -> commit -> rebase -> PR
-mechanical: rebase -> build -> per-test proof -> full suite -> commit -> rebase -> PR
+build:      plan -> rebase -> build -> per-test proof -> (full suite || review) -> PR
+judge:      plan -> rebase -> build -> per-test proof -> full suite -> review -> second review -> PR
+mechanical: rebase -> build -> per-test proof -> full suite -> PR
 ```
+
+A fix turn carries the red results back to the builder, then repeats proof, the suite and the tier's reviews. Build and judge do not automatically rerun a red suite on an unchanged tree. Before publishing, each lane commits and rebases. Build and judge commit only the tree their suite and reviews checked. If the head changes, they put the change on the new base tip and repeat every check, including reviews. If Git drops the commit as already upstream, they stop. Mechanical and finish prove and test a moved head again.
 
 A brief may choose `mechanical: true` for a change with no behaviour to judge. With no named test, its PR states `proof: none, mechanical lane, not reviewed`; the operator reviews the diff before merging. Protected paths restart it as judge, and builder insufficiency restarts it as build.
 

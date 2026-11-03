@@ -364,7 +364,7 @@ const EINTR = Object.assign(new Error('turn interrupted'), { code: 'EINTR' })
 const EPERM = Object.assign(new Error('denied'), { code: 'EPERM' })
 
 // A lane's whole loop with every outside effect faked: seats answer by envelope id, recordings are real files.
-function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = {}, scope, repairPlan = false, repairBuilder = false, status = ' M src/a.mjs\0' } = {}) {
+function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = {}, scope, repairPlan = false, repairBuilder = false, status = 'M  src/a.mjs\0' } = {}) {
   const dir = scratchDir('lean-')
   const spec = {
     id: 'lane', cwd: join(dir, 'worktree'), taskDir: join(dir, 'task'), tier, shape: 'standard', brief: BRIEF,
@@ -406,10 +406,11 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
       proveTests: async () => ({ status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }] }),
       runSuite: async () => GREEN,
       commitChanges: async () => ({ status: 'green', reason: null, head: 'a'.repeat(40) }),
-      rebaseBranch: async () => ({ status: 'green', reason: null, head: 'b'.repeat(40) }),
+      rebaseBranch: async () => ({ status: 'green', reason: null, head: (committed ? 'a' : 'b').repeat(40) }),
       openPullRequest: async () => ({ status: 'green', reason: null, pr: { number: 7, url: 'https://example.test/7' } }),
       // After the rebase the tree is the rebased head and clean; before it, status reads the scripted paths.
-      run: async (input) => input.args.includes('rev-parse') ? { ...GREEN, stdout: `${rebasedHead}\n` }
+      run: async (input) => input.args.includes('write-tree') ? { ...GREEN, stdout: `${'e'.repeat(40)}\n` }
+        : input.args.includes('rev-parse') ? { ...GREEN, stdout: `${rebasedHead}\n` }
         : input.args.includes('status') ? { ...GREEN, stdout: rebasedHead ? '' : [status].flat()[Math.min(reads++, [status].flat().length - 1)] } : GREEN,
       ...loopDeps,
     },
@@ -454,7 +455,7 @@ test('a judge tech-lead turn gets the reviewer map grants by scope, the builder 
 })
 
 test("a raised lane's later turns run the judge tier definition", async () => {
-  const f = leanFixture({ tier: 'mechanical', status: [' M crew/loop.mjs\0', ' M src/a.mjs\0'] })
+  const f = leanFixture({ tier: 'mechanical', status: [' M crew/loop.mjs\0', 'M  src/a.mjs\0'] })
   f.spec.acceptance = ['RV1'] // archived spec, also accepted before ADR-055
   assert.equal((await f.go()).status, 'done')
   const builder = f.requests.findLast((r) => r.definition.role === 'builder')
@@ -538,7 +539,7 @@ test('LG2: reviewer gets scope grants rather than changed-path grants', async ()
     [['other/a.ts'], []],
     [['elsewhere/a.spec.ts'], ['test-strength']],
   ]) {
-    const f = leanFixture({ tier, scope, repairPlan: true, status: ' M crew/other.mjs\0', answers: { reviews: ['changes-needed', 'pass'] } })
+    const f = leanFixture({ tier, scope, repairPlan: true, status: 'M  crew/other.mjs\0', answers: { reviews: ['changes-needed', 'pass'] } })
     assert.equal((await f.go()).status, 'done')
     for (const { definition } of f.requests.filter((r) => r.definition.role === 'reviewer')) {
       assert.deepEqual(definition.skills, ['code-less', 'pr-review', ...extra])
@@ -579,7 +580,7 @@ test("each reviewer prompt carries the latest builder's tests and notes and a va
 test('each reviewer prompt lists that round\'s measured paths as JSON-quoted bullets and no other seat gets the section', async () => {
   const f = leanFixture({
     answers: { reviews: ['changes-needed', 'pass'] },
-    status: [' M src/a.mjs\0?? untracked file.txt\0?? line\nbreak.txt\0?? "quoted".txt\0R  moved.mjs\0old.mjs\0', '', ' M commit-only.mjs\0'],
+    status: [' M src/a.mjs\0?? untracked file.txt\0?? line\nbreak.txt\0?? "quoted".txt\0R  moved.mjs\0old.mjs\0', '', 'M  commit-only.mjs\0'],
   })
   assert.equal((await f.go()).status, 'done')
   const section = (prompt) => (prompt.split('\n## Changed paths\n')[1] ?? '').split('\n## ')[0].split('\n').filter((line) => line.startsWith('- '))
@@ -1169,7 +1170,7 @@ test('a turn that throws or rejects stops with a terminal row', async () => {
 })
 
 test('the terminal row repeats a stopped loop result and a throwing log is not swallowed', async () => {
-  const f = leanFixture({ loopDeps: { run: async () => { throw EPERM } } })
+  const f = leanFixture({ loopDeps: { run: async ({ args }) => { if (args.includes('status')) throw EPERM; return GREEN } } })
   const result = await f.go()
   assert.deepEqual(result, { status: 'stopped', reason: 'paths-unmeasured', pr: null })
   assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
@@ -1196,7 +1197,7 @@ test('the bridge entry reads one spec file; a malformed or unreadable spec is on
   assert.equal(await leanMain([specPath], good.options), 0)
   assert.equal(existsSync(good.sessionOf('planner', 1)), true)
   const stoppedRows = []
-  const failing = leanFixture({ loopDeps: { run: async () => { throw EPERM } } })
+  const failing = leanFixture({ loopDeps: { run: async ({ args }) => { if (args.includes('status')) throw EPERM; return GREEN } } })
   const failingPath = join(dir, 'failing.json')
   writeFileSync(failingPath, JSON.stringify(failing.spec))
   assert.equal(await leanMain([failingPath], { ...failing.options, log: (line) => stoppedRows.push(line) }), 1)
@@ -1236,7 +1237,7 @@ test('a started lean spec reaches the PR with its exact P1 source and measured b
   assert.equal((await g.go()).status, 'done')
   assert.equal(seen.commit.subject, 'fix(crew): publish measured lane results')
   assert.equal(seen.publish.title, seen.commit.subject)
-  assert.equal(seen.publish.body, ['Source: "issue 1961"', '', '## Measurements', '- proof: lib.test.mjs "works": red on the old source, green on the build', '- Suite: green; exit 0.'].join('\n'))
+  assert.match(seen.publish.body, /^Source: "issue 1961"\n\n## Measurements\n- proof: lib\.test\.mjs "works": red on the old source, green on the build\n- Suite: green; exit 0\.\n\n## Lane\n- Wall time: (?:\d+ s before publication; publication unmeasured|unmeasured)\./)
   assert.equal(spec.source, 'issue 1961')
 })
 

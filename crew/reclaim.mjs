@@ -5,7 +5,7 @@ import { readJsonAt, JSON_STATES } from './json-leaf.mjs'
 
 export const PHASES = { RESERVED: 'reserved', SPAWNING: 'spawning', RUNNING: 'running' }
 const VERDICTS = { FREE: 'free', RECLAIMABLE: 'reclaimable', BUSY: 'busy', UNRESOLVABLE: 'unresolvable' }
-export const EVIDENCE_KINDS = { PGID: 'pgid', SUCCESSOR: 'successor' }
+export const EVIDENCE_KINDS = { PGID: 'pgid' }
 export const LIVENESS = { ALIVE: 'alive', DEAD: 'dead', UNKNOWN: 'unknown' }
 const LOCK_ATTEMPTS = 20
 const LOCK_INTERVAL_MS = 50
@@ -41,18 +41,7 @@ function normalDeps(deps) {
 
 function ownerState(owner, d) {
   if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) return LIVENESS.UNKNOWN
-  // This function USED to short-circuit `owner.pid === d.pid` to ALIVE. That
-  // was dropped when the lease surface landed, and the drop is deliberate —
-  // acknowledged here rather than left silent, because this is shared
-  // lock/marker code the lease work did not otherwise touch.
-  //
-  // Production behaviour is unchanged: `process.kill(self, 0)` always
-  // succeeds, so the probe returns ALIVE for our own pid with or without the
-  // shortcut (verified, not assumed). It differs only under an injected
-  // `kill` that reports our own process dead — which is exactly how the
-  // crash-recovery fixtures simulate a supervisor that died holding a lease.
-  // Restoring the shortcut makes that simulation impossible and breaks the
-  // D14 terminal-only lease test, so the probe stays authoritative.
+  // The probe stays authoritative even for our own pid: an injected kill can report it dead.
   try { d.kill(owner.pid, 0); return LIVENESS.ALIVE } catch (err) {
     return err?.code === 'ESRCH' ? LIVENESS.DEAD : LIVENESS.ALIVE
   }

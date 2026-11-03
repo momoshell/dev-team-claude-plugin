@@ -288,7 +288,7 @@ test('a mechanical lane discards its build and restarts from planning: as judge 
     assert.equal(f.requests.filter((r) => r.role === 'builder')[1].tier, row.to)
   }
   let builds = 0
-  const repair = sequenced([redRun(), green()], { spec: { tier: 'mechanical' }, edit: (v) => {
+  const repair = sequenced([redRun(), green()], { spec: { tier: 'mechanical' }, lead: 'bounce', target: 'planner', edit: (v) => {
     if (v.role === 'builder') {
       builds++
       if (builds === 1) v.details.subject = 'docs(crew): fix typo'
@@ -297,7 +297,7 @@ test('a mechanical lane discards its build and restarts from planning: as judge 
     return v
   } })
   assert.equal((await repair.go()).status, 'done')
-  assert.deepEqual(repair.requests.map((r) => r.role), ['builder', 'builder', 'planner', 'builder', 'planner', 'builder', 'reviewer'])
+  assert.deepEqual(repair.requests.map((r) => r.role), ['builder', 'builder', 'planner', 'builder', 'lead', 'planner', 'builder', 'reviewer'])
   const next = repair.requests.filter((r) => r.role === 'builder')
   assert.deepEqual(next[2].feedback, [])
   assert.deepEqual(next[3].feedback.map((item) => item.id), ['plan-revised'])
@@ -435,23 +435,91 @@ test('an escalate without details.question is a bounce to the same seat, and the
   }
 })
 
-test('a builder insufficient goes to the planner, and the build continues on the revised plan without the lead', async () => {
-  let builds = 0, plans = 0
-  const f = fakes({ edit: (v) => {
-    if (v.role === 'planner' && ++plans === 2) Object.assign(v.details, { files_in_scope: ['crew/loop.mjs'], subject: 'fix(crew): revised plan', tests: [] })
-    if (v.role === 'builder' && ++builds === 1) return { ...v, status: 'insufficient', summary: 'gap' }
-    if (v.role === 'builder') v.details.tests = []
+// MUTATION: restore direct replan for builder insufficiency on build lanes.
+test('a builder insufficient on build and judge goes to the lead with its envelope, and the lead routes it to the builder, the planner or the operator', async () => {
+  for (const tier of ['build', 'judge']) for (const route of ['builder', 'planner', 'escalate']) {
+    let builds = 0, plans = 0
+    const f = fakes({ spec: { tier }, lead: route === 'escalate' ? 'escalate' : 'bounce', target: route, edit: (v) => {
+      if (v.role === 'planner' && ++plans === 2 && tier === 'judge') Object.assign(v.details, { files_in_scope: ['crew/loop.mjs'], subject: 'fix(crew): revised plan', tests: [] })
+      if (v.role === 'builder' && ++builds === 1) return { ...v, status: 'insufficient', summary: 'gap' }
+      if (v.role === 'builder' && route === 'planner' && tier === 'judge') v.details.tests = []
+      return v
+    } })
+    const result = await f.go()
+    const roles = route === 'escalate' ? ['planner', 'builder', 'lead'] : ['planner', 'builder', 'lead', ...(route === 'planner' ? ['planner'] : []), 'builder', 'reviewer', ...(tier === 'judge' ? ['tech-lead'] : [])]
+    assert.deepEqual(f.requests.map((r) => r.role), roles, `${tier} ${route}`)
+    const held = f.requests.find((r) => r.role === 'lead').feedback[0]
+    assert.equal(held.role, 'builder'); assert.equal(held.reason, 'insufficient')
+    assert.equal(held.envelope.status, 'insufficient'); assert.equal(held.envelope.summary, 'gap')
+    if (route === 'escalate') {
+      assert.deepEqual(result, stopped('lead-escalated'))
+      assert.equal(f.rows.findLast((r) => r.event === 'verdict').observation.question, 'Which way should the lane go?')
+    } else {
+      assert.equal(result.status, 'done')
+      const planners = f.requests.filter((r) => r.role === 'planner')
+      const builders = f.requests.filter((r) => r.role === 'builder')
+      if (route === 'builder') {
+        assert.equal(planners.length, 1)
+        assert.equal(builders[1].planPath, builders[0].planPath)
+        assert.deepEqual(builders[1].feedback[0], { id: 'lead-bounce', summary: 'fixture' })
+      } else {
+        assert.deepEqual(planners[1].feedback[0], { id: 'plan-gap', role: 'builder', envelope: held.envelope, lead: 'fixture' })
+        assert.deepEqual(builders[1].feedback[0], { id: 'plan-revised', plan_path: builders[1].planPath })
+        if (tier === 'judge') {
+          assert.deepEqual(builders[1].filesInScope, ['crew/loop.mjs'])
+          assert.equal(builders[1].tier, 'judge')
+          assert.equal(f.seen.publish.title, 'fix(crew): revised plan')
+          assert.ok(f.seen.publish.body.includes('proof: none'))
+        }
+      }
+    }
+  }
+  for (const tier of ['build', 'judge']) for (const next of ['builder', 'planner', 'accept']) {
+    let builds = 0, leads = 0
+    const f = fakes({ spec: { tier }, lead: 'bounce', target: next, edit: (v) => {
+      if (v.role === 'builder' && ++builds === 1) return { ...v, status: 'insufficient', summary: 'gap' }
+      if (v.role === 'lead' && (++leads === 1 || next === 'accept')) v.details = { decision: 'accept' }
+      return v
+    } })
+    const result = await f.go()
+    const roles = f.requests.map((r) => r.role)
+    assert.deepEqual(roles.slice(0, 4), ['planner', 'builder', 'lead', 'lead'], `${tier} ${next}`)
+    const retry = f.requests.filter((r) => r.role === 'lead')[1].feedback[0]
+    assert.equal(retry.envelope.status, 'insufficient')
+    assert.equal(retry.feedback[0].id, 'accept-insufficient')
+    if (next === 'accept') {
+      assert.deepEqual(result, stopped('lead-escalated'))
+      assert.match(f.rows.findLast((r) => r.event === 'verdict').observation.question, /accept/)
+      assert.ok(!f.calls.includes('proof'))
+    } else {
+      assert.equal(roles[4], next)
+      assert.equal(result.status, 'done')
+    }
+  }
+})
+
+// MUTATION: restore round-bound at the spent-lead stop.
+test("the lead's last consult is marked last, and a spent lead bound stops for the operator with a question, never round-bound", async () => {
+  const later = fakes({ review: 10, bounds: { builder: 1, reviewer: 10 }, lead: 'bounce', edit: (v) => {
+    if (v.role === 'lead') v.summary = 'keep fixing R1'
+    if (v.role === 'builder') v.summary = 'built R1'
     return v
   } })
-  const result = await f.go()
-  assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'builder', 'planner', 'builder', 'reviewer', 'tech-lead'])
-  assert.equal(result.status, 'done')
-  assert.equal(f.requests[2].feedback[0].envelope.status, 'insufficient')
-  assert.deepEqual(f.requests[3].filesInScope, ['crew/loop.mjs'])
-  assert.equal(f.requests[3].feedback[0].id, 'plan-revised')
-  assert.equal(f.seen.publish.title, 'fix(crew): revised plan')
-  assert.ok(f.seen.publish.body.includes('proof: none'))
-  assert.equal(f.requests[3].tier, 'judge')
+  assert.deepEqual(await later.go(), stopped('lead-escalated'))
+  assert.deepEqual(later.requests.filter((r) => r.role === 'lead').map((r) => r.feedback[0].last), [false, true])
+  const observation = later.rows.findLast((r) => r.event === 'verdict').observation
+  assert.equal(observation.bound, 'lead'); assert.equal(observation.role, 'builder'); assert.equal(observation.reason, 'round-bound')
+  for (const text of ['builder', 'round-bound', 'built R1', 'bounce', 'keep fixing R1']) assert.ok(observation.question.includes(text))
+  assert.ok(!later.rows.some((r) => r.event === 'verdict' && r.reason === 'round-bound'))
+
+  const reask = fakes({ bounds: { lead: 1 }, edit: (v) => {
+    if (v.role === 'planner') return { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } }
+    if (v.role === 'lead') return { ...v, details: { decision: 'escalate' } }
+    return v
+  } })
+  assert.deepEqual(await reask.go(), stopped('lead-escalated'))
+  assert.equal(reask.requests.find((r) => r.role === 'lead').feedback[0].last, true)
+  assert.match(reask.rows.findLast((r) => r.event === 'verdict').observation.question, /planner/)
 })
 
 test('a lead bounce names its target: planner revises the plan from the builder\'s envelope, builder keeps building', async () => {
@@ -488,19 +556,19 @@ test('the same failure with the same evidence twice stops the lane no-progress a
       return v
     } })
     const result = await f.go()
-    const expected = mode === 'envelope' ? ['planner', 'builder', 'lead', 'builder'] : mode.startsWith('insufficient') ? ['planner', 'builder', 'planner', 'builder'] : mode === 'lead' ? ['planner', 'builder', 'lead', 'lead'] : ['planner', 'builder', 'builder']
+    const expected = mode === 'envelope' ? ['planner', 'builder', 'lead', 'builder'] : mode.startsWith('insufficient') ? ['planner', 'builder', 'lead', 'builder'] : mode === 'lead' ? ['planner', 'builder', 'lead', 'lead'] : ['planner', 'builder', 'builder']
     assert.deepEqual(f.requests.map((r) => r.role), expected)
     assert.equal(result.reason, 'no-progress')
     const observation = f.rows.findLast((r) => r.event === 'verdict').observation
     assert.equal(['envelope', 'insufficient', 'insufficient-reordered', 'lead'].includes(mode) ? observation.role : observation.failure, mode === 'lead' ? 'lead' : mode === 'envelope' || mode.startsWith('insufficient') ? 'builder' : mode)
   }
   let builds = 0
-  const revised = fakes({ bounds: { planner: 3 }, edit: (v) => {
+  const revised = fakes({ bounds: { planner: 3 }, lead: 'bounce', target: 'planner', edit: (v) => {
     if (v.role === 'builder' && ++builds <= 2) return { ...v, status: 'insufficient', details: { ...v.details, summary: `gap ${builds}` } }
     return v
   } })
   assert.equal((await revised.go()).status, 'done')
-  assert.deepEqual(revised.requests.map((r) => r.role), ['planner', 'builder', 'planner', 'builder', 'planner', 'builder', 'reviewer'])
+  assert.deepEqual(revised.requests.map((r) => r.role), ['planner', 'builder', 'lead', 'planner', 'builder', 'lead', 'planner', 'builder', 'reviewer'])
 })
 
 const count = (f, role) => f.requests.filter((r) => r.role === role).length
@@ -779,7 +847,7 @@ test('a lead bounce grants one retry, repeated bounces are bounded by the lead a
   assert.equal(count(once, 'lead'), 1)
   assert.equal(count(once, 'builder'), 2)
   const repeated = fakes({ review: 10, bounds: { builder: 1, reviewer: 10 }, lead: 'bounce' })
-  assert.deepEqual(await repeated.go(), stopped('round-bound'))
+  assert.deepEqual(await repeated.go(), stopped('lead-escalated'))
   assert.equal(count(repeated, 'lead'), 2)
   assert.equal(count(repeated, 'builder'), 3)
   assert.equal(repeated.calls.includes('commit'), false)
@@ -802,7 +870,7 @@ test('a lead accept releases only a valid non-done envelope and never an exhaust
   assert.equal(count(escalated, 'lead'), 1)
   assert.deepEqual(escalated.requests.find((r) => r.role === 'lead').feedback.map((x) => [x.role, x.reason, x.envelope.status]), [['planner', 'escalate', 'escalate']])
   const exhausted = fakes({ lead: 'accept', review: 10, bounds: { builder: 1 } })
-  assert.deepEqual(await exhausted.go(), stopped('round-bound'))
+  assert.deepEqual(await exhausted.go(), stopped('lead-escalated'))
   assert.equal(count(exhausted, 'lead'), 2)
   assert.equal(exhausted.calls.includes('commit'), false)
   const changes = fakes({ lead: 'accept', review: 10, edit: (v) => v.role === 'reviewer' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v })

@@ -253,7 +253,7 @@ export async function runLoop(spec, deps = {}) {
 
   // One role's turn: issue, await, read back, validate (a schema-refused file gets one repair turn that
   // costs no round). Returns { envelope } for a done envelope or { halt }.
-  // Non-done returns route under ADR-055 §12; an exhausted bound goes to the lead, unless singleTurn stops it.
+  // Non-done returns route under ADR-055 §12; an exhausted bound goes to the lead, unless singleTurn or the lead's own bound stops it.
   const seatTurn = async (role, feedback = [], { singleTurn = false } = {}) => {
     let given = feedback
     for (;;) {
@@ -264,6 +264,7 @@ export async function runLoop(spec, deps = {}) {
         turn += 1
         rounds[role] += 1
         turns[role] += 1
+        if (role === 'lead') feedback = feedback.map((item) => Object.hasOwn(item, 'last') ? { ...item, last: rounds.lead >= (seats.lead.rounds ?? DEFAULT_ROUNDS) } : item)
         if (role === 'builder' && feedback.some((item) => item.id === 'suite-repair')) suiteRepairs += 1
         const id = `${spec.id}.${role}.${turn}`
         const returnPath = join(spec.taskDir, `${role}-${turn}.json`)
@@ -343,8 +344,15 @@ export async function runLoop(spec, deps = {}) {
       }
       // ADR-055 §12: a mechanical repair turn's insufficient restarts the lane and its escalate goes to the lead; round-bound would misreport an unspent bound.
       if (singleTurn && !(role === 'builder' && !isFinish && tier === 'mechanical' && held.envelope && ['insufficient', 'escalate'].includes(held.envelope.status))) return { halt: await stop('round-bound', { role, ...held }) }
-      // The lead is never consulted about itself: no recursion, an unusable lead turn ends the lane.
-      if (role === 'lead') return { halt: await stop(held.envelope ? 'lead-refused' : 'round-bound', held) }
+      // The lead is never consulted about itself: a spent bound asks the operator about the held issue.
+      if (role === 'lead') {
+        if (held.envelope) return { halt: await stop('lead-refused', held) }
+        const { role, reason, envelope } = given[0]
+        const lead = last.lead ?? null
+        const decision = lead?.details?.decision ? [lead.details.decision, lead.details.target, lead.summary].filter(Boolean).join(' ') : 'nothing'
+        const question = oneLine(`How should ${role} resolve ${reason}: ${envelope?.summary || 'no envelope'}? Lead: ${decision}.`)
+        return { halt: await stop('lead-escalated', { role, reason, envelope, lead, bound: 'lead', question }) }
+      }
       if (held.envelope) {
         const { status, details } = held.envelope
         const failure = { role, status, details }
@@ -353,12 +361,12 @@ export async function runLoop(spec, deps = {}) {
           feedback = [{ id: 'escalate-no-question', summary: 'Name the decision needed from the operator in details.question.' }, ...given]
           continue
         }
-        if (!isFinish && role === 'builder' && status === 'insufficient') {
-          const mechanical = tier === 'mechanical'
-          const revised = mechanical ? await restart('build', 'builder-insufficient', { envelope: held.envelope }) : await replan(held.envelope)
+        // ADR-055 §12, amended 2026-11-03: only mechanical insufficiency restarts directly.
+        if (!isFinish && role === 'builder' && status === 'insufficient' && tier === 'mechanical') {
+          const revised = await restart('build', 'builder-insufficient', { envelope: held.envelope })
           if (revised.halt) return revised
-          if (mechanical) { singleTurn = false; given = [] }
-          feedback = mechanical ? [] : [{ id: 'plan-revised', plan_path: planPath }, ...given]
+          singleTurn = false; given = []
+          feedback = []
           seats[role] = { ...seats[role], rounds: Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }
           continue
         }
@@ -376,6 +384,8 @@ export async function runLoop(spec, deps = {}) {
         if (revised.halt) return revised
         if (mechanical) { singleTurn = false; given = [] }
         feedback = mechanical ? [] : [{ id: 'plan-revised', plan_path: planPath }, ...given]
+      } else if (role === 'builder') {
+        feedback = [{ id: 'lead-bounce', summary: decided.summary }, ...given]
       }
       // bounce: exactly one more turn for this role, beyond its bound only if the bound is spent; the counter keeps its history
       seats[role] = { ...seats[role], rounds: Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }
@@ -384,15 +394,22 @@ export async function runLoop(spec, deps = {}) {
       }
     }
   }
-  // accept releases only a schema-valid envelope the seat itself returned; it never stands in for a measurement.
+  // accept releases only a schema-valid envelope the seat itself returned, except a builder insufficient that needs routing.
   const consultLead = async (role, held, feedback) => {
     if (!seats.lead) return { halt: await stop('lead-unavailable', { role, ...held }) }
-    const asked = await stage('lead', () => seatTurn('lead', [{ role, reason: held.reason, envelope: held.envelope ?? last[role] ?? null, feedback }]))
-    if (asked.halt) return asked
-    const { decision, target, question } = asked.envelope.details
-    if (decision === 'escalate') return { halt: await stop('lead-escalated', { role, ...held, question }) }
-    if (decision === 'accept' && !held.envelope) return { decision: 'bounce', target: role, summary: asked.envelope.summary }
-    return { decision, target, summary: asked.envelope.summary }
+    for (;;) {
+      const lastConsult = rounds.lead + 1 >= (seats.lead.rounds ?? DEFAULT_ROUNDS)
+      const asked = await stage('lead', () => seatTurn('lead', [{ role, reason: held.reason, envelope: held.envelope ?? last[role] ?? null, feedback, last: lastConsult }]))
+      if (asked.halt) return asked
+      const { decision, target, question } = asked.envelope.details
+      if (decision === 'escalate') return { halt: await stop('lead-escalated', { role, ...held, question }) }
+      if (decision === 'accept' && !isFinish && tier !== 'mechanical' && role === 'builder' && held.reason === 'insufficient') {
+        feedback = [{ id: 'accept-insufficient', summary: 'Route the builder insufficient to builder or planner, or escalate with a question.' }, ...feedback]
+        continue
+      }
+      if (decision === 'accept' && !held.envelope) return { decision: 'bounce', target: role, summary: asked.envelope.summary }
+      return { decision, target, summary: asked.envelope.summary }
+    }
   }
   const replan = async (envelope, lead) => {
     const planned = await stage('replan', () => seatTurn('planner', [{ id: 'plan-gap', role: 'builder', envelope, ...(lead ? { lead } : {}) }]))

@@ -33,6 +33,15 @@ const boilerplate = charter => {
 const insufficient = '`insufficient` means a named gap in the plan: say what is wrong or missing, and where. Size or effort is never a reason to return `insufficient`.'
 const types = 'The type is one of `chore`, `ci`, `crew`, `docs`, `feat`, `fix`, `merge`, `perf`, `refactor`, `revert`, `spike`, `test`, `wip`, `workflow`.'
 
+// MUTATION: drop the planner's narrow-or-drop sentence.
+test('LD2: a builder insufficient goes to the lead, and a planner revision narrows or drops an unmeetable criterion', () => {
+  has(body('crew/agents/lead.md'), 'A builder `insufficient` comes to you with its envelope: bounce it to `builder` for unfinished work, which continues on the same plan, or to `planner` for a real gap in the plan; escalate only for a §12 case. A consult whose feedback carries `last: true` is your last on this lane: route the held envelope to a seat that can finish it, or escalate naming the unresolved point. If that seat comes back unresolved, the lane stops for the operator.')
+  const builder = body('crew/agents/builder.md')
+  has(builder, 'A builder `insufficient` goes to the lead with your envelope: unfinished work comes back to you on the same plan, and a real gap in the plan goes to the planner, whose revised plan you continue on.')
+  assert.doesNotMatch(builder, /A builder `insufficient` goes to the planner, which revises the plan/)
+  has(body('crew/agents/planner.md'), 'When a revision answers a builder finding that a criterion cannot be met, narrow or drop that criterion rather than add mechanism to keep it.')
+})
+
 // MUTATION: restore return boilerplate or remove a builder loop rule.
 test('CH1: the builder charter keeps the rules the loop depends on', () => {
   const charter = body('crew/agents/builder.md')

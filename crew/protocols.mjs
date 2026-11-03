@@ -14,7 +14,7 @@ const AGENTS = Object.freeze(['claude', 'pi'])
 const EFFORTS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max'])
 const WRITES = Object.freeze(['none', 'task-dir', 'repo'])
 const EXTENSIONS = Object.freeze(['readgate', 'skeletonread', 'subagent', 'fff'])
-const AGENT_FIELDS = Object.freeze(['name', 'description', 'role', 'writes', 'envelope', 'agent', 'model', 'effort', 'fallback', 'skills', 'requires', 'tools', 'extensions', 'advisor', 'memory', 'rounds', 'wait_s', 'tiers'])
+const AGENT_FIELDS = Object.freeze(['name', 'description', 'role', 'writes', 'envelope', 'agent', 'model', 'effort', 'skills', 'requires', 'tools', 'extensions', 'advisor', 'memory', 'rounds', 'wait_s', 'tiers'])
 const AGENT_REQUIRED = Object.freeze(['name', 'description', 'role', 'agent', 'model', 'effort'])
 // A tier may override how a seat runs, never who it is or which tiers exist.
 const TIER_OVERRIDES = Object.freeze(AGENT_FIELDS.filter((key) => !['name', 'description', 'role', 'tiers'].includes(key)))
@@ -183,27 +183,12 @@ function entryDefects(entry, path, required, optional = []) {
   return out
 }
 
-// A fallback stays on the seat's agent and never names the seat's own model.
-function fallbackDefects(fields, prefix) {
-  if (!Array.isArray(fields.fallback)) return []
-  const out = []
-  fields.fallback.forEach((entry, index) => {
-    if (!plain(entry)) return
-    if (entry.model === fields.model) out.push(`${prefix}fallback[${index}].model is the seat's own model ${fields.model}`)
-    if (typeof entry.agent === 'string' && typeof fields.agent === 'string' && entry.agent !== fields.agent) out.push(`${prefix}fallback[${index}].agent ${entry.agent} changes the seat's agent ${fields.agent}`)
-  })
-  return out
-}
-
 // Type and vocabulary defects for the fields present; `prefix` locates a tier override.
 function validateAgentFields(fields, prefix = '') {
   const out = []
   for (const [key, v] of Object.entries(fields)) {
     if (Object.hasOwn(AGENT_RULES, key)) { if (!AGENT_RULES[key][0](v)) out.push(`${prefix}${key} ${AGENT_RULES[key][1]}`) }
-    else if (key === 'fallback') {
-      if (!Array.isArray(v)) out.push(`${prefix}fallback is a list of {agent, model, effort} objects`)
-      else v.forEach((entry, index) => out.push(...entryDefects(entry, `${prefix}fallback[${index}]`, ['agent', 'model'], ['effort'])))
-    } else if (key === 'advisor' && v !== null) out.push(...entryDefects(v, `${prefix}advisor`, ['agent', 'model', 'effort']))
+    else if (key === 'advisor' && v !== null) out.push(...entryDefects(v, `${prefix}advisor`, ['agent', 'model', 'effort']))
   }
   return out
 }
@@ -228,7 +213,7 @@ export function parseAgent(text) {
     else fields[key] = parsed.value
   }
   for (const key of AGENT_REQUIRED) if (!Object.hasOwn(fields, key)) agentDefects.push(`missing field ${key}`)
-  agentDefects.push(...validateAgentFields(fields), ...fallbackDefects(fields, ''))
+  agentDefects.push(...validateAgentFields(fields))
   if (Object.hasOwn(fields, 'tiers')) {
     if (!plain(fields.tiers)) agentDefects.push(`tiers is an object keyed by ${TIERS.join(', ')}`)
     else for (const [tier, override] of Object.entries(fields.tiers)) {
@@ -239,8 +224,6 @@ export function parseAgent(text) {
       for (const key of Object.keys(override)) if (!TIER_OVERRIDES.includes(key)) agentDefects.push(`${path}.${key} cannot be overridden; the overrides are ${TIER_OVERRIDES.join(', ')}`)
       const allowed = Object.fromEntries(Object.entries(override).filter(([key]) => TIER_OVERRIDES.includes(key)))
       agentDefects.push(...validateAgentFields(allowed, `${path}.`))
-      // The effective seat is checked only when the base is sound, so one fault reports once.
-      if (!fallbackDefects(fields, '').length) agentDefects.push(...fallbackDefects({ ...fields, ...allowed }, `${path}.`))
     }
   }
   const body = lines.slice(end + 1).join('\n')

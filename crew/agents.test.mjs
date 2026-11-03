@@ -38,15 +38,7 @@ const roster = {
         "provider": "openai",
         "id": "gpt-6-astra",
         "agent": "pi",
-        "effort": "high",
-        "fallback": [
-          {
-            "provider": "openai",
-            "id": "gpt-6.1-sol",
-            "agent": "pi",
-            "effort": "high"
-          }
-        ]
+        "effort": "high"
       },
       "planner": {
         "provider": "anthropic",
@@ -73,15 +65,7 @@ const roster = {
         "provider": "openai",
         "id": "gpt-6-astra",
         "agent": "pi",
-        "effort": "high",
-        "fallback": [
-          {
-            "provider": "openai",
-            "id": "gpt-6.1-sol",
-            "agent": "pi",
-            "effort": "high"
-          }
-        ]
+        "effort": "high"
       },
       "planner": {
         "provider": "anthropic",
@@ -105,15 +89,7 @@ const roster = {
         "provider": "anthropic",
         "id": "claude-fable-5-1",
         "agent": "claude",
-        "effort": "xhigh",
-        "fallback": [
-          {
-            "provider": "anthropic",
-            "id": "claude-opus-5-5",
-            "agent": "claude",
-            "effort": "xhigh"
-          }
-        ]
+        "effort": "xhigh"
       }
     }
   }
@@ -150,7 +126,6 @@ test('the five committed definitions parse clean with standalone lean charters',
 test('lean charter declarations match the P2 schemas and loop ownership', () => {
   const vocabulary = {
     reviewer: [['Review verdicts', REVIEW_VERDICTS], ['Finding severities', FINDING_SEVERITIES]],
-    'tech-lead': [['Review verdicts', REVIEW_VERDICTS], ['Finding severities', FINDING_SEVERITIES]],
     lead: [['Lead decisions', LEAD_DECISIONS]],
   }
   for (const role of AGENT_ROLES) {
@@ -172,15 +147,18 @@ test('lean charter declarations match the P2 schemas and loop ownership', () => 
       assert.deepEqual(validateEnvelope(role, { role, id: 'probe', status: 'done', summary: 'probe', details: { summary: 'probe', ...optional } }).defects, [])
       detailKeys.push(...Object.keys(optional))
     }
-    for (const [label, expected] of [['Details keys', detailKeys], ...(vocabulary[role] ?? [])]) {
+    for (const [label, expected] of [...(role === 'tech-lead' ? [] : [['Details keys', detailKeys]]), ...(vocabulary[role] ?? [])]) {
       assert.deepEqual(declared(label), [...expected].sort(), `${role}: ${label}`)
     }
     assert.ok(body.includes(`writes: ${fields.writes}`), `${role}: write boundary`)
-    assert.ok(body.includes('The loop runs each test the builder names on the old source and on the build.'), role)
     if (role === 'builder') {
+      assert.ok(body.includes('The loop runs each test the builder names on the old source and on the build.'), role)
       assert.ok(!body.includes('Do not run those stages yourself.'), role)
       assert.ok(body.includes('You may run targeted tests to check your work. Do not run the full suite, commit, rebase or open the PR.'), role)
-    } else assert.ok(body.includes('Do not run those stages yourself.'), role)
+    } else {
+      assert.ok(!body.includes('The loop runs each test the builder names'), role)
+      assert.ok(!body.includes('Do not run those stages yourself.'), role)
+    }
   }
   const planner = parseAgent(readFileSync(join(AGENTS_DIR, 'planner.md'), 'utf8')).body
   assert.match(planner, /conventional-commit subject[^\n]*at most 72 characters/)
@@ -190,7 +168,7 @@ test('lean charter declarations match the P2 schemas and loop ownership', () => 
   assert.ok(reviewer.includes('Read the supplied brief, plan, changed paths and any feedback. Inspect the tracked diff and read every listed untracked file directly; git diff alone omits untracked files.'))
 })
 
-// MUTATION: change any model, effort, fallback or null tier in a definition and this tier drifts from the roster.
+// MUTATION: change any model, effort or null tier in a definition and this tier drifts from the roster.
 test('every tier resolves to exactly the roster cells, null roles unseated', () => {
   assert.deepEqual(TIERS, Object.keys(roster.tiers))
   for (const tier of TIERS) {
@@ -213,10 +191,9 @@ test('each committed definition declares exactly its arm grants', () => {
 
 // MUTATION: hardcode the roster cells and an edited definition no longer changes the resolution.
 test('an edited definition changes the resolved cell, and only in the tier it overrides', () => withScratch((dir) => {
-  edit(dir, 'builder', (text) => text.replace('"judge":{"effort":"xhigh"}', '"judge":{"model":"openai/changed","agent":"pi","effort":"max","fallback":[{"agent":"pi","model":"openai/spare"}]}'))
+  edit(dir, 'builder', (text) => text.replace('"judge":{"effort":"xhigh"}', '"judge":{"model":"openai/changed","agent":"pi","effort":"max"}'))
   assert.deepEqual(resolveAgents('judge', dir).seats.builder, {
     provider: 'openai', id: 'changed', agent: 'pi', effort: 'max',
-    fallback: [{ provider: 'openai', id: 'spare', agent: 'pi', effort: 'max' }],
   })
   assert.deepEqual(resolveAgents('build', dir).seats.builder, roster.tiers.build.builder)
   edit(dir, 'builder', (text) => text.replace('effort: high', 'effort: low'))
@@ -226,10 +203,10 @@ test('an edited definition changes the resolved cell, and only in the tier it ov
 test('nothing leaks between calls: every call reads the files afresh and returns its own objects', () => withScratch((dir) => {
   const first = resolveAgents('build', dir)
   first.seats.planner.effort = 'mutated'
-  first.seats.lead.fallback.push('mutated')
+  first.advisor.effort = 'mutated'
   const second = resolveAgents('build', dir)
   assert.equal(second.seats.planner.effort, 'high')
-  assert.equal(second.seats.lead.fallback.length, 1)
+  assert.equal(second.advisor.effort, 'medium')
   edit(dir, 'planner', (text) => text.replace('effort: high', 'effort: low'))
   assert.equal(resolveAgents('build', dir).seats.planner.effort, 'low')
 }))
@@ -240,15 +217,6 @@ test('a null tier override unseats a role, and a missing one inherits', () => wi
   assert.equal('lead' in resolveAgents('build', dir).seats, true)
   edit(dir, 'lead', (text) => text.replace('tiers: {"mechanical":null}', 'tiers: {}'))
   assert.equal('lead' in resolveAgents('mechanical', dir).seats, true)
-}))
-
-test('a fallback inherits the seat effort, and an empty chain is no fallback key', () => withScratch((dir) => {
-  edit(dir, 'lead', (text) => text.replace(',"effort":"high"}]', '}]'))
-  assert.equal(resolveAgents('build', dir).seats.lead.fallback[0].effort, 'high')
-  edit(dir, 'lead', (text) => text.replace('effort: high', 'effort: low'))
-  assert.equal(resolveAgents('build', dir).seats.lead.fallback[0].effort, 'low')
-  edit(dir, 'lead', (text) => text.replace(/fallback: .*\n/, 'fallback: []\n'))
-  assert.equal('fallback' in resolveAgents('build', dir).seats.lead, false)
 }))
 
 // MUTATION: drop the rounds copy in resolveAgents and a declared bound never reaches the seat.

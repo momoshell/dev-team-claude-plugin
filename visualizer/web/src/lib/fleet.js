@@ -63,15 +63,23 @@ function recordedConfigurationValue(run = {}, dimension) {
   return typeof value === 'string' && value.trim() ? value : null
 }
 
+function boardConfigurationValue(run, dimension) {
+  if (run?.source === 'lean') {
+    if (dimension === 'assurance') return run.tier ? assuranceMeta(run.tier).key : null
+    if (dimension === 'execution_shape') return recordedConfigurationValue(run, 'shape')
+  }
+  return recordedConfigurationValue(run, dimension)
+}
+
 function configurationDimensionDescriptor(source, descriptor) {
-  const values = [...new Set(source.map((run) => recordedConfigurationValue(run, descriptor.key)).filter((value) => value !== null))].sort()
+  const values = [...new Set(source.map((run) => boardConfigurationValue(run, descriptor.key)).filter((value) => value !== null))].sort()
   if (values.length === 0) return []
   return [{ key: descriptor.key, label: descriptor.label, options: values.map((value) => ({ value, label: descriptor.meta(value).label })) }]
 }
 
 export function configurationDimensionCell(run = {}, dimension) {
   const descriptor = CONFIGURATION_DIMENSIONS.find((candidate) => candidate.key === dimension)
-  const value = descriptor ? recordedConfigurationValue(run, descriptor.key) : null
+  const value = descriptor ? boardConfigurationValue(run, descriptor.key) : null
   if (value === null) return absenceMark('Not recorded')
   const meta = descriptor.meta(value)
   return { ...measuredCell(value, meta.label), key: value, summary: meta.summary ?? null }
@@ -385,7 +393,7 @@ export function configurationFilterView(runs = [], selections = {}) {
   const rows = source.filter((run) => CONFIGURATION_DIMENSIONS.every((descriptor) => {
     const selection = selections?.[descriptor.key]
     if (!selection || selection === 'all') return true
-    const value = recordedConfigurationValue(run, descriptor.key)
+    const value = boardConfigurationValue(run, descriptor.key)
     if (value === null) return true
     return value === selection
   }))
@@ -863,7 +871,7 @@ export function tokenCell(run = {}) {
     const value = metrics?.[field]
     if (typeof value === 'number' && Number.isFinite(value)) total = (total ?? 0) + value
   }
-  if (total == null) return absenceMark(run?.pending?.billed_input_tokens)
+  if (total == null) return absenceMark(run?.pending?.billed_input_tokens ?? run?.pending?.tokens ?? 'not measured')
   const input = finiteNumber(metrics?.billed_input_tokens)
   const output = finiteNumber(metrics?.billed_output_tokens)
   const cacheWrite = finiteNumber(metrics?.billed_cache_write_tokens)

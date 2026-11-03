@@ -24,5 +24,5 @@ export function setModelPreference(metadata,value,models) {
   else if(value) lines.push(`model: ${JSON.stringify(value)}`)
   return lines.join('\n').replace(/^\n/,'')
 }
-export const transportLabel = value => ({pane:'Visible terminal', 'headless-json':'Background · JSON', 'headless-rpc':'Background · RPC', acp:'Agent Client Protocol (ACP)'})[value] || value
+export const transportLabel = value => ({acp:'Agent Client Protocol (ACP)'})[value] || value
 export const capabilityLabel = value => ({extensions:'Extensions',skills:'Skills',mcp_servers:'MCP servers',local_provider:'Local model providers'})[value] || value

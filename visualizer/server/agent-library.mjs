@@ -6,7 +6,7 @@ import { AGENT_FILE_LIMIT, composeAgentFile, parseAgentFile, validateAgentFile }
 
 const digest = (text) => createHash('sha256').update(text).digest('hex')
 const safeName = (name) => typeof name === 'string' && /^[a-z][a-z0-9._-]{0,79}$/.test(name)
-const TRANSPORTS = ['pane', 'headless-json', 'headless-rpc', 'acp'] // crew/capabilities.schema.json transports enum
+const TRANSPORTS = ['acp'] // crew/capabilities.schema.json transports enum
 const problem = (error, status=400) => ({ ok:false, error, status })
 
 export function createAgentLibrary({ checkout=process.cwd(), home=homedir(), env=process.env, writable=true, capabilitiesPath=join(checkout,'crew/capabilities.json') } = {}) {

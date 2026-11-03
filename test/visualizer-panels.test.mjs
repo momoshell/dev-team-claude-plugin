@@ -11,6 +11,30 @@ import { diffLines } from '../visualizer/web/src/lib/diff-lines.js'
 import { ROOT, scratchDir, sqliteAvailable } from './helpers.mjs'
 import { getPluginWriteMode, proposeSkills } from '../visualizer/web/src/lib/api.js'
 import { activitySummary } from '../visualizer/web/src/lib/activity.js'
+import { transportLabel } from '../visualizer/web/src/lib/agent-settings.js'
+
+test('TR3 transportLabel names acp and shows a retired transport as recorded', () => {
+  assert.equal(transportLabel('acp'), 'Agent Client Protocol (ACP)')
+  for (const value of ['pane', 'headless-json', 'headless-rpc']) assert.equal(transportLabel(value), value)
+})
+
+test('LB1 a lean row\'s tier and shape fill the board\'s assurance and execution cells and filters', () => {
+  const lean = { adw_id: 'l', source: 'lean', tier: 'build', shape: 'standard' }
+  // MUTATION: read the absent assurance and execution_shape fields instead.
+  assert.equal(configurationDimensionCell(lean, 'assurance').text, 'Standard')
+  assert.equal(configurationDimensionCell(lean, 'execution_shape').text, 'Standard')
+  assert.equal(configurationDimensionCell(lean, 'task_profile').dashed, true)
+  assert.deepEqual(configurationFilterView([lean]).dimensions.map((d) => d.key), ['execution_shape', 'assurance'])
+  assert.equal(configurationFilterView([lean], { assurance: 'rigorous' }).rows.length, 0)
+  assert.equal(configurationFilterView([lean], { assurance: 'standard' }).rows.length, 1)
+  assert.equal(configurationDimensionCell({ tier: 'build' }, 'assurance').dashed, true)
+})
+
+test('TK1 tokenCell keeps a lean row\'s closed tokens reason', () => {
+  const reason = 'lean seat recordings are not counted'
+  const cell = tokenCell({ source: 'lean', pending: { tokens: reason } })
+  assert.equal(cell.text, reason); assert.equal(cell.title, reason)
+})
 test('RO6', async () => {
   // MUTATION: change the getter URL; the behavioral fetch assertion must fail.
   const original = globalThis.fetch

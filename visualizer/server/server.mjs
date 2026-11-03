@@ -573,7 +573,7 @@ export function startServer(options = {}) {
       }
       if (url.pathname === '/api/health') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
-        return json(res, 200, { schema, ...journal.health(), ledger: { readable: false, absent: 'ledger source removed: the visualizer no longer reads the ledger' } })
+        return json(res, 200, { schema, ...journal.health(), readonly: false, writes: SERVER_WRITES, ledger: { readable: false, absent: 'ledger source removed: the visualizer no longer reads the ledger' } })
       }
       if (url.pathname.startsWith('/api/')) return method === 'GET' ? json(res, 404, { schema, error: 'not found' }) : json(res, 405, { schema, error: 'not found' }, { allow: 'GET' })
       if (method !== 'GET' && method !== 'HEAD') return res.writeHead(405, { allow: 'GET, HEAD' }).end()
@@ -586,10 +586,12 @@ export function startServer(options = {}) {
   process.once('SIGTERM', close); process.once('SIGINT', close)
   server.listen(config.port, config.host, () => {
     const address = server.address()
-    process.stdout.write(`${JSON.stringify({ listening: true, port: address.port, crew_root: config.crewRoot, readonly: false, writes: ['project agent definition files when Save agent is explicitly requested', 'harness execution preferences when Save harness settings is explicitly requested', 'skill definitions and selection rules when explicitly saved', 'Artificial Analysis key in the project .env.local when explicitly requested'] })}\n`)
+    process.stdout.write(`${JSON.stringify({ listening: true, port: address.port, crew_root: config.crewRoot, readonly: false, writes: SERVER_WRITES })}\n`)
   })
   return { server, agents }
 }
+
+const SERVER_WRITES = ['project agent definition files when Save agent is explicitly requested', 'harness execution preferences when Save harness settings is explicitly requested', 'skill definitions and selection rules when explicitly saved', 'Artificial Analysis key in the project .env.local when explicitly requested']
 
 // For the dist fence above: a path that cannot be realpathed is compared as written.
 function realpathOr(path) {

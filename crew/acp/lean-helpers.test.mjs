@@ -251,3 +251,24 @@ test('BriefUsageError carries its name and reason', () => {
   assert.equal(err instanceof Error, true)
   assert.equal(new BriefUsageError('x').reason, 'missing-line')
 })
+
+// MUTATION: drop the own-role pass in registeredAgents, so the first role that names an agent wins.
+test('a seat whose role defines its own agent gets that definition, not an earlier role\'s', () => {
+  const register = { roles: {
+    planner: { mcp_servers: [], by_agent: { pi: { agents: [{ name: 'scout', def: 'planner.json' }] } } },
+    reviewer: { mcp_servers: [], by_agent: { pi: { agents: [{ name: 'scout', def: 'reviewer.json' }] } } },
+    builder: { mcp_servers: [] },
+  } }
+  const readFile = () => JSON.stringify({ name: 'scout', prompt: 'look' })
+  const own = armGrants({ role: 'reviewer', agent: 'pi', extensions: ['subagent'] }, { register, root: '/repo', exists: () => true, readFile })
+  assert.deepEqual(own.agents, [{ name: 'scout', def: resolvePath('/repo/reviewer.json') }])
+  const fallback = armGrants({ role: 'builder', agent: 'pi', extensions: ['subagent'] }, { register, root: '/repo', exists: () => true, readFile })
+  assert.deepEqual(fallback.agents, [{ name: 'scout', def: resolvePath('/repo/planner.json') }])
+})
+
+// MUTATION: read spec.extensions without a default.
+test('grantsFor on a shipped role with no extensions or agents field grants none', () => {
+  const grants = grantsFor(loadCapabilities(), 'builder', { exists: () => true })
+  assert.deepEqual(grants.extensions, [])
+  assert.deepEqual(grants.agents, [])
+})

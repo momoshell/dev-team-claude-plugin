@@ -216,12 +216,12 @@ export function grantsFor(register, role, { root = REGISTER_ROOT, exists = exist
   const spec = register?.roles && Object.hasOwn(register.roles, role) ? register.roles[role] : null
   if (!spec) throw refuse('register-invalid', `runtime capability register has no grant for unknown role ${JSON.stringify(role)} under the runtime-policy rule`)
 
-  const extensions = spec.extensions.map((relativePath) => {
+  const extensions = (spec.extensions ?? []).map((relativePath) => {
     const path = resolvedGrantPath(root, relativePath)
     if (!pathExists(exists, path)) throw pathMessage('extension-missing', role, 'extension grant', 'an existing checkout-relative path', 'missing', path)
     return path
   })
-  const agents = spec.agents.map((grant) => {
+  const agents = (spec.agents ?? []).map((grant) => {
     const path = resolvedGrantPath(root, grant.def)
     let raw
     try {
@@ -271,9 +271,16 @@ function registeredMcpServer(register, name) {
   return null
 }
 
-function registeredAgents(register) {
+// The seat's own role grant and its adapter overlay come first, so a role that defines an agent gets its own
+// definition; the other roles fill in only names the seat does not define (the reviewer's scout falls back
+// to the planner's pi overlay).
+function registeredAgents(register, role, agent) {
   const named = new Map()
-  for (const spec of Object.values(register?.roles ?? {})) {
+  const roles = register?.roles ?? {}
+  const own = Object.hasOwn(roles, role) ? roles[role] : null
+  const ownGroups = own ? [own, ...(agent && Object.hasOwn(own.by_agent ?? {}, agent) ? [own.by_agent[agent]] : [])] : []
+  for (const group of ownGroups) for (const grant of group?.agents ?? []) if (!named.has(grant.name)) named.set(grant.name, grant)
+  for (const spec of Object.values(roles)) {
     for (const group of [spec, ...Object.values(spec?.by_agent ?? {})]) {
       for (const grant of group?.agents ?? []) if (!named.has(grant.name)) named.set(grant.name, grant)
     }
@@ -302,7 +309,7 @@ export function armGrants({ role, agent, extensions = [] }, { register = loadCap
     }
   }
   const fanout = agent === 'pi' && paths.includes(SUBAGENT_EXTENSION)
-  const agents = fanout ? registeredAgents(register) : []
+  const agents = fanout ? registeredAgents(register, role, agent) : []
   if (fanout && agents.length === 0) {
     throw refuse('unknown-grant', `seat ${role} asks for subagent but the register declares no agent definition for it`)
   }

@@ -11,7 +11,8 @@
 // `--abandon` ends the lane unpublished. Each appends a `finish-decision` row; a lane takes one decision per ready.
 // Refused, with nothing written: `finish-worktree` (the worktree is gone), `finish-premise` (the lane never reached
 // a build), `finish-running` (a run re-entered or claimed the lane after its stop), `finish-published` and
-// `finish-committed` (nothing uncommitted is left), `finish-no-build` (no schema-valid done or insufficient builder
+// `finish-committed` (the build is still committed; a successful `uncommit` undoes the commit), `finish-no-build`
+// (no schema-valid done or insufficient builder
 // envelope in the journal). The PR carries the measured subject and body, and the notes, exactly (the lane's issues
 // ride on trailer lines); gh pr edit restores that text where opening rewrote issue tokens or the PR was already open.
 // A decision is refused as `finish-not-ready` (the last run did not end finish-ready), `finish-decided` (it already
@@ -179,9 +180,10 @@ export function finishLane({ lane, root, deps = {} }) {
   // A row after the stop means a run has re-entered the lane since: a second finish would race it.
   if (rows.slice(stopAt + 1).some((row) => row.event === 'stage-start' || row.event === 'finish-ready')) throw new FinishRefusal('finish-running', `lane ${lane} has run again since it stopped`)
 
-  // A published or committed lane has no uncommitted build left to finish.
+  // A published lane or a build still committed after the last successful uncommit cannot be finished.
   if (rows.some((row) => row.event === 'pr')) throw new FinishRefusal('finish-published', `lane ${lane} already has a recorded PR`)
-  if (rows.some((row) => row.event === 'commit')) throw new FinishRefusal('finish-committed', `lane ${lane} already committed its build`)
+  const lastCommit = rows.findLastIndex((row) => row.event === 'commit')
+  if (lastCommit >= 0 && !rows.slice(lastCommit + 1).some((row) => row.event === 'stage-end' && row.stage === 'uncommit' && row.outcome?.status === 'green')) throw new FinishRefusal('finish-committed', `lane ${lane} already committed its build`)
 
   if (!rows.some((row) => row.event === 'envelope' && row.role === 'builder' && Array.isArray(row.defects) && row.defects.length === 0 && ['done', 'insufficient'].includes(row.parsed?.status) && row.parsed.id === row.id)) throw new FinishRefusal('finish-no-build', `lane ${lane} has no schema-valid done or insufficient builder envelope in its journal`)
 

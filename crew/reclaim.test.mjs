@@ -4,7 +4,14 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
+import * as reclaim from './reclaim.mjs'
 import { reclaimStore, PHASES, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
+
+// MUTATION: restore the SLOT_ENV export.
+test('reclaim.mjs exports no SLOT_ENV', () => {
+  assert.equal(Object.hasOwn(reclaim, 'SLOT_ENV'), false)
+  assert.equal(typeof reclaim.reclaimStore, 'function')
+})
 
 
 function fixture() {

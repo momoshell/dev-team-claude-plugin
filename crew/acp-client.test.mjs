@@ -525,6 +525,43 @@ test('the client has only built-in or relative imports and the package has no ru
   assert.equal(specifiers.every((specifier) => specifier.startsWith('node:') || specifier.startsWith('./') || specifier.startsWith('../')), true)
 })
 
+// MUTATION: unlink the legacy rpc/<role>/cmd.fifo in start().
+test('start leaves a file at the legacy in-crew command path in place', () => {
+  const root = scratchDir('acp-legacy-')
+  const runtime = scratchDir('acp-runtime-')
+  const acpRoot = join(root, 'acp')
+  let groupGone = false
+  let api
+  try {
+    mkdirSync(join(acpRoot, 'builder'), { recursive: true })
+    writeFileSync(join(acpRoot, 'builder', 'stream.jsonl'), '')
+    api = acpClient({
+      launch: { bin: '/bin/false', args: [], env: {} }, dir: acpRoot, cwd: root, role: 'builder', sinks: {},
+      deps: {
+        pid: 900,
+        spawn: () => { writeFileSync(join(acpRoot, 'builder', 'pgid'), '901'); return { pid: 901, unref() {} } },
+        openSync: () => 7, writeSync: () => {}, closeSync: () => {},
+        kill: (target, signal) => {
+          if (target !== -901) return true
+          if (signal === 0 && groupGone) throw Object.assign(new Error('no such process'), { code: 'ESRCH' })
+          if (signal !== 0) { writeFileSync(join(acpRoot, 'builder', 'exit'), '0'); groupGone = true }
+          return true
+        },
+        now: () => Date.now(), sleep: () => {}, log: () => {}, seatCommandRoot: runtime,
+      },
+    })
+    const stale = join(root, 'rpc', 'builder', 'cmd.fifo')
+    mkdirSync(dirname(stale), { recursive: true })
+    writeFileSync(stale, '')
+    api.start()
+    assert.equal(existsSync(stale), true)
+  } finally {
+    api?.close()
+    rmSync(root, { recursive: true, force: true })
+    rmSync(runtime, { recursive: true, force: true })
+  }
+})
+
 test('E1', () => {
   const root = scratchDir('acp-e1-parity-')
   const parityRuntime = scratchDir('acp-runtime-')
@@ -568,11 +605,7 @@ test('E1', () => {
         seatCommandRoot: deadRuntime,
       },
     })
-    const stale = join(deadRoot, 'rpc', 'builder', 'cmd.fifo')
-    mkdirSync(dirname(stale), { recursive: true })
-    writeFileSync(stale, '')
     api.start()
-    assert.equal(existsSync(stale), false)
     assert.equal(existsSync(dirname(fifo)), true)
     writeFileSync(fifo, '')
     const result = api.close()

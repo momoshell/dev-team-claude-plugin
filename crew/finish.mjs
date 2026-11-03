@@ -29,7 +29,6 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { FINISH_REVIEW_ROUNDS, composeLanePrBody, openPullRequest, runSuite, withoutIssueTokens } from './checks.mjs'
 import { TIERS, validateEnvelope } from './protocols.mjs'
-import { SLOT_ENV } from './reclaim.mjs'
 
 const HOME = dirname(dirname(fileURLToPath(import.meta.url)))
 const LEAN = join(HOME, 'crew', 'lean.mjs')
@@ -156,8 +155,7 @@ function launch(d, { crewRoot, taskDir, spec, finish, claim }) {
   try {
     d.mkdirSync(started, { recursive: true })
     d.writeFileSync(specPath, `${JSON.stringify({ ...spec, shape: 'finish', finish }, null, 2)}\n`)
-    const env = { ...process.env, [SLOT_ENV.capacity]: '0' }
-    pid = d.spawnDetached(process.execPath, [LEAN, specPath], { cwd: spec.cwd, log, env })
+    pid = d.spawnDetached(process.execPath, [LEAN, specPath], { cwd: spec.cwd, log })
   } catch (error) {
     try { d.rmSync(claim, { force: true }) } catch { /* the launch error is the one reported */ }
     throw error

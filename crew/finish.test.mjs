@@ -216,8 +216,26 @@ test('a stopped lane with a build is finished: finish.json carries the stop, fin
     assert.equal(r.spawned[0].args[1], join(f.taskDir, 'finish.json'))
     assert.equal(r.spawned[0].opts.cwd, f.cwd)
     assert.equal(r.spawned[0].opts.log, join(f.root, 'briefs', 'started', 'lane9.run.log'))
-    assert.equal(r.spawned[0].opts.env.CREW_SUITE_SLOTS, '0')
     assert.deepEqual(out, { lane: 'lane9', worktree: f.cwd, specPath: join(f.taskDir, 'finish.json'), pid: 4242 })
+  } finally { cleanup(f) }
+})
+
+// MUTATION: pass { ...process.env, CREW_SUITE_SLOTS: '0' } as env.
+test('a finish run inherits the caller environment and sets no slot variable', () => {
+  const f = fixture({ rows: [
+    { event: 'run-start', stage: null },
+    { event: 'envelope', role: 'planner', parsed: PLANNER, defects: [] },
+    ...['baseline', 'gate', 'mutations'].map((stage) => ({ event: 'stage-start', stage })),
+    builderRow,
+    { event: 'envelope', role: 'reviewer', parsed: { status: 'done' }, defects: [] },
+    { event: 'verdict', stage: 'review', status: 'reviewed', verdict: 'changes-needed', findings: [FINDING] },
+    { event: 'verdict', stage: 'review', status: 'stopped', ...STOP },
+  ] })
+  try {
+    const r = run(f)
+    r.go()
+    assert.equal(r.spawned.length, 1)
+    assert.equal(r.spawned[0].opts.env, undefined)
   } finally { cleanup(f) }
 })
 

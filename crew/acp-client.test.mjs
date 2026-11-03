@@ -65,6 +65,100 @@ test('requests fail promptly on seat exit but consume final responses', () => {
   }
 })
 
+// MUTATION: reset setupDeadline on every request().
+test('S2-16 setup requests share one bounded budget', () => {
+  for (const answerInitialize of [false, true]) {
+    const root = scratchDir('acp-setup-budget-'), dir = join(root, 'acp')
+    const paths = acpSeatPaths(dir, 'builder', join(root, 'commands'))
+    let clock = 0, bytes = '', pending
+    const client = acpClient({ launch: { bin: '/unused', args: [] }, dir, cwd: root, role: 'builder', deps: {
+      seatCommandRoot: join(root, 'commands'), pid: 900,
+      spawn: () => ({ pid: 901, unref() {} }), openSync: () => 7, closeSync() {},
+      writeSync(_fd, buffer, offset, length) { pending = JSON.parse(buffer.subarray(offset, offset + length).toString()); return length },
+      existsSync: (path) => path === paths.stream || existsSync(path),
+      readFileSync: (path, ...args) => path === paths.stream ? Buffer.from(bytes) : readFileSync(path, ...args),
+      now: () => clock,
+      sleep() {
+        clock += 1000
+        if (answerInitialize && pending?.method === 'initialize' && clock >= 100000) {
+          bytes += JSON.stringify({ jsonrpc: '2.0', id: pending.id, result: { protocolVersion: 1 } }) + '\n'
+          pending = null
+        }
+      },
+      kill() { throw Object.assign(new Error('gone'), { code: 'ESRCH' }) },
+    } })
+    try {
+      client.start()
+      const at = clock
+      if (answerInitialize) client.initialize()
+      assert.throws(() => answerInitialize ? client.newSession() : client.initialize(), { reason: 'acp-request-timeout' })
+      assert.ok(clock - at <= 181000, `elapsed ${clock - at}`)
+    } finally { client.close(); rmSync(root, { recursive: true, force: true }) }
+  }
+})
+
+// MUTATION: let setup writes use only the independent write deadline.
+test('S2-16 blocked setup writes respect the shared budget and preserve torn frames', () => {
+  for (const [answerAt, reason, elapsed] of [[179000, 'acp-request-timeout', 180000], [100000, 'acp-prompt-write-timeout', 130000]]) {
+    const root = scratchDir('acp-setup-write-'), dir = join(root, 'acp')
+    const paths = acpSeatPaths(dir, 'builder', join(root, 'commands'))
+    let clock = 0, bytes = '', pending, partial = false
+    const client = acpClient({ launch: { bin: '/unused' }, dir, cwd: root, deps: {
+      seatCommandRoot: join(root, 'commands'), pid: 900,
+      spawn: () => ({ pid: 901, unref() {} }), openSync: () => 7, closeSync() {},
+      writeSync(_fd, buffer, offset, length) {
+        if (!pending) { pending = JSON.parse(buffer.subarray(offset, offset + length).toString()); return length }
+        if (!partial) { partial = true; return 5 }
+        throw Object.assign(new Error('blocked'), { code: 'EAGAIN' })
+      },
+      existsSync: (path) => path === paths.stream || existsSync(path),
+      readFileSync: (path, ...args) => path === paths.stream ? Buffer.from(bytes) : readFileSync(path, ...args),
+      now: () => clock,
+      sleep(ms) {
+        clock += ms
+        if (pending?.method === 'initialize' && !bytes && clock >= answerAt) bytes = JSON.stringify({ jsonrpc: '2.0', id: pending.id, result: { protocolVersion: 1 } }) + '\n'
+      },
+      kill() { throw Object.assign(new Error('gone'), { code: 'ESRCH' }) },
+    } })
+    try {
+      client.start()
+      client.initialize()
+      assert.throws(() => client.newSession({ _meta: { data: 'x'.repeat(100000) } }), { reason, bytesWritten: 5 })
+      assert.equal(clock, elapsed)
+      assert.throws(() => client.setMode('default'), { reason: 'acp-prompt-write-timeout', bytesWritten: 0 })
+    } finally { client.close(); rmSync(root, { recursive: true, force: true }) }
+  }
+})
+
+// MUTATION: restore the 20-iteration fifo loop.
+test('S2-17 a fifo that appears after 500 ms still starts the seat', () => {
+  const root = scratchDir('acp-slow-fifo-')
+  let clock = 0
+  const client = acpClient({ launch: { bin: '/unused', args: [] }, dir: join(root, 'acp'), cwd: root, role: 'builder', deps: {
+    seatCommandRoot: join(root, 'commands'), pid: 900,
+    spawn: () => ({ pid: 901, unref() {} }),
+    openSync() { if (clock < 2000) throw Object.assign(new Error('not yet'), { code: 'ENOENT' }); return 7 },
+    closeSync() {}, now: () => clock, sleep: (ms) => { clock += ms },
+    kill() { throw Object.assign(new Error('gone'), { code: 'ESRCH' }) },
+  } })
+  try {
+    let result
+    assert.doesNotThrow(() => { result = client.start() })
+    assert.deepEqual(result, { pid: 901 })
+  } finally { client.close(); rmSync(root, { recursive: true, force: true }) }
+
+  const lateRoot = scratchDir('acp-late-fifo-')
+  let lateClock = 0
+  const late = acpClient({ launch: { bin: '/unused', args: [] }, dir: join(lateRoot, 'acp'), cwd: lateRoot, role: 'builder', deps: {
+    seatCommandRoot: join(lateRoot, 'commands'), pid: 900,
+    spawn: () => ({ pid: 901, unref() {} }),
+    openSync() { if (lateClock === 0) throw Object.assign(new Error('not yet'), { code: 'ENOENT' }); return 7 },
+    now: () => lateClock, sleep: () => { lateClock += 11000 },
+    kill() { throw Object.assign(new Error('gone'), { code: 'ESRCH' }) },
+  } })
+  try { assert.throws(() => late.start(), { reason: 'acp-spawn-failed' }) } finally { late.close(); rmSync(lateRoot, { recursive: true, force: true }) }
+})
+
 const REGISTER_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
 const FIXTURES = join(REGISTER_ROOT, 'test', 'fixtures', 'acp')
@@ -1093,30 +1187,37 @@ test('an unproven close keeps the reservation so a second start refuses busy', (
     assert.equal(busy?.reason, 'acp-session-busy')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
-test('AT5 fifo failure signals the group, clears the reservation, and refuses acp-spawn-failed', () => {
-  const root = scratchDir('acp-fifo-')
-  const acpRoot = join(root, 'acp')
-  const kills = []
-  let clock = 1000
-  const baseDeps = {
-    pid: 99001,
-    spawn: () => ({ pid: 99002, unref() {} }),
-    writeSync: () => {},
-    closeSync: () => {},
-    existsSync: (path) => existsSync(path) || String(path).endsWith('cmd.fifo'),
-    kill: (target, signal) => { kills.push([target, signal]) },
-    now: () => { clock += 1000; return clock },
-    sleep: () => {},
-    log: () => {},
-    seatCommandRoot: join(root, 'seat-runtime'),
+// MUTATION: clear the reservation unconditionally on a fifo miss.
+test('S2-17 a fifo miss clears the reservation only after proven death', () => {
+  for (const state of ['alive', 'dead', 'eperm', 'unknown']) {
+    const root = scratchDir('acp-fifo-'), acpRoot = join(root, 'acp'), kills = []
+    let clock = 0, terminated = false
+    const baseDeps = {
+      pid: 99001, seatCommandRoot: join(root, 'seat-runtime'),
+      spawn: () => { writeFileSync(join(acpRoot, 'builder', 'pgid'), '99002'); return { pid: 99002, unref() {} } },
+      closeSync() {}, now: () => clock, sleep: (ms) => { clock += ms },
+      kill(target, signal) {
+        kills.push([target, signal])
+        if (signal === 'SIGTERM') terminated = true
+        if (target === -99002 && signal === 0) {
+          if (state === 'dead' && terminated) throw Object.assign(new Error('gone'), { code: 'ESRCH' })
+          if (state === 'eperm' || state === 'unknown') throw Object.assign(new Error('probe failed'), { code: state === 'eperm' ? 'EPERM' : 'EIO' })
+        }
+      },
+      spawnSync: () => state === 'unknown' ? { status: 1, stdout: '' } : { status: 0, stdout: '99002 S\n' },
+    }
+    const options = { launch: { bin: '/bin/false', args: [], env: {} }, dir: acpRoot, cwd: root, role: 'builder' }
+    try {
+      const first = acpClient({ ...options, deps: { ...baseDeps, openSync: () => { throw Object.assign(new Error('no fifo'), { code: 'ENOENT' }) } } })
+      let failure
+      assert.throws(() => { try { first.start() } catch (error) { failure = error; throw error } }, { reason: 'acp-spawn-failed' })
+      assert.ok(kills.some(([pid, signal]) => pid === -99002 && signal === 'SIGTERM'))
+      const second = acpClient({ ...options, deps: { ...baseDeps, openSync: () => 7 } })
+      if (state === 'dead') assert.deepEqual(second.start(), { pid: 99002 })
+      else assert.throws(() => second.start(), { reason: 'acp-session-busy' })
+      assert.equal(failure.teardown?.outcome, state === 'dead' ? 'proven' : state === 'unknown' ? 'unproven' : 'failed')
+    } finally { rmSync(root, { recursive: true, force: true }) }
   }
-  try {
-    const first = acpClient({ launch: { bin: '/bin/false', args: [], env: {} }, dir: acpRoot, cwd: root, role: 'builder', deps: { ...baseDeps, openSync: () => { throw Object.assign(new Error('no fifo'), { code: 'ENOENT' }) } } })
-    assert.throws(() => first.start(), (e) => e.reason === 'acp-spawn-failed')
-    assert.deepEqual(kills, [[-99002, 'SIGTERM']])
-    const second = acpClient({ launch: { bin: '/bin/false', args: [], env: {} }, dir: acpRoot, cwd: root, role: 'builder', deps: { ...baseDeps, openSync: () => 7 } })
-    assert.equal(second.start().pid, 99002)
-  } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
 test('AS ACP spawn withholds inherited pi seat keys unless the launch env grants them', () => {

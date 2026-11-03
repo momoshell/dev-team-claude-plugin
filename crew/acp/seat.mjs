@@ -426,6 +426,6 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
   } finally {
     try { closed = client?.close() ?? null } catch { /* teardown never overwrites the turn */ }
     // An unproven teardown keeps the runtime: it holds the evidence the next owner reclaims by.
-    if (!started || closed?.outcome === 'proven') { try { rmSync(runtime, { recursive: true, force: true }) } catch { /* best effort */ } }
+    if ((!started && !client?.spawned) || closed?.outcome === 'proven') { try { rmSync(runtime, { recursive: true, force: true }) } catch { /* best effort */ } }
   }
 }

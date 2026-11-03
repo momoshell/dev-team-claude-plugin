@@ -17,7 +17,7 @@ const CHARTER_LINK = /\]\((\.\.?\/[^)\s]+\.md)\)/g
 const stopped = (reason) => ({ status: 'stopped', reason, pr: null })
 
 // The P2 shape this turn must write; the role's own detail keys, with the issued role and id.
-function exampleEnvelope(role, id) {
+function exampleEnvelope(role, id, tier) {
   const review = {
     verdict: 'changes-needed',
     findings: [{ id: 'R1', severity: 'must-fix', location: 'path/to/file.mjs:10', summary: 'what breaks', trigger: 'the concrete state that breaks it', start_line: 10, end_line: 10, uncertain: 'what was not verified' }],
@@ -35,6 +35,7 @@ function exampleEnvelope(role, id) {
     },
     builder: {
       summary: '<what you built>',
+      ...(tier === 'mechanical' ? { subject: 'docs(crew): correct a lane brief typo' } : {}),
       tests: [{ file: '<repo-relative test file>', title: '<exact test title>' }],
       notes: '<what you did not test, the guards you relied on, the checks you ran>',
     },
@@ -89,7 +90,7 @@ function repairPromptFor({ request, spec }) {
     'P2 envelope, as JSON, to that same path; nothing else you write counts as your return.',
     `Envelope id: ${id}`,
     `Return path: ${returnPath}`,
-    JSON.stringify(exampleEnvelope(role, id), null, 2),
+    JSON.stringify(exampleEnvelope(role, id, request.tier ?? spec.tier), null, 2),
     'status is done, insufficient or escalate; use insufficient or escalate instead of faking a done.',
     '',
   ].join('\n')
@@ -119,7 +120,7 @@ function promptFor({ request, spec, source, charters, body, section }) {
     `Envelope id: ${id}`,
     `Return path: ${returnPath}`,
     `Task directory: ${spec.taskDir}`,
-    JSON.stringify(exampleEnvelope(role, id), null, 2),
+    JSON.stringify(exampleEnvelope(role, id, request.tier ?? spec.tier), null, 2),
     'status is done, insufficient or escalate; use insufficient or escalate instead of faking a done.',
     '',
   ]

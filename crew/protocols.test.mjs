@@ -8,13 +8,13 @@ import * as protocols from './protocols.mjs'
 
 const BODY = '## The ask\n\nRefuse roster edits that cannot boot.\n'
 const brief = (overrides = {}, body = BODY) => {
-  const fields = { source: 'issue 1961', closes: '1961', tier: 'build', shape: 'standard', out_of_scope: 'the visualizer', ...overrides }
+  const fields = { source: 'issue 1961', closes: '1961', shape: 'standard', out_of_scope: 'the visualizer', ...overrides }
   const front = Object.entries(fields).filter(([, v]) => v !== undefined).map(([k, v]) => `${k}: ${v}`).join('\n')
   return `---\n${front}\n---\n${body}`
 }
 
 test('P1 vocabularies are the ADR-052 fields, tiers and shapes', () => {
-  assert.deepEqual(BRIEF_FIELDS, ['source', 'closes', 'tier', 'shape', 'out_of_scope', 'suite'])
+  assert.deepEqual(BRIEF_FIELDS, ['source', 'closes', 'mechanical', 'shape', 'out_of_scope', 'suite'])
   assert.deepEqual(TIERS, ['mechanical', 'build', 'judge'])
   assert.deepEqual(SHAPES, ['standard', 'finish'])
   assert.ok(Object.isFrozen(SHAPES))
@@ -23,7 +23,7 @@ test('P1 vocabularies are the ADR-052 fields, tiers and shapes', () => {
 test('a brief with no acceptance field and no ## Acceptance section parses with no defects (PD1)', () => {
   const { fields, body, defects } = parseBrief(brief())
   assert.deepEqual(defects, [])
-  assert.deepEqual(fields, { source: 'issue 1961', closes: 1961, tier: 'build', shape: 'standard', out_of_scope: 'the visualizer' })
+  assert.deepEqual(fields, { source: 'issue 1961', closes: 1961, shape: 'standard', out_of_scope: 'the visualizer' })
   assert.match(body, /^## The ask/)
   assert.equal(parseBrief(brief({ closes: 'null' })).fields.closes, null)
 })
@@ -52,14 +52,13 @@ test('a brief without frontmatter is refused', () => {
 
 // MUTATION: skip the unknown-field check and a misspelt field is silently ignored.
 test('unknown and missing fields are refused by name', () => {
-  const { defects } = parseBrief(brief({ tier: undefined, lane: 'b1' }))
-  assert.ok(defects.includes('unknown field lane; the fields are source, closes, tier, shape, out_of_scope, suite'))
-  assert.ok(defects.includes('missing field tier'))
+  const { defects } = parseBrief(brief({ shape: undefined, lane: 'b1' }))
+  assert.ok(defects.includes('unknown field lane; the fields are source, closes, mechanical, shape, out_of_scope, suite'))
+  assert.ok(defects.includes('missing field shape'))
 })
 
 // MUTATION: accept any tier, shape or closes value and a typo boots on the wrong seats or binds no issue.
-test('tier, shape and closes take only their closed values', () => {
-  assert.ok(parseBrief(brief({ tier: 'rigorous' })).defects.includes('tier is one of mechanical, build, judge'))
+test('shape and closes take only their closed values', () => {
   assert.ok(parseBrief(brief({ shape: 'chunked' })).defects.includes('shape is one of standard, finish'))
   assert.ok(parseBrief(brief({ closes: '0' })).defects.includes('closes is null or one issue number'))
   // MUTATION: accept any integer and 9007199254740993 rounds to a different issue.
@@ -82,6 +81,19 @@ test('a repeated section is refused, because the driver reads only the first', (
 test('the body names no issue or PR number; closes is the only binding', () => {
   const body = BODY.replace('cannot boot.', 'cannot boot, after PR #1968.\n\nCloses #1961')
   assert.ok(parseBrief(brief({}, body)).defects.includes('the body names #1968, #1961; write "issue N" or "PR N", because closes is the only issue binding'))
+})
+
+test('a brief chooses its loop only with mechanical: true, and a tier field or any other mechanical value is refused (ADR-055 §1)', () => {
+  for (const [fields, expected, defect] of [
+    [{}, undefined, null], [{ mechanical: 'true' }, true, null],
+    [{ mechanical: 'false' }, 'false', 'mechanical is true, or the field is absent'],
+    [{ mechanical: 'yes' }, 'yes', 'mechanical is true, or the field is absent'],
+    [{ tier: 'build' }, undefined, 'tier is not a brief field: use mechanical: true for a mechanical lane (ADR-055 §1)'],
+  ]) {
+    const result = parseBrief(brief(fields))
+    assert.equal(result.fields.mechanical, expected)
+    assert.deepEqual(result.defects, defect ? [defect] : [])
+  }
 })
 
 // P5, the agent definition.

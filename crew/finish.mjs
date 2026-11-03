@@ -20,7 +20,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openPullRequest, runSuite } from './checks.mjs'
-import { validateEnvelope } from './protocols.mjs'
+import { TIERS, validateEnvelope } from './protocols.mjs'
 import { SLOT_ENV } from './reclaim.mjs'
 
 const HOME = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -69,7 +69,7 @@ function loadLane(d, lane, crewRoot) {
     try { return JSON.parse(line) } catch { throw new FinishRefusal('finish-unreadable', 'the lane journal has a malformed row') }
   }).filter(isObject)
   // ADR-055 §7: a recorded raise survives a finish run.
-  if (rows.some((row) => row.event === 'tier-raised' && row.to === 'judge')) spec.tier = 'judge'
+  for (const row of rows) if (row.event === 'tier-raised' && TIERS.includes(row.to) && TIERS.indexOf(row.to) > TIERS.indexOf(spec.tier)) spec.tier = row.to
   return { taskDir, spec, rows }
 }
 

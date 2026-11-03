@@ -17,7 +17,6 @@ const AGENTS = fileURLToPath(new URL('./agents/', import.meta.url))
 const BRIEF = `---
 source: issue 1961
 closes: 1961
-tier: build
 shape: standard
 out_of_scope: the visualizer
 ---
@@ -60,7 +59,7 @@ const invalid = process.argv[1] === 'invalid'
 process.argv[1] = process.execPath
 const { main } = await import(${JSON.stringify(new URL('./start.mjs', import.meta.url).href)})
 const deps = {
-  readFileSync: () => invalid ? ${JSON.stringify(BRIEF)}.replace('tier: build', 'tier: rigorous') : ${JSON.stringify(BRIEF)},
+  readFileSync: () => invalid ? ${JSON.stringify(BRIEF)}.replace('shape: standard', 'tier: build\\nshape: standard') : ${JSON.stringify(BRIEF)},
   resolveAgents: () => ({ seats: {} }), existsSync: () => false,
   mkdirSync: () => {}, writeFileSync: () => {},
   spawnSync: () => ({ status: 0, stdout: 'origin/main' }),
@@ -107,7 +106,7 @@ test('(SE2) invalid --check still refuses with stdout closed', async () => {
   assert.equal(result.signal, null)
   assert.ok(Number.isInteger(result.code) && result.code !== 0)
   assert.match(result.stderr, /brief .* is not a P1 brief:/)
-  assert.match(result.stderr, /tier is one of/)
+  assert.match(result.stderr, /tier is not a brief field/)
   assert.doesNotMatch(result.stderr, /\n\s+at |Unhandled 'error' event/)
   assert.equal(result.started, '')
 })
@@ -134,9 +133,23 @@ test('the lane name is the brief file name and must be a slug', () => {
 
 // MUTATION: skip the brief check and a malformed brief starts a lane.
 test('a brief with defects is refused before any git call', async () => {
-  const { deps, calls } = fakes({ brief: BRIEF.replace('tier: build', 'tier: rigorous') })
-  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), /tier is one of mechanical, build, judge/)
+  const { deps, calls } = fakes({ brief: BRIEF.replace('shape: standard', 'tier: build\nshape: standard') })
+  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), /tier is not a brief field/)
   assert.deepEqual(calls.filter(([kind]) => kind !== 'log'), [])
+})
+
+test('a brief with mechanical: true starts a mechanical lane and a brief without it starts a build lane', async () => {
+  for (const tier of ['mechanical', 'build']) {
+    const brief = tier === 'mechanical' ? BRIEF.replace('shape: standard', 'mechanical: true\nshape: standard') : BRIEF
+    const resolved = []
+    const f = fakes({ brief, resolve: (t) => { resolved.push(t); return resolveAgents(t) } })
+    await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', check: true, deps: f.deps }))
+    await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps }))
+    assert.deepEqual(resolved, [tier, tier])
+    assert.ok(f.calls.some(([kind, line]) => kind === 'log' && line.includes(`brief ok lane=b1 tier=${tier}`)))
+    assert.ok(f.calls.some(([kind, line]) => kind === 'log' && line.includes(`loop=lean tier=${tier}`)))
+    assert.equal(JSON.parse(written(f.calls, '/task/lean.json')[2]).tier, tier)
+  }
 })
 
 test('--check validates the brief and the agent definitions and starts nothing', async () => {
@@ -327,8 +340,8 @@ test('a lean start refuses before any effect when the agent definitions do not r
   const bad = fakes({ resolve: () => { throw new Error('agent definitions are refused: empty') } })
   await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps: bad.deps }), (error) => error instanceof StartRefusal && /agent definitions/.test(error.message))
   assert.deepEqual(bad.calls.filter(([kind]) => kind !== 'log'), [])
-  const defect = fakes({ brief: BRIEF.replace('tier: build', 'tier: rigorous') })
-  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps: defect.deps }), /tier is one of/)
+  const defect = fakes({ brief: BRIEF.replace('shape: standard', 'tier: build\nshape: standard') })
+  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', loop: 'lean', deps: defect.deps }), /tier is not a brief field/)
   assert.deepEqual(defect.calls.filter(([kind]) => kind !== 'log'), [])
 })
 
@@ -351,7 +364,7 @@ const EINTR = Object.assign(new Error('turn interrupted'), { code: 'EINTR' })
 const EPERM = Object.assign(new Error('denied'), { code: 'EPERM' })
 
 // A lane's whole loop with every outside effect faked: seats answer by envelope id, recordings are real files.
-function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = {}, scope, repairPlan = false, status = ' M src/a.mjs\0' } = {}) {
+function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = {}, scope, repairPlan = false, repairBuilder = false, status = ' M src/a.mjs\0' } = {}) {
   const dir = scratchDir('lean-')
   const spec = {
     id: 'lane', cwd: join(dir, 'worktree'), taskDir: join(dir, 'task'), tier, shape: 'standard', brief: BRIEF,
@@ -359,14 +372,15 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
   }
   mkdirSync(spec.cwd, { recursive: true })
   const requests = [], logs = [], reviews = answers.reviews ?? ['pass']
-  let review = 0, reads = 0, rebasedHead = null
+  let review = 0, reads = 0, rebasedHead = null, committed = false
   const envelope = (role, id) => {
     const n = Number(id.split('.').at(-1))
     const own = answers[`${role}.${n}`]
     const details = role === 'planner' ? { subject: 'fix(crew): publish measured lane results', tests: [{ file: 'lib.test.mjs', title: 'works' }], plan_path: join(spec.taskDir, 'plan.md'), gate_path: join(spec.taskDir, 'gate.mjs'), acceptance: ['RV1'], mutations: [LEAN_MUTATION], ...(scope === undefined ? {} : { files_in_scope: scope }) }
-      : role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }], notes: `builder turn ${n}` }
+      : role === 'builder' ? { summary: 'built', ...(tier === 'mechanical' ? { subject: 'docs(crew): fix typo' } : {}), tests: [{ file: 'lib.test.mjs', title: 'works' }], notes: `builder turn ${n}` }
       : role === 'lead' ? { decision: 'bounce', target: 'builder' }
       : { verdict: reviews[review] ?? 'pass', findings: reviews[review++] === 'changes-needed' ? [{ id: 'F1', severity: 'must-fix', location: 'a:1', summary: 'redo-this', trigger: 'bad input' }] : [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['a'], complete: true }, ...(review > 1 ? { closed: [{ id: 'F1', evidence: 'fixed' }] } : {}) }
+    if (role === 'builder' && own === 'escalate') details.question = 'What next?'
     return { role, id, status: own ?? 'done', summary: 'fixture', details }
   }
   const fakeAcp = acp ?? (async (input) => {
@@ -380,6 +394,7 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
     if (input.definition.role === 'planner') for (const name of ['plan.md', 'gate.mjs']) writeFileSync(join(spec.taskDir, name), '')
     const value = envelope(input.definition.role, id)
     if (repairPlan && input.definition.role === 'planner' && !input.prompt.startsWith('Your envelope was refused.')) value.details.files_in_scope = [123]
+    if (repairBuilder && input.definition.role === 'builder' && !input.prompt.startsWith('Your envelope was refused.')) delete value.details.subject
     writeFileSync(path, JSON.stringify(value))
     return { stopReason: 'end_turn', usage: null, refusal: null }
   })
@@ -400,11 +415,30 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
     },
     ...deps,
   }
+  const commit = options.loopDeps.commitChanges
+  options.loopDeps.commitChanges = async (input) => { const result = await commit(input); if (result.status === 'green') committed = true; return result }
   const rebase = options.loopDeps.rebaseBranch
-  options.loopDeps.rebaseBranch = async (input) => { const result = await rebase(input); if (result.status === 'green') rebasedHead = result.head; return result }
+  options.loopDeps.rebaseBranch = async (input) => { const result = await rebase(input); if (committed && result.status === 'green') rebasedHead = result.head; return result }
   const sessionOf = (role, n) => join(spec.taskDir, 'lean', role, `lane.${role}.${n}.jsonl`)
   return { spec, requests, logs, go: () => runLean(spec, options), sessionOf, options }
 }
+test("a mechanical builder prompt shows a P2 example with a subject, and a build builder's shows none", async () => {
+  for (const tier of ['mechanical', 'build']) {
+    const f = leanFixture({ tier, repairBuilder: tier === 'mechanical' })
+    const result = await f.go()
+    const builders = f.requests.filter((r) => r.definition.role === 'builder')
+    const prompts = builders.map((r) => r.prompt)
+    for (const prompt of prompts) {
+      const example = JSON.parse(prompt.slice(prompt.lastIndexOf('{\n  "role"'), prompt.lastIndexOf('}') + 1))
+      assert.equal(Object.hasOwn(example.details, 'subject'), tier === 'mechanical')
+      assert.deepEqual(validateEnvelope('builder', example).defects, [])
+    }
+    assert.equal(prompts.length, tier === 'mechanical' ? 2 : 1)
+    assert.equal(builders[0].definition.extensions.includes('skeletonread'), tier !== 'mechanical')
+    assert.equal(result.status, 'done')
+  }
+})
+
 test('a judge tech-lead turn gets the reviewer map grants by scope, the builder report, the changed paths and a valid P2 tech-lead example', async () => {
   const f = leanFixture({ tier: 'judge', scope: ['crew/lean.mjs', 'elsewhere/a.spec.ts'] })
   assert.equal((await f.go()).status, 'done')
@@ -420,10 +454,10 @@ test('a judge tech-lead turn gets the reviewer map grants by scope, the builder 
 })
 
 test("a raised lane's later turns run the judge tier definition", async () => {
-  const f = leanFixture({ tier: 'mechanical', scope: ['crew/loop.mjs'] })
+  const f = leanFixture({ tier: 'mechanical', status: [' M crew/loop.mjs\0', ' M src/a.mjs\0'] })
   f.spec.acceptance = ['RV1'] // archived spec, also accepted before ADR-055
   assert.equal((await f.go()).status, 'done')
-  const builder = f.requests.find((r) => r.definition.role === 'builder')
+  const builder = f.requests.findLast((r) => r.definition.role === 'builder')
   assert.deepEqual(builder.definition.advisor, parseAgent(readFileSync(join(AGENTS, 'builder.md'), 'utf8')).fields.advisor)
 })
 
@@ -475,7 +509,7 @@ test('every turn gets its role definition, the complete brief and P2, and its ow
 
 // MUTATION: remove builder from the laneRole predicate.
 test('LG1: builder gets accepted lane grants as bare whole skills', async () => {
-  for (const tier of TIERS) for (const [scope, extra] of [
+  for (const tier of ['build', 'judge']) for (const [scope, extra] of [
     [['crew/lean.mjs'], ['backend-node']],
     [['visualizer/a.svelte'], ['frontend-svelte', 'ui-design', 'ux']],
     [['other/a.ts'], []],
@@ -498,7 +532,7 @@ test('LG1: builder gets accepted lane grants as bare whole skills', async () => 
 
 // MUTATION: remove reviewer from the laneRole predicate.
 test('LG2: reviewer gets scope grants rather than changed-path grants', async () => {
-  for (const tier of TIERS) for (const [scope, extra] of [
+  for (const tier of ['build', 'judge']) for (const [scope, extra] of [
     [['crew/lean.mjs'], ['backend-node']],
     [['visualizer/a.svelte'], ['frontend-svelte', 'ui-design', 'ux']],
     [['other/a.ts'], []],
@@ -1070,13 +1104,12 @@ test('every lean seat turn carries the brief to the seat, and the planner exampl
 test('a tier override applies and an unseating override refuses the turn', async () => {
   const mechanical = leanFixture({ tier: 'mechanical' })
   assert.equal((await mechanical.go()).status, 'done')
-  assert.equal(mechanical.requests[0].definition.effort, resolveAgents('mechanical').seats.planner.effort)
-  assert.notEqual(mechanical.requests[0].definition.effort, parseAgent(readFileSync(join(AGENTS, 'planner.md'), 'utf8')).fields.effort)
+  assert.equal(mechanical.requests[0].definition.advisor, null)
   const seat = resolveAgents('build').seats.lead
-  const unseated = leanFixture({ tier: 'mechanical', answers: { 'planner.1': 'insufficient' }, loopDeps: { resolveAgents: (tier) => ({ ...resolveAgents(tier), seats: { ...resolveAgents(tier).seats, lead: seat } }) } })
+  const unseated = leanFixture({ tier: 'mechanical', answers: { 'builder.1': 'escalate' }, loopDeps: { resolveAgents: (tier) => ({ ...resolveAgents(tier), seats: { ...resolveAgents(tier).seats, lead: seat } }) } })
   const result = await unseated.go()
   assert.deepEqual(result, { status: 'stopped', reason: 'lead-refused', pr: null })
-  assert.deepEqual(unseated.requests.map((r) => r.definition.role), ['planner'])
+  assert.deepEqual(unseated.requests.map((r) => r.definition.role), ['builder'])
 })
 
 // MUTATION: append to an existing recording instead of creating it exclusively and an old turn is overwritten or mixed.

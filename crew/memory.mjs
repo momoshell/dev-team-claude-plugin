@@ -1,5 +1,5 @@
-// Team memory contract. The markdown backend provides context, propose,
-// reconcile and gc; extracts are bounded and carry byte accounting.
+// Team memory contract. The markdown backend provides context;
+// extracts are bounded and carry byte accounting.
 import { openMarkdownMemory } from './memory-md.mjs'
 
 export const DEFAULT_BACKEND = 'markdown'

@@ -1,9 +1,10 @@
 // The protocols code reads at the agent boundary (ADR-052 section 3). P1, the lane
-// brief: markdown opened by a frontmatter block. Code reads only BRIEF_FIELDS; the
-// body is the planner's to read. P5, the agent definition: the same frontmatter shape,
+// brief: markdown opened by a frontmatter block. Code reads BRIEF_FIELDS and checks
+// the body shape. P5, the agent definition: the same frontmatter shape,
 // one field per line, with JSON for objects and object lists. Import-free, so the new
 // path never loads the old one.
 
+export const ISSUE_SOURCE = /^issue ([1-9]\d*)$/
 export const BRIEF_FIELDS = Object.freeze(['source', 'closes', 'mechanical', 'shape', 'out_of_scope', 'suite', 'generated', 'regenerate'])
 export const TIERS = Object.freeze(['mechanical', 'build', 'judge'])
 export const SHAPES = Object.freeze(['standard', 'finish'])
@@ -38,9 +39,11 @@ function value(raw) {
 export function sections(body, { includeFences = false } = {}) {
   const out = new Map()
   const repeated = []
+  const askQuotes = new Set()
   let current = null
   let fence = null
-  for (const line of body.split('\n')) {
+  for (const [index, line] of body.split('\n').entries()) {
+    if (current === '## The ask' && /^ {0,3}>/.test(line)) askQuotes.add(index)
     const mark = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1]
     if (fence) {
       if (includeFences && current) out.get(current).push(line)
@@ -48,7 +51,7 @@ export function sections(body, { includeFences = false } = {}) {
       continue
     }
     if (mark) { if (includeFences && current) out.get(current).push(line); fence = mark; continue }
-    if (/^#{1,2}\s+/.test(line)) {
+    if (/^ {0,3}#{1,2}\s+/.test(line)) {
       current = line.trim()
       if (out.has(current)) repeated.push(current)
       else out.set(current, [])
@@ -56,7 +59,7 @@ export function sections(body, { includeFences = false } = {}) {
     }
     if (current) out.get(current).push(line)
   }
-  return { parts: out, repeated }
+  return { parts: out, repeated, askQuotes }
 }
 
 // Returns { fields, body, defects }. An empty defects list is a brief code can start.
@@ -98,11 +101,38 @@ export function parseBrief(text) {
   for (const key of ['suite', 'regenerate']) {
     if (typeof fields[key] === 'string' && /["'\\]/.test(fields[key])) defects.push(`${key} is split on whitespace and run without a shell: quotes and backslashes are refused`)
   }
-  const { repeated } = sections(body)
+  const { parts, repeated, askQuotes } = sections(body, { includeFences: true })
   if (repeated.length) defects.push(`the body repeats ${[...new Set(repeated)].join(', ')}; the driver reads only the first`)
-  // `closes` is the only issue binding; crew start writes it into the driver's bound-issue slot.
-  const stray = body.match(/#\d+/g)
-  if (stray) defects.push(`the body names ${stray.join(', ')}; write "issue N" or "PR N", because closes is the only issue binding`)
+  for (const line of body.split('\n')) {
+    if (/^ {0,3}#{1,2}\s+/.test(line)) break
+    if (line.trim()) defects.push(`the body holds only ## The ask and ## Context: ${line}`)
+  }
+  for (const heading of parts.keys()) {
+    if (!['## The ask', '## Context'].includes(heading)) defects.push(`the body holds only ## The ask and ## Context: ${body.split('\n').find((line) => line.trim() === heading)}`)
+  }
+  const issue = typeof fields.source === 'string' && ISSUE_SOURCE.test(fields.source)
+  if (typeof fields.source === 'string' && fields.source.startsWith('issue') && !issue) defects.push("source is issue N, or the operator's request")
+  const ask = parts.get('## The ask')
+  if (issue && ask) defects.push('an issue brief has no ## The ask: crew start takes the issue body as the ask')
+  if (!issue) {
+    // Quote markers alone (`> >`) carry no ask: a quoted line counts once a letter or digit is left.
+    if (!ask?.some((line) => /[\p{L}\p{N}]/u.test(line.replace(/^ {0,3}>[ \t]?/, '')))) defects.push("the body has no ## The ask; quote the operator's words there")
+    for (const line of ask ?? []) if (line.trim() && !/^ {0,3}>/.test(line)) defects.push(`## The ask quotes the source: every line starts with >: ${line}`)
+  }
+  const context = parts.get('## Context') ?? []
+  let pointer = false, hasItem = false
+  for (const line of context) {
+    if (!line.trim()) continue
+    if (/^ {0,3}[-*] +/.test(line)) {
+      hasItem = true
+      pointer = /^ {0,3}[-*] +(?:`[^`]+`|\[[^\]]+\]\([^)]+\)|(?:issue|PR) [1-9]\d*\b)/.test(line)
+    } else if (!/^[ \t]/.test(line) || !pointer) pointer = false
+    if (!pointer) defects.push(`## Context holds only pointers: each item opens with a code span, a [link](url), issue N or PR N: ${line}`)
+  }
+  if (!hasItem) defects.push('the body has no ## Context with at least one pointer')
+  // Quoted ask lines are the source's words and bind nothing; only `closes` reaches the bound-issue slot.
+  const stray = body.split('\n').flatMap((line, index) => askQuotes.has(index) ? [] : (line.match(/#\d+/g) ?? []))
+  if (stray.length) defects.push(`the body names ${stray.join(', ')}; write "issue N" or "PR N", because closes is the only issue binding`)
   return { fields, body, defects }
 }
 

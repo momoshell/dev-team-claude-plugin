@@ -44,6 +44,12 @@ A brief has `source`, `closes`, `out_of_scope`, `suite`, the cleaned ask, contex
 `mechanical: true` only when the issue alone shows no behaviour to judge (a version bump, a typo, a rename, a doc
 line). It has no acceptance ids and no `## Acceptance` section, and nobody writes tests in it.
 
+Amended 2026-11-03, operator decision ("yes, proceed"): the body has `## Context` pointers and, for an operator
+request, `## The ask` quoting the operator's words or approved proposal verbatim, `#N` included; `closes` remains the
+only issue binding. An issue brief has no ask; `crew start` quotes
+the issue body as the ask in the run brief. The planner names brief text taken as a constraint and why it binds; the
+reviewer flags criteria based only on brief text that is not the source's words or an operator decision.
+
 ### 2. The planner defines the work
 
 `plan.md` takes Kiro's shape, trimmed:

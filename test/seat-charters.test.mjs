@@ -164,7 +164,11 @@ out_of_scope: everything else
 ---
 ## The ask
 
-Check shape support.
+> Check shape support.
+
+## Context
+
+- \`crew/start.mjs\`
 `
   assert.deepEqual(parseBrief(brief).defects, [])
   const effects = []

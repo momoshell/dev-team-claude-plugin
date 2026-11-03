@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { parseBrief, parseAgent, validateEnvelope, AGENT_ROLES, BRIEF_FIELDS, TIERS, SHAPES, ENVELOPE_FIELDS, ENVELOPE_STATUSES, REVIEW_VERDICTS, LEAD_DECISIONS, FINDING_SEVERITIES, FINDING_DISPOSITIONS } from './protocols.mjs'
 import * as protocols from './protocols.mjs'
 
-const BODY = '## The ask\n\nRefuse roster edits that cannot boot.\n'
+const BODY = '## Context\n\n- `crew/agents.mjs`\n'
 const brief = (overrides = {}, body = BODY) => {
   const fields = { source: 'issue 1961', closes: '1961', shape: 'standard', out_of_scope: 'the visualizer', ...overrides }
   const front = Object.entries(fields).filter(([, v]) => v !== undefined).map(([k, v]) => `${k}: ${v}`).join('\n')
@@ -24,7 +24,7 @@ test('a brief with no acceptance field and no ## Acceptance section parses with 
   const { fields, body, defects } = parseBrief(brief())
   assert.deepEqual(defects, [])
   assert.deepEqual(fields, { source: 'issue 1961', closes: 1961, shape: 'standard', out_of_scope: 'the visualizer' })
-  assert.match(body, /^## The ask/)
+  assert.match(body, /^## Context/)
   assert.equal(parseBrief(brief({ closes: 'null' })).fields.closes, null)
 })
 
@@ -99,14 +99,30 @@ test('retired brief fields are refused', () => {
 
 // MUTATION: merge repeated sections and the validator approves ids the driver never reads.
 test('a repeated section is refused, because the driver reads only the first', () => {
-  const twice = '## Context\n\na\n\n## Context\n\nb\n'
+  const twice = `${BODY}\n## Context\n\n- \`other.mjs\`\n`
   assert.ok(parseBrief(brief({}, twice)).defects.includes('the body repeats ## Context; the driver reads only the first'))
 })
 
 // MUTATION: allow #N in the body and something other than closes can bind an issue.
 test('the body names no issue or PR number; closes is the only binding', () => {
-  const body = BODY.replace('cannot boot.', 'cannot boot, after PR #1968.\n\nCloses #1961')
+  const body = BODY.replace('`crew/agents.mjs`', '`crew/agents.mjs` after PR #1968, closes #1961')
   assert.ok(parseBrief(brief({}, body)).defects.includes('the body names #1968, #1961; write "issue N" or "PR N", because closes is the only issue binding'))
+})
+
+// MUTATION: restore the body-wide #N guard and the quoted source is refused.
+// MUTATION: exempt by line text or exempt the whole ask and the Context or unquoted case passes.
+test('an operator ask quotes #N verbatim and passes, and #N anywhere else in the body is still refused', () => {
+  const ask = '## The ask\n\n> Fix #42 after PR #7.\n\n'
+  for (const closes of ['null', '42']) {
+    assert.deepEqual(parseBrief(brief({ source: 'operator request', closes }, ask + BODY)).defects, [])
+  }
+  for (const [body, tokens] of [
+    [ask + BODY + '- `notes` mentions #9\n', '#9'],
+    [ask + 'plain #8\n' + BODY, '#8'],
+    [ask + BODY + '> Fix #42 after PR #7.\n', '#42, #7'],
+  ]) {
+    assert.ok(parseBrief(brief({ source: 'operator request' }, body)).defects.includes(`the body names ${tokens}; write "issue N" or "PR N", because closes is the only issue binding`))
+  }
 })
 
 test('a brief chooses its loop only with mechanical: true, and any other mechanical value is refused (ADR-055 §1)', () => {
@@ -119,6 +135,31 @@ test('a brief chooses its loop only with mechanical: true, and any other mechani
     assert.equal(result.fields.mechanical, expected)
     assert.deepEqual(result.defects, defect ? [defect] : [])
   }
+})
+
+test('a brief body is the quoted source ask and ## Context pointers, and anything else is refused (ADR-055 §1)', () => {
+  const operator = '## The ask\n\n> Do this.\n>\n> And that.\n\n' + BODY
+  for (const [fields, body] of [
+    [{}, BODY],
+    [{ source: 'operator request' }, operator + '- [docs](https://example.com)\n  continuation\n* issue 12\n- PR 34\n'],
+  ]) assert.deepEqual(parseBrief(brief(fields, body)).defects, [])
+  for (const [fields, body, defect] of [
+    [{}, BODY + '\n## Rules\n', 'the body holds only ## The ask and ## Context: ## Rules'],
+    [{}, BODY + '\n  ## Rules  \n', 'the body holds only ## The ask and ## Context:   ## Rules  '],
+    [{}, 'preamble\n' + BODY, 'the body holds only ## The ask and ## Context: preamble'],
+    [{ source: 'issue 0' }, operator, "source is issue N, or the operator's request"],
+    [{}, operator, 'an issue brief has no ## The ask: crew start takes the issue body as the ask'],
+    [{ source: 'operator request' }, BODY, "the body has no ## The ask; quote the operator's words there"],
+    [{ source: 'operator request' }, '## The ask\n\n' + BODY, "the body has no ## The ask; quote the operator's words there"],
+    [{ source: 'operator request' }, '## The ask\n> \n>\n' + BODY, "the body has no ## The ask; quote the operator's words there"],
+    [{ source: 'operator request' }, '## The ask\n> >\n> > -\n' + BODY, "the body has no ## The ask; quote the operator's words there"],
+    [{ source: 'operator request' }, '## The ask\nplain\n' + BODY, '## The ask quotes the source: every line starts with >: plain'],
+    [{ source: 'operator request' }, '## The ask\n```\n> text\n```\n' + BODY, '## The ask quotes the source: every line starts with >: ```'],
+    [{}, '', 'the body has no ## Context with at least one pointer'],
+    [{}, '## Context\nplain\n', '## Context holds only pointers: each item opens with a code span, a [link](url), issue N or PR N: plain'],
+    [{}, BODY + '- Never break the boot.\n', '## Context holds only pointers: each item opens with a code span, a [link](url), issue N or PR N: - Never break the boot.'],
+    [{}, BODY + '```\ntext\n```\n', '## Context holds only pointers: each item opens with a code span, a [link](url), issue N or PR N: ```'],
+  ]) assert.ok(parseBrief(brief(fields, body)).defects.includes(defect), defect)
 })
 
 // P5, the agent definition.

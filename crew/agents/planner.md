@@ -20,7 +20,7 @@ Write the plan with these exact headings:
 
 ## Criteria
 
-Number the criteria, one per line, as `WHEN <trigger> THE <code unit> SHALL <observable result>`. Each names the file or function it applies to.
+Number the criteria, one per line, as `WHEN <trigger> THE <code unit> SHALL <observable result>`. Each names the file or function it applies to. For a criterion based on brief text other than the source ask, name that text and why it binds; an operator decision is a reason.
 
 ## Properties
 

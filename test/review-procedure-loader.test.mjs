@@ -117,6 +117,24 @@ test('RP1: the procedure judges the plan criteria and returns the reviewer envel
   assert.doesNotMatch(text, /Changes|validation-lane|review\.md/)
 })
 
+// MUTATION: restore the old crew/checks.mjs line in posture.md.
+test('RP3: posture.md states the tier rules reviewer.md and the loop enforce', () => {
+  const reviewer = readFileSync(join(ROOT, 'crew/agents/reviewer.md'), 'utf8')
+  const posture = readFileSync(join(ROOT, 'skills/pr-review/references/posture.md'), 'utf8').replace(/\s+/g, ' ')
+  assert.doesNotMatch(reviewer.split('---')[1], /^tiers:/m)
+  for (const text of ['declares no `tiers` key', 'matches `PROTECTED` in `crew/loop.mjs`', 'the loop also raises it after the build']) assert.ok(posture.includes(text))
+  for (const text of ['crew/checks.mjs', 'never after the build', 'raises it at the judge tier']) assert.equal(posture.includes(text), false)
+})
+
+// MUTATION: restore "the charter names it and does not restate it."
+test('RP4: do-not-flag is labelled the /review procedure only', () => {
+  const guideline = readFileSync(GUIDELINES, 'utf8').replace(/\s+/g, ' ')
+  const reviewer = readFileSync(join(ROOT, 'crew/agents/reviewer.md'), 'utf8').replace(/\s+/g, ' ')
+  for (const text of ["the `/review` command's procedure only", 'commands/review.md', 'No lane seat receives it']) assert.ok(guideline.includes(text))
+  assert.equal(guideline.includes('the charter names it'), false)
+  assert.equal(reviewer.includes('review-do-not-flag'), false)
+})
+
 // MUTATION: RP2 restores "The loop runs the proof and suite, in parallel with this review on a build lane."
 test('RP2: step 2 orders the proof before review and runs only the suite beside it on build', () => {
   const text = readFileSync(join(ROOT, '.agents/skills/review-procedure/SKILL.md'), 'utf8')

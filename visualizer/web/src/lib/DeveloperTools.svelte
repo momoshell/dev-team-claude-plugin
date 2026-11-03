@@ -5,6 +5,7 @@
   import { formatLeanDuration } from './timeline.js'
   let { sessions = [], role = '', model = '', agent = '' } = $props()
   let timelineMode = $state('time')
+  let chartWidth = $state(1000)
   let eventList = $state(null)
   let file = $state(''), query = $state(''), kind = $state('all'), selectedId = $state(''), tab = $state('Summary'), page = $state(1), expanded = $state(false)
   let recording = $derived(sessions.find(session => session.file === file) ?? sessions[0] ?? null)
@@ -20,6 +21,10 @@
   let timedDuration = $derived(timedRecords.length ? Math.max(...timedRecords.map(record => record.ended_at)) - Math.min(...timedRecords.map(record => record.started_at)) : null)
   let effectiveMode = $derived(timelineMode==='time' && timedOverview.length ? 'time' : 'sequence')
   let overview = $derived(effectiveMode==='time' ? timedOverview : traceOverview(trace.records))
+  let overviewBars = $derived(overview.map(span => {
+    const width = effectiveMode==='time' ? Math.min(1,Math.max(6/Math.max(1,chartWidth),span.width)) : Math.max(.0008,span.width-.001)
+    return { ...span, x: Math.min(span.x,1-width), width }
+  }))
   let pane = $derived(selected ? tab === 'Payload' ? prettyTraceValue(selected.input) : tab === 'Result' ? prettyTraceValue(selected.output) : tab === 'Raw events' ? JSON.stringify(selected.raw, null, 2) : '' : '')
   const tabs = ['Summary', 'Payload', 'Result', 'Timing', 'Raw events']
   const lanes = ['Input', 'Model', 'Tools']
@@ -33,7 +38,7 @@
     const fraction=event.detail===0?0:Math.max(0,Math.min(1,(event.clientX-rect.left)/rect.width))
     const lane=lanes[Math.max(0,Math.min(2,Math.floor((event.clientY-rect.top)/rect.height*3)))]
     const clickedIndex=Number(event.target?.closest?.('[data-event-index]')?.getAttribute('data-event-index'))
-    const span=overview.find(span=>span.index===clickedIndex) ?? nearestTraceSpan(overview,fraction,event.detail===0?undefined:lane)
+    const span=overviewBars.find(span=>span.index===clickedIndex) ?? nearestTraceSpan(overviewBars,fraction,event.detail===0?undefined:lane)
     const record=trace.records.find(record=>record.id===span?.id)
     if(!record)return
     const identity=record.id,sourceFile=recording.file
@@ -56,13 +61,15 @@
       <div class="counts"><strong>{trace.records.length}</strong> events <span>·</span> <strong>{trace.tool_count}</strong> tool calls</div>
     </div>
     <div class="overview-header"><strong>Execution trace</strong>{#if timedOverview.length}<div class="timeline-mode" role="group" aria-label="Overview scale"><button aria-pressed={effectiveMode==='sequence'} onclick={()=>timelineMode='sequence'}>Recorded order</button><button aria-pressed={effectiveMode==='time'} onclick={()=>timelineMode='time'}>Recorded time</button></div>{:else}<span>Recorded order</span>{/if}</div>
-    <p class="scale-note">{effectiveMode==='time' ? `Positions and widths follow recorded time · ${trace.records.length-timedOverview.length} untimed events omitted. Bars measure receipt intervals; zero-duration events use point markers.` : !timedOverview.length ? 'Timing unavailable for this recording. No complete event timestamps were recorded; the trace shows event order.' : 'Equal event slots · positions and widths do not measure elapsed time.'}</p>
+    <p class="scale-note">{effectiveMode==='time' ? `Bars follow receipt timestamps, with a 6 px minimum width for visibility · ${trace.records.length-timedOverview.length} untimed events omitted. Hover for duration or select to inspect.` : !timedOverview.length ? 'Timing unavailable for this recording. No complete event timestamps were recorded; the trace shows event order.' : 'Equal-width slots show every event in recorded order, including events without timing.'}</p>
     <div class="overview">
       <div class="lane-labels" aria-hidden="true">{#each lanes as lane}<span>{lane}</span>{/each}</div>
-      <button class="overview-chart" aria-label="Select an event in the overview. The event list offers the same records by keyboard." onclick={selectOverview}>
+      <button class="overview-chart" aria-label="Select an event in the overview. The event list offers the same records by keyboard." bind:clientWidth={chartWidth} onclick={selectOverview}>
         <svg viewBox="0 0 1000 84" preserveAspectRatio="none" aria-hidden="true">
           {#each lanes as lane, index}<rect class="lane-track" x="0" y={index*28} width="1000" height="23" />{/each}
-          {#each overview as span (span.id)}<rect data-event-index={span.index} class={`span lane-${span.lane.toLowerCase()}`} class:selected={selected?.id===span.id} x={span.width===0 ? Math.min(span.x*1000,999.2) : span.x*1000} y={lanes.indexOf(span.lane)*28+4} width={effectiveMode==='time' ? (span.width===0 ? .8 : span.width*1000) : Math.max(.8,span.width*1000-1)} height="15"><title>{trace.records[span.index-1].name} · {formatLeanDuration(trace.records[span.index-1].duration_ms) ?? 'Timing unavailable'}</title></rect>{/each}
+          {#each overviewBars as span (span.id)}
+            <rect data-event-index={span.index} class={`span lane-${span.lane.toLowerCase()}`} class:selected={selected?.id===span.id} x={span.x*1000} y={lanes.indexOf(span.lane)*28+4} width={span.width*1000} height="15"><title>{trace.records[span.index-1].name} · {formatLeanDuration(trace.records[span.index-1].duration_ms) ?? 'Timing unavailable'}</title></rect>
+          {/each}
         </svg>
       </button>
     </div>

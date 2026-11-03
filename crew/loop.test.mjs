@@ -15,6 +15,92 @@ const STAGES = ['plan', 'fetch', 'rebase', 'build', 'proof', 'review-paths', 'su
 const SUCCESS = ['seat:planner', 'fetch', 'rebase', 'seat:builder', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'suite', 'seat:reviewer', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase', 'publish']
 const MUTATION = { check: 'A1', file: 'lib.mjs', find: 'old', replace: 'new' }
 
+// MUTATION: skip the return read after a failed turn.
+test('a valid return written before a turn error is accepted with the error on its envelope row, read once and never reissued (b1490)', async () => {
+  const f = fakes({ spec: { tier: 'judge' } })
+  const run = f.deps.runSeat, read = f.deps.readFile
+  let reads = 0
+  f.deps.readFile = async (path, ...args) => { if (path.includes('tech-lead-')) reads++; return read(path, ...args) }
+  const message = 'Claude ended the turn without returning results for tool calls: toolu_017oix8Gd77bQUj4ZiovxaYR'
+  f.deps.runSeat = async (r) => { const result = await run(r); if (r.role === 'tech-lead') throw Object.assign(new Error(message), { code: -32603 }); return result }
+  assert.equal((await f.go()).status, 'done')
+  assert.equal(reads, 1)
+  assert.equal(f.requests.filter((r) => r.role === 'tech-lead').length, 1)
+  assert.deepEqual(f.rows.find((r) => r.event === 'envelope' && r.role === 'tech-lead').turnError, { code: -32603, message })
+})
+
+// MUTATION: ignore the failed turn's skill recording.
+test('a return read after a turn error is validated in full, required-skill proof included', async () => {
+  for (const proven of [false, true]) {
+    const f = fakes()
+    const run = f.deps.runSeat
+    f.deps.runSeat = async (r) => {
+      const result = await run(r)
+      if (r.role === 'planner') throw Object.assign(new Error('turn failed'), { recording: { definition: { agent: 'pi', requires: ['alpha'], skills: ['alpha'], writes: 'repo' }, recorded: (proven ? [LOAD, DONE] : []).map(JSON.stringify).join('\n') } })
+      return result
+    }
+    const result = await f.go()
+    assert.equal(result.status, proven ? 'done' : 'stopped')
+    if (!proven) { assert.equal(result.reason, 'envelope-refused'); assert.ok(f.rows.some((r) => r.defects?.includes('required-skills-unproven'))) }
+  }
+})
+
+// MUTATION: stop immediately on a failed turn or rerun it without a bound.
+test('an absent or invalid return after a turn error gets one rerun of the turn, then the lane stops seat-unmeasured', async () => {
+  for (const mode of ['absent', 'json', 'schema', 'id', 'twice', 'provider']) {
+    const f = fakes({ bounds: { planner: 1 }, edit: (v, r) => r.role === 'planner' && !r.rerun ? mode === 'json' ? '{' : mode === 'schema' ? { ...v, summary: '' } : mode === 'id' ? { ...v, id: 'stale' } : v : v })
+    const run = f.deps.runSeat
+    const issued = []
+    f.deps.runSeat = async (r) => {
+      if (r.role !== 'planner') return run(r)
+      issued.push(r)
+      if (r.rerun && mode !== 'twice') return run(r)
+      if (['json', 'schema', 'id'].includes(mode)) await run(r)
+      throw Object.assign(new Error('Claude ended the turn without returning results for tool calls: toolu_017oix8Gd77bQUj4ZiovxaYR'), { code: -32603, ...(mode === 'provider' ? { providerKind: 'authentication' } : {}) })
+    }
+    const result = await f.go()
+    assert.equal(result.status, ['twice', 'provider'].includes(mode) ? 'stopped' : 'done', mode)
+    if (result.status === 'stopped') assert.equal(result.reason, 'seat-unmeasured')
+    assert.equal(issued.length, mode === 'provider' ? 1 : 2)
+    if (mode !== 'provider') {
+      const [a, b] = issued
+      assert.equal(a.id, b.id); assert.equal(a.returnPath, b.returnPath); assert.ok(b.rerun)
+    }
+  }
+})
+
+// MUTATION: consult the lead again when the planner's bound was already spent.
+test('a lead bounce to a planner whose rounds are spent gives the planner one more turn without asking the lead again (b1491)', async () => {
+  const f = fakes({ review: 2, bounds: { planner: 1 }, lead: 'bounce', target: 'planner' })
+  assert.equal((await f.go()).status, 'done')
+  assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'builder', 'reviewer', 'builder', 'reviewer', 'lead', 'planner', 'builder', 'reviewer'])
+})
+
+// MUTATION: stop instead of bouncing an accept with no envelope.
+test('a lead accept on a spent bound with nothing to accept is a bounce to that seat (b1487)', async () => {
+  const f = fakes({ review: 1, bounds: { reviewer: 1 }, lead: 'accept' })
+  assert.equal((await f.go()).status, 'done')
+  assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'builder', 'reviewer', 'builder', 'lead', 'reviewer'])
+  assert.ok(f.seen.publish)
+})
+
+// MUTATION: replan a mechanical lane without discarding and raising it.
+test('a mechanical lane whose builder the lead bounces to the planner restarts as build, planned and reviewed (PR 2133)', async () => {
+  let builds = 0
+  const f = fakes({ spec: { tier: 'mechanical' }, lead: 'bounce', target: 'planner', edit: (v) => {
+    if (v.role === 'builder' && ++builds === 1) { v.status = 'escalate'; v.details.question = 'What next?' }
+    return v
+  } })
+  assert.equal((await f.go()).status, 'done')
+  assert.deepEqual(f.requests.map((r) => r.role), ['builder', 'lead', 'planner', 'builder', 'reviewer'])
+  assert.deepEqual(f.discardArgs, [['reset', '--hard', 'a'.repeat(40)], ['clean', '-f', '-d']])
+  assert.ok(f.calls.lastIndexOf('discard') < f.calls.indexOf('seat:planner'))
+  const row = f.rows.find((r) => r.event === 'tier-raised')
+  assert.deepEqual([row.from, row.to, row.reason], ['mechanical', 'build', 'lead-bounce-planner'])
+  assert.equal(f.requests.find((r) => r.role === 'planner').feedback[0].id, 'mechanical-restart')
+  assert.doesNotMatch(f.seen.publish.body, /mechanical lane, not reviewed/)
+})
+
 // Every effect is a recorded call; nothing touches a model, git, gh, the network or the disk.
 // A seat "returns" by writing its envelope into a virtual file the loop then reads back.
 function fakes(options = {}) {
@@ -498,7 +584,7 @@ test('a repaired envelope that is refused again stops the lane with no third tur
       f.deps.runSeat = async (request) => { if (request.role === 'builder') dispatched += 1; if (request.repair) throw new Error('repair crashed'); return run(request) }
     }
     assert.deepEqual(await f.go(), stopped(reason), name)
-    assert.equal(name === 'seat failure' ? dispatched : count(f, 'builder'), 2, name)
+    assert.equal(name === 'seat failure' ? dispatched : count(f, 'builder'), name === 'seat failure' ? 3 : 2, name)
     assert.equal(f.calls.includes('gate'), false, name)
   }
   // a refused repair of the lead is a lead refusal
@@ -520,7 +606,7 @@ test('a non-JSON, empty, unreadable, id-only or proof-only refusal gets no repai
   ]) {
     const f = fakes(options)
     assert.deepEqual(await f.go(), stopped(reason))
-    assert.equal(count(f, 'planner'), 1)
+    assert.equal(count(f, 'planner'), options.seatThrows ? 2 : 1)
     assert.equal(f.requests.some((r) => r.repair), false)
   }
 })
@@ -654,7 +740,8 @@ test('a lead accept releases only a valid non-done envelope and never an exhaust
   assert.equal(count(escalated, 'lead'), 1)
   assert.deepEqual(escalated.requests.find((r) => r.role === 'lead').feedback.map((x) => [x.role, x.reason, x.envelope.status]), [['planner', 'escalate', 'escalate']])
   const exhausted = fakes({ lead: 'accept', review: 10, bounds: { builder: 1 } })
-  assert.deepEqual(await exhausted.go(), stopped('accept-unmeasured'))
+  assert.deepEqual(await exhausted.go(), stopped('round-bound'))
+  assert.equal(count(exhausted, 'lead'), 2)
   assert.equal(exhausted.calls.includes('commit'), false)
   const changes = fakes({ lead: 'accept', review: 10, edit: (v) => v.role === 'reviewer' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v })
   assert.notEqual((await changes.go()).status, 'done')

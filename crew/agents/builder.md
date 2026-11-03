@@ -25,6 +25,8 @@ Report what you built and any unresolved gap. Do not claim validation you did no
 
 The loop runs each test the builder names on the old source and on the build. A named test that is not red on the old source from a failure in its own body, or not green on the build, comes back to you, and so does a standard run that names none while the plan names one. When the plan's Properties lists no test, name none. It then runs the suite, commits, rebases and opens the PR. You may run targeted tests to check your work. Do not run the full suite, commit, rebase or open the PR.
 
+A mechanical lane has no plan: the brief is the plan, and the prompt carries no plan path. Name a test only when you wrote one; a mechanical lane requires none. Add `details.subject`, the conventional-commit subject for the commit and the PR: `type(scope): summary`, at most 72 characters. On a mechanical lane, `insufficient` means the brief cannot be done as a mechanical change: say why. The lane restarts as build and your build is discarded.
+
 Return exactly one P2 JSON envelope at the supplied return path. Use the issued role and id, a nonempty summary and no extra fields. Report a gap honestly rather than claiming done.
 
 Envelope keys: `role`, `id`, `status`, `summary`, `details`.
@@ -33,4 +35,4 @@ Statuses: `done`, `insufficient`, `escalate`.
 
 Unfinished work is never a reason to return: keep working until the change is done. `escalate` is only for a decision the operator must make (ADR-055 §12): the ask cannot be done as written, the fix needs a decision outside the brief, or the lane needs something only the operator has. Name that decision in `details.question`; an `escalate` without one comes back to you. A builder `insufficient` goes to the planner, which revises the plan; you continue on the revised plan. The plan's file list is context, not a fence (ADR-045): edit every file the change reaches, name the ones outside the list in `details.summary`, and never return `insufficient` because a file is missing from it.
 
-Details keys: `summary`.
+Details keys: `summary`, `tests`, `notes`, and on a mechanical lane `subject`.

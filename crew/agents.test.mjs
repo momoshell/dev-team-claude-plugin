@@ -158,7 +158,8 @@ test('lean charter declarations match the P2 schemas and loop ownership', () => 
     const declared = (label) => {
       const lines = body.split('\n').filter((line) => line.startsWith(`${label}:`))
       assert.equal(lines.length, 1, `${role}: one ${label} line`)
-      const value = lines[0].slice(label.length + 1)
+      let value = lines[0].slice(label.length + 1)
+      if (role === 'builder' && label === 'Details keys') value = value.replace(', and on a mechanical lane ', ', ')
       assert.equal(value.replace(/`[A-Za-z0-9_.-]+`/g, '').replace(/[,.\s]/g, ''), '', `${role}: ${label} is only backtick tokens`)
       return [...value.matchAll(/`([A-Za-z0-9_.-]+)`/g)].map((match) => match[1]).sort()
     }
@@ -166,6 +167,11 @@ test('lean charter declarations match the P2 schemas and loop ownership', () => 
     const detailKeys = validateEnvelope(role, { role, id: 'probe', status: 'done', summary: 'probe', details: {} }).defects
       .map((defect) => /^details\.([a-z_]+) is required$/.exec(defect)?.[1]).filter(Boolean)
     assert.ok(detailKeys.length > 0, role)
+    if (role === 'builder') {
+      const optional = { tests: [], notes: 'probe', subject: 'fix(crew): probe' }
+      assert.deepEqual(validateEnvelope(role, { role, id: 'probe', status: 'done', summary: 'probe', details: { summary: 'probe', ...optional } }).defects, [])
+      detailKeys.push(...Object.keys(optional))
+    }
     for (const [label, expected] of [['Details keys', detailKeys], ['Envelope keys', ENVELOPE_FIELDS], ['Statuses', ENVELOPE_STATUSES], ...(vocabulary[role] ?? [])]) {
       assert.deepEqual(declared(label), [...expected].sort(), `${role}: ${label}`)
     }

@@ -360,6 +360,37 @@ test('a lane with a recorded PR or a committed build is refused', () => {
   }
 })
 
+// MUTATION: drop the outcome status check and a red undo finishes.
+test('a commit the loop undid before its recheck stopped does not block a finish; a standing or failed undo is still refused', () => {
+  const head = 'a'.repeat(40)
+  const commit = { event: 'commit', stage: 'commit', head }
+  const greenUndo = { event: 'stage-end', stage: 'uncommit', outcome: { status: 'green', code: 0, reason: null } }
+  const review = { event: 'stage-start', stage: 'review' }
+  const stop = { event: 'verdict', stage: null, status: 'stopped', reason: 'round-bound' }
+  const base = [
+    { event: 'run-start', stage: null }, { event: 'stage-start', stage: 'build' }, builderRow,
+    { event: 'stage-end', stage: 'build' }, { event: 'stage-start', stage: 'commit' },
+    { event: 'stage-end', stage: 'commit', outcome: { status: 'green', head } }, commit,
+    { event: 'stage-start', stage: 'fetch' }, { event: 'stage-end', stage: 'fetch' },
+    { event: 'stage-start', stage: 'rebase' }, { event: 'stage-end', stage: 'rebase' },
+    { event: 'stage-start', stage: 'uncommit' },
+  ]
+  for (const [name, tail, allowed] of [
+    ['undone', [greenUndo, review], true],
+    ['failed undo', [{ ...greenUndo, outcome: { status: 'red', reason: 'command-failed' } }], false],
+    ['thrown undo', [{ ...greenUndo, outcome: { threw: 'error' } }], false],
+    ['never ended', [], false],
+    ['re-committed', [greenUndo, review, commit], false],
+  ]) {
+    const f = fixture({ rows: [...base, ...tail, stop] })
+    try {
+      const attempt = run(f)
+      if (allowed) { assert.doesNotThrow(() => attempt.go(), name); assert.equal(attempt.spawned.length, 1, name) }
+      else { assert.throws(() => attempt.go(), (e) => e instanceof FinishRefusal && e.reason === 'finish-committed', name); assert.equal(attempt.spawned.length, 0, name) }
+    } finally { cleanup(f) }
+  }
+})
+
 // MUTATION: keep the claim when the launch fails and a retry after the fix is refused as finish-running.
 test('a launch that fails releases its claim, so a retry after the fix spawns', () => {
   const f = fixture()

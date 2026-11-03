@@ -1,12 +1,8 @@
 // Provider failure kinds, ACP reset parsing and the provider retry decision.
-// Pure and dependency-free: the lean path imports this without the old driver.
+// Pure and dependency-free.
 
-// WHICH provider condition ended the turn, as a closed enum rather than the one
-// bit `budgetRefused` carries. The stream's terminal `result` frame already
-// records `api_error_status` and the driver has been discarding it, so a rate
-// limit, an expired key and a capacity outage have all been arriving as the
-// same `budget-refused` row — three causes an operator has to act on
-// differently, grouped as one (#779).
+// Provider conditions as a closed enum, so rate limits, expired keys and
+// capacity outages can be handled separately.
 //
 // Measured 2026-09-01 against a stand-in upstream (test/fake-upstream.mjs),
 // which returns a chosen status so the mapping is evidence and not a guess:
@@ -19,9 +15,7 @@
 // subtype: on a refused turn it says success while `is_error` says otherwise.
 //
 // The names are borrowed from the Agent Client Protocol's `data.errorKind`.
-// Nothing here depends on that protocol — the status has always been in our own
-// terminal frame — but a cause enum shared with the wider ecosystem costs
-// nothing and keeps one taxonomy if the question is ever reopened.
+// ACP error kinds are mapped to this shared taxonomy below.
 export const PROVIDER_FAILURE_KINDS = Object.freeze({
   RATE_LIMIT: 'rate_limit',
   AUTHENTICATION_FAILED: 'authentication_failed',
@@ -42,19 +36,12 @@ export function acpProviderFailureKind(errorKind, errorMessage) {
   return null
 }
 
-// --- provider retry: routing the kind the stream already carried ------------
-// #887. Four lanes died on 2026-09-03 because a 529, a 429 and a 401 all
-// collapse into one `budget-refused` and the driver escalates. b401 lost a
-// plan, a build, a scope gate, a 17/17 mutation proof and a completed review to
-// a 529 at review:r1, and its own stream shows the worker had ALREADY spent ten
-// retries over 223s inside the turn. The kind was measured the whole time
-// and nothing routed on it. Route here.
-//
+// Provider retry routing.
 // A retry that never gives up is worse than the escalation it replaces, so BOTH
 // bounds are closed constants and BOTH are consumed: a park that fits the
 // attempt count still runs out of total wait.
 export const PROVIDER_RETRY_MAX = 3
-// Five and a half hours: a POLICY bound this driver chose, not a fact about the
+// Five and a half hours: a policy bound, not a fact about the
 // provider. The provider's window is five hours (`rateLimitType: "five_hour"` in
 // the recorded 2026-08-30 frame), so a stated reset can legitimately be up to
 // nearly five hours out. This bound now COVERS that window, with half an hour of
@@ -71,12 +58,7 @@ export const PROVIDER_RETRY_MAX = 3
 //
 // A reset further away than this is still refused with the instant NAMED, so the
 // operator re-dispatches knowing exactly when.
-//
-// KNOWN TENSION, stated rather than hidden: a park this long is invisible to
-// every liveness instrument (#948) — the driver sleeps emitting nothing, reads
-// `stale` in crew-watch, and `dispatch-batch` refuses an unrelated batch against
-// it as `external-fence-abandoned`. Raising this bound makes that worse in
-// duration, not in kind. #948 is the fix; this constant is not.
+
 export const PROVIDER_RETRY_TOTAL_WAIT_MS = (5 * 60 + 30) * 60 * 1000
 
 // Minutes, not the worker's seconds: the one retry budget that already existed
@@ -111,12 +93,7 @@ export function acpTextReset(text, at) {
   return no()
 }
 
-// What the driver does about each kind, as DATA for the same reason
-// SEAT_REFUSAL_ACTIONS is data: a policy change is a data edit, not a new
-// branch. `none` is TODAY'S behaviour, byte for byte — no row, no wait, no
-// respawn — and it is what an UNCLASSIFIED failure and an unmeasured status
-// both get, because a failure nobody diagnosed must not be retried as though it
-// had been.
+// Retry action for each kind. Unclassified failures are not retried.
 export const PROVIDER_RETRY_ACTIONS = Object.freeze({
   [PROVIDER_FAILURE_KINDS.SERVER_ERROR]: 'backoff',
   [PROVIDER_FAILURE_KINDS.RATE_LIMIT]: 'park',

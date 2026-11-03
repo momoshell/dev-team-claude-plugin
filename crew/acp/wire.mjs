@@ -1,5 +1,5 @@
 // Wire helpers: shell quoting, LF frame splitting and seat command-channel paths.
-// Node builtins only, so the lean path owns them without the old driver.
+// Uses Node builtins only.
 import { lstatSync as fsLstatSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'

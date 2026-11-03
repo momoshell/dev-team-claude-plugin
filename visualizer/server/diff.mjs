@@ -1,4 +1,4 @@
-// Line diff helper for the agents editor proposals (moved out of the removed roster editor).
+// Line diff helper for agents editor proposals.
 function lines(text) {
   if (text === '') return { values: [], newline: false }
   const newline = text.endsWith('\n')
@@ -19,7 +19,7 @@ function bodyLine(prefix, value, noNewline = false) {
   return [{ text: `${prefix}${value}` }, ...(noNewline ? [{ text: '\\ No newline at end of file', marker: true }] : [])]
 }
 
-export function unifiedDiff(beforeText, afterText, { path = 'crew/roster.json' } = {}) {
+export function unifiedDiff(beforeText, afterText, { path } = {}) {
   if (beforeText === afterText) return ''
   const before = lines(beforeText), after = lines(afterText)
   const oldCount = before.values.length
@@ -27,9 +27,7 @@ export function unifiedDiff(beforeText, afterText, { path = 'crew/roster.json' }
   const equal = (oldIndex, newIndex) => before.values[oldIndex] === after.values[newIndex]
     && terminated(before, oldIndex) === terminated(after, newIndex)
 
-  // Keep unchanged regions out of the patch body. Besides producing a useful
-  // review diff, this prevents a schema migration from echoing the unchanged
-  // model-price catalog into a proposal's API response.
+  // Keep unchanged regions out of the patch body for a useful review diff.
   const lcs = Array.from({ length: oldCount + 1 }, () => new Uint32Array(newCount + 1))
   for (let oldIndex = oldCount - 1; oldIndex >= 0; oldIndex -= 1) {
     for (let newIndex = newCount - 1; newIndex >= 0; newIndex -= 1) {

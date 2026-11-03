@@ -13,8 +13,7 @@ export const PI_PROVIDERS = Object.freeze({ openai: 'openai-codex', anthropic: '
 // Object.prototype, so a roster provider named `toString` or `constructor`
 // resolved to a function — truthy — and modelString synthesized
 // `function toString() { [native code] }/<id>` instead of taking the refusal
-// below. adapter-claude.mjs's modelString already guards its local half the
-// same way. An OWN property is still honoured even when its name collides
+// below. An OWN property is still honoured even when its name collides
 // with a prototype member, and a null-prototype register behaves identically.
 const own = (obj, key) => Boolean(obj) && typeof obj === 'object' && Object.hasOwn(obj, key)
 

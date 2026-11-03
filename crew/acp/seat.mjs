@@ -289,7 +289,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
   const pi = isClaude ? null : resolveBinary('pi', binaries.pi, 'pi', env)
   const grantedSkills = skills.map((skill) => resolveSkill(skill, workdir))
   const grants = seatGrants(definition, { role, isClaude, skills: grantedSkills, deps })
-  // fff replaces native search, as the old path's effectiveDeny did; pi reads Glob and Grep as find and grep.
+  // fff replaces native search; pi reads Glob and Grep as find and grep.
   if (grants.mcp_servers.some((server) => server.name === 'fff')) deny = [deny, 'Glob,Grep'].filter(Boolean).join(',')
   const contextArms = isClaude ? [] : [
     ...(definition.extensions ?? []).filter((name) => CONTEXT_EXTENSIONS.includes(name)),

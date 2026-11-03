@@ -1876,6 +1876,50 @@ test('a post-rebase check that dirties the tree or moves HEAD stops a mechanical
   assert.deepEqual(await moved({ cleanStatus: 'garbage' }).go(), stopped('paths-unmeasured'))
 })
 
+// MUTATION: keep one lead counter for the lane.
+test("the lead's bound is per phase: plan routing before the first review never starves the review's or the recheck's consults (b1509)", async () => {
+  const A = 'a'.repeat(40), C = 'c'.repeat(40)
+  let builds = 0, leads = 0
+  const f = sequenced([green(), green(), redRun(), green()], {
+    bounds: { lead: 1 }, review: 1, lead: 'bounce',
+    rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C }),
+    commit: answers({ status: 'green', reason: null, head: A, files: ['lib.mjs'] }, { status: 'green', reason: null, head: C, files: ['lib.mjs'] }),
+    edit: (v) => {
+      if (v.role === 'builder' && ++builds === 1) v.status = 'insufficient'
+      if (v.role === 'lead') v.details.target = ++leads === 1 ? 'planner' : 'builder'
+      return v
+    },
+  })
+  assert.equal((await f.go()).status, 'done')
+  assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'builder', 'lead', 'planner', 'builder', 'reviewer', 'lead', 'builder', 'reviewer', 'reviewer', 'lead', 'builder', 'reviewer'])
+  assert.deepEqual(f.requests.filter((r) => r.role === 'lead').map((r) => r.feedback[0].last), [true, true, true])
+})
+
+// MUTATION: count the rebase-forced re-review against the seat's bound.
+test('a re-review forced only by a moved-head rebase spends no reviewer or tech-lead round, and a review after a recheck fix does (b1500)', async () => {
+  const A = 'a'.repeat(40), C = 'c'.repeat(40)
+  const rebase = () => answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C })
+  const commit = () => answers({ status: 'green', reason: null, head: A, files: ['lib.mjs'] }, { status: 'green', reason: null, head: C, files: ['lib.mjs'] })
+  const judge = fakes({ spec: { tier: 'judge' }, review: 1, bounds: { 'tech-lead': 1 }, rebase: rebase(), commit: commit() })
+  assert.equal((await judge.go()).status, 'done')
+  assert.deepEqual(judge.requests.map((r) => r.role), ['planner', 'builder', 'reviewer', 'builder', 'reviewer', 'tech-lead', 'reviewer', 'tech-lead'])
+
+  // MUTATION: keep the recheck free after a builder fix, or spend an available round on the rebase-only review.
+  for (const bound of [1, 2]) {
+    const build = sequenced([green(), redRun(), green()], { bounds: { reviewer: bound }, rebase: rebase(), commit: commit() })
+    const result = await build.go()
+    if (bound === 1) {
+      assert.deepEqual(result, stopped('lead-escalated'))
+      const held = build.requests.find((r) => r.role === 'lead').feedback[0]
+      assert.deepEqual({ role: held.role, reason: held.reason }, { role: 'reviewer', reason: 'round-bound' })
+      assert.equal(count(build, 'reviewer'), 2)
+    } else {
+      assert.equal(result.status, 'done')
+      assert.deepEqual(build.requests.map((r) => r.role), ['planner', 'builder', 'reviewer', 'reviewer', 'builder', 'reviewer'])
+    }
+  }
+})
+
 // MUTATION: keep the old post-rebase proof and suite path, without reviewing the rebased change.
 test('a build or judge lane whose publishing rebase moves the head reruns the proof, the suite and every review on the rebased change, through a builder fix when red, before it commits again and publishes', async () => {
   const c = 'c'.repeat(40)

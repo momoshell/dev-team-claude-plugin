@@ -135,6 +135,12 @@ export async function runLoop(spec, deps = {}) {
   const { cwd, timeoutMs } = spec
   const { journal } = d
   const rounds = { planner: 0, builder: 0, reviewer: 0, 'tech-lead': 0, lead: 0 }
+  const phases = ['build', 'review', 'recheck']
+  let phase = 0
+  const enterPhase = (next) => {
+    const index = phases.indexOf(next)
+    if (index > phase) { phase = index; rounds.lead = 0 }
+  }
   const last = {}
   const turns = { planner: 0, builder: 0, reviewer: 0, 'tech-lead': 0, lead: 0 }
   let suiteRepairs = 0
@@ -254,15 +260,17 @@ export async function runLoop(spec, deps = {}) {
   // One role's turn: issue, await, read back, validate (a schema-refused file gets one repair turn that
   // costs no round). Returns { envelope } for a done envelope or { halt }.
   // Non-done returns route under ADR-055 §12; an exhausted bound goes to the lead, unless singleTurn or the lead's own bound stops it.
-  const seatTurn = async (role, feedback = [], { singleTurn = false } = {}) => {
+  const seatTurn = async (role, feedback = [], { singleTurn = false, free = false } = {}) => {
+    if (role === 'reviewer') enterPhase('review')
     let given = feedback
     for (;;) {
       let held
-      if (rounds[role] >= (seats[role].rounds ?? DEFAULT_ROUNDS)) {
+      if (!free && rounds[role] >= (seats[role].rounds ?? DEFAULT_ROUNDS)) {
         held = { reason: 'round-bound', envelope: null }
       } else {
         turn += 1
-        rounds[role] += 1
+        if (!free) rounds[role] += 1
+        free = false
         turns[role] += 1
         if (role === 'lead') feedback = feedback.map((item) => Object.hasOwn(item, 'last') ? { ...item, last: rounds.lead >= (seats.lead.rounds ?? DEFAULT_ROUNDS) } : item)
         if (role === 'builder' && feedback.some((item) => item.id === 'suite-repair')) suiteRepairs += 1
@@ -545,6 +553,7 @@ export async function runLoop(spec, deps = {}) {
             continue
           }
         }
+        const rebaseOnly = recheck && !isFinish
         recheck = false
         if (!namedTests.length && !isFinish && !testsRequired) proofLines = [tier === 'mechanical' ? '- proof: none, mechanical lane, not reviewed' : '- proof: none, no criterion is machine-checked']
         if (namedTests.length) {
@@ -584,7 +593,7 @@ export async function runLoop(spec, deps = {}) {
         if (!isFinish) {
           const halt = await stageChecked()
           if (halt) return halt
-          const runReview = () => stage('review', () => seatTurn('reviewer', priorFindings))
+          const runReview = () => stage('review', () => seatTurn('reviewer', priorFindings, { free: rebaseOnly }))
           let suite, reviewed
           if (tier === 'build') {
             const pair = await Promise.allSettled([suiteRun(), runReview()])
@@ -616,7 +625,7 @@ export async function runLoop(spec, deps = {}) {
           }
           suiteLine = `- Suite: green; exit ${suite.code}.`
           if (tier === 'judge') {
-            const second = await stage('second-review', () => seatTurn('tech-lead', secondFindings))
+            const second = await stage('second-review', () => seatTurn('tech-lead', secondFindings, { free: rebaseOnly }))
             if (second.halt) return second.halt
             secondFindings = second.envelope.details.findings
             await emit('verdict', { status: 'reviewed', role: 'tech-lead', verdict: second.envelope.details.verdict, findings: secondFindings })
@@ -738,6 +747,7 @@ export async function runLoop(spec, deps = {}) {
       if (rebased.head === rebased.onto) return stop('nothing-to-commit', { head: rebased.head, onto: rebased.onto, committed: committed.head })
       const uncommitted = await stage('uncommit', () => callCheck('uncommit', d.run, { cwd, command: 'git', args: ['reset', '--soft', rebased.onto], timeoutMs }, { command: true }))
       if (uncommitted.status !== 'green') return stop(uncommitted.reason, uncommitted)
+      enterPhase('recheck')
       recheck = true
       continue
     }

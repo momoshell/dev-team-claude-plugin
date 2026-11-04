@@ -12,7 +12,7 @@ const NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills:
 const FFF_MCP_NAME = 'fff'
 export const FFF_HOOK_PATH = fileURLToPath(import.meta.url)
 
-export function hasFffGrant(grants = NO_GRANTS) {
+function hasFffGrant(grants = NO_GRANTS) {
   return Array.isArray(grants?.mcp_servers) && grants.mcp_servers.some((server) => (
     server?.name === FFF_MCP_NAME
   ))
@@ -133,7 +133,7 @@ function assertSupportedGrants(grants = NO_GRANTS) {
   }
 }
 
-export function skillsPluginDir({ taskDir, role } = {}) {
+function skillsPluginDir({ taskDir, role } = {}) {
   if (typeof taskDir !== 'string' || !isAbsolute(taskDir)) {
     throw new Error(`adapter-claude.skillsPluginDir: taskDir must be an ABSOLUTE path, got ${JSON.stringify(taskDir)}`)
   }
@@ -143,13 +143,13 @@ export function skillsPluginDir({ taskDir, role } = {}) {
   return join(taskDir, 'claude-skills', role)
 }
 
-export function skillDirName(source) {
+function skillDirName(source) {
   const base = basename(String(source))
   if (base === 'SKILL.md') return basename(dirname(String(source)))
   return base.endsWith('.md') ? base.slice(0, -3) : base
 }
 
-export function seatSkillFiles({ taskDir, role, grants } = {}) {
+function seatSkillFiles({ taskDir, role, grants } = {}) {
   return (grants?.skills || []).map((source) => join(skillsPluginDir({ taskDir, role }), 'skills', skillDirName(source), 'SKILL.md'))
 }
 
@@ -243,7 +243,7 @@ export function writeSeatSkills({ taskDir, role, grants } = {}, deps = {}) {
   }, null, 2))
 }
 
-export function assertSkillsMaterialised({ taskDir, role, grants } = {}) {
+function assertSkillsMaterialised({ taskDir, role, grants } = {}) {
   const skills = grants?.skills || []
   if (skills.length === 0) return
   for (const skillFile of seatSkillFiles({ taskDir, role, grants })) {

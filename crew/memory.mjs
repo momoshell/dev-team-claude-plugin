@@ -2,7 +2,7 @@
 // extracts are bounded and carry byte accounting.
 import { openMarkdownMemory } from './memory-md.mjs'
 
-export const DEFAULT_BACKEND = 'markdown'
+const DEFAULT_BACKEND = 'markdown'
 export const DEFAULT_BUDGET_BYTES = 8000
 
 export function openMemory({ dir, backend = DEFAULT_BACKEND, budgetBytes = DEFAULT_BUDGET_BYTES } = {}) {

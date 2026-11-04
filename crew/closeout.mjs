@@ -17,7 +17,7 @@ import { LANE, isObject, within } from './lane-core.mjs'
 import { parsePrUrl } from './record-pr.mjs'
 import { deadRun, probeAlive } from './run-pid.mjs'
 
-export class CloseoutRefusal extends Error {}
+class CloseoutRefusal extends Error {}
 
 const refuse = (message) => { throw new CloseoutRefusal(message) }
 const isDir = (path) => { try { return statSync(path).isDirectory() } catch { return false } }
@@ -52,7 +52,7 @@ function must(run, what, cmd, args) {
   return String(result.stdout ?? '')
 }
 
-export function closeoutLane({ lane, root = join(homedir(), '.crew'), archiveRoot, run = defaultRun, renameSync: rename = renameSync, mkdirSync: mkdir = mkdirSync, alive = probeAlive } = {}) {
+function closeoutLane({ lane, root = join(homedir(), '.crew'), archiveRoot, run = defaultRun, renameSync: rename = renameSync, mkdirSync: mkdir = mkdirSync, alive = probeAlive } = {}) {
   if (typeof lane !== 'string' || !LANE.test(lane)) refuse('lane must be a lean lane slug')
   const archive = archiveRoot ?? join(dirname(root), '.crew-journal-archive')
   const found = createLeanSource({ crewRoot: root, archiveRoot: archive }).resolveLane(lane)

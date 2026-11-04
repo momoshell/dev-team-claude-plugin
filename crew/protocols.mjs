@@ -36,7 +36,7 @@ function value(raw) {
 // heading or item quoted inside a fence is an example, as the driver reads it.
 // `includeFences` retains fenced lines as content without treating headings inside them as boundaries.
 // A heading the body repeats is listed in `repeated`; the driver reads only the first.
-export function sections(body, { includeFences = false } = {}) {
+function sections(body, { includeFences = false } = {}) {
   const out = new Map()
   const repeated = []
   const askQuotes = new Set()

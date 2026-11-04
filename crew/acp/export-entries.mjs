@@ -2,7 +2,7 @@
 
 import { extname } from 'node:path'
 
-export const CODE_EXTENSIONS = Object.freeze(['.js', '.mjs', '.ts'])
+const CODE_EXTENSIONS = Object.freeze(['.js', '.mjs', '.ts'])
 const UNSUPPORTED_EXPORT_FORMS = Object.freeze(['var', 'star', 'interface'])
 const EXPORTED_DECLARATION = /^export\s+(?:(?:async)\s+)?(function|const|let|class|var|interface)\s+([A-Za-z_$][\w$]*)/gm
 const EXPORTED_DEFAULT = /^export\s+default\b/gm
@@ -22,11 +22,11 @@ export class BriefUsageError extends Error {
 function refuseUsage(message, reason = MISSING_LINE) {
   throw new BriefUsageError(`brief: ${message}`, reason)
 }
-export function nonEmptyString(value) {
+function nonEmptyString(value) {
   return typeof value === 'string' && value.trim().length > 0
 }
 
-export function normaliseSourceInput(source, filePath = '') {
+function normaliseSourceInput(source, filePath = '') {
   if (source && typeof source === 'object' && !Array.isArray(source)) {
     filePath = source.file || source.path || ''
     source = source.source || ''
@@ -43,7 +43,7 @@ export function normaliseSourceInput(source, filePath = '') {
 // precomputed newline table with a binary search does the same 70k in 4.9ms.
 // That is the whole of #892: the two ARG_MAX fixtures took 110.8s and 70.2s and
 // npm test went from 35s to 218s.
-export function lineIndex(source) {
+function lineIndex(source) {
   const starts = [0]
   for (let at = source.indexOf('\n'); at !== -1; at = source.indexOf('\n', at + 1)) starts.push(at + 1)
   return (index) => {
@@ -480,7 +480,7 @@ function splitExportMembers(source, masked, start, end) {
   return members
 }
 
-export function exportedSymbolEntries(source) {
+function exportedSymbolEntries(source) {
   const entries = []
   const lineOf = lineIndex(source)
   const masked = maskLexical(source)
@@ -535,7 +535,7 @@ export function exportedSymbolEntries(source) {
   return entries
 }
 
-export function isCodeFile(filePath) {
+function isCodeFile(filePath) {
   return !nonEmptyString(filePath)
     || CODE_EXTENSIONS.includes(extname(String(filePath)).toLowerCase())
 }

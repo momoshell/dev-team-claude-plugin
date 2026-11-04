@@ -20,13 +20,13 @@ const MEASURED_CLAIM = new RegExp(String.raw`${CLAIM_LINE_START}Measure: ${MEASU
 const UNMEASURED_CLAIM = new RegExp(String.raw`${CLAIM_LINE_START}unmeasured \u2014 n insufficient; reason: [^;\n]*[^\s;\n][^;\n]*; re-measure after [1-9]\d* seats\.?(?:\n|$)`, 'i')
 export const PROMPT_NOT_APPLICABLE = 'not applicable \u2014 citation-only; no seat-behaviour change intended.'
 const isClaim = (line) => MEASURED_CLAIM.test(line) || UNMEASURED_CLAIM.test(line) || line === PROMPT_NOT_APPLICABLE
-export function stripPromptClaims(body) { return String(body ?? '').split('\n').filter((line) => !isClaim(line)).join('\n') }
+function stripPromptClaims(body) { return String(body ?? '').split('\n').filter((line) => !isClaim(line)).join('\n') }
 
 // Upstream banned-outright list minus harness, this repo noun (mutation harness,
 // 28 uses): flagging it would drown the signal.
 export const BANNED_WORDS = Object.freeze(['delve', 'foster', 'leverage', 'utilize', 'facilitate', 'empower', 'streamline', 'robust', 'cutting-edge', 'paradigm shift', 'game changer', 'this is huge', 'this changes everything', 'tapestry', 'realm', 'beacon', 'multifaceted', 'meticulous', 'intricate', 'paramount', 'transformative', 'elevate', 'embark', 'supercharge', 'ever-evolving'])
-export const EM_DASH_LIMIT = 2
-export const USAGE_EXIT = 2
+const EM_DASH_LIMIT = 2
+const USAGE_EXIT = 2
 export const RECAP_OPENERS = Object.freeze(['In conclusion', 'Ultimately', 'Overall', 'In summary', 'To sum up'])
 
 const DASH = String.fromCharCode(8212)
@@ -100,7 +100,7 @@ export function lintText(text, source) {
   return findings.map(({ source, line, rule, detail }) => ({ source, line, rule, detail }))
 }
 
-export function main(argv = process.argv.slice(2)) {
+function main(argv = process.argv.slice(2)) {
   if (argv.length > 1) {
     process.stderr.write('usage: prose-lint [file]\n')
     return USAGE_EXIT

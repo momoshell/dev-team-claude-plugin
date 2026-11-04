@@ -32,21 +32,21 @@ import { modelString } from '../../adapters/adapter-pi.mjs'
 
 export const ADVISOR_CONFIG_VERSION = 1
 export const ADVISOR_GRANT_ENV = 'CREW_ADVISOR'
-export const ADVISOR_MESSAGE_TYPE = 'crew-advisor'
+const ADVISOR_MESSAGE_TYPE = 'crew-advisor'
 export const ADVISOR_MANIFEST_FILE = 'advisor-manifest.json'
 export const ADVISED_ROLES = Object.freeze(new Set(['builder']))
 
 export const SCOPE_BREACH = 'scope-breach'
 export const REPEATED_FAILURE = 'repeated-failure'
-export const GROWTH_DIVERGENCE = 'growth-divergence'
+const GROWTH_DIVERGENCE = 'growth-divergence'
 // Separate from the three mechanical kinds: a model finding is not a predicate.
-export const TIER1_FINDING = 'tier1-finding'
-export const TRIGGERS = Object.freeze(['tier0-note', 'cadence', 'diff-growth', 'pre-return'])
+const TIER1_FINDING = 'tier1-finding'
+const TRIGGERS = Object.freeze(['tier0-note', 'cadence', 'diff-growth', 'pre-return'])
 
-export const REPEAT_FAILURE_THRESHOLD = 2
-export const GROWTH_DIVERGENCE_RATIO = 2
-export const GROWTH_FLOOR_BYTES = 120_000
-export const CADENCE_CALLS = 25
+const REPEAT_FAILURE_THRESHOLD = 2
+const GROWTH_DIVERGENCE_RATIO = 2
+const GROWTH_FLOOR_BYTES = 120_000
+const CADENCE_CALLS = 25
 export const TIER1_MAX_CONSULTS = 20
 // Lines added plus removed against HEAD (untracked files counted) that the working diff must grow by, since the last consult, to queue one.
 export const DIFF_GROWTH_LINES = 200
@@ -80,13 +80,13 @@ function countFileLines(path, cap) {
 }
 // How long a trigger queued by a call's start waits for that call's own result before a later result sends it as orphaned.
 const ORPHAN_PENDING_MS = 10 * 60 * 1000
-export const DEDUPE_CAP = 256
-export const SIGNATURE_CAP_BYTES = 256
-export const NOTE_TEXT_CAP_BYTES = 4096
-export const TARGET_CAP_BYTES = 256
+const DEDUPE_CAP = 256
+const SIGNATURE_CAP_BYTES = 256
+const NOTE_TEXT_CAP_BYTES = 4096
+const TARGET_CAP_BYTES = 256
 export const DELTA_ENTRIES = 12
 export const DELTA_ENTRY_CAP_BYTES = 512
-export const EXCERPT_LINES = 12
+const EXCERPT_LINES = 12
 // The pre-return consult's own, larger view: the whole working diff, bounded by bytes rather than by entries.
 export const PRE_RETURN_DIFF_BUDGET_BYTES = 48 * 1024
 // The omitted_files entries that say the window is incomplete in a way names cannot (not file paths).
@@ -100,12 +100,12 @@ export const RESPONSE_CAP_BYTES = 65_536
 export const CLAIM_CAP_BYTES = 500
 export const EVIDENCE_MAX = 5
 export const EVIDENCE_ITEM_CAP_BYTES = 200
-export const CONSULT_TIMEOUT_MS = 20_000
+const CONSULT_TIMEOUT_MS = 20_000
 // A judgment child that ignores SIGTERM gets SIGKILL after this grace, and a
 // consult settles only once the child has closed (or a second grace has passed).
-export const CHILD_KILL_GRACE_MS = 2_000
-export const GIT_TIMEOUT_MS = 5000
-export const DIFF_MAX_BUFFER_BYTES = 16 * 1024 * 1024
+const CHILD_KILL_GRACE_MS = 2_000
+const GIT_TIMEOUT_MS = 5000
+const DIFF_MAX_BUFFER_BYTES = 16 * 1024 * 1024
 
 export const JUDGMENT_CLASSES = Object.freeze(['edge-path', 'over-claim'])
 export const SEVERITIES = Object.freeze(['low', 'medium', 'high'])
@@ -117,7 +117,7 @@ export const SEVERITIES = Object.freeze(['low', 'medium', 'high'])
 // check runs over the raw frames. A frame that is not own spend never counts here: zero
 // own-spend frames keep the reducer's null and its usage-unavailable reason.
 const ADVISOR_TOKEN_CLASSES = Object.freeze(['input', 'output', 'cacheRead', 'cacheWrite'])
-export function ownSpendIncomplete(frame: any): boolean {
+function ownSpendIncomplete(frame: any): boolean {
   if (!carriesOwnSpend(frame)) return false
   const usage = frame.message.usage
   if (!usage || typeof usage !== 'object') return true
@@ -153,11 +153,11 @@ export function boundText(value, cap) {
   return decoder.write(Buffer.from(text, 'utf8').subarray(0, cap))
 }
 
-export function boundTarget(value) {
+function boundTarget(value) {
   return boundText(value, TARGET_CAP_BYTES)
 }
 
-export function journalPathFrom(taskDir) {
+function journalPathFrom(taskDir) {
   return journalPathOf(taskDir)
 }
 
@@ -228,7 +228,7 @@ function normalizePath(value) {
   return String(value ?? '').replaceAll('\\', '/').replace(/^\.\//, '')
 }
 
-export function repoRelative(cwd, path) {
+function repoRelative(cwd, path) {
   if (typeof path !== 'string' || !path) return null
   let absolute
   try { absolute = resolve(String(cwd || ''), path) } catch { return null }
@@ -238,7 +238,7 @@ export function repoRelative(cwd, path) {
   return rel
 }
 
-export function scopeMatcher(files) {
+function scopeMatcher(files) {
   const entries = Array.isArray(files) ? files.map(normalizePath).filter(Boolean) : []
   return (path) => {
     const candidate = normalizePath(path)
@@ -388,7 +388,7 @@ export function normalizeNote(text) {
   return String(text ?? '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
 }
 
-export function isContentFree(normalized) {
+function isContentFree(normalized) {
   const value = normalizeNote(normalized)
   return value.length < 12 || new Set([
     'stop', 'stopped', 'done', 'ok', 'okay', 'lgtm', 'looks good',
@@ -396,7 +396,7 @@ export function isContentFree(normalized) {
   ]).has(value)
 }
 
-export function isSelfEcho(text, injected) {
+function isSelfEcho(text, injected) {
   const normalized = normalizeNote(text)
   if (!normalized) return false
   const values = injected instanceof Set ? injected : new Set(injected || [])
@@ -461,7 +461,7 @@ function entryFromText(text, cap = DELTA_ENTRY_CAP_BYTES) {
 // delta scrubbed into mush produces confident advice about nothing — a failure
 // that is invisible, unlike a miss. A shape that would plausibly match ordinary
 // source code is left out, and each omission is stated where it is made.
-export const redactionPlaceholder = (kind) => `<redacted:${kind}>`
+const redactionPlaceholder = (kind) => `<redacted:${kind}>`
 
 // A value only counts as a credential when it mixes a digit and an upper-case
 // letter. Measured over this checkout, that one requirement is the difference
@@ -575,7 +575,7 @@ function gitOverflow(err) {
   return code === 'ENOBUFS' || /maxbuffer|stdout maxBuffer|buffer length/i.test(`${code} ${message}`)
 }
 
-export function gitDiffSize({ cwd, deps = {} } = {}) {
+function gitDiffSize({ cwd, deps = {} } = {}) {
   if (typeof cwd !== 'string' || !cwd) return null
   const exec = deps.execFileSync || execFileSync
   const statSize = deps.fileSize || ((path) => statSync(path).size)
@@ -809,7 +809,7 @@ function noteTextForTier0(kind, target, signature, role) {
   return 'The repository growth crossed the measured divergence threshold.'
 }
 
-export const REPLY_EXCERPT_CAP_BYTES = 512
+const REPLY_EXCERPT_CAP_BYTES = 512
 export const REPLY_REASONS = Object.freeze(['timeout', 'transport-failed', 'body-too-large', 'body-not-json', 'content-missing', 'reply-unrecorded'])
 
 export function createAdvisor({ env = process.env, deps = {} } = {}) {

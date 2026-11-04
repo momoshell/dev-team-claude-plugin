@@ -22,9 +22,9 @@ import { fileURLToPath } from 'node:url'
 import { constants as osConstants } from 'node:os'
 import net from 'node:net'
 
-export const PI_BIN_ENV = 'CREW_PI_BIN'
-export const STARTUP_ENV = 'CREW_ACP_BRIDGE_STARTUP_MS'
-export const DEFAULT_STARTUP_MS = 120000
+const PI_BIN_ENV = 'CREW_PI_BIN'
+const STARTUP_ENV = 'CREW_ACP_BRIDGE_STARTUP_MS'
+const DEFAULT_STARTUP_MS = 120000
 const TERM_GRACE_MS = 5000
 const POLL_MS = 25
 
@@ -36,13 +36,13 @@ const serverPath = join(repo, 'crew/pi/extensions/acp-server.ts')
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
 const say = (text) => { try { process.stderr.write(`acp-bridge: ${text}\n`) } catch {} }
 
-export function piBinaryFrom(value) {
+function piBinaryFrom(value) {
   if (typeof value !== 'string' || !value.startsWith('/')) return { error: `${PI_BIN_ENV} must be an absolute path to the pi executable` }
   try { if (!statSync(value).isFile()) return { error: `${PI_BIN_ENV} ${value} is not a file` } } catch { return { error: `${PI_BIN_ENV} ${value} does not exist` } }
   return { bin: value }
 }
 
-export function exitCodeOf(status) {
+function exitCodeOf(status) {
   if (status?.error) return 1
   if (Number.isInteger(status?.code)) return status.code
   const signo = status?.signal ? osConstants.signals[status.signal] : null

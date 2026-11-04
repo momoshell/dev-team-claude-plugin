@@ -39,7 +39,7 @@ const PI_TOOL_NAMES = Object.freeze({
 // unused, and mapping it here would undo both.
 export const PI_BUILTIN_TOOLS = Object.freeze(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'])
 
-export const PI_ACP_GATED_TOOLS = Object.freeze(['bash', 'edit', 'write', 'powershell'])
+const PI_ACP_GATED_TOOLS = Object.freeze(['bash', 'edit', 'write', 'powershell'])
 
 // Unknown claude names DROP rather than pass through: passing an unmatched
 // name would be inert inside pi anyway, and a typo must not look enforced.

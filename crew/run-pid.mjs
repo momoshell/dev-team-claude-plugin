@@ -1,7 +1,7 @@
 import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-export const RUN_PID_FILE = 'run.pid'
+const RUN_PID_FILE = 'run.pid'
 export function probeAlive(pid) {
   try { process.kill(pid, 0); return true } catch (error) { return error?.code === 'ESRCH' ? false : null }
 }
@@ -12,7 +12,7 @@ export function writeRunPid(taskDir, pid, { writeFileSync: write = writeFileSync
     return false
   }
 }
-export function openTail(rows) {
+function openTail(rows) {
   const last = rows.findLast((row) => row?.event !== 'stage-end')
   return !!last && !(last.event === 'verdict' && last.status === 'stopped') && last.event !== 'pr'
     && last.event !== 'finish-ready' && !(last.event === 'finish-decision' && last.choice !== 'return')

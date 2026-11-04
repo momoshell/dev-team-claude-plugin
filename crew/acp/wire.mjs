@@ -10,7 +10,7 @@ export function shq(value) {
   return `'${String(value).replaceAll("'", `'\\''`)}'`
 }
 
-export const SEAT_COMMAND_FILE = 'cmd.fifo'
+const SEAT_COMMAND_FILE = 'cmd.fifo'
 // Keep FIFOs outside crew/task trees: BSD recursive grep blocks opening them.
 // The key is a readable prefix
 // (at most 48 chars, so it stays under NAME_MAX) plus 128 bits of the

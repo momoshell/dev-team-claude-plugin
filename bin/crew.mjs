@@ -49,7 +49,7 @@ function git(home, args) {
 
 // Processes started from the home, other than this one and its parent shell:
 // lanes, drivers, the daemon and the visualizer all carry the home path in argv.
-export function homeProcesses(home, self = [process.pid, process.ppid]) {
+function homeProcesses(home, self = [process.pid, process.ppid]) {
   const result = spawnSync('pgrep', ['-fl', `${home}/`], { encoding: 'utf8', timeout: PGREP_TIMEOUT_MS, maxBuffer: MAX_BUFFER })
   if (result.error) throw new Error(`pgrep -fl ${home}/: ${spawnFailure(result.error, PGREP_TIMEOUT_MS)}`)
   if (result.status === 1) return []
@@ -59,7 +59,7 @@ export function homeProcesses(home, self = [process.pid, process.ppid]) {
     .filter((line) => !line.includes(`${home}/bin/crew.mjs`))
 }
 
-export function changedPaths(home, from, to) {
+function changedPaths(home, from, to) {
   if (from === to) return []
   return git(home, ['diff', '--name-only', `${from}..${to}`]).split('\n').filter(Boolean)
 }
@@ -105,7 +105,7 @@ function update(home, args) {
   return 0
 }
 
-export function main(argv = process.argv.slice(2), env = process.env) {
+function main(argv = process.argv.slice(2), env = process.env) {
   const home = crewHome(env)
   const [verb, ...rest] = argv
   if (verb === 'where' || verb === 'update') {

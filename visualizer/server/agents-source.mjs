@@ -2,7 +2,7 @@ import { readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, statSync 
 import { join, relative, resolve } from 'node:path'
 import { AGENT_ROLES } from '../../crew/protocols.mjs'
 
-export const DELIVERY_STORES = Object.freeze(['headless', 'headless-json', 'headless-rpc', 'pane'])
+const DELIVERY_STORES = Object.freeze(['headless', 'headless-json', 'headless-rpc', 'pane'])
 
 const DEFAULT_REASONS = Object.freeze({
   register: 'capability register is unavailable',

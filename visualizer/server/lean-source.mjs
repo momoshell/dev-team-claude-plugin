@@ -18,9 +18,9 @@ const nonEmpty = (value) => typeof value === 'string' && value.trim() !== ''
 // A row time is an epoch-ms number inside the Date range (past it, toISOString throws); anything else is unknown.
 const rowTime = (value) => (Number.isFinite(value) && !Number.isNaN(new Date(value).getTime()) ? new Date(value).toISOString() : null)
 
-export const leanIdentity = (lane) => `${PREFIX}${lane}`
-export const isLeanIdentity = (id) => typeof id === 'string' && id.startsWith(PREFIX)
-export const isLeanSlug = (slug) => typeof slug === 'string' && slug.startsWith('dt-')
+const leanIdentity = (lane) => `${PREFIX}${lane}`
+const isLeanIdentity = (id) => typeof id === 'string' && id.startsWith(PREFIX)
+const isLeanSlug = (slug) => typeof slug === 'string' && slug.startsWith('dt-')
 
 function dirs(path) {
   try { return readdirSync(path).sort() } catch { return [] }

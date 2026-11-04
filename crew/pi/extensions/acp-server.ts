@@ -32,11 +32,11 @@ import { unlinkSync } from 'node:fs'
 import { readOnlyCommandResult } from '../../acp-permission.mjs'
 import { ACP_PROTOCOL_VERSION, ACP_STOP_REASONS, ACP_UPDATE_KINDS } from '../../acp-client.mjs'
 
-export const GATED_TOOLS_ENV = 'CREW_ACP_GATED_TOOLS'
-export const PERMISSION_TIMEOUT_ENV = 'CREW_ACP_PERMISSION_TIMEOUT_MS'
-export const DEFAULT_GATED_TOOLS = Object.freeze(['bash', 'edit', 'write', 'powershell'])
-export const DEFAULT_PERMISSION_TIMEOUT_MS = 300000
-export const MAX_PARTIAL_FRAME_BYTES = 1024 * 1024
+const GATED_TOOLS_ENV = 'CREW_ACP_GATED_TOOLS'
+const PERMISSION_TIMEOUT_ENV = 'CREW_ACP_PERMISSION_TIMEOUT_MS'
+const DEFAULT_GATED_TOOLS = Object.freeze(['bash', 'edit', 'write', 'powershell'])
+const DEFAULT_PERMISSION_TIMEOUT_MS = 300000
+const MAX_PARTIAL_FRAME_BYTES = 1024 * 1024
 export const PERMISSION_OPTIONS = Object.freeze([
   Object.freeze({ optionId: 'allow_once', name: 'Allow once', kind: 'allow_once' }),
   Object.freeze({ optionId: 'reject_once', name: 'Reject', kind: 'reject_once' }),
@@ -90,7 +90,7 @@ export function usageFrom(messages: any[]): any {
 
 // ACP tool kinds for tool_call updates; any tool not listed is 'other'.
 const TOOL_KINDS: any = Object.freeze({ bash: 'execute', powershell: 'execute', read: 'read', edit: 'edit', write: 'edit', grep: 'search', find: 'search', ls: 'search' })
-export function toolKindFor(toolName: any): any { return Object.hasOwn(TOOL_KINDS, toolName) ? TOOL_KINDS[toolName] : 'other' }
+function toolKindFor(toolName: any): any { return Object.hasOwn(TOOL_KINDS, toolName) ? TOOL_KINDS[toolName] : 'other' }
 
 export function gatedToolsFrom(value: any): Set<string> {
   const names = String(value ?? '').split(',').map((name) => name.trim()).filter(Boolean)
@@ -98,7 +98,7 @@ export function gatedToolsFrom(value: any): Set<string> {
   return new Set(names.length ? names : DEFAULT_GATED_TOOLS)
 }
 
-export function permissionTimeoutFrom(value: any): number {
+function permissionTimeoutFrom(value: any): number {
   const parsed = Number(value)
   return value !== undefined && value !== '' && Number.isSafeInteger(parsed) && parsed > 0 ? parsed : DEFAULT_PERMISSION_TIMEOUT_MS
 }

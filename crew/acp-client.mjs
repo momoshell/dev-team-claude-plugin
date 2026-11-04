@@ -19,19 +19,19 @@ export const ACP_UPDATE_KINDS = Object.freeze([
   'agent_message_chunk', 'agent_thought_chunk', 'plan', 'tool_call', 'tool_call_update', 'usage_update',
 ])
 export const ACP_STOP_REASONS = Object.freeze(['end_turn', 'max_tokens', 'max_turn_requests', 'refusal', 'cancelled'])
-export const ACP_REFUSALS = Object.freeze([
+const ACP_REFUSALS = Object.freeze([
   'acp-malformed-frame', 'acp-protocol-mismatch', 'acp-spawn-failed', 'acp-session-busy',
   'acp-session-cancelled', 'acp-unresolvable-reservation', 'acp-request-timeout', 'acp-prompt-write-timeout', 'acp-seat-closed',
 ])
-export const ACP_SETUP_TIMEOUT_MS = 180000
-export const ACP_FIFO_WAIT_MS = 10000
+const ACP_SETUP_TIMEOUT_MS = 180000
+const ACP_FIFO_WAIT_MS = 10000
 export const ACP_WRITE_DEADLINE_MS = 30000
 export const ACP_POLL_MS = 25
-export const ACP_PS_TIMEOUT_MS = 1000
-export const ACP_KILL_PROOF_MS = 5000
+const ACP_PS_TIMEOUT_MS = 1000
+const ACP_KILL_PROOF_MS = 5000
 const METHOD_NOT_FOUND = -32601
 
-export function acpRefuse(reason, message) {
+function acpRefuse(reason, message) {
   if (!ACP_REFUSALS.includes(reason)) throw new Error(`unknown acp refusal reason ${JSON.stringify(reason)}`)
   return Object.assign(new Error(`${message} [${reason}]`), { reason })
 }
@@ -44,9 +44,9 @@ export function acpSeatPaths(dir, role, root) {
   })
 }
 
-export function turnUsage(result) { return result && typeof result.usage === 'object' && result.usage !== null ? result.usage : null }
+function turnUsage(result) { return result && typeof result.usage === 'object' && result.usage !== null ? result.usage : null }
 
-export function teardownOutcome(liveness) {
+function teardownOutcome(liveness) {
   if (liveness === LIVENESS.DEAD) return 'proven'
   if (liveness === LIVENESS.ALIVE) return 'failed'
   return 'unproven'

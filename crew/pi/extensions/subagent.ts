@@ -59,13 +59,13 @@ import { dirname, join } from 'node:path'
 import { modelString } from '../../adapters/adapter-pi.mjs'
 import { journalPathOf, spawnCountPathOf } from '../context-layout.mjs'
 
-export const AGENT_TOOL_NAME = 'agent'
+const AGENT_TOOL_NAME = 'agent'
 export const AGENTS_ENV = 'CREW_PI_AGENTS'
 export const DEPTH_ENV = 'CREW_PI_SUBAGENT_DEPTH'
 
 // The child's enforced boundary. --exclude-tools beats --tools on pi's filter,
 // so this is the real read-only line; the definition's `tools` is an activator.
-export const SUBAGENT_DENY = ['edit', 'write', 'bash']
+const SUBAGENT_DENY = ['edit', 'write', 'bash']
 
 // A plain JSON Schema object: pi takes an explicit non-TypeBox branch when the
 // schema carries no Symbol.for('TypeBox.Kind')
@@ -110,7 +110,7 @@ export const AGENT_PARAMS = {
 // WRONG AGENT NAME now diverts there, and that name is the one thing this tool
 // was already refusing on. Names are clamped with boundAgentName because the
 // register is a file: a schema is no place for an unbounded string.
-export function agentParams(allowlist: any[] = []): any {
+function agentParams(allowlist: any[] = []): any {
   const list = Array.isArray(allowlist) ? allowlist : []
   const names = [...new Set(list.map((one) => boundAgentName(String(one?.name))))]
   if (!names.length) return AGENT_PARAMS
@@ -177,7 +177,7 @@ export const SPAWN_BUDGET_OUTCOME = 'budget-refused'
 
 // The counter's file name. It sits beside the task dir, in the same directory
 // the journal already occupies (journalPathFrom below).
-export const SPAWN_COUNT_FILE = 'subagent-spawns.json'
+const SPAWN_COUNT_FILE = 'subagent-spawns.json'
 
 // Every code this validator can return, as a closed set. The refusal text is
 // built from these and NOTHING else, which is what bounds it: a payload cannot
@@ -261,7 +261,7 @@ export function parseAgentAllowlist(raw: any): any[] {
   return parsed.filter((one) => one && typeof one.name === 'string' && typeof one.def === 'string')
 }
 
-export function resolveDefCell(cell: any, { resolveModel, path }: any): any {
+function resolveDefCell(cell: any, { resolveModel, path }: any): any {
   // MUTATION A6: recognising a bare string as something other than a string
   // collapses the named refusal into the generic shape error.
   if (typeof cell === 'string') {
@@ -471,7 +471,7 @@ export function boundRefusalText(text: string): string {
 // carries. Applied at the entry point, so details.agent and the journal row are
 // bounded by construction: b33 shipped a 52,287-byte details.agent because the
 // bound lived at the exits instead (evidence/repro-early-refusal-before.out).
-export function boundAgentName(name: string): string {
+function boundAgentName(name: string): string {
   const out = String(name ?? '')
   if (Buffer.byteLength(out) <= AGENT_NAME_CAP_BYTES) return out
   return new StringDecoder('utf8').write(Buffer.from(out, 'utf8').subarray(0, AGENT_NAME_CAP_BYTES))
@@ -533,7 +533,7 @@ export function reserveSpawn({ taskDir, env, readFile, writeFile, budget = SUBAG
 }
 
 // A bare presence key is how every other journal row discriminates itself.
-export function usageRow({ at, role, agent, spawnId, model, usage, outcome }: any): any {
+function usageRow({ at, role, agent, spawnId, model, usage, outcome }: any): any {
   return {
     at,
     subagent_usage: { spawn_id: spawnId, parent_role: role, agent, model: model ?? null, outcome },
@@ -924,9 +924,9 @@ export function createAgentTool(deps: any = {}) {
 // model step and must not reset it. It never blocks or alters a call, and a journal
 // failure never reaches the seat.
 export const SCOUT_NUDGE_READ_THRESHOLD = 8
-export const SCOUT_NUDGE_MIN_DIRECTORIES = 3
+const SCOUT_NUDGE_MIN_DIRECTORIES = 3
 export const SCOUT_NUDGE_MESSAGE_TYPE = 'crew-scout-nudge'
-export const SCOUT_NUDGE_TEXT = 'You have made many read-type calls across several directories since your last write or scout call. Consider asking a scout that question instead, then read only what its findings cite.'
+const SCOUT_NUDGE_TEXT = 'You have made many read-type calls across several directories since your last write or scout call. Consider asking a scout that question instead, then read only what its findings cite.'
 
 export function createScoutNudge(deps: any = {}): any {
   const { env = process.env, send, appendFile = appendFileSync, now = () => new Date().toISOString() } = deps

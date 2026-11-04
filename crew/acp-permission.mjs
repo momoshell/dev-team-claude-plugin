@@ -94,7 +94,7 @@ export function readOnlyCommandResult(command) {
   return closeSegment(command.length) ?? { allowed: true, reason: null }
 }
 
-export function settlePermission({ toolCall, options, permit }) {
+function settlePermission({ toolCall, options, permit }) {
   const reject = options.find((o) => o.kind === 'reject_once') ?? options.find((o) => o.kind === 'reject_always')
   if (!reject) throw Object.assign(new Error('permission-no-reject-option'), { reason: 'permission-no-reject-option' })
   let allowed = false

@@ -24,11 +24,11 @@ const RUN_START_EVENT = 'run-start'
 
 const INCLUDE_SIGNATURE_ROWS = true
 const SELECT_LATEST_PLANNER_RETURN = true
-export const NO_CITED_RANGES = '(no cited ranges in accepted plan)'
+const NO_CITED_RANGES = '(no cited ranges in accepted plan)'
 export const BLIND_SPOT = 'Line-scan blind spot: export var, export * from, export interface, and code outside .js/.mjs/.ts are not indexed.'
-export const RETRIEVE_TOOL_NAME = 'retrieve'
+const RETRIEVE_TOOL_NAME = 'retrieve'
 
-export const RETRIEVE_PARAMS = Object.freeze({
+const RETRIEVE_PARAMS = Object.freeze({
   type: 'object',
   additionalProperties: false,
   required: ['file'],
@@ -59,7 +59,7 @@ function boundedText(value, cap) {
   return new StringDecoder('utf8').write(Buffer.from(text, 'utf8').subarray(0, cap))
 }
 
-export function normalizePath(value) {
+function normalizePath(value) {
   let clean = String(value ?? '').replaceAll('\\', '/').trim()
   if (clean.startsWith('./')) clean = clean.replace(/^\.\/+/, '')
   return clean
@@ -405,7 +405,7 @@ function sourceLines(text) {
   return lines
 }
 
-export function countTextLines(text) {
+function countTextLines(text) {
   return sourceLines(text).length
 }
 
@@ -421,7 +421,7 @@ function parseMaxLines(value) {
   return parsed
 }
 
-export function parseCitations(plan, filesInScope, sourceFor) {
+function parseCitations(plan, filesInScope, sourceFor) {
   const ranges = []
   const seen = new Set()
   const text = String(plan ?? '')
@@ -536,7 +536,7 @@ function numberedLines(lines, start, end) {
   return lines.slice(start - 1, end).map((line, offset) => `${start + offset}: ${line}`)
 }
 
-export function renderSkeleton({ target, source, lineCount, maxLines, context, readSource, readRange, index = exportEntries } = {}) {
+function renderSkeleton({ target, source, lineCount, maxLines, context, readSource, readRange, index = exportEntries } = {}) {
   if (!context || typeof source !== 'string' || !Number.isSafeInteger(lineCount)) throw new Error('skeleton render context is incomplete')
   const lines = sourceLines(source)
   const parts = [
@@ -758,7 +758,7 @@ export function createSkeletonRead(options = {}) {
   return { onToolResult, retrieve, fallback }
 }
 
-export function attachSkeletonRead(pi, options = {}) {
+function attachSkeletonRead(pi, options = {}) {
   const skeleton = createSkeletonRead(options)
   if (typeof pi?.registerTool !== 'function' || typeof pi?.on !== 'function') throw new Error('skeleton read extension needs pi.registerTool and pi.on')
   pi.registerTool(skeleton.retrieve)

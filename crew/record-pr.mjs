@@ -12,7 +12,7 @@ import { createLeanSource } from '../visualizer/server/lean-source.mjs'
 import { LANE, isObject, within } from './lane-core.mjs'
 import { deadRun, probeAlive } from './run-pid.mjs'
 
-export class RecordPrRefusal extends Error {}
+class RecordPrRefusal extends Error {}
 
 // A dot segment (`.` or `..`) is refused: a URL parser resolves it away and the link names another PR.
 const PR_URL = /^https:\/\/github\.com\/(?!\.\.?\/)[A-Za-z0-9_.-]+\/(?!\.\.?\/)[A-Za-z0-9_.-]+\/pull\/([1-9][0-9]*)$/

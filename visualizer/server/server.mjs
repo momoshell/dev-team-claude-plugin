@@ -35,12 +35,12 @@ export class ServerUsageError extends Error {
 // cannot express "an absent value defaults" without also swallowing 0 — the one
 // port a spawned descendant can ask for (#466) — and it let the env door bypass
 // the refusal table the flag door has carried since #467.
-export function parsePort(label, value) {
+function parsePort(label, value) {
   const text = value == null ? '' : String(value)
   if (!/^\d+$/.test(text) || Number(text) > 65535) throw new ServerUsageError(`${label} must be an integer between 0 and 65535, found ${text}`)
   return Number(text)
 }
-export function portFromEnv(env = process.env, fallback = DEFAULT_PORT) {
+function portFromEnv(env = process.env, fallback = DEFAULT_PORT) {
   const raw = env?.DEVTEAM_VIZ_PORT
   if (raw == null || raw === '') return fallback
   return parsePort('DEVTEAM_VIZ_PORT', raw)

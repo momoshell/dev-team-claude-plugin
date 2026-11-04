@@ -1,6 +1,6 @@
 # ADR-052 — Agents do the work; code keeps it correct
 
-**Status:** *ratified* 2026-10-24, operator decision (D1-D9 in `docs/plan-lean-runtime.md`); amended by ADR-055 and Amendment 5 (2026-11-04) · **Owner:** operator ·
+**Status:** *ratified* 2026-10-24, operator decision (D1-D9 in `docs/plan-lean-runtime.md`); amended by ADR-055 and Amendments 5 and 6 (2026-11-04) · **Owner:** operator ·
 **Relates to:** ADR-029 (headless observability), ADR-035 (run configuration axes), ADR-036 (ACP seat transport),
 ADR-044 (declared topologies), ADR-045 (scope is context), ADR-047 (advisor seat), ADR-048 (ordered build steps),
 ADR-049 (edit assist), ADR-050 (seat skills), ADR-051 (finish shape), epic #1964 (roster swap as one edit)
@@ -117,9 +117,11 @@ tiers: {"mechanical": {"effort": "medium"}, "judge": {"effort": "xhigh"}}
 ---
 ```
 
+*PR 2182 retired `fallback`; Amendment 6 holds the current example.*
+
 Each field is one line. Objects and object lists are JSON (Amendment 1). `role` is one of lead, planner,
 builder, reviewer, tech-lead; `writes` is none, task-dir or repo; `envelope` names the P2 role schema; `agent`
-is claude or pi. A `fallback` entry stays on the seat's agent. A seat loads its `requires` skills before its
+is claude or pi. A `fallback` entry stays on the seat's agent. *PR 2182 retired `fallback`; Amendment 6 holds the current example.* A seat loads its `requires` skills before its
 first write, or its envelope is refused. `extensions` draws from the kept arms: readgate, lab, builderloop,
 reminders, skeletonread, subagent, fff. `advisor` is null or `{"agent", "model", "effort"}` (ADR-047), and
 `edit_assist` is ADR-049. `tiers` keys are the three tiers; a null value unseats the role at that tier, and an
@@ -271,3 +273,34 @@ on changed behaviour; and the kill-mutation evidence rule in What stays. What th
 longer applies to codemode, the stepped shape, builderloop, lab, reminders or edit assist: §8 removed them.
 ADR-055 §8 also removes the `stepped` shape described in §3 and §6, and supersedes ADR-048.
 ADR-055 supersedes ADR-038 and ADR-049. The rest of ADR-052 stands.
+
+## Amendment 6 (2026-11-04): the agent definition has no fallback
+
+PR 2182 retired `fallback`. `parseAgent` refuses it as `unknown field fallback` at the base and as
+`tiers.<tier>.fallback cannot be overridden` in a tier. This example drops `fallback`, `edit_assist`,
+`codemode` and `lab`; Amendment 5 and ADR-055 §8 removed the last three arms. Amendment 1's claim that
+the example parses as it stands now applies to this example.
+
+```yaml
+---
+name: planner
+description: Plans one lane from its brief and writes the acceptance gate.
+role: planner
+writes: task-dir
+envelope: plan
+agent: pi
+model: openai/gpt-6.1-sol
+effort: high
+skills: [plan, qa-test-writing]
+requires: [qa-test-writing]
+tools: [read, grep, bash]
+extensions: [readgate]
+advisor: null
+memory: false
+rounds: 2
+wait_s: 1800
+tiers: {"mechanical": {"effort": "medium"}, "judge": {"effort": "xhigh"}}
+---
+```
+
+The rest of ADR-052 stands.

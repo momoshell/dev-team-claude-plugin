@@ -17,8 +17,10 @@ planner. The brief carries no file list, symbol index, tripwire list or baseline
 2. Check every premise on main (`git grep`, `git show main:<path>`, a quick run). A premise you did not check
    is either left out or written as "unmeasured: <why>".
 3. Write the brief to `~/.crew/briefs/<lane>.md`. The file name is the lane name: lowercase letters, digits
-   and `-` (convention `b<next number>-<short-slug>`; the last numbers are in `git branch -a` and
-   `~/.crew/briefs/started/`).
+   and `-`. Use `<project>-<issue>-<slug>` for an issue or `<project>-<slug>` for an operator request.
+   Use a short name for the checkout's repo as the project (`devteam` for this repo) and two to four words
+   naming the change as the slug, separated by `-`. For example, `devteam-1962-lane-names` or
+   `devteam-lane-names`.
 4. Validate: `crew start ~/.crew/briefs/<lane>.md --check`. In this repo, run the checkout's own copy:
    `node crew/start.mjs <brief> --check`. Fix every defect it names.
 5. Start: the same command without `--check`. It creates `../dt-<lane>`, snapshots the brief, writes the lean

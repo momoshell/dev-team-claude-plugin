@@ -162,7 +162,7 @@ test('a brief body is the quoted source ask and ## Context pointers, and anythin
   const operator = '## The ask\n\n> Do this.\n>\n> And that.\n\n' + BODY
   for (const [fields, body] of [
     [{}, BODY],
-    [{ source: 'operator request' }, operator + '- [docs](https://example.com)\n* issue 12\n- PR 34\n'],
+    [{ source: 'operator request' }, operator + '* issue 12\n- PR 34\n'],
   ]) assert.deepEqual(parseBrief(brief(fields, body)).defects, [])
   for (const [fields, body, defect] of [
     [{}, BODY + '\n## Rules\n', 'the body holds only ## The ask and ## Context: ## Rules'],
@@ -177,22 +177,38 @@ test('a brief body is the quoted source ask and ## Context pointers, and anythin
     [{ source: 'operator request' }, '## The ask\nplain\n' + BODY, '## The ask quotes the source: every line starts with >: plain'],
     [{ source: 'operator request' }, '## The ask\n```\n> text\n```\n' + BODY, '## The ask quotes the source: every line starts with >: ```'],
     [{}, '', 'the body has no ## Context with at least one pointer'],
-    [{}, '## Context\nplain\n', '## Context holds only bare pointers: each item is one or more code spans, [links](url), issue N or PR N, with no other text: plain'],
-    [{}, BODY + '- Never break the boot.\n', '## Context holds only bare pointers: each item is one or more code spans, [links](url), issue N or PR N, with no other text: - Never break the boot.'],
-    [{}, BODY + '```\ntext\n```\n', '## Context holds only bare pointers: each item is one or more code spans, [links](url), issue N or PR N, with no other text: ```'],
+    [{}, '## Context\nplain\n', '## Context holds only bare pointers: each item is one or more code spans, issue N or PR N, with no other text: plain'],
+    [{}, BODY + '- Never break the boot.\n', '## Context holds only bare pointers: each item is one or more code spans, issue N or PR N, with no other text: - Never break the boot.'],
+    [{}, BODY + '```\ntext\n```\n', '## Context holds only bare pointers: each item is one or more code spans, issue N or PR N, with no other text: ```'],
   ]) assert.ok(parseBrief(brief(fields, body)).defects.includes(defect), defect)
 })
 
 // MUTATION: drop the end anchor and prose after a pointer passes.
 test('## Context items are bare pointers: prose after a pointer or a continuation line is refused (ADR-055 §1)', () => {
-  for (const line of ['- `crew/protocols.mjs` `parseBrief` ', '- [docs](https://example.com)', '* issue 12', '- PR 34', '- `a`\tPR 34']) {
+  for (const line of ['- `crew/protocols.mjs` `parseBrief` ', '* issue 12', '- PR 34', '- `a`\tPR 34']) {
     assert.deepEqual(parseBrief(brief({}, `## Context\n${line}\n`)).defects, [], line)
   }
   for (const line of ['- `crew/agents.mjs`: what it checks.', '- PR 34 and more', '  continuation', '- see `x`', 'plain', '```']) {
     assert.deepEqual(parseBrief(brief({}, BODY + line + '\n')).defects, [
-      `## Context holds only bare pointers: each item is one or more code spans, [links](url), issue N or PR N, with no other text: ${line}`,
+      `## Context holds only bare pointers: each item is one or more code spans, issue N or PR N, with no other text: ${line}`,
     ], line)
   }
+})
+
+test('a ## Context pointer outside the checkout or a link is refused, and code-span paths are returned (ADR-056 Amendment 1)', () => {
+  for (const span of ['~/.crew/notes/x.md', '/abs/x.md', '../x.md', 'crew/../../x', 'https://x']) {
+    const result = parseBrief(brief({}, `## Context\n- \`${span}\`\n`))
+    assert.ok(result.defects.includes(`## Context points only inside the checkout (ADR-056 Amendment 1): ${span}`), span)
+  }
+  for (const link of ['[docs](https://example.com)', '[n](crew/a.mjs)']) {
+    const line = `- ${link}`
+    assert.ok(parseBrief(brief({}, `## Context\n${line}\n`)).defects.includes(`## Context holds only bare pointers: each item is one or more code spans, issue N or PR N, with no other text: ${line}`))
+  }
+  const result = parseBrief(brief({}, '## Context\n- `crew/protocols.mjs` `parseBrief` `agents/x.md`\n- `crew/protocols.mjs`\n- issue 12\n'))
+  assert.deepEqual(result.defects, [])
+  assert.deepEqual(result.paths, ['crew/protocols.mjs', 'agents/x.md'])
+  assert.deepEqual(parseBrief('').paths, [])
+  assert.deepEqual(parseBrief('---\n').paths, [])
 })
 
 // P5, the agent definition.

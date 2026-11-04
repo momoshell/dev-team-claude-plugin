@@ -62,12 +62,12 @@ function sections(body, { includeFences = false } = {}) {
   return { parts: out, repeated, askQuotes }
 }
 
-// Returns { fields, body, ask, defects }. An empty defects list is a brief code can start.
+// Returns { fields, body, ask, paths, defects }. An empty defects list is a brief code can start.
 export function parseBrief(text) {
   const lines = String(text ?? '').replace(/\r\n/g, '\n').split('\n')
-  if (lines[0]?.trim() !== '---') return { fields: null, body: null, ask: [], defects: ['the brief does not open with a --- frontmatter block'] }
+  if (lines[0]?.trim() !== '---') return { fields: null, body: null, ask: [], paths: [], defects: ['the brief does not open with a --- frontmatter block'] }
   const end = lines.findIndex((line, index) => index > 0 && line.trim() === '---')
-  if (end < 0) return { fields: null, body: null, ask: [], defects: ['the frontmatter block is never closed with ---'] }
+  if (end < 0) return { fields: null, body: null, ask: [], paths: [], defects: ['the frontmatter block is never closed with ---'] }
   const fields = {}
   const defects = []
   for (const line of lines.slice(1, end)) {
@@ -121,18 +121,31 @@ export function parseBrief(text) {
   }
   const context = parts.get('## Context') ?? []
   let hasItem = false
+  const paths = new Set()
   for (const line of context) {
     if (!line.trim()) continue
     if (/^ {0,3}[-*] +/.test(line)) hasItem = true
-    if (!/^ {0,3}[-*] +(?:`[^`]+`|\[[^\]]+\]\([^)]+\)|(?:issue|PR) [1-9]\d*)(?:[ \t]+(?:`[^`]+`|\[[^\]]+\]\([^)]+\)|(?:issue|PR) [1-9]\d*))*[ \t]*$/.test(line)) defects.push(`## Context holds only bare pointers: each item is one or more code spans, [links](url), issue N or PR N, with no other text: ${line}`)
+    if (!/^ {0,3}[-*] +(?:`[^`]+`|(?:issue|PR) [1-9]\d*)(?:[ \t]+(?:`[^`]+`|(?:issue|PR) [1-9]\d*))*[ \t]*$/.test(line)) defects.push(`## Context holds only bare pointers: each item is one or more code spans, issue N or PR N, with no other text: ${line}`)
+    const spans = [...line.matchAll(/`([^`]+)`/g)].map((match) => match[1])
+    for (const [index, span] of spans.entries()) {
+      if (/^(?:[\/~]|[A-Za-z][A-Za-z0-9+.-]*:)/.test(span) || span.split('/').includes('..')) defects.push(`## Context points only inside the checkout (ADR-056 Amendment 1): ${span}`)
+      if (index === 0 || span.includes('/')) paths.add(span)
+    }
   }
   if (!hasItem) defects.push('the body has no ## Context with at least one pointer')
   // Quoted ask lines are the source's words and bind nothing; only `closes` reaches the bound-issue slot.
   const stray = body.split('\n').flatMap((line, index) => askQuotes.has(index) ? [] : (line.match(/#\d+/g) ?? []))
   if (stray.length) defects.push(`the body names ${stray.join(', ')}; write "issue N" or "PR N", because closes is the only issue binding`)
-  const quotedAsk = [...askQuotes].map((i) => ({ line: end + 2 + i, text: lines[end + 1 + i].replace(/^ {0,3}>[ \t]?/, '') }))
-    .filter(({ text }) => /[\p{L}\p{N}]/u.test(text))
-  return { fields, body, ask: quotedAsk, defects }
+  const blocks = []
+  let previous = -2
+  for (const i of askQuotes) {
+    const text = lines[end + 1 + i].replace(/^ {0,3}>[ \t]?/, '')
+    if (i === previous + 1) blocks.at(-1).text += `\n${text}`
+    else blocks.push({ line: end + 2 + i, text })
+    previous = i
+  }
+  const quotedAsk = blocks.filter(({ text }) => /[\p{L}\p{N}]/u.test(text))
+  return { fields, body, ask: quotedAsk, paths: [...paths], defects }
 }
 
 const nonempty = (v) => typeof v === 'string' && v !== ''

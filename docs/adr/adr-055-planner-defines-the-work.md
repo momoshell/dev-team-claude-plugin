@@ -137,9 +137,10 @@ The judge loop's second review is the tech-lead's. It drops ADR-038's mutation o
 1. At dispatch: `mechanical` only when the issue shows it and names none of the protected paths below, otherwise
    `build`.
 2. After planning: the planner may raise the lane to `judge` with its `judge` reason.
-3. After the build: code raises the lane to `judge` when `files_in_scope` or the diff touches `crew/loop.mjs`, the
-   proof module, `crew/protocols.mjs`, `crew/acp/grants.mjs`, `hooks/`, `crew/agents/`, `.github/workflows/` or
-   `docs/adr/`.
+3. After the build: code raises the lane to `judge` when `files_in_scope` or the diff touches `crew/loop.mjs`,
+   `crew/checks.mjs`, `crew/finish.mjs`, `crew/lean.mjs`, the proof module, `crew/protocols.mjs`,
+   `crew/acp/grants.mjs`, `hooks/`, `crew/agents/`, `.github/workflows/` or `docs/adr/`.
+   Amended 2026-11-04, operator decision D3: the checker, finish and lean modules are protected too.
 
 Code raises a lane and never lowers one. A build lane raised after its build continues on the judge loop from the
 proof. A mechanical lane has no plan, so when it is raised, its builder returns `insufficient`, or the lead bounces its builder to the planner, it restarts from
@@ -258,6 +259,8 @@ Code holds the rule:
 - Amended 2026-11-03 (b1500, b1509): lead consults have separate full bounds for build, review and moved-head
   recheck. On standard build and judge lanes, the first reviewer turn forced only by a moved-head rebase spends no
   round; on judge the tech-lead turn is free too. Finish recheck reviews still spend a round under the finish review cap.
+- Amended 2026-11-04, operator decision D4: a publishing rebase may trigger at most three moved-head rechecks;
+  a fourth move stops as `recheck-bound` before uncommitting or publishing.
 - The lead's last consult is marked last. A spent lead bound stops for the operator as `lead-escalated`, with a
   question drawn from the held envelope and the lead's decision, never a bare `round-bound`. `no-progress` still
   stops in code.

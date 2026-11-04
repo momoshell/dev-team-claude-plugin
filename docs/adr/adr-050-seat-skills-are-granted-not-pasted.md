@@ -214,6 +214,8 @@ The plugin registers no Claude Code hook. The operator session is never gated. S
 through role packs (inline) and native grants. Any claude-seat enforcement under section 5 needs a new
 seat-scoped mechanism.
 
+Amended 2026-11-04 by ADR-059: the plugin registers the crew gate hooks.
+
 ## Operator decisions (2026-11-01)
 
 The builder and reviewer lose their map role packs. The map selects `code-less` by path for source files in any

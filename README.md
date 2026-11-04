@@ -54,7 +54,7 @@ There are two ways to use it:
 
 - **Skills only.** Nothing else to set up. The knowledge skills (`pr-review`,
   `qa-test-writing`, `test-economy`, `test-strength`, `backend-node`, `frontend-svelte`, `ui-design`, `devops`, `ux`, `code-less`, `prose-plain`)
-  work in any repo. Most repos stop here. The plugin registers no hooks.
+  work in any repo. Most repos stop here. The plugin registers the crew gate hooks (ADR-059); they do nothing outside a git checkout or in a crew seat.
 - **The crew runtime.** Lanes need one clone of this repo, node 26 or newer
   (`engines` in `package.json`). Lanes keep their state under `~/.crew`.
   The visualizer alone reads `DEVTEAM_CREW_ROOT` to serve journals from another root.
@@ -91,8 +91,8 @@ before its first lane.
   procedure: `/dispatch`, `/close-out`, `/status`, `/onboard`, `/review`.
 - **`bin/crew.mjs`** — the crew launcher: start, show, record-pr, finish,
   closeout, lanes, viz, where, update.
-- **`hooks/`** — the skill-map selector (`hooks/skill-gate.mjs`); the plugin
-  registers no hook.
+- **`hooks/`** — the skill-map selector (`hooks/skill-gate.mjs`) and the
+  crew gate hooks (`hooks/crew-gates.mjs`, ADR-059).
 - **`visualizer/`** — the local visualizer over lane journals (see Visualizer
   below).
 - **`docs/`** — the live design record: [`docs/adr/`](docs/adr/) is the

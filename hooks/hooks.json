@@ -1,3 +1,10 @@
 {
-  "hooks": {}
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/crew-gates.mjs\" session-start" }] }
+    ],
+    "PreToolUse": [
+      { "matcher": "Bash|Write|Edit", "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/crew-gates.mjs\" pre-tool-use" }] }
+    ]
+  }
 }

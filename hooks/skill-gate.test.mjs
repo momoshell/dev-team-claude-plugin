@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { scratchDir } from '../test/helpers.mjs'
@@ -149,8 +149,25 @@ test('G1 matches recursive globs within the requested directory', () => {
   assert.equal(matchGlob('crew/**/*.mjs', 'crew/README.md'), false)
 })
 test('U1 loadMap refuses an unparseable map', () => { const dir = fixture(); writeFileSync(join(dir, MAP_PATH), '{'); assert.deepEqual(loadMap(dir), { ok: false, reason: 'map-unparseable' }) })
-// MUTATION GH1: restore the PreToolUse entry in hooks/hooks.json and the zero-keys assertion reddens.
-test('GH1 the plugin hook manifest registers no hooks', () => { const hooks = JSON.parse(readFileSync(join(ROOT, MANIFEST), 'utf8')); assert.equal(typeof hooks.hooks, 'object'); assert.notEqual(hooks.hooks, null); assert.equal(Array.isArray(hooks.hooks), false); assert.deepEqual(Object.keys(hooks.hooks), []) })
-// MUTATION GH2: delete the README sentence 'The plugin registers no hooks.' and the docs assertions redden.
-test('GH2 the ADR and readmes document the no hook decision', () => { const adr = readFileSync(join(ROOT, 'docs/adr/adr-050-seat-skills-are-granted-not-pasted.md'), 'utf8'); const readme = readFileSync(join(ROOT, 'README.md'), 'utf8'); const index = readFileSync(join(ROOT, 'docs/adr/README.md'), 'utf8'); const flat = (s) => s.replace(/\s+/g, ' '); assert.ok(adr.split('\n').includes('## Operator decisions (2026-10-17)')); assert.ok(adr.indexOf('## Operator decisions (2026-10-17)') > adr.indexOf('## Operator decisions (2026-10-16)')); for (const phrase of ['The plugin registers no Claude Code hook.', 'The operator session is never gated.', 'Seats receive skills through role packs (inline) and native grants.', 'Any claude-seat enforcement under section 5 needs a new seat-scoped mechanism.']) assert.ok(flat(adr).includes(phrase), phrase); assert.ok(flat(readme).includes('The plugin registers no hooks.')); assert.ok(flat(index).includes('amended 2026-10-17 (the plugin registers no Claude Code hook)')) })
+// MUTATION GH1: remove a crew gate registration or add another plugin hook.
+test('GH1 the plugin hook manifest registers only the crew gates', () => {
+  const hooks = JSON.parse(readFileSync(join(ROOT, MANIFEST), 'utf8')).hooks
+  assert.deepEqual(Object.keys(hooks).sort(), ['PreToolUse', 'SessionStart'])
+  for (const event of Object.values(hooks)) for (const entry of event) for (const hook of entry.hooks) assert.ok(hook.command.includes('hooks/crew-gates.mjs'))
+})
+// MUTATION GH2: remove the ADR-059 record or its blind spot.
+test('GH2 ADR-059 records the crew gate hooks and their blind spot', () => {
+  const path = join(ROOT, 'docs/adr/adr-059-plugin-hooks-for-the-gates.md')
+  assert.ok(existsSync(path))
+  const record = readFileSync(path, 'utf8')
+  assert.ok(record.includes('A session that runs with hooks disabled bypasses them.'))
+  assert.ok(record.includes('CREW_ROLE'))
+  const adr = readFileSync(join(ROOT, 'docs/adr/adr-050-seat-skills-are-granted-not-pasted.md'), 'utf8')
+  const section = adr.split('## Operator decisions (2026-10-17)')[1]?.split('\n## ')[0]
+  assert.ok(section?.includes('ADR-059'))
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8')
+  assert.ok(readme.includes('(ADR-059)'))
+  assert.ok(!readme.includes('The plugin registers no hooks.'))
+  assert.ok(readFileSync(join(ROOT, 'docs/adr/README.md'), 'utf8').includes('](adr-059-plugin-hooks-for-the-gates.md)'))
+})
 test('Z1 the skill gate imports only node modules', () => { const source = readFileSync(join(ROOT, SCRIPT), 'utf8'); for (const match of source.matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)) assert.ok(match[1].startsWith('node:')) })

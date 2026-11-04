@@ -186,6 +186,7 @@ out_of_scope: everything else
   let resolutions = 0
   const forbidden = (name) => () => { effects.push(name); throw new Error(`unexpected effect: ${name}`) }
   const deps = {
+    transcriptRoot: '/virtual/no-transcripts',
     readFileSync: (file) => { assert.equal(file, briefPath); return brief },
     resolveAgents: () => { resolutions++; return { seats: {}, advisor: null } },
     existsSync: forbidden('existsSync'), mkdirSync: forbidden('mkdirSync'),

@@ -16,6 +16,7 @@ import { LANE } from './lane-core.mjs'
 import { ISSUE_SOURCE, parseBrief } from './protocols.mjs'
 import { resolveAgents } from './agents.mjs'
 import { writeRunPid } from './run-pid.mjs'
+import { askProvenance, readOperatorMessages } from './brief-provenance.mjs'
 
 const HOME = dirname(dirname(fileURLToPath(import.meta.url)))
 const LEAN = join(HOME, 'crew', 'lean.mjs')
@@ -58,6 +59,7 @@ const defaultDeps = () => ({
     } finally { closeSync(out) }
   },
   crewRoot: join(homedir(), '.crew'),
+  transcriptRoot: join(homedir(), '.claude', 'projects'),
   log: logStdout,
 })
 
@@ -77,9 +79,17 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
   const logLine = (line) => { try { d.log(line) } catch { /* Instrumentation must not affect the start. */ } }
   const lane = laneName(briefPath)
   const text = d.readFileSync(briefPath, 'utf8')
-  const { fields, defects } = parseBrief(text)
+  const { fields, ask: quotedAsk, defects } = parseBrief(text)
   if (defects.length) throw new StartRefusal(`brief ${briefPath} is not a P1 brief:\n- ${defects.join('\n- ')}`)
   if (fields.shape === 'finish') throw new StartRefusal('shape finish starts from an escalated lane, not a new brief; crew start runs standard only')
+  if (quotedAsk.length) {
+    const { messages, reason } = readOperatorMessages({ root: d.transcriptRoot })
+    if (messages === null) logLine(`crew start: ask provenance unmeasured: ${reason}`)
+    else {
+      const missing = askProvenance(quotedAsk, messages)
+      if (missing.length) throw new StartRefusal(`brief ${briefPath} quotes words the operator did not type (ADR-056):\n- ${missing.join('\n- ')}`)
+    }
+  }
   const tier = fields.mechanical === true ? 'mechanical' : 'build'
   let resolved
   try { resolved = d.resolveAgents(tier) } catch (cause) { throw new StartRefusal(`cannot resolve the agent definitions: ${cause.message}`, { cause }) }

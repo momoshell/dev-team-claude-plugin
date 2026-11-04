@@ -13,17 +13,19 @@ planner. The brief carries no file list, symbol index, tripwire list or baseline
 ## Steps
 
 1. Read the source: `gh issue view <N>`, or the operator's words. The ask comes from that source: for an issue,
-   write no ask (`crew start` adds the issue body); for an operator request, quote the words or approved proposal.
+   write no ask (`crew start` adds the issue body); for an operator request, quote only words the operator typed,
+   verbatim. Put proposals, premises and measured facts in `~/.crew/notes/<lane>.md` and point to it in `## Context`.
 2. Check every premise on main (`git grep`, `git show main:<path>`, a quick run). A premise you did not check
-   is either left out or written as "unmeasured: <why>".
+   is either left out or written as "unmeasured: <why>" in the notes.
 3. Write the brief to `~/.crew/briefs/<lane>.md`. The file name is the lane name: lowercase letters, digits
    and `-` (convention `b<next number>-<short-slug>`; the last numbers are in `git branch -a` and
    `~/.crew/briefs/started/`).
 4. Validate: `crew start ~/.crew/briefs/<lane>.md --check`. In this repo, run the checkout's own copy:
-   `node crew/start.mjs <brief> --check`. Fix every defect it names.
+   `node crew/start.mjs <brief> --check`. Fix every defect it names. When typed messages are measured,
+   `crew start` refuses an ask line not found in them (ADR-056).
 5. Start: the same command without `--check`. It creates `../dt-<lane>`, snapshots the brief, writes the lean
-   spec and starts the lean loop detached. Both steps check the brief with the P1 brief check and resolve the
-   agent definitions (standard shape only); they run no other parser. It prints the worktree,
+   spec and starts the lean loop detached. Both steps check the P1 brief and ask provenance, then resolve the
+   agent definitions (standard shape only). It prints the worktree,
    the brief snapshot, the run log and the status command.
 6. Close the lane out after its PR merges with the `crew-recovery` skill, as before.
 

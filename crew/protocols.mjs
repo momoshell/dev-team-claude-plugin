@@ -62,12 +62,12 @@ function sections(body, { includeFences = false } = {}) {
   return { parts: out, repeated, askQuotes }
 }
 
-// Returns { fields, body, defects }. An empty defects list is a brief code can start.
+// Returns { fields, body, ask, defects }. An empty defects list is a brief code can start.
 export function parseBrief(text) {
   const lines = String(text ?? '').replace(/\r\n/g, '\n').split('\n')
-  if (lines[0]?.trim() !== '---') return { fields: null, body: null, defects: ['the brief does not open with a --- frontmatter block'] }
+  if (lines[0]?.trim() !== '---') return { fields: null, body: null, ask: [], defects: ['the brief does not open with a --- frontmatter block'] }
   const end = lines.findIndex((line, index) => index > 0 && line.trim() === '---')
-  if (end < 0) return { fields: null, body: null, defects: ['the frontmatter block is never closed with ---'] }
+  if (end < 0) return { fields: null, body: null, ask: [], defects: ['the frontmatter block is never closed with ---'] }
   const fields = {}
   const defects = []
   for (const line of lines.slice(1, end)) {
@@ -130,7 +130,9 @@ export function parseBrief(text) {
   // Quoted ask lines are the source's words and bind nothing; only `closes` reaches the bound-issue slot.
   const stray = body.split('\n').flatMap((line, index) => askQuotes.has(index) ? [] : (line.match(/#\d+/g) ?? []))
   if (stray.length) defects.push(`the body names ${stray.join(', ')}; write "issue N" or "PR N", because closes is the only issue binding`)
-  return { fields, body, defects }
+  const quotedAsk = [...askQuotes].map((i) => ({ line: end + 2 + i, text: lines[end + 1 + i].replace(/^ {0,3}>[ \t]?/, '') }))
+    .filter(({ text }) => /[\p{L}\p{N}]/u.test(text))
+  return { fields, body, ask: quotedAsk, defects }
 }
 
 const nonempty = (v) => typeof v === 'string' && v !== ''

@@ -75,10 +75,13 @@ function replaySeat(name, options = {}) {
     }
     if (!Object.hasOwn(frame, 'id') || !frame.method) return
     if (frame.method === 'session/prompt') {
-      options.permissions?.forEach((toolCall, i) => appendFileSync(stream, `${JSON.stringify({
-        jsonrpc: '2.0', id: `permit-${i}`, method: 'session/request_permission',
-        params: { sessionId: 'fixture', toolCall, options: toolCall?._options ?? PERMISSION_OPTIONS },
-      })}\n`))
+      options.permissions?.forEach((toolCall, i) => {
+        for (const update of [toolCall?._update].flat().filter(Boolean)) appendFileSync(stream, `${JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fixture', update } })}\n`)
+        appendFileSync(stream, `${JSON.stringify({
+          jsonrpc: '2.0', id: `permit-${i}`, method: 'session/request_permission',
+          params: { sessionId: 'fixture', toolCall, options: toolCall?._options ?? PERMISSION_OPTIONS },
+        })}\n`)
+      })
     }
     if (options.writeError && frame.method === 'session/prompt') throw Object.assign(new Error('pipe broke'), { code: options.writeError })
     let source = records
@@ -105,6 +108,8 @@ function replaySeat(name, options = {}) {
       copy.params.update.sessionUpdate = 'future_recorded_update'
       responses.splice(1, 0, copy)
     }
+    if (frame.method === 'session/prompt' && options.usageUpdate) responses.unshift({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fixture', update: { sessionUpdate: 'usage_update', used: 500, size: 1000 } } })
+    if (frame.method === 'session/prompt' && options.promptUsage) responses.find((response) => response.id === frame.id).result.usage = options.promptUsage
     for (const response of responses) {
       if (response.method === 'session/update') expected.push({ ...response.params, at: 1700000000123 })
       appendFileSync(stream, `${JSON.stringify(response)}\n`)
@@ -164,7 +169,7 @@ function replaySeat(name, options = {}) {
   try {
     result = runAcpSeat({
       definition, cwd: options.cwd ?? root, taskDir: options.taskDir, prompt: options.prompt ?? 'fixture prompt', sessionFile,
-      binaries: options.binaries ?? { claudeAcp: BIN, claude: BIN, pi: BIN }, deps })
+      binaries: options.binaries ?? { claudeAcp: BIN, claude: BIN, pi: BIN, muse: BIN }, deps })
   } catch (caught) { error = caught }
   const leftover = [...runtimes(runtimeRoot)].filter((dir) => !before.has(dir)).map((dir) => join(runtimeRoot, dir))
   const rows = options.unwritable ? [] : readFileSync(sessionFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
@@ -179,6 +184,67 @@ function use(name, options, inspect) {
 }
 
 const sessionNew = (run) => run.sent.find((frame) => frame.method === 'session/new')
+
+test('a muse seat launches muse acp with the experimental flag, the stripped model, its effort and onRequest mode, and disables writes unless it writes repo', () => {
+  for (const writes of ['none', 'repo']) use('pi-turn', { agent: 'muse', model: 'meta/muse-spark-1.3', definition: { writes } }, (run) => {
+    assert.equal(run.error, undefined)
+    const [, args, options] = run.launches[0]
+    const command = `'${BIN}' 'acp' '--model' 'muse-spark-1.3' '-c' 'model_reasoning_efforts={"muse-spark-1.3":"high"}'`
+    assert.ok(args[1].includes(command))
+    assert.equal(args[1].includes("'--disable-write'"), writes !== 'repo')
+    assert.equal(options.env.MUSE_EXPERIMENTAL_ACP, '1')
+    assert.equal(run.sent.find((frame) => frame.method === 'session/set_mode').params.modeId, 'onRequest')
+    assert.deepEqual(sessionNew(run).params.mcpServers, [])
+  })
+})
+
+test('a muse seat that writes task-dir, names a non-meta model or declares skills, extensions or an advisor is refused by name before any process or runtime exists', () => {
+  for (const [label, definition, reason] of [
+    ['task-dir', { writes: 'task-dir' }, 'grant-unsupported'],
+    ['openai', { model: 'openai/model' }, undefined],
+    ['skills', { skills: ['alpha'] }, 'grant-unsupported'],
+    ['extensions', { extensions: ['readgate'] }, 'grant-unsupported'],
+    ['mcp_servers', { extensions: ['fff'] }, 'grant-unsupported'],
+    ['advisor', { advisor: {} }, 'grant-unsupported'],
+  ]) use('pi-turn', { agent: 'muse', model: 'meta/muse-spark-1.3', definition, deps: { exists: () => true } }, (run) => {
+    assert.match(run.error?.message ?? '', new RegExp(label))
+    assert.equal(run.error?.reason, reason)
+    assert.equal(run.launches.length, 0)
+    assert.deepEqual(run.leftover, [])
+  })
+})
+
+test('a muse permission naming only its toolCallId is decided on the earlier tool_call update, chained commands per segment, and an unseen id is refused', () => {
+  const permissions = [
+    ...['git status', 'cd /tmp && git status', 'git status && git push'].map((command, i) => ({ toolCallId: `c${i}`, _update: { sessionUpdate: 'tool_call', toolCallId: `c${i}`, kind: 'execute', title: 'bash', rawInput: { command } } })),
+    { toolCallId: 'edit', _update: { sessionUpdate: 'tool_call', toolCallId: 'edit', kind: 'edit', title: 'write_file', rawInput: { path: '/tmp/file', content: 'x' }, locations: [{ path: '/tmp/file' }] } },
+    { toolCallId: 'merged', rawInput: { command: 'git status && git push' }, title: 'frame', _update: [
+      { sessionUpdate: 'tool_call', toolCallId: 'merged', kind: 'execute', title: 'old' },
+      { sessionUpdate: 'tool_call_update', toolCallId: 'merged', rawInput: { command: 'git status' } },
+    ] },
+    { toolCallId: 'unseen' },
+  ]
+  for (const [agent, writes, expected] of [
+    ['muse', 'none', ['yes', 'deny', 'deny', 'deny', 'deny', 'deny']],
+    ['muse', 'repo', ['yes', 'yes', 'yes', 'deny', 'yes', 'deny']],
+    ['pi', 'none', ['deny', 'deny', 'deny', 'deny', 'deny', 'deny']],
+  ]) use('pi-turn', { agent, model: agent === 'muse' ? 'meta/muse-spark-1.3' : 'openai/model', definition: { writes }, permissions }, (run) => {
+    assert.equal(run.error, undefined)
+    assert.deepEqual(run.replies.map((reply) => reply?.optionId), expected)
+    const rows = run.rows.filter((row) => row.kind === 'permission')
+    assert.deepEqual(rows.map((row) => row.tool), agent === 'muse' ? ['execute', 'execute', 'execute', 'edit', 'execute', null] : [null, null, null, null, null, null])
+    assert.equal(rows[4].title, 'frame')
+  })
+})
+
+test('a muse turn reports usage null with the usage-unavailable reason, never the usage_update context window', () => {
+  use('pi-turn', { agent: 'muse', model: 'meta/muse-spark-1.3', usageUpdate: true, promptUsage: { input_tokens: 9, output_tokens: 3 } }, (run) => {
+    assert.equal(run.error, undefined)
+    assert.equal(run.result.usage, null)
+    assert.equal(run.result.usage_reason, 'usage-unavailable')
+    assert.ok(run.rows.some((row) => row.update?.sessionUpdate === 'usage_update'))
+  })
+})
 
 // MUTATION: removing `at` from recordUpdate loses the explicit receipt-time oracle.
 test('every routed update lands once, timestamped, in order, after the existing sentinel row (known and unknown kinds)', () => {

@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { main } from './lanes.mjs'
+import { laneRows, main } from './lanes.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
 const PR = 'https://github.com/o/r/pull/7'
@@ -31,6 +31,38 @@ function world() {
   return { run, lane: (name, rows) => lane(root, name, rows), done: () => rmSync(home, { recursive: true, force: true }) }
 }
 const lines = (text) => text.trim().split('\n')
+
+test('a lane whose run died with no terminal row lists as stopped run-died; terminal tails and unproven pids are unchanged', () => {
+  const home = realpathSync(scratchDir('lanes-'))
+  try {
+    const root = join(home, '.crew'), archiveRoot = join(home, 'archive')
+    const tails = [
+      ['stopped', { event: 'verdict', status: 'stopped', reason: 'x' }, false],
+      ['pr', { event: 'pr', pr: { url: PR } }, false],
+      ['ready', { event: 'finish-ready' }, false],
+      ['abandon', { event: 'finish-decision', choice: 'abandon' }, false],
+      ['return', { event: 'finish-decision', choice: 'return' }, true],
+      ['live', { event: 'stage-start', stage: 'build' }, false],
+      ['unknown', { event: 'stage-start', stage: 'build' }, false],
+      ['missing', { event: 'stage-start', stage: 'build' }, false],
+    ]
+    for (const [name, tail] of tails) {
+      const dir = join(root, `dt-${name}`, name)
+      put(join(dir, 'crew.json'), JSON.stringify({ members: { planner: { agent: 'pi' } } }))
+      put(join(dir, 'task', 'lean.json'), JSON.stringify({ id: name }))
+      put(join(dir, 'task', 'journal.jsonl'), jsonl([tail, { event: 'stage-end' }]))
+      if (name !== 'missing') put(join(dir, 'task', 'run.pid'), name === 'live' ? '124\n' : name === 'unknown' ? '125\n' : '123\n')
+    }
+    const opts = { root, archiveRoot }
+    const baseline = laneRows({ ...opts, alive: () => true })
+    const actual = laneRows({ ...opts, alive: (pid) => pid === 123 ? false : pid === 124 ? true : null })
+    for (const [name, , dead] of tails) {
+      const row = actual.find((r) => r.lane === name)
+      if (dead) assert.deepEqual([row.status, row.reason], ['stopped', 'run-died'])
+      else assert.deepEqual(row, baseline.find((r) => r.lane === name))
+    }
+  } finally { rmSync(home, { recursive: true, force: true }) }
+})
 
 test('LS1 LS4 LS5 lists live lanes with journal status, stop reason and PR url', () => {
   const w = world()

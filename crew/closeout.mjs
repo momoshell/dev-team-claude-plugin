@@ -14,6 +14,7 @@ import { basename, dirname, join, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLeanSource } from '../visualizer/server/lean-source.mjs'
 import { parsePrUrl } from './record-pr.mjs'
+import { deadRun, probeAlive } from './run-pid.mjs'
 
 export class CloseoutRefusal extends Error {}
 
@@ -21,7 +22,7 @@ const LANE = /^[a-z0-9][a-z0-9-]{0,62}$/
 const refuse = (message) => { throw new CloseoutRefusal(message) }
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 const isDir = (path) => { try { return statSync(path).isDirectory() } catch { return false } }
-const defaultRun = (cmd, args) => spawnSync(cmd, args, { encoding: 'utf8' })
+const defaultRun = (cmd, args) => spawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024 })
 
 function within(root, path) {
   try {
@@ -30,16 +31,22 @@ function within(root, path) {
   } catch { return false }
 }
 
-function lastPr(text) {
+function lastPr(text, lane, taskDir, alive) {
   let pr = null
+  const rows = []
   for (const line of text.split('\n')) {
     if (!line.trim()) continue
     let row
     try { row = JSON.parse(line) } catch { refuse('task journal has a malformed row') }
     if (!isObject(row)) refuse('task journal has a non-object row')
+    rows.push(row)
     if (row.event === 'pr') pr = row.pr
   }
-  if (!isObject(pr) || typeof pr.url !== 'string') refuse('task journal records no pull request')
+  if (!isObject(pr) || typeof pr.url !== 'string') {
+    const died = deadRun({ rows, taskDir, alive })
+    if (died && !rows.some((row) => row.event === 'pr')) refuse(`run-died: lane ${lane}'s run (pid ${died.pid}) died with no pull request recorded; record it with crew record-pr ${lane} --pr <url>`)
+    refuse('task journal records no pull request')
+  }
   try { return parsePrUrl(pr.url) } catch { refuse(`task journal records a malformed pull request url: ${pr.url}`) }
 }
 
@@ -53,7 +60,7 @@ function must(run, what, cmd, args) {
   return String(result.stdout ?? '')
 }
 
-export function closeoutLane({ lane, root = join(homedir(), '.crew'), archiveRoot, run = defaultRun, renameSync: rename = renameSync, mkdirSync: mkdir = mkdirSync } = {}) {
+export function closeoutLane({ lane, root = join(homedir(), '.crew'), archiveRoot, run = defaultRun, renameSync: rename = renameSync, mkdirSync: mkdir = mkdirSync, alive = probeAlive } = {}) {
   if (typeof lane !== 'string' || !LANE.test(lane)) refuse('lane must be a lean lane slug')
   const archive = archiveRoot ?? join(dirname(root), '.crew-journal-archive')
   const found = createLeanSource({ crewRoot: root, archiveRoot: archive }).resolveLane(lane)
@@ -63,7 +70,7 @@ export function closeoutLane({ lane, root = join(homedir(), '.crew'), archiveRoo
   if (!within(found.dir, journal)) refuse('task journal is missing or resolves outside the lane')
   let text
   try { text = readFileSync(journal, 'utf8') } catch (error) { refuse(`task journal unreadable: ${error?.code ?? error?.message}`) }
-  const pr = lastPr(text)
+  const pr = lastPr(text, lane, join(found.dir, 'task'), alive)
 
   const worktree = found.spec.cwd
   if (typeof worktree !== 'string' || !worktree || !isDir(worktree)) refuse('lean.json names no existing worktree')
@@ -102,7 +109,7 @@ export function main(argv = process.argv.slice(2), deps = {}) {
     return 2
   }
   try {
-    const done = closeoutLane({ lane, root: d.root, archiveRoot: d.archiveRoot, run: d.run, renameSync: d.renameSync, mkdirSync: d.mkdirSync })
+    const done = closeoutLane({ lane, root: d.root, archiveRoot: d.archiveRoot, run: d.run, renameSync: d.renameSync, mkdirSync: d.mkdirSync, alive: d.alive })
     d.stdout(`closed out ${lane}: removed ${done.worktree}, deleted branch ${lane}, archived to ${done.archivedDir}\n`)
     return 0
   } catch (error) {

@@ -9,6 +9,7 @@ import { homedir } from 'node:os'
 import { join, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLeanSource } from '../visualizer/server/lean-source.mjs'
+import { deadRun, probeAlive } from './run-pid.mjs'
 
 export class RecordPrRefusal extends Error {}
 
@@ -45,7 +46,7 @@ function parseRows(text) {
   return rows
 }
 
-export function recordPr({ lane, url, root = join(homedir(), '.crew'), append = appendFileSync, now = Date.now } = {}) {
+export function recordPr({ lane, url, root = join(homedir(), '.crew'), append = appendFileSync, now = Date.now, alive = probeAlive } = {}) {
   if (typeof lane !== 'string' || !LANE.test(lane)) refuse('lane must be a lean lane slug')
   const pr = parsePrUrl(url)
   const found = createLeanSource({ crewRoot: root }).resolveLane(lane)
@@ -57,7 +58,7 @@ export function recordPr({ lane, url, root = join(homedir(), '.crew'), append = 
   const rows = parseRows(text)
   if (rows.some((row) => row.event === 'pr')) refuse(`lane ${lane} already records a pull request`)
   const last = rows.findLast((row) => row.event !== 'stage-end')
-  if (last?.event !== 'verdict' || last.status !== 'stopped') refuse(`lane ${lane} is not stopped; stop it and let it go quiet first`)
+  if ((last?.event !== 'verdict' || last.status !== 'stopped') && !deadRun({ rows, taskDir: join(found.dir, 'task'), alive })) refuse(`lane ${lane} is not stopped; stop it and let it go quiet first`)
   const row = { event: 'pr', lane, stage: 'operator', actor: 'operator', at: now(), pr }
   try {
     append(realpathSync(journal), `${text.endsWith('\n') ? '' : '\n'}${JSON.stringify(row)}\n`)
@@ -73,7 +74,7 @@ export function main(argv = process.argv.slice(2), deps = {}) {
     return 2
   }
   try {
-    const done = recordPr({ lane, url, root: d.root, append: d.append, now: d.now })
+    const done = recordPr({ lane, url, root: d.root, append: d.append, now: d.now, alive: d.alive })
     d.stdout(`recorded operator-written pr #${done.pr.number} for ${lane}${done.archived ? ' (archived lane)' : ''}\n`)
     return 0
   } catch (error) {

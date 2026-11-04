@@ -1,30 +1,36 @@
 // crew lanes [--all] [--json] — list lean lanes from their journals.
 //
 // Status, latest stage, stop reason and PR come from the lane journal only (the visualizer's lean source).
-// Lean lanes record no pid, so this never says whether a lane's processes are alive or dead. A journal with
+// A recorded pid can prove an open run dead. A journal with
 // unreadable rows is flagged on its status, since the status was read past a gap.
 import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLeanSource } from '../visualizer/server/lean-source.mjs'
+import { deadRun, probeAlive } from './run-pid.mjs'
 
 const shown = (value) => (typeof value === 'string' && value !== '' ? value : 'not recorded')
 
-export function laneRows({ root, archiveRoot, all = false } = {}) {
-  return createLeanSource({ crewRoot: root, archiveRoot }).listRuns()
+export function laneRows({ root, archiveRoot, all = false, alive = probeAlive } = {}) {
+  const source = createLeanSource({ crewRoot: root, archiveRoot })
+  return source.listRuns()
     .filter((run) => all || !run.archived)
-    .map((run) => ({
-      lane: run.task_slug,
-      status: run.status,
-      latest_stage: run.latest_stage,
-      reason: run.reason,
-      pr: run.pr?.url ?? null,
-      archived: run.archived,
-      // null when the journal itself could not be read: its rows were never counted.
-      unreadable_rows: run.journal_error === null ? run.journal_skipped_malformed : null,
-      unreadable_rows_reason: run.journal_error,
-    }))
+    .map((run) => {
+      const found = run.journal_error === null ? source.resolveLane(run.task_slug) : null
+      const died = found && deadRun({ rows: source.readJournalRows(found).rows, taskDir: join(found.dir, 'task'), alive })
+      return {
+        lane: run.task_slug,
+        status: died ? 'stopped' : run.status,
+        latest_stage: run.latest_stage,
+        reason: died ? 'run-died' : run.reason,
+        pr: run.pr?.url ?? null,
+        archived: run.archived,
+        // null when the journal itself could not be read: its rows were never counted.
+        unreadable_rows: run.journal_error === null ? run.journal_skipped_malformed : null,
+        unreadable_rows_reason: run.journal_error,
+      }
+    })
 }
 
 export function main(argv = process.argv.slice(2), deps = {}) {
@@ -34,7 +40,7 @@ export function main(argv = process.argv.slice(2), deps = {}) {
     d.stderr('usage: crew lanes [--all] [--json]\n')
     return 2
   }
-  const rows = laneRows({ root: d.root, archiveRoot: d.archiveRoot, all: argv.includes('--all') })
+  const rows = laneRows({ root: d.root, archiveRoot: d.archiveRoot, all: argv.includes('--all'), alive: d.alive })
   if (argv.includes('--json')) d.stdout(`${JSON.stringify(rows, null, 2)}\n`)
   else for (const row of rows) {
     d.stdout(`${[row.lane, row.unreadable_rows > 0 ? `${shown(row.status)} (journal has ${row.unreadable_rows} unreadable rows)` : shown(row.status), shown(row.latest_stage), shown(row.reason), shown(row.pr), row.archived ? 'archived' : 'not archived'].join(' | ')}\n`)

@@ -188,7 +188,7 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
       }
     }
     // A stop inside a stage is followed by that stage's (and any enclosing stage's) stage-end row, so the
-    // lane's state is its last row that is not a stage-end.
+    // lane's state is its last row that is not a stage-end. An archived lane is never running.
     let last = rows.findLast((row) => row.event !== 'stage-end') ?? rows.at(-1)
     // `crew finish --accept` appends a `pr` row then a `finish-decision` row: a pr row after the last
     // finish-ready, followed only by those, is the lane's state.
@@ -221,6 +221,7 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
     } else {
       status = 'running'; running = true
     }
+    if (found.archived && running) { status = 'stopped'; reason = 'archived-without-terminal-row'; running = false }
     let ended_at = null, duration_ms = null
     if (!running && lastAt !== null) ended_at = lastAt
     if (started_at !== null && ended_at !== null) duration_ms = Date.parse(ended_at) - Date.parse(started_at)

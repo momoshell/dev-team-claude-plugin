@@ -9,7 +9,7 @@ export const FINISH_REVIEW_ROUNDS = 3
 
 export const CHECK_REASONS = Object.freeze([
   'invalid-input', 'unsupported-platform', 'exit-nonzero', 'signal', 'spawn-error', 'timeout', 'output-limit',
-  'cleanup-unproven', 'proof-unproven', 'runner-threw', 'nothing-to-commit', 'commit-failed', 'rebase-conflict', 'rebase-failed',
+  'cleanup-unproven', 'proof-unproven', 'invalid-project-config', 'setup-failed', 'runner-threw', 'nothing-to-commit', 'commit-failed', 'rebase-conflict', 'rebase-failed',
   'dirty-worktree', 'push-unmeasured', 'pr-unmeasured', 'invalid-remote-data',
 ])
 

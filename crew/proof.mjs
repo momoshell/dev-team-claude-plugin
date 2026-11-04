@@ -1,8 +1,8 @@
 // Red on the old source and green on the build shows that a test depends on the change.
 // This is not a kill proof.
-import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, relative, sep } from 'node:path'
+import { basename, dirname, extname, join, matchesGlob, relative, sep } from 'node:path'
 import { literalRelative, runSuite } from './checks.mjs'
 
 export function testState(events) {
@@ -15,6 +15,84 @@ export function testState(events) {
   if (e.type === 'test:pass') return { state: 'green', reason: null }
   if (e.type === 'test:fail' && e.failureType === 'testCodeFailure') return { state: 'red', reason: null }
   return { state: null, reason: e.failureType === 'hookFailed' ? 'hook-failed' : e.failureType === 'cancelledByParent' ? 'cancelled' : 'not-body-failure' }
+}
+
+// ADR-058: projects declare runners that emit JUnit testcase outcomes.
+export function junitEvents(xml) {
+  if (typeof xml !== 'string') return null
+  if (xml.startsWith('\uFEFF')) xml = xml.slice(1)
+  // Validate nesting before extracting outcomes; a truncated report must never prove green.
+  // This deliberately rejects DTDs rather than resolving external entities.
+  const token = /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>|<\/[A-Za-z_:][\w:.-]*\s*>|<[A-Za-z_:][\w:.-]*(?:\s+[A-Za-z_:][\w:.-]*\s*=\s*(?:"[^"<]*"|'[^'<]*'))*\s*\/?>/gy
+  const validEntities = (text) => !/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[\da-fA-F]+);)/.test(text) && [...text.matchAll(/&#(x[\da-fA-F]+|\d+);/g)].every(([, n]) => {
+    const code = n[0] === 'x' ? parseInt(n.slice(1), 16) : Number(n)
+    return code === 9 || code === 10 || code === 13 || (code >= 0x20 && code <= 0xd7ff) || (code >= 0xe000 && code <= 0xfffd) || (code >= 0x10000 && code <= 0x10ffff)
+  })
+  for (const char of xml) {
+    const code = char.codePointAt(0)
+    if (!(code === 9 || code === 10 || code === 13 || (code >= 0x20 && code <= 0xd7ff) || (code >= 0xe000 && code <= 0xfffd) || (code >= 0x10000 && code <= 0x10ffff))) return null
+  }
+  const stack = [], tags = []
+  let pos = 0, roots = 0
+  while (pos < xml.length) {
+    const next = xml.indexOf('<', pos), text = xml.slice(pos, next < 0 ? xml.length : next)
+    if ((!stack.length && text.trim()) || !validEntities(text) || text.includes(']]>')) return null
+    if (next < 0) break
+    token.lastIndex = next
+    const match = token.exec(xml)
+    if (!match) return null
+    const tag = match[0]
+    tags.push(tag)
+    if (tag.startsWith('<![CDATA[')) { if (!stack.length) return null }
+    else if (tag.startsWith('<!--')) { if (tag.slice(4, -3).includes('--')) return null }
+    else if (tag.startsWith('<?')) {
+      if (!/^<\?[A-Za-z_:][\w:.-]*(?:\s[\s\S]*?)?\?>$/.test(tag) || (/^<\?xml(?:\s|\?>)/i.test(tag) && (next !== 0 || !/^<\?xml\s+version\s*=\s*(['"])1\.[01]\1(?:\s+encoding\s*=\s*(['"])[A-Za-z][\w.-]*\2)?(?:\s+standalone\s*=\s*(['"])(?:yes|no)\3)?\s*\?>$/.test(tag)))) return null
+    } else {
+      const name = tag.match(/^<\/?([A-Za-z_:][\w:.-]*)/)[1]
+      if (tag.startsWith('</')) { if (stack.pop() !== name) return null }
+      else {
+        const attr = /\s+([A-Za-z_:][\w:.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/gy, names = new Set()
+        attr.lastIndex = name.length + 1
+        let a
+        while ((a = attr.exec(tag))) {
+          if (names.has(a[1]) || !validEntities(a[2] ?? a[3])) return null
+          names.add(a[1])
+        }
+        if (!stack.length && ++roots > 1) return null
+        if (!tag.endsWith('/>')) stack.push(name)
+      }
+    }
+    pos = token.lastIndex
+  }
+  if (stack.length || roots !== 1) return null
+  xml = xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>/g, '')
+  if (!/<testsuites?[\s>\/]/.test(xml)) return null
+  const decode = (value) => value.replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (entity, code) => {
+    const named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }
+    if (code[0] !== '#') return named[code] ?? entity
+    const n = code[1].toLowerCase() === 'x' ? parseInt(code.slice(2), 16) : Number(code.slice(1))
+    return n <= 0x10ffff ? String.fromCodePoint(n) : entity
+  })
+  return tags.flatMap((tag, i) => {
+    if (!/^<testcase(?:\s|\/?>)/.test(tag)) return []
+    const attrs = Object.create(null), attr = /\s+([A-Za-z_:][\w:.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/gy
+    attr.lastIndex = '<testcase'.length
+    let match
+    while ((match = attr.exec(tag))) attrs[match[1]] = decode(match[2] ?? match[3])
+    const body = []
+    if (!tag.endsWith('/>')) {
+      let depth = 1
+      for (let j = i + 1; j < tags.length; j++) {
+        const next = tags[j]
+        if (/^<testcase(?:\s|\/?>)/.test(next) && !next.endsWith('/>')) depth++
+        if (/^<\/testcase\s*>$/.test(next) && --depth === 0) break
+        body.push(next)
+      }
+    }
+    const has = (name) => body.some((part) => new RegExp(`^<${name}(?:\\s|/?>)`).test(part))
+    const outcome = has('skipped') ? { skip: true } : has('error') ? { type: 'test:fail', failureType: 'error' } : has('failure') ? { type: 'test:fail', failureType: 'testCodeFailure' } : { type: 'test:pass' }
+    return [{ name: attrs.name ?? '', classname: attrs.classname ?? '', ...outcome }]
+  })
 }
 
 export async function testEvents({ cwd, files, timeoutMs }) {
@@ -52,8 +130,22 @@ export async function proveTests(input = {}) {
     if (addRun.status !== 'green') result = unmeasured(addRun.reason, rows)
     else {
       added = { cwd, root, timeoutMs }
-      for (const row of rows) {
-        if (!/\.[cm]?js$/.test(row.file)) row.reason = 'unsupported-runner'
+      let entries = []
+      try {
+        const configPath = '.crew/project.json'
+        if (!safePath(root, configPath, false)) throw new Error('unsafe config')
+        if (lstatSync(join(root, configPath), { throwIfNoEntry: false })) {
+          const config = JSON.parse(readFileSync(join(root, configPath), 'utf8'))
+          if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('invalid config')
+          entries = config.proof ?? (Object.hasOwn(config, 'proof') ? null : [])
+          if (!Array.isArray(entries) || !entries.every((e) => e && typeof e === 'object' && !Array.isArray(e) && typeof e.match === 'string' && e.match.trim() && typeof e.run === 'string' && e.run.trim() && (!Object.hasOwn(e, 'setup') || (typeof e.setup === 'string' && e.setup.trim())))) throw new Error('invalid proof')
+        }
+      } catch { result = unmeasured('invalid-project-config', rows) }
+      const runners = new Map()
+      for (const row of result ? [] : rows) {
+        const entry = entries.find((e) => matchesGlob(row.file, e.match))
+        if (entry) runners.set(row, entry)
+        if (!entry && !/\.[cm]?js$/.test(row.file)) row.reason = 'unsupported-runner'
         else if (!literalRelative(row.file) || !safePath(cwd, row.file, true) || !safePath(root, row.file, false)) row.reason = 'unsafe-path'
         else {
           const dest = join(root, row.file)
@@ -61,8 +153,32 @@ export async function proveTests(input = {}) {
           copyFileSync(join(cwd, row.file), dest)
         }
       }
-      const files = [...new Set(rows.filter((r) => !r.reason).map((r) => r.file))]
-      if (files.length) {
+      for (const entry of new Set([...runners].filter(([row]) => !row.reason).map(([, entry]) => entry))) {
+        if (!entry.setup) continue
+        const [command, ...args] = entry.setup.trim().split(/\s+/)
+        const setup = await runSuite({ cwd: root, command, args, timeoutMs })
+        if (setup.status !== 'green') { result = unmeasured(setup.status === 'red' ? 'setup-failed' : setup.reason, rows); break }
+      }
+      for (const [i, row] of rows.entries()) {
+        if (result) break
+        const entry = runners.get(row)
+        if (!entry || row.reason) continue
+        for (const [side, dir] of [['base', root], ['build', cwd]]) {
+          const report = join(tmp, `report-${i}-${side}.xml`)
+          const values = { file: row.file, title: row.title, report, stem: basename(row.file, extname(row.file)) }
+          const [command, ...args] = entry.run.trim().split(/\s+/).map((token) => token.replace(/\{(file|title|report|stem)\}/g, (_, key) => values[key]))
+          const run = await runSuite({ cwd: dir, command, args, timeoutMs })
+          if (run.status === 'unmeasured') { result = unmeasured(run.reason, rows); break }
+          let events = null
+          try { events = junitEvents(readFileSync(report, 'utf8')) } catch {}
+          row[side] = !events?.length ? { state: null, reason: side === 'base' ? 'base-does-not-build' : 'no-report' } : testState(events.filter((e) => row.title === e.name || (e.classname && (row.title === `${e.classname}.${e.name}` || row.title === `${e.classname}::${e.name}`))))
+        }
+        if (result) break
+        row.proven = row.base.state === 'red' && row.build.state === 'green'
+        row.reason = row.proven ? null : row.base.state !== 'red' ? 'proof-not-red-on-base' : 'proof-not-green'
+      }
+      const files = [...new Set(rows.filter((r) => !r.reason && !runners.has(r)).map((r) => r.file))]
+      if (!result && files.length) {
         const old = await testEvents({ cwd: root, files, timeoutMs })
         const build = await testEvents({ cwd, files, timeoutMs })
         if (old.status === 'unmeasured' || build.status === 'unmeasured') result = unmeasured(old.status === 'unmeasured' ? old.reason : build.reason, rows)
@@ -71,7 +187,7 @@ export async function proveTests(input = {}) {
             if (e?.name !== row.title || typeof e.file !== 'string') return false
             try { return relative(realpathSync(dir), realpathSync(e.file)).split(sep).join('/') === row.file } catch { return false }
           })
-          for (const row of rows.filter((r) => !r.reason)) {
+          for (const row of rows.filter((r) => !r.reason && !runners.has(r))) {
             const a = hits(old.events, root, row), b = hits(build.events, cwd, row)
             row.base = testState(a)
             row.build = testState(b)

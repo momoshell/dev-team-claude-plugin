@@ -1122,6 +1122,49 @@ test('an expired real seat turn reads its late invalid envelope and reruns once 
   assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
 })
 
+test('a muse planner turn that adds, rewrites or deletes a lean record, or writes its own session file, stops seat-unmeasured with no return, and one that writes only task artifacts completes', async () => {
+  for (const [mutation, throws] of [['none', false], ['add', false], ['rewrite', false], ['delete', false], ['session', false], ['add', true]]) {
+    const f = leanFixture()
+    const prior = join(f.spec.taskDir, 'lean', 'reviewer', 'prior.jsonl')
+    mkdirSync(join(f.spec.taskDir, 'lean', 'reviewer'), { recursive: true })
+    writeFileSync(prior, 'prior')
+    const answered = f.options.runAcpSeat
+    f.options.runAcpSeat = async (input) => {
+      const turn = await answered(input)
+      if (input.definition.role === 'planner') {
+        if (mutation === 'add') {
+          mkdirSync(join(f.spec.taskDir, 'lean', 'builder'), { recursive: true })
+          writeFileSync(join(f.spec.taskDir, 'lean', 'builder', 'forged.jsonl'), 'forged')
+        }
+        if (mutation === 'rewrite') writeFileSync(prior, 'changed')
+        if (mutation === 'delete') rmSync(prior)
+        if (mutation === 'session') appendFileSyncReal(input.sessionFile, 'forged\n')
+        if (throws) throw new Error('turn failed')
+      }
+      return turn
+    }
+    const result = await f.go()
+    if (mutation === 'none') assert.equal(result.status, 'done')
+    else {
+      assert.deepEqual(result, { status: 'stopped', reason: 'seat-unmeasured', pr: null }, mutation)
+      assert.equal(existsSync(join(f.spec.taskDir, 'planner-1.json')), false, mutation)
+      assert.equal(f.requests.filter((input) => input.definition.role === 'planner').length, 1, mutation)
+    }
+  }
+})
+
+test('a muse planner whose lean records cannot be read before or after its turn stops seat-unmeasured with no return', async () => {
+  for (const [failAt, deletionFails] of [[1, false], [2, false], [2, true]]) {
+    let calls = 0
+    const f = leanFixture({ deps: { recordState: () => ++calls === failAt ? null : 'measured', ...(deletionFails ? { rmSync: () => { throw EPERM } } : {}) } })
+    mkdirSync(f.spec.taskDir, { recursive: true })
+    writeFileSync(join(f.spec.taskDir, 'planner-1.json'), 'unearned')
+    assert.deepEqual(await f.go(), { status: 'stopped', reason: 'seat-unmeasured', pr: null }, String(failAt))
+    assert.equal(existsSync(join(f.spec.taskDir, 'planner-1.json')), deletionFails, String(failAt))
+    assert.equal(f.requests.length, failAt - 1)
+  }
+})
+
 test('a seat turn that changed the repo it may not write leaves no return for the loop to accept', async () => {
   for (const reason of ['acp-seat-wrote-repo', 'acp-seat-repo-unmeasured']) {
     const f = leanFixture()

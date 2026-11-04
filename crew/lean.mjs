@@ -14,6 +14,7 @@ import { loadMap, resolveSeatSkills } from '../hooks/skill-gate.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CHARTER_LINK = /\]\((\.\.?\/[^)\s]+\.md)\)/g
+const LOOP_STAGES = 'The loop runs each test the builder names on the old source and on the build. It then runs the suite, commits, rebases and opens the PR. Do not run those stages yourself.'
 const stopped = (reason) => ({ status: 'stopped', reason, pr: null })
 
 // The P2 shape this turn must write; the role's own detail keys, with the issued role and id.
@@ -30,7 +31,7 @@ function exampleEnvelope(role, id, tier) {
       subject: 'fix(crew): publish measured lane results',
       plan_path: '<absolute path of the plan you wrote>',
       tests: [{ file: '<repo-relative test file>', title: '<exact test title>' }],
-      files_in_scope: ['<repo-relative file the builder may edit>'],
+      files_in_scope: ['<repo-relative file the build touches>'],
       validation_lane: '<the node --test command that checks the change>',
     },
     builder: {
@@ -103,6 +104,7 @@ function promptFor({ request, spec, source, charters, body, section }) {
     '',
     `Definition source: ${source}`,
     ...charters.map((charter) => `Charter file (relative links in the definition resolve from ${dirname(source)}): ${charter}`),
+    ...(role === 'builder' ? [] : ['', LOOP_STAGES]),
     '',
     '## Brief',
     brief,

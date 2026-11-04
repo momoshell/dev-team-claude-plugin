@@ -217,6 +217,12 @@ test('AR2-AR4 refuses retired agent fields and extensions, accepts retained exte
   assert.deepEqual(parseAgent(agent({ extensions: ['readgate', 'skeletonread', 'subagent', 'fff'] })).defects, [])
 })
 
+// MUTATION: add fallback back to AGENT_FIELDS.
+test('P5 refuses fallback as an unknown field, at the base and in a tier', () => {
+  assert.ok(defectsOf({ fallback: [{ agent: 'pi', model: 'openai/x' }] }, 'unknown field fallback').length)
+  assert.ok(defectsOf({ tiers: { judge: { fallback: [] } } }, 'tiers.judge.fallback cannot be overridden').length)
+})
+
 // MUTATION: add a path segment named for a retired extension.
 test('AR5 crew has no paths named for retired extensions', () => {
   const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => [join(dir, entry.name), ...(entry.isDirectory() ? walk(join(dir, entry.name)) : [])])
@@ -231,17 +237,16 @@ test('P5 roles are the five seats in canonical order', () => {
 test('every P5 field decodes to its own type', () => {
   const full = {
     writes: 'task-dir', envelope: 'plan',
-    fallback: [{ agent: 'pi', model: 'openai/gpt-6-astra', effort: 'medium' }, { agent: 'pi', model: 'openai/other' }],
     skills: ['plan', 'qa-test-writing'], requires: ['qa-test-writing'], tools: ['read', 'bash'], extensions: ['readgate', 'fff'],
     advisor: { agent: 'pi', model: 'openai/gpt-6-astra', effort: 'high' },
     memory: false, rounds: 2, wait_s: 1800,
-    tiers: { mechanical: { effort: 'medium' }, build: null, judge: { effort: 'xhigh', model: 'openai/changed', fallback: [] } },
+    tiers: { mechanical: { effort: 'medium' }, build: null, judge: { effort: 'xhigh', model: 'openai/changed' } },
   }
   const { fields, body, defects } = parseAgent(agent(full))
   assert.deepEqual(defects, [])
   assert.deepEqual(fields, { ...BASE, ...full })
   assert.equal(body, 'Read [the notes](../notes/planner.md).\n')
-  assert.deepEqual(parseAgent(agent({ advisor: null, skills: [], fallback: [] })).fields.advisor, null)
+  assert.deepEqual(parseAgent(agent({ advisor: null, skills: [] })).fields.advisor, null)
 })
 
 test('P5 lists are JSON or the ADR bare list, and nothing in between', () => {
@@ -293,34 +298,23 @@ test('P5 closed fields take only their values', () => {
 
 // MUTATION: skip the JSON check and a malformed object is salvaged by the list splitter.
 test('P5 malformed JSON is refused naming the field and JSON', () => {
-  for (const [field, raw] of [['fallback', '[{"agent":"pi",}]'], ['tiers', '{"judge":'], ['advisor', '{bad}']]) {
+  for (const [field, raw] of [['extensions', '["readgate",]'], ['tiers', '{"judge":'], ['advisor', '{bad}']]) {
     const found = defectsOf({ [field]: raw }, field)
     assert.equal(found.length, 1, field)
     assert.match(found[0], /JSON/)
   }
 })
 
-// MUTATION: drop the nested key checks and a misspelt advisor or fallback key is ignored.
-test('P5 fallback and advisor objects are closed and complete', () => {
-  assert.ok(defectsOf({ fallback: [{ agent: 'pi', model: 'openai/x', surprise: 1 }] }, 'fallback[0].surprise').length)
-  assert.ok(defectsOf({ fallback: [{ agent: 'pi' }] }, 'fallback[0].model is required').length)
-  assert.ok(defectsOf({ fallback: [{ agent: 'pi', model: 'bad' }] }, 'fallback[0].model').length)
-  assert.ok(defectsOf({ fallback: [{ agent: 'pi', model: 'openai/x', effort: 'huge' }] }, 'fallback[0].effort').length)
-  assert.ok(defectsOf({ fallback: 'openai/x' }, 'fallback').length)
+// MUTATION: drop the nested key checks and a misspelt advisor key is ignored.
+test('P5 advisor objects are closed and complete', () => {
   assert.ok(defectsOf({ advisor: { agent: 'pi', model: 'openai/x', effort: 'high', surprise: true } }, 'advisor.surprise').length)
   assert.ok(defectsOf({ advisor: { agent: 'pi', model: 'openai/x' } }, 'advisor.effort is required').length)
   assert.ok(defectsOf({ advisor: { agent: 'pi', model: 'bad', effort: 'high' } }, 'advisor.model').length)
   assert.ok(defectsOf({ advisor: 'terra' }, 'advisor').length)
 })
 
-// MUTATION: skip the self and agent-change checks and a seat falls back to itself or onto another transport.
-test('P5 fallback never names the seat itself or another agent', () => {
-  assert.ok(defectsOf({ fallback: [{ agent: 'pi', model: BASE.model }] }, 'fallback[0].model is the seat').length)
-  assert.ok(defectsOf({ fallback: [{ agent: 'claude', model: 'anthropic/claude-opus-5-5' }] }, 'fallback[0].agent claude changes').length)
-})
-
-// MUTATION: validate only the base fields and a tier override can seat an unknown effort, agent or fallback.
-test('P5 tier overrides are validated by path and by effective seat', () => {
+// MUTATION: validate only the base fields and a tier override can seat an unknown effort or agent.
+test('P5 tier overrides are validated by path', () => {
   assert.ok(defectsOf({ tiers: { ultra: { effort: 'high' } } }, 'tiers.ultra is not a tier').length)
   assert.ok(defectsOf({ tiers: { judge: { effort: 'nope' } } }, 'tiers.judge.effort').length)
   assert.ok(defectsOf({ tiers: { judge: { surprise: 'x' } } }, 'tiers.judge.surprise').length)
@@ -328,12 +322,6 @@ test('P5 tier overrides are validated by path and by effective seat', () => {
   assert.ok(defectsOf({ tiers: { judge: 'high' } }, 'tiers.judge').length)
   assert.ok(defectsOf({ tiers: [] }, 'tiers').length)
   assert.ok(defectsOf({ tiers: { judge: { advisor: { agent: 'pi', model: 'bad', effort: 'high' } } } }, 'tiers.judge.advisor.model').length)
-  // The base fallback is sound on pi; a tier moving the seat to claude strands it.
-  const stranded = { fallback: [{ agent: 'pi', model: 'openai/spare' }], tiers: { judge: { agent: 'claude', model: 'anthropic/claude-opus-5-5' } } }
-  assert.ok(defectsOf(stranded, 'tiers.judge.fallback[0].agent pi changes').length)
-  assert.deepEqual(parseAgent(agent({ tiers: { judge: { agent: 'claude', model: 'anthropic/claude-opus-5-5', fallback: [] } }, fallback: [{ agent: 'pi', model: 'openai/spare' }] })).defects, [])
-  // A tier giving the seat the base fallback's model makes it its own fallback.
-  assert.ok(defectsOf({ fallback: [{ agent: 'pi', model: 'openai/spare' }], tiers: { build: { model: 'openai/spare' } } }, 'tiers.build.fallback[0].model is the seat').length)
 })
 
 // P2, the seat envelope.

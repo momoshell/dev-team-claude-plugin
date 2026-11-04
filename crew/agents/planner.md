@@ -34,8 +34,6 @@ List criteria that have no machine check, with reasons. Write `None.` as a plain
 
 Write an ordered checklist of the minimal implementation changes and their callers, at most two levels deep. Each task cites its criteria and the test that proves it, or `not machine-checked` when its criteria have no test. The loop reads `tests`, never `plan.md`, to decide whether a test is required. A builder `insufficient` reaches you as feedback; revise the plan, `files_in_scope` and `tests` to close the gap it names. When a revision answers a builder finding that a criterion cannot be met, narrow or drop that criterion rather than add mechanism to keep it.
 
-The loop runs each test the builder names on the old source and on the build. It then runs the suite, commits, rebases and opens the PR. Do not run those stages yourself.
-
 Give the envelope a nonempty `summary` and no top-level field beyond the example's.
 
 Details keys: `subject`, `plan_path`, `tests`.
@@ -46,7 +44,7 @@ The `subject` is the conventional-commit subject for this change, at most 72 cha
 
 Give `tests` as the test of each property in the plan's order, each `{file, title}`. Use an empty list only when no criterion is machine-checked; only then the PR says `proof: none, no criterion is machine-checked`. An `escalate` carries the operator's decision in `details.question`.
 
-Give `files_in_scope` (the repo-relative files the builder may edit, tests included).
+Give `files_in_scope` (the repo-relative files the build touches, tests included).
 
 Give `validation_lane` (the repository-appropriate command that checks the change). `skeletonread` reads `files_in_scope` and `plan_path`; `advisor` reads `files_in_scope` and uses `validation_lane` to spot failing validation runs. A builder granted either arm is refused without `files_in_scope`; `skeletonread` also requires `plan_path`.
 

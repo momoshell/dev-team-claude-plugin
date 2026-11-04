@@ -574,6 +574,23 @@ test('every turn gets its role definition, the complete brief and P2, and its ow
   assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
 })
 
+// MUTATION: emit the loop paragraph for the builder too, or not at all.
+test('the loop-stage paragraph is written once by the prompt, not by the non-builder charters', async () => {
+  const paragraph = 'The loop runs each test the builder names on the old source and on the build. It then runs the suite, commits, rebases and opens the PR. Do not run those stages yourself.'
+  const f = leanFixture({ answers: { reviews: ['pass'] } })
+  assert.equal((await f.go()).status, 'done')
+  assert.deepEqual([...new Set(f.requests.map((request) => request.definition.role))], ['planner', 'builder', 'reviewer'])
+  for (const request of f.requests) {
+    const role = request.definition.role
+    if (role === 'builder') assert.ok(!request.prompt.includes('Do not run those stages yourself.'))
+    else {
+      assert.ok(!parseAgent(readFileSync(join(AGENTS, `${role}.md`), 'utf8')).body.includes(paragraph), role)
+      assert.equal(request.prompt.split(paragraph).length, 2, role)
+    }
+  }
+  for (const role of ['lead', 'tech-lead']) assert.ok(!parseAgent(readFileSync(join(AGENTS, `${role}.md`), 'utf8')).body.includes(paragraph), role)
+})
+
 // MUTATION: remove builder from the laneRole predicate.
 test('LG1: builder gets accepted lane grants as bare whole skills', async () => {
   for (const tier of ['build', 'judge']) for (const [scope, extra] of [

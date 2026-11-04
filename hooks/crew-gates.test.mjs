@@ -106,4 +106,13 @@ test('PreToolUse allows Claude Code auto-memory writes beside the transcripts an
     ['Bash', { command: "sed -i '' s/a/b/ ~/.claude/projects/p/memory/MEMORY.md" }],
   ]) assert.equal(invoke(tool, input), '')
   for (const path of [join(home, '.claude/projects/p/s.jsonl'), join(home, '.claude/projects/memory/s.jsonl'), join(home, '.claude/projects/p/s/subagents/memory.jsonl')]) denied(invoke('Write', { file_path: path }))
+  // A link inside memory/ that resolves to a transcript, or to another project, is not a memory write.
+  mkdirSync(memory, { recursive: true })
+  writeFileSync(join(home, '.claude/projects/p/s.jsonl'), '')
+  symlinkSync(join(home, '.claude/projects/p/s.jsonl'), join(memory, 'pointer.jsonl'))
+  symlinkSync(join(home, '.claude/projects/p'), join(memory, 'up'))
+  mkdirSync(join(home, '.claude/projects/q/memory'), { recursive: true })
+  symlinkSync(join(home, '.claude/projects/q/memory'), join(memory, 'other'))
+  for (const command of ['echo x > ~/.claude/projects/p/memory/pointer.jsonl', 'echo x > ~/.claude/projects/p/memory/up/s.jsonl', 'echo x > ~/.claude/projects/p/memory/other/note.md']) denied(invoke('Bash', { command }))
+  for (const name of ['pointer.jsonl', 'up/s.jsonl']) denied(invoke('Write', { file_path: join(memory, name) }))
 })

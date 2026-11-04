@@ -1,6 +1,6 @@
 // Best-effort shell inspection, not a shell parser; uncommon forms and symlinks may be missed.
 import { accessSync, constants, existsSync, readFileSync, realpathSync } from 'node:fs'
-import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 
 function checkoutAt(cwd) {
   if (typeof cwd !== 'string' || !isAbsolute(cwd)) return null
@@ -14,11 +14,25 @@ function expand(value) {
   return value.replace(/^~(?=\/|$)/, process.env.HOME).replace(/\$\{HOME\}|\$HOME\b/g, process.env.HOME)
 }
 
+// The real path of the deepest existing ancestor, with the rest appended: where a write would land.
+function destination(path) {
+  for (let dir = path, rest = '';; rest = join(basename(dir), rest), dir = dirname(dir)) {
+    try { return join(realpathSync(dir), rest) } catch {}
+    if (dirname(dir) === dir) return path
+  }
+}
+
 function protectedRoot(value, cwd) {
   const path = resolve(cwd, expand(value))
   const projects = join(process.env.HOME, '.claude/projects')
   // Claude Code keeps each project's auto-memory beside its transcripts; only the transcripts are operator words.
-  if (path.startsWith(projects + '/') && path.slice(projects.length + 1).split('/')[1] === 'memory') return undefined
+  // The exception holds only when the resolved destination is still a memory directory, so a symlink cannot reach a transcript.
+  const memoryOf = (p, root) => {
+    const parts = p.startsWith(root + '/') ? p.slice(root.length + 1).split('/') : []
+    return parts[1] === 'memory' && parts.length > 2 ? parts[0] : null
+  }
+  const project = memoryOf(path, projects)
+  if (project !== null && memoryOf(destination(path), destination(projects)) === project) return undefined
   return [projects, join(process.env.HOME, '.crew/briefs/started')]
     .find(root => path === root || path.startsWith(root + '/'))
 }

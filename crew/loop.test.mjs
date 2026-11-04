@@ -1247,6 +1247,7 @@ test('a task directory that cannot be made stops the lane before any seat', asyn
 // MUTATION: a reason outside the closed enum leaks into the result.
 test('an unknown check reason stops as runner-threw, and the loop enum is frozen', async () => {
   assert.ok(Object.isFrozen(LOOP_REASONS))
+  for (const reason of CHECK_REASONS) assert.ok(LOOP_REASONS.includes(reason), reason)
   const f = fakes({ suite: { status: 'red', reason: 'free text the enum has never heard of' } })
   assert.deepEqual(await f.go(), stopped('runner-threw'))
 })

@@ -1,6 +1,6 @@
 # ADR-055 — The planner defines the work, code checks red and green, the reviewer judges
 
-**Status:** builder (§3) and planner (§2) parts ratified 2026-11-03 by operator decision on `~/.crew/reviews/adr-055-readout-2026-11-03.md`; loops (§6) stays proposed until about 10 lanes run on b1514's round budgets · **Owner:** operator ·
+**Status:** builder (§3) and planner (§2) parts ratified 2026-11-03 by operator decision on `~/.crew/reviews/adr-055-readout-2026-11-03.md`; §1, §7, §8 and §12 ratified 2026-11-04 by operator decision D14 in `~/.crew/reviews/codebase-2026-11-04.md`; loops (§6) stays proposed until about 10 lanes run on b1514's round budgets · **Owner:** operator ·
 **Relates to:** ADR-052 (P1 brief, P3 acceptance gate, §6 the loop), ADR-053 (rejected here), ADR-054 (amended
 here), ADR-038 (superseded here), ADR-030 (superseded here), ADR-051 (finish shape), ADR-048 and ADR-049 (superseded
 here)

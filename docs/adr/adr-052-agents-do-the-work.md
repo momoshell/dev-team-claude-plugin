@@ -1,6 +1,6 @@
 # ADR-052 — Agents do the work; code keeps it correct
 
-**Status:** *ratified* 2026-10-24, operator decision (D1-D9 in `docs/plan-lean-runtime.md`) · **Owner:** operator ·
+**Status:** *ratified* 2026-10-24, operator decision (D1-D9 in `docs/plan-lean-runtime.md`); amended by ADR-055 and Amendment 5 (2026-11-04) · **Owner:** operator ·
 **Relates to:** ADR-029 (headless observability), ADR-035 (run configuration axes), ADR-036 (ACP seat transport),
 ADR-044 (declared topologies), ADR-045 (scope is context), ADR-047 (advisor seat), ADR-048 (ordered build steps),
 ADR-049 (edit assist), ADR-050 (seat skills), ADR-051 (finish shape), epic #1964 (roster swap as one edit)
@@ -54,6 +54,9 @@ Code does only these things:
 3. Validate what comes back against a protocol, and refuse what does not parse.
 4. Run the correctness checks: the acceptance gate is red at baseline and green after the build, each gate
    check has a mutation that kills it, the full suite is green, and commit and PR happen only on green.
+
+   *ADR-055 §4 and §8 replaced the acceptance gate and kill-mutations with per-test proof: each named test is red on the old source and green on the build, then the suite runs. See Amendment 5.*
+
 5. Prove that the skills an agent definition requires were loaded before its first write.
 6. Keep the record: one journal per lane and every seat's full session, so any session can be inspected
    afterwards. Writing the record never throws into the caller.
@@ -187,6 +190,8 @@ Nothing else in section 4 changes.
 
 ## Amendment 2 (2026-10-26): claude seats run the arms as plugin hooks
 
+*Withdrawn 2026-11-04: PR #2155 deleted `crew/adapters/claude-arms.mjs`; ADR-055 §8 removed builderloop, reminders and edit assist; and a claude seat now refuses readgate, skeletonread and an advisor before a client exists.*
+
 A claude seat used to refuse every pi arm, because the arms are `crew/pi/extensions/*.ts` and attach to pi's
 events. Two live probes on 2026-10-26, over `claude-agent-acp` 0.86.0, showed that Claude Code plugin hooks
 carry the arms the operator wants on a claude seat. On a claude ACP seat, readgate, skeletonread, reminders,
@@ -251,3 +256,18 @@ including finish passes. The skill map supplements their native grants using tha
 and reference selections grant the whole skill by bare name. These grants do not extend `requires`.
 Section 4's replacement of the skill map does not apply to these lean grants; no new gate or inline
 delivery is added.
+
+## Amendment 5 (2026-11-04)
+
+ADR-055 §1 replaces P1's `tier` and `acceptance` fields with the revised brief fields, including `mechanical`
+and `suite`. ADR-055 §2 replaces P2's planner envelope details: it drops acceptance ids and gate paths in favour
+of the plan path and named tests. ADR-055 replaces §1 item 4, P3 and the gate legs of §6's loop diagram:
+§8 removes the gate and mutation proof, §4 describes the per-test proof, and §6 places it in the loops.
+PR #2127 removed the gate and mutation proof. Amendment 2 is withdrawn as noted above.
+
+ADR-055 §8 also supersedes §4's listing of builderloop, reminders and lab as kept arms, its reference
+to `edit_assist` as ADR-049, and its treatment of removed arms as carried over; §6's judge-tier mutation
+on changed behaviour; and the kill-mutation evidence rule in What stays. What this does not decide no
+longer applies to codemode, the stepped shape, builderloop, lab, reminders or edit assist: §8 removed them.
+ADR-055 §8 also removes the `stepped` shape described in §3 and §6, and supersedes ADR-048.
+ADR-055 supersedes ADR-038 and ADR-049. The rest of ADR-052 stands.

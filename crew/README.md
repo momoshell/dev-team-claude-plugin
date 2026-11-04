@@ -35,7 +35,7 @@ judge:      plan -> rebase -> build -> per-test proof -> full suite -> review ->
 mechanical: rebase -> build -> per-test proof -> full suite -> PR
 ```
 
-A fix turn carries the red results back to the builder, then repeats proof, the suite and the tier's reviews. Build and judge do not automatically rerun a red suite on an unchanged tree. Before publishing, each lane commits and rebases. Build, judge and finish commit only the tree their suite and reviews checked. If the head changes, they put the change on the new base tip and repeat every check, including reviews. If Git drops the commit as already upstream, they stop. Mechanical re-proves and re-tests a moved head.
+A fix turn carries the red results back to the builder, then repeats proof, the suite and the tier's reviews. Build and judge do not automatically rerun a red suite on an unchanged tree. Before publishing, each lane commits and rebases. A publishing or finish base rebase conflict gets one builder conflict turn per run; an unresolved or spent turn stops `rebase-conflict`. Build, judge and finish commit only the tree their suite and reviews checked. If the head changes, they put the change on the new base tip and repeat every check, including reviews. If Git drops the commit as already upstream, they stop. Mechanical re-proves and re-tests a moved head.
 
 A brief may choose `mechanical: true` for a change with no behaviour to judge. With no named test, its PR states `proof: none, mechanical lane, not reviewed`; the operator reviews the diff before merging. Protected paths restart it as judge, and builder insufficiency restarts it as build.
 

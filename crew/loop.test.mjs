@@ -1595,7 +1595,7 @@ test("a finish run brings the uncommitted build onto the current base before the
 })
 
 // MUTATION: drop base-restore on a failed rebase and the build remains committed.
-test('a finish run whose base rebase conflicts stops before any seat turn, names the conflicting paths and leaves the build uncommitted', async () => {
+test('a finish run whose base rebase conflicts stops, names the conflicting paths and leaves the build uncommitted', async () => {
   for (const [rebase, reason, restore] of [
     [{ status: 'red', reason: 'rebase-conflict', conflicts: ['lib.mjs'] }, 'rebase-conflict', true],
     [{ status: 'unmeasured', reason: 'cleanup-unproven' }, 'cleanup-unproven', false],
@@ -1605,10 +1605,10 @@ test('a finish run whose base rebase conflicts stops before any seat turn, names
   ]) {
     const f = fakes({ spec: finishSpec(), rebase })
     assert.deepEqual(await f.go(), stopped(reason))
-    assert.equal(f.requests.length, 0)
-    assert.equal(f.calls.includes('base-restore'), restore)
+    assert.equal(f.requests.length, reason === 'rebase-conflict' ? 1 : 0)
+    if (reason !== 'rebase-conflict') assert.equal(f.calls.includes('base-restore'), restore)
     if (restore) {
-      assert.deepEqual(f.discardArgs, [['reset', '--soft', `${'a'.repeat(40)}^`]])
+      assert.deepEqual(f.discardArgs, [...(reason === 'rebase-conflict' ? [['reset', '--hard', 'a'.repeat(40)], ['clean', '-f', '-d']] : []), ['reset', '--soft', `${'a'.repeat(40)}^`]])
       if (reason === 'rebase-conflict') assert.deepEqual(f.rows.findLast((row) => row.status === 'stopped').observation.conflicts, ['lib.mjs'])
     }
   }
@@ -1882,6 +1882,90 @@ const O = 'd'.repeat(40)
 // A check answering from a sequence (the last answer repeats), for proof and suite seams that must differ across calls.
 const answers = (...list) => { let n = 0; return () => structuredClone(list[Math.min(n++, list.length - 1)]) }
 const moved = (options = {}) => fakes({ rebase: MOVED, spec: { tier: 'mechanical' }, unseated: ['planner', 'reviewer', 'lead'], edit: (v) => { if (v.role === 'builder') v.details.subject = 'fix: mechanical'; return v }, ...options })
+
+test('a publishing rebase that conflicts gives the builder one conflict turn, then rechecks the resolved tree before it publishes', async () => {
+  const A = 'a'.repeat(40), C = 'c'.repeat(40)
+  const conflict = { status: 'red', reason: 'rebase-conflict', conflicts: ['lib.mjs'] }
+  for (const tier of ['build', 'judge', 'mechanical']) {
+    const f = fakes({ spec: { tier }, bounds: { builder: 1 }, cleanHead: `${MOVED.head}\n`,
+      rebase: answers({ ...MOVED, head: A }, conflict, { ...MOVED, onto: O }, { ...MOVED, head: C, onto: O }),
+      commit: answers({ status: 'green', reason: null, head: A, files: ['lib.mjs'] }, { status: 'green', reason: null, head: C, files: ['lib.mjs'] }),
+      edit: (v, r) => { if (r.role === 'builder') { v.details.subject = r.feedback[0]?.id === 'rebase-conflict' ? 'fix: wrong' : 'fix: mechanical'; if (r.feedback[0]?.id === 'rebase-conflict') v.details.tests = [] } return v },
+    })
+    assert.equal((await f.go()).status, 'done', tier)
+    const conflictRequests = builderTurns(f).filter((r) => r.feedback[0]?.id === 'rebase-conflict')
+    assert.equal(conflictRequests.length, 1)
+    const item = conflictRequests[0].feedback[0]
+    assert.deepEqual({ id: item.id, severity: item.severity, checkout: item.checkout, base: item.base, conflicts: item.conflicts }, { id: 'rebase-conflict', severity: 'must-fix', checkout: f.spec.cwd, base: 'main', conflicts: ['lib.mjs'] })
+    assert.match(item.summary, /origin\/main/)
+    assert.equal(f.calls.filter((c) => c === 'proof').length, 2)
+    assert.deepEqual(f.seen.proof.tests, [{ file: 'lib.test.mjs', title: 'works' }])
+    assert.equal(f.calls.filter((c) => c === 'suite').length, 2)
+    assert.equal(f.calls.filter((c) => c === 'seat:reviewer').length, tier === 'mechanical' ? 0 : 2)
+    assert.equal(f.calls.filter((c) => c === 'seat:tech-lead').length, tier === 'judge' ? 2 : 0)
+    assert.equal(f.calls.filter((c) => c === 'commit').length, tier === 'mechanical' ? 1 : 2)
+    assert.equal(f.seen.publish.title, tier === 'mechanical' ? 'fix: mechanical' : 'fix(crew): planned lane')
+    assert.ok(f.calls.lastIndexOf('suite') < f.calls.indexOf('publish'))
+    if (tier !== 'mechanical') assert.ok(f.calls.indexOf('uncommit') < f.calls.lastIndexOf('proof'))
+  }
+})
+
+test('a conflict turn that cannot resolve the rebase stops rebase-conflict with the checkout reset to its pre-turn head, and a run gets only one conflict turn', async () => {
+  const A = 'a'.repeat(40), C = 'c'.repeat(40)
+  const conflict = { status: 'red', reason: 'rebase-conflict', conflicts: ['lib.mjs'] }
+  for (const mode of ['insufficient', 'follow-up', 'unmeasured', 'refused', 'second', 'reset', 'clean']) {
+    const f = fakes({ rebase: answers({ ...MOVED, head: A }, conflict, ...(mode === 'second' ? [{ ...MOVED, onto: O }, conflict] : [conflict])),
+      commit: answers({ status: 'green', reason: null, head: A, files: ['lib.mjs'] }, { status: 'green', reason: null, head: C, files: ['lib.mjs'] }),
+      discard: (input) => input.args.includes(mode) ? { ...green(), status: 'red', reason: 'exit-nonzero', code: 1 } : green(),
+      edit: (v, r) => r.feedback[0]?.id === 'rebase-conflict' ? mode === 'insufficient' ? { ...v, status: 'insufficient' } : mode === 'unmeasured' ? '' : mode === 'refused' ? '{' : v : v,
+    })
+    const gitArgs = [], run = f.deps.run
+    f.deps.run = (input) => { gitArgs.push(input.args); return run(input) }
+    assert.deepEqual(await f.go(), stopped(['reset', 'clean'].includes(mode) ? 'exit-nonzero' : 'rebase-conflict'), mode)
+    assert.equal(builderTurns(f).filter((r) => r.feedback[0]?.id === 'rebase-conflict').length, 1)
+    if (mode !== 'second') {
+      const abort = gitArgs.findIndex((args) => args[0] === 'rebase' && args[1] === '--abort')
+      assert.ok(abort >= 0)
+      assert.deepEqual(gitArgs.slice(abort + 1, abort + (mode === 'reset' ? 2 : 3)), [['reset', '--hard', A], ...(mode === 'reset' ? [] : [['clean', '-f', '-d']])])
+      assert.deepEqual(f.discardArgs, [['reset', '--hard', A], ...(mode === 'reset' ? [] : [['clean', '-f', '-d']])])
+      assert.equal(f.rows.at(-1).event, 'verdict')
+      assert.equal(f.rows.at(-1).status, 'stopped')
+      assert.ok(f.rows.findLastIndex((r) => r.stage === 'conflict-undo') < f.rows.length - 1)
+    } else assert.deepEqual(f.discardArgs, [['reset', '--soft', O]])
+    if (!['reset', 'clean'].includes(mode)) assert.deepEqual(f.rows.at(-1).observation.conflicts, ['lib.mjs'])
+    assert.equal(f.calls.includes('publish'), false)
+  }
+  for (const mode of ['failed-head', 'empty-head']) {
+    const f = fakes({ rebase: answers({ ...MOVED, head: A }, conflict), cleanHead: mode === 'empty-head' ? '' : undefined })
+    const run = f.deps.run
+    f.deps.run = (input) => input.args.includes('rev-parse') && mode === 'failed-head' ? { ...green(), status: 'red', reason: 'exit-nonzero', code: 1 } : run(input)
+    assert.deepEqual(await f.go(), stopped(mode === 'failed-head' ? 'exit-nonzero' : 'runner-threw'))
+    assert.equal(builderTurns(f).filter((r) => r.feedback[0]?.id === 'rebase-conflict').length, 0)
+    assert.deepEqual(f.discardArgs, [])
+  }
+})
+
+test('a finish run whose base rebase conflicts gives the builder one conflict turn before triage, and an unresolved turn leaves the build uncommitted', async () => {
+  const A = 'a'.repeat(40)
+  const conflict = { status: 'red', reason: 'rebase-conflict', conflicts: ['lib.mjs'] }
+  for (const mode of ['resolved', 'unresolved', 'second']) {
+    const f = fakes({ spec: finishSpec(), rebase: answers(conflict, ...(mode !== 'unresolved' ? [{ ...MOVED, onto: O }, mode === 'second' ? conflict : { ...MOVED, head: A }] : [])),
+      edit: (v, r) => mode === 'unresolved' && r.feedback[0]?.id === 'rebase-conflict' ? { ...v, status: 'insufficient' } : v })
+    assert.equal((await f.go()).status, mode === 'resolved' ? 'done' : 'stopped')
+    assert.equal(builderTurns(f)[0].feedback[0].id, 'rebase-conflict')
+    if (mode !== 'unresolved') {
+      assert.equal(builderTurns(f)[1].feedback[0].id, 'finish-stop')
+      assert.equal(builderTurns(f).length, 2)
+      assert.deepEqual(f.discardArgs[0], ['reset', '--soft', O])
+      if (mode === 'resolved') assert.ok(f.rows.some((r) => r.event === 'finish-ready'))
+      else assert.equal(f.rows.at(-1).reason, 'rebase-conflict')
+    } else {
+      assert.equal(builderTurns(f).length, 1)
+      assert.deepEqual(f.discardArgs, [['reset', '--hard', A], ['clean', '-f', '-d'], ['reset', '--soft', `${A}^`]])
+      assert.equal(f.rows.at(-1).reason, 'rebase-conflict')
+    }
+  }
+})
 
 // MUTATION: skip the post-rebase proof and suite and a moved head is published unchecked.
 test('a rebase that moves the head reruns proof then the suite on the rebased tree before it publishes (RB1)', async () => {

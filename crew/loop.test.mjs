@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { git as repoGit, scratchDir } from '../test/helpers.mjs'
 import { CHECK_REASONS } from './checks.mjs'
+import { proveTests } from './proof.mjs'
 import { FinishRefusal, finishLane } from './finish.mjs'
 import { DEFAULT_ROUNDS, LOOP_REASONS, runLoop } from './loop.mjs'
 
@@ -1158,6 +1159,20 @@ test('a failing journal append leaves the lane outcome unchanged and the result 
   }
   const result = await fakes({ journal: () => { throw Object.create(null) } }).go()
   assert.deepEqual(result.journal.error, { code: null, message: 'unprintable error' })
+})
+
+test('project proof configuration and setup failures retain their reasons through the loop', async () => {
+  for (const reason of ['invalid-project-config', 'setup-failed']) {
+    const cwd = scratchDir('loop-proof-config-')
+    repoGit(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew'))
+    writeFileSync(join(cwd, '.crew/project.json'), reason === 'invalid-project-config' ? '{' : JSON.stringify({ proof: [{ match: '*.mjs', setup: 'node missing.mjs', run: 'node runner.mjs' }] }))
+    writeFileSync(join(cwd, 'lib.test.mjs'), '')
+    repoGit(cwd, 'add', '.'); repoGit(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+    const f = fakes({ spec: { cwd }, deps: { proveTests } })
+    assert.deepEqual(await f.go(), stopped(reason))
+    const verdict = f.rows.find((row) => row.event === 'verdict')
+    assert.equal(verdict.observation.rows[0].title, 'works')
+  }
 })
 
 test('every loop-only stop reason is emitted by the loop source', () => {

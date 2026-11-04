@@ -26,8 +26,8 @@ const pidGone = (pid) => {
 test('the reason vocabulary is a frozen list of unique tokens', () => {
   assert.ok(Object.isFrozen(CHECK_REASONS))
   assert.equal(new Set(CHECK_REASONS).size, CHECK_REASONS.length)
-  assert.equal(CHECK_REASONS.length, 18)
-  for (const token of ['nothing-to-commit', 'commit-failed', 'rebase-conflict', 'rebase-failed', 'dirty-worktree', 'push-unmeasured', 'pr-unmeasured', 'invalid-remote-data']) assert.ok(CHECK_REASONS.includes(token), token)
+  assert.equal(CHECK_REASONS.length, 20)
+  for (const token of ['invalid-project-config', 'setup-failed', 'nothing-to-commit', 'commit-failed', 'rebase-conflict', 'rebase-failed', 'dirty-worktree', 'push-unmeasured', 'pr-unmeasured', 'invalid-remote-data']) assert.ok(CHECK_REASONS.includes(token), token)
 })
 
 test('runSuite reports exit 0 as green with a null reason and a real process group', async () => {

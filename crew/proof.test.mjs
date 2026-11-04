@@ -5,6 +5,109 @@ import { join } from 'node:path'
 import { git, scratchDir } from '../test/helpers.mjs'
 import { proveTests, testState } from './proof.mjs'
 
+test('a configured runner proves a TypeScript test from its JUnit report', async () => {
+  const cwd = scratchDir('proof-junit-')
+  git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew')); mkdirSync(join(cwd, 'lib'))
+  writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: [{ match: '**/*.test.ts', run: 'node --test --test-reporter=junit --test-reporter-destination={report} {file}' }] }))
+  writeFileSync(join(cwd, 'lib/add.ts'), 'export const add = () => 0\n')
+  git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+  writeFileSync(join(cwd, 'lib/add.ts'), 'export const add = () => 1\n')
+  writeFileSync(join(cwd, 'lib/add.test.ts'), "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { add } from './add.ts'\ntest('add is a function', () => assert.equal(typeof add, 'function'))\ntest('add returns one', () => assert.equal(add(), 1))\n")
+  writeFileSync(join(cwd, '.crew/project.json'), '{"proof":[]}')
+  const result = await proveTests({ cwd, tests: ['add returns one', 'add is a function'].map((title) => ({ file: 'lib/add.test.ts', title })) })
+  assert.equal(result.status, 'red'); assert.equal(result.rows[0].proven, true)
+  assert.equal(result.rows[1].reason, 'proof-not-red-on-base')
+})
+
+test('JUnit failure, pass, error, skip, absence and duplicates map to the node proof states', async () => {
+  const cwd = scratchDir('proof-xml-')
+  git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew')); mkdirSync(join(cwd, 'tests'))
+  writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: [{ match: '**/*.xml', run: 'cp {file} {report}' }] }))
+  git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+  writeFileSync(join(cwd, 'tests/report.xml'), `<testsuites><testsuite name="pytest"><testcase classname="tests.test_add" name="test_fails"><failure message="bad">a &lt; b</failure></testcase><testcase classname="tests.test_add" name="test_passes"/><testcase classname="tests.test_add" name="test_errors"><error/></testcase><testcase classname="tests.test_add" name="test_skipped"><skipped type="pytest.skip"/></testcase><testcase name="test_twice"/><testcase name="test_twice"/><testcase name="a &lt; b"/><testcase classname="suite&#46;one" name="a &amp; &quot;b&quot; &apos;&#x63;&#100;&apos;"/><!-- <testcase name="hidden"/> --><![CDATA[<testcase name="hidden"/>]]></testsuite></testsuites>`)
+  const cases = [['tests.test_add.test_fails', 'red', null], ['test_passes', 'green', null], ['test_errors', null, 'not-body-failure'], ['test_skipped', null, 'skipped'], ['test_absent', null, 'missing'], ['test_twice', null, 'ambiguous'], ['a < b', 'green', null], ['suite.one::a & "b" \'cd\'', 'green', null], ['hidden', null, 'missing']]
+  const result = await proveTests({ cwd, tests: cases.map(([title]) => ({ file: 'tests/report.xml', title })) })
+  assert.deepEqual(result.rows.map((row) => row.base), cases.map(([, state, reason]) => ({ state, reason })))
+})
+
+test('quoted testcase attributes cannot create a false proof', async () => {
+  const cases = [
+    [(outcome) => `<testcase name="works" classname="Comparison>Test"/><testcase name="other">${outcome}</testcase>`, { state: 'green', reason: null }],
+    [(outcome) => `<testcase classname="x name='works'" name="other">${outcome}</testcase>`, { state: null, reason: 'missing' }],
+  ]
+  for (const [testcases, expected] of cases) {
+    const cwd = scratchDir('proof-quoted-')
+    git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew'))
+    writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: [{ match: '*.xml', run: 'node report.mjs {report}' }] }))
+    const runner = (outcome) => `import { writeFileSync } from 'node:fs'; writeFileSync(process.argv[2], ${JSON.stringify(`<testsuite>${testcases(outcome)}</testsuite>`)})\n`
+    writeFileSync(join(cwd, 'report.mjs'), runner('<failure/>'))
+    git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+    writeFileSync(join(cwd, 'report.mjs'), runner(''))
+    writeFileSync(join(cwd, 'test.xml'), '<testsuite/>')
+    const result = await proveTests({ cwd, tests: [{ file: 'test.xml', title: 'works' }] })
+    assert.deepEqual(result.rows[0].base, expected)
+    assert.deepEqual(result.rows[0].build, expected); assert.equal(result.rows[0].proven, false)
+  }
+})
+
+test('a runner that writes no report on the old source is base-does-not-build, not red', async () => {
+  const cwd = scratchDir('proof-no-report-')
+  git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew')); mkdirSync(join(cwd, 'tests'))
+  writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: [{ match: '**/*.xml', run: 'node build.mjs {file} {report}' }] }))
+  writeFileSync(join(cwd, 'build.mjs'), 'process.exit(1)\n')
+  git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+  writeFileSync(join(cwd, 'build.mjs'), "import { copyFileSync } from 'node:fs'; copyFileSync(process.argv[2], process.argv[3])\n")
+  writeFileSync(join(cwd, 'tests/report.xml'), '<testsuite><testcase name="works"/></testsuite>')
+  const result = await proveTests({ cwd, tests: [{ file: 'tests/report.xml', title: 'works' }] })
+  assert.deepEqual(result.rows[0].base, { state: null, reason: 'base-does-not-build' })
+  assert.equal(result.rows[0].build.state, 'green'); assert.equal(result.rows[0].reason, 'proof-not-red-on-base')
+  for (const xml of ['<testsuite><testcase name="works"/>', '<testsuite/>', 'not XML']) {
+    writeFileSync(join(cwd, 'tests/report.xml'), xml)
+    const invalid = await proveTests({ cwd, tests: [{ file: 'tests/report.xml', title: 'works' }] })
+    assert.deepEqual(invalid.rows[0].build, { state: null, reason: 'no-report' })
+  }
+  writeFileSync(join(cwd, 'build.mjs'), `import { writeFileSync } from 'node:fs'; writeFileSync(process.argv[3], '<testsuite><testcase name="works"><failure/></testcase></testsuite>')\n`)
+  git(cwd, 'add', 'build.mjs'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'red report')
+  writeFileSync(join(cwd, 'build.mjs'), "import { copyFileSync } from 'node:fs'; copyFileSync(process.argv[2], process.argv[3])\n")
+  writeFileSync(join(cwd, 'tests/report.xml'), '<testsuite><testcase name="works"/>')
+  const truncated = await proveTests({ cwd, tests: [{ file: 'tests/report.xml', title: 'works' }] })
+  assert.equal(truncated.rows[0].base.state, 'red'); assert.deepEqual(truncated.rows[0].build, { state: null, reason: 'no-report' }); assert.equal(truncated.rows[0].proven, false)
+})
+
+test('setup runs in the old-source worktree before the runner and a failing setup is unmeasured', async () => {
+  const cwd = scratchDir('proof-setup-')
+  git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew')); mkdirSync(join(cwd, 'tests'))
+  writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: [{ match: '**/*.xml', setup: 'node setup.mjs', run: 'node run.mjs {file} {report}' }] }))
+  writeFileSync(join(cwd, 'setup.mjs'), "import { appendFileSync } from 'node:fs'; appendFileSync('ready', 'yes')\n")
+  writeFileSync(join(cwd, 'run.mjs'), "import { readFileSync, copyFileSync } from 'node:fs'; if (!['yes', 'build'].includes(readFileSync('ready', 'utf8'))) process.exit(1); copyFileSync(process.argv[2], process.argv[3])\n")
+  git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+  writeFileSync(join(cwd, 'ready'), 'build')
+  writeFileSync(join(cwd, 'tests/report.xml'), '<testsuite><testcase name="works"/><testcase name="also works"/></testsuite>')
+  const tests = ['works', 'also works'].map((title) => ({ file: 'tests/report.xml', title }))
+  const result = await proveTests({ cwd, tests })
+  assert.deepEqual(result.rows.map((row) => row.base.state), ['green', 'green']); assert.equal(readFileSync(join(cwd, 'ready'), 'utf8'), 'build')
+  const failing = scratchDir('proof-setup-fail-')
+  git(failing, 'init', '-q'); mkdirSync(join(failing, '.crew'))
+  writeFileSync(join(failing, '.crew/project.json'), JSON.stringify({ proof: [{ match: '**/*.xml', setup: 'node missing.mjs', run: 'cp {file} {report}' }] }))
+  git(failing, 'add', '.'); git(failing, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+  mkdirSync(join(failing, 'tests')); writeFileSync(join(failing, 'tests/report.xml'), '<testsuite/>')
+  const failed = await proveTests({ cwd: failing, tests })
+  assert.equal(failed.status, 'unmeasured'); assert.equal(failed.reason, 'setup-failed')
+  assert.equal(git(failing, 'worktree', 'list').trim().split('\n').length, 1)
+})
+
+test('an invalid project config is unmeasured invalid-project-config', async () => {
+  for (const config of ['{"proof":[{"match":"**/*.xml"}]}', '{', '{"proof":null}', '{"proof":[{"match":" ","run":"echo"}]}', '{"proof":[{"match":"*","run":"echo","setup":" "}]}', 'symlink']) {
+    const cwd = scratchDir('proof-config-')
+    git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew'))
+    if (config === 'symlink') { writeFileSync(join(cwd, 'target.json'), '{}'); symlinkSync('../target.json', join(cwd, '.crew/project.json')) }
+    else writeFileSync(join(cwd, '.crew/project.json'), config)
+    git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+    const result = await proveTests({ cwd, tests: [{ file: 'x.xml', title: 'x' }] })
+    assert.equal(result.status, 'unmeasured'); assert.equal(result.reason, 'invalid-project-config')
+  }
+})
+
 // MUTATION: classify testCodeFailure as not a body failure.
 test('a body failure on the old source and a pass on the build proves the test', async () => {
   const cwd = scratchDir('proof-')

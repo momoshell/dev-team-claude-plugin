@@ -10,7 +10,7 @@ const source = (name) => readFileSync(new URL(`../visualizer/web/src/lib/${name}
 const base = 1700000000000
 const phase = (id, start, end) => ({ id, name: `stage-${id}`, started_at: start == null ? null : base + start, ended_at: end == null ? null : base + end })
 
-test('WP1', () => {
+test('WP1 separates open and unrecorded phases without invented durations', () => {
   // MUTATION: disable the running, absent-end classification.
   const iso = n => new Date(base + n).toISOString()
   const open = { id: 2, name: 'open', role: 'builder', status: 'running', started_at: iso(20000), ended_at: null }
@@ -36,7 +36,7 @@ test('WP1', () => {
   assert.match(markup, /timeline\.unrecorded as entry/); assert.match(markup, /Not recorded — \{entry.reason\}/)
 })
 
-test('WP2', () => {
+test('WP2 scales recorded phases with a minimum visible width', () => {
   // MUTATION: remove the Math.max minimum-width floor.
   const run = { source: 'lean', phases: [phase(1, 0, 1000000), phase(2, 0, 1), phase(3, 200000, 200123), phase(4, 500000, 500000), phase(5, 999999, 1000000)] }
   const original = structuredClone(run), result = layoutTimeline(run)
@@ -53,7 +53,7 @@ test('WP2', () => {
   assert.match(source('LeanWaterfall.svelte'), /block\.width \* 100/)
 })
 
-test('WP3', () => {
+test('WP3 formats valid durations and rejects invalid values', () => {
   // MUTATION: replace the seconds conversion with raw milliseconds.
   for (const [ms, expected] of [[0, '0s'], [1, '0.001s'], [123, '0.123s'], [1500, '1.5s'], [60000, '1m 0s'], [165213, '2m 45.213s'], [664000, '11m 4s']]) assert.equal(formatLeanDuration(ms), expected)
   for (const value of [null, undefined, NaN, Infinity, -Infinity, -1, '1000']) assert.equal(formatLeanDuration(value), null)
@@ -62,7 +62,7 @@ test('WP3', () => {
   assert.match(markup, /\{formatLeanDuration\(block\.duration_ms\)\}/); assert.doesNotMatch(markup, /\{block\.duration_ms\}\s*ms\b/)
 })
 
-test('WF1', () => {
+test('WF1 mounts the waterfall and lays out recorded intervals', () => {
   // MUTATION: removing the LeanWaterfall mount must fail this test.
   const detail = source('LeanRunDetail.svelte'), component = source('LeanWaterfall.svelte')
   assert.match(detail, /<LeanWaterfall \{run\} \/>/)
@@ -75,7 +75,7 @@ test('WF1', () => {
   assert.equal(result.span_ms, 40000); assert.equal(result.request, null); assert.deepEqual(run, original)
 })
 
-test('WF2', () => {
+test('WF2 marks incomplete or invalid intervals as unrecorded', () => {
   // MUTATION: disabling recordedOnly must expose fabricated timing or queued phases.
   const phases = [phase(1, 0, 10000), phase(2, null, 90000), phase(3, 2000, null), { ...phase(4, 0, 1000), started_at: 'invalid' }, phase(5, 5000, 4000)]
   const run = { source: 'lean', phases }, result = layoutTimeline(run, [], { now: base + 100000 })
@@ -96,7 +96,7 @@ test('a run without a source tag lays out as recorded intervals only', () => {
   assert.deepEqual(result.queued, [])
 })
 
-test('WF3', () => {
+test('WF3 assigns recorded envelope roles to matching phases', () => {
   // MUTATION: disabling envelope processing must lose the recorded phase roles.
   const root = mkdtempSync(join(tmpdir(), 'lean-waterfall-'))
   try {

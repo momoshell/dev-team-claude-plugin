@@ -81,7 +81,7 @@ test('argument-taking commands declare a hint and pass the argument through', ()
 })
 
 // MUTATION RC1: point the review command back at the deleted pr-review module.
-test('RC1', () => {
+test('RC1 review command describes local and pull request reviews', () => {
   const { front, body } = parts('review.md')
   assert.ok(frontValue(front, 'argument-hint')?.includes('<pull request number>'))
   assert.ok(frontValue(front, 'argument-hint')?.includes('--local'))

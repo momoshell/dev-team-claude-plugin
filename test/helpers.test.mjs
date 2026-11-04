@@ -6,7 +6,17 @@ import { spawn, spawnSync } from 'node:child_process'
 import { writeFileSync, readFileSync, existsSync, globSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ROOT, forAll, rawRequest, scratchDir, startFileWriter, trackProcessGroupFile, writeTornFile } from './helpers.mjs'
+import { ROOT, forAll, git, rawRequest, scratchDir, startFileWriter, trackProcessGroupFile, writeTornFile } from './helpers.mjs'
+
+test('S5-10 no test file declares a bare-id test title', () => {
+  const files = git(ROOT, 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '*.test.mjs')
+    .split('\0').filter((file) => file && existsSync(join(ROOT, file)))
+  assert.ok(files.length > 50, `only ${files.length} test files found`)
+  const hits = files.flatMap((file) => [...readFileSync(join(ROOT, file), 'utf8')
+    .matchAll(/^\s*(?:test|it)\(\s*(['"\x60])([A-Za-z]*\d[A-Za-z\d.-]*)\1\s*,/gm)]
+    .map((match) => `${file}: ${match[2]}`))
+  assert.deepEqual(hits, [], hits.join('\n'))
+})
 
 const listen = async (server) => {
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })

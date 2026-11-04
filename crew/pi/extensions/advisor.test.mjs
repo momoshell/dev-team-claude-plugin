@@ -574,7 +574,7 @@ test('every delta source is redacted before it is stored, sent or frozen', async
   }
 })
 
-test('A1', async () => {
+test('A1 launches the advisor and records summed child usage', async () => {
   const f = fixture(); const journal = sink(); let argv; let input
   const judgment = { class: 'edge-path', severity: 'medium', claim: 'child found a grounded edge path', evidence: ['outside.mjs:1'] }
   const spawn = (bin, args) => {
@@ -687,7 +687,7 @@ test('A3 clockfree pi-child timeout, oversize output and invalid frames are clos
 })
 
 
-test('A3', async () => {
+test('A3 strips prior advisor notes and records unavailable usage', async () => {
   const f = fixture(); const journal = sink(); const inputs = []
   const childSpawn = (bin, args) => {
     const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()

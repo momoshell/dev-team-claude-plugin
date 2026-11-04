@@ -406,7 +406,7 @@ test('a passive extension-only grant adds exactly one operand without changing s
   assert.deepEqual(granted, plain)
 })
 
-test('GA1', () => {
+test('GA1 grants retrieve alongside the skeletonread extension', () => {
   const shape = { model: 'sonnet', promptFile: '/tmp/role-builder.md', deny: 'Task,Agent' }
   const plain = piSeatParts({ ...shape, grants: { extensions: [] } })
   const granted = piSeatParts({ ...shape, grants: { extensions: [SKELETONREAD_EXTENSION] } })

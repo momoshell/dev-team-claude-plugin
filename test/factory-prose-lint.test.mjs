@@ -212,14 +212,14 @@ test('PP8 the lint imports only node and relative modules', () => {
 })
 
 // Mutation SD1: change code-less's opening "Use when" trigger to non-trigger wording.
-test('SD1', () => {
+test('SD1 skill descriptions start with a loading trigger', () => {
   const offenders = skillDescriptions().filter(({ description }) =>
     !/^(?:Use when|Load when|Load before)\b/.test(description))
   assert.deepEqual(offenders, [], offenders.map(({ path, description }) => `${path}: ${description}`).join('\\n'))
 })
 
 // Mutation SD2: add U+2014 to code-less's description after the opening trigger.
-test('SD2', () => {
+test('SD2 skill descriptions contain no em dash', () => {
   const offenders = skillDescriptions().filter(({ description }) => description.includes(DASH))
   assert.deepEqual(offenders, [], offenders.map(({ path, description }) => `${path}: ${description}`).join('\\n'))
 })

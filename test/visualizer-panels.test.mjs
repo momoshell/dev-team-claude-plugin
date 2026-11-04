@@ -56,12 +56,12 @@ function configurationFixture() {
   return { historical, measured, other, colliding, rows: [historical, measured, other, colliding] }
 }
 
-test('A1', () => {
+test('A1 hides configuration filters when all dimensions are absent', () => {
   const { historical } = configurationFixture()
   assert.deepEqual(configurationFilterView([historical]).dimensions, [])
 })
 
-test('B1', () => {
+test('B1 exposes measured configuration dimensions and options', () => {
   const { rows } = configurationFixture()
   const view = configurationFilterView(rows)
   assert.deepEqual(view.dimensions.map((dimension) => dimension.key), ['task_profile', 'execution_shape', 'assurance'])
@@ -69,7 +69,7 @@ test('B1', () => {
   assert.ok(view.dimensions.every((dimension) => dimension.options.every((option) => option.value !== null)))
 })
 
-test('C1', () => {
+test('C1 marks missing configuration without inferring legacy fields', () => {
   const { historical } = configurationFixture()
   const marks = ['task_profile', 'execution_shape', 'assurance'].map((dimension) => configurationDimensionCell(historical, dimension))
   assert.ok(marks.every((mark) => mark.value === null && mark.text === 'Not recorded' && mark.dashed === true))
@@ -78,7 +78,7 @@ test('C1', () => {
   assert.notEqual(marks[2].text, 'Standard')
 })
 
-test('D1', () => {
+test('D1 distinguishes missing configuration from a matching literal value', () => {
   const { historical, colliding } = configurationFixture()
   const absent = configurationDimensionCell(historical, 'task_profile')
   const real = configurationDimensionCell(colliding, 'task_profile')
@@ -89,7 +89,7 @@ test('D1', () => {
   assert.notDeepEqual({ value: absent.value, dashed: absent.dashed }, { value: real.value, dashed: real.dashed })
 })
 
-test('E1', () => {
+test('E1 preserves unrecorded rows while filtering measured configuration', () => {
   const { historical, measured, other } = configurationFixture()
   const view = configurationFilterView([historical, measured, other], { task_profile: 'implementation' })
   assert.deepEqual(view.rows.map((row) => row.adw_id), ['historical', 'measured'])
@@ -97,7 +97,7 @@ test('E1', () => {
   assert.equal(view.excluded.line, '1 measured row excluded by configuration filters · not-recorded rows remain visible')
 })
 
-test('F1', () => {
+test('F1 lists only measured configuration options', () => {
   const { measured, colliding } = configurationFixture()
   const view = configurationFilterView([measured, colliding])
   const options = (key) => view.dimensions.find((dimension) => dimension.key === key).options.map((option) => option.value)
@@ -107,7 +107,7 @@ test('F1', () => {
   assert.doesNotMatch(JSON.stringify(view), /audit|scout|rigorous/)
 })
 
-test('G1', () => {
+test('G1 task list uses configuration cells filters and exclusion text', () => {
   const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/TaskList.svelte'), 'utf8')
   assert.match(source, /import \{[^}]*configurationDimensionCell[^}]*configurationFilterView[^}]*\} from '\.\/fleet\.js'/)
   assert.match(source, /let baseRows = \$derived\(/)

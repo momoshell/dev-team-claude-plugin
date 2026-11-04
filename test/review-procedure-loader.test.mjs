@@ -96,7 +96,7 @@ test('no review-skill document calls the shipped panel parked', () => {
   assert.deepEqual(offenders, [])
 })
 
-test('BB3', () => {
+test('BB3 review guidelines contain no brittle module line citations', () => {
   const text = readFileSync(GUIDELINES, 'utf8')
   const found = text.match(/[A-Za-z0-9_./-]+\.mjs:\d+/g) ?? []
   assert.deepEqual(found, [])

@@ -108,7 +108,7 @@ async function withSession(options = {}) {
 
 const bashCall = (toolCallId, command = 'echo hi') => ({ toolCallId, toolName: 'bash', input: { command } })
 
-test('P1', async () => {
+test('P1 initializes with the ACP version and limited capabilities', async () => {
   const h = await harness()
   try {
     const [init] = fixtureFrames('pi-handshake.ndjson', 'client->agent')
@@ -122,7 +122,7 @@ test('P1', async () => {
   } finally { h.close() }
 })
 
-test('P2', async () => {
+test('P2 answers a prompt once after settlement with usage', async () => {
   const h = await withSession()
   try {
     h.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'hello' }] } })
@@ -142,7 +142,7 @@ test('P2', async () => {
   } finally { h.close() }
 })
 
-test('P3', async () => {
+test('P3 aborts a cancelled prompt and answers once after settlement', async () => {
   const h = await withSession()
   try {
     h.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'long' }] } })
@@ -204,7 +204,7 @@ test('the default gate covers bash, edit, write and powershell, and a blank list
   } finally { h.close() }
 })
 
-test('C1', async () => {
+test('C1 accepts a new prompt after cancellation settles', async () => {
   const h = await withSession()
   try {
     h.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'cancel me' }] } })
@@ -221,7 +221,7 @@ test('C1', async () => {
     assert.equal(h.frames.some((frame) => frame.id === 6 && frame.error), false)
   } finally { h.close() }
 })
-test('C2', async () => {
+test('C2 answers cancellation only once despite repeated settlement', async () => {
   const h = await withSession()
   try {
     h.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'cancel me' }] } })
@@ -238,7 +238,7 @@ test('C2', async () => {
   } finally { h.close() }
 })
 
-test('P4', async () => {
+test('P4 asks permission for each gated call and honors each answer', async () => {
   const h = await withSession()
   try {
     const pending = h.emit('tool_call', bashCall('call-p4-1'))
@@ -281,7 +281,7 @@ test('permission offers allow_once and reject_once only, asks on every gated cal
   } finally { h.close() }
 })
 
-test('P6', async () => {
+test('P6 blocks gated calls when the ACP client is unavailable', async () => {
   const h = await harness({ connect: false })
   try {
     const result = await settle(h.emit('tool_call', bashCall('call-p6')))
@@ -348,7 +348,7 @@ async function waitFor(pred, what, ms = 5000) {
 const readRecord = (path) => { try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return null } }
 const killRecorded = (path) => { const rec = readRecord(path); if (rec?.pid) { try { process.kill(rec.pid, 'SIGKILL') } catch {} } }
 
-test('P7', async () => {
+test('P7 bridges ACP frames and terminates pi on stdin EOF', async () => {
   const dir = scratchDir('acp-bridge-')
   const recordPath = join(dir, 'record.json')
   const run = runBridge({ CREW_PI_BIN: fakePi(dir), FAKE_PI_RECORD: recordPath, FAKE_PI_MODE: 'serve', HOME: dir }, ['--model', 'fake/model'])
@@ -372,7 +372,7 @@ test('P7', async () => {
   } finally { run.child.kill('SIGKILL'); killRecorded(recordPath) }
 })
 
-test('P8', () => {
+test('P8 registers ACP handlers only when the socket is configured', () => {
   const off = stubPi()
   withEnv({ CREW_ACP_SOCKET: undefined }, () => acpServer(off.pi))
   assert.deepEqual([...off.handlers.keys()], [], 'without CREW_ACP_SOCKET the extension registers nothing')

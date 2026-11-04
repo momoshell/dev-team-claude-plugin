@@ -86,7 +86,7 @@ test('DEVTEAM_VIZ_CHECKOUT sets the default checkout and the retired intake name
   }
 })
 
-test('RO1', () => {
+test('RO1 installed plugins and paths without git are read only', () => {
   // MUTATION: invert the no-.git decision; this fake no-git checkout must refuse.
   const root = '/tmp/work', home = '/tmp/home'
   assert.deepEqual(pluginWriteMode({ pluginRoot:root, home, existsSync:() => false, realpathSync:(path) => path }), {
@@ -743,7 +743,7 @@ test('VL6 writeGuard refuses non-loopback peers and admits loopback spellings', 
   }
 })
 
-test('GR1', async () => {
+test('GR1 API reads reject hostile hosts across routes', async () => {
   // MUTATION GR1: limiting the shared API guard to /api/journal leaks other route data.
   const dir = scratchDir('visualizer-api-host-guard-')
   let server
@@ -773,7 +773,7 @@ test('GR1', async () => {
   }
 })
 
-test('GR2', () => {
+test('GR2 host guard accepts loopback on the matching port', () => {
   // MUTATION GR2: removing loopback membership accepts evil.example on the matching port.
   const accepted = ['127.0.0.1:4488', 'localhost:4488', '[::1]:4488']
   for (const host of accepted) {
@@ -794,7 +794,7 @@ test('GR2', () => {
   assert.equal(hostGuard({ headers: { host: 'localhost' }, socket: { localPort: 80 } }, 'read'), null)
 })
 
-test('GR3', async () => {
+test('GR3 API HEAD requests enforce the host guard without bodies', async () => {
   // MUTATION GR3: bypassing the shared guard for HEAD lets a hostile HEAD request escape.
   const dir = scratchDir('visualizer-api-host-head-')
   let server
@@ -816,7 +816,7 @@ test('GR3', async () => {
   }
 })
 
-test('GR4', () => {
+test('GR4 vite proxy rewrites the API host to loopback', () => {
   // MUTATION GR4: flipping changeOrigin to false removes the Vite proxy's Host rewriting.
   const source = readFileSync(join(ROOT, 'visualizer/web/vite.config.mjs'), 'utf8')
     .replace(/^import .*$/gm, '')
@@ -854,7 +854,7 @@ test('vite dev proxy rewrites same-origin requests and leaves foreign origins un
 })
 
 // MUTATION LH1: disable IPv4 interface equality on the normalization return.
-test('LH1', () => {
+test('LH1 read host guard follows current IPv4 interfaces', () => {
   let calls = 0
   let address = '192.0.2.23'
   const source = () => { calls++; return { ethernet: [{ address, family: 'IPv4' }], inactive: undefined } }
@@ -867,7 +867,7 @@ test('LH1', () => {
 })
 
 // MUTATION LH2: disable IPv6 interface equality on the normalization return.
-test('LH2', () => {
+test('LH2 read host guard normalizes IPv6 interface addresses', () => {
   const source = () => ({ ethernet: [{ address: '2001:0DB8:0000:0000:0000:0000:0000:0023', family: 'IPv6' }] })
   const results = ['[2001:db8::23]:4488', '[2001:DB8:0:0:0:0:0:23]:4488'].map(host =>
     hostGuard({ headers: { host }, socket: { localPort: 4488 } }, 'read', source))
@@ -875,7 +875,7 @@ test('LH2', () => {
 })
 
 // MUTATION LH3: neutralize the final refusal decision across the complete matrix.
-test('LH3', () => {
+test('LH3 read host guard refuses foreign malformed or unavailable interfaces', () => {
   const source = () => ({ ethernet: [{ address: '192.0.2.23' }, { address: '2001:db8::23' }] })
   const hosts = [
     '192.0.2.99:4488', '[2001:db8::99]:4488',
@@ -895,7 +895,7 @@ test('LH3', () => {
 })
 
 // MUTATION LH4: widening the read-only label condition admits writes on local literals.
-test('LH4', () => {
+test('LH4 write host guard refuses local interface literals', () => {
   let calls = 0
   const source = () => { calls++; return { ethernet: [{ address: '192.0.2.23' }, { address: '2001:db8::23' }] } }
   const hosts = ['192.0.2.23:4488', '[2001:db8::23]:4488']

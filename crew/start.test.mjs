@@ -1,7 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { appendFileSync as appendFileSyncReal, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import fs, { appendFileSync as appendFileSyncReal, existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { laneName, main, runBrief, startLane, StartRefusal } from './start.mjs'
@@ -69,6 +70,7 @@ function fakes({ brief = BRIEF, exists = () => false, worktreeStatus = 0, origin
     },
     spawnDetached: (file, args, options) => { calls.push(['detached', file, args, options]); return 4242 },
     crewRoot: '/home/.crew',
+    transcriptRoot: '/virtual/no-transcripts',
     log: (line) => calls.push(['log', line]),
   }
   return { deps, calls }
@@ -77,6 +79,96 @@ function fakes({ brief = BRIEF, exists = () => false, worktreeStatus = 0, origin
 const effects = (calls) => calls.filter(([kind]) => ['spawn', 'detached', 'mkdir', 'write'].includes(kind))
 const written = (calls, suffix) => calls.find(([kind, path]) => kind === 'write' && path.endsWith(suffix))
 const spawned = (calls, verb) => calls.find(([kind, , args]) => (kind === 'spawn' || kind === 'detached') && args.includes(verb))
+
+test('crew start refuses ask lines the operator never typed: seat prompts, pasted text and stale transcripts (ADR-056)', async () => {
+  const root = scratchDir('provenance-')
+  const dir = join(root, 'proj')
+  mkdirSync(dir)
+  const row = (content, promptSource = 'typed', kind = 'human') => ({ type: 'user', origin: { kind }, promptSource, message: { content } })
+  writeFileSync(join(dir, 'a.jsonl'), [
+    row('first   typed line\nsecond typed line'),
+    row([{ text: 'array seat prompt' }], 'sdk'),
+    row('string seat prompt', 'sdk'),
+    row('notification text', 'system', 'task-notification'),
+    row('outside <pasted_content id="c57b">pasted text</pasted_content id="c57b"> outside'),
+  ].map((r) => typeof r === 'string' ? r : JSON.stringify(r)).join('\n'))
+  const old = join(dir, 'old.jsonl')
+  writeFileSync(old, JSON.stringify(row('stale transcript')))
+  const then = new Date(Date.now() - 40 * 86400000)
+  utimesSync(old, then, then)
+  const typed = ['first typed line', 'second typed line']
+  const excluded = ['array seat prompt', 'string seat prompt', 'notification text', 'pasted text', 'stale transcript']
+  const brief = BRIEF.replace('source: issue 1961', 'source: operator request')
+    .replace('## Context', `## The ask\n\n${[...typed, ...excluded].map((line) => `> ${line}`).join('\n')}\n\n## Context`)
+  const expected = `brief /d/b1.md quotes words the operator did not type (ADR-056):\n${excluded.map((text, i) => `- ask line ${11 + i} is not words the operator typed: ${JSON.stringify(text)}`).join('\n')}`
+  for (const check of [true, false]) {
+    let resolutions = 0
+    const { deps, calls } = fakes({ brief, resolve: () => { resolutions++; return { seats: {} } } })
+    deps.transcriptRoot = root
+    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps }), (error) => error instanceof StartRefusal && error.message === expected)
+    assert.equal(resolutions, 0)
+    assert.deepEqual(effects(calls), [])
+  }
+  const pass = fakes({ brief: brief.replace(excluded.map((line) => `> ${line}\n`).join(''), '') })
+  pass.deps.transcriptRoot = root
+  assert.equal((await startLane({ briefPath: '/d/b1.md', check: true, deps: pass.deps })).checked, true)
+})
+
+test('crew start reports ask provenance unmeasured with no transcript and starts; an issue brief reads none (ADR-056)', async () => {
+  const brief = BRIEF.replace('source: issue 1961', 'source: operator request').replace('## Context', '## The ask\n\n> Do this.\n\n## Context')
+  const empty = scratchDir('provenance-empty-')
+  for (const [root, reason] of [['/virtual/no-transcripts', 'no Claude Code transcript directory'], [empty, 'no typed operator message']]) {
+    const operator = fakes({ brief })
+    operator.deps.transcriptRoot = root
+    await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: operator.deps })
+    assert.ok(operator.calls.some(([kind, line]) => kind === 'log' && line.includes(`crew start: ask provenance unmeasured: ${reason}`)))
+    assert.ok(effects(operator.calls).length)
+  }
+  const root = scratchDir('provenance-partial-')
+  const dir = join(root, 'proj')
+  mkdirSync(dir)
+  const row = (content) => JSON.stringify({ type: 'user', origin: { kind: 'human' }, promptSource: 'typed', message: { content } })
+  writeFileSync(join(dir, 'readable.jsonl'), row('Unrelated words.'))
+  for (const code of ['EACCES', 'EPERM', undefined]) {
+    const original = fs.readdirSync
+    fs.readdirSync = (...args) => { if (args[0] === root) throw Object.assign(new Error('denied'), { code }); return original(...args) }
+    syncBuiltinESMExports()
+    try {
+      const operator = fakes({ brief })
+      operator.deps.transcriptRoot = root
+      await startLane({ briefPath: '/d/b1.md', check: true, deps: operator.deps })
+      assert.ok(operator.calls.some(([kind, line]) => kind === 'log' && line.includes(`cannot read Claude Code transcript directory at ${root}: ${code ?? 'unknown error'}`)))
+    } finally { fs.readdirSync = original; syncBuiltinESMExports() }
+  }
+  const hidden = join(dir, 'unreadable.jsonl')
+  writeFileSync(hidden, row('Do this.'))
+  for (const [method, path] of [['readFileSync', hidden], ['statSync', hidden], ['readdirSync', dir]]) {
+    const original = fs[method]
+    fs[method] = (...args) => { if (args[0] === path) throw Object.assign(new Error('denied'), { code: 'EACCES' }); return original(...args) }
+    syncBuiltinESMExports()
+    try {
+      for (const check of [true, false]) {
+        const operator = fakes({ brief })
+        operator.deps.transcriptRoot = root
+        await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps: operator.deps })
+        assert.ok(operator.calls.some(([kind, line]) => kind === 'log' && line.includes('ask provenance unmeasured: incomplete Claude Code transcript scan')))
+        assert.equal(effects(operator.calls).length > 0, !check)
+      }
+    } finally { fs[method] = original; syncBuiltinESMExports() }
+  }
+  writeFileSync(hidden, row('Do this.').slice(0, -1))
+  for (const check of [true, false]) {
+    const operator = fakes({ brief })
+    operator.deps.transcriptRoot = root
+    await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps: operator.deps })
+    assert.ok(operator.calls.some(([kind, line]) => kind === 'log' && line.includes('ask provenance unmeasured: incomplete Claude Code transcript scan')))
+    assert.equal(effects(operator.calls).length > 0, !check)
+  }
+  const issue = fakes()
+  issue.deps.transcriptRoot = { [Symbol.toPrimitive]() { throw new Error('transcript root read') } }
+  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: issue.deps })
+  assert.equal(issue.calls.some(([kind, line]) => kind === 'log' && line.includes('ask provenance')), false)
+})
 
 const pipeFixture = `
 import { writeSync } from 'node:fs'

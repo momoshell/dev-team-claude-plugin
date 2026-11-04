@@ -1,7 +1,7 @@
 # Architecture decision register
 
 Every ADR number this repo has ever minted, ratified or not. **Grep here before
-minting a new one** — the next free number is **056**.
+minting a new one** — the next free number is **057**.
 
 That instruction is the point of the file. ADR numbers are cited from shipped
 code as the authority for invariants (`crew/loop.mjs`), and those citations name *numbers,
@@ -83,6 +83,7 @@ not free.
 | 053 | Build first, prove after: the builder writes the acceptance tests and the loop proves them | proposed 2026-11-01, rejected by ADR-055 on its own measurement (2026-11-02) | [full document](adr-053-build-first-prove-after.md) |
 | 054 | Each tier runs its own loop, and every stage earns its place | proposed 2026-11-01, operator direction; §2–§4 amended by ADR-055 | [full document](adr-054-each-tier-runs-its-own-loop.md) |
 | 055 | The planner defines the work, code checks red and green, the reviewer judges | §2 and §3 ratified 2026-11-03; §1, §7, §8 and §12 ratified 2026-11-04 by operator decision D14; §6 proposed until about 10 lanes run on b1514's round budgets | [full document](adr-055-planner-defines-the-work.md) |
+| 056 | The ask is operator words | proposed 2026-11-04, operator request; ratified by merging this PR | [full document](adr-056-the-ask-is-operator-words.md) |
 
 ### The 014–019 tangle, recorded so nobody re-derives it
 

@@ -182,7 +182,7 @@ export async function runLean(spec, deps = {}) {
       })
       if (recordError) throw recordError
       // The runtime writes the one turn row of every turn, accepted or not.
-      guardedAppend(sessionFile, `${JSON.stringify({ type: 'turn', stopReason: turn?.stopReason ?? null, usage: turn?.usage ?? null, refusal: turn?.refusal ?? null })}\n`, 'utf8')
+      guardedAppend(sessionFile, `${JSON.stringify({ type: 'turn', stopReason: turn?.stopReason ?? null, usage: turn?.usage ?? null, refusal: turn?.refusal ?? null, ...(typeof turn?.usage_reason === 'string' ? { usage_reason: turn.usage_reason } : {}) })}\n`, 'utf8')
       // The loop reads the issued return even when this turn fails. Skill proof trusts only the
       // relayed copy, and only while the session file still matches it.
       const recorded = relayed.join('')

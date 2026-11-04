@@ -203,6 +203,10 @@ const agent = (fields = {}, body = 'Read [the notes](../notes/planner.md).\n') =
 }
 const defectsOf = (fields, needle) => parseAgent(agent(fields)).defects.filter((d) => d.includes(needle))
 
+test('an agent definition may name muse as its agent', () => {
+  assert.deepEqual(parseAgent(agent({ agent: 'muse', model: 'meta/muse-spark-1.3' })).defects, [])
+})
+
 // MUTATION: add a retired field to AGENT_FIELDS or a retired extension to EXTENSIONS.
 test('AR2-AR4 refuses retired agent fields and extensions, accepts retained extensions', () => {
   const rows = [

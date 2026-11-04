@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-11-03",
+  "updated_at": "2026-11-04",
   "coding_agents": {
     "pi": {
       "providers": [
@@ -34,6 +34,17 @@
       "display_name": "Claude Code",
       "binary": "claude",
       "install_hint": "Install Claude Code and ensure the claude binary is on PATH.",
+      "availability": "executable",
+      "availability_reason": "executable"
+    },
+    "muse": {
+      "providers": ["meta"],
+      "transports": ["acp"],
+      "adapter": "crew/adapters/adapter-muse.mjs",
+      "refuses": ["extensions", "skills", "mcp_servers", "local_provider"],
+      "display_name": "Muse Code",
+      "binary": "muse",
+      "install_hint": "Install Muse Code and ensure the muse binary is on PATH.",
       "availability": "executable",
       "availability_reason": "executable"
     }

@@ -10,6 +10,7 @@ import { armGrants, PI_AGENT_DIR_ENV, refuse } from './grants.mjs'
 import { AGENT_ROLES, validateEnvelope } from '../protocols.mjs'
 import * as claudeAdapter from '../adapters/adapter-claude.mjs'
 import * as piAdapter from '../adapters/adapter-pi.mjs'
+import * as museAdapter from '../adapters/adapter-muse.mjs'
 import { CONTEXT_LAYOUT_ENV, LEAN_LAYOUT, journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../pi/context-layout.mjs'
 import { ADVISOR_MANIFEST_FILE, ADVISOR_CONFIG_VERSION, SAFE_MODEL, ADVISED_ROLES, READ_CAP_BYTES, boundText, loadContext as advisorContext } from '../pi/extensions/advisor.ts'
 import { loadAcceptedContext } from '../pi/extensions/skeletonread.ts'
@@ -66,14 +67,14 @@ const nonempty = (value) => typeof value === 'string' && value !== ''
 
 // armGrants refuses unknown or missing names. Claude expresses only fff and skills;
 // its adapter refuses every resolved extension and the advisor.
-function seatGrants(definition, { role, isClaude, skills, deps }) {
+function seatGrants(definition, { role, isPi, skills, deps }) {
   const extensions = definition.extensions ?? []
   if (!Array.isArray(extensions) || !extensions.every(nonempty)) throw new Error('extensions must be a list of extension names')
   const advisor = definition.advisor !== undefined && definition.advisor !== null
-  if (!isClaude && advisor && !ADVISED_ROLES.has(role)) throw refuse('grant-unsupported', `advisor grant is unsupported for seat ${role}`)
+  if (isPi && advisor && !ADVISED_ROLES.has(role)) throw refuse('grant-unsupported', `advisor grant is unsupported for seat ${role}`)
   const armed = armGrants({ role, agent: definition.agent, extensions }, { register: deps.register, root: deps.root, exists: deps.exists })
   const mcp = armed.mcp_servers.length > 0
-  const piBuiltins = !isClaude && mcp ? ['builtin:mcp'] : []
+  const piBuiltins = isPi && mcp ? ['builtin:mcp'] : []
   return {
     tools: [],
     extensions: [...armed.extensions, ...piBuiltins],
@@ -250,7 +251,7 @@ function laneContext({ arms, role, laneTaskDir, workdir, definition, deps }) {
 
 export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, binaries = {}, deps = {} }) {
   if (!definition || typeof definition !== 'object') throw new Error('definition must be an object')
-  if (!['claude', 'pi'].includes(definition.agent)) throw new Error(`unsupported agent: ${definition.agent}`)
+  if (!['claude', 'pi', 'muse'].includes(definition.agent)) throw new Error(`unsupported agent: ${definition.agent}`)
   if (!nonempty(cwd)) throw new Error('cwd must be a nonempty string')
   if (!nonempty(sessionFile)) throw new Error('sessionFile must be a nonempty string')
   if (typeof prompt !== 'string') throw new Error('prompt must be a string')
@@ -271,6 +272,10 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
   const now = deps.now ?? (() => Number(process.hrtime.bigint()) / 1e6)
   const sleep = deps.sleep ?? ((ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) })
   const isClaude = definition.agent === 'claude'
+  const isPi = definition.agent === 'pi'
+  const isMuse = definition.agent === 'muse'
+  if (isMuse && writes === 'task-dir') throw refuse('grant-unsupported', 'muse cannot confine writes to task-dir')
+  if (isMuse && !definition.model.startsWith('meta/')) throw new Error(`muse requires a meta model, got ${definition.model}`)
   let tools
   let deny = ''
   if (isClaude) {
@@ -282,12 +287,13 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
   }
   const claudeAcp = isClaude ? resolveBinary('claude ACP', binaries.claudeAcp, 'claude-agent-acp', env) : null
   const claude = isClaude ? resolveBinary('claude', binaries.claude, 'claude', env) : null
-  const pi = isClaude ? null : resolveBinary('pi', binaries.pi, 'pi', env)
+  const pi = isPi ? resolveBinary('pi', binaries.pi, 'pi', env) : null
+  const muse = isMuse ? resolveBinary('muse', binaries.muse, 'muse', env) : null
   const grantedSkills = skills.map((skill) => resolveSkill(skill, workdir))
-  const grants = seatGrants(definition, { role, isClaude, skills: grantedSkills, deps })
+  const grants = seatGrants(definition, { role, isPi, skills: grantedSkills, deps })
   // fff replaces native search; pi reads Glob and Grep as find and grep.
   if (grants.mcp_servers.some((server) => server.name === 'fff')) deny = [deny, 'Glob,Grep'].filter(Boolean).join(',')
-  const contextArms = isClaude ? [] : [
+  const contextArms = !isPi ? [] : [
     ...(definition.extensions ?? []).filter((name) => CONTEXT_EXTENSIONS.includes(name)),
     ...(grants.advisor ? ['advisor'] : []),
   ]
@@ -308,8 +314,16 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
     } catch { /* session recording never changes the turn */ }
   }
   // Wall-clock receipt time is recording evidence; the runner's `now` is monotonic.
+  const toolCalls = new Map()
   const recordUpdate = (payload) => {
-    try { record({ sessionId: payload.sessionId, update: payload.update, at: (deps.recordNow ?? Date.now)() }) } catch { /* recording cannot change the turn */ }
+    try {
+      const update = payload.update
+      if (isMuse && ['tool_call', 'tool_call_update'].includes(update?.sessionUpdate) && nonempty(update.toolCallId)) {
+        const fields = Object.fromEntries(['kind', 'rawInput', 'title'].filter((key) => update[key] !== undefined).map((key) => [key, update[key]]))
+        toolCalls.set(update.toolCallId, { ...toolCalls.get(update.toolCallId), ...fields })
+      }
+      record({ sessionId: payload.sessionId, update, at: (deps.recordNow ?? Date.now)() })
+    } catch { /* recording cannot change the turn */ }
   }
   function recordPermission(decision) {
     const { sessionId, toolCall, options, optionId } = decision
@@ -340,6 +354,11 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
   const decide = permissionHandler({ permit: seatPermission })
   function onPermission({ sessionId, toolCall, options }) {
     let optionId = null
+    try {
+      if (isMuse && toolCalls.has(toolCall?.toolCallId)) {
+        toolCall = { ...toolCalls.get(toolCall.toolCallId), ...Object.fromEntries(Object.entries(toolCall).filter(([, value]) => value !== undefined)) }
+      }
+    } catch { /* leave the request unchanged */ }
     try { optionId = decide({ toolCall, options }) } catch { /* an undecidable request is cancelled */ }
     recordPermission({ sessionId, toolCall, options, optionId })
     return optionId
@@ -381,12 +400,14 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
         launch.mode = 'default'
         options.allowedTools = options.allowedTools.filter((tool) => !UNASKED_TOOLS.includes(tool.split('(')[0].trim()))
       }
-    } else {
+    } else if (isPi) {
       for (const file of grantedSkills) {
         if (!statSync(file).isFile()) throw new Error(`granted skill ${JSON.stringify(file)} is not a file`)
       }
       writePiAgentDir({ agentDir: piAdapter.piSeatAgentDir({ taskDir: runtime, role }), grants, cwd: workdir, env, role })
       launch = piAdapter.acpLaunch({ ...spec, bin: pi, model: piModel })
+    } else {
+      launch = museAdapter.acpLaunch({ ...spec, bin: muse, model, writes })
     }
     const sinkKinds = [...ACP_UPDATE_KINDS, 'unknown']
     client = (deps.clientFactory ?? acpClient)({
@@ -408,13 +429,13 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
       }
       const turn = client.pollPrompt(promptId)
       if (now() >= deadline) break
-      if (turn) return turn
+      if (turn) return isMuse ? { ...turn, usage: null, usage_reason: 'usage-unavailable' } : turn
       // A seat that died with no answer would otherwise hold the turn until its deadline.
       if (client.hasExitMarker?.()) {
         // The answer may have settled between the empty poll and the marker.
         const exitedTurn = client.pollPrompt(promptId)
         if (now() >= deadline) break
-        if (exitedTurn) return exitedTurn
+        if (exitedTurn) return isMuse ? { ...exitedTurn, usage: null, usage_reason: 'usage-unavailable' } : exitedTurn
         throw Object.assign(new Error(`${role} exited before answering (acp-seat-closed)`), { reason: 'acp-seat-closed' })
       }
       sleep(Math.max(0, Math.min(ACP_POLL_MS, deadline - now())))

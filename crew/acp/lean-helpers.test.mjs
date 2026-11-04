@@ -23,6 +23,20 @@ test('refuse stamps a closed reason and rejects an unknown one', () => {
   assert.throws(() => refuse('not-a-capability-reason', 'bad'), /unknown capability refusal reason/)
 })
 
+test('the shipped register declares muse as an acp coding agent whose adapter exists and refuses every grant it cannot carry', () => {
+  const muse = loadCapabilities().coding_agents.muse
+  assert.ok(muse)
+  assert.deepEqual(muse.providers, ['meta'])
+  assert.deepEqual(muse.transports, ['acp'])
+  assert.equal(muse.adapter, 'crew/adapters/adapter-muse.mjs')
+  assert.ok(existsSync(join(REGISTER_ROOT, muse.adapter)))
+  const imports = [...readFileSync(join(REGISTER_ROOT, muse.adapter), 'utf8').matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)].map((match) => match[1])
+  assert.ok(imports.length > 0)
+  assert.ok(imports.every((specifier) => specifier.startsWith('node:')))
+  assert.equal(muse.binary, 'muse')
+  assert.deepEqual(muse.refuses, ['extensions', 'skills', 'mcp_servers', 'local_provider'])
+})
+
 test('loadCapabilities reads the shipped register and refuses an invalid injected one', () => {
   const register = loadCapabilities()
   assert.deepEqual(Object.keys(register.roles), ['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])

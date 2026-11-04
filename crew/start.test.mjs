@@ -1031,6 +1031,13 @@ test('a denied turn-row append still fails the seat and names the recording erro
   }
 })
 
+test("a turn row carries the seat's usage reason when the seat names one and keeps its shape otherwise", async () => {
+  for (const reason of ['usage-unavailable', undefined]) {
+    const run = await oneTurn({ stopReason: 'end_turn', usage: null, refusal: null, usage_reason: reason })
+    assert.deepEqual(run.rows.at(-1), { type: 'turn', stopReason: 'end_turn', usage: null, refusal: null, ...(reason === undefined ? {} : { usage_reason: reason }) })
+  }
+})
+
 // MUTATION: null the usage in the turn row and an accepted turn loses its measurement.
 test('an accepted turn ends with exactly one turn row carrying its usage, and its envelope is read', async () => {
   for (const usage of [{ input_tokens: 5, output_tokens: 2 }, null]) {

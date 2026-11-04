@@ -1368,11 +1368,14 @@ test('a changed-path read that is denied, interrupted, non-green or malformed st
 })
 
 // MUTATION: import an old runtime module, or wire the loop into one, and the isolated lane is no longer isolated.
-test('the loop imports only builtins, the three contract modules and the skill proof, and only the lean bridge imports it', () => {
+test('the loop imports only its pinned modules and only the lean bridge imports it', () => {
   const dir = fileURLToPath(new URL('.', import.meta.url))
   const source = readFileSync(join(dir, 'loop.mjs'), 'utf8')
   const specifiers = [...source.matchAll(/^(?:import|} from|export [^\n]* from)[^'\n]*'([^']+)'/gm)].map((m) => m[1]).sort()
-  assert.deepEqual(specifiers, ['./agents.mjs', './checks.mjs', './proof.mjs', './protocols.mjs', './skills-proof.mjs', 'node:async_hooks', 'node:fs/promises', 'node:path', 'node:util'])
+  assert.deepEqual(specifiers, ['./agents.mjs', './checks.mjs', './lane-core.mjs', './proof.mjs', './protocols.mjs', './skills-proof.mjs', 'node:async_hooks', 'node:fs/promises', 'node:path', 'node:util'])
+  const laneCore = readFileSync(join(dir, 'lane-core.mjs'), 'utf8')
+  const laneCoreImports = [...laneCore.matchAll(/from ['"]([^'"]+)['"]/g)].map((m) => m[1])
+  assert.ok(laneCoreImports.length > 0 && laneCoreImports.every((name) => name.startsWith('node:')))
   const importers = readdirSync(dir, { recursive: true, withFileTypes: true })
     .filter((e) => e.isFile() && e.name.endsWith('.mjs') && !e.name.endsWith('.test.mjs') && e.name !== 'loop.mjs')
     .map((e) => join(e.parentPath, e.name))

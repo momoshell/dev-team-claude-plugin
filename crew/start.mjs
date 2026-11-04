@@ -12,13 +12,13 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync,
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { LANE } from './lane-core.mjs'
 import { ISSUE_SOURCE, parseBrief } from './protocols.mjs'
 import { resolveAgents } from './agents.mjs'
 import { writeRunPid } from './run-pid.mjs'
 
 const HOME = dirname(dirname(fileURLToPath(import.meta.url)))
 const LEAN = join(HOME, 'crew', 'lean.mjs')
-const LANE = /^[a-z0-9][a-z0-9-]{0,62}$/
 
 export class StartRefusal extends Error {}
 

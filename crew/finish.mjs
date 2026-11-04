@@ -28,12 +28,12 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { FINISH_REVIEW_ROUNDS, composeLanePrBody, openPullRequest, runSuite, withoutIssueTokens } from './checks.mjs'
+import { LANE, isObject } from './lane-core.mjs'
 import { TIERS, validateEnvelope } from './protocols.mjs'
 import { deadRun, probeAlive, writeRunPid } from './run-pid.mjs'
 
 const HOME = dirname(dirname(fileURLToPath(import.meta.url)))
 const LEAN = join(HOME, 'crew', 'lean.mjs')
-const LANE = /^[a-z0-9][a-z0-9-]{0,62}$/
 
 export const FINISH_REASONS = Object.freeze([
   'finish-unreadable', 'finish-worktree', 'finish-premise', 'finish-running', 'finish-published', 'finish-committed',
@@ -67,8 +67,6 @@ const defaultDeps = () => ({
   crewRoot: join(homedir(), '.crew'),
   log: (line) => process.stdout.write(`${line}\n`),
 })
-
-const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 
 function readJson(d, path, what) {
   try { return JSON.parse(d.readFileSync(path, 'utf8')) } catch (error) {

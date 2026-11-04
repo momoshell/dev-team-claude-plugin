@@ -144,13 +144,15 @@ test('a failed git worktree add is unmeasured, runs no test and leaves no temp d
   } finally { if (prior === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = prior }
 })
 
-test('proof imports only builtins and its pinned builtin-only check runner', () => {
+test('proof imports only builtins and its pinned check runner and lane-core leaf', () => {
   const imports = (file) => [...readFileSync(new URL(file, import.meta.url), 'utf8').matchAll(/from ['"]([^'"]+)['"]/g)].map((m) => m[1])
   const proof = imports('./proof.mjs')
   assert.ok(proof.length > 0)
   assert.deepEqual(proof.filter((name) => !name.startsWith('node:')), ['./checks.mjs'])
   const checks = imports('./checks.mjs')
   assert.ok(checks.length > 0)
-  assert.ok(checks.every((name) => name.startsWith('node:')))
+  assert.deepEqual(checks.filter((name) => !name.startsWith('node:')), ['./lane-core.mjs'])
+  const laneCore = imports('./lane-core.mjs')
+  assert.ok(laneCore.length > 0 && laneCore.every((name) => name.startsWith('node:')))
   assert.deepEqual(imports('./proof-reporter.mjs'), [])
 })

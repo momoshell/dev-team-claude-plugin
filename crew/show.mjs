@@ -11,8 +11,7 @@ import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-
-const LANE = /^[a-z0-9][a-z0-9-]{0,62}$/
+import { LANE, isObject } from './lane-core.mjs'
 const ROLE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/
 class ShowRefusal extends Error {}
 
@@ -90,7 +89,6 @@ export function showLane({ lane, role, json = false, deps = {} }) {
   if (crewText === null) throw new ShowRefusal(`lane ${lane}: ${crewPath} is missing`)
   let members
   try { members = JSON.parse(crewText).members } catch (error) { throw new ShowRefusal(`lane ${lane}: ${crewPath} is not valid JSON (${error.message})`) }
-  const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
   if (!isObject(members)) throw new ShowRefusal(`lane ${lane}: ${crewPath} has no members object`)
   const seats = Object.entries(members)
   if (seats.length === 0) throw new ShowRefusal(`lane ${lane}: ${crewPath} lists no members`)

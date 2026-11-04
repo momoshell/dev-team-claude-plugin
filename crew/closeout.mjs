@@ -10,26 +10,18 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { homedir } from 'node:os'
-import { basename, dirname, join, sep } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLeanSource } from '../visualizer/server/lean-source.mjs'
+import { LANE, isObject, within } from './lane-core.mjs'
 import { parsePrUrl } from './record-pr.mjs'
 import { deadRun, probeAlive } from './run-pid.mjs'
 
 export class CloseoutRefusal extends Error {}
 
-const LANE = /^[a-z0-9][a-z0-9-]{0,62}$/
 const refuse = (message) => { throw new CloseoutRefusal(message) }
-const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 const isDir = (path) => { try { return statSync(path).isDirectory() } catch { return false } }
 const defaultRun = (cmd, args) => spawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024 })
-
-function within(root, path) {
-  try {
-    const base = realpathSync(root), real = realpathSync(path)
-    return real === base || real.startsWith(`${base}${sep}`)
-  } catch { return false }
-}
 
 function lastPr(text, lane, taskDir, alive) {
   let pr = null

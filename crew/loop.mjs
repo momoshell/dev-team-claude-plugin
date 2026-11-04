@@ -16,6 +16,7 @@ import { resolveAgents } from './agents.mjs'
 import {
   CHECK_REASONS, FINISH_REVIEW_ROUNDS, commitChanges, openPullRequest, parseStatus, rebaseBranch, runSuite, validGenerated,
 } from './checks.mjs'
+import { HEX_OID, describeError as describe, GIT_STATUS_ARGS } from './lane-core.mjs'
 import { proveTests } from './proof.mjs'
 import { TIERS, validateEnvelope } from './protocols.mjs'
 import { proveRequiredSkills } from './skills-proof.mjs'
@@ -33,7 +34,6 @@ const REQUIRED_ROLES = ['planner', 'builder', 'reviewer']
 const FINISH_ROLES = ['builder', 'reviewer']
 const text = (v) => typeof v === 'string' && v !== ''
 const strings = (v) => Array.isArray(v) && v.every(text)
-const describe = (error) => ({ code: error?.code ?? null, message: String(error?.message ?? error) })
 const refusal = (reason) => ({ status: 'stopped', reason, pr: null })
 
 // The failing tests and file locations a red suite printed, from the Node spec reporter (`test at file:l:c`,
@@ -87,8 +87,6 @@ function parseChangedPaths(stdout, unstaged = false) {
 function worktreeRecords(stdout) {
   return parseStatus(stdout).filter(({ y }) => y !== ' ').map(({ x, y, path, from }) => `${x}${y} ${path}${from === null ? '' : `\0${from}`}`)
 }
-
-const HEX_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 
 // ADR-055 §7: exact files and directory trees that require judge review.
 const PROTECTED = ['crew/loop.mjs', 'crew/checks.mjs', 'crew/finish.mjs', 'crew/lean.mjs', 'crew/proof.mjs', 'crew/proof-reporter.mjs', 'crew/protocols.mjs', 'crew/acp/grants.mjs', 'hooks/', 'crew/agents/', '.github/workflows/', 'docs/adr/']
@@ -268,6 +266,8 @@ export async function runLoop(spec, deps = {}) {
       && (!command || result.status !== 'green' || (result.code === 0 && !result.signal && result.timedOut === false))
     return sound ? result : { status: 'unmeasured', reason: 'runner-threw' }
   }
+
+  const readStatus = (name) => stage(name, () => callCheck(name, d.run, { cwd, command: 'git', args: [...GIT_STATUS_ARGS] }, { command: true }))
 
   // One role's turn: issue, await, read back, validate (a schema-refused file gets one repair turn that
   // costs no round). Returns { envelope } for a done envelope or { halt }.
@@ -491,7 +491,7 @@ export async function runLoop(spec, deps = {}) {
     }
 
     if (isFinish) {
-      const status = await stage('base-paths', () => callCheck('base-paths', d.run, { cwd, command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'] }, { command: true }))
+      const status = await readStatus('base-paths')
       const files = status.status === 'green' && typeof status.stdout === 'string' ? parseChangedPaths(status.stdout) : null
       if (files === null) return stop('paths-unmeasured', status)
       const fetched = await fetchOrigin()
@@ -591,7 +591,7 @@ export async function runLoop(spec, deps = {}) {
         }
 
         // The reviewer is told what git reports changed now, remeasured every round; an unreadable status stops the lane.
-        const status = await stage('review-paths', () => callCheck('review-paths', d.run, { cwd, command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'] }, { command: true }))
+        const status = await readStatus('review-paths')
         changedPaths = status.status === 'green' && typeof status.stdout === 'string' ? parseChangedPaths(status.stdout) : null
         if (changedPaths === null) return stop('paths-unmeasured', status)
         stagePaths = parseChangedPaths(status.stdout, true)
@@ -734,7 +734,7 @@ export async function runLoop(spec, deps = {}) {
     ].join('\n')
 
     // The commit names what git reports changed now, never a list the caller wrote before the build.
-    const status = await stage('paths', () => callCheck('paths', d.run, { cwd, command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'] }, { command: true }))
+    const status = await readStatus('paths')
     const files = status.status === 'green' && typeof status.stdout === 'string' ? parseChangedPaths(status.stdout) : null
     if (!files) return stop('paths-unmeasured', status)
     // A protected path first seen after the review-time check (the suite wrote it) never met the raise: never commit it.
@@ -786,7 +786,7 @@ export async function runLoop(spec, deps = {}) {
       const postSuite = await suiteRun()
       if (postSuite.status !== 'green') return stop(postSuite.reason, postSuite)
       // The tree the checks passed on must be the commit that is published or reported ready.
-      const cleanStatus = await stage('post-rebase-clean', () => callCheck('post-rebase-clean', d.run, { cwd, command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'] }, { command: true }))
+      const cleanStatus = await readStatus('post-rebase-clean')
       const cleanPaths = cleanStatus.status === 'green' && typeof cleanStatus.stdout === 'string' ? parseChangedPaths(cleanStatus.stdout) : null
       if (cleanPaths === null) return stop('paths-unmeasured', cleanStatus)
       if (cleanPaths.length > 0) return stop('dirty-worktree', cleanStatus)

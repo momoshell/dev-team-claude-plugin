@@ -6,31 +6,23 @@
 // The lane must already be stopped and quiet: there is no arbitration against a concurrent writer.
 import { appendFileSync, readFileSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, sep } from 'node:path'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLeanSource } from '../visualizer/server/lean-source.mjs'
+import { LANE, isObject, within } from './lane-core.mjs'
 import { deadRun, probeAlive } from './run-pid.mjs'
 
 export class RecordPrRefusal extends Error {}
 
-const LANE = /^[a-z0-9][a-z0-9-]{0,62}$/
 // A dot segment (`.` or `..`) is refused: a URL parser resolves it away and the link names another PR.
 const PR_URL = /^https:\/\/github\.com\/(?!\.\.?\/)[A-Za-z0-9_.-]+\/(?!\.\.?\/)[A-Za-z0-9_.-]+\/pull\/([1-9][0-9]*)$/
 const refuse = (message) => { throw new RecordPrRefusal(message) }
-const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 
 export function parsePrUrl(url) {
   const match = typeof url === 'string' ? PR_URL.exec(url) : null
   const number = match ? Number(match[1]) : NaN
   if (!Number.isSafeInteger(number)) refuse('--pr must be https://github.com/<owner>/<repo>/pull/<number>')
   return { number, url }
-}
-
-function within(root, path) {
-  try {
-    const base = realpathSync(root), real = realpathSync(path)
-    return real === base || real.startsWith(`${base}${sep}`)
-  } catch { return false }
 }
 
 function parseRows(text) {

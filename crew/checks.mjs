@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
+import { GIT_STATUS_ARGS, HEX_OID, describeError } from './lane-core.mjs'
 
 export const FINISH_REVIEW_ROUNDS = 3
 
@@ -23,7 +24,6 @@ const INHERITED_ENV = ['FORCE_COLOR', 'CLICOLOR_FORCE', 'NODE_TEST_CONTEXT', 'NO
 const sleep = (ms) => new Promise((wake) => setTimeout(wake, ms))
 const unmeasured = (reason, extra = {}) => ({ status: 'unmeasured', reason, code: null, signal: null, stdout: '', stderr: '', timedOut: false, pgid: null, ...extra })
 const validTimeout = (ms) => Number.isSafeInteger(ms) && ms > 0 && ms <= MAX_TIMEOUT_MS
-const describeError = (error) => ({ code: error?.code ?? null, message: String(error?.message ?? error) })
 
 function cleanEnv() {
   const env = { ...process.env, NO_COLOR: '1' }
@@ -153,7 +153,6 @@ export const validGenerated = (v) => v !== null && typeof v === 'object' && !Arr
   && Array.isArray(v.args) && v.args.every((arg) => typeof arg === 'string' && !arg.includes('\0'))
   && (v.timeoutMs === undefined || validTimeout(v.timeoutMs))
 
-const HEX_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 const ISSUE_TOKEN = /#(\d+)/g
 // A ref-like name that is never an option, never blank, never a control character.
 const SAFE_NAME = /^[^-\x00-\x20\x7f][^\x00-\x20\x7f]*$/
@@ -207,7 +206,7 @@ function composeLaneMessage({ subject, body, closes, refs }) {
 }
 
 export function composeLanePrBody({ body, closes, refs }) {
-  const prose = body.replace(/#(\d+)/g, 'issue $1')
+  const prose = withoutIssueTokens(body)
   return joinBlocks([prose, issueLines(closes, refs).join('\n')])
 }
 
@@ -246,7 +245,7 @@ async function readCheckout(git, cwd) {
     await git(['rev-parse', 'HEAD']),
     await git(['rev-parse', '--abbrev-ref', 'HEAD']),
     await git(['rev-parse', ...GIT_PATHS.flatMap((name) => ['--git-path', name])]),
-    await git(['status', '--porcelain=v1', '-z', '--untracked-files=all']),
+    await git([...GIT_STATUS_ARGS]),
     await git(['ls-files', '--stage', '-z']),
   ]
   const bad = reads.find((read) => read.status !== 'green')
@@ -448,7 +447,7 @@ export async function rebaseBranch(spec = {}, deps = {}) {
                     } else if (ignored.status !== 'red' || ignored.code !== 1) { failure = notGreen(ignored, 'rebase-failed'); break }
                   }
                   if (!failure) {
-                    const status = await scratchGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'])
+                    const status = await scratchGit([...GIT_STATUS_ARGS])
                     entries = status.status === 'green' ? parseStatus(status.stdout) : null
                     changed = entries?.flatMap((entry) => entry.from === null ? [entry.path] : [entry.path, entry.from])
                     if (!changed) failure = unmeasured('rebase-failed', { detail: 'regenerated paths could not be listed' })

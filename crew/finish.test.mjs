@@ -10,6 +10,7 @@ import { openPullRequest } from './checks.mjs'
 import { LOOP_REASONS } from './loop.mjs'
 import { validateEnvelope } from './protocols.mjs'
 import { recordPr } from './record-pr.mjs'
+import { projectHash } from './onboard.mjs'
 
 const FINDING = { id: 'R1', severity: 'must-fix', location: 'lib.mjs:1', summary: 'Fix the defect' }
 const MUTATION = { check: 'A1', file: 'lib.mjs', find: 'old', replace: 'new' }
@@ -614,6 +615,23 @@ test('--accept refuses a gated lane whose worktree is not onboarded and publishe
       const before = r.rowsOf()
       assert.equal(await reasonOf(r.decide(choice)), reason)
       assert.equal(r.published.length, choice === 'accept' && reason === null ? 1 : 0)
+      if (reason) assert.deepEqual(r.rowsOf(), before)
+    } finally { cleanup(r.f) }
+  }
+})
+
+// MUTATION: drop the comparison with spec.onboarded and a recalibrated project file publishes a lane started under another onboarding.
+test('--accept refuses a gated lane whose calibrated project file differs from the onboarding it started under, and publishes when they match (ADR-057)', async () => {
+  const project = { suite: 'npm test', proof: [] }
+  const hash = projectHash(project)
+  for (const [started, reason] of [['a'.repeat(64), 'onboarding-stale'], [hash, null]]) {
+    const r = ready([], { spec: { onboarded: started } })
+    try {
+      mkdirSync(join(r.f.base, 'worktree', '.crew'), { recursive: true })
+      writeFileSync(join(r.f.base, 'worktree', '.crew', 'project.json'), JSON.stringify({ ...project, onboarded: { hash } }))
+      const before = r.rowsOf()
+      assert.equal(await reasonOf(r.decide('accept')), reason)
+      assert.equal(r.published.length, reason === null ? 1 : 0)
       if (reason) assert.deepEqual(r.rowsOf(), before)
     } finally { cleanup(r.f) }
   }

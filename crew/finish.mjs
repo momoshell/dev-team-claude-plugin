@@ -329,10 +329,13 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
 
   if (choice === 'accept' && Object.hasOwn(spec, 'onboarded')) {
     requireWorktree(d, spec)
-    try { requireOnboarded(spec.cwd, d.readFileSync) } catch (error) {
+    let project
+    try { project = requireOnboarded(spec.cwd, d.readFileSync) } catch (error) {
       if (error instanceof OnboardRefusal) throw new FinishRefusal(error.reason, error.message)
       throw error
     }
+    // A calibrated file the lane did not start under is still a different onboarding.
+    if (project.hash !== spec.onboarded) throw new FinishRefusal('onboarding-stale', `lane ${lane} started under onboarding ${spec.onboarded}; the worktree's .crew/project.json is ${project.hash}: run /onboard and start the lane again`)
   }
   const claim = claimDecision(d, lane, taskDir, readyAt)
   try {

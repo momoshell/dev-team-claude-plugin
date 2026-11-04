@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readdirSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseBrief, parseAgent, validateEnvelope, AGENT_ROLES, BRIEF_FIELDS, TIERS, SHAPES, ENVELOPE_FIELDS, ENVELOPE_STATUSES, REVIEW_VERDICTS, LEAD_DECISIONS, FINDING_SEVERITIES, FINDING_DISPOSITIONS } from './protocols.mjs'
@@ -221,6 +221,12 @@ test('AR2-AR4 refuses retired agent fields and extensions, accepts retained exte
 test('P5 refuses fallback as an unknown field, at the base and in a tier', () => {
   assert.ok(defectsOf({ fallback: [{ agent: 'pi', model: 'openai/x' }] }, 'unknown field fallback').length)
   assert.ok(defectsOf({ tiers: { judge: { fallback: [] } } }, 'tiers.judge.fallback cannot be overridden').length)
+})
+
+test('P5 the current agent example in ADR-052 parses with no defects', () => {
+  const doc = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../docs/adr/adr-052-agents-do-the-work.md'), 'utf8')
+  const block = [...doc.matchAll(/```yaml\n([\s\S]*?)\n```/g)].at(-1)?.[1]
+  assert.deepEqual(parseAgent(block).defects, [])
 })
 
 // MUTATION: add a path segment named for a retired extension.

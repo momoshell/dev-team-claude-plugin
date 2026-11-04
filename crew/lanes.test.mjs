@@ -23,12 +23,12 @@ function world() {
   lane(root, 'beta', [{ event: 'verdict', stage: 'build', status: 'stopped', reason: 'seat-unmeasured' }, { event: 'stage-end', stage: 'build' }])
   lane(root, 'gamma', [{ event: 'verdict', stage: 'review', status: 'reviewed' }, { event: 'pr', stage: 'publish', pr: { number: 7, url: PR } }])
   lane(archiveRoot, 'delta', [{ event: 'stage-start', stage: 'gate' }])
-  const run = (argv) => {
+  const run = (argv, alive) => {
     const out = [], err = []
-    const status = main(argv, { root, archiveRoot, stdout: (t) => out.push(t), stderr: (t) => err.push(t) })
+    const status = main(argv, { root, archiveRoot, alive, stdout: (t) => out.push(t), stderr: (t) => err.push(t) })
     return { status, out: out.join(''), err: err.join('') }
   }
-  return { run, lane: (name, rows) => lane(root, name, rows), done: () => rmSync(home, { recursive: true, force: true }) }
+  return { root, archiveRoot, run, lane: (name, rows) => lane(root, name, rows), done: () => rmSync(home, { recursive: true, force: true }) }
 }
 const lines = (text) => text.trim().split('\n')
 
@@ -64,6 +64,20 @@ test('a lane whose run died with no terminal row lists as stopped run-died; term
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
+test('an archived lane with no terminal row lists as stopped archived-without-terminal-row, even with a dead pid', () => {
+  const w = world()
+  try {
+    put(join(w.archiveRoot, 'dt-delta', 'delta', 'task', 'run.pid'), '123\n')
+    const alive = () => false
+    const rows = laneRows({ root: w.root, archiveRoot: w.archiveRoot, all: true, alive })
+    const delta = rows.find((row) => row.lane === 'delta')
+    assert.deepEqual([delta.status, delta.reason, delta.archived], ['stopped', 'archived-without-terminal-row', true])
+    assert.equal(rows.find((row) => row.lane === 'alpha').status, 'reviewed')
+    assert.deepEqual(JSON.parse(w.run(['--all', '--json'], alive).out), rows)
+    assert.ok(lines(w.run(['--all'], alive).out).includes('delta | stopped | gate | archived-without-terminal-row | not recorded | archived'))
+  } finally { w.done() }
+})
+
 test('LS1 LS4 LS5 lists live lanes with journal status, stop reason and PR url', () => {
   const w = world()
   try {
@@ -83,7 +97,7 @@ test('LS2 LS3 archived lanes appear only with --all, marked archived', () => {
     assert.ok(!w.run([]).out.includes('delta'))
     const all = lines(w.run(['--all']).out)
     assert.equal(all.length, 4)
-    assert.equal(all.find((line) => line.startsWith('delta')), 'delta | running | gate | not recorded | not recorded | archived')
+    assert.equal(all.find((line) => line.startsWith('delta')), 'delta | stopped | gate | archived-without-terminal-row | not recorded | archived')
   } finally { w.done() }
 })
 

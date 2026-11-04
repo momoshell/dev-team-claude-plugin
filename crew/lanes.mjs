@@ -1,7 +1,7 @@
 // crew lanes [--all] [--json] — list lean lanes from their journals.
 //
 // Status, latest stage, stop reason and PR come from the lane journal only (the visualizer's lean source).
-// A recorded pid can prove an open run dead. A journal with
+// A recorded pid can prove an open live run dead. A journal with
 // unreadable rows is flagged on its status, since the status was read past a gap.
 import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -18,7 +18,7 @@ export function laneRows({ root, archiveRoot, all = false, alive = probeAlive } 
     .filter((run) => all || !run.archived)
     .map((run) => {
       const found = run.journal_error === null ? source.resolveLane(run.task_slug) : null
-      const died = found && deadRun({ rows: source.readJournalRows(found).rows, taskDir: join(found.dir, 'task'), alive })
+      const died = found && !run.archived && deadRun({ rows: source.readJournalRows(found).rows, taskDir: join(found.dir, 'task'), alive })
       return {
         lane: run.task_slug,
         status: died ? 'stopped' : run.status,

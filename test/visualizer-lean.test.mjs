@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import { appendFileSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { startServer } from '../visualizer/server/server.mjs'
+import { createLeanSource } from '../visualizer/server/lean-source.mjs'
+import { taskBoard, leanStatus } from '../visualizer/web/src/lib/fleet.js'
 import { leanCheckStatus } from '../visualizer/web/src/lib/lean.js'
 import { scratchDir } from './helpers.mjs'
 
@@ -34,6 +36,27 @@ async function withServer(work, overrides = {}) {
   }
 }
 const q = (name, extra = {}) => `repo_slug=dt-${name}&task_slug=${name}&adw_id=lean%3A${name}` + Object.entries(extra).map(([k, v]) => `&${k}=${encodeURIComponent(v)}`).join('')
+
+test('an archived lane with no terminal row reads stopped, never running, in listRuns and the board', () => {
+  const sandbox = scratchDir('lean-viz-')
+  try {
+    const crewRoot = join(sandbox, '.crew'), archiveRoot = join(sandbox, '.crew-journal-archive')
+    lane(archiveRoot, 'x-open', [{ event: 'stage-start', stage: 'gate' }])
+    lane(crewRoot, 'y-rev', [{ event: 'verdict', stage: 'review', status: 'reviewed' }], '.archive-2026-11-01')
+    lane(archiveRoot, 'z-stop', [{ event: 'verdict', status: 'stopped', reason: 'seat-unmeasured' }, { event: 'stage-end' }])
+    lane(crewRoot, 'w-live', [{ event: 'stage-start', stage: 'build' }])
+    const runs = createLeanSource({ crewRoot, archiveRoot }).listRuns()
+    for (const name of ['x-open', 'y-rev']) {
+      const run = runs.find((r) => r.task_slug === name)
+      assert.deepEqual([run.status, run.reason, run.running], ['stopped', 'archived-without-terminal-row', false])
+      assert.deepEqual([leanStatus(run).key, leanStatus(run).word, leanStatus(run).why], ['aborted', 'stopped', 'archived-without-terminal-row'])
+    }
+    const live = runs.find((r) => r.task_slug === 'w-live'), stopped = runs.find((r) => r.task_slug === 'z-stop')
+    assert.deepEqual([live.status, live.reason, live.running], ['running', null, true])
+    assert.deepEqual([stopped.status, stopped.reason, stopped.running], ['stopped', 'seat-unmeasured', false])
+    assert.equal(taskBoard(runs, { showArchived: true }).counts.open, 1)
+  } finally { rmSync(sandbox, { recursive: true, force: true }) }
+})
 
 test('LV1 lists live, archived and sibling-archive lanes with their latest stage; reread on append', async () => {
   await withServer(async ({ crewRoot, archiveRoot, get }) => {

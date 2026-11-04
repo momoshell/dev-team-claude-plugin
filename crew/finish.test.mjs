@@ -179,6 +179,26 @@ test('a mechanical lane with no planner return is finished on its brief under it
   }
 })
 
+test('finishing a mechanical lane after a resolved conflict keeps the build subject', () => {
+  const head = 'a'.repeat(40), moved = 'b'.repeat(40), onto = 'c'.repeat(40)
+  const build = { ...builderRow, stage: 'build', parsed: { ...BUILDER, details: { ...BUILDER.details, subject: 'fix: original build' } } }
+  const conflict = { ...builderRow, stage: 'conflict', id: 'lane9.builder.3', parsed: { ...BUILDER, id: 'lane9.builder.3', details: { ...BUILDER.details, subject: 'fix: conflict only' } } }
+  for (const stage of ['proof', 'suite']) {
+    const f = fixture({ rows: [
+      { event: 'run-start' }, build, { event: 'commit', head }, conflict,
+      { event: 'stage-end', stage: 'rebase', outcome: { status: 'green', head: moved, onto } },
+      { event: 'stage-start', stage }, { event: 'verdict', stage: null, status: 'stopped', reason: 'runner-threw' },
+    ] })
+    try {
+      const path = join(f.taskDir, 'lean.json')
+      writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, 'utf8')), tier: 'mechanical' }))
+      rmSync(join(f.taskDir, 'planner-1.json'))
+      run(f, { git: (_cwd, args) => ({ status: 'green', stdout: args[0] === 'rev-parse' ? (args[1] === 'HEAD' ? moved : onto) : args[0] === 'symbolic-ref' ? 'lane9' : '' }) }).go()
+      assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.subject, 'fix: original build', stage)
+    } finally { cleanup(f) }
+  }
+})
+
 // MUTATION: trust a builder row whose envelope carries another turn's id and finish launches on a return the loop refused.
 test('a builder return whose id is not the issued one is never a finish subject or a finish build', () => {
   const wrong = { ...builderRow, parsed: { ...BUILDER, id: 'lane9.builder.9', details: { ...BUILDER.details, subject: 'fix: mechanical' } } }

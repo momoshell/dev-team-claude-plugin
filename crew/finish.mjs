@@ -1,8 +1,9 @@
 // crew finish <lane> — finish a stopped lean lane with its own builder seat (ADR-051's finish shape, lean loop).
 //
 // Re-enters the lane in its own worktree and starts the detached `finish` run: rebase onto the current base ->
-// builder triage -> proof -> review -> suite -> commit -> rebase. A base conflict stops before any seat, leaving
-// the build uncommitted. A mechanical lane is finished on its brief. Only the checked tree is committed; a rebase
+// builder triage -> proof -> review -> suite -> commit -> rebase. A base or publishing conflict gets one builder
+// conflict turn; an unresolved or spent turn stops rebase-conflict. A failed base turn leaves the build uncommitted.
+// A mechanical lane is finished on its brief. Only the checked tree is committed; a rebase
 // that moves the head repeats proof, review and suite. It never re-plans, re-runs the baseline or publishes; the
 // operator's publish decision is a later step:
 // `--accept [--notes <file>]` publishes the PR the finish run measured (merging stays the operator's),
@@ -127,7 +128,7 @@ function loadPlan(d, lane, taskDir, rows = []) {
 function planFor(d, lane, taskDir, recordedTier, rows) {
   if (recordedTier === 'mechanical' && !d.readdirSync(taskDir).some((name) => /^planner-\d+\.json$/.test(name))
     && !rows.some((row) => row.event === 'envelope' && row.role === 'planner')) {
-    const builder = rows.findLast((row) => row.event === 'envelope' && row.role === 'builder'
+    const builder = rows.findLast((row) => row.event === 'envelope' && row.role === 'builder' && row.stage !== 'conflict'
       && Array.isArray(row.defects) && row.defects.length === 0 && !row.error && row.parsed?.status === 'done' && row.parsed.id === row.id
       && typeof row.parsed.details?.subject === 'string' && row.parsed.details.subject !== '')
     if (!builder) throw new FinishRefusal('finish-premise', `lane ${lane} has no builder subject`)

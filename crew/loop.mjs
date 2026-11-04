@@ -1,7 +1,8 @@
 // Build: plan -> rebase -> build -> proof -> (suite || review) -> PR.
 // Judge: plan -> rebase -> build -> proof -> suite -> review -> second review -> PR.
-// Finish: rebase -> builder triage -> proof -> review -> suite -> commit -> rebase. A base conflict stops before
-// any seat with the build uncommitted; a mechanical finish uses its brief and publishes nothing.
+// Finish: rebase -> builder triage -> proof -> review -> suite -> commit -> rebase. A base conflict gets one
+// builder conflict turn; an unresolved or spent turn stops with the build uncommitted. A mechanical finish uses its brief and publishes nothing.
+// A publishing rebase conflict also gets one builder conflict turn per run; an unresolved or spent turn stops rebase-conflict.
 // Mechanical: rebase -> build -> proof -> suite -> PR. A fix turn repeats checks; build, judge and mechanical
 // never automatically rerun a red suite (ADR-054 §1). Finish retains its unchanged-tree rerun (ADR-054:93).
 // Every shape commits only the checked tree; a moved head repeats checks at most three times, stopping if Git dropped the change as upstream.
@@ -272,7 +273,7 @@ export async function runLoop(spec, deps = {}) {
   // One role's turn: issue, await, read back, validate (a schema-refused file gets one repair turn that
   // costs no round). Returns { envelope } for a done envelope or { halt }.
   // Non-done returns route under ADR-055 §12; an exhausted bound goes to the lead, unless singleTurn or the lead's own bound stops it.
-  const seatTurn = async (role, feedback = [], { singleTurn = false, free = false } = {}) => {
+  const seatTurn = async (role, feedback = [], { singleTurn = false, free = false, hold = false } = {}) => {
     if (role === 'reviewer') enterPhase('review')
     let given = feedback
     for (;;) {
@@ -344,8 +345,9 @@ export async function runLoop(spec, deps = {}) {
         await emit('envelope', { role, id, returnPath, parsed, defects: checked.defects, error: failure?.error ?? null, turnError: latest.turnError })
         if (latest.turnError && !returnValid) failure = { reason: 'seat-unmeasured', error: latest.turnError }
         if (!failure && !valid) failure = { reason: 'envelope-refused', defects: checked.defects }
-        if (failure) return { halt: await stop(role === 'lead' ? 'lead-refused' : failure.reason, { role, id, ...failure }) }
+        if (failure) return hold ? { held: { ...failure, envelope: null } } : { halt: await stop(role === 'lead' ? 'lead-refused' : failure.reason, { role, id, ...failure }) }
         last[role] = checked.envelope
+        if (hold && checked.envelope.status !== 'done') return { held: { reason: checked.envelope.status, envelope: checked.envelope } }
         // ADR-055 §12: a questionless escalation returns to the same seat, including the lead.
         if (role === 'lead') {
           const questionless = checked.envelope.details.decision === 'escalate' && !text(checked.envelope.details.question)
@@ -362,6 +364,7 @@ export async function runLoop(spec, deps = {}) {
         if (checked.envelope.status === 'done') return { envelope: checked.envelope }
         held = { reason: checked.envelope.status, envelope: checked.envelope }
       }
+      if (hold) return { held }
       // ADR-055 §12: a finish escalation with a question reaches the operator; mechanical repair returns still route to the lead or restart.
       if (singleTurn && !(role === 'builder' && !isFinish && tier === 'mechanical' && held.envelope && ['insufficient', 'escalate'].includes(held.envelope.status))) {
         if (held.envelope?.status === 'escalate' && text(held.envelope.details?.question)) return { halt: await stop('seat-escalated', { role, reason: 'escalate', envelope: held.envelope, question: held.envelope.details.question }) }
@@ -467,6 +470,28 @@ export async function runLoop(spec, deps = {}) {
 
   const fetchOrigin = () => stage('fetch', () => callCheck('fetch', d.run, { cwd, command: 'git', args: ['fetch', 'origin'] }, { command: true }))
   const rebaseOnBase = () => stage('rebase', () => callCheck('rebase', d.rebaseBranch, { cwd, base: spec.base, ...(spec.generated ? { generated: spec.generated } : {}) }))
+  let conflictTurn = true
+  const resolveConflict = async (rebased) => {
+    if (rebased.status !== 'red' || rebased.reason !== 'rebase-conflict' || !conflictTurn) return rebased
+    conflictTurn = false
+    const head = await stage('conflict-head', () => callCheck('conflict-head', d.run, { cwd, command: 'git', args: ['rev-parse', 'HEAD'] }, { command: true }))
+    if (head.status !== 'green') return head
+    const before = typeof head.stdout === 'string' ? head.stdout.trim() : ''
+    if (!HEX_OID.test(before)) return { status: 'unmeasured', reason: 'runner-threw', head }
+    const item = { id: 'rebase-conflict', severity: 'must-fix', summary: `Rebase ${cwd} onto origin/${spec.base}, resolve conflicts in ${JSON.stringify(rebased.conflicts)}, complete the rebase, leave a clean tree. This is your only conflict turn.`, checkout: cwd, base: spec.base, conflicts: rebased.conflicts }
+    const turn = await stage('conflict', () => seatTurn('builder', [item], { free: true, hold: true }))
+    let outcome = turn.held
+    if (turn.envelope?.status === 'done') {
+      outcome = await rebaseOnBase()
+      if (outcome.status === 'green' && text(outcome.head)) return outcome
+    }
+    await stage('conflict-undo', () => callCheck('conflict-undo', d.run, { cwd, command: 'git', args: ['rebase', '--abort'] }, { command: true }))
+    for (const args of [['reset', '--hard', before], ['clean', '-f', '-d']]) {
+      const undone = await stage('conflict-undo', () => callCheck('conflict-undo', d.run, { cwd, command: 'git', args }, { command: true }))
+      if (undone.status !== 'green') return undone
+    }
+    return { ...rebased, turn: outcome }
+  }
   const suiteRun = () => stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs }, { command: true }))
   const result = await (async () => {
   try {
@@ -509,7 +534,7 @@ export async function runLoop(spec, deps = {}) {
         wip = await stage('base-commit', () => callCheck('base-commit', d.commitChanges, { cwd, files: kept, subject: 'wip: crew finish base' }))
         if (wip.status !== 'green' || !text(wip.head)) return stop(wip.reason ?? 'runner-threw', wip)
       }
-      const rebased = await rebaseOnBase()
+      const rebased = await resolveConflict(await rebaseOnBase())
       const baseFailure = rebased.status !== 'green' ? rebased.reason
         : typeof rebased.onto !== 'string' || !HEX_OID.test(rebased.onto) || !text(rebased.head) ? 'runner-threw'
         : rebased.head === rebased.onto ? 'nothing-to-commit' : null
@@ -759,7 +784,7 @@ export async function runLoop(spec, deps = {}) {
     const fetched = await fetchOrigin()
     if (fetched.status !== 'green') return stop(fetched.reason, fetched)
 
-    rebased = await rebaseOnBase()
+    rebased = await resolveConflict(await rebaseOnBase())
     if (rebased.status !== 'green' || !text(rebased.head)) return stop(rebased.reason ?? 'runner-threw', rebased)
 
     if (rebased.head !== committed.head) {

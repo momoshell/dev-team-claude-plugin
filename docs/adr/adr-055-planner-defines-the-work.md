@@ -250,6 +250,7 @@ Everything else goes to the seat that can fix it:
 
 Code holds the rule:
 
+- Amended 2026-11-04, operator direction (b1526, b1528, b1533, b1539): a rebase conflict before publishing, or a finish base conflict, gets one builder conflict turn per run. A resolved head takes the moved-head recheck; an unresolved turn is undone and stops `rebase-conflict`, as does a conflict after the turn is spent.
 - An `escalate` from any seat carries `details.question`, the decision it needs from the operator. An `escalate`
   without one is a bounce to the same seat.
 - Amended 2026-11-03, operator direction: on build and judge, a builder `insufficient` goes to the lead with its

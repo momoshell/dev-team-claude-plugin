@@ -89,7 +89,7 @@ const roster = {
         "provider": "anthropic",
         "id": "claude-fable-5-1",
         "agent": "claude",
-        "effort": "xhigh"
+        "effort": "high"
       }
     }
   }

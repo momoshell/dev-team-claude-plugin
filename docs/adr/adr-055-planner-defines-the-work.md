@@ -292,6 +292,9 @@ reports the lanes it has, with that denominator.
   §5's shape (0 of 60 defects under the strict validator). Tokens rose: high 13.6M against 9.4M (+44%), xhigh 20.2M
   against 12.9M (+57%). No cell caught b1402, b1416 or b1441, old or new. At N = 30 neither difference is significant.
   Decided 2026-11-03: judge lanes run the reviewer at high; the tech-lead's second review stays at xhigh.
+  Revised 2026-11-04 by operator decision: the tech-lead runs at high; since 2026-11-02 it returned 42 times over
+  29 judge lanes, with 39 passed, 3 changes-needed with should-fix findings only, no must-fix findings, and 668k output
+  tokens over 22 turns on 2026-11-04, the most of any seat.
 - **Builder (first 10 lanes):** test lines as a share of code lines added (the 18 corpus lanes: 804 of 1196, 67%), tests
   named per lane, tests red on the old source and green on the build out of tests named, and builder tokens. Lanes
   differ in size from the corpus, so the share is compared, not raw lines. The §3 rules stay if the share falls. The

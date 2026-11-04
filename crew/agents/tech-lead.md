@@ -5,7 +5,7 @@ role: tech-lead
 writes: task-dir
 agent: claude
 model: anthropic/claude-fable-5-1
-effort: xhigh
+effort: high
 advisor: null
 tiers: {"mechanical":null,"build":null}
 ---

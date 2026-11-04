@@ -94,3 +94,29 @@ test('PreToolUse denies writes to transcripts and started brief snapshots and al
   ]) assert.equal(invoke(tool, input), '')
   assert.equal(invoke('Write', { file_path: transcript }, { ...env, CREW_ROLE: 'builder' }), '')
 })
+
+// MUTATION: drop the memory exception and every Claude Code auto-memory write in every project is denied.
+test('PreToolUse allows Claude Code auto-memory writes beside the transcripts and still denies the transcripts', () => {
+  const { home, checkout, env } = fixture()
+  const invoke = (tool_name, tool_input) => run('PreToolUse', { cwd: checkout, tool_name, tool_input }, env)
+  const memory = join(home, '.claude/projects/p/memory')
+  for (const [tool, input] of [
+    ['Write', { file_path: join(memory, 'note.md') }],
+    ['Edit', { file_path: join(memory, 'MEMORY.md') }],
+    ['Bash', { command: "sed -i '' s/a/b/ ~/.claude/projects/p/memory/MEMORY.md" }],
+  ]) assert.equal(invoke(tool, input), '')
+  for (const path of [join(home, '.claude/projects/p/s.jsonl'), join(home, '.claude/projects/memory/s.jsonl'), join(home, '.claude/projects/p/s/subagents/memory.jsonl')]) denied(invoke('Write', { file_path: path }))
+  // A link inside memory/ that resolves to a transcript, or to another project, is not a memory write.
+  mkdirSync(memory, { recursive: true })
+  writeFileSync(join(home, '.claude/projects/p/s.jsonl'), '')
+  symlinkSync(join(home, '.claude/projects/p/s.jsonl'), join(memory, 'pointer.jsonl'))
+  symlinkSync(join(home, '.claude/projects/p'), join(memory, 'up'))
+  mkdirSync(join(home, '.claude/projects/q/memory'), { recursive: true })
+  symlinkSync(join(home, '.claude/projects/q/memory'), join(memory, 'other'))
+  for (const command of ['echo x > ~/.claude/projects/p/memory/pointer.jsonl', 'echo x > ~/.claude/projects/p/memory/up/s.jsonl', 'echo x > ~/.claude/projects/p/memory/other/note.md']) denied(invoke('Bash', { command }))
+  // A dangling link would create the transcript it names.
+  symlinkSync(join(home, '.claude/projects/p/new.jsonl'), join(memory, 'ghost.jsonl'))
+  symlinkSync(join(home, '.claude/projects/p/gone'), join(memory, 'ghostdir'))
+  for (const name of ['pointer.jsonl', 'up/s.jsonl', 'ghost.jsonl', 'ghostdir/s.jsonl']) denied(invoke('Write', { file_path: join(memory, name) }))
+  assert.equal(invoke('Write', { file_path: join(memory, 'new-note.md') }), '')
+})

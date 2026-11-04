@@ -6,7 +6,7 @@ import {
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve } from 'node:path'
-import { ROOT, scratchDir } from '../../test/helpers.mjs'
+import { ROOT, git, scratchDir } from '../../test/helpers.mjs'
 import { runAcpSeat } from './seat.mjs'
 import { parseAgent } from '../protocols.mjs'
 import * as claude from '../adapters/adapter-claude.mjs'
@@ -206,12 +206,87 @@ test('a muse seat that writes task-dir, names a non-meta model or declares skill
     ['extensions', { extensions: ['readgate'] }, 'grant-unsupported'],
     ['mcp_servers', { extensions: ['fff'] }, 'grant-unsupported'],
     ['advisor', { advisor: {} }, 'grant-unsupported'],
-  ]) use('pi-turn', { agent: 'muse', model: 'meta/muse-spark-1.3', definition, deps: { exists: () => true } }, (run) => {
+  ]) use('pi-turn', { agent: 'muse', model: 'meta/muse-spark-1.3', definition, deps: { exists: () => true, repoState: () => null } }, (run) => {
     assert.match(run.error?.message ?? '', new RegExp(label))
     assert.equal(run.error?.reason, reason)
     assert.equal(run.launches.length, 0)
     assert.deepEqual(run.leftover, [])
   })
+})
+
+test('a muse seat that writes task-dir launches with writes enabled and settles when the worktree is clean before and after the turn', () => {
+  let checks = 0
+  use('pi-turn', { agent: 'muse', model: 'meta/muse-wonder-1.0', definition: { writes: 'task-dir' }, deps: { repoState: () => { checks++; return '' } } }, (run) => {
+    assert.equal(run.error, undefined)
+    assert.equal(run.launches.length, 1)
+    assert.equal(run.launches[0][1][1].includes("'--disable-write'"), false)
+    assert.equal(run.result.usage, null)
+    assert.equal(run.result.usage_reason, 'usage-unavailable')
+    assert.equal(checks, 2)
+    assert.deepEqual(run.leftover, [])
+  })
+})
+
+test('a muse task-dir seat is refused on an unreadable worktree, settles on an unchanged dirty one, and fails when its turn changes the worktree or leaves it unreadable', () => {
+  for (const [states, reason, launches] of [
+    [[' M a.mjs sha256:1\0', ' M a.mjs sha256:1\0'], undefined, 1],
+    [[null], 'grant-unsupported', 0],
+    [[new Error('EPERM')], 'grant-unsupported', 0],
+    [[' M a.mjs sha256:1\0', ' M a.mjs sha256:2\0'], 'acp-seat-wrote-repo', 1],
+    [['', null], 'acp-seat-repo-unmeasured', 1],
+    [['', new Error('EPERM')], 'acp-seat-repo-unmeasured', 1],
+  ]) {
+    let checks = 0
+    use('pi-turn', { agent: 'muse', model: 'meta/muse-wonder-1.0', definition: { writes: 'task-dir' }, deps: { repoState: () => { const state = states[checks++]; if (state instanceof Error) throw state; return state } } }, (run) => {
+      assert.equal(run.error?.reason, reason)
+      if (!launches) assert.match(run.error.message, /task-dir/)
+      if (reason === 'acp-seat-wrote-repo') assert.match(run.error.message, /a\.mjs/)
+      if (!reason) assert.equal(run.result.stopReason, 'end_turn')
+      assert.equal(run.launches.length, launches)
+      assert.deepEqual(run.leftover, [])
+    })
+  }
+  for (const [after, reason] of [['?? src/x.mjs\0', 'acp-seat-wrote-repo'], [null, 'acp-seat-repo-unmeasured']]) {
+    let clock = 0, checks = 0
+    const client = { start() {}, initialize() {}, newSession() {}, setMode() {}, beginPrompt: () => 1, pollPrompt: () => null,
+      cancelPrompt: () => true, close: () => ({ outcome: 'proven' }) }
+    use('pi-turn', { agent: 'muse', model: 'meta/muse-wonder-1.0', definition: { writes: 'task-dir', wait_s: 1 }, deps: {
+      repoState: () => checks++ === 0 ? '' : after, clientFactory: () => client, now: () => clock, sleep: (ms) => { clock += ms },
+    } }, (run) => {
+      assert.equal(run.error?.reason, reason)
+      assert.equal(clock, 1000)
+      assert.deepEqual(run.leftover, [])
+    })
+  }
+})
+
+test('the default worktree fingerprint keeps a dirty worktree the muse turn left alone and sees an edit to an already-changed file, a new file and a deletion', () => {
+  for (const [name, mutate] of [
+    ['unchanged', () => {}],
+    ['a.mjs', (repo) => writeFileSync(join(repo, 'a.mjs'), 'planner edit')],
+    ['u.txt', (repo) => writeFileSync(join(repo, 'u.txt'), 'changed untracked')],
+    ['c.mjs', (repo) => writeFileSync(join(repo, 'c.mjs'), 'new')],
+    ['b.mjs', (repo) => rmSync(join(repo, 'b.mjs'))],
+  ]) {
+    const repo = scratchDir('muse-fingerprint-')
+    try {
+      git(repo, 'init')
+      for (const file of ['a.mjs', 'b.mjs', 'old.mjs']) writeFileSync(join(repo, file), file)
+      git(repo, 'add', '.')
+      git(repo, 'commit', '-m', 'base')
+      writeFileSync(join(repo, 'a.mjs'), 'builder edit')
+      git(repo, 'mv', 'old.mjs', 'new.mjs')
+      writeFileSync(join(repo, 'u.txt'), 'untracked')
+      const client = { start() {}, initialize() {}, newSession() {}, setMode() {}, beginPrompt: () => 1,
+        pollPrompt: () => { mutate(repo); return { stopReason: 'end_turn' } }, close: () => ({ outcome: 'proven' }) }
+      use('pi-turn', { agent: 'muse', model: 'meta/muse-wonder-1.0', cwd: repo, definition: { writes: 'task-dir' }, deps: { clientFactory: () => client } }, (run) => {
+        assert.equal(run.error?.reason, name === 'unchanged' ? undefined : 'acp-seat-wrote-repo', name)
+        if (name === 'unchanged') assert.equal(run.result.stopReason, 'end_turn')
+        if (name === 'a.mjs') assert.match(run.error.message, /a\.mjs/)
+        assert.deepEqual(run.leftover, [])
+      })
+    } finally { rmSync(repo, { recursive: true, force: true }) }
+  }
 })
 
 test('a muse permission naming only its toolCallId is decided on the earlier tool_call update, chained commands per segment, and an unseen id is refused', () => {

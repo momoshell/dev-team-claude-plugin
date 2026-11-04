@@ -270,6 +270,7 @@ Code holds the rule:
 - A lead bounce names its target, `builder` or `planner`. A bounce to a spent planner is the planner's round.
 - An `accept` with nothing to accept is a bounce to the held seat.
 - A return written before a turn error is read and validated in full. An absent or invalid return gets one rerun; a provider failure keeps its bounded retry instead.
+- Amended 2026-11-04, operator direction (use Muse Wonder as the planner): a Muse task-dir seat compares worktree fingerprints before and after a started turn. A changed fingerprint raises `acp-seat-wrote-repo`; an unreadable after-check raises `acp-seat-repo-unmeasured`. The return is deleted and, even if deletion fails, is not read or rerun. This check misses ignored files, writes outside the worktree and task dir (including the main repository's `.git`), edits restored before the after-check, index-only changes, and writes after an unproven teardown. Directories listed by git, including nested repositories and submodules, are compared by status only.
 
 The charter lines (the builder's statuses and `files_in_scope`, the lead's escalation list) apply at once. The code parts
 land with the wave-2 planner lane.

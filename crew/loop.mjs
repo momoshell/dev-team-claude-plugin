@@ -298,10 +298,13 @@ export async function runLoop(spec, deps = {}) {
           try { recording = await d.runSeat(asked, { emit }) } catch (error) {
             turnError = describe(error)
             recording = error?.recording ?? null
-            routed = typeof error?.providerKind === 'string'
+            // ADR-055 amendment: a repo violation's return is neither read nor rerun.
+            const repoViolation = ['acp-seat-wrote-repo', 'acp-seat-repo-unmeasured'].includes(error?.reason)
+            routed = typeof error?.providerKind === 'string' || repoViolation
+            if (repoViolation) failure = { reason: 'seat-unmeasured', error: turnError }
           }
           let raw = null
-          try { raw = await d.readFile(returnPath, 'utf8') } catch (error) { failure = { reason: 'seat-unmeasured', error: describe(error) } }
+          if (!failure) try { raw = await d.readFile(returnPath, 'utf8') } catch (error) { failure = { reason: 'seat-unmeasured', error: describe(error) } }
           if (!failure && (typeof raw !== 'string' || raw.trim() === '')) failure = { reason: 'seat-unmeasured', error: { code: null, message: 'the seat returned an empty file' } }
           if (!failure) {
             try { parsed = JSON.parse(raw) } catch (error) { failure = { reason: 'envelope-refused', error: describe(error) } }

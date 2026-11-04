@@ -211,6 +211,9 @@ export async function runLean(spec, deps = {}) {
       return recording
     }
     } catch (error) {
+      if (['acp-seat-wrote-repo', 'acp-seat-repo-unmeasured'].includes(error?.reason) && request.returnPath) {
+        try { d.rmSync(request.returnPath, { force: true }) } catch { /* preserve the turn error */ }
+      }
       if (!error || typeof error !== 'object' || !Object.isExtensible(error)) {
         error = Object.assign(new Error(String(error?.message ?? error)), { code: error?.code ?? null, providerKind: error?.providerKind })
       }

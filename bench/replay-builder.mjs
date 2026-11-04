@@ -14,7 +14,7 @@ import { addWorktree, addedLines, inside, isTestFile, advisorRows, callSeat, dir
 const count = (s, k) => Number(s?.match(new RegExp(`^ℹ ${k} (\\d+)`, 'm'))?.[1] ?? NaN)
 
 export function boundState(events, id) {
-  return testState(events, (e) => typeof e?.name === 'string' && e.name.startsWith(`(${id}) `))
+  return testState((events ?? []).filter((e) => typeof e?.name === 'string' && e.name.startsWith(`(${id}) `)))
 }
 
 async function runTestEvents(cwd, files) {

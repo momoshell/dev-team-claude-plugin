@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join, relative, sep } from 'node:path'
 import { literalRelative, runSuite } from './checks.mjs'
 
-export function testState(events, matches) {
-  const hits = (events ?? []).filter(matches)
+export function testState(events) {
+  const hits = events ?? []
   if (hits.length === 0) return { state: null, reason: 'missing' }
   if (hits.length > 1) return { state: null, reason: 'ambiguous' }
   const [e] = hits
@@ -73,8 +73,8 @@ export async function proveTests(input = {}) {
           })
           for (const row of rows.filter((r) => !r.reason)) {
             const a = hits(old.events, root, row), b = hits(build.events, cwd, row)
-            row.base = testState(a, () => true)
-            row.build = testState(b, () => true)
+            row.base = testState(a)
+            row.build = testState(b)
             const identity = a.length === 1 && b.length === 1 && Number.isInteger(a[0].line) && Number.isInteger(a[0].column) && a[0].line === b[0].line && a[0].column === b[0].column
             row.proven = row.base.state === 'red' && row.build.state === 'green' && identity
             row.reason = row.proven ? null : row.base.state !== 'red' ? 'proof-not-red-on-base' : 'proof-not-green'

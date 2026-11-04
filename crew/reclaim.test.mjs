@@ -60,7 +60,8 @@ test('reserve refuses a legacy d<N> marker with a canonical exit as unresolvable
 })
 
 test('exports closed enums', () => assert.deepEqual(PHASES, { RESERVED: 'reserved', SPAWNING: 'spawning', RUNNING: 'running' }))
-test('evidence enum includes successor authority', () => assert.deepEqual(EVIDENCE_KINDS, { PGID: 'pgid', SUCCESSOR: 'successor' }))
+// MUTATION: re-add SUCCESSOR: 'successor' to EVIDENCE_KINDS.
+test('evidence enum holds only the probed pgid kind', () => assert.deepEqual(EVIDENCE_KINDS, { PGID: 'pgid' }))
 test('liveness enum is tri-state', () => assert.deepEqual(LIVENESS, { ALIVE: 'alive', DEAD: 'dead', UNKNOWN: 'unknown' }))
 test('an absent marker is free', () => each(({ s }) => assert.equal(s.reserve('a', { phase: PHASES.RESERVED }).ok, true)))
 test('a marker path that cannot be read is unresolvable, not free', () => each(({ dir, s }) => {

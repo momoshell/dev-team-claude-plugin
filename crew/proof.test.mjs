@@ -57,8 +57,16 @@ test('static and dynamic import failures on the old source are unproven', async 
   for (const row of result.rows) { assert.equal(row.proven, false); assert.equal(row.reason, 'proof-not-red-on-base'); assert.equal(row.build.state, 'green') }
 })
 
+// MUTATION: restore the matches parameter to testState.
+test('testState takes only the events and classifies them without a matcher', () => {
+  assert.equal(testState.length, 1)
+  for (const [event, state] of [[{ type: 'test:pass' }, 'green'], [{ type: 'test:fail', failureType: 'testCodeFailure' }, 'red']]) {
+    assert.deepEqual(testState([event]), { state, reason: null })
+  }
+})
+
 test('testState refuses missing, ambiguous, skipped, todo, hook and cancelled results', () => {
-  for (const [events, reason] of [[[], 'missing'], [[{}, {}], 'ambiguous'], [[{ skip: true }], 'skipped'], [[{ todo: true }], 'todo'], [[{ failureType: 'hookFailed' }], 'hook-failed'], [[{ failureType: 'cancelledByParent' }], 'cancelled']]) assert.equal(testState(events, () => true).reason, reason)
+  for (const [events, reason] of [[[], 'missing'], [[{}, {}], 'ambiguous'], [[{ skip: true }], 'skipped'], [[{ todo: true }], 'todo'], [[{ failureType: 'hookFailed' }], 'hook-failed'], [[{ failureType: 'cancelledByParent' }], 'cancelled']]) assert.equal(testState(events).reason, reason)
 })
 
 test('unsupported runners and symlinked paths are refused without outside writes', async () => {

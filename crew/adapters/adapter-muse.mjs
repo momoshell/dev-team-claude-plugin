@@ -8,10 +8,10 @@ export function acpLaunch(spec = {}) {
     }
   }
   if (typeof bin !== 'string' || !isAbsolute(bin)) throw new Error(`adapter-muse.acpLaunch: bin must be an ABSOLUTE path, got ${JSON.stringify(bin)}`)
-  // Muse 1.4.14 needs the experimental flag; write_file bypasses permission requests.
+  // Muse 1.4.14 write_file bypasses permission requests; task-dir confinement is checked after the turn in acp/seat.mjs.
   return {
     bin,
-    args: ['acp', '--model', model, '-c', 'model_reasoning_efforts=' + JSON.stringify({ [model]: effort }), ...(writes === 'repo' ? [] : ['--disable-write'])],
+    args: ['acp', '--model', model, '-c', 'model_reasoning_efforts=' + JSON.stringify({ [model]: effort }), ...(writes === 'none' ? ['--disable-write'] : [])],
     env: { ...env, MUSE_EXPERIMENTAL_ACP: '1' },
     mode: 'onRequest',
     sessionParams: { cwd, mcpServers: [] },

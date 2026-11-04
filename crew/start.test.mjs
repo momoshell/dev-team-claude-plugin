@@ -1104,7 +1104,7 @@ test('an expired real seat turn reads its late invalid envelope and reruns once 
           cancelPrompt: () => { late(); return true },
           close: () => ({ outcome: 'proven' }),
         }
-        return runAcpSeat({ ...input, binaries: { pi: process.execPath, claudeAcp: process.execPath, claude: process.execPath },
+        return runAcpSeat({ ...input, definition: { ...input.definition, agent: 'claude', model: 'anthropic/claude-opus-4-6' }, binaries: { pi: process.execPath, claudeAcp: process.execPath, claude: process.execPath },
           deps: { ...input.deps, clientFactory: () => client, now: () => clock, sleep: (ms) => { clock += ms } } })
       },
     },
@@ -1120,6 +1120,105 @@ test('an expired real seat turn reads its late invalid envelope and reruns once 
   assert.ok(rerun.prompt.includes(`Return path: ${returnPath}\n`))
   assert.equal(clock, 2000)
   assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
+})
+
+test('a seat turn that changed the repo it may not write leaves no return for the loop to accept', async () => {
+  for (const reason of ['acp-seat-wrote-repo', 'acp-seat-repo-unmeasured']) {
+    const f = leanFixture()
+    const answered = f.options.runAcpSeat
+    f.options.runAcpSeat = async (input) => {
+      const turn = await answered(input)
+      if (input.definition.role === 'planner') throw Object.assign(new Error(reason), { reason })
+      return turn
+    }
+    const result = await f.go()
+    assert.deepEqual(result, { status: 'stopped', reason: 'seat-unmeasured', pr: null })
+    assert.equal(existsSync(join(f.spec.taskDir, 'planner-1.json')), false)
+  }
+  const f = leanFixture({ deps: { rmSync: () => { throw EPERM } } })
+  const answered = f.options.runAcpSeat
+  f.options.runAcpSeat = async (input) => {
+    await answered(input)
+    throw Object.assign(new Error('changed repo'), { reason: 'acp-seat-wrote-repo' })
+  }
+  assert.deepEqual(await f.go(), { status: 'stopped', reason: 'seat-unmeasured', pr: null })
+  assert.equal(existsSync(join(f.spec.taskDir, 'planner-1.json')), true)
+  assert.equal(f.requests.length, 1)
+})
+
+test('a build-lane planner bounce after builder edits replans through a real muse seat, and a replan that edits an already-modified file leaves no return', async () => {
+  for (const edit of [false, true]) {
+    const f = leanFixture({ answers: { 'builder.2': 'insufficient' } })
+    try {
+      git(f.spec.cwd, 'init')
+      mkdirSync(join(f.spec.cwd, 'src'))
+      writeFileSync(join(f.spec.cwd, 'src/a.mjs'), 'base')
+      git(f.spec.cwd, 'add', '.')
+      git(f.spec.cwd, 'commit', '-m', 'base')
+      const answered = f.options.runAcpSeat
+      const plannerReturns = []
+      f.options.runAcpSeat = async (input) => {
+        const role = input.definition.role
+        if (role === 'builder') writeFileSync(join(f.spec.cwd, 'src/a.mjs'), 'builder edit')
+        if (role === 'planner') {
+          plannerReturns.push(/^Return path: (.+)$/m.exec(input.prompt)[1])
+          const client = { start() {}, initialize() {}, newSession() {}, setMode() {}, beginPrompt: () => 1,
+            pollPrompt: () => {
+              answered(input)
+              if (edit && plannerReturns.length === 2) writeFileSync(join(f.spec.cwd, 'src/a.mjs'), 'planner edit')
+              return { stopReason: 'end_turn' }
+            }, close: () => ({ outcome: 'proven' }) }
+          return runAcpSeat({ ...input, definition: { ...input.definition, agent: 'muse', model: 'meta/muse-wonder-1.0' },
+            binaries: { muse: process.execPath }, deps: { ...input.deps, clientFactory: () => client } })
+        }
+        const turn = await answered(input)
+        if (role === 'lead') {
+          const path = /^Return path: (.+)$/m.exec(input.prompt)[1]
+          const value = JSON.parse(readFileSync(path, 'utf8'))
+          value.details = { decision: 'bounce', target: 'planner' }
+          writeFileSync(path, JSON.stringify(value))
+        }
+        return turn
+      }
+      const result = await f.go()
+      if (edit) {
+        assert.deepEqual(result, { status: 'stopped', reason: 'seat-unmeasured', pr: null })
+        assert.equal(existsSync(plannerReturns[1]), false)
+      } else assert.equal(result.status, 'done')
+      assert.equal(plannerReturns.length, 2)
+    } finally { rmSync(join(f.spec.cwd, '..'), { recursive: true, force: true }) }
+  }
+})
+
+test('a muse planner in a repository subdirectory cannot change an already-dirty file and leave a return', async () => {
+  const f = leanFixture()
+  const repo = f.spec.cwd
+  try {
+    git(repo, 'init')
+    mkdirSync(join(repo, 'src'))
+    const file = join(repo, 'src/a.mjs')
+    writeFileSync(file, 'base')
+    git(repo, 'add', '.')
+    git(repo, 'commit', '-m', 'base')
+    writeFileSync(file, 'builder edit')
+    f.spec.cwd = join(repo, 'src')
+    const answered = f.options.runAcpSeat
+    let returnPath, turns = 0
+    f.options.runAcpSeat = (input) => {
+      if (input.definition.role !== 'planner') return answered(input)
+      turns++
+      returnPath = /^Return path: (.+)$/m.exec(input.prompt)[1]
+      const client = { start() {}, initialize() {}, newSession() {}, setMode() {}, beginPrompt: () => 1,
+        pollPrompt: () => { answered(input); writeFileSync(file, 'planner edit'); return { stopReason: 'end_turn' } },
+        close: () => ({ outcome: 'proven' }) }
+      return runAcpSeat({ ...input, definition: { ...input.definition, agent: 'muse', model: 'meta/muse-wonder-1.0' },
+        binaries: { muse: process.execPath }, deps: { ...input.deps, clientFactory: () => client } })
+    }
+    assert.deepEqual(await f.go(), { status: 'stopped', reason: 'seat-unmeasured', pr: null })
+    assert.equal(readFileSync(file, 'utf8'), 'planner edit')
+    assert.equal(turns, 1)
+    assert.equal(existsSync(returnPath), false)
+  } finally { rmSync(join(repo, '..'), { recursive: true, force: true }) }
 })
 
 // MUTATION: skip the empty-list refusal in the seat and a toolless Claude seat starts and runs.
@@ -1211,7 +1310,11 @@ test('a refused ACP turn with a valid return must prove its required skills', as
     const f = leanFixture({ deps: { readFileSync: (path, ...args) => {
       const text = readFileSync(path, ...args)
       return path === planner ? text.replace('advisor: null', 'advisor: null\nskills: ["alpha"]\nrequires: ["alpha"]') : text
-    } }, loopDeps: { journal: async (row) => rows.push(row) } })
+    } }, loopDeps: { journal: async (row) => rows.push(row), resolveAgents: (tier) => {
+      const resolved = resolveAgents(tier)
+      resolved.seats.planner = { ...resolved.seats.planner, provider: 'anthropic', id: 'claude-opus-4-6', agent: 'claude' }
+      return resolved
+    } } })
     const answered = f.options.runAcpSeat
     f.options.runAcpSeat = async (input) => {
       const turn = await answered(input)
@@ -1629,13 +1732,17 @@ test('the requires a seat receives are the effective definition list, tier overr
     const text = readFileSync(path, ...args)
     return path === planner ? text.replace(from, to) : text
   }
-  // The shipped planner is a claude seat: its load is a Skill call in its own crew-skills-planner plugin.
+  // Pin a Claude planner: its load is a Skill call in its own crew-skills-planner plugin.
   const load = JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'tool_call', toolCallId: 'r1', title: 'Skill', kind: 'other', status: 'in_progress', rawInput: { skill: 'crew-skills-planner:alpha' }, _meta: { claudeCode: { toolName: 'Skill' } } } })
   const loaded = JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'tool_call_update', toolCallId: 'r1', status: 'completed' } })
   const based = leanFixture({ deps: { readFileSync: edit('advisor: null', 'advisor: null\nrequires: ["alpha"]') } })
   assert.equal((await based.go()).status, 'stopped')
   assert.deepEqual(based.requests[0].definition.requires, ['alpha'])
-  const tiered = leanFixture({ deps: { readFileSync: edit(/tiers: .*/, 'skills: ["alpha"]\nrequires: ["base"]\ntiers: {"build":{"requires":["alpha"]}}') } })
+  const tiered = leanFixture({ deps: { readFileSync: edit(/tiers: .*/, 'skills: ["alpha"]\nrequires: ["base"]\ntiers: {"build":{"requires":["alpha"]}}') }, loopDeps: { resolveAgents: (tier) => {
+    const resolved = resolveAgents(tier)
+    resolved.seats.planner = { ...resolved.seats.planner, provider: 'anthropic', id: 'claude-opus-4-6', agent: 'claude' }
+    return resolved
+  } } })
   const answered = tiered.options.runAcpSeat
   tiered.options.runAcpSeat = async (input) => {
     const turn = await answered(input)

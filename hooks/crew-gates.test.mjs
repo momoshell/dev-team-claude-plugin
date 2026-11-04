@@ -114,5 +114,9 @@ test('PreToolUse allows Claude Code auto-memory writes beside the transcripts an
   mkdirSync(join(home, '.claude/projects/q/memory'), { recursive: true })
   symlinkSync(join(home, '.claude/projects/q/memory'), join(memory, 'other'))
   for (const command of ['echo x > ~/.claude/projects/p/memory/pointer.jsonl', 'echo x > ~/.claude/projects/p/memory/up/s.jsonl', 'echo x > ~/.claude/projects/p/memory/other/note.md']) denied(invoke('Bash', { command }))
-  for (const name of ['pointer.jsonl', 'up/s.jsonl']) denied(invoke('Write', { file_path: join(memory, name) }))
+  // A dangling link would create the transcript it names.
+  symlinkSync(join(home, '.claude/projects/p/new.jsonl'), join(memory, 'ghost.jsonl'))
+  symlinkSync(join(home, '.claude/projects/p/gone'), join(memory, 'ghostdir'))
+  for (const name of ['pointer.jsonl', 'up/s.jsonl', 'ghost.jsonl', 'ghostdir/s.jsonl']) denied(invoke('Write', { file_path: join(memory, name) }))
+  assert.equal(invoke('Write', { file_path: join(memory, 'new-note.md') }), '')
 })

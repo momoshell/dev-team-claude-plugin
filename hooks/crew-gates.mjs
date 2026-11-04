@@ -1,5 +1,5 @@
 // Best-effort shell inspection, not a shell parser; uncommon forms and symlinks may be missed.
-import { accessSync, constants, existsSync, readFileSync, realpathSync } from 'node:fs'
+import { accessSync, constants, existsSync, lstatSync, readFileSync, readlinkSync, realpathSync } from 'node:fs'
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 
 function checkoutAt(cwd) {
@@ -15,9 +15,13 @@ function expand(value) {
 }
 
 // The real path of the deepest existing ancestor, with the rest appended: where a write would land.
-function destination(path) {
+// A dangling link is followed to its target, so a write through it lands where the link points.
+function destination(path, hops = 0) {
   for (let dir = path, rest = '';; rest = join(basename(dir), rest), dir = dirname(dir)) {
     try { return join(realpathSync(dir), rest) } catch {}
+    try {
+      if (lstatSync(dir).isSymbolicLink()) return hops < 40 ? destination(join(resolve(dirname(dir), readlinkSync(dir)), rest), hops + 1) : path
+    } catch {}
     if (dirname(dir) === dir) return path
   }
 }

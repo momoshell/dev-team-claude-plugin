@@ -1,4 +1,4 @@
-const AGENT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
+import { SKILL_ROLES } from './skill-files.js'
 const UNMEASURED_REASON = 'measurement is unavailable'
 
 function record(value) {
@@ -31,16 +31,12 @@ function skillRows(payload) {
 }
 
 function matrixInput(payload) {
-  if (Array.isArray(payload?.matrix)) return payload.matrix
-  if (Array.isArray(payload?.role_by_skill)) return payload.role_by_skill
-  if (Array.isArray(payload?.roles)) return payload.roles
-  return []
+  return Array.isArray(payload?.matrix) ? payload.matrix : []
 }
 
 function cellInput(row, name) {
-  const source = row?.cells || row?.skills
+  const source = row?.cells
   if (record(source) && record(source[name])) return source[name]
-  if (record(row?.[name])) return row[name]
   return {}
 }
 
@@ -57,7 +53,7 @@ function buildSkillMatrix(payload = {}, skills = skillRows(payload)) {
   const names = skills.map((skill) => skill?.name).filter((name) => typeof name === 'string' && name)
   const rows = matrixInput(payload)
   const byRole = new Map(rows.map((row) => [row?.role, row]))
-  return AGENT_ROLES.map((role) => {
+  return SKILL_ROLES.map((role) => {
     const row = byRole.get(role) || { role }
     const cells = Object.fromEntries(names.map((name) => {
       const source = cellInput(row, name)
@@ -67,7 +63,7 @@ function buildSkillMatrix(payload = {}, skills = skillRows(payload)) {
         : (typeof source.last_seat_delivery === 'boolean' ? source.last_seat_delivery : markedValue(source.last_seat_delivery, `last-seat delivery for ${role}/${name} is unavailable`))
       return [name, skillCell(registerGrant, lastSeatDelivery)]
     }))
-    return { role, cells, skills: cells }
+    return { role, cells }
   })
 }
 

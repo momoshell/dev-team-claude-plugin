@@ -119,16 +119,9 @@ What is enforced instead is the thing that actually shipped wrong metadata:
 
 ## Visualizer
 
-The local visualizer reads its Artificial Analysis catalog key from
-the process environment. To keep it across restarts without committing it,
-copy `.env.example` to `.env.local`, set `ARTIFICIAL_ANALYSIS_API_KEY`, then
-start the server normally:
+Build and start the local visualizer:
 
 ```bash
-cp .env.example .env.local
 npm run viz:build
 npm run viz:serve
 ```
-
-`.env.local` and other environment files are ignored by Git; `.env.example`
-is the only committed template.

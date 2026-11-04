@@ -27,7 +27,6 @@ returns/
 # Local secrets and machine-specific environment
 .env
 .env.*
-!.env.example
 
 # pi runtime state: credentials and machine-local files, never the repo's
 crew/pi/auth.json

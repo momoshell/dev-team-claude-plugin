@@ -1,6 +1,5 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
 import { cpSync, mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, realpathSync, statSync, symlinkSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -12,10 +11,9 @@ import { spawn, spawn as spawnProcess, spawnSync } from 'node:child_process'
 import { parseCliArgs, pluginWriteMode, pluginWriteTargetMode, sameOrigin, hostGuard, ROUTE_PARAMS, ServerUsageError, startServer as startVisualizerServer, writeGuard } from '../visualizer/server/server.mjs'
 import { createJournalSource } from '../visualizer/server/journal-source.mjs'
 import * as webApi from '../visualizer/web/src/lib/api.js'
-import { createAgentsSource, proposeAgent, proposeSkills } from '../visualizer/server/agents-source.mjs'
+import { createAgentsSource } from '../visualizer/server/agents-source.mjs'
 import { normalizeSkillsPage } from '../visualizer/web/src/lib/agents.js'
 import { ROOT, rawRequest, scratchDir, treeDigest } from './helpers.mjs'
-const require = createRequire(import.meta.url)
 const children = new Set()
 after(() => { for (const child of children) { try { child.kill('SIGKILL') } catch {} } })
 async function json(base, path, options) {
@@ -55,20 +53,18 @@ const SERVER_SCRIPT = join(ROOT, 'visualizer', 'server', 'server.mjs')
 
 // MUTATION: restore text += chunk in body()
 test('S3-1 a JSON body split inside a multibyte character reaches the route intact', async () => {
-  let seen
-  const agents = { proposeAgent: async (input) => { seen = input; return { ok: true, diff: null, refusals: [] } } }
-  const started = await startInProcess({}, { agents })
+  const started = await startInProcess({})
   try {
-    const payload = Buffer.from(JSON.stringify({ name: 'future-agent', entry: { note: '€uro' } }))
+    const payload = Buffer.from(JSON.stringify({ role: 'builder', field: '€uro', value: 'openai/example' }))
     const cut = payload.indexOf(Buffer.from('€')) + 1
-    const status = await new Promise((resolve, reject) => {
-      const req = request(`${started.base}/api/agents/propose`, { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': payload.length } }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)) })
+    const response = await new Promise((resolve, reject) => {
+      const req = request(`${started.base}/api/agents/propose`, { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': payload.length } }, (res) => { let text = ''; res.on('data', chunk => { text += chunk }); res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(text) })) })
       req.on('error', reject)
       req.write(payload.subarray(0, cut))
       setTimeout(() => req.end(payload.subarray(cut)), 50)
     })
-    assert.equal(status, 200)
-    assert.equal(seen.entry.note, '€uro')
+    assert.equal(response.status, 200)
+    assert.match(response.body.refusals[0].message, /€uro/)
   } finally { await stopInProcess(started.server) }
 })
 
@@ -129,43 +125,6 @@ async function stopInProcess(server) {
     target.closeIdleConnections?.()
     target.closeAllConnections?.()
     await new Promise((resolve) => target.close(resolve))
-  }
-}
-function serverRosterFixture() {
-  const cell = (provider, id, agent, effort) => ({ provider, id, agent, effort })
-  return {
-    schema_version: 1,
-    updated_at: '2026-08-30',
-    tiers: {
-      mechanical: {
-        lead: null,
-        planner: cell('anthropic', 'claude-opus-5-5', 'claude', 'medium'),
-        builder: cell('openai', 'gpt-6-luna', 'pi', 'max'),
-        reviewer: cell('openai', 'gpt-6.1-sol', 'pi', 'medium'),
-      },
-      build: {
-        lead: cell('anthropic', 'claude-opus-5-5', 'claude', 'medium'),
-        planner: cell('anthropic', 'claude-opus-5-5', 'claude', 'medium'),
-        builder: cell('openai', 'gpt-6-luna', 'pi', 'max'),
-        reviewer: cell('openai', 'gpt-6.1-sol', 'pi', 'high'),
-      },
-      judge: {
-        lead: cell('anthropic', 'claude-opus-5-5', 'claude', 'high'),
-        planner: cell('anthropic', 'claude-opus-5-5', 'claude', 'high'),
-        builder: cell('openai', 'gpt-6-luna', 'pi', 'max'),
-        reviewer: cell('anthropic', 'claude-opus-5-5', 'claude', 'xhigh'),
-        'tech-lead': cell('openai', 'gpt-6.1-sol', 'pi', 'xhigh'),
-      },
-    },
-    models: {
-      'anthropic/claude-sonnet-5-5': { cost_in_per_mtok: 2, cost_out_per_mtok: 10, context: 1000000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-13' },
-      'anthropic/claude-haiku-4-5': { cost_in_per_mtok: 1, cost_out_per_mtok: 5, context: 200000, tags: ['cheap'], source: 'models.dev', last_verified: '2026-08-13' },
-      'anthropic/claude-opus-5-5': { cost_in_per_mtok: 5, cost_out_per_mtok: 25, context: 1000000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-13' },
-      'openai/gpt-6.1-sol': { cost_in_per_mtok: 4, cost_out_per_mtok: 20, context: 1050000, tags: ['reasoning'], source: 'models.dev', last_verified: '2026-08-30' },
-      'openai/gpt-5.6-terra': { cost_in_per_mtok: 2, cost_out_per_mtok: 12, context: 1050000, tags: ['review'], source: 'models.dev', last_verified: '2026-08-13' },
-      'openai/gpt-6-luna': { cost_in_per_mtok: 0.2, cost_out_per_mtok: 1.2, context: 1050000, tags: ['coding'], source: 'models.dev', last_verified: '2026-08-13' },
-      'anthropic/claude-fable-5': { cost_in_per_mtok: 10, cost_out_per_mtok: 50, context: 1000000, tags: ['override-only'], source: 'models.dev', last_verified: '2026-08-13' },
-    },
   }
 }
 function agentsFixture(prefix = 'visualizer-agents-') {
@@ -300,8 +259,7 @@ test('raw Host values are refused without killing the visualizer', async () => {
 })
 
 const WRITE_ROUTES = [
-  { path: '/api/agents/propose', body: JSON.stringify({ name: 'future-agent', entry: {} }) },
-  { path: '/api/skills/propose', body: JSON.stringify({ role: 'builder', skills: [] }) },
+  { path: '/api/agents/propose', body: JSON.stringify({ role: 'builder', field: 'model', value: 'example/model' }) },
 ]
 
 test('state-writing routes refuse CORS simple requests before reading the body', async () => {
@@ -361,32 +319,36 @@ test('B1 agents page proposal endpoints are diff-only', async () => {
     server = await startInProcess({}, { checkout: fixture.checkout, crewRoot: fixture.crewRoot, agents: source, ledgerDb: join(fixture.dir, 'ledger.db'), triageDb: join(fixture.dir, 'triage.db') })
     const view = await json(server.base, '/api/agents')
     assert.equal(view.status, 200)
-    assert.equal(view.json.agents.length, 2)
-    assert.equal(view.json.agents.find((agent) => agent.name === 'pi').availability.value, 'discovered-unavailable')
-    assert.equal(view.json.agents.find((agent) => agent.name === 'pi').install_hint.value, 'Install Pi.')
     assert.equal(view.json.skills.length, 9)
-    assert.equal(view.json.roles.length, 5)
-    assert.equal(view.json.prompts.length, 5)
-    assert.equal(view.json.roles.find((row) => row.role === 'builder').cells['frontend-svelte'].last_seat_delivery, true)
-    const post = (path, body) => json(server.base, path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
-    const agent = await post('/api/agents/propose', { name: 'future-agent', entry: { providers: ['openai'], transports: ['acp'], adapter: 'crew/adapters/adapter-future-agent.mjs', refuses: [], availability: 'proposal-stub' } })
-    assert.equal(agent.status, 200); assert.equal(agent.json.ok, true); assert.ok(agent.json.diff); assert.deepEqual(agent.json.refusals, []); assert.equal(Object.hasOwn(agent.json, 'target_path'), false); assert.equal(Object.hasOwn(agent.json, 'after_text'), false)
-    const skills = await post('/api/skills/propose', { role: 'builder', skills: ['frontend-svelte'] })
-    assert.equal(skills.status, 200); assert.equal(skills.json.ok, true); assert.match(skills.json.diff, /crew\/capabilities\.json/); assert.deepEqual(skills.json.refusals, [])
+    assert.equal(view.json.matrix.length, 5)
+    assert.equal(view.json.matrix.find((row) => row.role === 'builder').cells['frontend-svelte'].last_seat_delivery, true)
     assert.equal(treeDigest(fixture.checkout), checkoutBefore)
     assert.equal(treeDigest(fixture.crewRoot), crewBefore)
-    for (const [path, body] of [['/api/agents/propose', '{ not json'], ['/api/skills/propose', JSON.stringify({ role: 'builder', skills: 'frontend-svelte' })]]) {
-      const response = await json(server.base, path, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
-      assert.equal(response.status, 400, path)
-    }
-    assert.equal((await json(server.base, '/api/agents/propose?unknown=1', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 400)
-    const deniedError = Object.assign(new Error('permission denied'), { code: 'EPERM' })
-    const denied = proposeAgent({ checkout: fixture.checkout, name: 'denied', entry: {}, readFileSync: () => { throw deniedError } })
-    assert.equal(denied.ok, false); assert.ok(denied.refusals[0].message)
-    const empty = proposeSkills({ checkout: fixture.checkout, role: 'builder', skills: [], readFileSync: () => '', readdirSync: () => [] })
-    assert.equal(empty.ok, false); assert.ok(empty.refusals[0].message)
   } finally {
     if (server) await stopInProcess(server)
+  }
+})
+
+test('S3-12 /api/agents emits the fields the web reads once, under schema 2', async () => {
+  const fixture = agentsFixture('visualizer-agents-shape-')
+  const source = createAgentsSource({ checkout: fixture.checkout, crewRoot: fixture.crewRoot })
+  let server
+  try {
+    server = await startInProcess({}, { agents: source })
+    const response = await json(server.base, '/api/agents')
+    assert.equal(response.status, 200)
+    const keys = ['degraded', 'error', 'matrix', 'reasons', 'role_evidence', 'schema', 'skills']
+    const direct = source.read()
+    assert.deepEqual(Object.keys(direct).sort(), keys)
+    assert.equal(direct.schema, 2)
+    assert.deepEqual(Object.keys(response.json).sort(), keys)
+    assert.equal(response.json.schema, 2)
+    assert.deepEqual(response.json.matrix.map((row) => row.role), ['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
+    for (const row of response.json.matrix) assert.deepEqual(Object.keys(row).sort(), ['cells', 'role'])
+    assert.equal(normalizeSkillsPage(response.json).matrix.find((row) => row.role === 'builder').cells['frontend-svelte'].last_seat_delivery, true)
+  } finally {
+    await stopInProcess(server)
+    rmSync(fixture.dir, { recursive: true, force: true })
   }
 })
 
@@ -425,55 +387,6 @@ test('skills-page:B1', () => {
     assert.equal(typeof row.holders.reason, 'string')
     assert.ok(row.holders.reason.length > 0)
     assert.notDeepEqual(row.holders.value, [])
-  }
-})
-
-test('skills-page:C1', async () => {
-  const fixture = agentsFixture('visualizer-skills-proposal-')
-  const source = createAgentsSource({ checkout: fixture.checkout, crewRoot: fixture.crewRoot })
-  const checkoutBefore = treeDigest(fixture.checkout), crewBefore = treeDigest(fixture.crewRoot)
-  let server
-  try {
-    server = await startInProcess({}, { checkout: fixture.checkout, crewRoot: fixture.crewRoot, agents: source, ledgerDb: join(fixture.dir, 'ledger.db'), triageDb: join(fixture.dir, 'triage.db') })
-    const response = await json(server.base, '/api/skills/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ role: 'builder', skills: ['frontend-svelte'] }) })
-    assert.equal(response.status, 200)
-    assert.equal(response.json.ok, true)
-    assert.match(response.json.diff, /capabilities\.json/)
-    assert.equal(Object.hasOwn(response.json, 'target_path'), false)
-    assert.equal(Object.hasOwn(response.json, 'after_text'), false)
-    assert.equal(treeDigest(fixture.checkout), checkoutBefore)
-    assert.equal(treeDigest(fixture.crewRoot), crewBefore)
-  } finally {
-    if (server) await stopInProcess(server)
-  }
-})
-
-test('prompts-page:C1', async () => {
-  const fixture = agentsFixture('visualizer-prompts-page-')
-  const source = createAgentsSource({ checkout: fixture.checkout, crewRoot: fixture.crewRoot })
-  const checkoutBefore = treeDigest(fixture.checkout), crewBefore = treeDigest(fixture.crewRoot)
-  let server
-  try {
-    server = await startInProcess({}, { checkout: fixture.checkout, crewRoot: fixture.crewRoot, agents: source, ledgerDb: join(fixture.dir, 'ledger.db'), triageDb: join(fixture.dir, 'triage.db') })
-    const view = await json(server.base, '/api/agents')
-    assert.equal(view.status, 200)
-    assert.deepEqual(view.json.prompts.map((prompt) => prompt.role), ['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
-    assert.equal(view.json.prompts.length, 5)
-    for (const prompt of view.json.prompts) {
-      assert.equal(prompt.path, `crew/agents/${prompt.role}.md`)
-      assert.equal(prompt.text, readFileSync(join(fixture.checkout, prompt.path), 'utf8'))
-      if (prompt.recipients === null) {
-        assert.equal(typeof prompt.recipients_reason, 'string')
-        assert.ok(prompt.recipients_reason.trim().length > 0)
-      } else {
-        assert.ok(Array.isArray(prompt.recipients) && prompt.recipients.length > 0 && prompt.recipients.every((recipient) => typeof recipient === 'string' && recipient.trim()))
-        assert.equal(prompt.recipients_reason, null)
-      }
-    }
-    assert.equal(treeDigest(fixture.checkout), checkoutBefore)
-    assert.equal(treeDigest(fixture.crewRoot), crewBefore)
-  } finally {
-    if (server) await stopInProcess(server)
   }
 })
 
@@ -582,85 +495,6 @@ test('a genuine internal failure still exits 1', async () => {
   }
 })
 
-test('D1a OpenRouter failure serves AA-only rows with absence', async () => {
-  let handles
-  try {
-    handles = await startInProcess({}, {
-      openRouterCatalog: { get:async () => ({ configured:true, source:'OpenRouter', source_url:'https://openrouter.ai/api/v1/models', models:null, absent:'OpenRouter unavailable' }) },
-      modelCatalog: { get:async () => ({ configured:true, credential_source:'environment', source:'Artificial Analysis', source_url:'https://artificialanalysis.ai/', models:[{ source_id:'aa-only', name:'AA Only', slug:'aa-only', family_name:'AA Only', family_slug:'aa-only', creator:'Example', creator_id:'example', provider_hint:'example', runtime_id_hint:'aa/runtime', intelligence:73, coding:null, agentic:null, price_input:4, price_output:8, context_window_tokens:32768 }], absent:null }) },
-    })
-    const result = await json(handles.base, '/api/model-catalog')
-    assert.equal(result.status, 200)
-    assert.deepEqual(result.json.join, { matched:0, total:0 })
-    assert.equal(result.json.absent, 'OpenRouter unavailable')
-    assert.equal(result.json.models.length, 1)
-    assert.equal(result.json.models[0].runtime_id, null)
-    assert.equal(result.json.models[0].intelligence, 73)
-    assert.equal(result.json.models[0].score_absent_reason, 'no-runtime-listing')
-  } finally {
-    if (handles) await stopInProcess(handles.server)
-  }
-})
-
-test('D1b absent AA key serves OpenRouter rows as aa-unconfigured', async () => {
-  let handles
-  try {
-    handles = await startInProcess({}, {
-      openRouterCatalog: { get:async () => ({ configured:true, source:'OpenRouter', source_url:'https://openrouter.ai/api/v1/models', models:[{ source_id:'meta/muse-spark-1.3', runtime_id:'meta/muse-spark-1.3', name:'Muse Spark 1.3', slug:'muse-spark-1.3', family_name:'Muse Spark 1.3', family_slug:'muse-spark-1.3', creator:'Meta', creator_id:'meta', provider_hint:'meta', price_input:0.1, price_output:0.2, context_length:131072, context_window_tokens:131072 }], absent:null }) },
-      modelCatalog: { get:async () => ({ configured:false, credential_source:null, source:'Artificial Analysis', source_url:'https://artificialanalysis.ai/', models:null, absent:'Add an Artificial Analysis API key to load current benchmark data.' }) },
-    })
-    const result = await json(handles.base, '/api/model-catalog')
-    assert.equal(result.status, 200)
-    assert.deepEqual(result.json.join, { matched:0, total:1 })
-    assert.equal(result.json.models.length, 1)
-    assert.equal(result.json.models[0].runtime_id, 'meta/muse-spark-1.3')
-    assert.equal(result.json.models[0].intelligence, null)
-    assert.equal(result.json.models[0].score_absent_reason, 'aa-unconfigured')
-    assert.equal(result.json.absent, 'Add an Artificial Analysis API key to load current benchmark data.')
-  } finally {
-    if (handles) await stopInProcess(handles.server)
-  }
-})
-
-test('the model catalog endpoint persists a key only when explicitly requested', async () => {
-  const dir = scratchDir('visualizer-catalog-env-')
-  const envFile = join(dir, '.env.local')
-  let handles
-  try {
-    handles = await startInProcess({}, {
-      envFile,
-      fetchImpl:async () => new Response(JSON.stringify({ tier:'free', intelligence_index_version:4.1, pagination:{ has_more:false }, data:[] }), { status:200, headers:{ 'content-type':'application/json' } }),
-      openRouterCatalog:{ get:async () => ({ configured:true, source:'OpenRouter', source_url:'https://openrouter.ai/api/v1/models', models:[], absent:null }) },
-    })
-    const saved = await json(handles.base, '/api/model-catalog/key', {
-      method:'POST', headers:{ 'content-type':'application/json' },
-      body:JSON.stringify({ api_key:'saved-catalog-secret', persist:true }),
-    })
-    assert.equal(saved.status, 200)
-    assert.equal(saved.json.persisted, true)
-    assert.equal(saved.json.credential_source, 'environment')
-    assert.doesNotMatch(saved.body, /saved-catalog-secret/)
-    assert.match(readFileSync(envFile, 'utf8'), /^ARTIFICIAL_ANALYSIS_API_KEY="saved-catalog-secret"\n$/)
-
-    const temporary = await json(handles.base, '/api/model-catalog/key', {
-      method:'POST', headers:{ 'content-type':'application/json' },
-      body:JSON.stringify({ api_key:'temporary-catalog-secret', persist:false }),
-    })
-    assert.equal(temporary.json.persisted, false)
-    assert.equal(temporary.json.credential_source, 'session')
-    assert.doesNotMatch(temporary.body, /temporary-catalog-secret/)
-    assert.doesNotMatch(readFileSync(envFile, 'utf8'), /temporary-catalog-secret/)
-
-    const restored = await json(handles.base, '/api/model-catalog/key', {
-      method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({ api_key:null }),
-    })
-    assert.equal(restored.json.credential_source, 'environment')
-  } finally {
-    if (handles) await stopInProcess(handles.server)
-    rmSync(dir, { recursive:true, force:true })
-  }
-})
-
 test('static responses refuse symlinks that leave web/dist', async () => {
   const dir = scratchDir('visualizer-static-outside-')
   const outside = join(dir, 'outside.txt')
@@ -694,12 +528,7 @@ test('V1 agents resources come from the plugin root for a foreign checkout', asy
     server = await startInProcess({ close() {} }, { checkout: root, ledgerDb: join(root, 'ledger.db'), triageDb: join(root, 'triage.db'), crewRoot: join(root, 'runtime') })
     const agents = await json(server.base, '/api/agents')
     // Mutation: omit pluginRoot from the agents-source construction.
-    assert.ok(agents.json.agents.length > 0)
     assert.ok(agents.json.skills.some((skill) => skill.path === 'skills/code-less/SKILL.md'))
-    assert.equal(agents.json.plugin_root, ROOT)
-    assert.equal(agents.json.checkout, root)
-    assert.equal(agents.json.prompts.find((prompt) => prompt.role === 'builder')?.path, 'crew/agents/builder.md')
-    assert.equal(agents.json.prompts.find((prompt) => prompt.role === 'builder')?.text, readFileSync(join(ROOT, 'crew/agents/builder.md'), 'utf8'))
     assert.equal(agents.json.reasons.some((reason) => reason.includes(root)), false)
   } finally {
     if (server) await stopInProcess(server)
@@ -721,41 +550,17 @@ test('a readable seat command is the whole delivery evidence: no boot-journal or
 test('agents source separates plugin reads from target proposals compatibly', () => {
   const target = agentsFixture('visualizer-agents-target-root-')
   const plugin = agentsFixture('visualizer-agents-plugin-root-')
-  const path = require('node:path')
-  const fs = require('node:fs')
   try {
-    const checkoutOnly = createAgentsSource({ checkout: target.checkout, crewRoot: target.crewRoot }).read()
-    assert.equal(checkoutOnly.plugin_root, path.resolve(target.checkout))
-    assert.equal(checkoutOnly.checkout, path.resolve(target.checkout))
-    assert.equal(checkoutOnly.prompts.find((row) => row.role === 'builder').path, 'crew/agents/builder.md')
-    assert.equal(checkoutOnly.prompts.find((row) => row.role === 'builder').text, '# builder\nFixture charter for builder.\n')
-
-    writeFileSync(join(plugin.checkout, 'crew', 'agents', 'builder.md'), '# PLUGIN-ONLY builder charter\n')
     const pluginCapabilities = JSON.parse(readFileSync(join(plugin.checkout, 'crew', 'capabilities.json'), 'utf8'))
-    pluginCapabilities.coding_agents.pi.adapter = 'crew/adapters/PLUGIN-ONLY-pi.mjs'
+    pluginCapabilities.roles.builder.skills = ['plugin-only-skill']
     writeFileSync(join(plugin.checkout, 'crew', 'capabilities.json'), `${JSON.stringify(pluginCapabilities, null, 2)}\n`)
     mkdirSync(join(plugin.checkout, 'skills', 'plugin-only-skill'), { recursive: true })
     writeFileSync(join(plugin.checkout, 'skills', 'plugin-only-skill', 'SKILL.md'), '---\nname: plugin-only-skill\ndescription: Plugin-only skill.\n---\n\nPLUGIN-ONLY skill body\n')
     const source = createAgentsSource({ checkout: target.checkout, pluginRoot: plugin.checkout, crewRoot: target.crewRoot })
     const read = source.read()
-    assert.equal(read.agents.find((agent) => agent.name === 'pi').adapter, 'crew/adapters/PLUGIN-ONLY-pi.mjs')
     assert.ok(read.skills.some((skill) => skill.path === 'skills/plugin-only-skill/SKILL.md' && skill.content.includes('PLUGIN-ONLY skill body')))
-    assert.equal(read.prompts.find((row) => row.role === 'builder').text, '# PLUGIN-ONLY builder charter\n')
-    assert.equal(read.prompts.find((row) => row.role === 'builder').path, 'crew/agents/builder.md')
-    assert.equal(read.checkout, path.resolve(target.checkout))
-    assert.equal(read.plugin_root, path.resolve(plugin.checkout))
-    assert.equal(read.crew_root, path.resolve(target.crewRoot))
-
-    assert.equal(source.proposePrompt, undefined)
-    const agent = source.proposeAgent({ name: 'future-agent', entry: { providers: ['openai'], transports: ['acp'], adapter: 'crew/adapters/adapter-future-agent.mjs', refuses: [], availability: 'proposal-stub' } })
-    assert.equal(agent.ok, true)
-    assert.equal(agent.target_path, join(target.checkout, 'crew', 'capabilities.json'))
-    assert.equal(JSON.parse(agent.after_text).coding_agents.pi.display_name, 'Pi')
-    const skills = source.proposeSkills({ role: 'builder', skills: ['frontend-svelte'] })
-    assert.equal(skills.ok, true)
-    assert.equal(skills.target_path, join(target.checkout, 'crew', 'capabilities.json'))
-    assert.deepEqual(JSON.parse(skills.after_text).roles.builder.skills, ['frontend-svelte'])
-    assert.equal(fs.existsSync(join(target.checkout, 'skills', 'plugin-only-skill')), false)
+    assert.equal(read.matrix.find((row) => row.role === 'builder').cells['plugin-only-skill'].register_grant, true)
+    assert.equal(existsSync(join(target.checkout, 'skills', 'plugin-only-skill')), false)
   } finally {
     rmSync(target.dir, { recursive: true, force: true })
     rmSync(plugin.dir, { recursive: true, force: true })
@@ -773,46 +578,6 @@ test('RO1 symlinked plugins dir', () => {
       writable:false, reason:'installed-plugin-read-only', basis:'under-claude-plugins-dir', plugin_root:installed,
     })
   } finally { rmSync(dir, { recursive:true, force:true }) }
-})
-
-function pluginWriteServerFixture(prefix) {
-  const dir = realpathSync(scratchDir(prefix))
-  const pluginRoot = join(dir, 'plugin'), home = join(dir, 'home'), rosterPath = join(dir, 'roster.json'), envFile = join(dir, '.env.local')
-  mkdirSync(pluginRoot, { recursive:true })
-  mkdirSync(home, { recursive:true })
-  writeFileSync(rosterPath, JSON.stringify(serverRosterFixture(), null, 2))
-  const reviewer = serverRosterFixture().tiers.build.reviewer
-  const move = { tier:'build', role:'reviewer', cell:{ ...reviewer, effort:reviewer.effort === 'high' ? 'xhigh' : 'high' } }
-  const options = {
-    pluginRoot, home, rosterPath, envFile, ledgerDb:join(dir, 'ledger.db'), triageDb:join(dir, 'triage.db'), crewRoot:dir,
-    fetchImpl:async () => new Response(JSON.stringify({ tier:'free', intelligence_index_version:4.1, pagination:{ has_more:false }, data:[] }), { status:200, headers:{ 'content-type':'application/json' } }),
-    openRouterCatalog:{ get:async () => ({ configured:true, source:'OpenRouter', source_url:'https://openrouter.ai/api/v1/models', models:[], absent:null }) },
-  }
-  const refusal = { schema:2, error:'This plugin runs from an installed, version-pinned copy whose edits the next plugin update would overwrite.', reason:'installed-plugin-read-only', basis:'no-git-work-tree', plugin_root:pluginRoot }
-  return { dir, rosterPath, envFile, move, options, refusal }
-}
-const postJson = (input) => ({ method:'POST', headers:{ 'content-type':'application/json' }, body:typeof input === 'string' ? input : JSON.stringify(input) })
-
-// MUTATION: delete the ladder/apply `if (!writeMode.writable) return json(res, 409, pluginWriteRefusal)` guard;
-// the apply then reaches the roster writer (or the body parser) and this test reddens.
-test('RO4 installed plugin refuses a persistent catalog key and keeps session and null-clear keys', async () => {
-  const { dir, envFile, options, refusal } = pluginWriteServerFixture('visualizer-plugin-key-')
-  let handles
-  try {
-    handles = await startInProcess({}, options)
-    const persisted = await json(handles.base, '/api/model-catalog/key', postJson({ api_key:'installed-catalog-secret', persist:true }))
-    assert.deepEqual({ status:persisted.status, ...persisted.json }, { status:409, ...refusal })
-    assert.equal(existsSync(envFile), false)
-    const session = await json(handles.base, '/api/model-catalog/key', postJson({ api_key:'installed-catalog-secret', persist:false }))
-    assert.equal(session.status, 200)
-    assert.equal(session.json.persisted, false)
-    const cleared = await json(handles.base, '/api/model-catalog/key', postJson({ api_key:null, persist:true }))
-    assert.equal(cleared.status, 200)
-    assert.equal(existsSync(envFile), false)
-  } finally {
-    if (handles) await stopInProcess(handles.server)
-    rmSync(dir, { recursive:true, force:true })
-  }
 })
 
 // MUTATION: add a `pluginWriteRefusal` 409 to the propose, stage or compose route; proposals write
@@ -1148,7 +913,7 @@ test('LH4', () => {
 // ---- b1410: the visualizer no longer reads the ledger or any old-path module ----
 const DROPPED_ROUTES = ['/api/returns', '/api/roster', '/api/roster/pick', '/api/roster/propose', '/api/roster/agent/propose', '/api/roster/ladder', '/api/roster/ladder/stage', '/api/roster/ladder/compose', '/api/roster/ladder/apply',
   '/api/workflows', '/api/workflows/propose', '/api/workflows/editor', '/api/workflows/save', '/api/workflows/library', '/api/workflows/preview', '/api/prepared-tasks', '/api/assurances', '/api/assurances/preview', '/api/assurances/propose',
-  '/api/prompts/propose', '/api/prompt-library', '/api/prompt-library/preview', '/api/prompt-library/save', '/api/cell-health', '/api/run-set', '/api/intake', '/api/intake/brake', '/api/seat-teardowns', '/api/cell-attribution', '/api/triage']
+  '/api/model-catalog', '/api/model-catalog/key', '/api/skills/propose', '/api/prompts/propose', '/api/prompt-library', '/api/prompt-library/preview', '/api/prompt-library/save', '/api/cell-health', '/api/run-set', '/api/intake', '/api/intake/brake', '/api/seat-teardowns', '/api/cell-attribution', '/api/triage']
 
 function leanLane(crewRoot, id, rows = [{ event: 'run-start', at: Date.now() }, { event: 'stage-start', stage: 'plan' }]) {
   const laneDir = join(crewRoot, `dt-${id}`, id)
@@ -1161,7 +926,8 @@ function leanLane(crewRoot, id, rows = [{ event: 'run-start', at: Date.now() }, 
 // MUTATION: re-add '/api/prompts/propose': [] to ROUTE_PARAMS
 test('route tombstones: every removed server.mjs route is unregistered and has no handler', async () => {
   for (const route of DROPPED_ROUTES) assert.equal(Object.hasOwn(ROUTE_PARAMS, route), false, `${route} must not be in ROUTE_PARAMS`)
-  for (const route of ['/api/sessions', '/api/events', '/api/journal', '/api/seat-sessions', '/api/agents', '/api/agents/propose', '/api/agent-library', '/api/skill-library', '/api/model-catalog', '/api/health', '/api/plugin-write-mode']) assert.ok(Object.hasOwn(ROUTE_PARAMS, route), `${route} stays`)
+  for (const name of ['model-catalog.mjs', 'openrouter-catalog.mjs', 'model-directory.mjs', 'local-env.mjs']) assert.equal(existsSync(join(ROOT, 'visualizer/server', name)), false, name)
+  for (const route of ['/api/sessions', '/api/events', '/api/journal', '/api/seat-sessions', '/api/agents', '/api/agents/propose', '/api/agent-library', '/api/skill-library', '/api/health', '/api/plugin-write-mode']) assert.ok(Object.hasOwn(ROUTE_PARAMS, route), `${route} stays`)
   const crewRoot = scratchDir('visualizer-dropped-routes-')
   let started
   try {
@@ -1312,16 +1078,6 @@ test('/api/events serves a lean lane from its journal and states absence for a n
   }
 })
 
-test('TR1 proposeAgent accepts the acp transport and refuses retired transports', () => {
-  const entry = { providers: ['openai'], adapter: 'crew/adapters/adapter-future-agent.mjs', refuses: [], availability: 'proposal-stub' }
-  for (const transport of ['acp', 'pane', 'headless-json', 'headless-rpc']) {
-    const result = proposeAgent({ checkout: '/x', name: 'future-agent', entry: { ...entry, transports: [transport] }, readFileSync: () => JSON.stringify({ coding_agents: {} }) })
-    // MUTATION: allow retired transports or reject acp.
-    if (transport === 'acp') assert.equal(result.ok, true)
-    else { assert.equal(result.ok, false); assert.ok(result.refusals.some((r) => r.code === 'payload-shape')) }
-  }
-})
-
 // MUTATION: restore the ledger constant in the health payload
 test('/api/health answers schema, crew_root, readonly false and the write list only', async () => {
   const started = await startInProcess({})
@@ -1380,9 +1136,8 @@ test('AE1 /api/agents/propose proposes a crew/agents frontmatter edit over HTTP 
     assert.equal((await post({ role: 'builder', field: 'effort' })).status, 400)
     assert.equal((await post({ role: 'builder', field: 'effort', value: 'max', name: 'x' })).status, 400)
     assert.equal((await post({ role: 'builder', field: 'effort', value: 7 })).status, 400)
+    assert.equal((await post({ name: 'future-agent', entry: { providers: ['openai'], transports: ['acp'], adapter: 'crew/adapters/adapter-future-agent.mjs', refuses: [], availability: 'proposal-stub' } })).status, 400)
     assert.equal(readFileSync(agentFile, 'utf8'), agentText)
-    // The register-entry proposal shares the endpoint and is untouched.
-    assert.equal((await post({ name: 'future-agent', entry: 7 })).status, 400)
   } finally {
     await stopInProcess(server)
     rmSync(dir, { recursive: true, force: true })

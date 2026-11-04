@@ -1,18 +1,12 @@
 import { readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, statSync as fsStatSync } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
-import { unifiedDiff } from './diff.mjs'
+import { join, relative, resolve } from 'node:path'
+import { AGENT_ROLES } from '../../crew/protocols.mjs'
 
-export const AGENT_REFUSALS = Object.freeze(['extensions', 'skills', 'mcp_servers', 'local_provider'])
-export const AGENT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
 export const DELIVERY_STORES = Object.freeze(['headless', 'headless-json', 'headless-rpc', 'pane'])
-export const AVAILABILITY_REASON = 'availability-pending-1289'
-export const PROMPT_LABEL = 'protected: prompt-surface'
 
 const DEFAULT_REASONS = Object.freeze({
   register: 'capability register is unavailable',
   skills: 'skill inventory is unavailable',
-  prompt: 'prompt source is unavailable',
-  recipients: 'prompt recipients are unavailable',
   command: 'last-seat delivery has no readable command evidence',
 })
 
@@ -64,24 +58,12 @@ function safeEntries(readdir, path) {
   }
 }
 
-function canonicalJson(value) {
-  return `${JSON.stringify(value, null, 2)}\n`
-}
-
 function refusal(code, message) {
   return { code, message }
 }
 
-function proposalResult({ ok = false, diff = null, refusals = [], target_path = null, after_text = null, extra = {} } = {}) {
-  return { ok, diff, refusals, target_path, after_text, ...extra }
-}
-
 function validName(value) {
   return typeof value === 'string' && /^[a-z0-9][a-z0-9-]*$/.test(value)
-}
-
-function validPath(value) {
-  return typeof value === 'string' && value !== '' && !isAbsolute(value) && !value.split('/').includes('..') && /^[A-Za-z0-9._/-]+$/.test(value)
 }
 
 function parseJson(read, path, label) {
@@ -148,38 +130,6 @@ function listSkills({ read, readdir, checkout }) {
     skills.push({ name: frontmatter.value.name, description: frontmatter.value.description, content: source.text, path: relative(checkout, path).replaceAll('\\', '/'), frontmatter: frontmatter.value })
   }
   return { skills, reasons }
-}
-
-function registerFlags(refuses) {
-  const set = new Set(Array.isArray(refuses) ? refuses : [])
-  return Object.fromEntries(AGENT_REFUSALS.map((name) => [name, !set.has(name)]))
-}
-
-function registerAgents(register, reasons) {
-  const entries = record(register?.coding_agents) ? register.coding_agents : {}
-  return Object.entries(entries).sort(([left], [right]) => left.localeCompare(right)).map(([name, entry]) => {
-    const safe = record(entry) ? entry : {}
-    const refuses = Array.isArray(safe.refuses) ? safe.refuses.filter((value) => AGENT_REFUSALS.includes(value)) : []
-    const availabilityMark = Object.hasOwn(safe, 'availability')
-      ? marked(safe.availability, null)
-      : marked(null, AVAILABILITY_REASON)
-    const installMark = Object.hasOwn(safe, 'install_hint')
-      ? marked(safe.install_hint, null)
-      : marked(null, AVAILABILITY_REASON)
-    if (availabilityMark.measured === false && availabilityMark.reason) reasons.push(`${name} availability: ${availabilityMark.reason}`)
-    if (installMark.measured === false && installMark.reason) reasons.push(`${name} install hint: ${installMark.reason}`)
-    return {
-      name,
-      providers: Array.isArray(safe.providers) ? [...safe.providers] : [],
-      transports: Array.isArray(safe.transports) ? [...safe.transports] : [],
-      adapter: typeof safe.adapter === 'string' ? safe.adapter : null,
-      refuses,
-      flags: registerFlags(refuses),
-      capability_flags: registerFlags(refuses),
-      availability: availabilityMark,
-      install_hint: installMark,
-    }
-  })
 }
 
 function commandTokens(value) {
@@ -294,109 +244,11 @@ function matrixRows({ skills, register, deliveries }) {
       const lastSeatDelivery = delivery.measured ? delivery.skills.includes(name) : marked(null, delivery.reason || DEFAULT_REASONS.command)
       return [name, { register_grant: registerGrant, last_seat_delivery: lastSeatDelivery }]
     }))
-    return { role, skills: cells, cells, delivery: { ...delivery } }
+    return { role, cells }
   })
 }
 
-function promptRows({ read, checkout, deliveries }) {
-  const prompts = []
-  const reasons = []
-  for (const role of AGENT_ROLES) {
-    const path = join(checkout, 'crew', 'agents', `${role}.md`)
-    const source = safeRead(read, path, path)
-    const sourceBytes = source.text === null ? marked(null, source.reason || DEFAULT_REASONS.prompt) : marked(Buffer.byteLength(source.text, 'utf8'), null)
-    if (!source.text) reasons.push(source.reason || `${path} is unavailable`)
-    const delivery = deliveries[role]
-    prompts.push({
-      role,
-      path: relative(checkout, path).replaceAll('\\', '/'),
-      text: source.text,
-      recipients: null,
-      recipients_reason: DEFAULT_REASONS.recipients,
-      source_bytes: sourceBytes,
-      protected: PROMPT_LABEL,
-      label: PROMPT_LABEL,
-      delivery_source: delivery?.source_path || null,
-    })
-  }
-  return { prompts, reasons }
-}
-
-function proposalSource({ read, checkout }) {
-  const register = readRegister(read, checkout)
-  const before = register.text
-  if (!register.value || typeof before !== 'string') return { value: null, before, path: register.path, refusals: register.refusals }
-  return { value: register.value, before, path: register.path, refusals: [] }
-}
-
-function validateStringArray(value, field, { vocabulary = null, minItems = 0, pattern = null } = {}) {
-  if (!Array.isArray(value) || value.length < minItems || value.some((item) => typeof item !== 'string' || (pattern && !pattern.test(item)) || (vocabulary && !vocabulary.includes(item)))) return [refusal('payload-shape', `${field} must be an array of ${minItems ? 'one or more ' : ''}valid strings`)]
-  if (new Set(value).size !== value.length) return [refusal('payload-duplicate', `${field} must not contain duplicates`)]
-  return []
-}
-
-function proposalReadFailure(source, target) {
-  return proposalResult({ target_path: target, refusals: source.refusals.length ? source.refusals : [refusal('read-unavailable', `${target} could not be read`)] })
-}
-
-export function proposeAgent({ checkout = process.cwd(), name, entry, readFileSync = fsReadFileSync } = {}) {
-  const source = proposalSource({ read: readFileSync, checkout: resolve(checkout) })
-  const target = source.path
-  if (source.refusals.length) return proposalReadFailure(source, target)
-  const refusals = []
-  if (!validName(name)) refusals.push(refusal('name-invalid', 'agent name must match [a-z0-9][a-z0-9-]*'))
-  if (Object.hasOwn(source.value.coding_agents || {}, name)) refusals.push(refusal('name-duplicate', `coding agent ${name} already exists`))
-  if (!record(entry)) refusals.push(refusal('entry-shape', 'entry must be an object'))
-  const value = record(entry) ? entry : {}
-  const keys = Object.keys(value)
-  for (const key of keys) if (!['providers', 'transports', 'adapter', 'refuses', 'availability'].includes(key)) refusals.push(refusal('entry-field', `entry field ${key} is not supported`))
-  refusals.push(...validateStringArray(value.providers, 'providers', { minItems: 1, pattern: /^[a-z0-9][a-z0-9-]*$/ }))
-  refusals.push(...validateStringArray(value.transports, 'transports', { minItems: 1, vocabulary: ['acp'] }))
-  if (!validPath(value.adapter)) refusals.push(refusal('adapter-path', 'adapter must be a confined checkout-relative path'))
-  else if (value.adapter !== `crew/adapters/adapter-${name}.mjs`) refusals.push(refusal('adapter-path', `adapter must match coding agent ${name}: crew/adapters/adapter-${name}.mjs`))
-  refusals.push(...validateStringArray(value.refuses, 'refuses', { vocabulary: AGENT_REFUSALS }))
-  if (value.availability !== 'proposal-stub') refusals.push(refusal('availability-stub', 'new coding agents must carry availability: proposal-stub'))
-  if (refusals.length) return proposalResult({ target_path: target, refusals })
-  const afterValue = structuredClone(source.value)
-  afterValue.coding_agents = {
-    ...(record(afterValue.coding_agents) ? afterValue.coding_agents : {}),
-    [name]: {
-      providers: [...value.providers],
-      transports: [...value.transports],
-      adapter: value.adapter,
-      refuses: [...value.refuses],
-      display_name: name,
-      binary: name,
-      install_hint: `Install ${name} and ensure the ${name} binary is on PATH.`,
-      availability: 'proposal-stub',
-      availability_reason: 'proposal-stub',
-    },
-  }
-  const after = canonicalJson(afterValue)
-  return proposalResult({ ok: true, diff: unifiedDiff(source.before, after, { path: 'crew/capabilities.json' }), target_path: target, after_text: after })
-}
-
-export function proposeSkills({ checkout = process.cwd(), role, skills, readFileSync = fsReadFileSync, readdirSync = fsReaddirSync } = {}) {
-  const root = resolve(checkout)
-  const source = proposalSource({ read: readFileSync, checkout: root })
-  const target = source.path
-  if (source.refusals.length) return proposalReadFailure(source, target)
-  const refusals = []
-  if (!AGENT_ROLES.includes(role)) refusals.push(refusal('role-invalid', `role must be one of ${AGENT_ROLES.join(', ')}`))
-  refusals.push(...validateStringArray(skills, 'skills', { pattern: /^[a-z0-9][a-z0-9-]*$/ }))
-  const available = new Set(listSkills({ read: readFileSync, readdir: readdirSync, checkout: root }).skills.map((skill) => skill.name))
-  for (const skill of Array.isArray(skills) ? skills : []) if (!available.has(skill)) refusals.push(refusal('skill-unknown', `skill ${skill} is not present in skills/*/SKILL.md`))
-  if (refusals.length) return proposalResult({ target_path: target, refusals })
-  const afterValue = structuredClone(source.value)
-  afterValue.roles = record(afterValue.roles) ? afterValue.roles : {}
-  afterValue.roles[role] = record(afterValue.roles[role]) ? afterValue.roles[role] : {}
-  afterValue.roles[role].skills = [...skills]
-  const after = canonicalJson(afterValue)
-  return proposalResult({ ok: true, diff: unifiedDiff(source.before, after, { path: 'crew/capabilities.json' }), target_path: target, after_text: after })
-}
-
 export function createAgentsSource({ checkout = process.cwd(), pluginRoot = checkout, crewRoot = process.env.HOME ? join(process.env.HOME, '.crew') : process.cwd(), readFileSync = fsReadFileSync, readdirSync = fsReaddirSync, statSync = fsStatSync } = {}) {
-  const root = resolve(checkout)
   const resourcesRoot = resolve(pluginRoot)
   const runtimeRoot = resolve(crewRoot)
   const read = readFileSync
@@ -407,34 +259,23 @@ export function createAgentsSource({ checkout = process.cwd(), pluginRoot = chec
       const register = readRegister(read, resourcesRoot)
       const registerReasons = [...(register.refusals || []).map((item) => item.message)]
       const skillResult = listSkills({ read, readdir, checkout: resourcesRoot })
-      const agents = registerAgents(register.value, registerReasons)
       const deliveries = Object.fromEntries(AGENT_ROLES.map((role) => [role, roleDelivery({ read, readdir, stat, crewRoot: runtimeRoot, role })]))
       const matrix = matrixRows({ skills: skillResult.skills, register: register.value, deliveries })
-      const promptResult = promptRows({ read, checkout: resourcesRoot, deliveries })
-      const reasons = [...registerReasons, ...skillResult.reasons, ...promptResult.reasons]
+      const reasons = [...registerReasons, ...skillResult.reasons]
       for (const role of AGENT_ROLES) {
         const delivery = deliveries[role]
         if (!delivery.measured) reasons.push(`${role}: ${delivery.reason || DEFAULT_REASONS.command}`)
       }
       const roleEvidence = Object.fromEntries(AGENT_ROLES.map((role) => [role, deliveries[role]]))
       return {
-        schema: 1,
+        schema: 2,
         degraded: reasons.length > 0,
         reasons: [...new Set(reasons.filter(nonBlank))],
         error: register.value ? null : (registerReasons[0] || DEFAULT_REASONS.register),
-        agents,
         skills: skillResult.skills,
-        roles: matrix,
         matrix,
-        role_by_skill: matrix,
         role_evidence: roleEvidence,
-        prompts: promptResult.prompts,
-        checkout: root,
-        plugin_root: resourcesRoot,
-        crew_root: runtimeRoot,
       }
     },
-    proposeAgent(input = {}) { return proposeAgent({ ...input, checkout: root, readFileSync: read }) },
-    proposeSkills(input = {}) { return proposeSkills({ ...input, checkout: root, readFileSync: read, readdirSync: readdir }) },
   }
 }

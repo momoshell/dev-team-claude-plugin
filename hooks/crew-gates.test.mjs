@@ -94,3 +94,16 @@ test('PreToolUse denies writes to transcripts and started brief snapshots and al
   ]) assert.equal(invoke(tool, input), '')
   assert.equal(invoke('Write', { file_path: transcript }, { ...env, CREW_ROLE: 'builder' }), '')
 })
+
+// MUTATION: drop the memory exception and every Claude Code auto-memory write in every project is denied.
+test('PreToolUse allows Claude Code auto-memory writes beside the transcripts and still denies the transcripts', () => {
+  const { home, checkout, env } = fixture()
+  const invoke = (tool_name, tool_input) => run('PreToolUse', { cwd: checkout, tool_name, tool_input }, env)
+  const memory = join(home, '.claude/projects/p/memory')
+  for (const [tool, input] of [
+    ['Write', { file_path: join(memory, 'note.md') }],
+    ['Edit', { file_path: join(memory, 'MEMORY.md') }],
+    ['Bash', { command: "sed -i '' s/a/b/ ~/.claude/projects/p/memory/MEMORY.md" }],
+  ]) assert.equal(invoke(tool, input), '')
+  for (const path of [join(home, '.claude/projects/p/s.jsonl'), join(home, '.claude/projects/memory/s.jsonl'), join(home, '.claude/projects/p/s/subagents/memory.jsonl')]) denied(invoke('Write', { file_path: path }))
+})

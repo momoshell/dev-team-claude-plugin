@@ -16,7 +16,10 @@ function expand(value) {
 
 function protectedRoot(value, cwd) {
   const path = resolve(cwd, expand(value))
-  return [join(process.env.HOME, '.claude/projects'), join(process.env.HOME, '.crew/briefs/started')]
+  const projects = join(process.env.HOME, '.claude/projects')
+  // Claude Code keeps each project's auto-memory beside its transcripts; only the transcripts are operator words.
+  if (path.startsWith(projects + '/') && path.slice(projects.length + 1).split('/')[1] === 'memory') return undefined
+  return [projects, join(process.env.HOME, '.crew/briefs/started')]
     .find(root => path === root || path.startsWith(root + '/'))
 }
 

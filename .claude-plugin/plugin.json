@@ -1,7 +1,7 @@
 {
   "name": "dev-team",
-  "version": "0.9.3",
-  "description": "Crew: a team runtime \u2014 a whole team booted per task, with deterministic code running the loop (plan, build, per-test proof, review, suite, commit-on-green) and agents kept for judgment via closed-enum decision envelopes.",
+  "version": "0.10.0",
+  "description": "Crew: a team runtime \u2014 agents do the work, code keeps it correct. One brief starts a lane: a planner, builder and reviewer play their seats over ACP, and code commits and opens the PR only after a per-test proof (each named test red on the old source, green on the build) and a green full suite.",
   "author": {
     "name": "momoshell"
   }

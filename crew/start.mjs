@@ -10,7 +10,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, posix, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { LANE } from './lane-core.mjs'
 import { ISSUE_SOURCE, parseBrief } from './protocols.mjs'
@@ -79,7 +79,7 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
   const logLine = (line) => { try { d.log(line) } catch { /* Instrumentation must not affect the start. */ } }
   const lane = laneName(briefPath)
   const text = d.readFileSync(briefPath, 'utf8')
-  const { fields, ask: quotedAsk, defects } = parseBrief(text)
+  const { fields, ask: quotedAsk, paths, defects } = parseBrief(text)
   if (defects.length) throw new StartRefusal(`brief ${briefPath} is not a P1 brief:\n- ${defects.join('\n- ')}`)
   if (fields.shape === 'finish') throw new StartRefusal('shape finish starts from an escalated lane, not a new brief; crew start runs standard only')
   if (quotedAsk.length) {
@@ -104,6 +104,17 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
   const remoteHead = git(d, checkout, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
   if (!remoteHead) throw new StartRefusal('cannot read origin/HEAD; repair it with git remote set-head origin --auto')
   const base = remoteHead.replace(/^origin\//, '')
+  const missing = paths.filter((path) => {
+    const name = posix.normalize(path).replace(/\/+$/, '') || '.'
+    if (git(d, checkout, ['cat-file', '-e', `${base}:${name}`]) === null) return true
+    const parts = name === '.' ? [] : name.split('/')
+    return parts.some((_, i) => {
+      const prefix = parts.slice(0, i + 1).join('/')
+      const entry = git(d, checkout, ['--literal-pathspecs', 'ls-tree', '-z', base, '--', prefix])
+      return !entry || !/^(?:040000 tree|100(?:644|755) blob) [0-9a-f]+\t/.test(entry) || entry.slice(entry.indexOf('\t') + 1).replace(/\0$/, '') !== prefix
+    })
+  })
+  if (missing.length) throw new StartRefusal(`brief ${briefPath} could not verify ## Context paths on ${base} (ADR-056 Amendment 1); they may be missing, symlinks, submodules, or the git check may have failed:\n- ${missing.join('\n- ')}`)
   let ask = null
   const issue = ISSUE_SOURCE.exec(fields.source)
   if (issue) {

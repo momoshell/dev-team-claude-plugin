@@ -14,9 +14,10 @@ planner. The brief carries no file list, symbol index, tripwire list or baseline
 
 1. Read the source: `gh issue view <N>`, or the operator's words. The ask comes from that source: for an issue,
    write no ask (`crew start` adds the issue body); for an operator request, quote only words the operator typed,
-   verbatim. Put proposals, premises and measured facts in `~/.crew/notes/<lane>.md` and point to it in `## Context`.
+   verbatim, one whole message per quoted block. Put proposals, premises and measured facts in an issue the
+   operator can read and edit. A session-filed issue opens with the operator words that asked for it.
 2. Check every premise on main (`git grep`, `git show main:<path>`, a quick run). A premise you did not check
-   is either left out or written as "unmeasured: <why>" in the notes.
+   is either left out or written as "unmeasured: <why>" in the issue.
 3. Write the brief to `~/.crew/briefs/<lane>.md`. The file name is the lane name: lowercase letters, digits
    and `-`. Use `<project>-<issue>-<slug>` for an issue or `<project>-<slug>` for an operator request.
    Use a short name for the checkout's repo as the project (`devteam` for this repo) and two to four words
@@ -24,7 +25,7 @@ planner. The brief carries no file list, symbol index, tripwire list or baseline
    `devteam-lane-names`.
 4. Validate: `crew start ~/.crew/briefs/<lane>.md --check`. In this repo, run the checkout's own copy:
    `node crew/start.mjs <brief> --check`. Fix every defect it names. When typed messages are measured,
-   `crew start` refuses an ask line not found in them (ADR-056).
+   `crew start` refuses an ask block that is not one whole typed message (ADR-056 Amendment 1).
 5. Start: the same command without `--check`. It creates `../dt-<lane>`, snapshots the brief, writes the lean
    spec and starts the lean loop detached. Both steps check the P1 brief and ask provenance, then resolve the
    agent definitions (standard shape only). It prints the worktree,
@@ -64,7 +65,7 @@ out_of_scope: the visualizer
 - `crew/agents.mjs` `resolveAgents`
 ```
 
-Context items are bare pointers: each list item contains one or more code spans, Markdown links, `issue N` or `PR N`, separated by spaces or tabs. No prose or continuation lines. Rules and criteria belong to the planner.
+Context items are bare pointers: each list item contains one or more code spans, `issue N` or `PR N`, separated by spaces or tabs. No links, prose or continuation lines. Code spans cannot start with `/`, `~` or a URL scheme, or contain a `..` path segment. The first span in each item and later spans containing `/` are repo paths checked on the local base branch at start; symlinks and submodules in those paths are refused. Later spans without `/` name symbols. Rules and criteria belong to the planner.
 
 No acceptance ids or `## Acceptance` section: the planner writes the criteria (ADR-055 §1). A brief with an `acceptance` field is refused.
 Field rules (the validator refuses anything else):

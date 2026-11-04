@@ -64,6 +64,10 @@ function fakes({ brief = BRIEF, exists = () => false, worktreeStatus = 0, origin
       calls.push(['spawn', file, args, options?.cwd ?? null])
       if (file === 'gh') return issueBody === null ? { status: 1, stdout: '' } : { status: 0, stdout: issueBody }
       if (file === 'git' && args.includes('symbolic-ref')) return originHead ? { status: 0, stdout: `${originHead}\n` } : { status: 1, stdout: '' }
+      if (file === 'git' && args.includes('ls-tree')) {
+        const path = args.at(-1)
+        return { status: 0, stdout: `${path.includes('.') ? '100644 blob' : '040000 tree'} ${'a'.repeat(40)}\t${path}\0` }
+      }
       if (file === 'git' && args.includes('worktree')) return { status: worktreeStatus, stdout: '' }
       if (file === 'git' && args.includes('rev-parse')) return inGit ? { status: 0, stdout: '/repo/checkout\n' } : { status: 128, stdout: '' }
       return { status: 0, stdout: '', stderr: '' }
@@ -99,8 +103,8 @@ test('crew start refuses ask lines the operator never typed: seat prompts, paste
   const typed = ['first typed line', 'second typed line']
   const excluded = ['array seat prompt', 'string seat prompt', 'notification text', 'pasted text', 'stale transcript']
   const brief = BRIEF.replace('source: issue 1961', 'source: operator request')
-    .replace('## Context', `## The ask\n\n${[...typed, ...excluded].map((line) => `> ${line}`).join('\n')}\n\n## Context`)
-  const expected = `brief /d/b1.md quotes words the operator did not type (ADR-056):\n${excluded.map((text, i) => `- ask line ${11 + i} is not words the operator typed: ${JSON.stringify(text)}`).join('\n')}`
+    .replace('## Context', `## The ask\n\n${typed.map((line) => `> ${line}`).join('\n')}\n\n${excluded.map((line) => `> ${line}`).join('\n\n')}\n\n## Context`)
+  const expected = `brief /d/b1.md quotes words the operator did not type (ADR-056):\n${excluded.map((text, i) => `- ask block at line ${12 + 2 * i} is not one whole message the operator typed: ${JSON.stringify(text)}`).join('\n')}`
   for (const check of [true, false]) {
     let resolutions = 0
     const { deps, calls } = fakes({ brief, resolve: () => { resolutions++; return { seats: {} } } })
@@ -109,9 +113,77 @@ test('crew start refuses ask lines the operator never typed: seat prompts, paste
     assert.equal(resolutions, 0)
     assert.deepEqual(effects(calls), [])
   }
-  const pass = fakes({ brief: brief.replace(excluded.map((line) => `> ${line}\n`).join(''), '') })
+  const pass = fakes({ brief: brief.replace(`${excluded.map((line) => `> ${line}`).join('\n\n')}\n\n`, '') })
   pass.deps.transcriptRoot = root
   assert.equal((await startLane({ briefPath: '/d/b1.md', check: true, deps: pass.deps })).checked, true)
+})
+
+test('crew start refuses a ## Context path missing on the base before the worktree (ADR-056 Amendment 1)', async () => {
+  for (const status of [128, 1, null]) {
+    const missing = fakes({ brief: BRIEF.replace('`crew/agents.mjs`', '`crew/missing.mjs`') })
+    const spawnSync = missing.deps.spawnSync
+    missing.deps.spawnSync = (file, args, options) => {
+      const result = spawnSync(file, args, options)
+      return file === 'git' && args.includes('main:crew/missing.mjs') ? { status } : result
+    }
+    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: missing.deps }), (error) => error instanceof StartRefusal && error.message.includes('could not verify') && error.message.includes('main') && error.message.includes('crew/missing.mjs'))
+    assert.equal(missing.calls.some(([kind, file, args]) => kind === 'spawn' && (file === 'gh' || args.includes('worktree'))), false)
+  }
+
+  const pass = fakes({ brief: BRIEF.replace('`crew/agents.mjs`', '`crew/agents.mjs` `resolveAgents`\n- `crew/`') })
+  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: pass.deps })
+  const checks = pass.calls.filter(([kind, file, args]) => kind === 'spawn' && file === 'git' && args.includes('cat-file')).map(([, , args]) => args.at(-1))
+  assert.deepEqual(checks, ['main:crew/agents.mjs', 'main:crew'])
+
+  const repo = scratchDir('context-base-')
+  for (const args of [['init', '-b', 'main'], ['config', 'user.name', 'Test'], ['config', 'user.email', 'test@example.com']]) {
+    assert.equal(spawnSync('git', args, { cwd: repo }).status, 0)
+  }
+  writeFileSync(join(repo, 'tracked'), 'base')
+  fs.symlinkSync('/outside/notes.md', join(repo, 'notes.md'))
+  fs.symlinkSync('/outside', join(repo, 'linked-dir'))
+  for (const args of [['add', '.'], ['commit', '-m', 'base']]) assert.equal(spawnSync('git', args, { cwd: repo }).status, 0)
+  writeFileSync(join(repo, 'remote-only'), 'remote')
+  for (const args of [['add', '.'], ['commit', '-m', 'remote'], ['update-ref', 'refs/remotes/origin/main', 'HEAD'], ['reset', '--hard', 'HEAD^']]) {
+    assert.equal(spawnSync('git', args, { cwd: repo }).status, 0)
+  }
+  for (const path of ['tracked', 'remote-only', 'notes.md', 'linked-dir/file']) {
+    const fail = fakes({ brief: BRIEF.replace('`crew/agents.mjs`', `\`${path}\``) })
+    const fakeSpawn = fail.deps.spawnSync
+    fail.deps.spawnSync = (file, args, options) => {
+      const result = fakeSpawn(file, args, options)
+      return file === 'git' && !args.includes('symbolic-ref') && !args.includes('worktree') ? spawnSync(file, args, { encoding: 'utf8' }) : result
+    }
+    if (path === 'tracked') await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: repo, deps: fail.deps }))
+    else {
+      await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: repo, deps: fail.deps }), (error) => error instanceof StartRefusal && error.message.includes(path) && error.message.includes('main'))
+      assert.equal(fail.calls.some(([kind, file, args]) => kind === 'spawn' && (file === 'gh' || args.includes('worktree'))), false)
+    }
+  }
+})
+
+test('crew start accepts a quoted ask block only as one whole typed message (ADR-056 Amendment 1)', async () => {
+  const root = scratchDir('whole-message-')
+  const dir = join(root, 'proj')
+  mkdirSync(dir)
+  writeFileSync(join(dir, 'a.jsonl'), [
+    'will this enforce proper briefs now?',
+    'yes, all; probably best as followup',
+    'see <pasted_content id="p1">x</pasted_content id="p1"> please',
+  ].map((content) => JSON.stringify({ type: 'user', origin: { kind: 'human' }, promptSource: 'typed', message: { content } })).join('\n'))
+  const makeBrief = (ask) => BRIEF.replace('source: issue 1961', 'source: operator request').replace('## Context', `## The ask\n\n${ask}\n\n## Context`)
+  const good = '> will this enforce proper\n> briefs now?\n\n> yes, all; probably best as followup\n\n> see please'
+  for (const check of [true, false]) {
+    const pass = fakes({ brief: makeBrief(good) })
+    pass.deps.transcriptRoot = root
+    await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps: pass.deps }))
+    for (const ask of ['> yes', '> will this enforce proper briefs now?\n> yes, all; probably best as followup']) {
+      const fail = fakes({ brief: makeBrief(ask) })
+      fail.deps.transcriptRoot = root
+      await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps: fail.deps }), (error) => error instanceof StartRefusal && error.message.includes('ask block at line 9 is not one whole message the operator typed'))
+      assert.deepEqual(effects(fail.calls), [])
+    }
+  }
 })
 
 test('crew start reports ask provenance unmeasured with no transcript and starts; an issue brief reads none (ADR-056)', async () => {
@@ -179,7 +251,7 @@ const deps = {
   readFileSync: () => invalid ? ${JSON.stringify(BRIEF)}.replace('shape: standard', 'tier: build\\nshape: standard') : ${JSON.stringify(BRIEF)},
   resolveAgents: () => ({ seats: {} }), existsSync: () => false,
   mkdirSync: () => {}, writeFileSync: () => {},
-  spawnSync: () => ({ status: 0, stdout: 'origin/main' }),
+  spawnSync: (file, args) => ({ status: 0, stdout: args.includes('ls-tree') ? (args.at(-1).includes('.') ? '100644 blob ' : '040000 tree ') + 'a'.repeat(40) + '\\t' + args.at(-1) + '\\0' : 'origin/main' }),
   spawnDetached: () => { writeSync(3, 'started\\n'); return 4242 }, crewRoot: '/virtual/crew',
 }
 const argv = invalid ? ['/d/b1.md', '--check'] :

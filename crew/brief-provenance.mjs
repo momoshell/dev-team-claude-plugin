@@ -39,6 +39,6 @@ export function readOperatorMessages({ root, now = Date.now(), days = 30 }) {
 export function askProvenance(ask, messages) {
   const normalise = (text) => text.replace(/\s+/g, ' ').trim()
   const typed = messages.map(normalise)
-  return ask.filter(({ text }) => !typed.some((message) => message.includes(normalise(text))))
-    .map(({ line, text }) => `ask line ${line} is not words the operator typed: ${JSON.stringify(text)}`)
+  return ask.filter(({ text }) => !typed.includes(normalise(text)))
+    .map(({ line, text }) => `ask block at line ${line} is not one whole message the operator typed: ${JSON.stringify(text)}`)
 }

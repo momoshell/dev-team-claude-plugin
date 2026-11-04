@@ -1,5 +1,5 @@
 ---
-description: Onboard a checkout for lean lanes — install the plugin and set the checkout's suite command.
+description: Onboard a checkout for lean lanes and calibrate .crew/project.json.
 argument-hint: <path-to-checkout-or-blank-for-here>
 ---
 

@@ -1,7 +1,8 @@
 import { test } from 'node:test'
+import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -63,6 +64,34 @@ function gitHome(root) {
   return { seed, origin, home }
 }
 
+test('onboard --check writes .crew/project.json only when the pass probe reads green and the fail probe red by failure', () => {
+  const root = scratch('onboard')
+  try {
+    const repo = join(root, 'repo')
+    mkdirSync(repo)
+    git(repo, 'init', '-q')
+    writeFileSync(join(repo, 'README'), 'base\n')
+    git(repo, 'add', '.')
+    git(repo, 'commit', '-qm', 'base')
+    const draft = join(root, 'draft.json')
+    const entry = { match: 'probe/**', run: 'node --test --test-reporter=junit --test-reporter-destination={report} {file}', calibrate: { file: 'probe/calibrate.mjs', text: "import { test } from 'node:test'\nimport assert from 'node:assert/strict'\ntest('passes', () => {})\ntest('fails', () => assert.fail())\n", pass: 'passes', fail: 'fails' } }
+    writeFileSync(draft, JSON.stringify({ suite: 'npm test', proof: [entry] }))
+    const env = { CREW_HOME: '' }
+    const out = crew(['onboard', '--check', draft, '--checkout', repo], { cwd: root, env })
+    assert.equal(out.status, 0, out.stderr + out.stdout)
+    const project = JSON.parse(readFileSync(join(repo, '.crew/project.json'), 'utf8'))
+    assert.deepEqual(project.proof, [{ match: entry.match, run: entry.run }])
+    assert.equal(project.onboarded.hash, createHash('sha256').update(JSON.stringify(['npm test', [[entry.match, null, entry.run]]])).digest('hex'))
+    assert.equal(git(repo, 'status', '--porcelain'), '?? .crew/')
+    rmSync(join(repo, '.crew'), { recursive: true })
+    entry.calibrate.text = entry.calibrate.text.replace('assert.fail()', '{}')
+    writeFileSync(draft, JSON.stringify({ suite: 'npm test', proof: [entry] }))
+    const failed = crew(['onboard', '--check', draft, '--checkout', repo], { cwd: root, env })
+    assert.equal(failed.status, 1, failed.stderr + failed.stdout)
+    assert.equal(existsSync(join(repo, '.crew/project.json')), false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('an unknown or missing verb is refused with exit 2 and runs nothing', () => {
   const root = scratch('unknown')
   try {
@@ -71,7 +100,7 @@ test('an unknown or missing verb is refused with exit 2 and runs nothing', () =>
       const out = crew(args, { cwd: root, env: { CREW_HOME: home } })
       assert.equal(out.status, 2)
       assert.equal(out.stdout, '')
-      assert.match(out.stderr, /^crew: unknown verb ".*"; expected start, show, record-pr, closeout, finish, lanes, viz, where or update$/m)
+      assert.match(out.stderr, /^crew: unknown verb ".*"; expected onboard, start, show, record-pr, closeout, finish, lanes, viz, where or update$/m)
     }
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
@@ -85,7 +114,7 @@ test('a verb naming an Object.prototype member is refused as unknown with exit 2
       const out = crew([verb], { cwd: root, env: { CREW_HOME: home } })
       assert.equal(out.status, 2)
       assert.equal(out.stdout, '')
-      assert.match(out.stderr, new RegExp(`^crew: unknown verb "${verb}"; expected start, show, record-pr, closeout, finish, lanes, viz, where or update$`, 'm'))
+      assert.match(out.stderr, new RegExp(`^crew: unknown verb "${verb}"; expected onboard, start, show, record-pr, closeout, finish, lanes, viz, where or update$`, 'm'))
       assert.doesNotMatch(out.stderr, /\n\s+at /)
     }
   } finally { rmSync(root, { recursive: true, force: true }) }

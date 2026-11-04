@@ -1,4 +1,5 @@
 import { test } from 'node:test'
+import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import fs, { appendFileSync as appendFileSyncReal, existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
@@ -11,7 +12,7 @@ import { runAcpSeat } from './acp/seat.mjs'
 import { parseAgent, TIERS, validateEnvelope } from './protocols.mjs'
 import { resolveAgents } from './agents.mjs'
 import { PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS } from './acp/provider.mjs'
-import { scratchDir } from '../test/helpers.mjs'
+import { git, scratchDir } from '../test/helpers.mjs'
 
 test('an existing crew lane directory is refused before any worktree is made', async () => {
   const { deps, calls } = fakes({ exists: (path) => path === '/home/.crew/dt-b1/b1' })
@@ -52,10 +53,16 @@ out_of_scope: the visualizer
 
 // Every effect is a recorded call; nothing touches git, the disk or a process. The agent
 // resolution is injected too; the default resolves the committed definitions.
-function fakes({ brief = BRIEF, exists = () => false, worktreeStatus = 0, originHead = 'origin/main', inGit = true, issueBody = 'Refuse roster edits that cannot boot.\n', resolve = (tier) => resolveAgents(tier), write = () => {} } = {}) {
+const projectFile = (suite = 'npm test', proof = []) => ({ suite, proof, onboarded: { hash: createHash('sha256').update(JSON.stringify([suite, proof.map((e) => [e.match, e.setup ?? null, e.run])])).digest('hex') } })
+
+function fakes({ brief = BRIEF, project = projectFile(), exists = () => false, worktreeStatus = 0, originHead = 'origin/main', inGit = true, issueBody = 'Refuse roster edits that cannot boot.\n', resolve = (tier) => resolveAgents(tier), write = () => {} } = {}) {
   const calls = []
   const deps = {
-    readFileSync: () => brief,
+    readFileSync: (path) => {
+      if (!path.endsWith('/.crew/project.json')) return brief
+      if (project === null) throw Object.assign(new Error('missing'), { code: 'ENOENT' })
+      return typeof project === 'string' ? project : JSON.stringify(project)
+    },
     resolveAgents: resolve,
     existsSync: (path) => exists(path),
     mkdirSync: (path) => { calls.push(['mkdir', path]); write('mkdir', path) },
@@ -66,10 +73,12 @@ function fakes({ brief = BRIEF, exists = () => false, worktreeStatus = 0, origin
       if (file === 'git' && args.includes('symbolic-ref')) return originHead ? { status: 0, stdout: `${originHead}\n` } : { status: 1, stdout: '' }
       if (file === 'git' && args.includes('ls-tree')) {
         const path = args.at(-1)
+        if (path === '.crew/project.json') return { status: 0, stdout: `100644 blob ${'a'.repeat(40)}\t.crew/project.json\n` }
         return { status: 0, stdout: `${path.includes('.') ? '100644 blob' : '040000 tree'} ${'a'.repeat(40)}\t${path}\0` }
       }
       if (file === 'git' && args.includes('worktree')) return { status: worktreeStatus, stdout: '' }
-      if (file === 'git' && args.includes('rev-parse')) return inGit ? { status: 0, stdout: '/repo/checkout\n' } : { status: 128, stdout: '' }
+      if (file === 'git' && args.includes('show')) return { status: 0, stdout: JSON.stringify(project) }
+      if (file === 'git' && args.includes('rev-parse')) return inGit ? { status: 0, stdout: args.includes('--verify') ? `${'a'.repeat(40)}\n` : '/repo/checkout\n' } : { status: 128, stdout: '' }
       return { status: 0, stdout: '', stderr: '' }
     },
     spawnDetached: (file, args, options) => { calls.push(['detached', file, args, options]); return 4242 },
@@ -140,6 +149,8 @@ test('crew start refuses a ## Context path missing on the base before the worktr
     assert.equal(spawnSync('git', args, { cwd: repo }).status, 0)
   }
   writeFileSync(join(repo, 'tracked'), 'base')
+  mkdirSync(join(repo, '.crew'))
+  writeFileSync(join(repo, '.crew', 'project.json'), JSON.stringify(projectFile()))
   fs.symlinkSync('/outside/notes.md', join(repo, 'notes.md'))
   fs.symlinkSync('/outside', join(repo, 'linked-dir'))
   for (const args of [['add', '.'], ['commit', '-m', 'base']]) assert.equal(spawnSync('git', args, { cwd: repo }).status, 0)
@@ -248,10 +259,10 @@ const invalid = process.argv[1] === 'invalid'
 process.argv[1] = process.execPath
 const { main } = await import(${JSON.stringify(new URL('./start.mjs', import.meta.url).href)})
 const deps = {
-  readFileSync: () => invalid ? ${JSON.stringify(BRIEF)}.replace('shape: standard', 'tier: build\\nshape: standard') : ${JSON.stringify(BRIEF)},
+  readFileSync: (path) => path.endsWith('/.crew/project.json') ? ${JSON.stringify(JSON.stringify({suite:'npm test',proof:[],onboarded:{hash:createHash('sha256').update(JSON.stringify(['npm test',[]])).digest('hex')}}))} : invalid ? ${JSON.stringify(BRIEF)}.replace('shape: standard', 'tier: build\\nshape: standard') : ${JSON.stringify(BRIEF)},
   resolveAgents: () => ({ seats: {} }), existsSync: () => false,
   mkdirSync: () => {}, writeFileSync: () => {},
-  spawnSync: (file, args) => ({ status: 0, stdout: args.includes('ls-tree') ? (args.at(-1).includes('.') ? '100644 blob ' : '040000 tree ') + 'a'.repeat(40) + '\\t' + args.at(-1) + '\\0' : 'origin/main' }),
+  spawnSync: (file, args) => ({ status: 0, stdout: args.includes('ls-tree') ? (args.at(-1) === '.crew/project.json' ? '100644 blob ' + 'a'.repeat(40) + '\\t.crew/project.json' : (args.at(-1).includes('.') ? '100644 blob ' : '040000 tree ') + 'a'.repeat(40) + '\\t' + args.at(-1) + '\\0') : args.includes('show') ? ${JSON.stringify(JSON.stringify({suite:'npm test',proof:[],onboarded:{hash:createHash('sha256').update(JSON.stringify(['npm test',[]])).digest('hex')}}))} : args.includes('--verify') ? 'a'.repeat(40) : 'origin/main' }),
   spawnDetached: () => { writeSync(3, 'started\\n'); return 4242 }, crewRoot: '/virtual/crew',
 }
 const argv = invalid ? ['/d/b1.md', '--check'] :
@@ -343,7 +354,7 @@ test('a brief with mechanical: true starts a mechanical lane and a brief without
 
 test('--check validates the brief and the agent definitions and starts nothing', async () => {
   const { deps, calls } = fakes()
-  const result = await startLane({ briefPath: '/d/b1.md', checkout: null, check: true, deps })
+  const result = await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check: true, deps })
   assert.equal(result.checked, true)
   assert.deepEqual(effects(calls), [])
   assert.match(calls.at(-1)[1], /brief ok lane=b1 tier=build shape=standard closes=1961/)
@@ -372,10 +383,8 @@ test('main reports usage, refusals and success as exit codes', async () => {
   assert.equal(await main(['/d/b1.md', '--checkout', '/repo/checkout'], fakes({ worktreeStatus: 1 }).deps), 1)
 })
 
-// MUTATION: resolve the checkout before --check and a brief cannot be validated outside a repo.
-test('--check works outside a git checkout; a real start there is refused', async () => {
-  assert.equal(await main(['/d/b1.md', '--check'], fakes({ inGit: false }).deps), 0)
-  assert.equal(await main(['/d/b1.md'], fakes({ inGit: false }).deps), 2)
+test('--check and a real start need a checkout', async () => {
+  for (const args of [['/d/b1.md', '--check'], ['/d/b1.md']]) assert.equal(await main(args, fakes({ inGit: false }).deps), 2)
 })
 
 // MUTATION: drop the bound-issue slot and the run brief carries no bound issue.
@@ -466,7 +475,7 @@ test('start detaches the bridge on a measured spec and boots nothing', async () 
   const spec = JSON.parse(written(calls, '/task/lean.json')[2])
   assert.deepEqual(spec, {
     id: 'b1', cwd: '/repo/dt-b1', taskDir: '/home/.crew/dt-b1/b1/task', tier: 'build', shape: 'standard', brief: runBrief(BRIEF, 1961, 'Refuse roster edits that cannot boot.\n'),
-    source: 'issue 1961', branch: 'b1', base: 'main', closes: [1961], suite: { command: 'npm', args: ['test'], timeoutMs: 1800000 },
+    source: 'issue 1961', branch: 'b1', base: 'main', closes: [1961], suite: { command: 'npm', args: ['test'], timeoutMs: 1800000 }, onboarded: projectFile().onboarded.hash,
   })
   assert.equal(spec.timeoutMs, undefined)
   const { members } = JSON.parse(written(calls, '/dt-b1/b1/crew.json')[2])
@@ -478,14 +487,71 @@ test('start detaches the bridge on a measured spec and boots nothing', async () 
   assert.deepEqual(JSON.parse(written(unbound.calls, '/task/lean.json')[2]).closes, [])
 })
 
-// MUTATION: ignore fields.suite and a cargo brief runs npm test; always use it and a brief without suite gets no command.
-test('a brief suite line is the lean spec suite, split on whitespace; without one the suite is npm test (SB5, SB6)', async () => {
-  const cargo = fakes({ brief: BRIEF.replace('out_of_scope:', 'suite: cargo test -p power-api\nout_of_scope:') })
-  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: cargo.deps })
-  assert.deepEqual(JSON.parse(written(cargo.calls, '/task/lean.json')[2]).suite, { command: 'cargo', args: ['test', '-p', 'power-api'], timeoutMs: 1800000 })
-  const plain = fakes()
-  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: plain.deps })
-  assert.deepEqual(JSON.parse(written(plain.calls, '/task/lean.json')[2]).suite, { command: 'npm', args: ['test'], timeoutMs: 1800000 })
+test('the project suite and onboarded hash become the lean spec suite and onboarded (ADR-057)', async () => {
+  const project = projectFile('cargo test -p power-api')
+  const { deps, calls } = fakes({ project })
+  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
+  const spec = JSON.parse(written(calls, '/task/lean.json')[2])
+  assert.deepEqual(spec.suite, { command: 'cargo', args: ['test', '-p', 'power-api'], timeoutMs: 1800000 })
+  assert.equal(spec.onboarded, project.onboarded.hash)
+})
+
+test('start refuses when the selected lane base lacks the approved onboarding', async () => {
+  for (const [baseProject, reason] of [[null, 'not-onboarded'], ['{', 'onboarding-stale'], [projectFile('cargo test'), 'onboarding-stale'], [projectFile(), null]]) {
+    const root = scratchDir('start-base-onboarding-')
+    const repo = join(root, 'checkout')
+    mkdirSync(repo)
+    git(repo, 'init', '-b', 'main')
+    git(repo, 'config', 'user.email', 'test@example.test')
+    git(repo, 'config', 'user.name', 'Test')
+    writeFileSync(join(repo, 'initial'), 'initial')
+    mkdirSync(join(repo, 'crew'))
+    writeFileSync(join(repo, 'crew', 'agents.mjs'), '')
+    if (baseProject !== null) {
+      mkdirSync(join(repo, '.crew'))
+      writeFileSync(join(repo, '.crew', 'project.json'), typeof baseProject === 'string' ? baseProject : JSON.stringify(baseProject))
+    }
+    git(repo, 'add', '.')
+    git(repo, 'commit', '-m', 'base')
+    const baseCommit = git(repo, 'rev-parse', 'HEAD').trim()
+    git(repo, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main')
+    git(repo, 'checkout', '-b', 'feature')
+    mkdirSync(join(repo, '.crew'), { recursive: true })
+    writeFileSync(join(repo, '.crew', 'project.json'), JSON.stringify(projectFile()))
+    writeFileSync(join(repo, 'feature-only'), 'feature')
+    git(repo, 'add', '.crew/project.json', 'feature-only')
+    git(repo, 'commit', '-m', 'onboard feature')
+    const briefPath = join(root, 'b1.md')
+    writeFileSync(briefPath, BRIEF)
+    const calls = []
+    const deps = {
+      crewRoot: join(root, 'crew'), resolveAgents: () => ({ seats: {} }),
+      spawnSync: (file, args, options) => {
+        calls.push([file, args])
+        return file === 'git' ? spawnSync(file, args, { ...options, encoding: 'utf8' }) : { status: 0, stdout: 'issue body' }
+      },
+      spawnDetached: () => { calls.push(['launch']); return 1 }, log: () => {},
+    }
+    if (reason) {
+      await assert.rejects(startLane({ briefPath, checkout: repo, deps }), (error) => error instanceof StartRefusal && error.message.includes(reason) && error.message.includes('/onboard') && error.message.includes('main'))
+      assert.equal(calls.some(([file, args]) => file === 'launch' || args.includes('worktree')), false)
+      assert.equal(existsSync(join(root, 'crew')), false)
+      assert.equal(existsSync(join(root, 'dt-b1')), false)
+    } else {
+      const lane = await startLane({ briefPath, checkout: repo, deps })
+      assert.equal(git(repo, 'rev-parse', 'b1').trim(), baseCommit)
+      assert.equal(existsSync(join(lane.worktree, 'feature-only')), false)
+      assert.equal(JSON.parse(readFileSync(lane.specPath, 'utf8')).base, 'main')
+    }
+  }
+})
+
+test('crew start and --check refuse a checkout that is not onboarded or is stale, naming /onboard, and start nothing (ADR-057)', async () => {
+  for (const project of [null, { suite: 'npm test', proof: [] }, '{', { ...projectFile(), suite: 'cargo test' }, { ...projectFile(), proof: null }]) for (const check of [false, true]) {
+    const { deps, calls } = fakes({ project })
+    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps }), (e) => e instanceof StartRefusal && e.message.includes('/onboard') && e.message.includes(project === null || !Object.hasOwn(Object(project), 'onboarded') && typeof project !== 'string' ? 'not-onboarded' : 'onboarding-stale'))
+    assert.deepEqual(effects(calls), [])
+  }
 })
 
 test('crew start writes the brief generated paths and regenerate command into the lane spec, and no generated key when the brief declares neither', async () => {

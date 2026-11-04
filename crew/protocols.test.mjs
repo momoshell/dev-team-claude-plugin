@@ -14,7 +14,7 @@ const brief = (overrides = {}, body = BODY) => {
 }
 
 test('P1 vocabularies are the ADR-052 fields, tiers and shapes', () => {
-  assert.deepEqual(BRIEF_FIELDS, ['source', 'closes', 'mechanical', 'shape', 'out_of_scope', 'suite', 'generated', 'regenerate'])
+  assert.deepEqual(BRIEF_FIELDS, ['source', 'closes', 'mechanical', 'shape', 'out_of_scope', 'generated', 'regenerate'])
   assert.deepEqual(TIERS, ['mechanical', 'build', 'judge'])
   assert.deepEqual(SHAPES, ['standard', 'finish'])
   assert.ok(Object.isFrozen(SHAPES))
@@ -46,15 +46,8 @@ test('AR1 refuses the retired stepped shape', () => {
   assert.deepEqual(parseBrief(brief({ shape: 'stepped' })).defects, ['shape is one of standard, finish'])
 })
 
-// MUTATION: require suite like the other fields and every brief without it is refused; skip its check and a list passes.
-test('suite is an optional command line: absent is defect-free, a string parses, an empty or list value is refused (SB5, SB6)', () => {
-  assert.equal(Object.hasOwn(parseBrief(brief()).fields, 'suite'), false)
-  const cargo = parseBrief(brief({ suite: 'cargo test -p power-api' }))
-  assert.deepEqual(cargo.defects, [])
-  assert.equal(cargo.fields.suite, 'cargo test -p power-api')
-  for (const suite of ['', '[cargo, test]']) {
-    assert.deepEqual(parseBrief(brief({ suite })).defects, ['suite is a command line (for example: suite: cargo test -p power-api)'])
-  }
+test('a brief suite field is refused and points at onboarding (ADR-057)', () => {
+  for (const suite of ['cargo test', '', '[cargo, test]']) assert.deepEqual(parseBrief(brief({ suite })).defects, ['suite is not a brief field: the suite lives in .crew/project.json; run /onboard (ADR-057)'])
 })
 
 // MUTATION: require out_of_scope like the other fields and an absent field is refused.
@@ -65,12 +58,11 @@ test('out_of_scope is optional: absent parses with no defects and no field, an e
   assert.deepEqual(parseBrief(brief({ out_of_scope: '' })).defects, ['out_of_scope says what the lane must not change'])
 })
 
-test('a suite or regenerate line with a quote or backslash is refused', () => {
-  for (const key of ['suite', 'regenerate']) for (const char of ['"', "'", '\\']) {
-    const fields = key === 'suite' ? { suite: `npm ${char}test` } : { generated: '[a]', regenerate: `npm ${char}test` }
-    assert.ok(parseBrief(brief(fields)).defects.some((d) => d.includes(`${key} is split on whitespace`) && d.includes('without a shell')))
+test('a regenerate line with a quote or backslash is refused', () => {
+  for (const char of ['"', "'", '\\']) {
+    const fields = { generated: '[a]', regenerate: `npm ${char}test` }
+    assert.ok(parseBrief(brief(fields)).defects.some((d) => d.includes('regenerate is split on whitespace') && d.includes('without a shell')))
   }
-  assert.deepEqual(parseBrief(brief({ suite: '"npm test"' })).defects, [])
 })
 
 test('generated and regenerate are an optional pair: both parse, either alone, an empty list or a non-literal path is refused', () => {
@@ -95,7 +87,7 @@ test('a brief without frontmatter is refused', () => {
 // MUTATION: skip the unknown-field check and a misspelt field is silently ignored.
 test('unknown and missing fields are refused by name', () => {
   const { defects } = parseBrief(brief({ shape: undefined, lane: 'b1' }))
-  assert.ok(defects.includes('unknown field lane; the fields are source, closes, mechanical, shape, out_of_scope, suite, generated, regenerate'))
+  assert.ok(defects.includes('unknown field lane; the fields are source, closes, mechanical, shape, out_of_scope, generated, regenerate'))
   assert.ok(defects.includes('missing field shape'))
 })
 

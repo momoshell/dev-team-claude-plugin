@@ -114,6 +114,9 @@ function safePath(root, file, required) {
   return true
 }
 
+export const validProofEntry = (e) => e && typeof e === 'object' && !Array.isArray(e) && typeof e.match === 'string' && e.match.trim() && typeof e.run === 'string' && e.run.trim() && (!Object.hasOwn(e, 'setup') || (typeof e.setup === 'string' && e.setup.trim()))
+export const entryCommand = (run, values) => run.trim().split(/\s+/).map((token) => token.replace(/\{(file|title|report|stem)\}/g, (_, key) => values[key]))
+
 export async function proveTests(input = {}) {
   const unmeasured = (reason, rows = []) => ({ status: 'unmeasured', reason, rows })
   let tmp, added = null, result, rows = []
@@ -138,7 +141,7 @@ export async function proveTests(input = {}) {
           const config = JSON.parse(readFileSync(join(root, configPath), 'utf8'))
           if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('invalid config')
           entries = config.proof ?? (Object.hasOwn(config, 'proof') ? null : [])
-          if (!Array.isArray(entries) || !entries.every((e) => e && typeof e === 'object' && !Array.isArray(e) && typeof e.match === 'string' && e.match.trim() && typeof e.run === 'string' && e.run.trim() && (!Object.hasOwn(e, 'setup') || (typeof e.setup === 'string' && e.setup.trim())))) throw new Error('invalid proof')
+          if (!Array.isArray(entries) || !entries.every(validProofEntry)) throw new Error('invalid proof')
         }
       } catch { result = unmeasured('invalid-project-config', rows) }
       const runners = new Map()
@@ -166,7 +169,7 @@ export async function proveTests(input = {}) {
         for (const [side, dir] of [['base', root], ['build', cwd]]) {
           const report = join(tmp, `report-${i}-${side}.xml`)
           const values = { file: row.file, title: row.title, report, stem: basename(row.file, extname(row.file)) }
-          const [command, ...args] = entry.run.trim().split(/\s+/).map((token) => token.replace(/\{(file|title|report|stem)\}/g, (_, key) => values[key]))
+          const [command, ...args] = entryCommand(entry.run, values)
           const run = await runSuite({ cwd: dir, command, args, timeoutMs })
           if (run.status === 'unmeasured') { result = unmeasured(run.reason, rows); break }
           let events = null

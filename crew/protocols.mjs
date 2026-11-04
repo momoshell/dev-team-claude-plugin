@@ -5,7 +5,7 @@
 // path never loads the old one.
 
 export const ISSUE_SOURCE = /^issue ([1-9]\d*)$/
-export const BRIEF_FIELDS = Object.freeze(['source', 'closes', 'mechanical', 'shape', 'out_of_scope', 'suite', 'generated', 'regenerate'])
+export const BRIEF_FIELDS = Object.freeze(['source', 'closes', 'mechanical', 'shape', 'out_of_scope', 'generated', 'regenerate'])
 export const TIERS = Object.freeze(['mechanical', 'build', 'judge'])
 export const SHAPES = Object.freeze(['standard', 'finish'])
 export const AGENT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
@@ -77,6 +77,7 @@ export function parseBrief(text) {
     // ADR-055 §1: the planner, not the brief, writes criteria.
     if (pair[1] === 'acceptance') { defects.push('acceptance is not a brief field: the planner writes the criteria (ADR-055 §1)'); continue }
     if (pair[1] === 'tier') { defects.push('tier is not a brief field: use mechanical: true for a mechanical lane (ADR-055 §1)'); continue }
+    if (pair[1] === 'suite') { defects.push('suite is not a brief field: the suite lives in .crew/project.json; run /onboard (ADR-057)'); continue }
     if (!BRIEF_FIELDS.includes(pair[1])) { defects.push(`unknown field ${pair[1]}; the fields are ${BRIEF_FIELDS.join(', ')}`); continue }
     fields[pair[1]] = value(pair[2])
   }
@@ -90,7 +91,6 @@ export function parseBrief(text) {
   }
   if (!SHAPES.includes(fields.shape)) defects.push(`shape is one of ${SHAPES.join(', ')}`)
   if (Object.hasOwn(fields, 'out_of_scope') && (typeof fields.out_of_scope !== 'string' || !fields.out_of_scope)) defects.push('out_of_scope says what the lane must not change')
-  if (Object.hasOwn(fields, 'suite') && (typeof fields.suite !== 'string' || fields.suite.trim() === '')) defects.push('suite is a command line (for example: suite: cargo test -p power-api)')
   if (Object.hasOwn(fields, 'generated') !== Object.hasOwn(fields, 'regenerate')) defects.push('generated and regenerate must be declared together')
   if (Object.hasOwn(fields, 'generated') && !(Array.isArray(fields.generated) && fields.generated.length > 0 && fields.generated.every((path) => {
     if (typeof path !== 'string') return false
@@ -98,7 +98,7 @@ export function parseBrief(text) {
     return file !== '' && !file.startsWith('/') && !/[\\\0*?\[\]]/.test(file) && file.split('/').every((part) => part !== '' && part !== '.' && part !== '..' && part.toLowerCase() !== '.git')
   }))) defects.push('generated is a nonempty list of literal repo-relative paths')
   if (Object.hasOwn(fields, 'regenerate') && (typeof fields.regenerate !== 'string' || fields.regenerate.trim() === '' || fields.regenerate.includes('\0'))) defects.push('regenerate is a nonempty command line')
-  for (const key of ['suite', 'regenerate']) {
+  for (const key of ['regenerate']) {
     if (typeof fields[key] === 'string' && /["'\\]/.test(fields[key])) defects.push(`${key} is split on whitespace and run without a shell: quotes and backslashes are refused`)
   }
   const { parts, repeated, askQuotes } = sections(body, { includeFences: true })

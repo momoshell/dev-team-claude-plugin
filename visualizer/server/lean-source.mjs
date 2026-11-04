@@ -192,20 +192,22 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
     let last = rows.findLast((row) => row.event !== 'stage-end') ?? rows.at(-1)
     // `crew finish --accept` appends a `pr` row then a `finish-decision` row: a pr row after the last
     // finish-ready, followed only by those, is the lane's state.
+    const ready = rows.findLastIndex((row) => row.event === 'finish-ready')
     if (last?.event === 'finish-decision') {
       const tail = rows.findLast((row) => row.event !== 'stage-end' && row.event !== 'finish-decision')
-      const ready = rows.findLastIndex((row) => row.event === 'finish-ready')
-      if (tail?.event === 'pr' && isObject(tail.pr) && tail.index > ready) last = tail
+      // A returned finish can start or stop before its parent records the decision.
+      if ((tail?.event === 'pr' && isObject(tail.pr) && tail.index > ready)
+        || (last.choice === 'return' && ready >= 0 && tail?.index > ready)) last = tail
     }
     const terminalIndex = rows.findLastIndex((row) => row.event === 'finish-ready' || row.event === 'finish-decision')
     const terminal = rows[terminalIndex]
     if (error || !rows.length) {
       reason = error ?? (skipped_malformed ? 'task journal has no readable rows' : 'task journal is empty')
-    } else if (terminal?.event === 'finish-ready') {
+    } else if (terminal?.event === 'finish-ready' && !(last.event === VERDICT_EVENT && last.status === 'stopped' && last.index > terminalIndex)) {
       status = 'ready-for-operator'
     } else if (terminal?.choice === 'abandon') {
       status = 'abandoned'
-    } else if (terminal?.choice === 'return' && !rows.slice(terminalIndex + 1).some((row) => row.event === 'stage-start')) {
+    } else if (terminal?.choice === 'return' && !rows.slice(ready >= 0 ? ready + 1 : terminalIndex + 1).some((row) => row.event === 'stage-start' || (row.event === VERDICT_EVENT && row.status === 'stopped'))) {
       status = 'returned'
     } else if (last.event === VERDICT_EVENT) {
       status = nonEmpty(last.status) ? last.status : 'unknown'

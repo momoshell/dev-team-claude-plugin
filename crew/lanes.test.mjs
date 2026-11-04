@@ -28,7 +28,7 @@ function world() {
     const status = main(argv, { root, archiveRoot, stdout: (t) => out.push(t), stderr: (t) => err.push(t) })
     return { status, out: out.join(''), err: err.join('') }
   }
-  return { run, done: () => rmSync(home, { recursive: true, force: true }) }
+  return { run, lane: (name, rows) => lane(root, name, rows), done: () => rmSync(home, { recursive: true, force: true }) }
 }
 const lines = (text) => text.trim().split('\n')
 
@@ -107,6 +107,29 @@ test('a journal that cannot be read reports its unreadable-row count as null wit
     assert.equal(typeof row.unreadable_rows_reason, 'string')
     assert.notEqual(row.unreadable_rows_reason, '')
   } finally { rmSync(home, { recursive: true, force: true }) }
+})
+
+// MUTATION: let the finish decision hide a concurrent early stop and lanes loses the reason.
+test('a finish return preserves a concurrent stop in either order without reviving older stops', () => {
+  const w = world()
+  try {
+    const ready = { event: 'finish-ready' }, decision = { event: 'finish-decision', choice: 'return' }
+    const stop = { event: 'verdict', stage: null, status: 'stopped', reason: 'seat-unmeasured' }
+    const start = { event: 'stage-start', stage: 'build' }
+    for (const [name, rows, status, reason] of [
+      ['stop-first', [ready, stop, decision], 'stopped', 'seat-unmeasured'],
+      ['decision-first', [ready, decision, stop], 'stopped', 'seat-unmeasured'],
+      ['stop-after-ready', [ready, { ...stop, reason: 'invalid-input' }], 'stopped', 'invalid-input'],
+      ['returned', [stop, ready, decision], 'returned', null],
+      ['run-before-decision', [ready, stop, start, decision], 'running', null],
+      ['run-after-decision', [ready, decision, stop, start], 'running', null],
+    ]) {
+      w.lane(name, rows)
+      const row = JSON.parse(w.run(['--json']).out).find((r) => r.lane === name)
+      assert.equal(row.status, status, name)
+      assert.equal(row.reason, reason, name)
+    }
+  } finally { w.done() }
 })
 
 test('LP1 LP2 lanes shows the PR of an accepted finish and a finish-ready lane as ready-for-operator', () => {

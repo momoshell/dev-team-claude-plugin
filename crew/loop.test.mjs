@@ -348,7 +348,7 @@ test('a judge lane with no tech-lead seat stops seat-unmeasured at the start and
   for (const tier of ['judge', 'build']) {
     const f = fakes({ spec: { tier }, unseated: ['tech-lead'], edit: (v) => { if (v.role === 'planner') v.details.judge = 'needs review'; return v } })
     assert.deepEqual(await f.go(), stopped('seat-unmeasured'))
-    if (tier === 'judge') { assert.deepEqual(f.calls, []); assert.deepEqual(f.rows, []) }
+    if (tier === 'judge') { assert.deepEqual(f.calls, []); assert.deepEqual(f.rows, [{ event: 'verdict', lane: 'lane', stage: null, status: 'stopped', reason: 'seat-unmeasured', at: 0 }]) }
     else assert.equal(count(f, 'builder'), 0)
   }
 })
@@ -642,13 +642,13 @@ test('a suite timeout override reaches only the suite and absent overrides inher
 })
 
 // MUTATION: drop the suite timeout validation and an unsound override starts the lane.
-test('an invalid suite timeout override is refused before any dependency or journal effect', async () => {
+test('an invalid suite timeout override is refused before any dependency effect, with one stopped journal row', async () => {
   const invalid = [0, -1, 1.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1, '1800000', null, true, {}, []]
   for (const timeoutMs of invalid) {
     const f = fakes({ spec: { suite: { command: 'node', timeoutMs } } })
     assert.deepEqual(await f.go(), stopped('invalid-input'), String(timeoutMs))
     assert.deepEqual(f.calls, [])
-    assert.deepEqual(f.rows, [])
+    assert.deepEqual(f.rows, [{ event: 'verdict', lane: 'lane', stage: null, status: 'stopped', reason: 'invalid-input', at: 0 }])
     assert.equal(f.requests.length, 0)
   }
 })
@@ -1184,7 +1184,7 @@ test('the journal carries each envelope, verdict, check, commit and PR observati
 })
 
 // MUTATION: skip input validation and an unsupported or malformed lane starts effects.
-test('an unsupported shape, invalid input or unsound seam is refused before any effect', async () => {
+test('an unsupported shape, invalid input or unsound seam is refused before dependency effects', async () => {
   const cases = [
     [{ shape: 'stepped' }, 'unsupported-shape'], [{ shape: 'finish' }, 'invalid-input'], [{ shape: undefined }, 'unsupported-shape'],
     [{ tier: 'rigorous' }, 'invalid-input'], [{ id: '' }, 'invalid-input'], [{ cwd: 3 }, 'invalid-input'], [{ taskDir: undefined }, 'invalid-input'],
@@ -1197,15 +1197,18 @@ test('an unsupported shape, invalid input or unsound seam is refused before any 
   for (const [spec, reason] of cases) {
     const f = fakes({ spec })
     assert.deepEqual(await f.go(), stopped(reason), JSON.stringify(spec))
-    assert.deepEqual([f.calls, f.rows], [[], []])
+    assert.deepEqual(f.calls, [])
+    assert.deepEqual(f.rows, spec.id === '' || Object.hasOwn(spec, 'taskDir') && spec.taskDir === undefined ? [] : [{ event: 'verdict', lane: 'lane', stage: null, status: 'stopped', reason, at: 0 }])
   }
   for (const name of ['runSeat', 'journal', 'readFile', 'proveTests', 'openPullRequest', 'run']) {
     const f = fakes({ deps: { [name]: undefined } })
     assert.deepEqual(await f.go(), stopped('invalid-input'), name)
     assert.deepEqual(f.calls, [])
+    assert.deepEqual(f.rows, name === 'journal' ? [] : [{ event: 'verdict', lane: 'lane', stage: null, status: 'stopped', reason: 'invalid-input', at: 0 }])
   }
   assert.deepEqual(await runLoop(null, {}), stopped('invalid-input'))
-  assert.deepEqual(await runLoop(fakes().spec), stopped('invalid-input'))
+  const { status, reason, pr } = await runLoop(fakes().spec)
+  assert.deepEqual({ status, reason, pr }, stopped('invalid-input'))
 })
 
 // MUTATION: treat a missing role, a failed lookup or a bad bound as usable and the lane starts with a hole.
@@ -1236,7 +1239,7 @@ test('a task directory that cannot be made stops the lane before any seat', asyn
 test('every stopped reason is a member of the closed enum', async () => {
   assert.ok(Object.isFrozen(LOOP_REASONS))
   for (const reason of CHECK_REASONS) assert.ok(LOOP_REASONS.includes(reason))
-  for (const reason of ['unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'lead-escalated', 'lead-unavailable', 'lead-refused', 'round-bound', 'paths-unmeasured', 'no-progress']) assert.ok(LOOP_REASONS.includes(reason))
+  for (const reason of ['unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'lead-escalated', 'lead-unavailable', 'lead-refused', 'seat-escalated', 'round-bound', 'paths-unmeasured', 'no-progress']) assert.ok(LOOP_REASONS.includes(reason))
   const f = fakes({ suite: { status: 'red', reason: 'free text the enum has never heard of' } })
   assert.deepEqual(await f.go(), stopped('runner-threw'))
 })
@@ -1773,6 +1776,98 @@ test('a lead envelope with status insufficient and decision bounce gives the hel
   assert.equal(count(f, 'lead'), 1)
 })
 
+// MUTATION: drop the seat-escalated branch and the question stops round-bound.
+test('a finish review or finish suite-repair escalate with a question stops seat-escalated with that question and no lead consult (S1-4)', async () => {
+  const question = 'Keep or drop the public API?'
+  for (const mode of ['review', 'repair', 'insufficient', 'questionless']) {
+    let builds = 0
+    const edit = (v) => {
+      if (v.role === 'builder') builds++
+      if ((mode === 'repair' && v.role === 'builder' && builds === 2) || (mode !== 'repair' && v.role === 'reviewer')) {
+        v.status = mode === 'insufficient' ? 'insufficient' : 'escalate'
+        if (mode !== 'insufficient' && mode !== 'questionless') v.details.question = question
+      }
+      return v
+    }
+    const options = { spec: finishSpec(), unseated: ['planner'], edit }
+    const f = mode === 'repair' ? sequenced([redRun(), redRun()], options) : fakes(options)
+    assert.deepEqual(await f.go(), stopped(['insufficient', 'questionless'].includes(mode) ? 'round-bound' : 'seat-escalated'), mode)
+    assert.equal(count(f, 'lead'), 0)
+    if (!['insufficient', 'questionless'].includes(mode)) {
+      const observation = f.rows.findLast((r) => r.status === 'stopped').observation
+      assert.equal(observation.question, question)
+      assert.equal(observation.role, mode === 'repair' ? 'builder' : 'reviewer')
+      assert.equal(observation.reason, 'escalate')
+      assert.equal(observation.envelope.details.question, question)
+    }
+    assert.equal(f.calls.includes('commit'), false)
+    assert.equal(f.rows.some((r) => r.event === 'finish-ready'), false)
+  }
+})
+
+// MUTATION: restore the mechanical skip on the dropped-commit check.
+test('a mechanical lane whose publishing rebase drops its commit as already upstream stops nothing-to-commit without reproving or publishing (S1-5)', async () => {
+  for (const invalid of [false, true]) {
+    const f = moved({ rebase: answers({ ...MOVED, head: 'a'.repeat(40) }, invalid ? { ...MOVED, onto: undefined } : { ...MOVED, head: O, onto: O }), cleanHead: `${invalid ? MOVED.head : O}\n` })
+    assert.deepEqual(await f.go(), stopped(invalid ? 'runner-threw' : 'nothing-to-commit'))
+    assert.equal(f.calls.filter((c) => c === 'proof').length, 1)
+    assert.equal(f.calls.filter((c) => c === 'suite').length, 1)
+    assert.equal(f.calls.includes('uncommit'), false)
+    assert.equal(f.calls.includes('publish'), false)
+    if (!invalid) assert.deepEqual(f.rows.findLast((r) => r.status === 'stopped').observation, { head: O, onto: O, committed: 'a'.repeat(40) })
+  }
+})
+
+// MUTATION: drop the finish Scope line.
+test('a finish report labels its Lane counts as this finish run only and a standard PR body carries no such label (S1-7)', async () => {
+  const f = fakes({ spec: finishSpec(), unseated: ['planner'] })
+  assert.equal((await f.go()).status, 'done')
+  const label = '\n## Lane\n- Scope: this finish run only; earlier runs of this lane are unmeasured.\n- Wall time:'
+  assert.ok(JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body.includes(label))
+  assert.ok(f.rows.find((r) => r.event === 'finish-ready').body.includes(label))
+  const standard = fakes()
+  assert.equal((await standard.go()).status, 'done')
+  assert.equal(standard.seen.publish.body, BODY + LANE)
+  assert.doesNotMatch(standard.seen.publish.body, /- Scope:/)
+})
+
+// MUTATION: drop the early journal write.
+test('an early refusal journals one stopped verdict row with its reason, and none when the spec names no lane or task dir (D5)', async () => {
+  for (const [options, reason] of [
+    [{ spec: { shape: 'stepped' } }, 'unsupported-shape'],
+    [{ spec: { brief: '' } }, 'invalid-input'],
+    [{ spec: finishSpec({ turnOffset: -1 }) }, 'invalid-input'],
+    [{ deps: { runSeat: undefined } }, 'invalid-input'],
+    [{ unseated: ['builder'] }, 'seat-unmeasured'],
+    [{ deps: { resolveAgents: () => { throw new Error('unavailable') } } }, 'seat-unmeasured'],
+    [{ deps: { resolveAgents: () => ({ seats: { planner: { rounds: 0 }, builder: {}, reviewer: {} } }) } }, 'invalid-input'],
+  ]) {
+    const f = fakes(options)
+    assert.deepEqual(await f.go(), stopped(reason))
+    assert.deepEqual(f.calls, [])
+    assert.deepEqual(f.rows, [{ event: 'verdict', lane: 'lane', stage: null, status: 'stopped', reason, at: 0 }])
+  }
+  for (const options of [{ spec: { id: '' } }, { spec: { taskDir: undefined } }, { deps: { journal: undefined } }]) {
+    const f = fakes(options)
+    assert.deepEqual(await f.go(), stopped('invalid-input'))
+    assert.deepEqual(f.rows, [])
+  }
+  for (const journal of [() => { throw Object.assign(new Error('full'), { code: 'ENOSPC' }) }, async () => { throw Object.assign(new Error('full'), { code: 'ENOSPC' }) }]) {
+    const f = fakes({ spec: { brief: '' }, deps: { journal } })
+    assert.deepEqual(await f.go(), { ...stopped('invalid-input'), journal: { unwritten: 1, error: { code: 'ENOSPC', message: 'full' } } })
+  }
+  const taskDir = scratchDir('early-journal-')
+  const f = fakes({ spec: { taskDir, brief: '' } })
+  delete f.deps.journal
+  assert.deepEqual(await f.go(), stopped('invalid-input'))
+  assert.deepEqual(JSON.parse(readFileSync(join(taskDir, 'journal.jsonl'), 'utf8')), { event: 'verdict', lane: 'lane', stage: null, status: 'stopped', reason: 'invalid-input', at: 0 })
+  for (const now of [() => NaN, () => { throw new Error('clock') }]) {
+    const f = fakes({ spec: { brief: '' }, deps: { now } })
+    assert.deepEqual(await f.go(), stopped('invalid-input'))
+    assert.deepEqual(f.rows, [{ event: 'verdict', lane: 'lane', stage: null, status: 'stopped', reason: 'invalid-input' }])
+  }
+})
+
 const MOVED = { status: 'green', reason: null, head: 'b'.repeat(40), onto: 'c'.repeat(40) }
 const O = 'd'.repeat(40)
 // A check answering from a sequence (the last answer repeats), for proof and suite seams that must differ across calls.
@@ -1869,7 +1964,7 @@ test('a mechanical stop after a rebase that moved the head is finishable: crew f
       : variant === 'publish' ? { publish: { status: 'red', reason: 'exit-nonzero' } }
         : { suite: answers(green(), red), ...(variant === 'dropped' ? { rebase: { ...MOVED, head: MOVED.onto } } : {}) }
     const f = moved(options)
-    assert.deepEqual(await f.go(), stopped(variant === 'proof' ? 'proof-unproven' : 'exit-nonzero'), variant)
+    assert.deepEqual(await f.go(), stopped(variant === 'proof' ? 'proof-unproven' : variant === 'dropped' ? 'nothing-to-commit' : 'exit-nonzero'), variant)
     const root = scratchDir(), task = join(root, 'dt-lane', 'lane', 'task'), journal = join(task, 'journal.jsonl')
     mkdirSync(task, { recursive: true })
     writeFileSync(join(task, 'lean.json'), JSON.stringify({ ...f.spec, cwd: root }))

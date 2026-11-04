@@ -339,18 +339,6 @@ test('modelString refuses providers inherited from Object.prototype', () => {
   }
 })
 
-test('modelString refuses undeclared Object.prototype providers with a local register', () => {
-  const localProviders = { 'local-pi': { pi_provider: 'local-pi' } }
-  const names = ['toString', 'constructor', 'hasOwnProperty', 'valueOf']
-  for (const name of names) {
-    const expected = `adapter-pi: no pi provider for roster provider "${name}" (known: openai, anthropic, meta, local-pi) — refusing a guessed passthrough: pi synthesizes phantom models on narrowed lookups`
-    assert.throws(
-      () => modelString({ provider: name, id: 'x', localProviders }),
-      (error) => error.message === expected,
-    )
-  }
-})
-
 test('the seat\'s claude-named `tools` allowlist cannot influence a composed pi seat command', () => {
   let count = 0
   for (const shape of seatShapes()) {
@@ -397,13 +385,12 @@ test('ungranted pi seats disable extension and skill discovery across the full s
 })
 
 test('granted pi seats append deduped activators and checkout-pinned extension, skill, and config paths', () => {
-  const { args, env } = piSeatParts({ ...[...seatShapes()][0], grants: { tools: ['read', 'task', 'task'], extensions: ['/checkout/crew/pi/extensions/readgate.ts'], skills: ['/checkout/crew/pi/skills/scout.md'], agents: [], advisor: false }, configDir: '/checkout/crew/pi' })
+  const { args } = piSeatParts({ ...[...seatShapes()][0], grants: { tools: ['read', 'task', 'task'], extensions: ['/checkout/crew/pi/extensions/readgate.ts'], skills: ['/checkout/crew/pi/skills/scout.md'], agents: [], advisor: false } })
   assert.equal(args[args.indexOf('--tools') + 1], `${PI_BUILTIN_TOOLS.join(',')},task`)
   assert.ok(args.includes('--no-extensions'))
   assert.equal(args[args.indexOf('-e') + 1], '/checkout/crew/pi/extensions/readgate.ts')
   assert.equal(args[args.indexOf('--skill') + 1], '/checkout/crew/pi/skills/scout.md')
   assert.ok(args.includes('--no-skills'))
-  assert.equal(env.PI_CODING_AGENT_DIR, '/checkout/crew/pi')
   assert.equal(args.includes('--provider'), false)
 })
 
@@ -439,26 +426,26 @@ test('a granted pi tool cannot widen the deny boundary', () => {
   assert.equal(args[args.indexOf('--exclude-tools') + 1], 'edit')
 })
 
-test('modelString maps a local provider only when the register supplies its pi namespace', () => {
-  assert.equal(modelString({ provider: 'local-pi', id: 'qwen3-coder', localProviders: { 'local-pi': { pi_provider: 'local-pi' } } }), 'local-pi/qwen3-coder')
-  assert.throws(() => modelString({ provider: 'local-pi', id: 'qwen3-coder' }), /local-pi/)
+// MUTATION: restore localProviders lookup.
+test('modelString resolves only the fixed pi providers and ignores a local provider table', () => {
+  const localProviders = { 'local-pi': { pi_provider: 'local-pi' } }
+  for (const [provider, namespace] of Object.entries(PI_PROVIDERS)) assert.equal(modelString({ provider, id: 'x', localProviders }), `${namespace}/x`)
+  assert.throws(() => modelString({ provider: 'local-pi', id: 'x', localProviders }), /known: openai, anthropic, meta\)/)
 })
 
-test('modelString honours an own local provider named after Object.prototype', () => {
-  assert.equal(
-    modelString({ provider: 'hasOwnProperty', id: 'qwen3-coder', localProviders: { hasOwnProperty: { pi_provider: 'local-pi' } } }),
-    'local-pi/qwen3-coder',
-  )
+// MUTATION: restore configDir as the fallback.
+test('piSeatParts takes its agent directory only from an MCP grant, never from configDir', () => {
+  const spec = { role: 'builder', taskDir: '/tmp/task', configDir: '/legacy', model: 'm', promptFile: 'p' }
+  assert.equal(Object.hasOwn(piSeatParts(spec).env, 'PI_CODING_AGENT_DIR'), false)
+  assert.equal(piSeatParts({ ...spec, grants: { extensions: ['builtin:mcp'] } }).env.PI_CODING_AGENT_DIR, '/tmp/task/pi-agent/builder')
 })
 
-test('modelString handles null-prototype local provider registers', () => {
-  const localProviders = Object.create(null)
-  localProviders['local-pi'] = { pi_provider: 'local-pi' }
-  assert.equal(modelString({ provider: 'local-pi', id: 'qwen3-coder', localProviders }), 'local-pi/qwen3-coder')
-  assert.throws(
-    () => modelString({ provider: 'toString', id: 'x', localProviders }),
-    (error) => error.message === 'adapter-pi: no pi provider for roster provider "toString" (known: openai, anthropic, meta, local-pi) — refusing a guessed passthrough: pi synthesizes phantom models on narrowed lookups',
-  )
+// MUTATION: restore the binary path comparison in piFffEnv.
+test('piSeatParts turns readgate fff mode on for an fff grant at any binary path', () => {
+  const spec = { role: 'builder', taskDir: '/tmp/task', model: 'm', promptFile: 'p' }
+  const grants = { extensions: ['builtin:mcp'], mcp_servers: [{ name: 'fff', command: { bin: '/usr/local/bin/fff-mcp', args: [] }, url: null }] }
+  assert.equal(piSeatParts({ ...spec, grants }).env.CREW_FFF, '1')
+  assert.equal(piSeatParts({ ...spec, grants: { ...grants, extensions: [] } }).env.CREW_FFF, '0')
 })
 
 test('legacy F1: mcp_servers do not alter the seat command', () => {

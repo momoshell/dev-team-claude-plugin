@@ -10,12 +10,11 @@ export const CLAUDE_SEAT_SETTINGS = fileURLToPath(new URL('./claude-usage.settin
 
 const NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills: [], advisor: false, mcp_servers: [] })
 const FFF_MCP_NAME = 'fff'
-const FFF_MCP_BIN = '/opt/homebrew/bin/fff-mcp'
 export const FFF_HOOK_PATH = fileURLToPath(import.meta.url)
 
 export function hasFffGrant(grants = NO_GRANTS) {
   return Array.isArray(grants?.mcp_servers) && grants.mcp_servers.some((server) => (
-    server?.name === FFF_MCP_NAME && server?.command?.bin === FFF_MCP_BIN
+    server?.name === FFF_MCP_NAME
   ))
 }
 
@@ -257,32 +256,10 @@ export function assertSkillsMaterialised({ taskDir, role, grants } = {}) {
   }
 }
 
-function assertNoLocalProvider(configDir) {
-  if (configDir !== null && configDir !== undefined) {
-    throw Object.assign(
-      new Error(`adapter-claude cannot express local-provider configDir ${JSON.stringify(configDir)} — refusing to boot a silently weaker seat [grant-unsupported]`),
-      { reason: 'grant-unsupported' },
-    )
-  }
-}
-
-// The claude CLI accepts full model ids, so the roster's {provider,id} pair
-// needs no namespace prefix — the id IS the CLI's namespace.
-export function modelString({ provider, id, localProviders }) {
-  if (localProviders && typeof localProviders === 'object' && Object.hasOwn(localProviders, provider)) {
-    throw Object.assign(
-      new Error(`adapter-claude cannot express local provider ${JSON.stringify(provider)} — refusing to boot a silently weaker seat [grant-unsupported]`),
-      { reason: 'grant-unsupported' },
-    )
-  }
-  return id
-}
-
 export function acpLaunch(spec = {}) {
-  const { bin, claudeBin, cwd, model, tools, deny, effort, promptFile, role, taskDir, grants = NO_GRANTS, configDir, env = {} } = spec
+  const { bin, claudeBin, cwd, model, tools, deny, effort, promptFile, role, taskDir, grants = NO_GRANTS, env = {} } = spec
   assertSupportedGrants(grants)
   assertSkillsMaterialised({ role, taskDir, grants })
-  assertNoLocalProvider(configDir)
   if (typeof bin !== 'string' || !bin || !isAbsolute(bin)) {
     throw new Error(`adapter-claude.acpLaunch: bin must be a nonempty ABSOLUTE ACP path, got ${JSON.stringify(bin)}`)
   }

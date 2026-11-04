@@ -9,6 +9,7 @@ import {
   FFF_HOOK_PATH, CLAUDE_SEAT_SETTINGS, fffHookDecision,
   acpLaunch as claudeAcpLaunch,
 } from '../../adapters/adapter-claude.mjs'
+import * as claude from '../../adapters/adapter-claude.mjs'
 import { scratchDir } from '../../../test/helpers.mjs'
 
 const FFF_BIN = '/opt/homebrew/bin/fff-mcp'
@@ -35,6 +36,30 @@ function fffGrant() {
     mcp_servers: [{ name: 'fff', command: { bin: FFF_BIN, args: [] }, url: null }],
   }
 }
+
+// MUTATION: restore the fff binary comparison in hasFffGrant.
+test('claude acpLaunch arms fff tools and CREW_FFF for an fff grant at any binary path', () => {
+  const grants = fffGrant()
+  grants.mcp_servers[0].command.bin = '/usr/local/bin/fff-mcp'
+  const launch = claudeAcpLaunch({ bin: '/abs/acp', claudeBin: '/abs/claude', cwd: '/tmp', role: 'builder', model: 'sonnet', promptFile: '/tmp/p', taskDir: '/tmp/task', grants })
+  assert.equal(launch.env.CREW_FFF, '1')
+  assert.equal(launch.env.CREW_FFF_NODE, process.execPath)
+  assert.equal(launch.env.CREW_FFF_HOOK, FFF_HOOK_PATH)
+  for (const tool of ['mcp__fff__find_files', 'mcp__fff__grep', 'mcp__fff__multi_grep']) assert.ok(launch.sessionParams._meta.claudeCode.options.allowedTools.includes(tool))
+})
+
+// MUTATION: re-export claude modelString.
+test('the claude adapter exports no modelString', () => {
+  assert.equal(Object.hasOwn(claude, 'modelString'), false)
+})
+
+// MUTATION: restore assertNoLocalProvider(configDir).
+test('claude acpLaunch ignores configDir instead of refusing it', () => {
+  const spec = { bin: '/abs/acp', claudeBin: '/abs/claude', cwd: '/tmp', role: 'builder', model: 'sonnet', promptFile: '/tmp/p', taskDir: '/tmp/task', grants: NO_GRANT }
+  let launch
+  assert.doesNotThrow(() => { launch = claudeAcpLaunch({ ...spec, configDir: '/legacy' }) })
+  assert.deepEqual(launch, claudeAcpLaunch(spec))
+})
 
 test('fff-E1-refuse', () => {
   const gate = createReadGate({ env: { CREW_FFF: '1' }, hasUnquotedPipe: () => false })

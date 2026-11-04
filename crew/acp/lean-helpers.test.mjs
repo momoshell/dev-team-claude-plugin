@@ -3,15 +3,16 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { isAbsolute, join, resolve as resolvePath } from 'node:path'
 import {
-  CAPABILITY_REFUSALS, PI_AGENT_DIR_ENV, REGISTER_ROOT, SUBAGENT_EXTENSION, armGrants,
-  grantsFor, loadCapabilities, mergeMcpServers, pathExists, pathMessage, refuse,
+  CAPABILITY_REFUSALS, PI_AGENT_DIR_ENV, REGISTER_ROOT, armGrants,
+  grantsFor, loadCapabilities, pathExists, pathMessage, refuse,
   resolvedGrantPath, validateCapabilities,
 } from './grants.mjs'
+import { SUBAGENT_EXTENSION } from '../adapters/adapter-pi.mjs'
 import { parseAgent } from '../protocols.mjs'
 import { BriefUsageError, exportEntries } from './export-entries.mjs'
 import * as grants from './grants.mjs'
 
-const role = (over = {}) => ({ tools: ['Read'], extensions: [], agents: [], skills: [], advisor: false, requires: [], mcp_servers: [], ...over })
+const role = (over = {}) => ({ extensions: [], agents: [], mcp_servers: [], ...over })
 const never = () => { throw new Error('unreadable') }
 
 test('refuse stamps a closed reason and rejects an unknown one', () => {
@@ -99,34 +100,24 @@ test('loadCapabilities refuses every vendor extension declaration on a role or a
 // MUTATION: restore vendorRoots.
 test('the seat path ships no vendor grants, grant backing check, assignment parser or log helper', () => {
   for (const name of ['assertGrantsBacked', 'resolveVendorExtension', 'vendorRoots', 'VENDOR_ROOT_ENV']) assert.equal(name in grants, false)
-  for (const value of [grants.armGrants({ role: 'builder', agent: 'pi', extensions: [] }, { root: REGISTER_ROOT, exists: () => true }), grants.EMPTY_GRANTS])
+  for (const value of [grants.armGrants({ role: 'builder', agent: 'pi', extensions: [] }, { root: REGISTER_ROOT, exists: () => true })])
     for (const key of ['vendor_extensions', 'vendor_withheld']) assert.equal(Object.hasOwn(value, key), false)
   for (const name of ['assignment.mjs', 'log.mjs']) assert.equal(existsSync(join(REGISTER_ROOT, 'crew/acp', name)), false)
   assert.equal(PI_AGENT_DIR_ENV, 'PI_CODING_AGENT_DIR')
 })
 
-test('mergeMcpServers lets the overlay replace by name', () => {
-  const a = { name: 'a', command: null, url: 'u1' }
-  const b = { name: 'b', command: null, url: 'u2' }
-  assert.deepEqual(mergeMcpServers([a, b], [{ ...a, url: 'u3' }]), [{ ...a, url: 'u3' }, b])
-  assert.deepEqual(mergeMcpServers(), [])
-})
-
 test('grantsFor resolves valid grants and fails closed on missing paths', () => {
-  const register = { roles: { builder: role({ extensions: ['crew/pi/e.js'], skills: ['crew/pi/s.md'], agents: [{ name: 'Explore', def: 'crew/pi/a.json' }] }) } }
+  const register = { roles: { builder: role({ extensions: ['crew/pi/e.js'], agents: [{ name: 'Explore', def: 'crew/pi/a.json' }] }) } }
   const readFile = () => JSON.stringify({ name: 'Explore', prompt: 'go' })
   const grants = grantsFor(register, 'builder', { root: '/r', exists: () => true, readFile })
   assert.deepEqual(grants.extensions, [resolvePath('/r/crew/pi/e.js')])
-  assert.deepEqual(grants.skills, [resolvePath('/r/crew/pi/s.md')])
   assert.deepEqual(grants.agents, [{ name: 'Explore', def: resolvePath('/r/crew/pi/a.json') }])
-  assert.deepEqual(grants.tools, ['Read'])
   assert.equal(Object.isFrozen(grants.extensions), true)
   const refused = (over, reason) => assert.throws(
     () => grantsFor({ roles: { builder: role(over) } }, 'builder', { root: '/r', exists: () => false, readFile }),
     (err) => err.reason === reason && /at /.test(err.message),
   )
   refused({ extensions: ['crew/pi/nope.js'] }, 'extension-missing')
-  refused({ skills: ['crew/pi/nope.md'] }, 'unknown-skill')
   assert.throws(() => grantsFor(register, 'nobody', { root: '/r' }), (err) => err.reason === 'register-invalid')
   assert.throws(
     () => grantsFor(register, 'builder', { root: '/r', exists: () => true, readFile: () => '{not-json' }),
@@ -166,6 +157,63 @@ test('the committed reviewer definition grants subagent with scout', () => {
   }
 })
 
+// MUTATION: restore the hard-coded LEAN_FFF_BIN probe.
+test('armGrants arms fff from the register binary, not a hard-coded path', () => {
+  const server = { name: 'fff', command: { bin: '/usr/local/bin/fff-mcp', args: [] }, url: null }
+  const register = { roles: { builder: { agents: [], mcp_servers: [server] } } }
+  const spec = { role: 'builder', agent: 'pi', extensions: ['fff'] }
+  let armed
+  assert.doesNotThrow(() => { armed = armGrants(spec, { register, exists: (p) => p === server.command.bin }) })
+  assert.equal(armed.mcp_servers[0].command.bin, server.command.bin)
+  assert.throws(() => armGrants(spec, { register, exists: (p) => p === '/opt/homebrew/bin/fff-mcp' }), (error) => error.reason === 'extension-missing' && error.message.includes('/usr/local/bin/fff-mcp'))
+  server.command = null
+  server.url = 'http://x'
+  assert.throws(() => armGrants(spec, { register, exists: () => true }), (error) => error.reason === 'extension-missing' && error.message.includes('no command'))
+})
+
+// MUTATION: add unknown-skill back to the vocabulary.
+test('CAPABILITY_REFUSALS lists only the reasons the seat path throws', () => {
+  assert.deepEqual(CAPABILITY_REFUSALS, ['register-invalid', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'agent-def-invalid'])
+  assert.equal(Object.isFrozen(CAPABILITY_REFUSALS), true)
+})
+
+// MUTATION: re-export EMPTY_GRANTS.
+test('grants.mjs exports no mergeMcpServers, EMPTY_GRANTS or SUBAGENT_EXTENSION', () => {
+  for (const name of ['mergeMcpServers', 'EMPTY_GRANTS', 'SUBAGENT_EXTENSION']) assert.equal(Object.hasOwn(grants, name), false, name)
+})
+
+// MUTATION: restore skills in grantsFor's return.
+test('armGrants returns only extensions, agents and mcp_servers', () => {
+  assert.deepEqual(Object.keys(armGrants({ role: 'builder', agent: 'pi' })).sort(), ['agents', 'extensions', 'mcp_servers'])
+})
+
+// MUTATION: restore lead's pi fff overlay.
+test('the shipped register keeps one fff copy, on the planner pi overlay with scout, and no unread role fields', () => {
+  const roles = loadCapabilities().roles
+  const locations = []
+  for (const [name, spec] of Object.entries(roles)) {
+    for (const key of Object.keys(spec)) assert.ok(['agents', 'mcp_servers', 'by_agent'].includes(key), `${name}.${key}`)
+    if (spec.mcp_servers.some((server) => server.name === 'fff')) locations.push(`roles.${name}`)
+    for (const [agent, overlay] of Object.entries(spec.by_agent || {})) {
+      for (const key of Object.keys(overlay)) assert.ok(['agents', 'mcp_servers'].includes(key), `${name}.${agent}.${key}`)
+      if ((overlay.mcp_servers || []).some((server) => server.name === 'fff')) locations.push(`roles.${name}.by_agent.${agent}`)
+    }
+  }
+  assert.deepEqual(locations, ['roles.planner.by_agent.pi'])
+  assert.deepEqual(roles.planner.by_agent.pi.agents, [{ name: 'scout', def: 'crew/pi/agents/scout.json' }])
+})
+
+// MUTATION: restore tools in the role schema.
+test('the register schema refuses the deleted role and overlay fields', () => {
+  const source = JSON.parse(readFileSync(join(REGISTER_ROOT, 'crew/capabilities.json'), 'utf8'))
+  for (const [overlay, field, value] of [[false, 'tools', []], [false, 'requires', []], [false, 'advisor', false], [false, 'extensions', []], [false, 'skills', []], [true, 'extensions', []], [true, 'skills', []]]) {
+    const register = structuredClone(source)
+    const target = overlay ? register.roles.planner.by_agent.pi : register.roles.builder
+    target[field] = value
+    assert.throws(() => loadCapabilities({ register }), { reason: 'register-invalid' }, field)
+  }
+})
+
 test('exportEntries scans exports with lines, spans and signatures', () => {
   const rows = exportEntries("export { remoteThing as localThing } from './remote.mjs';\n", 'fixture.mjs')
   assert.equal(rows.length, 1)
@@ -202,4 +250,25 @@ test('BriefUsageError carries its name and reason', () => {
   assert.equal(err.reason, 'wrong-type')
   assert.equal(err instanceof Error, true)
   assert.equal(new BriefUsageError('x').reason, 'missing-line')
+})
+
+// MUTATION: drop the own-role pass in registeredAgents, so the first role that names an agent wins.
+test('a seat whose role defines its own agent gets that definition, not an earlier role\'s', () => {
+  const register = { roles: {
+    planner: { mcp_servers: [], by_agent: { pi: { agents: [{ name: 'scout', def: 'planner.json' }] } } },
+    reviewer: { mcp_servers: [], by_agent: { pi: { agents: [{ name: 'scout', def: 'reviewer.json' }] } } },
+    builder: { mcp_servers: [] },
+  } }
+  const readFile = () => JSON.stringify({ name: 'scout', prompt: 'look' })
+  const own = armGrants({ role: 'reviewer', agent: 'pi', extensions: ['subagent'] }, { register, root: '/repo', exists: () => true, readFile })
+  assert.deepEqual(own.agents, [{ name: 'scout', def: resolvePath('/repo/reviewer.json') }])
+  const fallback = armGrants({ role: 'builder', agent: 'pi', extensions: ['subagent'] }, { register, root: '/repo', exists: () => true, readFile })
+  assert.deepEqual(fallback.agents, [{ name: 'scout', def: resolvePath('/repo/planner.json') }])
+})
+
+// MUTATION: read spec.extensions without a default.
+test('grantsFor on a shipped role with no extensions field grants no extensions', () => {
+  const register = loadCapabilities()
+  assert.equal(Object.hasOwn(register.roles.builder, 'extensions'), false)
+  assert.deepEqual(grantsFor(register, 'builder', { exists: () => true }).extensions, [])
 })

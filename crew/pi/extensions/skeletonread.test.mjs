@@ -66,7 +66,7 @@ function staleAndCurrentEnvelopes(f) {
   latestEnvelope(f, 2, 'latest-marker', RUN_AT + 200)
 }
 
-test('SRA1', () => {
+test('SRA1 includes indexed signatures in a skeleton read', () => {
   const f = fixture({ plan: 'src/target.mjs:2-3\n' })
   writeFileSync(f.sourcePath, 'export function visible() {\n  return 1\n}\nline-4\nline-5\n')
   const result = skeleton(f).onToolResult(readEvent('src/target.mjs'), { cwd: f.root })
@@ -75,7 +75,7 @@ test('SRA1', () => {
   assert.match(result.content[0].text, /visible/)
 })
 
-test('SRA2', () => {
+test('SRA2 uses cited ranges from the latest current planner return', () => {
   const f = fixture({ plan: 'old-marker\nsrc/target.mjs:1-1\n' })
   staleAndCurrentEnvelopes(f)
   const text = skeleton(f).onToolResult(readEvent('src/target.mjs'), { cwd: f.root }).content[0].text
@@ -127,14 +127,14 @@ test('RV2-1 preserves oversized cited ranges and retrieve output', async () => {
   assert.match(hook.onToolResult(readEvent('src/large.mjs'), { cwd: f.root })?.content?.[0]?.text || '', /Skeleton read: src\/large\.mjs/)
 })
 
-test('RR1', async () => {
+test('RR1 retrieves the requested line range', async () => {
   const f = fixture({ maxLines: undefined })
   const tool = mod.createRetrieveTool({ taskDir: f.taskDir, cwd: f.root, env: f.env, deps: f.deps })
   const value = await tool.execute('r', { file: 'src/target.mjs', range: '2-4' }, null, null, { cwd: f.root })
   assert.equal(value, 'line-2\nline-3\nline-4')
 })
 
-test('RS1', async () => {
+test('RS1 retrieves each symbol without its sibling body', async () => {
   const f = fixture({ source: 'const first = () => { return "FIRST_BODY" }\nconst second = () => { return "SECOND_BODY" }\nexport { first, second }\n', plan: 'src/target.mjs:1-3\n', maxLines: undefined })
   const tool = mod.createRetrieveTool({ taskDir: f.taskDir, cwd: f.root, env: f.env, deps: f.deps })
   const value = await tool.execute('r', { file: 'src/target.mjs', symbol: 'first' }, null, null, { cwd: f.root })
@@ -149,7 +149,7 @@ test('RS1', async () => {
   assert.doesNotMatch(other, /FIRST_BODY/)
 })
 
-test('RF1', async () => {
+test('RF1 refuses retrieval outside the accepted scope', async () => {
   const f = fixture({ scope: ['src/target.mjs'], maxLines: undefined })
   writeFileSync(join(f.root, 'src', 'outside.mjs'), 'outside-body\n')
   const tool = mod.createRetrieveTool({ taskDir: f.taskDir, cwd: f.root, env: f.env, deps: f.deps })
@@ -157,29 +157,29 @@ test('RF1', async () => {
   assert.match(value, /refused/)
 })
 
-test('NC1', () => {
+test('NC1 reports when the accepted plan has no cited ranges', () => {
   const f = fixture({ plan: '', source: 'a\nb\nc\nd\n', maxLines: '2' })
   const text = skeleton(f).onToolResult(readEvent('src/target.mjs'), { cwd: f.root }).content[0].text
   assert.match(text, /\(no cited ranges in accepted plan\)/)
 })
 
-test('NF1', () => {
+test('NF1 omits uncited file lines from the skeleton', () => {
   const f = fixture({ plan: '', source: 'uncited-1\nuncited-2\nuncited-3\nuncited-4\n', maxLines: '2' })
   const text = skeleton(f).onToolResult(readEvent('src/target.mjs'), { cwd: f.root }).content[0].text
   assert.doesNotMatch(text, /1: uncited-1/)
 })
 
-test('UE1', () => {
+test('UE1 leaves reads at the threshold unchanged', () => {
   const f = fixture({ source: 'one\ntwo\nthree\n', maxLines: '3' })
   assert.equal(skeleton(f).onToolResult(readEvent('src/target.mjs'), { cwd: f.root }), undefined)
 })
 
-test('NE1', () => {
+test('NE1 leaves out of scope reads unchanged', () => {
   const f = fixture({ source: 'one\ntwo\nthree\nfour\n', scope: ['src/other.mjs'], maxLines: '2' })
   assert.equal(skeleton(f).onToolResult(readEvent('src/target.mjs'), { cwd: f.root }), undefined)
 })
 
-test('FB1', () => {
+test('FB1 records context failures and leaves the read unchanged', () => {
   const f = fixture({ source: 'one\ntwo\nthree\nfour\n', maxLines: '2' })
   const failures = []
   const result = skeleton(f, { loadContext: () => { throw new Error('injected failure') }, recordFailure: (row) => failures.push(row) })
@@ -189,25 +189,25 @@ test('FB1', () => {
   assert.match(failures[0].skeleton_read_failure, /injected failure/)
 })
 
-test('TC1', () => {
+test('TC1 reports the configured line threshold', () => {
   const f = fixture({ source: 'one\ntwo\nthree\nfour\n', maxLines: '2' })
   const text = skeleton(f).onToolResult(readEvent('src/target.mjs'), { cwd: f.root }).content[0].text
   assert.match(text, /Threshold: 2 lines/)
 })
 
-test('TP1', () => {
+test('TP1 displays the configured threshold in skeleton output', () => {
   const f = fixture({ source: 'one\ntwo\nthree\nfour\n', maxLines: '2' })
   const text = skeleton(f).onToolResult(readEvent('src/target.mjs'), { cwd: f.root }).content[0].text
   assert.match(text, /Threshold: 2 lines/)
 })
 
-test('TD1', () => {
+test('TD1 reports the default line threshold', () => {
   const f = fixture({ source: Array.from({ length: 351 }, (_, index) => `default-${index}`).join('\n') + '\n', maxLines: null })
   const text = skeleton(f).onToolResult(readEvent('src/target.mjs'), { cwd: f.root }).content[0].text
   assert.match(text, /Threshold: 350 lines/)
 })
 
-test('BS1', () => {
+test('BS1 includes the blind spot warning in skeleton output', () => {
   const f = fixture({ source: 'one\ntwo\nthree\nfour\n', maxLines: '2' })
   const text = skeleton(f).onToolResult(readEvent('src/target.mjs'), { cwd: f.root }).content[0].text
   assert.match(text, new RegExp(mod.BLIND_SPOT.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))

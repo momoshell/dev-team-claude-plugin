@@ -280,7 +280,7 @@ test('missing files, injected failures, and throwing recorders always allow', ()
   assert.doesNotThrow(() => assert.equal(call(throwingSink, 'read', { path: f.large }, f.root), undefined))
 })
 
-test('A1', () => {
+test('A1 blocks a sliding read with excess delivered overlap', () => {
   const f = fixture()
   const gate = gateFor(f)
   const first = { path: f.ranged, offset: 180, limit: 251 }
@@ -296,7 +296,7 @@ test('A1', () => {
   unchanged(sliding, before)
 })
 
-test('B1', () => {
+test('B1 admits a mostly new range without changing its input', () => {
   const f = fixture()
   const gate = gateFor(f)
   const first = { path: f.ranged, offset: 1, limit: 10 }
@@ -309,7 +309,7 @@ test('B1', () => {
   unchanged(mostlyNew, before)
 })
 
-test('C1', () => {
+test('C1 explains refusal of a fully delivered range', () => {
   const f = fixture()
   const gate = gateFor(f)
   const first = { path: f.ranged, offset: 10, limit: 20 }
@@ -321,7 +321,7 @@ test('C1', () => {
   assert.equal(result?.reason, expected)
 })
 
-test('C2', () => {
+test('C2 blocks partial overlap and reports delivered lines', () => {
   const f = fixture()
   const gate = gateFor(f)
   const first = { path: f.ranged, offset: 10, limit: 20 }
@@ -439,7 +439,7 @@ test('ranged inspection and result failures fail open', () => {
   assert.match(resultRows[0].read_gate_failure.reason, /result snapshot boom/)
 })
 
-test('D1', () => {
+test('D1 admits a repeated range after the file changes', () => {
   const f = fixture()
   const gate = gateFor(f)
   const first = { path: f.ranged, offset: 10, limit: 20 }
@@ -452,7 +452,7 @@ test('D1', () => {
   unchanged(repeat, before)
 })
 
-test('E1', () => {
+test('E1 records overlap and covering turns for refusals', () => {
   const f = fixture()
   const rows = []
   const gate = gateFor(f, { deps: { recordFailure: (row) => rows.push(row) } })
@@ -502,7 +502,7 @@ test('E1', () => {
   })
 })
 
-test('E2', () => {
+test('E2 admits a whole read at the line threshold', () => {
   const f = fixture()
   const gate = gateFor(f)
   const input = { path: f.edge }
@@ -511,7 +511,7 @@ test('E2', () => {
   unchanged(input, before)
 })
 
-test('F1', () => {
+test('F1 enforces the whole read threshold for planner and tech lead', () => {
   const f = fixture()
   for (const role of ['planner', 'tech-lead']) {
     const gate = gateFor(f, { role })
@@ -530,7 +530,7 @@ test('F1', () => {
   }
 })
 
-test('F2', () => {
+test('F2 admits a piped cat command unchanged', () => {
   const f = fixture()
   const gate = gateFor(f)
   const input = { command: `cat '${f.large}' | grep large` }
@@ -539,7 +539,7 @@ test('F2', () => {
   unchanged(input, before)
 })
 
-test('F3', () => {
+test('F3 admits unrelated tools unchanged', () => {
   const f = fixture()
   const gate = gateFor(f)
   const input = { value: f.large, nested: { keep: true } }
@@ -548,7 +548,7 @@ test('F3', () => {
   unchanged(input, before)
 })
 
-test('G1', () => {
+test('G1 admits grep and retrieve without taking snapshots', () => {
   const f = fixture()
   let snapshots = 0
   const gate = gateFor(f, { deps: { snapshotFile: () => { snapshots += 1; throw new Error('unexpected snapshot') } } })
@@ -563,7 +563,7 @@ test('G1', () => {
   assert.equal(snapshots, 0)
 })
 
-test('G2', () => {
+test('G2 leaves no readgate state file after a delivery', () => {
   const f = fixture()
   const before = readdirSync(f.root).sort()
   const gate = gateFor(f)
@@ -574,7 +574,7 @@ test('G2', () => {
   assert.equal(existsSync(join(f.root, 'readgate-state')), false)
 })
 
-test('H1', () => {
+test('H1 pins measured repeat overlap thresholds', () => {
   const source = readFileSync(new URL('./readgate.ts', import.meta.url), 'utf8')
   assert.match(source, /const REPEAT_OVERLAP_THRESHOLD = 0\.15/)
   assert.match(source, /Measured after landing: 10 sessions, 558 ranged reads; 15% would refuse 192\/558 \(34\.4%\)\./)
@@ -598,14 +598,14 @@ test('RV1-1 keeps H1 threshold measurements checkout-contained', () => {
   const result = spawnSync(process.execPath, [
     '--test',
     '--test-reporter=tap',
-    '--test-name-pattern=^H1$',
+    '--test-name-pattern=^H1 pins measured repeat overlap thresholds$',
     new URL('./readgate.test.mjs', import.meta.url).pathname,
   ], {
     encoding: 'utf8',
     env: { ...env, CREW_TASK_DIR: '/nonexistent-task-dir' },
   })
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
-  assert.match(result.stdout, /^ok \d+ - H1$/m)
+  assert.match(result.stdout, /^ok \d+ - H1 pins measured repeat overlap thresholds$/m)
 })
 
 test('RV1-1 truncation metadata admits the untruncated tail', () => {
@@ -623,7 +623,7 @@ test('RV1-1 truncation metadata admits the untruncated tail', () => {
   unchanged(tail, tailBefore)
 })
 
-test('I1', () => {
+test('I1 includes the file path in repeat refusal', () => {
   const f = fixture()
   const gate = gateFor(f)
   const first = { path: f.edge, offset: 1, limit: 20 }
@@ -633,7 +633,7 @@ test('I1', () => {
   assert.match(repeat.reason, new RegExp(f.edge.replace(/[.*+?^${}()|[\\]\\]/g, '\\\\$&')))
 })
 
-test('I2', () => {
+test('I2 includes the requested range in repeat refusal', () => {
   const f = fixture()
   const gate = gateFor(f)
   const first = { path: f.edge, offset: 1, limit: 20 }
@@ -643,7 +643,7 @@ test('I2', () => {
   assert.match(repeat.reason, /range 5-8/)
 })
 
-test('I3', () => {
+test('I3 includes the delivery turn in repeat refusal', () => {
   const f = fixture()
   const gate = gateFor(f)
   gate.onTurnStart({ type: 'turn_start', turnIndex: 4 })
@@ -773,7 +773,7 @@ function handedFixture() {
   return { ...f, brief, wrapper, long: readFileSync(brief, 'utf8'), short: 'x\n'.repeat(400) }
 }
 
-test('RB1', () => {
+test('RB1 exempts handed briefs and aliases from whole read caps', () => {
   // MUTATION: disable the whole handed-read result bypass; the actual full text is capped.
   const f = handedFixture(), gate = gateFor(f)
   const input = { path: f.brief }
@@ -793,7 +793,7 @@ test('RB1', () => {
   assert.equal(call(gate, 'read', { path: alias }, f.root), undefined)
 })
 
-test('RB2', () => {
+test('RB2 exempts handed briefs from cat head and tail limits', () => {
   // MUTATION: remove the per-operand handed-file skip before cat bytes / head-tail lines.
   const f = handedFixture(), gate = gateFor(f)
   for (const command of ['cat', 'head', 'tail']) {
@@ -803,7 +803,7 @@ test('RB2', () => {
   }
 })
 
-test('RB3', () => {
+test('RB3 exempts task files and briefs but refuses other large files', () => {
   // MUTATION: disable the direct real-parent exemption; decision-1.md is refused.
   const f = handedFixture(), gate = gateFor(f)
   const decision = join(f.taskDir, 'decision-1.md'), other = join(f.root, 'other.md')
@@ -816,7 +816,7 @@ test('RB3', () => {
   for (const taskDir of ['', join(f.root, 'missing')]) refusal(call(gateFor(f, { taskDir }), 'read', { path: other }, f.root), other, 400)
 })
 
-test('RB4', () => {
+test('RB4 refuses large files outside direct task and handed brief exemptions', () => {
   // MUTATION: widen direct-parent equality to startsWith; subdir and sibling become exempt.
   const f = handedFixture(), gate = gateFor(f)
   const paths = [join(f.root,'elsewhere','task','big.md'), join(f.taskDir+'-x','big.md'), join(f.taskDir,'nested','big.md'), join(f.root,'other.md'), join(f.root,'ignored.md')]
@@ -829,7 +829,7 @@ test('RB4', () => {
   refusal(call(gate, 'read', { path: paths[4] }, f.root), paths[4], 400)
 })
 
-test('RB5', () => {
+test('RB5 refreshes handed brief exemptions when wrappers change', () => {
   // MUTATION: recognise only r1 wrappers; the post-construction r2 brief is refused.
   const f = handedFixture(), gate = gateFor(f), second = join(f.root, 'second.md')
   writeFileSync(second, f.long)
@@ -841,7 +841,7 @@ test('RB5', () => {
   assert.equal(call(gate, 'read', { path: f.brief }, f.root), undefined)
 })
 
-test('RB6', () => {
+test('RB6 refuses oversized direct cat output', () => {
   // MUTATION: remove direct cat byte refusal.
   const d = byteFixture({ lines: 100, width: 300 })
   const blocked = call(d.gate, 'bash', { command: `cat '${d.path}'` }, d.root)
@@ -849,7 +849,7 @@ test('RB6', () => {
   assert.match(blocked.reason, /30000 bytes/)
 })
 
-test('RB7', () => {
+test('RB7 caps an oversized first line at a valid utf8 prefix', () => {
   // MUTATION: return the full oversized first line.
   const d = byteFixture({ lines: 1, width: 30000 })
   const { output } = resultFor(d, { limit: 1 })
@@ -859,7 +859,7 @@ test('RB7', () => {
   assert.ok(Buffer.from(prefix).toString('utf8') === prefix)
 })
 
-test('RB8', () => {
+test('RB8 caps oversized read results without a pending range', () => {
   // MUTATION: apply the result cap only when a ranged read is pending.
   const d = byteFixture({ lines: 100, width: 300 })
   const { output } = resultFor(d, { range: false, id: 'rb8-no-pending' })

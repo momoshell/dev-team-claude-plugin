@@ -142,7 +142,7 @@ test('M2 loadMap refuses a map with an unknown key', () => {
   const dir = fixture(); writeMap(dir, { ...JSON.parse(readFileSync(join(dir, MAP_PATH))), surprise: true })
   assert.deepEqual(loadMap(dir), { ok: false, reason: 'map-schema' })
 })
-test('G1', () => {
+test('G1 matches recursive globs within the requested directory', () => {
   assert.equal(matchGlob('crew/**/*.mjs', 'crew/lean.mjs'), true)
   assert.equal(matchGlob('crew/**/*.mjs', 'crew/acp/seat.mjs'), true)
   assert.equal(matchGlob('crew/**/*.mjs', 'crewx/a.mjs'), false)
@@ -150,7 +150,7 @@ test('G1', () => {
 })
 test('U1 loadMap refuses an unparseable map', () => { const dir = fixture(); writeFileSync(join(dir, MAP_PATH), '{'); assert.deepEqual(loadMap(dir), { ok: false, reason: 'map-unparseable' }) })
 // MUTATION GH1: restore the PreToolUse entry in hooks/hooks.json and the zero-keys assertion reddens.
-test('GH1', () => { const hooks = JSON.parse(readFileSync(join(ROOT, MANIFEST), 'utf8')); assert.equal(typeof hooks.hooks, 'object'); assert.notEqual(hooks.hooks, null); assert.equal(Array.isArray(hooks.hooks), false); assert.deepEqual(Object.keys(hooks.hooks), []) })
+test('GH1 the plugin hook manifest registers no hooks', () => { const hooks = JSON.parse(readFileSync(join(ROOT, MANIFEST), 'utf8')); assert.equal(typeof hooks.hooks, 'object'); assert.notEqual(hooks.hooks, null); assert.equal(Array.isArray(hooks.hooks), false); assert.deepEqual(Object.keys(hooks.hooks), []) })
 // MUTATION GH2: delete the README sentence 'The plugin registers no hooks.' and the docs assertions redden.
-test('GH2', () => { const adr = readFileSync(join(ROOT, 'docs/adr/adr-050-seat-skills-are-granted-not-pasted.md'), 'utf8'); const readme = readFileSync(join(ROOT, 'README.md'), 'utf8'); const index = readFileSync(join(ROOT, 'docs/adr/README.md'), 'utf8'); const flat = (s) => s.replace(/\s+/g, ' '); assert.ok(adr.split('\n').includes('## Operator decisions (2026-10-17)')); assert.ok(adr.indexOf('## Operator decisions (2026-10-17)') > adr.indexOf('## Operator decisions (2026-10-16)')); for (const phrase of ['The plugin registers no Claude Code hook.', 'The operator session is never gated.', 'Seats receive skills through role packs (inline) and native grants.', 'Any claude-seat enforcement under section 5 needs a new seat-scoped mechanism.']) assert.ok(flat(adr).includes(phrase), phrase); assert.ok(flat(readme).includes('The plugin registers no hooks.')); assert.ok(flat(index).includes('amended 2026-10-17 (the plugin registers no Claude Code hook)')) })
-test('Z1', () => { const source = readFileSync(join(ROOT, SCRIPT), 'utf8'); for (const match of source.matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)) assert.ok(match[1].startsWith('node:')) })
+test('GH2 the ADR and readmes document the no hook decision', () => { const adr = readFileSync(join(ROOT, 'docs/adr/adr-050-seat-skills-are-granted-not-pasted.md'), 'utf8'); const readme = readFileSync(join(ROOT, 'README.md'), 'utf8'); const index = readFileSync(join(ROOT, 'docs/adr/README.md'), 'utf8'); const flat = (s) => s.replace(/\s+/g, ' '); assert.ok(adr.split('\n').includes('## Operator decisions (2026-10-17)')); assert.ok(adr.indexOf('## Operator decisions (2026-10-17)') > adr.indexOf('## Operator decisions (2026-10-16)')); for (const phrase of ['The plugin registers no Claude Code hook.', 'The operator session is never gated.', 'Seats receive skills through role packs (inline) and native grants.', 'Any claude-seat enforcement under section 5 needs a new seat-scoped mechanism.']) assert.ok(flat(adr).includes(phrase), phrase); assert.ok(flat(readme).includes('The plugin registers no hooks.')); assert.ok(flat(index).includes('amended 2026-10-17 (the plugin registers no Claude Code hook)')) })
+test('Z1 the skill gate imports only node modules', () => { const source = readFileSync(join(ROOT, SCRIPT), 'utf8'); for (const match of source.matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)) assert.ok(match[1].startsWith('node:')) })

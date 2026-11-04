@@ -16,7 +16,7 @@ const falsification = `${review}/references/falsification.md`
 const section = (text, heading) => text.split(`## ${heading}`)[1]?.split('\n## ')[0] ?? ''
 
 // MUTATION: replace the universal description with a repository-specific one.
-test('QG1', () => {
+test('QG1 test writing skill gives universal guidance', () => {
   const skill = read(`${qa}/SKILL.md`)
   assert.ok(flat(skill).includes('Writes and reviews tests in any repository.'))
   assert.doesNotMatch(skill, /this (?:repo|domain)|node --test|gate\.mjs/i)
@@ -24,7 +24,7 @@ test('QG1', () => {
 })
 
 // MUTATION: replace the node single-test runner with a syntax check.
-test('QG2', () => {
+test('QG2 test writing references show targeted red green runs', () => {
   const skill = read(`${qa}/SKILL.md`)
   for (const [name, command, api] of [['node-test', 'node --test --test-name-pattern', 'node:assert/strict'], ['cargo-test', 'cargo test tests::adds_numbers -- --exact', 'assert_eq!'], ['vitest', 'vitest run math.test.ts -t', "from 'vitest'"]]) {
     assert.ok(skill.includes(`references/${name}.md`))
@@ -34,7 +34,7 @@ test('QG2', () => {
 })
 
 // MUTATION: point the labelled evidence link at a repository source file.
-test('QG3', () => {
+test('QG3 repository evidence is linked and isolated from generic guidance', () => {
   const skill = read(`${qa}/SKILL.md`), evidencePath = `${qa}/references/dev-team-evidence.md`
   assert.equal(skill.split('[dev-team repository evidence](references/dev-team-evidence.md)').length, 2)
   const evidence = read(evidencePath)
@@ -44,7 +44,7 @@ test('QG3', () => {
 })
 
 // MUTATION: append a tripwire declaration instruction to the scope heading.
-test('SX1', () => {
+test('SX1 test writing guidance avoids tripwire declarations and orchestrator gates', () => {
   for (const file of docs(qa)) {
     const text = flat(read(file))
     assert.doesNotMatch(text, /\b(?:declar(?:e|es|ed|ing|ation(?:s)?)|list(?:s|ed|ing)?|enumerat(?:e|es|ed|ing))\b.{0,110}\btripwires?\b|\btripwires?\b.{0,80}\bdeclar(?:e|es|ed|ing|ation(?:s)?)\b/i, file)
@@ -53,7 +53,7 @@ test('SX1', () => {
 })
 
 // MUTATION: add a deleted vocabulary as an exhibit.
-test('SX2', () => {
+test('SX2 test writing evidence uses current repository vocabulary', () => {
   const all = docs(qa).map(read).join('\n')
   for (const name of ['guardedKill', 'MODIFIER_KINDS', 'openRun', 'foldRpcUsage', 'SHADOW_ABSENT', 'USAGE_ABSENT_CAUSES', 'CREW_BREAKER_THRESHOLD', 'KNOWN_FLAGS']) assert.ok(!all.includes(name), name)
   for (const name of ['proveMutations', 'CHECK_REASONS', 'crew/checks.mjs']) assert.ok(all.includes(name), name)
@@ -64,12 +64,12 @@ test('SX2', () => {
 })
 
 // MUTATION: append a path with a line number to the evidence heading.
-test('SX3', () => {
+test('SX3 backend skill avoids file line citations', () => {
   for (const file of docs(backend)) assert.doesNotMatch(read(file), /[A-Za-z0-9_./-]+\.[A-Za-z][A-Za-z0-9_-]*:\d+(?:[-–]\d+)?|`:\d+(?:[-–]\d+)?/, file)
 })
 
 // MUTATION: append a missing review recipe to the falsification heading.
-test('SX4', () => {
+test('SX4 review skill references resolve within the repository', () => {
   for (const file of docs(review)) {
     const text = read(file)
     const tokens = new Set(text.match(/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*\.(?:mjs|cjs|js|ts|jsonl|json|md|yaml|yml|txt)\b/g) ?? [])
@@ -85,7 +85,7 @@ test('SX4', () => {
 })
 
 // MUTATION: replace the impact floor with a style-only finding rule.
-test('SX5', () => {
+test('SX5 review findings require user operator data or security impact', () => {
   const text = read(falsification), prose = flat(section(text, 'Falsify before you write'))
   assert.ok(prose.includes('Report a finding only when its wrong outcome reaches a user, an operator, data, or a security boundary.'))
   assert.ok(prose.includes('A preference, wording, or style point alone is not a finding.'))
@@ -93,7 +93,7 @@ test('SX5', () => {
 })
 
 // MUTATION: permit reporting a variant covered by a recorded ruling.
-test('SX6', () => {
+test('SX6 review rulings cover variants across rounds', () => {
   assert.ok(flat(section(read(falsification), 'Rulings persist across rounds')).includes("Do not report a variant that a recorded ruling's rationale already covers."))
 })
 

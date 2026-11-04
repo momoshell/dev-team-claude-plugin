@@ -71,7 +71,7 @@ test("A1/B1: visualizer build is a release-time check, not a lane gate", () => {
   assert.notDeepEqual(oldErrors, [])
 })
 
-test('OD3', () => {
+test('OD3 install documents the marketplace and derived plugin commands', () => {
   // MUTATION OD3: alter the marketplace-add command in README.md and the derived install line no longer matches.
   const installLine = `/plugin install ${marketplace.plugins[0].name}@${marketplace.name}`
   const installIdx = readme.indexOf('## Install')
@@ -83,7 +83,7 @@ test('OD3', () => {
   assert.ok(install.includes(installLine), `Install misses ${installLine}`)
 })
 
-test('OD4', () => {
+test('OD4 install documents the main ref checkout and crew paths', () => {
   // MUTATION OD4: rename --checkout in README.md and the Install section no longer names the checkout flag.
   assert.equal(marketplace.plugins[0].source.ref, 'main')
   const install = docSection(readme, '## Install')
@@ -172,7 +172,7 @@ test('S4-10: lane-brief examples name no roster', () => {
   assert.doesNotMatch(read('skills/lane-brief/SKILL.md'), /roster/i)
 })
 
-test('OD5', () => {
+test('OD5 onboarding links to install and names plugin commands', () => {
   // MUTATION OD5: retarget README.md#install to README.md#setup in SKILL.md and the Installing link no longer reaches Install.
   const installing = docSection(onboardSkill, '## Installing')
   assert.ok(installing.includes('/plugin marketplace add momoshell/dev-team-claude-plugin'))
@@ -180,14 +180,14 @@ test('OD5', () => {
   assert.ok(installing.includes('README.md#install'))
 })
 
-test('RD3', () => {
+test('RD3 reseat documentation keeps raw overrides when exhausted', () => {
   // MUTATION RD3: replacing keeps with drops hides the reseat drift.
   const line = crewReadme.split('\n').find((line) => line.includes('keeps a raw override'))
   assert.ok(line, 'missing reseat sentence')
   assert.ok(line.includes('exhausted'), 'reseat sentence must name exhausted')
 })
 
-test('RM1', () => {
+test('RM1 the repo map names the skill gate and no factory importers', () => {
   // MUTATION RM1: renaming a factory importer in the crew bullet hides the drift.
   const names = readdirSync(join(ROOT, 'crew')).filter((name) => name.endsWith('.mjs') && !name.endsWith('.test.mjs') && !name.endsWith('-fixtures.mjs') && !name.endsWith('-test-helpers.mjs'))
   const derived = names.filter((name) => {
@@ -202,7 +202,7 @@ test('RM1', () => {
   assert.equal(readme.includes('three production modules'), false)
 })
 
-test('RM2', () => {
+test('RM2 the repo map names the crew CLI hooks and visualizer', () => {
   // MUTATION RM2: renaming visualizer/ in What is in this repo hides the drift.
   const section = docSection(readme, "## What's in this repo")
   for (const token of ['`bin/crew.mjs`', '`hooks/`', '`visualizer/`']) {
@@ -210,7 +210,7 @@ test('RM2', () => {
   }
 })
 
-test('RM3', () => {
+test('RM3 install names crew update stable and link mode', () => {
   // MUTATION RM3: renaming crew update in Install hides the operator-setup drift.
   const install = docSection(readme, '## Install')
   for (const token of ['crew update', 'dev-team-stable', 'link-mode']) {

@@ -418,7 +418,7 @@ test('a cancelled session refuses another prompt without sending a frame', () =>
   } finally { forget(run) }
 })
 
-test('B1', () => {
+test('B1 accepts a new prompt after prompt cancellation settles', () => {
   const run = replay('pi-cancel.ndjson', { nonblocking: true, cancelOnFirstUpdate: 'prompt', keepOpen: true })
   try {
     let cancelledTurn = null
@@ -428,7 +428,7 @@ test('B1', () => {
     assert.ok(run.sent.some((frame) => frame.method === 'session/prompt' && frame.params.prompt[0].text === 'next'))
   } finally { run.api.close(); forget(run) }
 })
-test('B2', () => {
+test('B2 sends cancellation as an idless session notification', () => {
   const run = replay('pi-cancel.ndjson', { nonblocking: true, cancelOnFirstUpdate: 'prompt', keepOpen: true })
   try {
     const cancel = run.sent.find((frame) => frame.method === 'session/cancel')
@@ -656,7 +656,7 @@ test('start leaves a file at the legacy in-crew command path in place', () => {
   }
 })
 
-test('E1', () => {
+test('E1 uses the shared seat command path and handles a dead group', () => {
   const root = scratchDir('acp-e1-parity-')
   const parityRuntime = scratchDir('acp-runtime-')
   try {
@@ -1020,7 +1020,7 @@ test('RV1-2 retains EPIPE and the number of partial bytes written', () => {
   } finally { f.cleanup() }
 })
 
-test('RV1-1', () => {
+test('RV1-1 creates the seat command directory on startup', () => {
   const root = scratchDir('acp-rv1-1-')
   const rvRuntime = scratchDir('acp-runtime-')
   let clock = 0

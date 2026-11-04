@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { readFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -187,7 +188,11 @@ out_of_scope: everything else
   const forbidden = (name) => () => { effects.push(name); throw new Error(`unexpected effect: ${name}`) }
   const deps = {
     transcriptRoot: '/virtual/no-transcripts',
-    readFileSync: (file) => { assert.equal(file, briefPath); return brief },
+    readFileSync: (file) => {
+      if (file === briefPath) return brief
+      assert.equal(file, '/virtual/checkout/.crew/project.json')
+      return JSON.stringify({ suite: 'npm test', proof: [], onboarded: { hash: createHash('sha256').update(JSON.stringify(['npm test', []])).digest('hex') } })
+    },
     resolveAgents: () => { resolutions++; return { seats: {}, advisor: null } },
     existsSync: forbidden('existsSync'), mkdirSync: forbidden('mkdirSync'),
     writeFileSync: forbidden('writeFileSync'), openSync: forbidden('openSync'),
@@ -195,7 +200,7 @@ out_of_scope: everything else
     spawnDetached: forbidden('spawnDetached'), log: () => {},
   }
   let result, error
-  try { result = await startLane({ briefPath, check: true, deps }) } catch (caught) { error = caught }
+  try { result = await startLane({ briefPath, checkout: '/virtual/checkout', check: true, deps }) } catch (caught) { error = caught }
   return { result, error, effects, resolutions }
 }
 

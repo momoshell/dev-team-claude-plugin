@@ -1,15 +1,14 @@
 ---
 name: crew-onboard
 description: >-
-  Load when installing this plugin somewhere new, or when pointing lean crew
-  lanes at a checkout: install the plugin, choose the checkout's suite command
-  and put it in the brief suite field.
+  Load when installing this plugin somewhere new or calibrating a checkout for
+  lean crew lanes.
 ---
 
 # Onboarding a checkout
 
-The knowledge skills work in any repo the moment the plugin is installed. Lean
-lanes need a git checkout and a brief that names how to prove it.
+The knowledge skills work in any repo once the plugin is installed. Lean lanes
+also require a calibrated git checkout.
 
 `commands/onboard.md` names this skill; the procedure lives here.
 
@@ -20,20 +19,52 @@ lanes need a git checkout and a brief that names how to prove it.
 /plugin install dev-team@dev-team
 ```
 
-For what the install brings and what the crew runtime needs, see the [README Install section](../../README.md#install).
-
-If you only want the skills, stop here: no lane is needed.
+For runtime requirements, see the [README Install section](../../README.md#install).
+If you only want the skills, stop here.
 
 ## Onboarding a checkout for lean lanes
 
-1. The target must be a git checkout; `crew start` refuses otherwise, or take
-   `--checkout <dir>` (`crew/start.mjs`).
-2. Pick the command that proves the checkout, for example `npm test` or
-   `cargo test -p power-api`, and run it once by hand on a clean tree.
-3. Put it in the brief's `suite:` field. Absent means `npm test`. The command is
-   split on whitespace and run without a shell, so no pipes or `&&`.
-4. Write the brief with the `lane-brief` skill (`skills/lane-brief/SKILL.md`).
-5. Validate with `crew start <brief> --check`; it needs no checkout. Then
-   `crew start <brief>` from inside the checkout starts the lane. `crew` on `PATH`
-   is a launcher you set up; installing the plugin does not add one. Without it,
-   run `node <dev-team clone>/bin/crew.mjs start <brief> --checkout <target>`.
+1. Pick the checkout's suite command, such as `npm test`, and run it on a clean
+   tree. Commands are split on whitespace without a shell; quotes, backslashes,
+   pipes and shell operators cannot be used as shell syntax.
+2. Write a draft JSON file outside the checkout. Set `suite` to that command and
+   `proof` to an array of runner entries. Node's built-in test runner is the
+   default for JavaScript tests, so use `proof: []` if it covers all proof tests.
+3. For each other runner, add `match` (a file glob), optional `setup`, `run`, and
+   `calibrate`. The latter holds `file` (a literal relative path matched first
+   by this entry), `text` (the throwaway test source), and distinct `pass` and
+   `fail` test titles. The source must contain a passing test and a test that
+   fails in its own body. The runner must write JUnit XML to `{report}`. Its
+   command can use `{file}`, `{title}`, `{report}` and `{stem}` as substitutions.
+   Setup and run commands are whitespace-split without a shell. For example:
+
+   ```json
+   {
+     "suite": "npm test",
+     "proof": [{
+       "match": "probe/**",
+       "run": "node --test --test-reporter=junit --test-reporter-destination={report} {file}",
+       "calibrate": {
+         "file": "probe/calibrate.mjs",
+         "text": "import { test } from 'node:test'\nimport assert from 'node:assert/strict'\ntest('passes', () => {})\ntest('fails', () => assert.fail())\n",
+         "pass": "passes",
+         "fail": "fails"
+       }
+     }]
+   }
+   ```
+
+4. Run `crew onboard --check <draft.json> --checkout <dir>`. It runs each probe
+   in a scratch worktree and writes `.crew/project.json` only when the passing
+   title reads green and the failing title reads red by JUnit `<failure>`.
+   Correct any reported failure and retry. No probe is left in the checkout.
+5. Commit `.crew/project.json` on the local base branch selected by `origin/HEAD`
+   before starting a lane. The checkout and base must have matching onboarding;
+   proof reads runner entries from the lane's old-source worktree. Re-run
+   onboarding after changing the suite or proof entries. Write a brief with
+   `skills/lane-brief/SKILL.md`, then run `crew start <brief> --check` and
+   `crew start <brief>` in the checkout. The start checks the base; `--check`
+   checks only the checkout.
+
+`crew` on `PATH` is a launcher you set up; installing the plugin does not add
+one. Without it, run `node <dev-team clone>/bin/crew.mjs` with the same verbs.

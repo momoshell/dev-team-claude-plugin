@@ -10,6 +10,7 @@ import { openPullRequest } from './checks.mjs'
 import { LOOP_REASONS } from './loop.mjs'
 import { validateEnvelope } from './protocols.mjs'
 import { recordPr } from './record-pr.mjs'
+import { projectHash } from './onboard.mjs'
 
 const FINDING = { id: 'R1', severity: 'must-fix', location: 'lib.mjs:1', summary: 'Fix the defect' }
 const MUTATION = { check: 'A1', file: 'lib.mjs', find: 'old', replace: 'new' }
@@ -579,7 +580,7 @@ test('a launch that fails releases its claim, so a retry after the fix spawns', 
 
 // ---- decisions on a ready lane ----
 const PR = { number: 73, url: 'https://github.com/o/r/pull/73' }
-function ready(extra = [], { before = [], legacy = false } = {}) {
+function ready(extra = [], { before = [], legacy = false, spec = {} } = {}) {
   const f = fixture({ rows: [
     { event: 'run-start', stage: null },
     { event: 'envelope', role: 'planner', id: 'lane9.planner.1', parsed: PLANNER, defects: [], error: null },
@@ -592,6 +593,8 @@ function ready(extra = [], { before = [], legacy = false } = {}) {
       : { event: 'finish-ready', stage: null, status: 'ready-for-operator', head: 'b'.repeat(40), subject: 'fix(crew): planned lane', body: 'MEASURED BODY', reviewRounds: 2 },
     ...extra,
   ] })
+  const specPath = join(f.taskDir, 'lean.json')
+  writeFileSync(specPath, JSON.stringify({ ...JSON.parse(readFileSync(specPath, 'utf8')), ...spec }))
   const published = [], spawned = []
   const deps = {
     openPullRequest: async (input) => { published.push(input); return { status: 'green', reason: null, pr: PR } },
@@ -604,6 +607,35 @@ function ready(extra = [], { before = [], legacy = false } = {}) {
   return { f, published, spawned, rowsOf, decide, deps }
 }
 const reasonOf = async (promise) => { try { await promise } catch (e) { return e.reason } return null }
+
+test('--accept refuses a gated lane whose worktree is not onboarded and publishes nothing; a pre-gate lane publishes and abandon is never gated (ADR-057)', async () => {
+  for (const [spec, choice, reason] of [[{ onboarded: 'hash' }, 'accept', 'not-onboarded'], [{}, 'accept', null], [{ onboarded: 'hash' }, 'abandon', null]]) {
+    const r = ready([], { spec })
+    try {
+      const before = r.rowsOf()
+      assert.equal(await reasonOf(r.decide(choice)), reason)
+      assert.equal(r.published.length, choice === 'accept' && reason === null ? 1 : 0)
+      if (reason) assert.deepEqual(r.rowsOf(), before)
+    } finally { cleanup(r.f) }
+  }
+})
+
+// MUTATION: drop the comparison with spec.onboarded and a recalibrated project file publishes a lane started under another onboarding.
+test('--accept refuses a gated lane whose calibrated project file differs from the onboarding it started under, and publishes when they match (ADR-057)', async () => {
+  const project = { suite: 'npm test', proof: [] }
+  const hash = projectHash(project)
+  for (const [started, reason] of [['a'.repeat(64), 'onboarding-stale'], [hash, null]]) {
+    const r = ready([], { spec: { onboarded: started } })
+    try {
+      mkdirSync(join(r.f.base, 'worktree', '.crew'), { recursive: true })
+      writeFileSync(join(r.f.base, 'worktree', '.crew', 'project.json'), JSON.stringify({ ...project, onboarded: { hash } }))
+      const before = r.rowsOf()
+      assert.equal(await reasonOf(r.decide('accept')), reason)
+      assert.equal(r.published.length, reason === null ? 1 : 0)
+      if (reason) assert.deepEqual(r.rowsOf(), before)
+    } finally { cleanup(r.f) }
+  }
+})
 
 // MUTATION: publish another title or body than the measured one, or drop the notes heading, and the PR text is not what was measured.
 test('--accept publishes the measured subject and body, notes under their own heading, then records the pr and the decision (FD3, FD4, FD5)', async () => {
@@ -882,7 +914,7 @@ test('--return writes no mutation declarations or gate path into finish.json', a
 test('FinishRefusal accepts only a reason in the frozen FINISH_REASONS list', () => {
   const reasons = finishModule.FINISH_REASONS
   assert.ok(Array.isArray(reasons))
-  assert.deepEqual(reasons, ['finish-unreadable', 'finish-worktree', 'finish-premise', 'finish-running', 'finish-published', 'finish-committed', 'finish-no-build', 'finish-not-ready', 'finish-decided', 'finish-head-moved', 'finish-publish', 'finish-rounds-spent'])
+  assert.deepEqual(reasons, ['finish-unreadable', 'finish-worktree', 'finish-premise', 'finish-running', 'finish-published', 'finish-committed', 'finish-no-build', 'finish-not-ready', 'finish-decided', 'finish-head-moved', 'finish-publish', 'finish-rounds-spent', 'not-onboarded', 'onboarding-stale'])
   assert.ok(Object.isFrozen(reasons))
   assert.equal(new Set(reasons).size, reasons.length)
   for (const reason of reasons) assert.equal(new FinishRefusal(reason, 'x').reason, reason)

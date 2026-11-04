@@ -32,6 +32,7 @@ import { FINISH_REVIEW_ROUNDS, composeLanePrBody, openPullRequest, runSuite, wit
 import { LANE, isObject } from './lane-core.mjs'
 import { TIERS, validateEnvelope } from './protocols.mjs'
 import { deadRun, probeAlive, writeRunPid } from './run-pid.mjs'
+import { OnboardRefusal, requireOnboarded } from './onboard.mjs'
 
 const HOME = dirname(dirname(fileURLToPath(import.meta.url)))
 const LEAN = join(HOME, 'crew', 'lean.mjs')
@@ -39,6 +40,7 @@ const LEAN = join(HOME, 'crew', 'lean.mjs')
 export const FINISH_REASONS = Object.freeze([
   'finish-unreadable', 'finish-worktree', 'finish-premise', 'finish-running', 'finish-published', 'finish-committed',
   'finish-no-build', 'finish-not-ready', 'finish-decided', 'finish-head-moved', 'finish-publish', 'finish-rounds-spent',
+  'not-onboarded', 'onboarding-stale',
 ])
 
 export class FinishRefusal extends Error {
@@ -325,6 +327,16 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
     if (priorReviewRounds >= FINISH_REVIEW_ROUNDS) throw new FinishRefusal('finish-rounds-spent', `lane ${lane} has spent its finish review rounds`)
   }
 
+  if (choice === 'accept' && Object.hasOwn(spec, 'onboarded')) {
+    requireWorktree(d, spec)
+    let project
+    try { project = requireOnboarded(spec.cwd, d.readFileSync) } catch (error) {
+      if (error instanceof OnboardRefusal) throw new FinishRefusal(error.reason, error.message)
+      throw error
+    }
+    // A calibrated file the lane did not start under is still a different onboarding.
+    if (project.hash !== spec.onboarded) throw new FinishRefusal('onboarding-stale', `lane ${lane} started under onboarding ${spec.onboarded}; the worktree's .crew/project.json is ${project.hash}: run /onboard and start the lane again`)
+  }
   const claim = claimDecision(d, lane, taskDir, readyAt)
   try {
     const notes = typeof file === 'string' ? readText(d, file, choice === 'return' ? 'the guidance file' : 'the notes file') : null

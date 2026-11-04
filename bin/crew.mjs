@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // crew — run the deployed crew from any folder.
 //
+//   crew onboard --check <draft.json>  calibrate project proof runners (ADR-057)
 //   crew start <brief.md>        run crew/start.mjs: start a lane from a P1 brief (ADR-052)
 //   crew show <lane> [<role>] [--json]  read a lane's recorded sessions (crew/show.mjs)
 //   crew record-pr <lane> --pr <url>  record the PR a stopped lean lane was hand-finished in (crew/record-pr.mjs)
@@ -23,7 +24,7 @@ export function crewHome(env = process.env, self = fileURLToPath(import.meta.url
   return env.CREW_HOME ? resolve(env.CREW_HOME) : dirname(dirname(realpathSync(self)))
 }
 
-const ENTRY = { start: 'crew/start.mjs', show: 'crew/show.mjs', 'record-pr': 'crew/record-pr.mjs', closeout: 'crew/closeout.mjs', finish: 'crew/finish.mjs', lanes: 'crew/lanes.mjs' }
+const ENTRY = { onboard: 'crew/onboard.mjs', start: 'crew/start.mjs', show: 'crew/show.mjs', 'record-pr': 'crew/record-pr.mjs', closeout: 'crew/closeout.mjs', finish: 'crew/finish.mjs', lanes: 'crew/lanes.mjs' }
 const MAX_BUFFER = 16 * 1024 * 1024
 const GIT_TIMEOUT_MS = 300_000
 const PGREP_TIMEOUT_MS = 10_000
@@ -121,7 +122,7 @@ function main(argv = process.argv.slice(2), env = process.env) {
   if (verb === 'viz') { const vizEnv = env.DEVTEAM_VIZ_CHECKOUT ? env : { ...env, DEVTEAM_VIZ_CHECKOUT: process.cwd() }; return run(process.execPath, ['--env-file-if-exists=.env.local', 'visualizer/server/server.mjs', ...rest], { cwd: home, env: vizEnv }) }
   const entry = Object.hasOwn(ENTRY, verb) ? ENTRY[verb] : null
   if (entry) return run(process.execPath, [join(home, entry), ...rest])
-  process.stderr.write(`crew: unknown verb ${JSON.stringify(verb ?? '')}; expected start, show, record-pr, closeout, finish, lanes, viz, where or update\n`)
+  process.stderr.write(`crew: unknown verb ${JSON.stringify(verb ?? '')}; expected onboard, start, show, record-pr, closeout, finish, lanes, viz, where or update\n`)
   return 2
 }
 

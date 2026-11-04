@@ -76,8 +76,7 @@ Field rules (the validator refuses anything else):
 - `mechanical` (optional): write `mechanical: true` only when the issue shows no behaviour to judge and names none of the protected paths: `crew/loop.mjs`, `crew/checks.mjs`, `crew/finish.mjs`, `crew/lean.mjs`, `crew/proof.mjs`, `crew/proof-reporter.mjs`, `crew/protocols.mjs`, `crew/acp/grants.mjs`, `hooks/`, `crew/agents/`, `.github/workflows/`, and `docs/adr/` (ADR-055 §7). Without it the lane runs the build loop. Judge is reached only by the planner's `judge` reason or a path raise. A `tier` line is refused.
 - `shape`: `standard` only. `finish` is not started from a brief.
 - `out_of_scope` (optional): what the lane must not change. Absent means none.
-- `suite` (optional): the command line the lean lane runs as its suite, for example `suite: cargo test -p power-api`.
-  Absent, the lane runs `npm test`. The line is split on whitespace without a shell; quotes and backslashes are refused, so an argument cannot contain a space.
+- The suite lives in `.crew/project.json`, not the brief; run `/onboard` to calibrate it.
 - `generated` and `regenerate` (optional, declared together): list literal repo-relative tracked files or directories
   (a trailing `/` marks a directory), for example `generated: [docs/api.json, dist/]`, and give a command line
   such as `regenerate: npm run generate`. The line is split on whitespace without a shell; quotes and backslashes are refused, so an argument cannot contain a space. On a rebase conflict limited to those paths, the lane takes the base

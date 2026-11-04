@@ -3,7 +3,7 @@
 // The lean entry (ADR-052 phase 1): one P1 brief in, one running lane out. It checks the
 // brief, creates the lane worktree and starts the run detached, handing the brief to the
 // planner as its whole input. No compile, no baseline, no gate. The lane name is the
-// brief's file name. --check validates the brief and needs no checkout.
+// brief's file name. --check validates the brief and the checkout's onboarding.
 //
 // The start stands on the brief parser and the agent definitions alone. It refuses before any
 // git call when the brief is not P1 or the definitions do not resolve.
@@ -17,6 +17,7 @@ import { ISSUE_SOURCE, parseBrief } from './protocols.mjs'
 import { resolveAgents } from './agents.mjs'
 import { writeRunPid } from './run-pid.mjs'
 import { askProvenance, readOperatorMessages } from './brief-provenance.mjs'
+import { OnboardRefusal, requireOnboarded } from './onboard.mjs'
 
 const HOME = dirname(dirname(fileURLToPath(import.meta.url)))
 const LEAN = join(HOME, 'crew', 'lean.mjs')
@@ -68,7 +69,7 @@ function git(d, checkout, args) {
   return result.status === 0 ? String(result.stdout).trim() : null
 }
 
-// A brief's `suite` line as a spec command: whitespace-split, no shell.
+// A project command as a spec command: whitespace-split, no shell.
 function suiteSpec(suite) {
   const [command, ...args] = suite.trim().split(/\s+/)
   return { command, args, timeoutMs: 1800000 }
@@ -93,10 +94,14 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
   const tier = fields.mechanical === true ? 'mechanical' : 'build'
   let resolved
   try { resolved = d.resolveAgents(tier) } catch (cause) { throw new StartRefusal(`cannot resolve the agent definitions: ${cause.message}`, { cause }) }
-  if (check) { logLine(`crew start: brief ok lane=${lane} tier=${tier} shape=${fields.shape} closes=${fields.closes ?? 'none'}`); return { lane, fields, checked: true } }
-
   checkout ??= git(d, process.cwd(), ['rev-parse', '--show-toplevel'])
   if (!checkout) throw Object.assign(new StartRefusal('not inside a git checkout; pass --checkout <dir>'), { exitCode: 2 })
+  let project
+  try { project = requireOnboarded(checkout, d.readFileSync) } catch (error) {
+    if (error instanceof OnboardRefusal) throw new StartRefusal(error.message, { cause: error })
+    throw error
+  }
+  if (check) { logLine(`crew start: brief ok lane=${lane} tier=${tier} shape=${fields.shape} closes=${fields.closes ?? 'none'}`); return { lane, fields, checked: true } }
   const worktree = join(dirname(checkout), `dt-${lane}`)
   const crewDir = join(d.crewRoot, `dt-${lane}`, lane)
   if (d.existsSync(crewDir)) throw new StartRefusal(`crew lane directory ${crewDir} already exists; pick another lane name or close that lane out`)
@@ -115,6 +120,21 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
     })
   })
   if (missing.length) throw new StartRefusal(`brief ${briefPath} could not verify ## Context paths on ${base} (ADR-056 Amendment 1); they may be missing, symlinks, submodules, or the git check may have failed:\n- ${missing.join('\n- ')}`)
+  const baseCommit = git(d, checkout, ['rev-parse', '--verify', `${base}^{commit}`])
+  if (!baseCommit) throw new StartRefusal(`cannot resolve lane base ${base}`)
+  const entry = git(d, checkout, ['ls-tree', baseCommit, '--', '.crew/project.json'])
+  const config = /^100(?:644|755) blob [0-9a-f]+\t\.crew\/project\.json$/.test(entry ?? '')
+    ? git(d, checkout, ['show', `${baseCommit}:.crew/project.json`]) : null
+  try {
+    const baseProject = requireOnboarded(checkout, () => {
+      if (config === null) throw Object.assign(new Error('missing'), { code: 'ENOENT' })
+      return config
+    })
+    if (baseProject.hash !== project.hash) throw new OnboardRefusal('onboarding-stale')
+  } catch (error) {
+    if (error instanceof OnboardRefusal) throw new StartRefusal(`lane base ${base}: ${error.message}; commit the approved .crew/project.json to ${base} before starting`, { cause: error })
+    throw error
+  }
   let ask = null
   const issue = ISSUE_SOURCE.exec(fields.source)
   if (issue) {
@@ -124,7 +144,7 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
     ask = String(result.stdout)
   }
   const run = runBrief(text, fields.closes, ask)
-  if (git(d, checkout, ['worktree', 'add', '-b', lane, worktree, base]) === null) throw new StartRefusal(`git worktree add -b ${lane} ${worktree} ${base} failed in ${checkout}`)
+  if (git(d, checkout, ['worktree', 'add', '-b', lane, worktree, baseCommit]) === null) throw new StartRefusal(`git worktree add -b ${lane} ${worktree} ${base} failed in ${checkout}`)
 
   // The run reads a snapshot, so editing the draft cannot change a running lane.
   const started = join(d.crewRoot, 'briefs', 'started')
@@ -148,7 +168,7 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
   const spec = {
     id: lane, cwd: worktree, taskDir, tier, shape: fields.shape, brief: run,
     source: fields.source, branch: lane, base, closes: fields.closes === null ? [] : [fields.closes],
-    suite: fields.suite === undefined ? { command: 'npm', args: ['test'], timeoutMs: 1800000 } : suiteSpec(fields.suite),
+    suite: suiteSpec(project.suite), onboarded: project.hash,
     ...(fields.generated === undefined ? {} : { generated: { paths: fields.generated, ...suiteSpec(fields.regenerate) } }),
   }
   try {
@@ -192,7 +212,7 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     process.stderr.write('usage: crew start <brief.md> [--check] [--checkout <dir>]\n')
     return 2
   }
-  // --check needs no checkout, and a real start finds one only after the brief passes.
+  // Resolve the checkout only after the brief passes.
   const checkout = flags['--checkout'] ? resolve(flags['--checkout']) : null
   try {
     await startLane({ briefPath: resolve(rest[0]), checkout, check: flags['--check'] ?? false, deps })

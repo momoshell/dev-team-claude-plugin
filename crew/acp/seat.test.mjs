@@ -83,6 +83,7 @@ async function replaySeat(name, options = {}) {
       }
     }
     if (!Object.hasOwn(frame, 'id') || !frame.method) return
+    if (frame.method === 'session/prompt') options.onPrompt?.(frame)
     if (frame.method === 'session/prompt' && (!options.permissionsOnlyFirst || prompts++ === 0)) {
       options.permissions?.forEach((toolCall, i) => {
         for (const update of [toolCall?._update].flat().filter(Boolean)) appendFileSync(stream, `${JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'fixture', update } })}\n`)
@@ -1626,7 +1627,7 @@ function advisorChild(hang = false) {
   return child
 }
 
-async function museAdvisorConsult(kind, inspect, fixtureName = 'pi-turn') {
+async function museAdvisorConsult(kind, inspect, fixtureName = 'pi-turn', extra = () => ({})) {
   const root = scratchDir('muse-consult-'), taskDir = join(root, 'task'), cwd = join(root, 'work')
   mkdirSync(taskDir); mkdirSync(cwd); leanLane(taskDir)
   writeFileSync(join(cwd, 'a.mjs'), 'grounded condition\n')
@@ -1640,7 +1641,7 @@ async function museAdvisorConsult(kind, inspect, fixtureName = 'pi-turn') {
   ]
   let clock = 0
   try {
-    await use(fixtureName, { agent: 'muse', model: 'meta/muse-spark-1.3', cwd, taskDir, permissionsOnlyFirst: true, delayPrompt: true,
+    await use(fixtureName, { agent: 'muse', model: 'meta/muse-spark-1.3', cwd, taskDir, permissionsOnlyFirst: true, delayPrompt: true, ...extra(taskDir),
       definition: { role: 'builder', wait_s: 1, advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' } },
       permissions: [{ toolCallId: 'fire', _update: updates }],
       deps: { now: () => clock, sleep: (ms) => { clock += ms }, wait: async (ms) => { clock += ms; await new Promise(setImmediate) }, advisorDeps: { spawn: () => advisorChild(kind === 'timeout'), consultTimeoutMs: kind === 'timeout' ? 10 : 5000, childKillGraceMs: 10 } },
@@ -1666,6 +1667,14 @@ test('a muse builder advisor pre-return verdict settles before the seat returns,
     assert.equal(prompts.length, 2)
     assert.match(prompts[1].params.prompt[0].text, /guard handles a grounded edge case/)
   })
+})
+
+test('a muse return the seat rewrites after a blocked pre-return verdict is kept', async () => {
+  let prompts = 0
+  await museAdvisorConsult('pre-return', (run, rows, taskDir) => {
+    assert.equal(run.sent.filter((frame) => frame.method === 'session/prompt').length, 2)
+    assert.equal(readFileSync(join(taskDir, 'builder-1.json'), 'utf8'), '{"fixed":true}')
+  }, 'pi-turn', (taskDir) => ({ onPrompt: () => { if (prompts++ === 1) writeFileSync(join(taskDir, 'builder-1.json'), '{"fixed":true}') } }))
 })
 
 test('a muse turn refused by its provider is returned unchanged with no follow-up prompt for queued advice', async () => {

@@ -1631,8 +1631,6 @@ async function museAdvisorConsult(kind, inspect, fixtureName = 'pi-turn', extra 
   const root = scratchDir('muse-consult-'), taskDir = join(root, 'task'), cwd = join(root, 'work')
   mkdirSync(taskDir); mkdirSync(cwd); leanLane(taskDir)
   writeFileSync(join(cwd, 'a.mjs'), 'grounded condition\n')
-  // Muse writes without asking, so the return the pre-return consult judges is already on disk.
-  if (kind === 'pre-return') writeFileSync(join(taskDir, 'builder-1.json'), '{}')
   const updates = [
     { sessionUpdate: 'tool_call', toolCallId: 'read', kind: 'read', rawInput: { path: 'a.mjs' } },
     { sessionUpdate: 'tool_call_update', toolCallId: 'read', status: 'completed', rawOutput: 'grounded condition' },
@@ -1641,7 +1639,11 @@ async function museAdvisorConsult(kind, inspect, fixtureName = 'pi-turn', extra 
   ]
   let clock = 0
   try {
-    await use(fixtureName, { agent: 'muse', model: 'meta/muse-spark-1.3', cwd, taskDir, permissionsOnlyFirst: true, delayPrompt: true, ...extra(taskDir),
+    const more = extra(taskDir)
+    let prompts = 0
+    // Muse writes without asking, so the return the pre-return consult judges is on disk during the first turn.
+    const onPrompt = (frame) => { if (prompts++ === 0 && kind === 'pre-return') writeFileSync(join(taskDir, 'builder-1.json'), '{}'); more.onPrompt?.(frame) }
+    await use(fixtureName, { agent: 'muse', model: 'meta/muse-spark-1.3', cwd, taskDir, permissionsOnlyFirst: true, delayPrompt: true, ...more, onPrompt,
       definition: { role: 'builder', wait_s: 1, advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' } },
       permissions: [{ toolCallId: 'fire', _update: updates }],
       deps: { now: () => clock, sleep: (ms) => { clock += ms }, wait: async (ms) => { clock += ms; await new Promise(setImmediate) }, advisorDeps: { spawn: () => advisorChild(kind === 'timeout'), consultTimeoutMs: kind === 'timeout' ? 10 : 5000, childKillGraceMs: 10 } },
@@ -1675,6 +1677,13 @@ test('a muse return the seat rewrites after a blocked pre-return verdict is kept
     assert.equal(run.sent.filter((frame) => frame.method === 'session/prompt').length, 2)
     assert.equal(readFileSync(join(taskDir, 'builder-1.json'), 'utf8'), '{"fixed":true}')
   }, 'pi-turn', (taskDir) => ({ onPrompt: () => { if (prompts++ === 1) writeFileSync(join(taskDir, 'builder-1.json'), '{"fixed":true}') } }))
+})
+
+test('a blocked muse return never removes a return from an earlier round', async () => {
+  await museAdvisorConsult('pre-return', (run, rows, taskDir) => {
+    assert.equal(existsSync(join(taskDir, 'builder-1.json')), false)
+    assert.equal(readFileSync(join(taskDir, 'builder-0.json'), 'utf8'), '{"round":0}')
+  }, 'pi-turn', (taskDir) => { writeFileSync(join(taskDir, 'builder-0.json'), '{"round":0}'); return {} })
 })
 
 test('a muse turn refused by its provider is returned unchanged with no follow-up prompt for queued advice', async () => {

@@ -1274,9 +1274,9 @@ test('a Claude seat authored with an empty tools list stops the lane as seat-unm
         const text = readFileSync(path, ...args)
         return path === planner ? text.replace('writes: task-dir', 'writes: task-dir\ntools: []') : text
       },
-      runAcpSeat: (input) => {
+      runAcpSeat: async (input) => {
         try {
-          return runAcpSeat({
+          return await runAcpSeat({
             ...input,
             definition: { ...input.definition, agent: 'claude', model: 'anthropic/claude-opus-4-6' },
             binaries: { claudeAcp: process.execPath, claude: process.execPath },

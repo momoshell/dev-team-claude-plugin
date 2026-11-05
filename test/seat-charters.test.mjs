@@ -129,7 +129,7 @@ test('SC4: the delivered skill owns the ladder and its references', () => {
 })
 
 // MUTATION: remove prose-plain from the builder base skills list.
-test('PP1: lean builder and reviewer deliver their skills through the ACP launch and prompt', () => {
+test('PP1: lean builder and reviewer deliver their skills through the ACP launch and prompt', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'charter-delivery-'))
   try {
     for (const role of ['builder', 'reviewer']) {
@@ -139,7 +139,7 @@ test('PP1: lean builder and reviewer deliver their skills through the ACP launch
       assert.deepEqual(fields.skills, skills)
       assert.match(prompt, /Read the granted `code-less` skill before (working|reviewing)/)
       let launch, sent
-      const result = runAcpSeat({
+      const result = await runAcpSeat({
         // Context arms are exercised by lean's integration test; isolate the skill transport here.
         definition: { role, agent: fields.agent, model: fields.model, effort: fields.effort, writes: fields.writes, skills: fields.skills },
         cwd: dir, prompt, sessionFile: join(dir, `${role}.jsonl`), binaries: { pi: process.execPath },

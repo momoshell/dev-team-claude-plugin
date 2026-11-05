@@ -15,9 +15,10 @@ import * as claudeAdapter from '../adapters/adapter-claude.mjs'
 import * as piAdapter from '../adapters/adapter-pi.mjs'
 import * as museAdapter from '../adapters/adapter-muse.mjs'
 import { CONTEXT_LAYOUT_ENV, LEAN_LAYOUT, journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../pi/context-layout.mjs'
-import { ADVISOR_MANIFEST_FILE, ADVISOR_CONFIG_VERSION, SAFE_MODEL, ADVISED_ROLES, READ_CAP_BYTES, boundText, loadContext as advisorContext } from '../pi/extensions/advisor.ts'
+import { ADVISOR_MANIFEST_FILE, ADVISOR_CONFIG_VERSION, SAFE_MODEL, ADVISED_ROLES, READ_CAP_BYTES, boundText, createAdvisor, loadContext as advisorContext } from '../pi/extensions/advisor.ts'
 import { loadAcceptedContext } from '../pi/extensions/skeletonread.ts'
 import { createReadGate, fffSearchProgram } from '../pi/extensions/readgate.ts'
+import { createScoutNudge } from '../pi/extensions/subagent.ts'
 
 const ROLE = 'seat'
 const WRITES = Object.freeze(['none', 'task-dir', 'repo'])
@@ -107,7 +108,7 @@ function seatGrants(definition, { role, isPi, skills, deps }) {
   const extensions = definition.extensions ?? []
   if (!Array.isArray(extensions) || !extensions.every(nonempty)) throw new Error('extensions must be a list of extension names')
   const advisor = definition.advisor !== undefined && definition.advisor !== null
-  if (isPi && advisor && !ADVISED_ROLES.has(role)) throw refuse('grant-unsupported', `advisor grant is unsupported for seat ${role}`)
+  if ((isPi || definition.agent === 'muse') && advisor && !ADVISED_ROLES.has(role)) throw refuse('grant-unsupported', `advisor grant is unsupported for seat ${role}`)
   const readgate = definition.agent === 'muse' && extensions.includes('readgate')
   const armed = armGrants({ role, agent: definition.agent, extensions: readgate ? extensions.filter((name) => name !== 'readgate') : extensions }, { register: deps.register, root: deps.root, exists: deps.exists })
   const mcp = armed.mcp_servers.length > 0
@@ -119,6 +120,8 @@ function seatGrants(definition, { role, isPi, skills, deps }) {
     skills,
     advisor,
     readgate,
+    skeletonread: definition.agent === 'muse' && extensions.includes('skeletonread'),
+    subagent: definition.agent === 'muse' && extensions.includes('subagent'),
     mcp_servers: armed.mcp_servers.map((server) => ({ ...server })),
   }
 }
@@ -223,7 +226,7 @@ function advisorCellOf(advisor) {
 // What a lean seat's context arms need, read from the lane's own task dir and nowhere else: the lane's run-start
 // anchor (written once by the loop, never per seat) and, past the planner, the planner's current return. A seat that
 // cannot be given them is refused here, before it starts, rather than booted with arms that read nothing.
-function laneContext({ arms, role, laneTaskDir, workdir, definition, deps }) {
+function laneContext({ arms, role, laneTaskDir, workdir, definition, deps, requirePlan = false }) {
   const refusal = (why) => { throw refuse('grant-unsupported', `seat ${role} declares ${arms.join(', ')}, which read the lane context, and ${why} — refusing to boot a silently weaker seat`) }
   if (!laneTaskDir) return refusal('it has no task dir')
   const layout = { [CONTEXT_LAYOUT_ENV]: LEAN_LAYOUT }
@@ -240,7 +243,7 @@ function laneContext({ arms, role, laneTaskDir, workdir, definition, deps }) {
   }
   if (anchor === null) return refusal('the lane journal has no run-start')
   let planner = null
-  if (role !== 'planner') {
+  if (role !== 'planner' || requirePlan) {
     const needs = [...new Set(arms.flatMap((arm) => CONTEXT_ARMS[arm]))]
     try {
       const dir = plannerReturnsDirOf(laneTaskDir)
@@ -287,7 +290,7 @@ function laneContext({ arms, role, laneTaskDir, workdir, definition, deps }) {
   if (role !== 'planner' && advisorContext({ taskDir: laneTaskDir, env: { [CONTEXT_LAYOUT_ENV]: LEAN_LAYOUT, CREW_TASK_DIR: laneTaskDir } }).scope_source === 'absent') refusal(`the advisor cannot read the lane's planner return`)
 }
 
-export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, binaries = {}, deps = {} }) {
+export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, binaries = {}, deps = {} }) {
   if (!definition || typeof definition !== 'object') throw new Error('definition must be an object')
   if (!['claude', 'pi', 'muse'].includes(definition.agent)) throw new Error(`unsupported agent: ${definition.agent}`)
   if (!nonempty(cwd)) throw new Error('cwd must be a nonempty string')
@@ -308,7 +311,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
   const piModel = definition.agent === 'pi' ? piAdapter.modelString({ provider: definition.model.split('/')[0], id: model }) : definition.model
   const env = deps.env ?? process.env
   const now = deps.now ?? (() => Number(process.hrtime.bigint()) / 1e6)
-  const sleep = deps.sleep ?? ((ms) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) })
+  const wait = deps.wait ?? deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
   const isClaude = definition.agent === 'claude'
   const isPi = definition.agent === 'pi'
   const isMuse = definition.agent === 'muse'
@@ -338,7 +341,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
   if (isMuse) museAdapter.assertSupportedGrants(grants)
   // fff replaces native search; pi reads Glob and Grep as find and grep.
   if (grants.mcp_servers.some((server) => server.name === 'fff')) deny = [deny, 'Glob,Grep'].filter(Boolean).join(',')
-  const contextArms = !isPi ? [] : [
+  const contextArms = !(isPi || isMuse) ? [] : [
     ...(definition.extensions ?? []).filter((name) => CONTEXT_EXTENSIONS.includes(name)),
     ...(grants.advisor ? ['advisor'] : []),
   ]
@@ -351,7 +354,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
     gateFailed = true
     if (laneTaskDir) append(journalPathOf(laneTaskDir), `${JSON.stringify({ at: new Date().toISOString(), ...row })}\n`)
   } }) : null
-  if (contextArms.length) laneContext({ arms: contextArms, role, laneTaskDir, workdir, definition, deps })
+  if (contextArms.length) laneContext({ arms: contextArms, role, laneTaskDir, workdir, definition, deps, requirePlan: isMuse && grants.skeletonread })
   const workRoot = canonicalRoot(workdir, real)
   const taskRoot = laneTaskDir ? canonicalRoot(laneTaskDir, real) : null
   // lean.mjs records every turn under <taskDir>/lean; a seat never edits the record of a turn.
@@ -365,12 +368,38 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
   }
   // Wall-clock receipt time is recording evidence; the runner's `now` is monotonic.
   const toolCalls = new Map()
+  const advisorNotes = []
+  const nudge = isMuse && grants.subagent && grants.agents.length ? createScoutNudge({ env: { ...env, CREW_ROLE: role, CREW_TASK_DIR: laneTaskDir, [CONTEXT_LAYOUT_ENV]: LEAN_LAYOUT }, send: (message) => advisorNotes.push(message.content) }) : null
+  const seenNudge = new Set()
+  const resolveConsultPi = () => { try { return { command: resolveBinary('pi', binaries.pi, 'pi', env) } } catch { return { error: 'pi binary unresolved' } } }
+  const advisor = isMuse && grants.advisor ? createAdvisor({ env: { ...env, CREW_ROLE: role, CREW_TASK_DIR: laneTaskDir, [CONTEXT_LAYOUT_ENV]: LEAN_LAYOUT }, deps: { ...deps.advisorDeps, cwd: workdir, resolveBinary: resolveConsultPi, send: (message) => advisorNotes.push(message.content) } }) : null
+  const advised = new Map()
+  const seenAdvice = new Set()
+  const completed = new Set()
   const recordUpdate = (payload) => {
     try {
       const update = payload.update
       if (isMuse && ['tool_call', 'tool_call_update'].includes(update?.sessionUpdate) && nonempty(update.toolCallId)) {
         const fields = Object.fromEntries(['kind', 'rawInput', 'title'].filter((key) => update[key] !== undefined).map((key) => [key, update[key]]))
-        toolCalls.set(update.toolCallId, { ...toolCalls.get(update.toolCallId), ...fields })
+        const call = { ...toolCalls.get(update.toolCallId), ...fields }
+        toolCalls.set(update.toolCallId, call)
+        const inputReady = call.rawInput && (['completed', 'failed'].includes(update.status) || (call.kind === 'execute' ? nonempty(call.rawInput.command) : ['read', 'edit', 'write'].includes(call.kind) ? nonempty(call.rawInput.path ?? call.rawInput.file_path) : true))
+        if (nudge && inputReady && !seenNudge.has(update.toolCallId)) {
+          seenNudge.add(update.toolCallId)
+          const toolName = ({ execute: 'bash', read: 'read', edit: 'edit', write: 'write' })[call.kind] || ({ 'mcp__crew-extras__agent': 'agent', 'mcp__fff__grep': 'grep', 'mcp__fff__multi_grep': 'grep', 'mcp__fff__find_files': 'find' })[call.title] || call.title
+          nudge.onToolCall({ toolName, input: { ...call.rawInput, path: call.rawInput.path ?? call.rawInput.file_path } })
+        }
+        if (advisor && inputReady && !seenAdvice.has(update.toolCallId)) {
+          seenAdvice.add(update.toolCallId)
+          const toolName = ({ execute: 'bash', read: 'read', edit: 'edit', write: 'write' })[call.kind] || call.title
+          advised.set(update.toolCallId, Promise.resolve(advisor.onToolCall({ toolName, input: { ...call.rawInput, path: call.rawInput.path ?? call.rawInput.file_path }, toolCallId: update.toolCallId }, { cwd: workdir })).catch(() => undefined))
+        }
+        if (advisor && seenAdvice.has(update.toolCallId) && ['completed', 'failed'].includes(update.status) && !completed.has(update.toolCallId)) {
+          completed.add(update.toolCallId)
+          const toolName = ({ execute: 'bash', read: 'read', edit: 'edit', write: 'write' })[call.kind] || call.title
+          const content = typeof update.rawOutput === 'string' ? [{ type: 'text', text: update.rawOutput }] : (update.content || []).map((item) => item.content || item)
+          advisor.onToolResult({ toolName, input: { ...call.rawInput, path: call.rawInput.path ?? call.rawInput.file_path }, toolCallId: update.toolCallId, isError: update.status === 'failed', content }, { cwd: workdir })
+        }
       }
       record({ sessionId: payload.sessionId, update, at: (deps.recordNow ?? Date.now)() })
     } catch { /* recording cannot change the turn */ }
@@ -475,7 +504,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
       launch = piAdapter.acpLaunch({ ...spec, bin: pi, model: piModel })
     } else {
       museAdapter.writeSeatSkills({ taskDir: runtime, grants })
-      launch = museAdapter.acpLaunch({ ...spec, bin: muse, model, writes })
+      launch = museAdapter.acpLaunch({ ...spec, bin: muse, model, writes, piBinary: grants.subagent ? resolveConsultPi().command : undefined })
     }
     const sinkKinds = [...ACP_UPDATE_KINDS, 'unknown']
     client = (deps.clientFactory ?? acpClient)({
@@ -491,7 +520,57 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
     const deadline = now() + waitS * 1000
     // ACP's selected rejection carries only an option ID, so give the redirects before the turn.
     const guidance = readgate ? `\n\nReadgate is active: whole-file reads and cat/head/tail of large files are refused; use a ranged read instead.${grants.mcp_servers.some((server) => server.name === 'fff') ? ' Direct grep/rg/find/fd searches are refused; use mcp__fff__grep or mcp__fff__find_files instead.' : ''}` : ''
-    const promptId = client.beginPrompt([{ type: 'text', text: prompt + guidance }])
+    const extras = [grants.skeletonread && 'mcp__crew-extras__retrieve', grants.skeletonread && 'mcp__crew-extras__skeleton', grants.subagent && 'mcp__crew-extras__agent'].filter(Boolean)
+    const extraGuidance = (extras.length ? `\n\nGranted tools: ${extras.join(', ')}.` : '') + (grants.skeletonread ? ' A whole read of a large in-scope source file is refused; call mcp__crew-extras__skeleton with its path for the indexed signatures and plan citations, then mcp__crew-extras__retrieve for a range or symbol.' : '')
+    // Muse writes without asking, so a return the advisor blocked is already on disk, however it was written. A
+    // blocked turn records the returns this run wrote; after the follow-up turn, any still byte-identical is removed.
+    const returnName = new RegExp('^' + role + '-\\d+\\.json$')
+    // An unreadable return hashes to null: it is never removed, and a return unreadable at the start is never new.
+    const returnHashes = () => {
+      const hashes = new Map()
+      let names = []
+      try { names = laneTaskDir ? readdirSync(laneTaskDir) : [] } catch { /* no returns to judge */ }
+      for (const name of names.filter((entry) => returnName.test(entry))) {
+        let hash = null
+        try { hash = createHash('sha256').update(readFileSync(join(laneTaskDir, name))).digest('hex') } catch { /* stays null */ }
+        hashes.set(join(laneTaskDir, name), hash)
+      }
+      return hashes
+    }
+    const priorReturns = returnHashes()
+    let blockedReturns = null
+    let promptId = client.beginPrompt([{ type: 'text', text: prompt + guidance + extraGuidance }])
+    let settleTimedOut = false
+    const finishTurn = async (turn) => {
+      if (blockedReturns) {
+        for (const [path, hash] of returnHashes()) if (hash !== null && blockedReturns.get(path) === hash) try { rmSync(path, { force: true }) } catch { /* the block was still delivered */ }
+        blockedReturns = null
+      }
+      // A refused or cancelled turn is terminal: queued advice never turns it into another prompt.
+      const terminal = turn.refusal != null || turn.stopReason !== 'end_turn'
+      if (advisor && !terminal) {
+        let timer
+        const settled = await Promise.race([
+          (async () => {
+            const verdicts = await Promise.all(advised.values())
+            await advisor.settled()
+            return verdicts
+          })().catch(() => []),
+          new Promise((resolve) => { timer = setTimeout(() => resolve(null), Math.max(0, deadline - now())) }),
+        ])
+        clearTimeout(timer)
+        if (settled === null || now() >= deadline) { settleTimedOut = true; return null }
+        advised.clear()
+        const blocks = settled.filter((verdict) => verdict?.block && nonempty(verdict.reason))
+        for (const verdict of blocks) advisorNotes.push(verdict.reason)
+        if (isMuse && blocks.length) blockedReturns = new Map([...returnHashes()].filter(([path, hash]) => hash !== null && (!priorReturns.has(path) || (priorReturns.get(path) !== null && priorReturns.get(path) !== hash))))
+      }
+      if (advisorNotes.length && !terminal) {
+        promptId = client.beginPrompt([{ type: 'text', text: advisorNotes.splice(0).join('\n\n') }])
+        return null
+      }
+      return isMuse ? { ...turn, usage: null, usage_reason: 'usage-unavailable', ...(grantedSkills.length ? { museSkillsRoot: join(runtime, 'muse-skills') } : {}) } : turn
+    }
     while (now() < deadline) {
       // Nothing can repair a lost runtime, and the stream it held would stay silent until the deadline.
       if (!existsSync(runtime)) {
@@ -499,16 +578,26 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
       }
       const turn = client.pollPrompt(promptId)
       if (now() >= deadline) break
-      if (turn) return isMuse ? { ...turn, usage: null, usage_reason: 'usage-unavailable', ...(grantedSkills.length ? { museSkillsRoot: join(runtime, 'muse-skills') } : {}) } : turn
+      if (turn) {
+        const finished = await finishTurn(turn)
+        if (finished) return finished
+        if (settleTimedOut) break
+        continue
+      }
       // A seat that died with no answer would otherwise hold the turn until its deadline.
       if (client.hasExitMarker?.()) {
         // The answer may have settled between the empty poll and the marker.
         const exitedTurn = client.pollPrompt(promptId)
         if (now() >= deadline) break
-        if (exitedTurn) return isMuse ? { ...exitedTurn, usage: null, usage_reason: 'usage-unavailable', ...(grantedSkills.length ? { museSkillsRoot: join(runtime, 'muse-skills') } : {}) } : exitedTurn
+        if (exitedTurn) {
+          const finished = await finishTurn(exitedTurn)
+          if (finished) return finished
+          if (settleTimedOut) break
+          continue
+        }
         throw Object.assign(new Error(`${role} exited before answering (acp-seat-closed)`), { reason: 'acp-seat-closed' })
       }
-      sleep(Math.max(0, Math.min(ACP_POLL_MS, deadline - now())))
+      await wait(Math.max(0, Math.min(ACP_POLL_MS, deadline - now())))
     }
     // The cancel is a courtesy: its answer is never awaited, and a failed write cannot replace the deadline.
     // A turn that settled too late is no longer pending, so the session-wide cancel stands in for the prompt's.

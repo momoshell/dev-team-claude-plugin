@@ -297,13 +297,15 @@ export function armGrants({ role, agent, extensions = [] }, { register = loadCap
       const bin = server.command?.bin
       if (typeof bin !== 'string' || !bin.trim() || !pathExists(exists, bin)) throw pathMessage('extension-missing', role, 'fff MCP server', 'an installed fff-mcp binary', 'missing', bin ?? 'no command')
       mcp_servers.push(server)
+    } else if (agent === 'muse' && ['skeletonread', 'subagent'].includes(name)) {
+      continue
     } else if (/^[a-z]+$/.test(name)) {
       paths.push(`crew/pi/extensions/${name}.ts`)
     } else {
       throw refuse('unknown-grant', `seat ${role} has unregistered extension ${JSON.stringify(name)}`)
     }
   }
-  const fanout = agent === 'pi' && paths.includes(SUBAGENT_EXTENSION)
+  const fanout = (agent === 'pi' && paths.includes(SUBAGENT_EXTENSION)) || (agent === 'muse' && extensions.includes('subagent'))
   const agents = fanout ? registeredAgents(register, role, agent) : []
   if (fanout && agents.length === 0) {
     throw refuse('unknown-grant', `seat ${role} asks for subagent but the register declares no agent definition for it`)

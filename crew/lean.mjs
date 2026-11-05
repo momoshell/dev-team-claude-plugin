@@ -2,8 +2,9 @@
 // standard loop (crew/loop.mjs) with each seat turn played over ACP (crew/acp/seat.mjs), records
 // every turn under <taskDir>/lean/<role>/<id>.jsonl, and ends with one terminal row in the run log.
 // Import-safe: importing this module launches nothing; every effect crosses an injected seam.
-import { appendFileSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { appendFileSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runAcpSeat } from './acp/seat.mjs'
 import { openMemory, renderSection } from './memory.mjs'
@@ -16,6 +17,25 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const CHARTER_LINK = /\]\((\.\.?\/[^)\s]+\.md)\)/g
 const LOOP_STAGES = 'The loop runs each test the builder names on the old source and on the build. It then runs the suite, commits, rebases and opens the PR. Do not run those stages yourself.'
 const stopped = (reason) => ({ status: 'stopped', reason, pr: null })
+
+function recordState(leanDir, sessionFile) {
+  try {
+    const entries = []
+    const walk = (path) => {
+      const stat = lstatSync(path)
+      if (stat.isDirectory()) {
+        entries.push([relative(leanDir, path), 'dir'])
+        for (const name of readdirSync(path).sort()) walk(join(path, name))
+      } else if (path !== sessionFile) {
+        if (stat.isFile()) entries.push([relative(leanDir, path), 'file', createHash('sha256').update(readFileSync(path)).digest('hex')])
+        else if (stat.isSymbolicLink()) entries.push([relative(leanDir, path), 'link', readlinkSync(path)])
+        else throw new Error('unsupported lean record entry')
+      }
+    }
+    walk(leanDir)
+    return JSON.stringify(entries)
+  } catch { return null }
+}
 
 // The P2 shape this turn must write; the role's own detail keys, with the issued role and id.
 function exampleEnvelope(role, id, tier) {
@@ -131,7 +151,7 @@ function promptFor({ request, spec, source, charters, body, section }) {
 
 export async function runLean(spec, deps = {}) {
   const d = {
-    runAcpSeat, readFileSync, mkdirSync, writeFileSync, appendFileSync, rmSync,
+    runAcpSeat, readFileSync, mkdirSync, writeFileSync, appendFileSync, rmSync, recordState,
     now: Date.now,
     sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
     log: (line) => process.stdout.write(`${line}\n`),
@@ -176,19 +196,32 @@ export async function runLean(spec, deps = {}) {
       const guardedAppend = (...args) => {
         try { const out = d.appendFileSync(...args); if (args[0] === sessionFile) relayed.push(String(args[1])); return out } catch (error) { recordError ??= error; throw error }
       }
-      const turn = await d.runAcpSeat({
-        definition, cwd: spec.cwd, taskDir: spec.taskDir, prompt, sessionFile, briefText: spec.brief,
-        deps: { appendFileSync: guardedAppend },
-      })
-      if (recordError) throw recordError
-      // The runtime writes the one turn row of every turn, accepted or not.
-      guardedAppend(sessionFile, `${JSON.stringify({ type: 'turn', stopReason: turn?.stopReason ?? null, usage: turn?.usage ?? null, refusal: turn?.refusal ?? null, ...(typeof turn?.usage_reason === 'string' ? { usage_reason: turn.usage_reason } : {}) })}\n`, 'utf8')
-      // The loop reads the issued return even when this turn fails. Skill proof trusts only the
-      // relayed copy, and only while the session file still matches it.
+      const checkRecords = definition.agent === 'muse' && definition.writes !== 'none'
+      const fingerprint = () => { try { return d.recordState(join(spec.taskDir, 'lean'), sessionFile) } catch { return null } }
+      const violation = (reason) => Object.assign(new Error(reason), { reason })
+      const before = checkRecords ? fingerprint() : null
+      if (checkRecords && typeof before !== 'string') throw violation('acp-seat-record-unmeasured')
+      let turn, turnError, failed = false
+      try {
+        turn = await d.runAcpSeat({
+          definition, cwd: spec.cwd, taskDir: spec.taskDir, prompt, sessionFile, briefText: spec.brief,
+          deps: { appendFileSync: guardedAppend },
+        })
+        if (recordError) throw recordError
+        // The runtime writes the one turn row of every turn, accepted or not.
+        guardedAppend(sessionFile, `${JSON.stringify({ type: 'turn', stopReason: turn?.stopReason ?? null, usage: turn?.usage ?? null, refusal: turn?.refusal ?? null, ...(typeof turn?.usage_reason === 'string' ? { usage_reason: turn.usage_reason } : {}) })}\n`, 'utf8')
+      } catch (error) { failed = true; turnError = error }
+      // Skill proof trusts only the relayed copy, and only while the session file still matches it.
       const recorded = relayed.join('')
       let intact = false
       try { intact = d.readFileSync(sessionFile, 'utf8') === header + recorded } catch { /* unreadable is not intact */ }
-      recording = { definition, recorded: intact ? recorded : null, cwd: spec.cwd }
+      recording = { definition, recorded: !failed && intact ? recorded : null, cwd: spec.cwd }
+      if (checkRecords) {
+        const after = fingerprint()
+        if (typeof after !== 'string') throw violation('acp-seat-record-unmeasured')
+        if (after !== before || !intact) throw violation('acp-seat-wrote-record')
+      }
+      if (failed) throw turnError
       if (turn?.refusal || !turn?.stopReason) {
         const failure = Object.assign(new Error(turn?.refusal?.message ?? 'ACP seat turn returned no stop reason'), { code: turn?.refusal?.code ?? null, errorKind: turn?.refusal?.errorKind ?? null })
         if (!turn?.refusal) throw failure
@@ -211,7 +244,7 @@ export async function runLean(spec, deps = {}) {
       return recording
     }
     } catch (error) {
-      if (['acp-seat-wrote-repo', 'acp-seat-repo-unmeasured'].includes(error?.reason) && request.returnPath) {
+      if (['acp-seat-wrote-repo', 'acp-seat-repo-unmeasured', 'acp-seat-wrote-record', 'acp-seat-record-unmeasured'].includes(error?.reason) && request.returnPath) {
         try { d.rmSync(request.returnPath, { force: true }) } catch { /* preserve the turn error */ }
       }
       if (!error || typeof error !== 'object' || !Object.isExtensible(error)) {

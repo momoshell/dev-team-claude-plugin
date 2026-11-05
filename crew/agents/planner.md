@@ -3,8 +3,8 @@ name: planner
 description: Reads the task and writes the plan the builder implements.
 role: planner
 writes: task-dir
-agent: claude
-model: anthropic/claude-opus-5-5
+agent: muse
+model: meta/muse-wonder-1.0
 effort: high
 advisor: null
 memory: true

@@ -14,9 +14,9 @@ const roster = {
       "advisor": null,
       "lead": null,
       "planner": {
-        "provider": "anthropic",
-        "id": "claude-opus-5-5",
-        "agent": "claude",
+        "provider": "meta",
+        "id": "muse-wonder-1.0",
+        "agent": "muse",
         "effort": "medium"
       },
       "builder": {
@@ -41,9 +41,9 @@ const roster = {
         "effort": "high"
       },
       "planner": {
-        "provider": "anthropic",
-        "id": "claude-opus-5-5",
-        "agent": "claude",
+        "provider": "meta",
+        "id": "muse-wonder-1.0",
+        "agent": "muse",
         "effort": "high"
       },
       "builder": {
@@ -68,9 +68,9 @@ const roster = {
         "effort": "high"
       },
       "planner": {
-        "provider": "anthropic",
-        "id": "claude-opus-5-5",
-        "agent": "claude",
+        "provider": "meta",
+        "id": "muse-wonder-1.0",
+        "agent": "muse",
         "effort": "xhigh"
       },
       "builder": {

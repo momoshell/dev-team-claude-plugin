@@ -299,7 +299,7 @@ export async function runLoop(spec, deps = {}) {
             turnError = describe(error)
             recording = error?.recording ?? null
             // ADR-055 amendment: a repo violation's return is neither read nor rerun.
-            const repoViolation = ['acp-seat-wrote-repo', 'acp-seat-repo-unmeasured'].includes(error?.reason)
+            const repoViolation = ['acp-seat-wrote-repo', 'acp-seat-repo-unmeasured', 'acp-seat-wrote-record', 'acp-seat-record-unmeasured'].includes(error?.reason)
             routed = typeof error?.providerKind === 'string' || repoViolation
             if (repoViolation) failure = { reason: 'seat-unmeasured', error: turnError }
           }

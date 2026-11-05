@@ -185,6 +185,18 @@ function use(name, options, inspect) {
 
 const sessionNew = (run) => run.sent.find((frame) => frame.method === 'session/new')
 
+test('a muse seat that writes task-dir or repo opens its session with the lane task dir as its only additional directory, and one that writes none or has no task dir opens with none', () => {
+  const taskDir = scratchDir('muse-task-')
+  try {
+    for (const [writes, dir] of [['task-dir', taskDir], ['repo', taskDir], ['none', taskDir], ['task-dir', undefined]]) {
+      use('pi-turn', { agent: 'muse', model: 'meta/muse-wonder-1.0', taskDir: dir, definition: { writes }, deps: { repoState: () => '' } }, (run) => {
+        assert.equal(run.error, undefined)
+        assert.deepEqual(sessionNew(run).params.additionalDirectories, writes !== 'none' && dir ? [resolve(dir)] : undefined)
+      })
+    }
+  } finally { rmSync(taskDir, { recursive: true, force: true }) }
+})
+
 test('a muse seat launches muse acp with the experimental flag, the stripped model, its effort and onRequest mode, and disables writes unless it writes repo', () => {
   for (const writes of ['none', 'repo']) use('pi-turn', { agent: 'muse', model: 'meta/muse-spark-1.3', definition: { writes } }, (run) => {
     assert.equal(run.error, undefined)

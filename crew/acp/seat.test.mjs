@@ -1626,10 +1626,12 @@ function advisorChild(hang = false) {
   return child
 }
 
-async function museAdvisorConsult(kind, inspect) {
+async function museAdvisorConsult(kind, inspect, fixtureName = 'pi-turn') {
   const root = scratchDir('muse-consult-'), taskDir = join(root, 'task'), cwd = join(root, 'work')
   mkdirSync(taskDir); mkdirSync(cwd); leanLane(taskDir)
   writeFileSync(join(cwd, 'a.mjs'), 'grounded condition\n')
+  // Muse writes without asking, so the return the pre-return consult judges is already on disk.
+  if (kind === 'pre-return') writeFileSync(join(taskDir, 'builder-1.json'), '{}')
   const updates = [
     { sessionUpdate: 'tool_call', toolCallId: 'read', kind: 'read', rawInput: { path: 'a.mjs' } },
     { sessionUpdate: 'tool_call_update', toolCallId: 'read', status: 'completed', rawOutput: 'grounded condition' },
@@ -1638,11 +1640,11 @@ async function museAdvisorConsult(kind, inspect) {
   ]
   let clock = 0
   try {
-    await use('pi-turn', { agent: 'muse', model: 'meta/muse-spark-1.3', cwd, taskDir, permissionsOnlyFirst: true, delayPrompt: true,
+    await use(fixtureName, { agent: 'muse', model: 'meta/muse-spark-1.3', cwd, taskDir, permissionsOnlyFirst: true, delayPrompt: true,
       definition: { role: 'builder', wait_s: 1, advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' } },
       permissions: [{ toolCallId: 'fire', _update: updates }],
       deps: { now: () => clock, sleep: (ms) => { clock += ms }, wait: async (ms) => { clock += ms; await new Promise(setImmediate) }, advisorDeps: { spawn: () => advisorChild(kind === 'timeout'), consultTimeoutMs: kind === 'timeout' ? 10 : 5000, childKillGraceMs: 10 } },
-    }, (run) => inspect(run, readFileSync(join(taskDir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)))
+    }, (run) => inspect(run, readFileSync(join(taskDir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse), taskDir))
   } finally { rmSync(root, { recursive: true, force: true }) }
 }
 
@@ -1655,14 +1657,23 @@ test('a muse builder advisor tier-1 consult settles during polling and delivers 
   })
 })
 
-test('a muse builder advisor pre-return verdict settles before the seat returns and sends its block as a follow-up prompt', async () => {
-  await museAdvisorConsult('pre-return', (run, rows) => {
+test('a muse builder advisor pre-return verdict settles before the seat returns, removes the blocked return and sends its block as a follow-up prompt', async () => {
+  await museAdvisorConsult('pre-return', (run, rows, taskDir) => {
+    assert.equal(existsSync(join(taskDir, 'builder-1.json')), false)
     assert.ok(rows.some((row) => row.advisor_consult?.trigger === 'pre-return'))
     assert.equal(run.error, undefined)
     const prompts = run.sent.filter((frame) => frame.method === 'session/prompt')
     assert.equal(prompts.length, 2)
     assert.match(prompts[1].params.prompt[0].text, /guard handles a grounded edge case/)
   })
+})
+
+test('a muse turn refused by its provider is returned unchanged with no follow-up prompt for queued advice', async () => {
+  await museAdvisorConsult('tier1', (run) => {
+    assert.equal(run.error, undefined)
+    assert.equal(run.result.refusal?.errorKind, 'authentication_failed')
+    assert.equal(run.sent.filter((frame) => frame.method === 'session/prompt').length, 1)
+  }, 'claude-refusal-auth')
 })
 
 test('a muse builder advisor consult that times out lets the seat return and journals the failure', async () => {

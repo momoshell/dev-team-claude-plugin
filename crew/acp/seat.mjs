@@ -525,8 +525,11 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
     let promptId = client.beginPrompt([{ type: 'text', text: prompt + guidance + extraGuidance }])
     let settleTimedOut = false
     const finishTurn = async (turn) => {
-      if (advisor) {
+      // A refused or cancelled turn is terminal: queued advice never turns it into another prompt.
+      const terminal = turn.refusal != null || turn.stopReason !== 'end_turn'
+      if (advisor && !terminal) {
         let timer
+        const calls = [...advised.keys()]
         const settled = await Promise.race([
           (async () => {
             const verdicts = await Promise.all(advised.values())
@@ -538,9 +541,18 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
         clearTimeout(timer)
         if (settled === null || now() >= deadline) { settleTimedOut = true; return null }
         advised.clear()
-        for (const verdict of settled) if (verdict?.block && nonempty(verdict.reason)) advisorNotes.push(verdict.reason)
+        settled.forEach((verdict, i) => {
+          if (!verdict?.block || !nonempty(verdict.reason)) return
+          advisorNotes.push(verdict.reason)
+          // Muse writes without asking, so a blocked return already exists: remove it until the seat writes it again.
+          try {
+            const input = toolCalls.get(calls[i])?.rawInput
+            const target = taskRoot ? canonicalWritePath(input?.path ?? input?.file_path, workRoot, real) : null
+            if (target != null && inside(target, taskRoot) && !inside(target.toLowerCase(), leanRoot?.toLowerCase())) rmSync(target, { force: true })
+          } catch { /* the follow-up prompt still carries the block */ }
+        })
       }
-      if (advisorNotes.length) {
+      if (advisorNotes.length && !terminal) {
         promptId = client.beginPrompt([{ type: 'text', text: advisorNotes.splice(0).join('\n\n') }])
         return null
       }

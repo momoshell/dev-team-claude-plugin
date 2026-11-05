@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { main } from './closeout.mjs'
 import { git, gitResult, scratchDir } from '../test/helpers.mjs'
@@ -9,6 +9,13 @@ import { git, gitResult, scratchDir } from '../test/helpers.mjs'
 const LANE = 'demo'
 const PR_ROW = { event: 'pr', lane: LANE, pr: { number: 7, url: 'https://github.com/o/r/pull/7' } }
 const jsonl = (rows) => rows.map((row) => JSON.stringify(row)).join('\n') + '\n'
+const STOPPED = [
+  { event: 'run-start', lane: LANE },
+  { event: 'stage-start', stage: 'plan' },
+  { event: 'envelope', role: 'planner', status: 'error' },
+  { event: 'verdict', status: 'stopped', reason: 'seat-unmeasured' },
+  { event: 'stage-end', stage: 'plan' },
+]
 
 function world({ rows = [{ event: 'run-start', lane: LANE }, PR_ROW], cwd, origin = 'git@github.com:o/r.git' } = {}) {
   const home = realpathSync(scratchDir('closeout-'))
@@ -59,6 +66,139 @@ function assertUnchanged(w) {
   assert.equal(readFileSync(join(w.leaf, 'task', 'journal.jsonl'), 'utf8'), w.journalText)
   assert.ok(!existsSync(join(w.archiveRoot, `dt-${LANE}`)), 'no archive destination')
 }
+
+test('a lane stopped in plan with no pull request is discarded: worktree and branch removed, lane archived, no gh call', () => {
+  const w = world({ rows: STOPPED })
+  try {
+    const r = close(w, { argv: [LANE, '--discard'], renameSync: (from, to) => {
+      assert.ok(!existsSync(w.worktree))
+      assert.ok(!branchExists(w))
+      renameSync(from, to)
+    } })
+    assert.equal(r.status, 0, r.err)
+    assert.match(r.out, /^discarded demo:/)
+    assert.ok(!existsSync(w.worktree))
+    assert.ok(!branchExists(w))
+    assert.ok(!existsSync(w.laneDir))
+    assert.equal(readFileSync(join(w.archiveRoot, `dt-${LANE}`, LANE, 'task', 'journal.jsonl'), 'utf8'), w.journalText)
+    assert.deepEqual(r.calls.filter((c) => c[0] === 'git' && (c.includes('remove') || c.includes('-D'))).map((c) => c.slice(3, 5).join(' ')), ['worktree remove', 'branch -D'])
+    assert.ok(!r.calls.some((c) => c[0] === 'gh'))
+  } finally { w.done() }
+})
+
+test('discard holds the finish stop claim throughout teardown', () => {
+  const w = world({ rows: STOPPED })
+  try {
+    let attempted = false
+    const run = runner('MERGED', tipOf(w), [])
+    const r = close(w, { argv: [LANE, '--discard'], run: (cmd, args) => {
+      if (!attempted) {
+        attempted = true
+        assert.throws(() => writeFileSync(join(w.leaf, 'task', 'finish-3.claim'), '999\n', { flag: 'wx' }), { code: 'EEXIST' })
+      }
+      return run(cmd, args)
+    } })
+    assert.equal(r.status, 0, r.err)
+    assert.ok(attempted)
+    assert.ok(!existsSync(join(w.archiveRoot, `dt-${LANE}`, LANE, 'task', 'finish-3.claim')))
+  } finally { w.done() }
+})
+
+test('discard refuses a lane that recorded a pull request, naming plain closeout, with nothing changed', () => {
+  const w = world({ rows: [...STOPPED, PR_ROW] })
+  try {
+    const r = close(w, { argv: [LANE, '--discard'] })
+    assert.equal(r.status, 1)
+    assert.match(r.err, /crew closeout demo/)
+    assert.equal(r.calls.length, 0)
+    assertUnchanged(w)
+  } finally { w.done() }
+})
+
+test('discard refuses a lane with a finish-ready row, naming crew finish, with nothing changed', () => {
+  for (const event of ['finish-ready', 'finish-decision']) {
+    const w = world({ rows: [...STOPPED, { event }] })
+    try {
+      const r = close(w, { argv: [LANE, '--discard'] })
+      assert.equal(r.status, 1, event)
+      assert.match(r.err, /crew finish demo/)
+      assert.equal(r.calls.length, 0)
+      assertUnchanged(w)
+    } finally { w.done() }
+  }
+})
+
+test('a dead run with no pull request and no stop verdict is discarded', () => {
+  const w = world({ rows: [{ event: 'stage-start', stage: 'plan' }] })
+  try {
+    writeFileSync(join(w.leaf, 'task', 'run.pid'), '123\n')
+    const r = close(w, { argv: [LANE, '--discard'], alive: () => false })
+    assert.equal(r.status, 0, r.err)
+    assert.ok(!existsSync(w.worktree))
+    assert.ok(!branchExists(w))
+    assert.equal(readFileSync(join(w.archiveRoot, `dt-${LANE}`, LANE, 'task', 'journal.jsonl'), 'utf8'), w.journalText)
+    assert.ok(!r.calls.some((c) => c[0] === 'gh'))
+  } finally { w.done() }
+})
+
+test('discard refuses a lane whose recorded pid is still alive, with nothing changed', () => {
+  for (const { rows, file, pid, alive } of [
+    ...[true, null].map((result) => ({ rows: [{ event: 'stage-start', stage: 'plan' }], file: 'run.pid', pid: '123\n', alive: () => result })),
+    ...[true, null].map((result) => ({ rows: STOPPED, file: 'run.pid', pid: '123\n', alive: () => result })),
+    ...['123\n', ''].map((pid) => ({ rows: STOPPED, file: 'finish-3.claim', pid, alive: () => true })),
+    { rows: STOPPED, file: 'finish-3.reclaim', pid: '123\n', alive: () => true },
+  ]) {
+    const w = world({ rows })
+    try {
+      writeFileSync(join(w.leaf, 'task', file), pid)
+      const r = close(w, { argv: [LANE, '--discard'], alive })
+      assert.equal(r.status, 1)
+      assert.match(r.err, /not stopped/)
+      assert.equal(r.calls.length, 0)
+      assertUnchanged(w)
+    } finally { w.done() }
+  }
+})
+
+test('discard refuses a worktree with uncommitted changes, with nothing changed', () => {
+  const w = world({ rows: STOPPED })
+  try {
+    writeFileSync(join(w.worktree, 'dirty.txt'), 'x\n')
+    const r = close(w, { argv: [LANE, '--discard'] })
+    assert.equal(r.status, 1)
+    assert.match(r.err, /git worktree remove failed/)
+    assert.ok(!r.calls.some((c) => c.includes('--force') || c.includes('-D') || c[0] === 'gh'))
+    assertUnchanged(w)
+    assert.ok(existsSync(join(w.worktree, 'dirty.txt')))
+  } finally { w.done() }
+})
+
+test('discard refuses a lean.json naming another lane worktree, with nothing changed', () => {
+  for (const wrongBranch of [false, true]) {
+    const w = world({ rows: STOPPED, ...(wrongBranch ? {} : { cwd: (home) => join(home, 'repos', 'dt-other') }) })
+    try {
+      if (wrongBranch) git(w.worktree, 'switch', '-q', '-c', 'side')
+      const r = close(w, { argv: [LANE, '--discard'] })
+      assert.equal(r.status, 1)
+      assert.match(r.err, wrongBranch ? /refs\/heads\/side, not demo/ : /is not dt-demo/)
+      assert.ok(!r.calls.some((c) => c.includes('remove') || c.includes('-D') || c[0] === 'gh'))
+      assertUnchanged(w)
+    } finally { w.done() }
+  }
+})
+
+test('closeout usage names --discard and bad discard usage exits 2', () => {
+  const w = world({ rows: STOPPED })
+  try {
+    for (const argv of [[], [''], ['', '--discard'], ['--discard'], [LANE, '--discard', '--discard'], [LANE, 'bad'], ['--discard', LANE]]) {
+      const r = close(w, { argv })
+      assert.equal(r.status, 2)
+      assert.equal(r.err, 'usage: crew closeout <lane> [--discard]\n')
+      assert.equal(r.calls.length, 0)
+    }
+    assertUnchanged(w)
+  } finally { w.done() }
+})
 
 test('a dead run with no pull request is refused as run-died naming crew record-pr, with nothing changed', () => {
   const w = world({ rows: [{ event: 'stage-start', stage: 'build' }] })

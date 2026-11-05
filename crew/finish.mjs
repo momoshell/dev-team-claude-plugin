@@ -181,7 +181,7 @@ function launch(d, { crewRoot, taskDir, spec, finish, claim, recoveryPid }) {
   return { lane: spec.id, worktree: spec.cwd, specPath, pid }
 }
 
-function claimStop(d, lane, taskDir, at) {
+export function claimStop(d, lane, taskDir, at) {
   // The claim is exclusive and names the stop it finishes, so two calls before the run's first row cannot both spawn.
   const claim = join(taskDir, `finish-${at}.claim`)
   try { d.writeFileSync(claim, `${process.pid}\n`, { flag: 'wx' }) } catch (error) {

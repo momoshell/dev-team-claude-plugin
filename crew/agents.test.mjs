@@ -15,7 +15,7 @@ const roster = {
       "lead": null,
       "planner": {
         "provider": "meta",
-        "id": "muse-wonder-1.0",
+        "id": "muse-wonder-1.0-contributor",
         "agent": "muse",
         "effort": "medium"
       },
@@ -42,7 +42,7 @@ const roster = {
       },
       "planner": {
         "provider": "meta",
-        "id": "muse-wonder-1.0",
+        "id": "muse-wonder-1.0-contributor",
         "agent": "muse",
         "effort": "high"
       },
@@ -69,7 +69,7 @@ const roster = {
       },
       "planner": {
         "provider": "meta",
-        "id": "muse-wonder-1.0",
+        "id": "muse-wonder-1.0-contributor",
         "agent": "muse",
         "effort": "xhigh"
       },

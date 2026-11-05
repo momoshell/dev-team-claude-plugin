@@ -215,7 +215,7 @@ export async function runLean(spec, deps = {}) {
       const recorded = relayed.join('')
       let intact = false
       try { intact = d.readFileSync(sessionFile, 'utf8') === header + recorded } catch { /* unreadable is not intact */ }
-      recording = { definition, recorded: !failed && intact ? recorded : null, cwd: spec.cwd }
+      recording = { definition, recorded: !failed && intact ? recorded : null, cwd: spec.cwd, museSkillsRoot: turn?.museSkillsRoot }
       if (checkRecords) {
         const after = fingerprint()
         if (typeof after !== 'string') throw violation('acp-seat-record-unmeasured')

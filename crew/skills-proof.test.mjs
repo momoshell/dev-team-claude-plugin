@@ -166,10 +166,35 @@ test('a dotted skill name loads, and a skills root with spaces is matched whole'
 })
 
 // MUTATION: let any agent but pi prove a skill by a file read and an unnamed agent passes.
-test('a seat whose agent is neither claude nor pi proves nothing', async () => {
+test('a seat whose agent is neither claude nor pi nor muse proves nothing', async () => {
   for (const agent of [undefined, 'other']) {
     assert.equal(await prove([piLoad(), write()], { agent, requires: ['alpha'], skills: ['alpha'], writes: 'task-dir' }), 'required-skills-unproven', String(agent))
   }
+})
+
+test('a muse seat proves a required skill only by a whole read of its granted SKILL.md', () => {
+  const definition = { agent: 'muse', requires: ['alpha'], skills: ['alpha'], writes: 'task-dir' }
+  for (const title of ['read', 'read_file']) {
+    const read = call('r', title, 'read', { file_path: '/c/skills/alpha/SKILL.md' })
+    assert.equal(prove([read, done('r'), write()], definition), null)
+    assert.equal(prove([write(), read, done('r')], definition), 'required-skills-unproven')
+    assert.equal(prove([read, write()], definition), 'required-skills-unproven')
+  }
+  for (const input of [{ path: '/c/skills/alpha/SKILL.md', offset: 1 }, { path: '/c/skills/alpha/SKILL.md', limit: 1 }, { path: '/c/skills/beta/SKILL.md' }]) {
+    assert.equal(prove([call('r', 'read_file', 'read', input), done('r'), write()], definition), 'required-skills-unproven')
+  }
+  assert.equal(prove([call('sh', 'bash', 'execute', { command: 'cat /c/skills/alpha/SKILL.md' }), done('sh'), write()], definition), 'required-skills-unproven')
+  assert.equal(prove([piLoad(), write()], { ...definition, skills: [] }), 'required-skills-unproven')
+  const copied = '/runtime/muse-skills/alpha/SKILL.md'
+  const at = (rows, root = '/runtime/muse-skills', grant = definition) => proveRequiredSkills({ definition: grant, skillsRoot: '/c/skills', museSkillsRoot: root, recorded: rows.join('\n') })
+  const readCopy = call('r', 'read_file', 'read', { path: copied })
+  assert.equal(at([readCopy, done('r'), write()]), null)
+  assert.equal(at([write(), readCopy, done('r')]), 'required-skills-unproven')
+  assert.equal(at([call('r', 'read', 'read', { path: copied, limit: 1 }), done('r'), write()]), 'required-skills-unproven')
+  assert.equal(at([call('r', 'bash', 'execute', { command: `cat ${copied}` }), done('r'), write()]), 'required-skills-unproven')
+  assert.equal(at([readCopy, done('r'), write()], '/other/muse-skills'), 'required-skills-unproven')
+  assert.equal(at([readCopy, done('r'), write()], null), 'required-skills-unproven')
+  assert.equal(at([readCopy, done('r'), write()], '/runtime/muse-skills', { ...definition, skills: [] }), 'required-skills-unproven')
 })
 
 // MUTATION: accept a read for a skill not granted by bare name and a path-granted or ungranted skill proves.

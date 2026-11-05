@@ -340,7 +340,7 @@ export async function runLoop(spec, deps = {}) {
         if (!failure && checked.defects.length === 0 && checked.envelope?.id === id) {
           for (const { recording } of attempts) {
             if (!recording?.definition) continue
-            const unproven = proveRequiredSkills({ definition: recording.definition, recorded: recording.recorded, cwd: recording.cwd })
+            const unproven = proveRequiredSkills({ definition: recording.definition, recorded: recording.recorded, cwd: recording.cwd, museSkillsRoot: recording.museSkillsRoot })
             if (unproven) checked.defects.push(unproven)
           }
         }

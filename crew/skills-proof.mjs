@@ -56,30 +56,32 @@ function toolNameOf(call) {
 // The required skill a completed call loads, or null when it loads none.
 // A claude seat loads its granted skills only through its own plugin, `crew-skills-<role>`
 // (adapter-claude writeSeatSkills): a Skill call under that namespace counts, a bare or foreign name
-// does not, and neither does a file read. A pi seat counts only a whole read-tool read (no offset or
-// limit) of <skills root>/<name>/SKILL.md, the file crew/acp/seat.mjs grants for a bare skill name; a
-// relative path resolves against the seat's cwd. Shell reads and path-granted skills prove nothing.
-function loadOf(name, input, { agent, role, required, bareGrants, skillsRoot, cwd }) {
+// does not, and neither does a file read. A pi or muse seat counts only a whole read-tool read (no offset or
+// limit) of <skills root>/<name>/SKILL.md, or for muse the per-seat copy. The runtime root comes from
+// the runner, not the recording. A relative path resolves against the seat's cwd. Shell reads and
+// path-granted skills prove nothing.
+function loadOf(name, input, { agent, role, required, bareGrants, skillsRoot, museSkillsRoot, cwd }) {
   if (agent === 'claude') {
     const own = `crew-skills-${role}:`
     const skill = name === 'Skill' && typeof input.skill === 'string' && input.skill.startsWith(own) ? input.skill.slice(own.length) : null
     return required.includes(skill) ? skill : null
   }
-  if (agent !== 'pi' || name.toLowerCase() !== 'read' || input.offset != null || input.limit != null) return null
+  if (!(agent === 'pi' && name.toLowerCase() === 'read') && !(agent === 'muse' && ['read', 'read_file'].includes(name.toLowerCase()))) return null
+  if (input.offset != null || input.limit != null) return null
   const path = input.path ?? input.file_path
   if (typeof path !== 'string' || path === '' || (!isAbsolute(path) && typeof cwd !== 'string')) return null
   const full = isAbsolute(path) ? normalize(path) : resolve(cwd, path)
-  return required.find((skill) => bareGrants.has(skill) && full === join(skillsRoot, skill, 'SKILL.md')) ?? null
+  return required.find((skill) => bareGrants.has(skill) && (full === join(skillsRoot, skill, 'SKILL.md') || (agent === 'muse' && typeof museSkillsRoot === 'string' && full === join(museSkillsRoot, skill, 'SKILL.md')))) ?? null
 }
 
-export function proveRequiredSkills({ definition, recorded, cwd, skillsRoot = SKILLS_ROOT }) {
+export function proveRequiredSkills({ definition, recorded, cwd, skillsRoot = SKILLS_ROOT, museSkillsRoot }) {
   const required = definition?.requires ?? []
   if (required.length === 0) return null
   if (typeof recorded !== 'string' || recorded.trim() === '') return UNPROVEN
   let calls
   try { calls = foldCalls(recorded) } catch { return UNPROVEN }
   const bareGrants = new Set((Array.isArray(definition.skills) ? definition.skills : []).filter((entry) => typeof entry === 'string' && !entry.includes('/') && !entry.endsWith('.md')))
-  const scope = { agent: definition.agent, role: definition.role, required, bareGrants, skillsRoot, cwd }
+  const scope = { agent: definition.agent, role: definition.role, required, bareGrants, skillsRoot, museSkillsRoot, cwd }
   const loadedAt = new Map()
   let firstWrite = null
   for (const call of calls) {

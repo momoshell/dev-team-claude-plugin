@@ -17,6 +17,7 @@ import * as museAdapter from '../adapters/adapter-muse.mjs'
 import { CONTEXT_LAYOUT_ENV, LEAN_LAYOUT, journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../pi/context-layout.mjs'
 import { ADVISOR_MANIFEST_FILE, ADVISOR_CONFIG_VERSION, SAFE_MODEL, ADVISED_ROLES, READ_CAP_BYTES, boundText, loadContext as advisorContext } from '../pi/extensions/advisor.ts'
 import { loadAcceptedContext } from '../pi/extensions/skeletonread.ts'
+import { createReadGate, fffSearchProgram } from '../pi/extensions/readgate.ts'
 
 const ROLE = 'seat'
 const WRITES = Object.freeze(['none', 'task-dir', 'repo'])
@@ -101,14 +102,14 @@ const CONTEXT_EXTENSIONS = Object.freeze(['skeletonread'])
 
 const nonempty = (value) => typeof value === 'string' && value !== ''
 
-// armGrants refuses unknown or missing names. Claude expresses only fff and skills;
-// its adapter refuses every resolved extension and the advisor.
+// armGrants resolves extension assets; muse handles readgate at its permission boundary.
 function seatGrants(definition, { role, isPi, skills, deps }) {
   const extensions = definition.extensions ?? []
   if (!Array.isArray(extensions) || !extensions.every(nonempty)) throw new Error('extensions must be a list of extension names')
   const advisor = definition.advisor !== undefined && definition.advisor !== null
   if (isPi && advisor && !ADVISED_ROLES.has(role)) throw refuse('grant-unsupported', `advisor grant is unsupported for seat ${role}`)
-  const armed = armGrants({ role, agent: definition.agent, extensions }, { register: deps.register, root: deps.root, exists: deps.exists })
+  const readgate = definition.agent === 'muse' && extensions.includes('readgate')
+  const armed = armGrants({ role, agent: definition.agent, extensions: readgate ? extensions.filter((name) => name !== 'readgate') : extensions }, { register: deps.register, root: deps.root, exists: deps.exists })
   const mcp = armed.mcp_servers.length > 0
   const piBuiltins = isPi && mcp ? ['builtin:mcp'] : []
   return {
@@ -117,6 +118,7 @@ function seatGrants(definition, { role, isPi, skills, deps }) {
     agents: [...armed.agents],
     skills,
     advisor,
+    readgate,
     mcp_servers: armed.mcp_servers.map((server) => ({ ...server })),
   }
 }
@@ -333,6 +335,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
   const muse = isMuse ? resolveBinary('muse', binaries.muse, 'muse', env) : null
   const grantedSkills = skills.map((skill) => resolveSkill(skill, workdir))
   const grants = seatGrants(definition, { role, isPi, skills: grantedSkills, deps })
+  if (isMuse) museAdapter.assertSupportedGrants(grants)
   // fff replaces native search; pi reads Glob and Grep as find and grep.
   if (grants.mcp_servers.some((server) => server.name === 'fff')) deny = [deny, 'Glob,Grep'].filter(Boolean).join(',')
   const contextArms = !isPi ? [] : [
@@ -343,6 +346,11 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
   const append = deps.appendFileSync ?? appendFileSync
   const real = deps.realpathSync ?? realpathSync
   const laneTaskDir = nonempty(taskDir) ? resolve(taskDir) : null
+  let gateFailed = false
+  const readgate = grants.readgate ? createReadGate({ cwd: workdir, taskDir: laneTaskDir, env: { ...env, CREW_FFF: grants.mcp_servers.some((server) => server.name === 'fff') ? '1' : '0' }, recordFailure: (row) => {
+    gateFailed = true
+    if (laneTaskDir) append(journalPathOf(laneTaskDir), `${JSON.stringify({ at: new Date().toISOString(), ...row })}\n`)
+  } }) : null
   if (contextArms.length) laneContext({ arms: contextArms, role, laneTaskDir, workdir, definition, deps })
   const workRoot = canonicalRoot(workdir, real)
   const taskRoot = laneTaskDir ? canonicalRoot(laneTaskDir, real) : null
@@ -378,6 +386,23 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
 
   // The effective definition's writes are the only authority; anything the rules do not name is refused.
   function seatPermission(toolCall) {
+    if (readgate && (toolCall?.kind === 'execute' || toolCall?.kind === 'read')) {
+      try {
+        const input = toolCall.rawInput
+        const isRead = toolCall.kind === 'read'
+        const path = input?.path ?? input?.file_path
+        if (isRead ? nonempty(path) : nonempty(input?.command)) {
+          gateFailed = false
+          const event = { toolName: isRead ? 'read' : 'bash', input: isRead ? { ...input, path } : input, toolCallId: toolCall.toolCallId }
+          const result = readgate.onToolCall(event, { cwd: workdir })
+          if (result?.block) return false
+          // The shared gate handles cd + rg; apply its direct-search rule to the other certain cd shapes too.
+          const cd = !isRead && /^\s*cd\s+((?:"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|\\.|[^\s;&|])+)\s+&&\s+([\s\S]*)$/.exec(input.command)
+          if (cd && !/[`$]/.test(cd[1]) && /^(?:grep|rg|find|fd)(?:\s|$)/.test(cd[2]) && fffSearchProgram(cd[2]) && readgate.onToolCall({ ...event, input: { command: cd[2] } }, { cwd: workdir })?.block) return false
+          if (isRead && !gateFailed) return true
+        }
+      } catch { /* fall through to the existing permission decision */ }
+    }
     if (toolCall?.kind === 'execute') {
       if (!nonempty(toolCall.rawInput?.command)) return false
       return writes === 'repo' || readOnlyCommand(toolCall?.rawInput?.command)
@@ -449,6 +474,7 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
       writePiAgentDir({ agentDir: piAdapter.piSeatAgentDir({ taskDir: runtime, role }), grants, cwd: workdir, env, role })
       launch = piAdapter.acpLaunch({ ...spec, bin: pi, model: piModel })
     } else {
+      museAdapter.writeSeatSkills({ taskDir: runtime, grants })
       launch = museAdapter.acpLaunch({ ...spec, bin: muse, model, writes })
     }
     const sinkKinds = [...ACP_UPDATE_KINDS, 'unknown']
@@ -463,7 +489,9 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
     client.newSession(launch.sessionParams)
     if (launch.mode) client.setMode(launch.mode)
     const deadline = now() + waitS * 1000
-    const promptId = client.beginPrompt([{ type: 'text', text: prompt }])
+    // ACP's selected rejection carries only an option ID, so give the redirects before the turn.
+    const guidance = readgate ? `\n\nReadgate is active: whole-file reads and cat/head/tail of large files are refused; use a ranged read instead.${grants.mcp_servers.some((server) => server.name === 'fff') ? ' Direct grep/rg/find/fd searches are refused; use mcp__fff__grep or mcp__fff__find_files instead.' : ''}` : ''
+    const promptId = client.beginPrompt([{ type: 'text', text: prompt + guidance }])
     while (now() < deadline) {
       // Nothing can repair a lost runtime, and the stream it held would stay silent until the deadline.
       if (!existsSync(runtime)) {
@@ -471,13 +499,13 @@ export function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, bina
       }
       const turn = client.pollPrompt(promptId)
       if (now() >= deadline) break
-      if (turn) return isMuse ? { ...turn, usage: null, usage_reason: 'usage-unavailable' } : turn
+      if (turn) return isMuse ? { ...turn, usage: null, usage_reason: 'usage-unavailable', ...(grantedSkills.length ? { museSkillsRoot: join(runtime, 'muse-skills') } : {}) } : turn
       // A seat that died with no answer would otherwise hold the turn until its deadline.
       if (client.hasExitMarker?.()) {
         // The answer may have settled between the empty poll and the marker.
         const exitedTurn = client.pollPrompt(promptId)
         if (now() >= deadline) break
-        if (exitedTurn) return isMuse ? { ...exitedTurn, usage: null, usage_reason: 'usage-unavailable' } : exitedTurn
+        if (exitedTurn) return isMuse ? { ...exitedTurn, usage: null, usage_reason: 'usage-unavailable', ...(grantedSkills.length ? { museSkillsRoot: join(runtime, 'muse-skills') } : {}) } : exitedTurn
         throw Object.assign(new Error(`${role} exited before answering (acp-seat-closed)`), { reason: 'acp-seat-closed' })
       }
       sleep(Math.max(0, Math.min(ACP_POLL_MS, deadline - now())))

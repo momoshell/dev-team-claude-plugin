@@ -1,4 +1,4 @@
-// ADR-056: measure only typed Claude Code messages, not seat prompts or pasted text.
+// ADR-056: measure only typed or queued Claude Code messages, not seat prompts or pasted text.
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -18,10 +18,10 @@ export function readOperatorMessages({ root, now = Date.now(), days = 30 }) {
           const path = join(dir, file.name)
           if (statSync(path).mtimeMs < now - days * 86400000) continue
           for (const line of readFileSync(path, 'utf8').split('\n')) {
-            if (!/"promptSource"\s*:\s*"typed"/.test(line)) continue
+            if (!/"promptSource"\s*:\s*"(?:typed|queued)"/.test(line)) continue
             try {
               const row = JSON.parse(line)
-              if (row.type === 'user' && row.origin?.kind === 'human' && row.promptSource === 'typed' && typeof row.message?.content === 'string') {
+              if (row.type === 'user' && row.origin?.kind === 'human' && (row.promptSource === 'typed' || row.promptSource === 'queued') && typeof row.message?.content === 'string') {
                 messages.push(row.message.content.replace(/<pasted_content id="([^"]+)">[\s\S]*?<\/pasted_content id="\1">/g, ''))
               }
             } catch { incomplete = true }

@@ -127,6 +127,77 @@ test('crew start refuses ask lines the operator never typed: seat prompts, paste
   assert.equal((await startLane({ briefPath: '/d/b1.md', check: true, deps: pass.deps })).checked, true)
 })
 
+test('crew start accepts queued operator messages as provenance and refuses words no queued or typed message contains (ADR-056)', async () => {
+  const root = scratchDir('provenance-queued-')
+  const dir = join(root, 'proj')
+  mkdirSync(dir)
+  const row = (content, promptSource = 'queued', kind = 'human') => ({ type: 'user', origin: { kind }, promptSource, message: { content } })
+  const path = join(dir, 'a.jsonl')
+  writeFileSync(path, [
+    row('whole queued message'), row('sdk message', 'sdk'), row('system message', 'system'),
+    row('non-human message', 'queued', 'task-notification'), row(['array message']),
+    { ...row('non-user message'), type: 'assistant' },
+  ].map(JSON.stringify).join('\n'))
+  const old = join(dir, 'old.jsonl')
+  writeFileSync(old, JSON.stringify(row('stale queued message')))
+  const then = new Date(Date.now() - 40 * 86400000)
+  utimesSync(old, then, then)
+  const makeBrief = (ask) => BRIEF.replace('source: issue 1961', 'source: operator request').replace('## Context', `## The ask\n\n${ask}\n\n## Context`)
+  const excluded = ['unrelated words', 'queued message', 'sdk message', 'system message', 'non-human message', 'array message', 'non-user message', 'stale queued message']
+  for (const check of [true, false]) {
+    let resolutions = 0
+    const fail = fakes({ brief: makeBrief(excluded.map((text) => `> ${text}`).join('\n\n')), resolve: () => { resolutions++; return { seats: {} } } })
+    fail.deps.transcriptRoot = root
+    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps: fail.deps }), (error) => error instanceof StartRefusal && excluded.every((text) => error.message.includes(JSON.stringify(text))))
+    assert.equal(resolutions, 0)
+    assert.deepEqual(effects(fail.calls), [])
+    const pass = fakes({ brief: makeBrief('> whole queued message') })
+    pass.deps.transcriptRoot = root
+    await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps: pass.deps }))
+    assert.equal(pass.calls.some(([kind, line]) => kind === 'log' && line.includes('ask provenance unmeasured')), false)
+  }
+  appendFileSyncReal(path, `\n${JSON.stringify(row('whole typed message', 'typed'))}`)
+  const both = fakes({ brief: makeBrief('> whole queued message\n\n> whole typed message') })
+  both.deps.transcriptRoot = root
+  assert.equal((await startLane({ briefPath: '/d/b1.md', check: true, deps: both.deps })).checked, true)
+})
+
+test('crew start strips pasted content from queued messages and still refuses the pasted text itself (ADR-056)', async () => {
+  const root = scratchDir('provenance-queued-paste-')
+  const dir = join(root, 'proj')
+  mkdirSync(dir)
+  writeFileSync(join(dir, 'a.jsonl'), JSON.stringify({ type: 'user', origin: { kind: 'human' }, promptSource: 'queued', message: { content: 'before <pasted_content id="p1">pasted words</pasted_content id="p1"> after' } }))
+  const makeBrief = (ask) => BRIEF.replace('source: issue 1961', 'source: operator request').replace('## Context', `## The ask\n\n> ${ask}\n\n## Context`)
+  for (const check of [true, false]) {
+    const fail = fakes({ brief: makeBrief('pasted words') })
+    fail.deps.transcriptRoot = root
+    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps: fail.deps }), (error) => error instanceof StartRefusal && error.message.includes('"pasted words"'))
+    assert.deepEqual(effects(fail.calls), [])
+    const pass = fakes({ brief: makeBrief('before after') })
+    pass.deps.transcriptRoot = root
+    await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps: pass.deps }))
+    assert.equal(pass.calls.some(([kind, line]) => kind === 'log' && line.includes('ask provenance unmeasured')), false)
+  }
+})
+
+test('crew start reports ask provenance unmeasured for a malformed queued transcript row and starts (ADR-056)', async () => {
+  const root = scratchDir('provenance-queued-malformed-')
+  const dir = join(root, 'proj')
+  mkdirSync(dir)
+  const path = join(dir, 'a.jsonl')
+  const brief = BRIEF.replace('source: issue 1961', 'source: operator request').replace('## Context', '## The ask\n\n> Do this.\n\n## Context')
+  for (const readable of [false, true]) {
+    writeFileSync(path, `${readable ? `${JSON.stringify({ type: 'user', origin: { kind: 'human' }, promptSource: 'typed', message: { content: 'Unrelated words.' } })}\n` : ''}{"promptSource":"queued",`)
+    for (const check of [true, false]) {
+      const operator = fakes({ brief })
+      operator.deps.transcriptRoot = root
+      await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps: operator.deps }))
+      assert.ok(operator.calls.some(([kind, line]) => kind === 'log' && line.includes(`crew start: ask provenance unmeasured: incomplete Claude Code transcript scan under ${root}`)))
+      assert.equal(effects(operator.calls).length > 0, !check)
+    }
+  }
+})
+
 test('crew start refuses a ## Context path missing on the base before the worktree (ADR-056 Amendment 1)', async () => {
   for (const status of [128, 1, null]) {
     const missing = fakes({ brief: BRIEF.replace('`crew/agents.mjs`', '`crew/missing.mjs`') })

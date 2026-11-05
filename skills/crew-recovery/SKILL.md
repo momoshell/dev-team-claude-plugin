@@ -49,6 +49,13 @@ longer the head the run measured. Read the refusal; it names the cause.
 
 ## Close it out
 
+For a stopped lane with no PR that the visualizer keeps showing, use
+`crew closeout <lane> --discard`. It removes the worktree and branch and
+archives the journal; it does not change the visualizer. It refuses lanes with
+any recorded PR (use plain closeout after merge), finish records (use `crew finish`),
+a run not proven stopped, or uncommitted worktree changes. The worktree removal
+is never forced. Inspect the lane first: discard removes its worktree.
+
 - Finished by hand: in the lane worktree, commit every change the build made
   (`git status --short` shows nothing left), fetch, and rebase onto the base the
   lane recorded as `origin/<base>` (`base` in `task/lean.json`; a local `<base>` does not move on fetch). Then, on
@@ -63,4 +70,4 @@ longer the head the run measured. Read the refusal; it names the cause.
   `~/.crew-journal-archive/` (`crew/closeout.mjs`). It refuses unless the
   recorded PR is merged with the lane branch tip as its head.
 
-Never close out before the merge: the worktree is the only copy of the build.
+For a lane with a PR, never close out before the merge: the worktree is the only copy of the build.

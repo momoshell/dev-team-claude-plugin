@@ -8,6 +8,8 @@
 //   crew finish <lane>           finish a stopped lean lane with its own builder seat; stops committed and rebased, unpublished (crew/finish.mjs)
 //   crew finish <lane> --accept [--notes <file>] | --return <file> | --abandon  decide a lane whose finish run is ready (crew/finish.mjs)
 //   crew closeout <lane>         remove a merged lean lane's worktree and branch, archive its lane directory (crew/closeout.mjs)
+//   crew closeout <lane> --discard  archive a stopped no-PR lane; refuses PRs, finish records, running lanes and dirty worktrees
+//                                PRs use plain closeout after merge; finish records use crew finish; the visualizer is unchanged
 //   crew lanes [--all] [--json]  list lean lanes from their journals (crew/lanes.mjs)
 //   crew viz                     serve the visualizer from the crew home
 //   crew where                   print the crew home, its branch and its commit

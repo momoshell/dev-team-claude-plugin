@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync,
+  appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync,
 } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
@@ -219,6 +219,109 @@ test('a muse seat launches muse acp with the experimental flag, the stripped mod
     assert.equal(run.sent.find((frame) => frame.method === 'session/set_mode').params.modeId, 'onRequest')
     assert.deepEqual(sessionNew(run).params.mcpServers, [])
   })
+})
+
+test('a muse seat launches acp with web tools and foreign personal context disabled', async () => {
+  const overrides = ['tools.web_search.mode="off"', 'tools.web_fetch.enabled=false']
+  const launch = muse.acpLaunch({ bin: BIN, model: 'muse-spark-1.3', effort: 'high', taskDir: scratchDir('muse-direct-') })
+  await use('pi-turn', { agent: 'muse', model: 'meta/muse-spark-1.3' }, (run) => {
+    assert.equal(run.error, undefined)
+    for (const override of overrides) {
+      assert.ok(launch.args.some((arg, i) => arg === '-c' && launch.args[i + 1] === override), override)
+      assert.ok(run.launches[0][1][1].includes(`'-c' '${override}'`), override)
+    }
+    for (const foreign of ['context.foreign_personal_rules=false', 'context.foreign_personal_skills=false']) {
+      assert.ok(!launch.args.includes(foreign))
+      assert.ok(!run.launches[0][1][1].includes(foreign))
+    }
+    for (const env of [launch.env, run.launches[0][2].env]) {
+      assert.equal(env.MUSE_ENABLE_WEB_TOOLS, '0')
+      assert.equal(env.MUSE_WEB_SEARCH_MODE, 'off')
+      assert.equal(env.MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL, '1')
+    }
+  })
+})
+
+test('an inherited web-tool env cannot re-enable web tools on a muse seat', async () => {
+  const previous = { MUSE_ENABLE_WEB_TOOLS: process.env.MUSE_ENABLE_WEB_TOOLS, MUSE_WEB_SEARCH_MODE: process.env.MUSE_WEB_SEARCH_MODE }
+  try {
+    for (const mode of ['hosted', 'client']) {
+      const env = { MUSE_ENABLE_WEB_TOOLS: '1', MUSE_WEB_SEARCH_MODE: mode }
+      Object.assign(process.env, env)
+      const launch = muse.acpLaunch({ bin: BIN, env, taskDir: scratchDir('muse-direct-') })
+      await use('pi-turn', { agent: 'muse', model: 'meta/muse-spark-1.3' }, (run) => {
+        assert.equal(run.error, undefined)
+        for (const actual of [launch.env, run.launches[0][2].env]) {
+          assert.equal(actual.MUSE_ENABLE_WEB_TOOLS, '0')
+          assert.equal(actual.MUSE_WEB_SEARCH_MODE, 'off')
+        }
+      })
+    }
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+})
+
+test('a muse launch prepares an isolated home that links only the operator auth file', async () => {
+  const root = scratchDir('muse-isolation-')
+  const operator = join(root, 'operator')
+  const config = join(operator, 'config')
+  mkdirSync(join(config, 'muse', 'skills', 'personal'), { recursive: true })
+  writeFileSync(join(config, 'muse', 'auth.json'), 'auth')
+  writeFileSync(join(config, 'muse', 'settings.json'), 'settings')
+  writeFileSync(join(config, 'muse', 'skills', 'personal', 'SKILL.md'), 'personal')
+  const taskDir = scratchDir('muse-direct-')
+  const launch = muse.acpLaunch({ bin: BIN, taskDir, env: { HOME: operator, XDG_CONFIG_HOME: config, XDG_DATA_HOME: operator, CLAUDE_CONFIG_DIR: operator, CODEX_HOME: operator } })
+  const home = join(taskDir, 'muse-home')
+  assert.equal(launch.env.HOME, home)
+  assert.deepEqual(readdirSync(home).sort(), ['claude', 'codex', 'config', 'data'])
+  for (const key of ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME']) {
+    assert.ok(relative(home, launch.env[key]) && !relative(home, launch.env[key]).startsWith('..'), key)
+    assert.ok(statSync(launch.env[key]).isDirectory())
+  }
+  assert.deepEqual(readdirSync(launch.env.XDG_CONFIG_HOME), ['muse'])
+  assert.deepEqual(readdirSync(join(launch.env.XDG_CONFIG_HOME, 'muse')), ['auth.json'])
+  const linkedAuth = join(launch.env.XDG_CONFIG_HOME, 'muse', 'auth.json')
+  assert.ok(lstatSync(linkedAuth).isSymbolicLink())
+  assert.equal(readlinkSync(linkedAuth), join(config, 'muse', 'auth.json'))
+  for (const key of ['XDG_DATA_HOME', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME']) assert.deepEqual(readdirSync(launch.env[key]), [])
+  mkdirSync(join(operator, '.config', 'muse'), { recursive: true })
+  writeFileSync(join(operator, '.config', 'muse', 'auth.json'), 'fallback auth')
+  for (const [sourceHome, expected] of [[operator, join(operator, '.config', 'muse', 'auth.json')], [join(root, 'missing'), null]]) {
+    const other = muse.acpLaunch({ bin: BIN, taskDir: scratchDir('muse-direct-'), env: { HOME: sourceHome, XDG_CONFIG_HOME: '' } })
+    const auth = join(other.env.XDG_CONFIG_HOME, 'muse', 'auth.json')
+    if (expected) assert.equal(readlinkSync(auth), expected)
+    else assert.equal(existsSync(auth), false)
+  }
+  await use('pi-turn', { agent: 'muse', model: 'meta/muse-spark-1.3' }, (run) => {
+    assert.equal(run.error, undefined)
+    const env = run.launches[0][2].env
+    assert.equal(basename(env.HOME), 'muse-home')
+    for (const key of ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME']) assert.ok(relative(env.HOME, env[key]) && !relative(env.HOME, env[key]).startsWith('..'), key)
+  })
+})
+
+test('a muse launch that cannot prepare its isolated home is refused before any seat process starts', async () => {
+  const root = scratchDir('muse-isolation-fail-')
+  const file = join(root, 'file')
+  writeFileSync(file, 'not a directory')
+  for (const taskDir of [undefined, 'relative', file]) {
+    assert.throws(() => muse.acpLaunch({ bin: BIN, taskDir }), { reason: 'grant-unsupported' })
+  }
+  const previous = process.env.XDG_CONFIG_HOME
+  try {
+    process.env.XDG_CONFIG_HOME = file
+    await use('pi-turn', { agent: 'muse', model: 'meta/muse-spark-1.3' }, (run) => {
+      assert.equal(run.error?.reason, 'grant-unsupported')
+      assert.equal(run.launches.length, 0)
+    })
+  } finally {
+    if (previous === undefined) delete process.env.XDG_CONFIG_HOME
+    else process.env.XDG_CONFIG_HOME = previous
+  }
 })
 
 test('a muse seat that writes task-dir, names a non-meta model or declares an unsupported extension is refused by name before any process or runtime exists', async () => {
@@ -1715,7 +1818,7 @@ test('a muse builder advisor consult that times out lets the seat return and jou
 
 test('adapter-muse accepts fff with crew-extras and refuses foreign servers and pi extensions', async () => {
   const fff = { name: 'fff', command: { bin: BIN, args: [] }, url: null }
-  const spec = { bin: BIN, cwd: '/tmp', model: 'm', effort: 'high', grants: { mcp_servers: [fff], skeletonread: true, agents: [], advisor: true }, env: { CREW_ROLE: 'builder', CREW_TASK_DIR: '/tmp/task' } }
+  const spec = { bin: BIN, cwd: '/tmp', taskDir: scratchDir('muse-direct-'), model: 'm', effort: 'high', grants: { mcp_servers: [fff], skeletonread: true, agents: [], advisor: true }, env: { CREW_ROLE: 'builder', CREW_TASK_DIR: '/tmp/task' } }
   let launch
   assert.doesNotThrow(() => { launch = muse.acpLaunch(spec) })
   assert.deepEqual(launch.sessionParams.mcpServers.map((server) => server.name), ['fff', 'crew-extras'])

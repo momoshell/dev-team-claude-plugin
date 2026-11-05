@@ -35,9 +35,9 @@ const roster = {
     "build": {
       "advisor": {"provider": "openai", "id": "gpt-6.1-sol", "agent": "pi", "effort": "medium"},
       "lead": {
-        "provider": "openai",
-        "id": "gpt-6-astra",
-        "agent": "pi",
+        "provider": "anthropic",
+        "id": "claude-opus-5-5",
+        "agent": "claude",
         "effort": "high"
       },
       "planner": {
@@ -62,9 +62,9 @@ const roster = {
     "judge": {
       "advisor": {"provider": "openai", "id": "gpt-6.1-sol", "agent": "pi", "effort": "medium"},
       "lead": {
-        "provider": "openai",
-        "id": "gpt-6-astra",
-        "agent": "pi",
+        "provider": "anthropic",
+        "id": "claude-opus-5-5",
+        "agent": "claude",
         "effort": "high"
       },
       "planner": {

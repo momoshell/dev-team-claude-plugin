@@ -15,7 +15,7 @@ const roster = {
       "lead": null,
       "planner": {
         "provider": "meta",
-        "id": "muse-wonder-1.0",
+        "id": "muse-wonder-1.0-contributor",
         "agent": "muse",
         "effort": "medium"
       },
@@ -35,14 +35,14 @@ const roster = {
     "build": {
       "advisor": {"provider": "openai", "id": "gpt-6.1-sol", "agent": "pi", "effort": "medium"},
       "lead": {
-        "provider": "openai",
-        "id": "gpt-6-astra",
-        "agent": "pi",
+        "provider": "anthropic",
+        "id": "claude-opus-5-5",
+        "agent": "claude",
         "effort": "high"
       },
       "planner": {
         "provider": "meta",
-        "id": "muse-wonder-1.0",
+        "id": "muse-wonder-1.0-contributor",
         "agent": "muse",
         "effort": "high"
       },
@@ -62,14 +62,14 @@ const roster = {
     "judge": {
       "advisor": {"provider": "openai", "id": "gpt-6.1-sol", "agent": "pi", "effort": "medium"},
       "lead": {
-        "provider": "openai",
-        "id": "gpt-6-astra",
-        "agent": "pi",
+        "provider": "anthropic",
+        "id": "claude-opus-5-5",
+        "agent": "claude",
         "effort": "high"
       },
       "planner": {
         "provider": "meta",
-        "id": "muse-wonder-1.0",
+        "id": "muse-wonder-1.0-contributor",
         "agent": "muse",
         "effort": "xhigh"
       },

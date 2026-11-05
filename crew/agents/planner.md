@@ -4,7 +4,7 @@ description: Reads the task and writes the plan the builder implements.
 role: planner
 writes: task-dir
 agent: muse
-model: meta/muse-wonder-1.0
+model: meta/muse-wonder-1.0-contributor
 effort: high
 advisor: null
 memory: true

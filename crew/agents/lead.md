@@ -3,8 +3,8 @@ name: lead
 description: The crew's judge: reads envelopes and decides, while code drives the loop.
 role: lead
 writes: task-dir
-agent: pi
-model: openai/gpt-6-astra
+agent: claude
+model: anthropic/claude-opus-5-5
 effort: high
 advisor: null
 tiers: {"mechanical":null}

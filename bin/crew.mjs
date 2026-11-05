@@ -5,8 +5,9 @@
 //   crew start <brief.md>        run crew/start.mjs: start a lane from a P1 brief (ADR-052)
 //   crew show <lane> [<role>] [--json]  read a lane's recorded sessions (crew/show.mjs)
 //   crew record-pr <lane> --pr <url>  record the PR a stopped lean lane was hand-finished in (crew/record-pr.mjs)
-//   crew finish <lane>           finish a stopped lean lane with its own builder seat; stops committed and rebased, unpublished (crew/finish.mjs)
-//   crew finish <lane> --accept [--notes <file>] | --return <file> | --abandon  decide a lane whose finish run is ready (crew/finish.mjs)
+//   crew finish <lane>           report a stopped or ready lane, read-only (crew/finish.mjs)
+//   crew finish <lane> --return <file>  start a pass with guidance on a finishable stop, dead run or ready lane
+//   crew finish <lane> --accept [--notes <file>] | --abandon  decide a ready finish run
 //   crew closeout <lane>         remove a merged lean lane's worktree and branch, archive its lane directory (crew/closeout.mjs)
 //   crew closeout <lane> --discard  archive a stopped no-PR lane; refuses PRs, finish records, running lanes and dirty worktrees
 //                                PRs use plain closeout after merge; finish records use crew finish; the visualizer is unchanged

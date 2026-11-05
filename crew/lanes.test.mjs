@@ -178,6 +178,22 @@ test('a finish return preserves a concurrent stop in either order without revivi
   } finally { w.done() }
 })
 
+test('a child started before its anchored return decision invalidates the previous ready state', () => {
+  const w = world()
+  try {
+    const ready = { event: 'finish-ready' }, start = { event: 'stage-start', stage: 'build' }
+    const decision = { event: 'finish-decision', choice: 'return', launchedAt: 1 }
+    for (const [name, rows, status] of [
+      ['active', [ready, start, decision], 'running'],
+      ['child-ready', [ready, start, ready, decision], 'ready-for-operator'],
+      ['child-stopped', [ready, start, { event: 'verdict', status: 'stopped', reason: 'x' }, decision], 'stopped'],
+    ]) {
+      w.lane(name, rows)
+      assert.equal(JSON.parse(w.run(['--json'], () => true).out).find((row) => row.lane === name).status, status, name)
+    }
+  } finally { w.done() }
+})
+
 test('LP1 LP2 lanes shows the PR of an accepted finish and a finish-ready lane as ready-for-operator', () => {
   const home = realpathSync(scratchDir('lanes-'))
   try {

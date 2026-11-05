@@ -9,7 +9,7 @@ crew onboard --check <draft.json> [--checkout <dir>] # calibrate the checkout
 crew start <brief.md> [--check] [--checkout <dir>]   # worktree + journal + a detached lane
 crew lanes [--all] [--json]                          # list lanes from their journals
 crew show <lane> [<role>] [--json]                   # read a lane's recorded seat sessions
-crew finish <lane>                                   # finish a stopped lane with its own builder seat
+crew finish <lane>                                   # report a stopped or ready lane, read-only
 crew finish <lane> --accept [--notes <file>] | --return <file> | --abandon
 crew record-pr <lane> --pr <url>                     # record the PR a stopped lane was hand-finished in
 crew closeout <lane>                                 # remove a merged lane's worktree and branch, archive its directory
@@ -48,8 +48,11 @@ A fix turn carries the red results back to the builder, then repeats proof, the 
 A brief may choose `mechanical: true` for a change with no behaviour to judge. With no named test, its PR states `proof: none, mechanical lane, not reviewed`; the operator reviews the diff before merging. Protected paths restart it as judge, and builder insufficiency restarts it as build.
 
 The lane name is the brief's file name. `crew start` runs the `standard` shape
-only; `finish` (ADR-051) is the second entry path, started by `crew finish` from
-an escalated lane. A claim whose run is provably gone is taken over. A committed
+only; `finish` (ADR-051) is the second entry path. `crew finish <lane> --return <file>`
+starts a finish pass on any finishable stop, including an escalation or a
+provably dead run, or another pass on a ready lane, with the file as guidance.
+Bare `crew finish <lane>` reports without writing.
+A claim whose run is provably gone is taken over. A committed
 build with no remote branch is uncommitted and finished if HEAD is the commit or
 its journal-recorded one-commit rebase. The latter is reset onto the rebase base;
 the journal records `finish-uncommit`. `--return` refuses with `finish-rounds-spent`

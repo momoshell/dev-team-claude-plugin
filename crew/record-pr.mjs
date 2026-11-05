@@ -9,6 +9,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLeanSource } from '../visualizer/server/lean-source.mjs'
+import { supersededReturn } from '../visualizer/server/lean-journal-order.mjs'
 import { LANE, isObject, within } from './lane-core.mjs'
 import { deadRun, probeAlive } from './run-pid.mjs'
 
@@ -49,7 +50,7 @@ export function recordPr({ lane, url, root = join(homedir(), '.crew'), append = 
   try { text = readFileSync(journal, 'utf8') } catch (error) { refuse(`task journal unreadable: ${error?.code ?? error?.message}`) }
   const rows = parseRows(text)
   if (rows.some((row) => row.event === 'pr')) refuse(`lane ${lane} already records a pull request`)
-  const last = rows.findLast((row) => row.event !== 'stage-end')
+  const last = rows.findLast((row, index) => row.event !== 'stage-end' && !supersededReturn(rows, row, index))
   if ((last?.event !== 'verdict' || last.status !== 'stopped') && !deadRun({ rows, taskDir: join(found.dir, 'task'), alive })) refuse(`lane ${lane} is not stopped; stop it and let it go quiet first`)
   const row = { event: 'pr', lane, stage: 'operator', actor: 'operator', at: now(), pr }
   try {

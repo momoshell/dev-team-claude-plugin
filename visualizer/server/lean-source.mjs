@@ -3,6 +3,7 @@
 // archive root. Nothing here writes, spawns, or trusts a path the lane's own files name.
 import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
+import { supersededReturn } from './lean-journal-order.mjs'
 
 const LEAN_SPEC_FILE = 'lean.json'
 const VERDICT_EVENT = 'verdict'
@@ -189,7 +190,7 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
     }
     // A stop inside a stage is followed by that stage's (and any enclosing stage's) stage-end row, so the
     // lane's state is its last row that is not a stage-end. An archived lane is never running.
-    let last = rows.findLast((row) => row.event !== 'stage-end') ?? rows.at(-1)
+    let last = rows.findLast((row, index) => row.event !== 'stage-end' && !supersededReturn(rows, row, index)) ?? rows.at(-1)
     // `crew finish --accept` appends a `pr` row then a `finish-decision` row: a pr row after the last
     // finish-ready, followed only by those, is the lane's state.
     const ready = rows.findLastIndex((row) => row.event === 'finish-ready')
@@ -199,11 +200,12 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
       if ((tail?.event === 'pr' && isObject(tail.pr) && tail.index > ready)
         || (last.choice === 'return' && ready >= 0 && tail?.index > ready)) last = tail
     }
-    const terminalIndex = rows.findLastIndex((row) => row.event === 'finish-ready' || row.event === 'finish-decision')
+    const terminalIndex = rows.findLastIndex((row, index) => row.event === 'finish-ready' || (row.event === 'finish-decision' && !supersededReturn(rows, row, index)))
     const terminal = rows[terminalIndex]
     if (error || !rows.length) {
       reason = error ?? (skipped_malformed ? 'task journal has no readable rows' : 'task journal is empty')
-    } else if (terminal?.event === 'finish-ready' && !(last.event === VERDICT_EVENT && last.status === 'stopped' && last.index > terminalIndex)) {
+    } else if (terminal?.event === 'finish-ready' && !(last.event === VERDICT_EVENT && last.status === 'stopped' && last.index > terminalIndex)
+      && !rows.some((row, index) => index > terminalIndex && row.launchedAt > terminalIndex && supersededReturn(rows, row, index))) {
       status = 'ready-for-operator'
     } else if (terminal?.choice === 'abandon') {
       status = 'abandoned'

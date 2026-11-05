@@ -48,6 +48,17 @@ test('a lane whose run died with no terminal row records the operator pr; a live
   } finally { w.done() }
 })
 
+test('record-pr recognizes a child stop before its anchored return decision', () => {
+  const w = world()
+  try {
+    const rows = [...STOP, { event: 'stage-start', stage: 'review' }, { event: 'verdict', status: 'stopped', reason: 'seat-escalated' }, { event: 'finish-decision', choice: 'return', launchedAt: STOP.length }]
+    const file = w.lane('returned', { rows })
+    put(join(dirname(file), 'run.pid'), '123\n')
+    assert.equal(run(w, 'returned', URL1, { alive: () => false }).status, 0)
+    assert.equal(JSON.parse(readFileSync(file, 'utf8').trim().split('\n').at(-1)).event, 'pr')
+  } finally { w.done() }
+})
+
 test('HF1 appends exactly one operator pr row after the original bytes, live and archived', () => {
   const w = world()
   try {

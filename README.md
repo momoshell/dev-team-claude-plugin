@@ -9,7 +9,8 @@ a verdict, a **lead** answers escalations with one closed decision, and a
 **tech-lead** gives judge lanes a second review. Code only checks the result: each named test is red on the
 old source and green on the build, and the full suite is green. Commit, rebase
 and PR happen only on green (ADR-052, ADR-055). A stopped
-lane is picked up again with `crew finish`. Every seat's full session is
+finishable lane, including an escalated or provably dead run, can be picked up
+with `crew finish <lane> --return <file>`. The same flag starts another pass on a ready lane. Every seat's full session is
 recorded, so any lane can be inspected afterwards, and the visualizer reads
 those journals and session files.
 
@@ -24,7 +25,7 @@ crew onboard --check /abs/path/draft.json # calibrate the checkout
 crew start /abs/path/brief.md          # worktree + journal + a detached lane
 crew lanes                              # list lanes from their journals
 crew show <lane> [<role>]               # read a seat's recorded session
-crew finish <lane>                      # finish a stopped lane; stops committed and rebased
+crew finish <lane>                      # report a stopped or ready lane, read-only
 crew finish <lane> --accept | --return <file> | --abandon
 crew record-pr <lane> --pr <url>        # record a PR you finished by hand
 crew closeout <lane>                    # remove a merged lane's worktree and branch

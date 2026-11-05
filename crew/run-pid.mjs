@@ -1,5 +1,6 @@
 import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { supersededReturn } from '../visualizer/server/lean-journal-order.mjs'
 
 const RUN_PID_FILE = 'run.pid'
 export function probeAlive(pid) {
@@ -13,7 +14,7 @@ export function writeRunPid(taskDir, pid, { writeFileSync: write = writeFileSync
   }
 }
 function openTail(rows) {
-  const last = rows.findLast((row) => row?.event !== 'stage-end')
+  const last = rows.findLast((row, index) => row?.event !== 'stage-end' && !supersededReturn(rows, row, index))
   return !!last && !(last.event === 'verdict' && last.status === 'stopped') && last.event !== 'pr'
     && last.event !== 'finish-ready' && !(last.event === 'finish-decision' && last.choice !== 'return')
 }

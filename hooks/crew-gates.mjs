@@ -14,20 +14,34 @@ function expand(value) {
   return value.replace(/^~(?=\/|$)/, process.env.HOME).replace(/\$\{HOME\}|\$HOME\b/g, process.env.HOME)
 }
 
-// The real path of the deepest existing ancestor, with the rest appended: where a write would land.
-// A dangling link is followed to its target, so a write through it lands where the link points.
-function destination(path, hops = 0) {
-  for (let dir = path, rest = '';; rest = join(basename(dir), rest), dir = dirname(dir)) {
-    try { return join(realpathSync(dir), rest) } catch {}
+// Resolve links before applying later dotdot segments, including links to missing targets.
+function destination(path, links) {
+  let dir = '/', hops = 0
+  const parts = path.split('/')
+  while (parts.length) {
+    const part = parts.shift()
+    if (!part || part === '.') continue
+    if (part === '..') { dir = dirname(dir); continue }
+    const next = join(dir, part)
+    let link
+    try { link = lstatSync(next).isSymbolicLink() } catch (error) {
+      if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') return null
+    }
+    if (!link) { dir = next; continue }
+    links?.push(next + '/')
+    if (++hops > 40) return null
     try {
-      if (lstatSync(dir).isSymbolicLink()) return hops < 40 ? destination(join(resolve(dirname(dir), readlinkSync(dir)), rest), hops + 1) : path
-    } catch {}
-    if (dirname(dir) === dir) return path
+      const target = readlinkSync(next)
+      if (isAbsolute(target)) dir = '/'
+      parts.unshift(...target.split('/'))
+    } catch { return null }
   }
+  return dir
 }
 
 function protectedRoot(value, cwd) {
-  const path = resolve(cwd, expand(value))
+  const target = expand(value)
+  const path = isAbsolute(target) ? target : `${cwd}/${target}`
   const projects = join(process.env.HOME, '.claude/projects')
   // Claude Code keeps each project's auto-memory beside its transcripts; only the transcripts are operator words.
   // The exception holds only when the resolved destination is still a memory directory, so a symlink cannot reach a transcript.
@@ -35,10 +49,23 @@ function protectedRoot(value, cwd) {
     const parts = p.startsWith(root + '/') ? p.slice(root.length + 1).split('/') : []
     return parts[1] === 'memory' && parts.length > 2 ? parts[0] : null
   }
-  const project = memoryOf(path, projects)
-  if (project !== null && memoryOf(destination(path), destination(projects)) === project) return undefined
+  const links = [], projectsRoot = destination(projects), landed = destination(path, links)
+  if (!landed || !projectsRoot) return undefined
+  // A link traversed in one project's memory must not redirect into another project's memory.
+  const origin = [...links.map(link => memoryOf(link, projectsRoot)), memoryOf(resolve(path), projects), memoryOf(path, projects)].find(project => project !== null)
+  // Unlink and rename operate on the final pathname, even when it is a symlink.
+  const parent = destination(dirname(path))
+  const pathname = parent && join(parent, basename(path))
+  const protectedPaths = [landed, pathname].filter(p => {
+    if (!p) return false
+    const project = memoryOf(p, projectsRoot)
+    return project === null || (origin !== undefined && origin !== project)
+  })
   return [projects, join(process.env.HOME, '.crew/briefs/started')]
-    .find(root => path === root || path.startsWith(root + '/'))
+    .find(root => {
+      const resolved = destination(root)
+      return resolved && protectedPaths.some(p => p === resolved || p.startsWith(resolved + '/'))
+    })
 }
 
 function crewHome(words, cwd, crewHome) {
@@ -99,6 +126,7 @@ function inspectBash(command, initialCwd) {
       const root = protectedRoot(target, cwd)
       if (root) return `Writes to ${root} are protected.`
     }
+    // Bash's default cd applies dotdot logically; write targets still resolve links physically.
     if (words[0] === 'cd' && words[1]) cwd = resolve(cwd, expand(words[1]))
     return null
   }

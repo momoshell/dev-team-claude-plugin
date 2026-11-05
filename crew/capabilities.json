@@ -41,7 +41,7 @@
       "providers": ["meta"],
       "transports": ["acp"],
       "adapter": "crew/adapters/adapter-muse.mjs",
-      "refuses": ["extensions", "skills", "mcp_servers", "local_provider"],
+      "refuses": ["local_provider"],
       "display_name": "Muse Code",
       "binary": "muse",
       "install_hint": "Install Muse Code and ensure the muse binary is on PATH.",

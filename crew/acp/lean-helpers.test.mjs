@@ -34,7 +34,7 @@ test('the shipped register declares muse as an acp coding agent whose adapter ex
   assert.ok(imports.length > 0)
   assert.ok(imports.every((specifier) => specifier.startsWith('node:')))
   assert.equal(muse.binary, 'muse')
-  assert.deepEqual(muse.refuses, ['extensions', 'skills', 'mcp_servers', 'local_provider'])
+  assert.deepEqual(muse.refuses, ['local_provider'])
 })
 
 test('loadCapabilities reads the shipped register and refuses an invalid injected one', () => {

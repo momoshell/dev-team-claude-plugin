@@ -10,6 +10,8 @@ import { ROOT, git, scratchDir } from '../../test/helpers.mjs'
 import { runAcpSeat } from './seat.mjs'
 import { parseAgent } from '../protocols.mjs'
 import * as claude from '../adapters/adapter-claude.mjs'
+import * as muse from '../adapters/adapter-muse.mjs'
+import { loadCapabilities } from './grants.mjs'
 import { loadAcceptedContext } from '../pi/extensions/skeletonread.ts'
 import { loadContext as advisorContext } from '../pi/extensions/advisor.ts'
 
@@ -44,6 +46,7 @@ function replaySeat(name, options = {}) {
   const launches = []
   const expected = []
   const plugins = []
+  const museSkills = []
   const kills = []
   let stream = null
   let clock = 1000
@@ -63,6 +66,9 @@ function replaySeat(name, options = {}) {
   const outgoing = (frame) => {
     sent.push(frame)
     if (frame.method === 'session/new') {
+      for (const dir of frame.params?.additionalDirectories ?? []) {
+        if (basename(dir) === 'muse-skills') museSkills.push({ dir, files: readdirSync(dir).sort().map((name) => [name, readFileSync(join(dir, name, 'SKILL.md'), 'utf8')]) })
+      }
       for (const entry of frame.params?._meta?.claudeCode?.options?.plugins ?? []) {
         const names = readdirSync(join(entry.path, 'skills')).sort()
         plugins.push({ entry, names, files: names.map((skill) => ({
@@ -174,7 +180,7 @@ function replaySeat(name, options = {}) {
   const leftover = [...runtimes(runtimeRoot)].filter((dir) => !before.has(dir)).map((dir) => join(runtimeRoot, dir))
   const rows = options.unwritable ? [] : readFileSync(sessionFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
   const replies = (options.permissions ?? []).map((_, i) => sent.find((frame) => frame.id === `permit-${i}` && !frame.method)?.result?.outcome ?? null)
-  return { root, result, error, rows, expected, sent, replies, launches, plugins, kills, skills, leftover, sessionFile,
+  return { root, result, error, rows, expected, sent, replies, launches, plugins, museSkills, kills, skills, leftover, sessionFile,
     cleanup() { for (const dir of leftover) rmSync(dir, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true }) } }
 }
 
@@ -210,13 +216,12 @@ test('a muse seat launches muse acp with the experimental flag, the stripped mod
   })
 })
 
-test('a muse seat that writes task-dir, names a non-meta model or declares skills, extensions or an advisor is refused by name before any process or runtime exists', () => {
+test('a muse seat that writes task-dir, names a non-meta model or declares unsupported extensions or an advisor is refused by name before any process or runtime exists', () => {
   for (const [label, definition, reason] of [
     ['task-dir', { writes: 'task-dir' }, 'grant-unsupported'],
     ['openai', { model: 'openai/model' }, undefined],
-    ['skills', { skills: ['alpha'] }, 'grant-unsupported'],
-    ['extensions', { extensions: ['readgate'] }, 'grant-unsupported'],
-    ['mcp_servers', { extensions: ['fff'] }, 'grant-unsupported'],
+    ['extensions', { extensions: ['skeletonread'] }, 'grant-unsupported'],
+    ['extensions', { extensions: ['subagent'] }, 'grant-unsupported'],
     ['advisor', { advisor: {} }, 'grant-unsupported'],
   ]) use('pi-turn', { agent: 'muse', model: 'meta/muse-spark-1.3', definition, deps: { exists: () => true, repoState: () => null } }, (run) => {
     assert.match(run.error?.message ?? '', new RegExp(label))
@@ -224,6 +229,59 @@ test('a muse seat that writes task-dir, names a non-meta model or declares skill
     assert.equal(run.launches.length, 0)
     assert.deepEqual(run.leftover, [])
   })
+})
+
+test('a muse seat granted fff launches with the fff MCP server and CREW_FFF, and one without has neither', () => {
+  const register = loadCapabilities()
+  const server = Object.values(register.roles).flatMap((role) => [role, ...Object.values(role.by_agent ?? {})]).flatMap((role) => role.mcp_servers ?? []).find((entry) => entry.name === 'fff')
+  for (const granted of [true, false]) use('pi-turn', { agent: 'muse', model: 'meta/muse-spark-1.3', grant: true, definition: { extensions: granted ? ['fff'] : [], writes: 'none' }, deps: { exists: () => true } }, (run) => {
+    assert.equal(run.error, undefined)
+    assert.deepEqual(sessionNew(run).params.mcpServers, granted ? [{ name: 'fff', command: server.command.bin, args: server.command.args, env: [] }] : [])
+    assert.equal(run.launches[0][2].env.CREW_FFF, granted ? '1' : '0')
+    assert.deepEqual(run.museSkills[0].files.map(([name]) => name), ['alpha', 'beta'])
+    assert.match(run.museSkills[0].files[0][1], /name: alpha/)
+    assert.ok(sessionNew(run).params.additionalDirectories.includes(run.museSkills[0].dir))
+    assert.equal(run.result.museSkillsRoot, run.museSkills[0].dir)
+  })
+  assert.deepEqual(register.coding_agents.muse.refuses, ['local_provider'])
+  for (const bad of [{ name: 'other', command: { bin: BIN, args: [] }, url: null }, { name: 'fff', command: null, url: 'https://example.com' }, { name: 'fff', type: 'http', command: { bin: BIN, args: [] }, url: null }]) {
+    assert.throws(() => muse.acpLaunch({ bin: BIN, grants: { mcp_servers: [bad] } }), (error) => error.reason === 'grant-unsupported')
+  }
+  const root = scratchDir('muse-skill-guards-')
+  try {
+    const [alpha] = makeSkills(root, ['alpha'])
+    const [duplicate] = makeSkills(root, ['Alpha'])
+    for (const skills of [[dirname(alpha)], [alpha, duplicate]]) {
+      assert.throws(() => muse.writeSeatSkills({ taskDir: root, grants: { skills } }), (error) => error.reason === 'grant-unsupported')
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('a muse readgate seat refuses search and whole-file shell reads at the permission boundary and admits other calls', () => {
+  const root = scratchDir('muse-readgate-')
+  try {
+    writeFileSync(join(root, 'large'), 'line\n'.repeat(351))
+    writeFileSync(join(root, 'small'), 'one\n')
+    const permissions = [
+      ...['grep x large', 'rg x', ...['grep x', 'rg x', 'find .', 'fd x'].map((command) => `cd ${root} && ${command}`), 'cat large', 'git status', 'echo $UNKNOWN'].map((command, i) => ({ toolCallId: `c${i}`, _update: { sessionUpdate: 'tool_call', toolCallId: `c${i}`, kind: 'execute', title: 'bash', rawInput: { command } } })),
+      ...['large', 'small'].map((path, i) => ({ toolCallId: `r${i}`, _update: { sessionUpdate: 'tool_call', toolCallId: `r${i}`, kind: 'read', title: 'read_file', rawInput: { path } } })),
+    ]
+    use('pi-turn', { agent: 'muse', model: 'meta/muse-spark-1.3', cwd: root, definition: { writes: 'repo', extensions: ['fff', 'readgate'] }, permissions, deps: { exists: () => true } }, (run) => {
+      assert.equal(run.error, undefined)
+      assert.deepEqual(run.replies.map((reply) => reply?.optionId), ['deny', 'deny', 'deny', 'deny', 'deny', 'deny', 'deny', 'yes', 'yes', 'deny', 'yes'])
+      const prompt = run.sent.find((frame) => frame.method === 'session/prompt').params.prompt[0].text
+      assert.match(prompt, /ranged read/)
+      assert.match(prompt, /mcp__fff__grep/)
+      assert.match(prompt, /mcp__fff__find_files/)
+    })
+    use('pi-turn', { agent: 'muse', model: 'meta/muse-spark-1.3', cwd: root, taskDir: root, definition: { writes: 'repo', extensions: ['readgate'] }, deps: { env: { CREW_FFF: '1' } }, permissions: [{ kind: 'read', rawInput: { path: 'missing' } }, { kind: 'execute', rawInput: { command: 'cat missing' } }, { kind: 'read', rawInput: { path: 'large' } }, { kind: 'execute', rawInput: { command: 'grep x large' } }] }, (run) => {
+      assert.equal(run.error, undefined)
+      assert.deepEqual(run.replies.map((reply) => reply?.optionId), ['deny', 'yes', 'yes', 'yes'])
+      const prompt = run.sent.find((frame) => frame.method === 'session/prompt').params.prompt[0].text
+      assert.match(prompt, /ranged read/)
+      assert.doesNotMatch(prompt, /mcp__fff__/)
+    })
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
 test('a muse seat that writes task-dir launches with writes enabled and settles when the worktree is clean before and after the turn', () => {

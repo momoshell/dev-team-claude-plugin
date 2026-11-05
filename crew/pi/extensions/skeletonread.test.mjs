@@ -233,3 +233,15 @@ test('a lean lane accepts its own planner return: citations come from the lane p
   rmSync(join(lane.taskDir, 'journal.jsonl'))
   assert.equal(mod.loadAcceptedContext({ taskDir: lane.taskDir, cwd, env: lane.env }), null, 'no fallback to the parent journal')
 })
+
+test('the skeleton tool serves the whole-read replacement for exactly the reads it replaces and refuses the rest', async () => {
+  const f = fixture({ plan: 'src/target.mjs:2-3\n' })
+  writeFileSync(join(f.root, 'src', 'other.mjs'), 'x\n'.repeat(10))
+  const tool = mod.createSkeletonTool({ taskDir: f.taskDir, cwd: f.root, env: f.env, deps: f.deps })
+  const expected = skeleton(f).onToolResult(readEvent('src/target.mjs'), { cwd: f.root })
+  assert.match(expected.content[0].text, /Skeleton read: src\/target\.mjs/)
+  assert.deepEqual(await tool.execute('1', { path: 'src/target.mjs' }, undefined, undefined, { cwd: f.root }), expected)
+  assert.equal(tool.replaces({ path: 'src/target.mjs' }, f.root), true)
+  for (const input of [{ path: 'src/target.mjs', offset: 1 }, { path: 'src/target.mjs', limit: 2 }, { path: 'src/other.mjs' }, {}]) assert.equal(tool.replaces(input, f.root), false, JSON.stringify(input))
+  assert.match(await tool.execute('2', { path: 'src/other.mjs' }, undefined, undefined, { cwd: f.root }), /^refused:/)
+})

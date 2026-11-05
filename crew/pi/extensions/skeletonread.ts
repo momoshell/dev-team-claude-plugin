@@ -758,6 +758,29 @@ export function createSkeletonRead(options = {}) {
   return { onToolResult, retrieve, fallback }
 }
 
+export const SKELETON_TOOL_NAME = 'skeleton'
+
+// Muse cannot replace a native read result, so its seats deny the whole-file read and call this tool for the
+// same replacement: same eligibility, same text.
+export function createSkeletonTool(options = {}) {
+  const skeleton = createSkeletonRead(options)
+  const replacement = (input, cwd) => skeleton.onToolResult({ toolName: 'read', isError: false, content: [], input }, { cwd })
+  return {
+    name: SKELETON_TOOL_NAME,
+    label: 'Skeleton',
+    description: 'Indexed signatures and accepted-plan citations for an in-scope source file too large for a whole read.',
+    parameters: { type: 'object', properties: { path: { type: 'string', description: 'The file a whole read was refused for.' } }, required: ['path'], additionalProperties: false },
+    executionMode: 'sequential',
+    // A read input as the agent sent it; a ranged read is never replaced.
+    replaces: (input, cwd) => typeof input?.path === 'string' && input.path !== '' && replacement(input, cwd) !== undefined,
+    async execute(_id, params, _signal, _update, ctx) {
+      const path = params?.path
+      const result = typeof path === 'string' && path !== '' ? replacement({ path }, ctx?.cwd) : undefined
+      return result ?? refusal('no skeleton for this path; read it directly')
+    },
+  }
+}
+
 function attachSkeletonRead(pi, options = {}) {
   const skeleton = createSkeletonRead(options)
   if (typeof pi?.registerTool !== 'function' || typeof pi?.on !== 'function') throw new Error('skeleton read extension needs pi.registerTool and pi.on')

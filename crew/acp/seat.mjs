@@ -525,13 +525,16 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
     // Muse writes without asking, so a return the advisor blocked is already on disk, however it was written. A
     // blocked turn records the returns this run wrote; after the follow-up turn, any still byte-identical is removed.
     const returnName = new RegExp('^' + role + '-\\d+\\.json$')
+    // An unreadable return hashes to null: it is never removed, and a return unreadable at the start is never new.
     const returnHashes = () => {
       const hashes = new Map()
-      try {
-        for (const name of laneTaskDir ? readdirSync(laneTaskDir) : []) {
-          if (returnName.test(name)) hashes.set(join(laneTaskDir, name), createHash('sha256').update(readFileSync(join(laneTaskDir, name))).digest('hex'))
-        }
-      } catch { /* an unreadable return is never removed */ }
+      let names = []
+      try { names = laneTaskDir ? readdirSync(laneTaskDir) : [] } catch { /* no returns to judge */ }
+      for (const name of names.filter((entry) => returnName.test(entry))) {
+        let hash = null
+        try { hash = createHash('sha256').update(readFileSync(join(laneTaskDir, name))).digest('hex') } catch { /* stays null */ }
+        hashes.set(join(laneTaskDir, name), hash)
+      }
       return hashes
     }
     const priorReturns = returnHashes()
@@ -540,7 +543,7 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
     let settleTimedOut = false
     const finishTurn = async (turn) => {
       if (blockedReturns) {
-        for (const [path, hash] of returnHashes()) if (blockedReturns.get(path) === hash) try { rmSync(path, { force: true }) } catch { /* the block was still delivered */ }
+        for (const [path, hash] of returnHashes()) if (hash !== null && blockedReturns.get(path) === hash) try { rmSync(path, { force: true }) } catch { /* the block was still delivered */ }
         blockedReturns = null
       }
       // A refused or cancelled turn is terminal: queued advice never turns it into another prompt.
@@ -560,7 +563,7 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
         advised.clear()
         const blocks = settled.filter((verdict) => verdict?.block && nonempty(verdict.reason))
         for (const verdict of blocks) advisorNotes.push(verdict.reason)
-        if (isMuse && blocks.length) blockedReturns = new Map([...returnHashes()].filter(([path, hash]) => priorReturns.get(path) !== hash))
+        if (isMuse && blocks.length) blockedReturns = new Map([...returnHashes()].filter(([path, hash]) => hash !== null && (!priorReturns.has(path) || (priorReturns.get(path) !== null && priorReturns.get(path) !== hash))))
       }
       if (advisorNotes.length && !terminal) {
         promptId = client.beginPrompt([{ type: 'text', text: advisorNotes.splice(0).join('\n\n') }])

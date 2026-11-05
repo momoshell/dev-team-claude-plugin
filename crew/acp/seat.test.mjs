@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync,
+  appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync,
 } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
@@ -1684,6 +1684,17 @@ test('a blocked muse return never removes a return from an earlier round', async
     assert.equal(existsSync(join(taskDir, 'builder-1.json')), false)
     assert.equal(readFileSync(join(taskDir, 'builder-0.json'), 'utf8'), '{"round":0}')
   }, 'pi-turn', (taskDir) => { writeFileSync(join(taskDir, 'builder-0.json'), '{"round":0}'); return {} })
+})
+
+test('an earlier-round muse return unreadable when the seat starts survives a later blocked return', async () => {
+  await museAdvisorConsult('pre-return', (run, rows, taskDir) => {
+    assert.equal(existsSync(join(taskDir, 'builder-1.json')), false)
+    assert.equal(readFileSync(join(taskDir, 'builder-0.json'), 'utf8'), '{"round":0}')
+  }, 'pi-turn', (taskDir) => {
+    writeFileSync(join(taskDir, 'builder-0.json'), '{"round":0}')
+    chmodSync(join(taskDir, 'builder-0.json'), 0o000)
+    return { onPrompt: () => chmodSync(join(taskDir, 'builder-0.json'), 0o644) }
+  })
 })
 
 test('a muse turn refused by its provider is returned unchanged with no follow-up prompt for queued advice', async () => {

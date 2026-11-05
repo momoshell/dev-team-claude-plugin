@@ -522,27 +522,25 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
     const guidance = readgate ? `\n\nReadgate is active: whole-file reads and cat/head/tail of large files are refused; use a ranged read instead.${grants.mcp_servers.some((server) => server.name === 'fff') ? ' Direct grep/rg/find/fd searches are refused; use mcp__fff__grep or mcp__fff__find_files instead.' : ''}` : ''
     const extras = [grants.skeletonread && 'mcp__crew-extras__retrieve', grants.skeletonread && 'mcp__crew-extras__skeleton', grants.subagent && 'mcp__crew-extras__agent'].filter(Boolean)
     const extraGuidance = (extras.length ? `\n\nGranted tools: ${extras.join(', ')}.` : '') + (grants.skeletonread ? ' A whole read of a large in-scope source file is refused; call mcp__crew-extras__skeleton with its path for the indexed signatures and plan citations, then mcp__crew-extras__retrieve for a range or symbol.' : '')
-    // Muse writes without asking, so a return the advisor blocked is already on disk however it was written. Each
-    // blocked turn snapshots the returns this run wrote or changed; after the follow-up turn, one still byte-identical
-    // is removed. Returns from earlier rounds are never touched.
-    let blockedReturns = null
+    // Muse writes without asking, so a return the advisor blocked is already on disk, however it was written. A
+    // blocked turn records the returns this run wrote; after the follow-up turn, any still byte-identical is removed.
     const returnName = new RegExp('^' + role + '-\\d+\\.json$')
     const returnHashes = () => {
       const hashes = new Map()
-      if (!laneTaskDir) return hashes
-      for (const name of readdirSync(laneTaskDir)) {
-        if (!returnName.test(name)) continue
-        try { hashes.set(join(laneTaskDir, name), createHash('sha256').update(readFileSync(join(laneTaskDir, name))).digest('hex')) } catch { /* unreadable is not unchanged */ }
-      }
+      try {
+        for (const name of laneTaskDir ? readdirSync(laneTaskDir) : []) {
+          if (returnName.test(name)) hashes.set(join(laneTaskDir, name), createHash('sha256').update(readFileSync(join(laneTaskDir, name))).digest('hex'))
+        }
+      } catch { /* an unreadable return is never removed */ }
       return hashes
     }
-    let priorReturns = new Map()
-    try { priorReturns = returnHashes() } catch { /* an unreadable task dir has no prior returns to keep */ }
+    const priorReturns = returnHashes()
+    let blockedReturns = null
     let promptId = client.beginPrompt([{ type: 'text', text: prompt + guidance + extraGuidance }])
     let settleTimedOut = false
     const finishTurn = async (turn) => {
       if (blockedReturns) {
-        try { for (const [path, hash] of returnHashes()) if (blockedReturns.get(path) === hash) rmSync(path, { force: true }) } catch { /* the block was still delivered */ }
+        for (const [path, hash] of returnHashes()) if (blockedReturns.get(path) === hash) try { rmSync(path, { force: true }) } catch { /* the block was still delivered */ }
         blockedReturns = null
       }
       // A refused or cancelled turn is terminal: queued advice never turns it into another prompt.
@@ -562,7 +560,7 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
         advised.clear()
         const blocks = settled.filter((verdict) => verdict?.block && nonempty(verdict.reason))
         for (const verdict of blocks) advisorNotes.push(verdict.reason)
-        if (isMuse && blocks.length) try { blockedReturns = new Map([...returnHashes()].filter(([path, hash]) => priorReturns.get(path) !== hash)) } catch { blockedReturns = null }
+        if (isMuse && blocks.length) blockedReturns = new Map([...returnHashes()].filter(([path, hash]) => priorReturns.get(path) !== hash))
       }
       if (advisorNotes.length && !terminal) {
         promptId = client.beginPrompt([{ type: 'text', text: advisorNotes.splice(0).join('\n\n') }])

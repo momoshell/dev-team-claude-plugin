@@ -37,27 +37,57 @@ const text = (v) => typeof v === 'string' && v !== ''
 const strings = (v) => Array.isArray(v) && v.every(text)
 const refusal = (reason) => ({ status: 'stopped', reason, pr: null })
 
-// The failing tests and file locations a red suite printed, from the Node spec reporter (`test at file:l:c`,
-// `✖ name`) or TAP (`not ok N - name`, `location: 'file:l:c'`), with a bounded tail of each run for the diagnostics.
+// Extract failure names and locations from Node, Rust and Vitest output, with bounded diagnostics for each run.
 const SUITE_LIST_MAX = 40
 const SUITE_TAIL_MAX = 2000
+const SUITE_PREFIX_MAX = 1250
 function suiteFailures(results) {
   const tests = new Set()
   const files = new Set()
   const tails = []
   for (const result of results) {
-    const out = typeof result?.stdout === 'string' ? result.stdout : ''
-    for (const line of out.split(/\r?\n/)) {
+    const stdout = typeof result?.stdout === 'string' ? result.stdout : ''
+    const stderr = typeof result?.stderr === 'string' ? result.stderr : ''
+    const out = stdout + (stdout && stderr && !stdout.endsWith('\n') ? '\n' : '') + stderr
+    const failures = new Set()
+    for (const line of out.split(/\n/)) {
       const at = /^\s*test at (\S+)\s*$/.exec(line)
       const loc = /^\s*location:\s*['"]?([^'"]+?)['"]?\s*$/.exec(line)
       const spec = /^\s*✖\s+(.+?)(?:\s+\(\d+(?:\.\d+)?ms\))?\s*$/.exec(line)
       const tap = /^\s*not ok\s+\d+\s*-?\s*(.*?)\s*$/.exec(line)
+      const nextest = /^\s*FAIL\s+\[\s*\d+(?:\.\d+)?s\]\s+(?:\(\d+\/\d+\)\s+)?(.+?)\s*$/.exec(line)
+      const cargo = /^\s*test\s+(.+?)\s+\.\.\.\s+FAILED\s*$/.exec(line)
+      const vitest = /^\s*FAIL\s+(.+?)\s+>\s+(.+?)\s*$/.exec(line)
+      const cross = /^\s*×\s+(.+?)(?:\s+\(?\d+(?:\.\d+)?\s*(?:ms|s)\)?)?\s*$/.exec(line)
+      let recognised = true
       if (at) files.add(at[1])
       else if (loc) files.add(loc[1])
       else if (spec && !/^failing tests:?$/.test(spec[1])) tests.add(spec[1])
       else if (tap?.[1]) tests.add(tap[1])
+      else if (nextest) tests.add(nextest[1])
+      else if (cargo) tests.add(cargo[1])
+      else if (vitest) { files.add(vitest[1]); tests.add(vitest[2]) }
+      else if (cross) tests.add(cross[1])
+      else recognised = false
+      if (recognised && !at && !loc && out.length > SUITE_TAIL_MAX) failures.add(line.replace(/\r$/, ''))
     }
-    tails.push(out.slice(-SUITE_TAIL_MAX))
+    // Reserve trailing diagnostics unless a single failure line needs more prefix space.
+    const budget = Math.min(SUITE_TAIL_MAX - 1, [...failures].reduce((max, line) => Math.max(max, line.length), SUITE_PREFIX_MAX))
+    const kept = new Set()
+    let prefix = ''
+    let added
+    do {
+      added = false
+      for (const line of failures) {
+        const trailing = out.slice(-(SUITE_TAIL_MAX - (prefix ? prefix.length + 1 : 0)))
+        if (kept.has(line) || trailing.includes(line) || prefix.length + (prefix ? 1 : 0) + line.length > budget) continue
+        prefix += `${prefix ? '\n' : ''}${line}`
+        kept.add(line)
+        added = true
+      }
+    } while (added)
+    const remaining = SUITE_TAIL_MAX - (prefix ? prefix.length + 1 : 0)
+    tails.push(prefix ? `${prefix}\n${remaining ? out.slice(-remaining) : ''}` : out.slice(-SUITE_TAIL_MAX))
   }
   return { tests: [...tests].slice(0, SUITE_LIST_MAX), files: [...files].slice(0, SUITE_LIST_MAX), tail: tails.filter((t) => t !== '') }
 }

@@ -971,7 +971,82 @@ test('a finish lane runs a red suite once more and a green re-run reaches the co
 const SPEC_OUT = ['ℹ failing tests:', 'test at skills/qa-test-writing/exhibits.test.mjs:42:1', '✖ anchor spans remain current (2ms)', '  AssertionError: stale'].join('\n')
 const TAP_OUT = ['not ok 1 - exhibit census remains current', '  ---', "  location: '/virtual/checkout/skills/ux/exhibits.test.mjs:73:1'", '  ...'].join('\n')
 const redOut = (stdout) => ({ ...redRun(1), stdout })
+const redErr = (stderr) => ({ ...redRun(1), stderr })
 const builderTurns = (f) => f.requests.filter((r) => r.role === 'builder')
+
+test('a red suite on stderr names nextest and cargo test failures in the repair feedback', async () => {
+  const stderr = [
+    'FAIL [ 0.123s] crate::module test_name',
+    'FAIL [ 1.234s] (2/4) other::crate another_test',
+    'test path::name ... FAILED',
+    'test path::passing ... ok',
+    'test path::skipped ... ignored',
+    'test path::benchmark ... bench: 42 ns/iter',
+  ].join('\n')
+  const f = sequenced([redErr(stderr), green()])
+  await f.go()
+  const feedback = builderTurns(f)[1].feedback.find((item) => item.id === 'suite-repair')
+  assert.deepEqual(feedback.failingTests, ['crate::module test_name', 'other::crate another_test', 'path::name'])
+  assert.deepEqual(feedback.outputTail, [stderr])
+})
+
+test('a red suite names vitest failures and files in the repair feedback', async () => {
+  const stdout = ' FAIL  src/widget.test.ts > widget > renders'
+  const stderr = '  × handles input 12ms'
+  const f = sequenced([{ ...redOut(stdout), stderr }, green()])
+  await f.go()
+  const feedback = builderTurns(f)[1].feedback.find((item) => item.id === 'suite-repair')
+  assert.deepEqual(feedback.failingTests, ['widget > renders', 'handles input'])
+  assert.deepEqual(feedback.failingFiles, ['src/widget.test.ts'])
+  assert.deepEqual(feedback.outputTail, [`${stdout}\n${stderr}`])
+})
+
+test('a red suite tail keeps the failing line past the tail bound', async () => {
+  for (const line of ['FAIL [ 0.123s] crate::module test_name', 'test path::name ... FAILED', ' FAIL  src/widget.test.ts > widget > renders', '  × handles input 12ms', '✖ node failure (2ms)', 'not ok 1 - tap failure']) {
+    const f = sequenced([redOut(`${line}\n${'trailing output\n'.repeat(200)}`), green()])
+    await f.go()
+    const tail = builderTurns(f)[1].feedback.find((item) => item.id === 'suite-repair').outputTail[0]
+    assert.ok(tail.includes(line), line)
+    assert.ok(tail.length <= 2000, `tail length: ${tail.length}`)
+    assert.ok(tail.endsWith('trailing output\n'))
+  }
+  const early = `✖ ${'early'.repeat(30)}`
+  const displaced = '✖ displaced failure (2ms)'
+  const displacedRun = sequenced([redOut(`${early}\n${'padding\n'.repeat(40)}${displaced}\n${'z'.repeat(1950)}`), green()])
+  await displacedRun.go()
+  const displacedTail = builderTurns(displacedRun)[1].feedback.find((item) => item.id === 'suite-repair').outputTail[0]
+  assert.ok(displacedTail.includes(early))
+  assert.ok(displacedTail.includes(displaced))
+  assert.ok(displacedTail.length <= 2000)
+
+  const longLines = [`✖ ${'a'.repeat(598)}`, `✖ ${'b'.repeat(598)}`]
+  const longRun = sequenced([redOut(`${longLines.join('\n')}\n${'z'.repeat(2000)}`), green()])
+  await longRun.go()
+  const longTail = builderTurns(longRun)[1].feedback.find((item) => item.id === 'suite-repair').outputTail[0]
+  for (const line of longLines) assert.ok(longTail.includes(line))
+  assert.ok(longTail.length <= 2000)
+
+  const summary = Array.from({ length: 21 }, (_, i) => `✖ failure ${i} with a long test name (2ms)\ntest at /virtual/checkout/long/path/test-${i}.test.mjs:42:1\n  AssertionError: diagnostic ${i}`).join('\n')
+  const nodeRun = sequenced([redOut(`${'earlier output\n'.repeat(200)}failing tests:\n${summary}`), green()])
+  await nodeRun.go()
+  const nodeTail = builderTurns(nodeRun)[1].feedback.find((item) => item.id === 'suite-repair').outputTail[0]
+  assert.ok(nodeTail.includes('AssertionError: diagnostic 20'))
+  assert.ok(nodeTail.length <= 2000)
+
+  for (const count of [10, 20]) {
+    const blocks = Array.from({ length: count }, (_, i) => [
+      `✖ failure ${i} ${'long test name '.repeat(4)}(2ms)`,
+      `test at /virtual/checkout/${'long-path/'.repeat(4)}test-${i}.test.mjs:42:1`,
+      `  AssertionError: diagnostic ${i} ${'details '.repeat(8)}`,
+      ...Array.from({ length: 7 }, (_, frame) => `    at frame${frame} (/virtual/checkout/${'stack-path/'.repeat(5)}file.mjs:42:1)`),
+    ].join('\n')).join('\n')
+    const f = sequenced([redOut(`failing tests:\n${blocks}`), green()])
+    await f.go()
+    const tail = builderTurns(f)[1].feedback.find((item) => item.id === 'suite-repair').outputTail[0]
+    assert.ok(tail.includes('AssertionError:'), `${count} failures lost diagnostics`)
+    assert.ok(tail.length <= 2000, `${count} failures: tail length ${tail.length}`)
+  }
+})
 test('a mechanical suite red goes straight to one builder fix before the suite runs again', async () => {
   for (const after of [green(), redOut(TAP_OUT)]) {
     const f = sequenced([redOut(SPEC_OUT), after, green()], { spec: { tier: 'mechanical' }, unseated: ['planner', 'reviewer', 'lead'], edit: (v) => {

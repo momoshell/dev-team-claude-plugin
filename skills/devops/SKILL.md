@@ -20,8 +20,9 @@ description: >-
 
 ## Pull requests
 
-- For a hand-opened PR, use `## Summary` with a `Change:` line for reviewer
-  context and a `Source:` line, `## Changes` for the changed files,
+- For a hand-opened PR, use `## Summary` with a `Purpose:` line stating what
+  the PR achieves, the issue number and title or quoted operator request for why,
+  a `How:` line for the implementation and a `Source:` line, `## Changes` for the changed files,
   `## Verification` for test and suite results, and `## Open points` for
   unresolved should-fix findings when present.
   Crew lanes generate this body themselves. Follow `prose-plain` for PR prose.

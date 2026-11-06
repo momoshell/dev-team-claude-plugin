@@ -25,15 +25,46 @@ test('JUnit failure, pass, error, skip, absence and duplicates map to the node p
   writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: [{ match: '**/*.xml', run: 'cp {file} {report}' }] }))
   git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
   writeFileSync(join(cwd, 'tests/report.xml'), `<testsuites><testsuite name="pytest"><testcase classname="tests.test_add" name="test_fails"><failure message="bad">a &lt; b</failure></testcase><testcase classname="tests.test_add" name="test_passes"/><testcase classname="tests.test_add" name="test_errors"><error/></testcase><testcase classname="tests.test_add" name="test_skipped"><skipped type="pytest.skip"/></testcase><testcase name="test_twice"/><testcase name="test_twice"/><testcase name="a &lt; b"/><testcase classname="suite&#46;one" name="a &amp; &quot;b&quot; &apos;&#x63;&#100;&apos;"/><!-- <testcase name="hidden"/> --><![CDATA[<testcase name="hidden"/>]]></testsuite></testsuites>`)
-  const cases = [['tests.test_add.test_fails', 'red', null], ['test_passes', 'green', null], ['test_errors', null, 'not-body-failure'], ['test_skipped', null, 'skipped'], ['test_absent', null, 'missing'], ['test_twice', null, 'ambiguous'], ['a < b', 'green', null], ['suite.one::a & "b" \'cd\'', 'green', null], ['hidden', null, 'missing']]
+  const cases = [['tests.test_add.test_fails', 'red', null], ['test_passes', 'green', null], ['test_errors', null, 'not-body-failure'], ['test_skipped', null, 'skipped'], ['test_absent', null, 'title-unmatched', ['test_passes']], ['test_twice', null, 'ambiguous'], ['a < b', 'green', null], ['suite.one::a & "b" \'cd\'', 'green', null], ['hidden', null, 'title-unmatched', ['a < b']]]
   const result = await proveTests({ cwd, tests: cases.map(([title]) => ({ file: 'tests/report.xml', title })) })
-  assert.deepEqual(result.rows.map((row) => row.base), cases.map(([, state, reason]) => ({ state, reason })))
+  assert.deepEqual(result.rows.map((row) => row.base), cases.map(([, state, reason, nearest]) => nearest ? { state, reason, nearest } : { state, reason }))
+})
+
+test('a report with no matching title is title-unmatched with its nearest name on both sides', async () => {
+  const cwd = scratchDir('proof-unmatched-')
+  git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew')); mkdirSync(join(cwd, 'tests'))
+  writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: [{ match: '**/*.xml', run: 'cp {file} {report}' }] }))
+  git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+  const cases = [
+    ['<testcase name="unrelated"/><testcase name="registry::wiring_tests::works"/>', 'wiring_tests::works', 'registry::wiring_tests::works'],
+    ['<testcase name="xabc"/><testcase name="yabc"/><testcase name="abcde"/>', 'zabc', 'xabc'],
+    ['<testcase name="longabc"/><testcase name="xabc"/>', 'zabc', 'xabc'],
+    ['<testcase classname="registry::wiring_tests" name="works"/>', 'wiring_tests::works', 'registry::wiring_tests::works'],
+    ['<error message="load failed"/><testcase name="other"/>', 'works', 'other'],
+  ]
+  for (const [testcases, title, nearest] of cases) {
+    writeFileSync(join(cwd, 'tests/report.xml'), `<testsuite>${testcases}</testsuite>`)
+    const result = await proveTests({ cwd, tests: [{ file: 'tests/report.xml', title }] })
+    for (const side of ['base', 'build']) assert.deepEqual(result.rows[0][side], { state: null, reason: 'title-unmatched', nearest: [nearest] })
+  }
+})
+
+test('a file-level failure with no matching row is title-unmatched on both sides', async () => {
+  const cwd = scratchDir('proof-load-failure-')
+  git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew')); mkdirSync(join(cwd, 'tests'))
+  writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: [{ match: '**/*.xml', run: 'cp {file} {report}' }] }))
+  git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+  for (const xml of ['<testsuite name="load"><error message="load failed"/></testsuite>', '<testsuite><failure>load failed</failure></testsuite>']) {
+    writeFileSync(join(cwd, 'tests/report.xml'), xml)
+    const result = await proveTests({ cwd, tests: [{ file: 'tests/report.xml', title: 'works' }] })
+    for (const side of ['base', 'build']) assert.deepEqual(result.rows[0][side], { state: null, reason: 'title-unmatched', nearest: [] })
+  }
 })
 
 test('quoted testcase attributes cannot create a false proof', async () => {
   const cases = [
     [(outcome) => `<testcase name="works" classname="Comparison>Test"/><testcase name="other">${outcome}</testcase>`, { state: 'green', reason: null }],
-    [(outcome) => `<testcase classname="x name='works'" name="other">${outcome}</testcase>`, { state: null, reason: 'missing' }],
+    [(outcome) => `<testcase classname="x name='works'" name="other">${outcome}</testcase>`, { state: null, reason: 'title-unmatched', nearest: ['other'] }],
   ]
   for (const [testcases, expected] of cases) {
     const cwd = scratchDir('proof-quoted-')
@@ -61,7 +92,7 @@ test('a runner that writes no report on the old source is base-does-not-build, n
   const result = await proveTests({ cwd, tests: [{ file: 'tests/report.xml', title: 'works' }] })
   assert.deepEqual(result.rows[0].base, { state: null, reason: 'base-does-not-build' })
   assert.equal(result.rows[0].build.state, 'green'); assert.equal(result.rows[0].reason, 'proof-not-red-on-base')
-  for (const xml of ['<testsuite><testcase name="works"/>', '<testsuite/>', 'not XML']) {
+  for (const xml of ['<testsuite><testcase name="works"/>', '<testsuite/>', '<testsuite><!-- <error/> --><![CDATA[<failure/>]]><?info <error/>?></testsuite>', 'not XML']) {
     writeFileSync(join(cwd, 'tests/report.xml'), xml)
     const invalid = await proveTests({ cwd, tests: [{ file: 'tests/report.xml', title: 'works' }] })
     assert.deepEqual(invalid.rows[0].build, { state: null, reason: 'no-report' })

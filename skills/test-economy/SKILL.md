@@ -16,7 +16,9 @@ its fixtures and helpers; do not add a helper or fixture for one test. Each name
 test must compile against the old source and reach new behaviour through a surface
 it already has, such as a route, a registered name or an existing public function.
 Do not call a function the change adds or use a new test module under `src/` that
-only the change declares.
+only the change declares. A named test's title must be the name the proof runner
+reports. For an in-source Rust test, use the full module path, such as
+`registry::wiring_tests::X`; the short title `X` matches nothing.
 
 ## Node tests
 

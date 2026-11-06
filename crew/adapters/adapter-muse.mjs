@@ -1,5 +1,5 @@
-import { cpSync, mkdirSync, statSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join } from 'node:path'
+import { cpSync, lstatSync, mkdirSync, statSync, symlinkSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const EXTRAS = fileURLToPath(new URL('../mcp/crew-extras.mjs', import.meta.url))
@@ -51,6 +51,27 @@ export function acpLaunch(spec = {}) {
   const { bin, cwd, model, effort, writes, writableDirs, taskDir, piBinary, grants = {}, env = {} } = spec
   assertSupportedGrants(grants)
   if (typeof bin !== 'string' || !isAbsolute(bin)) throw new Error(`adapter-muse.acpLaunch: bin must be an ABSOLUTE path, got ${JSON.stringify(bin)}`)
+  if (typeof taskDir !== 'string' || !isAbsolute(taskDir)) throw Object.assign(new Error('adapter-muse requires an absolute taskDir [grant-unsupported]'), { reason: 'grant-unsupported' })
+  const home = join(taskDir, 'muse-home')
+  const config = join(home, 'config')
+  const data = join(home, 'data')
+  const claude = join(home, 'claude')
+  const codex = join(home, 'codex')
+  try {
+    // The seat runtime is fresh; refusing an existing root prevents symlink escapes.
+    mkdirSync(home, { mode: 0o700 })
+    for (const dir of [config, data, claude, codex, join(config, 'muse')]) mkdirSync(dir, { mode: 0o700 })
+    const inherited = { ...process.env, ...env }
+    const sourceConfig = inherited.XDG_CONFIG_HOME || (inherited.HOME && join(inherited.HOME, '.config'))
+    if (sourceConfig) {
+      const auth = resolve(sourceConfig, 'muse', 'auth.json')
+      let present = true
+      try { lstatSync(auth) } catch (error) { if (error.code === 'ENOENT') present = false; else throw error }
+      if (present) symlinkSync(auth, join(config, 'muse', 'auth.json'))
+    }
+  } catch (error) {
+    throw Object.assign(new Error(`adapter-muse cannot prepare isolated home: ${error.message} [grant-unsupported]`), { reason: 'grant-unsupported' })
+  }
   const servers = [...(grants.mcp_servers || [])]
   const extras = [...(grants.skeletonread ? ['retrieve', 'skeleton'] : []), ...(grants.subagent ? ['agent'] : [])]
   if (extras.length) {
@@ -66,8 +87,8 @@ export function acpLaunch(spec = {}) {
   // Muse write_file bypasses permission requests. The task dir is a session root; lean.mjs checks lean records after the turn.
   return {
     bin,
-    args: ['acp', '--model', model, '-c', 'model_reasoning_efforts=' + JSON.stringify({ [model]: effort }), ...(writes === 'none' ? ['--disable-write'] : [])],
-    env: { ...env, MUSE_EXPERIMENTAL_ACP: '1', CREW_FFF: servers.some((server) => server.name === 'fff') ? '1' : '0' },
+    args: ['acp', '--model', model, '-c', 'model_reasoning_efforts=' + JSON.stringify({ [model]: effort }), '-c', 'tools.web_search.mode="off"', '-c', 'tools.web_fetch.enabled=false', ...(writes === 'none' ? ['--disable-write'] : [])],
+    env: { ...env, HOME: home, XDG_CONFIG_HOME: config, XDG_DATA_HOME: data, CLAUDE_CONFIG_DIR: claude, CODEX_HOME: codex, MUSE_EXPERIMENTAL_ACP: '1', MUSE_ENABLE_WEB_TOOLS: '0', MUSE_WEB_SEARCH_MODE: 'off', MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL: '1', CREW_FFF: servers.some((server) => server.name === 'fff') ? '1' : '0' },
     mode: 'onRequest',
     sessionParams: { cwd, mcpServers: servers.map((server) => ({ name: server.name, command: server.command.bin, args: [...server.command.args], env: Object.entries(builtServers.has(server) ? server.env : {}).map(([name, value]) => ({ name, value })) })), ...(directories.length ? { additionalDirectories: directories } : {}) },
   }

@@ -22,7 +22,8 @@ description: >-
 
 - For a hand-opened PR, use `## Summary` with a `Purpose:` line stating what
   the PR achieves, the issue number and title or quoted operator request for why,
-  a `How:` line for the implementation and a `Source:` line, `## Changes` for the changed files,
+  a `How:` line for the implementation, a `Source:` line only when the issue or
+  request line does not name the source, `## Changes` for the changed files,
   `## Verification` for test and suite results, and `## Open points` for
   unresolved should-fix findings when present.
   Crew lanes generate this body themselves. Follow `prose-plain` for PR prose.

@@ -30,10 +30,10 @@ export function laneName(briefPath) {
   return lane
 }
 
-export function runBrief(text, closes, ask = null) {
+export function runBrief(text, closes, ask = null, title = null) {
   if (ask !== null) {
     const quote = ask.trimEnd().split(/\r?\n/).map((line) => line.trim() ? `> ${line}` : '>').join('\n')
-    text = text.replace(/^([^\S\r\n]*---[^\S\r\n]*\r?\n[\s\S]*?\r?\n[^\S\r\n]*---[^\S\r\n]*\r?\n)/, (front) => `${front}## The ask\n\n${quote}\n\n`)
+    text = text.replace(/^([^\S\r\n]*---[^\S\r\n]*\r?\n[\s\S]*?\r?\n[^\S\r\n]*---[^\S\r\n]*\r?\n)/, (front) => `${front}${title === null ? '' : `Issue title: ${title.replace(/\s+/g, ' ').trim()}\n`}## The ask\n\n${quote}\n\n`)
   }
   return `# Task\n${closes ? `<!-- crew:bound-issue #${closes} -->\n` : ''}\n${text}`
 }
@@ -135,15 +135,19 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
     if (error instanceof OnboardRefusal) throw new StartRefusal(`lane base ${base}: ${error.message}; commit the approved .crew/project.json to ${base} before starting`, { cause: error })
     throw error
   }
-  let ask = null
+  let ask = null, title = null
   const issue = ISSUE_SOURCE.exec(fields.source)
   if (issue) {
     const result = d.spawnSync('gh', ['issue', 'view', issue[1], '--json', 'body', '--jq', '.body'], { cwd: checkout })
     if (result.status !== 0) throw new StartRefusal(`cannot read the body of issue ${issue[1]}: ${result.error?.message || String(result.stderr ?? '').trim() || `gh exited with status ${result.status}`}`)
     if (!/[\p{L}\p{N}]/u.test(String(result.stdout ?? ''))) throw new StartRefusal(`issue ${issue[1]} has an empty body: no letter or digit`)
     ask = String(result.stdout)
+    const titleResult = d.spawnSync('gh', ['issue', 'view', issue[1], '--json', 'title', '--jq', '.title'], { cwd: checkout })
+    if (titleResult.status !== 0) throw new StartRefusal(`cannot read the title of issue ${issue[1]}: ${titleResult.error?.message || String(titleResult.stderr ?? '').trim() || `gh exited with status ${titleResult.status}`}`)
+    title = String(titleResult.stdout ?? '').replace(/\s+/g, ' ').trim()
+    if (!title) throw new StartRefusal(`issue ${issue[1]} has an empty title`)
   }
-  const run = runBrief(text, fields.closes, ask)
+  const run = runBrief(text, fields.closes, ask, title)
   if (git(d, checkout, ['worktree', 'add', '-b', lane, worktree, baseCommit]) === null) throw new StartRefusal(`git worktree add -b ${lane} ${worktree} ${base} failed in ${checkout}`)
 
   // The run reads a snapshot, so editing the draft cannot change a running lane.

@@ -53,7 +53,7 @@ out_of_scope: the visualizer
 
 // Every effect is a recorded call; nothing touches git, the disk or a process. The agent
 // resolution is injected too; the default resolves the committed definitions.
-const projectFile = (suite = 'npm test', proof = []) => ({ suite, proof, onboarded: { hash: createHash('sha256').update(JSON.stringify([suite, proof.map((e) => [e.match, e.setup ?? null, e.run])])).digest('hex') } })
+const projectFile = (suite = 'npm test', proof = [], suiteTimeoutMs) => ({ suite, proof, ...(suiteTimeoutMs === undefined ? {} : { suiteTimeoutMs }), onboarded: { hash: createHash('sha256').update(JSON.stringify([suite, proof.map((e) => [e.match, e.setup ?? null, e.run])])).digest('hex') } })
 
 function fakes({ brief = BRIEF, project = projectFile(), exists = () => false, worktreeStatus = 0, originHead = 'origin/main', inGit = true, issueBody = 'Refuse roster edits that cannot boot.\n', resolve = (tier) => resolveAgents(tier), write = () => {} } = {}) {
   const calls = []
@@ -565,6 +565,14 @@ test('the project suite and onboarded hash become the lean spec suite and onboar
   const spec = JSON.parse(written(calls, '/task/lean.json')[2])
   assert.deepEqual(spec.suite, { command: 'cargo', args: ['test', '-p', 'power-api'], timeoutMs: 1800000 })
   assert.equal(spec.onboarded, project.onboarded.hash)
+})
+
+test('a configured suiteTimeoutMs in project.json reaches the lane suite spec and an absent one keeps 1800000', async () => {
+  for (const [value, expected] of [[3600000, 3600000], [undefined, 1800000]]) {
+    const { deps, calls } = fakes({ project: projectFile('npm test', [], value) })
+    await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
+    assert.equal(JSON.parse(written(calls, '/task/lean.json')[2]).suite.timeoutMs, expected)
+  }
 })
 
 test('start refuses when the selected lane base lacks the approved onboarding', async () => {

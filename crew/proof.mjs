@@ -95,6 +95,26 @@ export function junitEvents(xml) {
   })
 }
 
+function nearestTitle(events, title) {
+  const candidates = new Set(events.flatMap((e) => e.classname ? [e.name, `${e.classname}.${e.name}`, `${e.classname}::${e.name}`] : [e.name]))
+  let best, bestSuffix = -1, bestDistance = Infinity
+  for (const candidate of candidates) {
+    let suffix = 0
+    while (suffix < title.length && suffix < candidate.length && title[title.length - 1 - suffix] === candidate[candidate.length - 1 - suffix]) suffix++
+    let distances = Array.from({ length: title.length + 1 }, (_, i) => i)
+    for (let i = 0; i < candidate.length; i++) {
+      const next = [i + 1]
+      for (let j = 0; j < title.length; j++) next.push(Math.min(next[j] + 1, distances[j + 1] + 1, distances[j] + (candidate[i] === title[j] ? 0 : 1)))
+      distances = next
+    }
+    const distance = distances[title.length]
+    if (suffix > bestSuffix || (suffix === bestSuffix && distance < bestDistance)) {
+      best = candidate; bestSuffix = suffix; bestDistance = distance
+    }
+  }
+  return best === undefined ? [] : [best]
+}
+
 export async function testEvents({ cwd, files, timeoutMs }) {
   const run = await runSuite({ cwd, command: process.execPath, args: ['--test', `--test-reporter=${new URL('./proof-reporter.mjs', import.meta.url).href}`, '--test-reporter-destination=stdout', ...files], timeoutMs })
   const events = run.stdout.split('\n').flatMap((line) => { try { return [JSON.parse(line)] } catch { return [] } })
@@ -172,9 +192,11 @@ export async function proveTests(input = {}) {
           const [command, ...args] = entryCommand(entry.run, values)
           const run = await runSuite({ cwd: dir, command, args, timeoutMs })
           if (run.status === 'unmeasured') { result = unmeasured(run.reason, rows); break }
-          let events = null
-          try { events = junitEvents(readFileSync(report, 'utf8')) } catch {}
-          row[side] = !events?.length ? { state: null, reason: side === 'base' ? 'base-does-not-build' : 'no-report' } : testState(events.filter((e) => row.title === e.name || (e.classname && (row.title === `${e.classname}.${e.name}` || row.title === `${e.classname}::${e.name}`))))
+          let xml, events = null
+          try { xml = readFileSync(report, 'utf8'); events = junitEvents(xml) } catch {}
+          const hits = events?.filter((e) => row.title === e.name || (e.classname && (row.title === `${e.classname}.${e.name}` || row.title === `${e.classname}::${e.name}`)))
+          const loadFailure = events && !events.length && /<(?:failure|error)(?:\s|\/?>)/.test(xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>/g, ''))
+          row[side] = hits?.length ? testState(hits) : events && (events.length || loadFailure) ? { state: null, reason: 'title-unmatched', nearest: nearestTitle(events, row.title) } : { state: null, reason: side === 'base' ? 'base-does-not-build' : 'no-report' }
         }
         if (result) break
         row.proven = row.base.state === 'red' && row.build.state === 'green'

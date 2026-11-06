@@ -13,6 +13,14 @@ test('acpProviderFailureKind maps the ACP error kinds onto the provider failure 
   for (const kind of ['', 'other', null, undefined]) assert.equal(acpProviderFailureKind(kind), null)
 })
 
+test('a Muse logged-out message classifies as authentication_failed and near misses do not', () => {
+  const message = 'log in to Muse before opening a session'
+  assert.equal(acpProviderFailureKind(null, message), 'authentication_failed')
+  for (const kind of ['authentication_failed', 'oauth_org_not_allowed', 'verification_required']) assert.equal(acpProviderFailureKind(kind, 'anything'), 'authentication_failed')
+  for (const miss of [`prefix ${message}`, `${message} suffix`, `${message}.`, `${message} `, ` ${message}`, `${message}\n`, message.replace('log in', 'log  in'), message.toUpperCase(), null, 42, {}]) assert.equal(acpProviderFailureKind(null, miss), null)
+  for (const [kind, expected] of [['rate_limit', 'rate_limit'], ['overloaded', 'server_error'], ['other', 'authentication_failed']]) assert.equal(acpProviderFailureKind(kind, message), expected)
+})
+
 test('pi provider messages classify only measured failures and retain retry policy', () => {
   const overload = 'Codex error: Our servers are currently overloaded. Please try again later.'
   const limit = 'Codex error: The usage limit has been reached'

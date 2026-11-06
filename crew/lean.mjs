@@ -210,7 +210,14 @@ export async function runLean(spec, deps = {}) {
         if (recordError) throw recordError
         // The runtime writes the one turn row of every turn, accepted or not.
         guardedAppend(sessionFile, `${JSON.stringify({ type: 'turn', stopReason: turn?.stopReason ?? null, usage: turn?.usage ?? null, refusal: turn?.refusal ?? null, ...(typeof turn?.usage_reason === 'string' ? { usage_reason: turn.usage_reason } : {}) })}\n`, 'utf8')
-      } catch (error) { failed = true; turnError = error }
+      } catch (error) {
+        failed = true
+        if (error?.method === 'session/new' && acpProviderFailureKind(error.errorKind, error.errorMessage) === 'authentication_failed') {
+          if (!Object.isExtensible(error)) error = Object.assign(new Error(String(error.message ?? error)), { reason: error.reason, code: error.code, method: error.method, errorKind: error.errorKind, errorMessage: error.errorMessage })
+          error.providerKind = 'authentication_failed'
+        }
+        turnError = error
+      }
       // Skill proof trusts only the relayed copy, and only while the session file still matches it.
       const recorded = relayed.join('')
       let intact = false

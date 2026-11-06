@@ -256,7 +256,11 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     const meta = params._meta ?? null
     const sessionParams = { cwd: params.cwd ?? cwd, mcpServers: params.mcpServers ?? [], ...(meta ? { _meta: meta } : {}), ...(Array.isArray(params.additionalDirectories) && params.additionalDirectories.length ? { additionalDirectories: params.additionalDirectories } : {}) }
     const frame = request('session/new', sessionParams)
-    if (frame.error) throw acpRefuse('acp-protocol-mismatch', `acp seat ${role} refused session/new: ${frame.error.message}`)
+    if (frame.error) throw Object.assign(acpRefuse('acp-protocol-mismatch', `acp seat ${role} refused session/new: ${frame.error.message}`), {
+      errorKind: frame.error.data?.errorKind ?? null,
+      errorMessage: typeof frame.error.data?.errorMessage === 'string' ? frame.error.data.errorMessage : frame.error.message,
+      method: 'session/new',
+    })
     session.id = frame.result?.sessionId ?? null
     return session.id
   }

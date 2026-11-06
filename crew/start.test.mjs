@@ -831,6 +831,77 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
   const sessionOf = (role, n) => join(spec.taskDir, 'lean', role, `lane.${role}.${n}.jsonl`)
   return { spec, requests, logs, go: () => runLean(spec, options), sessionOf, options }
 }
+test('a Muse seat refused at session/new for being logged out stops as authentication_failed with no rerun', async () => {
+  const message = 'log in to Muse before opening a session'
+  for (const [errorKind, errorMessage, frozen] of [[null, message, false], ['authentication_failed', 'denied', true], ['oauth_org_not_allowed', 'denied', false], ['verification_required', 'denied', false]]) {
+    const rows = []
+    const f = leanFixture({ acp: async () => {
+      const error = Object.assign(new Error(`acp seat planner refused session/new: ${errorMessage} [acp-protocol-mismatch]`), { reason: 'acp-protocol-mismatch', method: 'session/new', errorKind, errorMessage })
+      throw frozen ? Object.freeze(error) : error
+    }, loopDeps: { journal: async (row) => rows.push(row), resolveAgents: (tier) => {
+      const resolved = resolveAgents(tier)
+      resolved.seats.planner = { ...resolved.seats.planner, agent: 'muse' }
+      return resolved
+    } } })
+    assert.deepEqual(await f.go(), { status: 'stopped', reason: 'authentication_failed', pr: null })
+    assert.equal(f.requests.length, 1)
+    const verdicts = rows.filter((row) => row.event === 'verdict')
+    assert.equal(verdicts.length, 1)
+    assert.equal(verdicts[0].reason, 'authentication_failed')
+    assert.match(verdicts[0].observation.error.message, new RegExp(errorMessage))
+  }
+  for (const target of ['lead', 'conflict']) {
+    const rows = []
+    let rebases = 0
+    const f = leanFixture({ tier: target === 'conflict' ? 'mechanical' : 'build', answers: target === 'lead' ? { 'builder.2': 'insufficient' } : {}, loopDeps: {
+      journal: async (row) => rows.push(row),
+      ...(target === 'conflict' ? { rebaseBranch: async () => ++rebases === 1 ? { status: 'green', reason: null, head: 'b'.repeat(40) } : { status: 'red', reason: 'rebase-conflict', conflicts: ['file'] } } : {}),
+    } })
+    if (target === 'conflict') {
+      const run = f.options.loopDeps.run
+      f.options.loopDeps.run = async (input) => input.args.includes('rev-parse') ? { ...GREEN, stdout: `${'c'.repeat(40)}\n` } : run(input)
+    }
+    const answered = f.options.runAcpSeat
+    f.options.runAcpSeat = async (input) => {
+      if (target === 'lead' ? input.definition.role === 'lead' : input.prompt.includes('Rebase ')) {
+        throw Object.assign(new Error(message), { method: 'session/new', errorKind: null, errorMessage: message })
+      }
+      return answered(input)
+    }
+    assert.equal((await f.go()).reason, 'authentication_failed', target)
+    const verdicts = rows.filter((row) => row.event === 'verdict')
+    assert.equal(verdicts.length, 1, target)
+    assert.match(JSON.stringify(verdicts[0].observation), /log in to Muse/, target)
+  }
+  const f = leanFixture()
+  const answered = f.options.runAcpSeat
+  f.options.runAcpSeat = async (input) => {
+    const turn = await answered(input)
+    if (input.definition.role === 'planner') throw Object.assign(new Error(message), { method: 'session/new', errorKind: null, errorMessage: message })
+    return turn
+  }
+  assert.equal((await f.go()).status, 'done')
+})
+
+test('a session/new refusal that is not a logged-out message keeps seat-unmeasured and one rerun', async () => {
+  const message = 'log in to Muse before opening a session'
+  for (const [method, errorKind, errorMessage, reason, calls] of [
+    ['session/new', null, 'session unavailable', 'seat-unmeasured', 2],
+    ['session/new', 'rate_limit', message, 'seat-unmeasured', 2],
+    ['initialize', 'authentication_failed', message, 'seat-unmeasured', 2],
+    ['session/set_mode', 'authentication_failed', message, 'seat-unmeasured', 2],
+    ['session/new', 'verification_required', 'verify', 'authentication_failed', 1],
+  ]) {
+    const rows = []
+    const f = leanFixture({ acp: async () => { throw Object.assign(new Error(`acp seat planner refused ${method}: ${errorMessage} [acp-protocol-mismatch]`), { reason: 'acp-protocol-mismatch', method, errorKind, errorMessage }) }, loopDeps: { journal: async (row) => rows.push(row) } })
+    assert.deepEqual(await f.go(), { status: 'stopped', reason, pr: null }, method)
+    assert.equal(f.requests.length, calls, method)
+    const verdicts = rows.filter((row) => row.event === 'verdict')
+    assert.equal(verdicts.length, 1)
+    assert.match(verdicts[0].observation.error.message, /\[acp-protocol-mismatch\]/)
+  }
+})
+
 test("a mechanical builder prompt shows a P2 example with a subject, and a build builder's shows none", async () => {
   for (const tier of ['mechanical', 'build']) {
     const f = leanFixture({ tier, repairBuilder: tier === 'mechanical' })

@@ -784,10 +784,12 @@ export async function runLoop(spec, deps = {}) {
       const title = issue && (/^title:\s*(.+)$/im.exec(spec.brief.split(/^---\s*$/m)[1] ?? '')?.[1]
         ?? /^\s*(?:>\s*)?issue title:\s*(.+)$/im.exec(spec.brief)?.[1])
       const ask = !issue ? briefAsk(spec.brief) : ''
+      const purpose = oneLine(planSummary).replace(/^(?:the plan|plan)(?:\s+|$)/i, '')
       return [
-        '## Summary', `Purpose: ${oneLine(planSummary).replace(/^(?:the plan|plan)\s+/i, '') || 'unmeasured.'}`,
+        '## Summary', `Purpose: ${purpose && !/plan\.md|^(?:written|drafted)\b/i.test(purpose) ? purpose[0].toUpperCase() + purpose.slice(1) : 'unmeasured.'}`,
         ...(issue ? [`Closes issue ${issue[1]}${title ? `: ${oneLine(title)}` : ''}`] : ask ? [`Operator request: ${ask}`] : []),
-        `How: ${oneLine(builderSummary) || oneLine(subject)}`, '', `Source: ${oneLine(spec.source)}`,
+        `How: ${oneLine(builderSummary) || oneLine(subject)}`,
+        ...(!issue && !ask ? ['', `Source: ${oneLine(spec.source)}`] : []),
         ...(isFinish ? ['', `The lane stopped with reason ${oneLine(fin.stop.reason)}. This report covers only this finish run.`, `${finishReviews.length} ${finishReviews.length === 1 ? 'review' : 'reviews'} in this finish run; final verdict: ${oneLine(finishReviews.at(-1)?.verdict) || 'unmeasured'}.`] : []),
         '', '## Changes', ...publishedFiles.map((file) => `- ${oneLine(file)}`),
         '', '## Verification',

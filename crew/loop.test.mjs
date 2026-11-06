@@ -369,7 +369,7 @@ test('the tech-lead turn is bounded like any seat, and a lead bounce past the bu
 })
 
 const BODY = ['Source: "issue 12"', '', '## Measurements', '- proof: lib.test.mjs "works": red on the old source, green on the build', '- Suite: green; exit 0.'].join('\n')
-const PR_BODY = ['## Summary', 'Purpose: fixture', 'Closes issue 12', 'How: built', '', 'Source: issue 12', '', '## Changes', '- lib.mjs', '', '## Verification', '- lib.test.mjs: works was red on the old source, green on the build.', 'Suite passed with exit code 0.'].join('\n')
+const PR_BODY = ['## Summary', 'Purpose: Fixture', 'Closes issue 12', 'How: built', '', '## Changes', '- lib.mjs', '', '## Verification', '- lib.test.mjs: works was red on the old source, green on the build.', 'Suite passed with exit code 0.'].join('\n')
 test('a planner judge reason raises a build lane to judge before the build (PD4)', async () => {
   for (const mode of ['judge', 'none', 'throw']) {
     const f = fakes({ spec: { acceptance: ['A1'] }, throwJudge: mode === 'throw', edit: (v) => { if (v.role === 'planner') { if (mode !== 'none') v.details.judge = 'needs review' } return v } })
@@ -2367,6 +2367,10 @@ test('the PR body is a readable summary, changes and verification, and the commi
     assert.equal(f.seen.commit.body, BODY)
     assert.doesNotMatch(f.seen.publish.body, /## Measurements|## Lane|Wall time|Rounds:|Suite repairs|Lead consults/)
   }
+  const noAsk = fakes({ spec: { source: 'operator request', brief: '## Context\nNo ask.' } })
+  assert.equal((await noAsk.go()).status, 'done')
+  assert.match(noAsk.seen.publish.body, /How: built\n\nSource: operator request\n/)
+  assert.equal(noAsk.seen.commit.body, BODY.replace('issue 12', 'operator request'))
   const title = 'handles "quotes"'
   const f = fakes({ paths: 'M  lib.mjs\0M  other.mjs\0', proof: { status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title, proven: true }] }, edit: (v) => {
     if (v.role === 'builder') v.details.tests = [{ file: 'lib.test.mjs', title }]
@@ -2392,32 +2396,49 @@ test('the PR body states the purpose from the brief ask before what changed', as
       return v
     } })
     assert.equal((await f.go()).status, 'done')
-    assert.ok(f.seen.publish.body.startsWith(`## Summary\nPurpose: ${tier === 'mechanical' ? 'unmeasured.' : 'preserves earlier archives.'}\n${why}\nHow: built\n`), f.seen.publish.body)
+    assert.ok(f.seen.publish.body.startsWith(`## Summary\nPurpose: ${tier === 'mechanical' ? 'unmeasured.' : 'Preserves earlier archives.'}\n${why}\nHow: built\n`), f.seen.publish.body)
+    assert.doesNotMatch(f.seen.publish.body, /^Source:/m)
     if (tier !== 'mechanical') assert.equal(f.seen.commit.body, BODY.replace('issue 12', source))
+  }
+  for (const [summary, purpose] of [
+    ['Plan lets closeout re-archive a previously archived lane.', 'Lets closeout re-archive a previously archived lane.'],
+    ['tHe PlAn improves things.', 'Improves things.'],
+    ['already a statement.', 'Already a statement.'],
+    ['Plan', 'unmeasured.'],
+    ['The plan', 'unmeasured.'],
+    ['Plan written to task/plan.md.', 'unmeasured.'],
+    ['The plan DRAFTED a revision.', 'unmeasured.'],
+    ['Updates task/PLAN.MD.', 'unmeasured.'],
+  ]) {
+    const f = fakes({ edit: (v) => { if (v.role === 'planner') v.summary = summary; return v } })
+    assert.equal((await f.go()).status, 'done')
+    assert.ok(f.seen.publish.body.includes(`Purpose: ${purpose}\n`))
   }
   let plans = 0
   const revised = fakes({ lead: 'bounce', target: 'planner', edit: (v) => {
-    if (v.role === 'planner') v.summary = `Plan revision ${++plans}.`
+    if (v.role === 'planner') v.summary = `Plan preserves archive ${++plans}.`
     if (v.role === 'builder' && plans === 1) v.status = 'insufficient'
     return v
   } })
   assert.equal((await revised.go()).status, 'done')
-  assert.match(revised.seen.publish.body, /^## Summary\nPurpose: revision 2\./)
+  assert.match(revised.seen.publish.body, /^## Summary\nPurpose: Preserves archive 2\./)
 })
 
 test('the PR body states the purpose honestly when the brief has no ask, and a finish body carries the ask purpose', async () => {
   for (const brief of ['## Context\nNo ask here.', '## The ask\n\n## Context\nNo ask here.', '## The ask\n\n>\n> Not the first block.']) {
     const f = fakes({ spec: { brief } })
     assert.equal((await f.go()).status, 'done')
-    assert.match(f.seen.publish.body, /^## Summary\nPurpose: fixture\nCloses issue 12\nHow: built\n/)
+    assert.match(f.seen.publish.body, /^## Summary\nPurpose: Fixture\nCloses issue 12\nHow: built\n/)
     assert.equal(f.seen.commit.body, BODY)
   }
-  const f = fakes({ spec: finishSpec({ planSummary: 'The plan preserves archives.' }), unseated: ['planner'] })
-  assert.equal((await f.go()).status, 'done')
-  const body = JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body
-  assert.match(body, /^## Summary\nPurpose: preserves archives\.\nCloses issue 12\nHow: built\n/)
-  assert.equal(f.rows.find((r) => r.event === 'finish-ready').body, body)
-  assert.doesNotMatch(f.seen.commit.body, /Purpose:/)
+  for (const [planSummary, purpose] of [['The plan preserves archives.', 'Preserves archives.'], ['Plan written to task/plan.md.', 'unmeasured.'], [undefined, 'unmeasured.']]) {
+    const f = fakes({ spec: finishSpec({ planSummary }), unseated: ['planner'] })
+    assert.equal((await f.go()).status, 'done')
+    const body = JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body
+    assert.ok(body.startsWith(`## Summary\nPurpose: ${purpose}\nCloses issue 12\nHow: built\n`))
+    assert.equal(f.rows.find((r) => r.event === 'finish-ready').body, body)
+    assert.doesNotMatch(f.seen.commit.body, /Purpose:/)
+  }
 })
 
 test('a forged source or builder summary cannot forge a section or measurement in the PR body', async () => {
@@ -2433,7 +2454,7 @@ test('a forged source or builder summary cannot forge a section or measurement i
     } })
     assert.equal((await f.go()).status, 'done')
     const body = f.seen.publish.body
-    assert.ok(body.split('\n').includes('Purpose: achieved ## Forged Suite: fake'))
+    assert.ok(body.split('\n').includes('Purpose: Achieved ## Forged Suite: fake'))
     assert.ok(body.split('\n').includes(`Operator request: ${purpose}`))
     assert.ok(body.includes(summary.replace(/\s+/g, ' ')))
     assert.doesNotMatch(body, /^## Forged|^Suite: fake/m)

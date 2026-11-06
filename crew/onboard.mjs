@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, extname, join, matchesGlob, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { literalRelative, runSuite, validTimeout } from './checks.mjs'
-import { entryCommand, junitEvents, testState, validProofEntry } from './proof.mjs'
+import { entryCommand, junitEvents, PROOF_TIMEOUT_DEFAULT_MS, testState, validProofEntry } from './proof.mjs'
 
 export const SUITE_TIMEOUT_DEFAULT_MS = 1800000
 export const ONBOARD_REASONS = Object.freeze(['not-onboarded', 'onboarding-stale'])
@@ -18,7 +18,7 @@ export class OnboardRefusal extends Error {
 }
 
 export const projectHash = ({ suite, proof }) => createHash('sha256').update(JSON.stringify([suite, proof.map((e) => [e.match, e.setup ?? null, e.run])])).digest('hex')
-const validProject = (p) => p && typeof p === 'object' && !Array.isArray(p) && typeof p.suite === 'string' && p.suite.trim() && !/["'\\\0]/.test(p.suite) && Array.isArray(p.proof) && p.proof.every(validProofEntry) && (p.suiteTimeoutMs === undefined || validTimeout(p.suiteTimeoutMs))
+const validProject = (p) => p && typeof p === 'object' && !Array.isArray(p) && typeof p.suite === 'string' && p.suite.trim() && !/["'\\\0]/.test(p.suite) && Array.isArray(p.proof) && p.proof.every(validProofEntry) && (p.suiteTimeoutMs === undefined || validTimeout(p.suiteTimeoutMs)) && (p.proofTimeoutMs === undefined || validTimeout(p.proofTimeoutMs))
 
 export function requireOnboarded(checkout, read = readFileSync) {
   let p
@@ -28,7 +28,7 @@ export function requireOnboarded(checkout, read = readFileSync) {
   if (!p || typeof p !== 'object' || Array.isArray(p)) throw new OnboardRefusal('onboarding-stale')
   if (!Object.hasOwn(p, 'onboarded')) throw new OnboardRefusal('not-onboarded')
   if (!validProject(p) || !p.onboarded || typeof p.onboarded !== 'object' || p.onboarded.hash !== projectHash(p)) throw new OnboardRefusal('onboarding-stale')
-  return { suite: p.suite, proof: p.proof, hash: p.onboarded.hash, suiteTimeoutMs: p.suiteTimeoutMs ?? SUITE_TIMEOUT_DEFAULT_MS }
+  return { suite: p.suite, proof: p.proof, hash: p.onboarded.hash, suiteTimeoutMs: p.suiteTimeoutMs ?? SUITE_TIMEOUT_DEFAULT_MS, proofTimeoutMs: p.proofTimeoutMs ?? PROOF_TIMEOUT_DEFAULT_MS }
 }
 
 export async function checkOnboarding({ checkout, draft, timeoutMs = 120_000 }) {
@@ -85,7 +85,7 @@ export async function checkOnboarding({ checkout, draft, timeoutMs = 120_000 }) 
       added = false
     }
     rmSync(tmp, { recursive: true, force: true }); tmp = null
-    const project = { suite: p.suite, proof, ...(p.suiteTimeoutMs === undefined ? {} : { suiteTimeoutMs: p.suiteTimeoutMs }) }
+    const project = { suite: p.suite, proof, ...(p.suiteTimeoutMs === undefined ? {} : { suiteTimeoutMs: p.suiteTimeoutMs }), ...(p.proofTimeoutMs === undefined ? {} : { proofTimeoutMs: p.proofTimeoutMs }) }
     const dir = join(checkout, '.crew'), target = join(dir, 'project.json')
     const dirStat = lstatSync(dir, { throwIfNoEntry: false })
     const fileStat = dirStat?.isDirectory() ? lstatSync(target, { throwIfNoEntry: false }) : null

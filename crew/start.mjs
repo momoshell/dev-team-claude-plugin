@@ -172,7 +172,7 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
   const spec = {
     id: lane, cwd: worktree, taskDir, tier, shape: fields.shape, brief: run,
     source: fields.source, branch: lane, base, closes: fields.closes === null ? [] : [fields.closes],
-    suite: suiteSpec(project.suite, project.suiteTimeoutMs), onboarded: project.hash,
+    suite: suiteSpec(project.suite, project.suiteTimeoutMs), proofTimeoutMs: project.proofTimeoutMs, onboarded: project.hash,
     ...(fields.generated === undefined ? {} : { generated: { paths: fields.generated, ...suiteSpec(fields.regenerate) } }),
   }
   try {

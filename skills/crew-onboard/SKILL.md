@@ -30,6 +30,8 @@ If you only want the skills, stop here.
 2. Write a draft JSON file outside the checkout. Set `suite` to that command and
    `proof` to an array of runner entries. Node's built-in test runner is the
    default for JavaScript tests, so use `proof: []` if it covers all proof tests.
+   Optionally set `suiteTimeoutMs` to a safe integer from 1 to `2**31-1` ms;
+   if absent, the suite timeout is 1800000 ms.
 3. For each other runner, add `match` (a file glob), optional `setup`, `run`, and
    `calibrate`. The latter holds `file` (a literal relative path matched first
    by this entry), `text` (the throwaway test source), and distinct `pass` and
@@ -61,7 +63,9 @@ If you only want the skills, stop here.
 5. Commit `.crew/project.json` on the local base branch selected by `origin/HEAD`
    before starting a lane. The checkout and base must have matching onboarding;
    proof reads runner entries from the lane's old-source worktree. Re-run
-   onboarding after changing the suite or proof entries. Write a brief with
+   onboarding after changing the suite or proof entries. Changing only
+   `suiteTimeoutMs` in `.crew/project.json` does not require re-onboarding.
+   Write a brief with
    `skills/lane-brief/SKILL.md`, then run `crew start <brief> --check` and
    `crew start <brief>` in the checkout. The start checks the base; `--check`
    checks only the checkout.

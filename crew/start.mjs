@@ -17,7 +17,7 @@ import { ISSUE_SOURCE, parseBrief } from './protocols.mjs'
 import { resolveAgents } from './agents.mjs'
 import { writeRunPid } from './run-pid.mjs'
 import { askProvenance, readOperatorMessages } from './brief-provenance.mjs'
-import { OnboardRefusal, requireOnboarded } from './onboard.mjs'
+import { OnboardRefusal, requireOnboarded, SUITE_TIMEOUT_DEFAULT_MS } from './onboard.mjs'
 
 const HOME = dirname(dirname(fileURLToPath(import.meta.url)))
 const LEAN = join(HOME, 'crew', 'lean.mjs')
@@ -70,9 +70,9 @@ function git(d, checkout, args) {
 }
 
 // A project command as a spec command: whitespace-split, no shell.
-function suiteSpec(suite) {
+function suiteSpec(suite, timeoutMs = SUITE_TIMEOUT_DEFAULT_MS) {
   const [command, ...args] = suite.trim().split(/\s+/)
-  return { command, args, timeoutMs: 1800000 }
+  return { command, args, timeoutMs }
 }
 
 export async function startLane({ briefPath, checkout, check = false, deps = {} }) {
@@ -168,7 +168,7 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
   const spec = {
     id: lane, cwd: worktree, taskDir, tier, shape: fields.shape, brief: run,
     source: fields.source, branch: lane, base, closes: fields.closes === null ? [] : [fields.closes],
-    suite: suiteSpec(project.suite), onboarded: project.hash,
+    suite: suiteSpec(project.suite, project.suiteTimeoutMs), onboarded: project.hash,
     ...(fields.generated === undefined ? {} : { generated: { paths: fields.generated, ...suiteSpec(fields.regenerate) } }),
   }
   try {

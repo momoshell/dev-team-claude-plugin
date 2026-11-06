@@ -19,6 +19,25 @@ test('a configured runner proves a TypeScript test from its JUnit report', async
   assert.equal(result.rows[1].reason, 'proof-not-red-on-base')
 })
 
+test('a timed-out runner row is unmeasured on its own and the remaining rows are still proven', { timeout: 20_000 }, async () => {
+  for (const side of ['base', 'build']) {
+    const cwd = scratchDir('proof-runner-timeout-')
+    git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew'))
+    writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: [{ match: '*.xml', run: 'node runner.mjs {title} {report}' }] }))
+    writeFileSync(join(cwd, 'runner.mjs'), `import { readFileSync, writeFileSync } from 'node:fs'\nconst v = readFileSync('v', 'utf8')\nif (process.argv[2] === 'hang' && v === '${side}') setInterval(() => {}, 1000)\nelse writeFileSync(process.argv[3], '<testsuite><testcase name="' + process.argv[2] + '">' + (v === 'base' ? '<failure/>' : '') + '</testcase></testsuite>')\n`)
+    writeFileSync(join(cwd, 'v'), 'base')
+    git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+    writeFileSync(join(cwd, 'v'), 'build'); writeFileSync(join(cwd, 'test.xml'), '<testsuite/>')
+    const result = await proveTests({ cwd, tests: ['hang', 'works'].map((title) => ({ file: 'test.xml', title })), timeoutMs: 3000 })
+    assert.equal(result.status, 'red'); assert.equal(result.reason, 'proof-unproven')
+    assert.deepEqual(result.rows[0][side], { state: null, reason: 'timeout' })
+    assert.equal(result.rows[0].reason, 'timeout'); assert.equal(result.rows[0].proven, false)
+    assert.deepEqual(result.rows[0][side === 'base' ? 'build' : 'base'], side === 'base' ? { state: null, reason: 'not-run' } : { state: 'red', reason: null })
+    assert.equal(result.rows[1].proven, true); assert.equal(result.rows[1].reason, null)
+    assert.equal(git(cwd, 'worktree', 'list').trim().split('\n').length, 1)
+  }
+})
+
 test('JUnit failure, pass, error, skip, absence and duplicates map to the node proof states', async () => {
   const cwd = scratchDir('proof-xml-')
   git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew')); mkdirSync(join(cwd, 'tests'))
@@ -253,15 +272,26 @@ test('the same title at a different line on the old source does not prove', asyn
 })
 
 // MUTATION: drop timeoutMs from the old-source testEvents call.
-test('the timeout reaches the old-source run and a hang is unmeasured timeout', { timeout: 20_000 }, async () => {
-  const cwd = scratchDir('proof-timeout-')
-  git(cwd, 'init', '-q'); writeFileSync(join(cwd, 'v.mjs'), 'export const v = 1\n')
-  git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
-  writeFileSync(join(cwd, 'v.mjs'), 'export const v = 2\n')
-  writeFileSync(join(cwd, 'v.test.mjs'), "import test from 'node:test'\nimport { v } from './v.mjs'\ntest('hang', async () => { if (v === 1) { setInterval(() => {}, 1000); await new Promise(() => {}) } })\n")
-  const result = await proveTests({ cwd, tests: [{ file: 'v.test.mjs', title: 'hang' }], timeoutMs: 5_000 })
-  assert.equal(result.status, 'unmeasured'); assert.equal(result.reason, 'timeout'); assert.equal(result.rows[0].proven, false)
-  assert.equal(git(cwd, 'worktree', 'list').trim().split('\n').length, 1)
+test('a timed-out test file is unmeasured on its own rows and rows in other files are still proven', { timeout: 20_000 }, async () => {
+  for (const side of ['base', 'build']) {
+    const cwd = scratchDir('proof-timeout-')
+    git(cwd, 'init', '-q'); writeFileSync(join(cwd, 'v.mjs'), "export const v = 'base'\n")
+    git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+    writeFileSync(join(cwd, 'v.mjs'), "export const v = 'build'\n")
+    writeFileSync(join(cwd, 'v.test.mjs'), `import test from 'node:test'\nimport { v } from './v.mjs'\ntest('hang', async () => { if (v === '${side}') { setInterval(() => {}, 1000); await new Promise(() => {}) } })\ntest('also', () => {})\n`)
+    writeFileSync(join(cwd, 'other.test.mjs'), "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { v } from './v.mjs'\ntest('works', () => assert.equal(v, 'build'))\n")
+    const tests = [{ file: 'v.test.mjs', title: 'hang' }, { file: 'v.test.mjs', title: 'also' }, { file: 'other.test.mjs', title: 'works' }]
+    const result = await proveTests({ cwd, tests, timeoutMs: 3000 })
+    assert.equal(result.status, 'red'); assert.equal(result.reason, 'proof-unproven')
+    for (const row of result.rows.slice(0, 2)) {
+      assert.deepEqual(row[side], { state: null, reason: 'timeout' })
+      assert.equal(row.reason, 'timeout'); assert.equal(row.proven, false)
+      if (side === 'base') assert.deepEqual(row.build, { state: null, reason: 'not-run' })
+      else assert.deepEqual(row.base, { state: 'green', reason: null })
+    }
+    assert.equal(result.rows[2].proven, true); assert.equal(result.rows[2].reason, null)
+    assert.equal(git(cwd, 'worktree', 'list').trim().split('\n').length, 1)
+  }
 })
 
 // MUTATION: only remove tmp when the worktree was added.

@@ -598,7 +598,7 @@ test('a green run walks every stage in order and returns the measured PR with ea
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
   assert.deepEqual(f.calls, ['mkdir', ...SUCCESS])
   assert.deepEqual(f.seen.mkdir, ['/virtual/task', { recursive: true }])
-  assert.deepEqual(f.seen.proof, { cwd: '/virtual/checkout', base: 'HEAD', tests: [{ file: 'lib.test.mjs', title: 'works' }] })
+  assert.deepEqual(f.seen.proof, { cwd: '/virtual/checkout', base: 'HEAD', tests: [{ file: 'lib.test.mjs', title: 'works' }], timeoutMs: undefined })
   assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: undefined })
   assert.deepEqual(f.seen['review-paths'], f.seen.paths)
   assert.deepEqual(f.seen.paths, { cwd: '/virtual/checkout', command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'] })
@@ -643,14 +643,33 @@ test('a suite timeout override reaches only the suite, and a spec refs list or g
     const f = fakes({ spec: { suite: { command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs } } })
     assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
     assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs })
-    for (const stage of ['proof', 'review-paths', 'paths', 'commit', 'fetch', 'rebase', 'publish']) assert.equal(Object.hasOwn(f.seen[stage], 'timeoutMs'), false, stage)
+    for (const stage of ['proof', 'review-paths', 'paths', 'commit', 'fetch', 'rebase', 'publish']) assert.equal(f.seen[stage].timeoutMs, undefined, stage)
   }
   for (const [refs, timeoutMs] of [[[13], 5000], [0, 0], [null, -1], ['stale', Infinity]]) {
     const f = fakes({ spec: { refs, timeoutMs } })
     assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
     assert.equal(f.seen.suite.timeoutMs, undefined)
-    for (const stage of ['proof', 'review-paths', 'paths', 'commit', 'fetch', 'rebase', 'publish']) assert.equal(Object.hasOwn(f.seen[stage], 'timeoutMs'), false, stage)
+    for (const stage of ['proof', 'review-paths', 'paths', 'commit', 'fetch', 'rebase', 'publish']) assert.equal(f.seen[stage].timeoutMs, undefined, stage)
     for (const stage of ['commit', 'publish']) { assert.equal(Object.hasOwn(f.seen[stage], 'refs'), false, stage); assert.deepEqual(f.seen[stage].closes, [12]) }
+  }
+})
+
+test('a proofTimeoutMs in the lane spec reaches proveTests', async () => {
+  for (const value of [undefined, 1, 360000, Number.MAX_SAFE_INTEGER]) {
+    const inputs = []
+    const f = fakes({ spec: { tier: 'mechanical', proofTimeoutMs: value }, rebase: { status: 'green', reason: null, head: 'b'.repeat(40), onto: 'c'.repeat(40) }, edit: (v) => { if (v.role === 'builder') v.details.subject = 'fix: timeout'; return v } })
+    const prove = f.deps.proveTests
+    f.deps.proveTests = (input) => { inputs.push(input); return prove(input) }
+    assert.equal((await f.go()).status, 'done')
+    assert.equal(inputs.length, 2)
+    assert.deepEqual(inputs.map((input) => input.timeoutMs), [value, value])
+    assert.equal(inputs[0].base, 'HEAD')
+    assert.equal(inputs[1].base, `${'b'.repeat(40)}^`)
+  }
+  for (const value of [null, 0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '1000', true, {}, []]) {
+    const f = fakes({ spec: { proofTimeoutMs: value } })
+    assert.deepEqual(await f.go(), stopped('invalid-input'))
+    assert.equal(f.calls.includes('proof'), false)
   }
 })
 

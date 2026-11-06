@@ -163,6 +163,7 @@ export async function runLoop(spec, deps = {}) {
   const sound = [spec.id, spec.cwd, spec.taskDir, spec.brief, spec.source, spec.branch, spec.base].every(text) && TIERS.includes(spec.tier)
     && text(spec.suite?.command) && (spec.suite.args === undefined || Array.isArray(spec.suite.args))
     && (spec.suite.timeoutMs === undefined || (Number.isSafeInteger(spec.suite.timeoutMs) && spec.suite.timeoutMs > 0))
+    && (spec.proofTimeoutMs === undefined || (Number.isSafeInteger(spec.proofTimeoutMs) && spec.proofTimeoutMs > 0))
     && (!Object.hasOwn(spec, 'generated') || validGenerated(spec.generated))
     && (spec.closes === undefined || Array.isArray(spec.closes))
   if (!sound) return early('invalid-input')
@@ -651,7 +652,7 @@ export async function runLoop(spec, deps = {}) {
         recheck = false
         if (!namedTests.length && !isFinish && !testsRequired) proofLines = [tier === 'mechanical' ? '- proof: none, mechanical lane, not reviewed' : '- proof: none, no criterion is machine-checked']
         if (namedTests.length) {
-          const proof = await stage('proof', () => callCheck('proof', d.proveTests, { cwd, base: 'HEAD', tests: namedTests }))
+          const proof = await stage('proof', () => callCheck('proof', d.proveTests, { cwd, base: 'HEAD', tests: namedTests, timeoutMs: spec.proofTimeoutMs }))
           const rows = Array.isArray(proof.rows) ? proof.rows : []
           const proofOK = proof.status === 'green' && proof.reason === null && rows.length === namedTests.length && rows.every((row) => row?.proven === true)
           if (!proofOK && proof.status === 'red') {
@@ -881,7 +882,7 @@ export async function runLoop(spec, deps = {}) {
         ? parseChangedPaths(output === '' ? '' : `${output.slice(0, -1).split('\0').map((file) => `M  ${file}`).join('\0')}\0`) : null
       if (publishedFiles === null) return stop('paths-unmeasured', paths)
       if (namedTests.length) {
-        const reproven = await stage('proof', () => callCheck('proof', d.proveTests, { cwd, base: `${rebased.head}^`, tests: namedTests }))
+        const reproven = await stage('proof', () => callCheck('proof', d.proveTests, { cwd, base: `${rebased.head}^`, tests: namedTests, timeoutMs: spec.proofTimeoutMs }))
         if (reproven.status !== 'green' || reproven.reason !== null || !Array.isArray(reproven.rows) || reproven.rows.length !== namedTests.length || !reproven.rows.every((row) => row?.proven === true)) return stop(reproven.reason ?? 'runner-threw', reproven)
         proofRows = reproven.rows
       }

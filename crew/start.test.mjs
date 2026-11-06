@@ -53,7 +53,7 @@ out_of_scope: the visualizer
 
 // Every effect is a recorded call; nothing touches git, the disk or a process. The agent
 // resolution is injected too; the default resolves the committed definitions.
-const projectFile = (suite = 'npm test', proof = [], suiteTimeoutMs) => ({ suite, proof, ...(suiteTimeoutMs === undefined ? {} : { suiteTimeoutMs }), onboarded: { hash: createHash('sha256').update(JSON.stringify([suite, proof.map((e) => [e.match, e.setup ?? null, e.run])])).digest('hex') } })
+const projectFile = (suite = 'npm test', proof = [], suiteTimeoutMs, proofTimeoutMs) => ({ suite, proof, ...(suiteTimeoutMs === undefined ? {} : { suiteTimeoutMs }), ...(proofTimeoutMs === undefined ? {} : { proofTimeoutMs }), onboarded: { hash: createHash('sha256').update(JSON.stringify([suite, proof.map((e) => [e.match, e.setup ?? null, e.run])])).digest('hex') } })
 
 function fakes({ brief = BRIEF, project = projectFile(), exists = () => false, worktreeStatus = 0, originHead = 'origin/main', inGit = true, issueBody = 'Refuse roster edits that cannot boot.\n', issueTitle = 'Refuse roster edits', resolve = (tier) => resolveAgents(tier), write = () => {} } = {}) {
   const calls = []
@@ -566,7 +566,7 @@ test('start detaches the bridge on a measured spec and boots nothing', async () 
   assert.match(spec.brief, /\nIssue title: Refuse roster edits\n## The ask\n/)
   assert.deepEqual(spec, {
     id: 'b1', cwd: '/repo/dt-b1', taskDir: '/home/.crew/dt-b1/b1/task', tier: 'build', shape: 'standard', brief: runBrief(BRIEF, 1961, 'Refuse roster edits that cannot boot.\n', 'Refuse roster edits'),
-    source: 'issue 1961', branch: 'b1', base: 'main', closes: [1961], suite: { command: 'npm', args: ['test'], timeoutMs: 1800000 }, onboarded: projectFile().onboarded.hash,
+    source: 'issue 1961', branch: 'b1', base: 'main', closes: [1961], suite: { command: 'npm', args: ['test'], timeoutMs: 1800000 }, proofTimeoutMs: 120000, onboarded: projectFile().onboarded.hash,
   })
   assert.equal(spec.timeoutMs, undefined)
   const { members } = JSON.parse(written(calls, '/dt-b1/b1/crew.json')[2])
@@ -592,6 +592,14 @@ test('a configured suiteTimeoutMs in project.json reaches the lane suite spec an
     const { deps, calls } = fakes({ project: projectFile('npm test', [], value) })
     await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
     assert.equal(JSON.parse(written(calls, '/task/lean.json')[2]).suite.timeoutMs, expected)
+  }
+})
+
+test('a configured proofTimeoutMs in project.json reaches the lane spec and an absent one keeps 120000', async () => {
+  for (const [value, expected] of [[360000, 360000], [undefined, 120000]]) {
+    const { deps, calls } = fakes({ project: projectFile('npm test', [], undefined, value) })
+    await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
+    assert.equal(JSON.parse(written(calls, '/task/lean.json')[2]).proofTimeoutMs, expected)
   }
 })
 

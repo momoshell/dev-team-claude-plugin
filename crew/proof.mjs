@@ -137,11 +137,13 @@ function safePath(root, file, required) {
 export const validProofEntry = (e) => e && typeof e === 'object' && !Array.isArray(e) && typeof e.match === 'string' && e.match.trim() && typeof e.run === 'string' && e.run.trim() && (!Object.hasOwn(e, 'setup') || (typeof e.setup === 'string' && e.setup.trim()))
 export const entryCommand = (run, values) => run.trim().split(/\s+/).map((token) => token.replace(/\{(file|title|report|stem)\}/g, (_, key) => values[key]))
 
+export const PROOF_TIMEOUT_DEFAULT_MS = 120_000
+
 export async function proveTests(input = {}) {
   const unmeasured = (reason, rows = []) => ({ status: 'unmeasured', reason, rows })
   let tmp, added = null, result, rows = []
   try {
-    const { cwd, base = 'HEAD', tests, timeoutMs = 120_000 } = input ?? {}
+    const { cwd, base = 'HEAD', tests, timeoutMs = PROOF_TIMEOUT_DEFAULT_MS } = input ?? {}
     if (typeof cwd !== 'string' || !cwd || typeof base !== 'string' || !/^[^-\s]\S*$/.test(base) || !Array.isArray(tests) || !tests.length || !tests.every((t) => t && typeof t.file === 'string' && t.file && typeof t.title === 'string' && t.title)) return unmeasured('invalid-input')
     const notRun = () => ({ state: null, reason: 'not-run' })
     rows = tests.map(({ file, title }) => ({ file, title, base: notRun(), build: notRun(), proven: false, reason: null }))
@@ -191,35 +193,40 @@ export async function proveTests(input = {}) {
           const values = { file: row.file, title: row.title, report, stem: basename(row.file, extname(row.file)) }
           const [command, ...args] = entryCommand(entry.run, values)
           const run = await runSuite({ cwd: dir, command, args, timeoutMs })
-          if (run.status === 'unmeasured') { result = unmeasured(run.reason, rows); break }
+          if (run.status === 'unmeasured') { row[side] = { state: null, reason: run.reason }; row.reason = run.reason; break }
           let xml, events = null
           try { xml = readFileSync(report, 'utf8'); events = junitEvents(xml) } catch {}
           const hits = events?.filter((e) => row.title === e.name || (e.classname && (row.title === `${e.classname}.${e.name}` || row.title === `${e.classname}::${e.name}`)))
           const loadFailure = events && !events.length && /<(?:failure|error)(?:\s|\/?>)/.test(xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>/g, ''))
           row[side] = hits?.length ? testState(hits) : events && (events.length || loadFailure) ? { state: null, reason: 'title-unmatched', nearest: nearestTitle(events, row.title) } : { state: null, reason: side === 'base' ? 'base-does-not-build' : 'no-report' }
         }
-        if (result) break
+        if (row.reason) continue
         row.proven = row.base.state === 'red' && row.build.state === 'green'
         row.reason = row.proven ? null : row.base.state !== 'red' ? 'proof-not-red-on-base' : 'proof-not-green'
       }
       const files = [...new Set(rows.filter((r) => !r.reason && !runners.has(r)).map((r) => r.file))]
-      if (!result && files.length) {
-        const old = await testEvents({ cwd: root, files, timeoutMs })
-        const build = await testEvents({ cwd, files, timeoutMs })
-        if (old.status === 'unmeasured' || build.status === 'unmeasured') result = unmeasured(old.status === 'unmeasured' ? old.reason : build.reason, rows)
-        else {
-          const hits = (events, dir, row) => events.filter((e) => {
-            if (e?.name !== row.title || typeof e.file !== 'string') return false
-            try { return relative(realpathSync(dir), realpathSync(e.file)).split(sep).join('/') === row.file } catch { return false }
-          })
-          for (const row of rows.filter((r) => !r.reason && !runners.has(r))) {
-            const a = hits(old.events, root, row), b = hits(build.events, cwd, row)
-            row.base = testState(a)
-            row.build = testState(b)
-            const identity = a.length === 1 && b.length === 1 && Number.isInteger(a[0].line) && Number.isInteger(a[0].column) && a[0].line === b[0].line && a[0].column === b[0].column
-            row.proven = row.base.state === 'red' && row.build.state === 'green' && identity
-            row.reason = row.proven ? null : row.base.state !== 'red' ? 'proof-not-red-on-base' : 'proof-not-green'
+      for (const file of result ? [] : files) {
+        const fileRows = rows.filter((r) => !r.reason && !runners.has(r) && r.file === file)
+        const hits = (events, dir, row) => events.filter((e) => {
+          if (e?.name !== row.title || typeof e.file !== 'string') return false
+          try { return relative(realpathSync(dir), realpathSync(e.file)).split(sep).join('/') === row.file } catch { return false }
+        })
+        const runs = {}
+        for (const [side, dir] of [['base', root], ['build', cwd]]) {
+          const run = await testEvents({ cwd: dir, files: [file], timeoutMs })
+          if (run.status === 'unmeasured') {
+            for (const row of fileRows) { row[side] = { state: null, reason: run.reason }; row.reason = run.reason }
+            break
           }
+          runs[side] = run.events
+          for (const row of fileRows) row[side] = testState(hits(run.events, dir, row))
+        }
+        if (!runs.build) continue
+        for (const row of fileRows) {
+          const a = hits(runs.base, root, row), b = hits(runs.build, cwd, row)
+          const identity = a.length === 1 && b.length === 1 && Number.isInteger(a[0].line) && Number.isInteger(a[0].column) && a[0].line === b[0].line && a[0].column === b[0].column
+          row.proven = row.base.state === 'red' && row.build.state === 'green' && identity
+          row.reason = row.proven ? null : row.base.state !== 'red' ? 'proof-not-red-on-base' : 'proof-not-green'
         }
       }
       if (!result) result = rows.every((r) => r.proven) ? { status: 'green', reason: null, rows } : { status: 'red', reason: 'proof-unproven', rows }

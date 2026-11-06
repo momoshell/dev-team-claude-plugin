@@ -22,6 +22,31 @@ test('acpClient exposes no prompt, resumeSession or reprove', () => {
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+test('a session/new logged-out refusal carries the recorded message for provider classification', () => {
+  const message = 'log in to Muse before opening a session'
+  for (const [data, expectedKind, expectedMessage] of [[undefined, null, message], [{ errorKind: 'verification_required', errorMessage: 'verify' }, 'verification_required', 'verify'], [{ errorKind: 'other', errorMessage: 42 }, 'other', message]]) {
+    const root = scratchDir('acp-new-refusal-'), dir = join(root, 'acp'), commandRoot = join(root, 'commands')
+    const paths = acpSeatPaths(dir, 'planner', commandRoot)
+    let bytes = ''
+    const client = acpClient({ launch: { bin: '/unused' }, dir, cwd: root, role: 'planner', deps: {
+      seatCommandRoot: commandRoot, pid: 900,
+      spawn: () => ({ pid: 901, unref() {} }), openSync: () => 7, closeSync() {},
+      writeSync(_fd, buffer, offset, length) {
+        const frame = JSON.parse(buffer.subarray(offset, offset + length).toString())
+        bytes += JSON.stringify({ jsonrpc: '2.0', id: frame.id, error: { code: -32603, message, ...(data ? { data } : {}) } }) + '\n'
+        return length
+      },
+      existsSync: (path) => path === paths.stream || existsSync(path),
+      readFileSync: (path, ...args) => path === paths.stream ? Buffer.from(bytes) : readFileSync(path, ...args),
+      kill() { throw Object.assign(new Error('gone'), { code: 'ESRCH' }) },
+    } })
+    try {
+      client.start()
+      assert.throws(() => client.newSession(), { reason: 'acp-protocol-mismatch', message: `acp seat planner refused session/new: ${message} [acp-protocol-mismatch]`, method: 'session/new', errorKind: expectedKind, errorMessage: expectedMessage })
+    } finally { client.close(); rmSync(root, { recursive: true, force: true }) }
+  }
+})
+
 // MUTATION: disable the request exit-marker branch
 test('requests fail promptly on seat exit but consume final responses', () => {
   for (const method of ['initialize', 'session/new', 'session/set_mode']) {

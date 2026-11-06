@@ -27,7 +27,7 @@ const MAX_ENVELOPE_REPAIRS = 1
 const MAX_RECHECKS = 3
 const PROOF_UNMEASURED = '- proof: unmeasured'
 export const LOOP_REASONS = Object.freeze([
-  ...CHECK_REASONS, 'unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'lead-escalated', 'lead-unavailable',
+  ...CHECK_REASONS, 'unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'authentication_failed', 'lead-escalated', 'lead-unavailable',
   'lead-refused', 'seat-escalated', 'round-bound', 'paths-unmeasured', 'no-progress', 'raise-needs-plan', 'recheck-bound',
 ])
 
@@ -336,9 +336,11 @@ export async function runLoop(spec, deps = {}) {
         const attempt = async (asked) => {
           let failure = null
           let parsed = null
-          let recording = null, turnError = null, routed = false
+          let recording = null, turnError = null, routed = false, providerKind = null, method = null
           try { recording = await d.runSeat(asked, { emit }) } catch (error) {
             turnError = describe(error)
+            providerKind = error?.providerKind
+            method = error?.method
             recording = error?.recording ?? null
             // ADR-055 amendment: a repo violation's return is neither read nor rerun.
             const repoViolation = ['acp-seat-wrote-repo', 'acp-seat-repo-unmeasured', 'acp-seat-wrote-record', 'acp-seat-record-unmeasured'].includes(error?.reason)
@@ -354,7 +356,7 @@ export async function runLoop(spec, deps = {}) {
           const checked = failure ? { envelope: null, defects: [] } : validateEnvelope(role, parsed, { prior: (role === 'reviewer' ? priorFindings : role === 'tech-lead' ? secondFindings : []).map((finding) => finding?.id) })
           if (!isFinish && tier === 'mechanical' && role === 'builder' && checked.envelope?.status === 'done' && checked.envelope.details && !Object.hasOwn(checked.envelope.details, 'subject')) checked.defects.push('details.subject is required on a mechanical lane for the commit and PR')
           if (role === 'planner' && checked.envelope && checked.defects.length === 0) checked.defects.push(...await artifactDefects(checked.envelope.details))
-          return { failure, parsed, recording, checked, turnError, routed }
+          return { failure, parsed, recording, checked, turnError, routed, providerKind, method }
         }
         const observe = (a) => emit('envelope', { role, id, returnPath, parsed: a.parsed, defects: a.checked.defects, error: a.failure?.error ?? null, turnError: a.turnError })
         const attempts = [await attempt(request)]
@@ -388,9 +390,9 @@ export async function runLoop(spec, deps = {}) {
         }
         const valid = checked.defects.length === 0 && checked.envelope?.id === id
         await emit('envelope', { role, id, returnPath, parsed, defects: checked.defects, error: failure?.error ?? null, turnError: latest.turnError })
-        if (latest.turnError && !returnValid) failure = { reason: 'seat-unmeasured', error: latest.turnError }
+        if (latest.turnError && !returnValid) failure = { reason: latest.providerKind === 'authentication_failed' && latest.method === 'session/new' ? 'authentication_failed' : 'seat-unmeasured', error: latest.turnError }
         if (!failure && !valid) failure = { reason: 'envelope-refused', defects: checked.defects }
-        if (failure) return hold ? { held: { ...failure, envelope: null } } : { halt: await stop(role === 'lead' ? 'lead-refused' : failure.reason, { role, id, ...failure }) }
+        if (failure) return hold ? { held: { ...failure, envelope: null } } : { halt: await stop(role === 'lead' && failure.reason !== 'authentication_failed' ? 'lead-refused' : failure.reason, { role, id, ...failure }) }
         last[role] = checked.envelope
         if (hold && checked.envelope.status !== 'done') return { held: { reason: checked.envelope.status, envelope: checked.envelope } }
         // ADR-055 §12: a questionless escalation returns to the same seat, including the lead.
@@ -535,7 +537,7 @@ export async function runLoop(spec, deps = {}) {
       const undone = await stage('conflict-undo', () => callCheck('conflict-undo', d.run, { cwd, command: 'git', args }, { command: true }))
       if (undone.status !== 'green') return undone
     }
-    return { ...rebased, turn: outcome }
+    return { ...rebased, ...(outcome?.reason === 'authentication_failed' ? { reason: 'authentication_failed' } : {}), turn: outcome }
   }
   const suiteRun = () => stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs }, { command: true }))
   const result = await (async () => {

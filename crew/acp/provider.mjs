@@ -33,6 +33,7 @@ export function acpProviderFailureKind(errorKind, errorMessage) {
   if (errorKind === 'rate_limit') return PROVIDER_FAILURE_KINDS.RATE_LIMIT
   if (errorKind === 'overloaded' || errorKind === 'server_error') return PROVIDER_FAILURE_KINDS.SERVER_ERROR
   if (errorKind === 'authentication_failed' || errorKind === 'oauth_org_not_allowed' || errorKind === 'verification_required') return PROVIDER_FAILURE_KINDS.AUTHENTICATION_FAILED
+  if (errorMessage === 'log in to Muse before opening a session') return PROVIDER_FAILURE_KINDS.AUTHENTICATION_FAILED
   return null
 }
 

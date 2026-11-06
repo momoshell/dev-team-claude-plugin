@@ -74,6 +74,8 @@ is never forced. Inspect the lane first: discard removes its worktree.
 - After the PR merges: `crew closeout <lane>` removes the worktree (never
   forced), deletes the lane branch and moves the lane directory to
   `~/.crew-journal-archive/` (`crew/closeout.mjs`). It refuses unless the
-  recorded PR is merged with the lane branch tip as its head.
+  recorded PR is merged with the lane branch tip as its head. A previously
+  archived lane name moves to `dt-<lane>.archive-<n>`, using the smallest free
+  `n` from 2 and keeping the earlier archive.
 
 For a lane with a PR, never close out before the merge: the worktree is the only copy of the build.

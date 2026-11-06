@@ -3,11 +3,11 @@
 // Three steps, in this order, each checked:
 //   1. git worktree remove <worktree>   (never --force, so git refuses a worktree with uncommitted changes)
 //   2. git branch -D <lane>             (local only)
-//   3. move ~/.crew/dt-<lane> to ~/.crew-journal-archive/dt-<lane>  (moved, never deleted)
+//   3. move ~/.crew/dt-<lane> to ~/.crew-journal-archive/dt-<lane> (or a free .archive-<n> suffix on re-archive)
 // The lane's recorded PR must be MERGED on GitHub, in the worktree's origin repository, with the lane branch's tip
 // as its head; the worktree must be dt-<lane> on that branch. All of it is checked before step 1, so a refusal
 // there changes nothing. A failed move in step 3 is refused after steps 1 and 2 ran; the lane directory stays put.
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -69,7 +69,16 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
   const rows = journalRows(text)
   let pr, claim, moved = false
   const taskDir = join(found.dir, 'task')
-  const archivedDir = join(archive, `dt-${lane}`)
+  let archivedDir = join(archive, `dt-${lane}`)
+  for (let n = 2; ; n++) {
+    if (!existsSync(archivedDir)) {
+      try { lstatSync(archivedDir) } catch (error) {
+        if (error?.code === 'ENOENT') break
+        refuse(`could not check ${archivedDir}: ${error?.code ?? error?.message}`)
+      }
+    }
+    archivedDir = join(archive, `dt-${lane}.archive-${n}`)
+  }
   try {
   if (discard) {
     if (rows.some((row) => row.event === 'pr')) refuse(`lane recorded a pull request; use crew closeout ${lane}`)
@@ -98,7 +107,6 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
   if (typeof worktree !== 'string' || !worktree || !isDir(worktree)) refuse('lean.json names no existing worktree')
   if (basename(worktree) !== `dt-${lane}`) refuse(`worktree ${worktree} is not dt-${lane}`)
   const laneDir = join(root, `dt-${lane}`)
-  if (existsSync(archivedDir)) refuse(`${archivedDir} already exists`)
 
   let view
   if (!discard) {

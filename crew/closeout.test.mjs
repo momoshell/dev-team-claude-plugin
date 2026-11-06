@@ -1,9 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { main } from './closeout.mjs'
+import { laneRows } from './lanes.mjs'
 import { git, gitResult, scratchDir } from '../test/helpers.mjs'
 
 const LANE = 'demo'
@@ -225,6 +226,98 @@ test('CL1-CL3 a merged clean lane loses worktree and branch and moves to the arc
     assert.deepEqual(effects, ['worktree remove', 'branch -D'])
     assert.deepEqual(r.calls.find((c) => c[0] === 'gh'), ['gh', 'pr', 'view', PR_ROW.pr.url, '--json', 'state,headRefOid'])
   } finally { w.done() }
+})
+
+test('a lane archived before is closed out to the next free archive destination, keeping the previous archive', () => {
+  const w = world()
+  try {
+    const previous = join(w.archiveRoot, `dt-${LANE}`, LANE, 'task', 'journal.jsonl')
+    cpSync(w.laneDir, join(w.archiveRoot, `dt-${LANE}`), { recursive: true })
+    const previousText = jsonl([{ event: 'pr', pr: { number: 6, url: 'https://github.com/o/r/pull/6' } }])
+    writeFileSync(previous, previousText)
+    const destination = join(w.archiveRoot, `dt-${LANE}.archive-2`)
+    const r = close(w)
+    assert.equal(r.status, 0, r.err)
+    assert.ok(!existsSync(w.worktree))
+    assert.ok(!branchExists(w))
+    assert.ok(!existsSync(w.laneDir))
+    assert.equal(readFileSync(previous, 'utf8'), previousText)
+    assert.equal(readFileSync(join(destination, LANE, 'task', 'journal.jsonl'), 'utf8'), w.journalText)
+    assert.ok(r.out.includes(destination))
+    assert.equal(laneRows({ root: w.root, archiveRoot: w.archiveRoot, all: true })[0].pr, PR_ROW.pr.url)
+    rmSync(join(w.archiveRoot, `dt-${LANE}`), { recursive: true })
+    assert.equal(laneRows({ root: w.root, archiveRoot: w.archiveRoot, all: true })[0].pr, PR_ROW.pr.url)
+  } finally { w.done() }
+})
+
+test('archive selection ignores older directory metadata changes', () => {
+  const w = world({ rows: [{ event: 'run-start', lane: LANE, at: 200 }, PR_ROW] })
+  try {
+    const previous = join(w.archiveRoot, `dt-${LANE}`)
+    cpSync(w.laneDir, previous, { recursive: true })
+    writeFileSync(join(previous, LANE, 'task', 'journal.jsonl'), jsonl([
+      { event: 'run-start', lane: LANE, at: 100 },
+      { event: 'pr', pr: { number: 6, url: 'https://github.com/o/r/pull/6' }, at: 300 },
+    ]))
+    const r = close(w)
+    assert.equal(r.status, 0, r.err)
+    chmodSync(previous, 0o700)
+    assert.equal(laneRows({ root: w.root, archiveRoot: w.archiveRoot, all: true })[0].pr, PR_ROW.pr.url)
+  } finally { w.done() }
+})
+
+test('a discarded lane archived before is archived to a suffixed destination, keeping the previous archive', () => {
+  const w = world({ rows: STOPPED })
+  try {
+    const previous = join(w.archiveRoot, `dt-${LANE}`, LANE, 'task', 'journal.jsonl')
+    mkdirSync(join(w.archiveRoot, `dt-${LANE}`, LANE, 'task'), { recursive: true })
+    writeFileSync(previous, 'previous journal\n')
+    const destination = join(w.archiveRoot, `dt-${LANE}.archive-2`)
+    const r = close(w, { argv: [LANE, '--discard'] })
+    assert.equal(r.status, 0, r.err)
+    assert.ok(!existsSync(w.worktree))
+    assert.ok(!branchExists(w))
+    assert.ok(!existsSync(w.laneDir))
+    assert.ok(!r.calls.some((c) => c[0] === 'gh'))
+    assert.equal(readFileSync(previous, 'utf8'), 'previous journal\n')
+    assert.equal(readFileSync(join(destination, LANE, 'task', 'journal.jsonl'), 'utf8'), w.journalText)
+    assert.ok(r.out.includes(destination))
+  } finally { w.done() }
+})
+
+test('a third archive of one lane name takes the next free suffix and keeps both earlier archives', () => {
+  const w = world()
+  try {
+    const previous = [`dt-${LANE}`, `dt-${LANE}.archive-2`].map((name, i) => {
+      const task = join(w.archiveRoot, name, LANE, 'task')
+      mkdirSync(task, { recursive: true })
+      const journal = join(task, 'journal.jsonl')
+      writeFileSync(journal, `previous journal ${i}\n`)
+      return journal
+    })
+    const destination = join(w.archiveRoot, `dt-${LANE}.archive-3`)
+    const r = close(w)
+    assert.equal(r.status, 0, r.err)
+    assert.ok(!existsSync(w.worktree))
+    assert.ok(!branchExists(w))
+    assert.ok(!existsSync(w.laneDir))
+    for (const [i, journal] of previous.entries()) assert.equal(readFileSync(journal, 'utf8'), `previous journal ${i}\n`)
+    assert.equal(readFileSync(join(destination, LANE, 'task', 'journal.jsonl'), 'utf8'), w.journalText)
+    assert.ok(r.out.includes(destination))
+  } finally { w.done() }
+
+  const gap = world({ rows: [{ event: 'run-start', lane: LANE, at: 200 }, PR_ROW] })
+  try {
+    for (const name of [`dt-${LANE}`, `dt-${LANE}.archive-3`]) {
+      const dir = join(gap.archiveRoot, name)
+      cpSync(gap.laneDir, dir, { recursive: true })
+      writeFileSync(join(dir, LANE, 'task', 'journal.jsonl'), jsonl([{ event: 'run-start', lane: LANE, at: 100 }, { event: 'pr', pr: { url: 'https://github.com/o/r/pull/6' } }]))
+    }
+    const r = close(gap)
+    assert.equal(r.status, 0, r.err)
+    assert.ok(r.out.includes(join(gap.archiveRoot, `dt-${LANE}.archive-2`)))
+    assert.equal(laneRows({ root: gap.root, archiveRoot: gap.archiveRoot, all: true })[0].pr, PR_ROW.pr.url)
+  } finally { gap.done() }
 })
 
 test('the move is the last effect: a failing rename happens after worktree and branch, and nothing is deleted', () => {

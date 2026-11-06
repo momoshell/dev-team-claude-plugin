@@ -1,6 +1,6 @@
 // Read-only view of lean lanes (ADR-052): ~/.crew/dt-<lane>/<lane>/{crew.json,task/...}.
 // Lanes are found live, then as the newest sibling <lane>.archive-*, then under the separate
-// archive root. Nothing here writes, spawns, or trusts a path the lane's own files name.
+// archive root ordered by the first journal row's time. Nothing here writes, spawns, or trusts a path the lane's own files name.
 import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import { supersededReturn } from './lean-journal-order.mjs'
@@ -45,13 +45,30 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
   const root = resolve(crewRoot)
   const archive = resolve(archiveRoot ?? join(dirname(root), '.crew-journal-archive'))
 
-  // Candidate lane directories, best first: live, newest sibling archive, then the archive root's.
+  // Live lanes and their sibling archives come first, followed by the newest closeout archive.
   function candidates(lane) {
     const out = []
     for (const base of [root, archive]) {
-      const laneDir = join(base, `dt-${lane}`)
-      const siblings = dirs(laneDir).filter((name) => name.startsWith(`${lane}.archive-`)).reverse()
-      for (const name of [lane, ...siblings]) out.push({ base, dir: join(laneDir, name), archived: name !== lane || base === archive })
+      const prefix = `dt-${lane}.archive-`
+      // First-row times survive later journal appends; suffixes break ties and order unknown times.
+      const outer = base === archive ? dirs(base).filter((name) => name === `dt-${lane}` || (name.startsWith(prefix) && /^[1-9]\d*$/.test(name.slice(prefix.length))))
+        .map((name) => {
+          const laneDir = join(base, name, lane), path = join(laneDir, 'task', LEAN_JOURNAL_FILE)
+          let at = null
+          try {
+            if (within(base, laneDir) && within(laneDir, path)) {
+              const value = JSON.parse(readFileSync(path, 'utf8').split('\n')[0]).at
+              if (Number.isFinite(value)) at = value
+            }
+          } catch { /* An unreadable first row has unknown time. */ }
+          return { name, at, suffix: name === `dt-${lane}` ? 1 : Number(name.slice(prefix.length)) }
+        })
+        .sort((a, b) => (b.at ?? -Infinity) - (a.at ?? -Infinity) || b.suffix - a.suffix).map(({ name }) => name) : [`dt-${lane}`]
+      for (const dirName of outer) {
+        const laneDir = join(base, dirName)
+        const siblings = dirs(laneDir).filter((name) => name.startsWith(`${lane}.archive-`)).reverse()
+        for (const name of [lane, ...siblings]) out.push({ base, dir: join(laneDir, name), archived: name !== lane || base === archive })
+      }
     }
     return out
   }
@@ -82,7 +99,10 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
 
   function lanes() {
     const names = new Set()
-    for (const base of [root, archive]) for (const name of laneNames(base)) if (name.startsWith('dt-') && LANE.test(name.slice(3))) names.add(name.slice(3))
+    for (const base of [root, archive]) for (const name of laneNames(base)) {
+      const lane = (base === archive ? name.replace(/\.archive-[1-9]\d*$/, '') : name).slice(3)
+      if (name.startsWith('dt-') && LANE.test(lane)) names.add(lane)
+    }
     return [...names].sort().map(resolveLane).filter(Boolean)
   }
 

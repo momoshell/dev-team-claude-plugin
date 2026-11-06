@@ -95,6 +95,22 @@ const protectedPaths = (paths) => (paths ?? []).map((path) => path.replace(/^(\.
 
 const oneLine = (v) => String(v ?? '').replace(/\s*[\r\n]+\s*/g, ' ').trim()
 
+function briefAsk(brief) {
+  const lines = brief.split(/\r?\n/)
+  const heading = lines.findIndex((line) => line.trim() === '## The ask')
+  if (heading < 0) return ''
+  const block = []
+  for (const line of lines.slice(heading + 1)) {
+    if (/^ {0,3}#{1,2}(?:\s|$)/.test(line)) break
+    if (!line.trim()) { if (block.length) break; continue }
+    if (!/^ {0,3}>/.test(line)) continue
+    const content = line.replace(/^ {0,3}>[ \t]?/, '')
+    if (!content.trim()) break
+    block.push(content)
+  }
+  return oneLine(block.join('\n'))
+}
+
 export async function runLoop(spec, deps = {}) {
   if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return refusal('invalid-input')
   const early = async (reason) => {
@@ -163,6 +179,7 @@ export async function runLoop(spec, deps = {}) {
   let repaired = false
   let planPath = isFinish ? fin.planPath : null
   let subject = isFinish ? fin.subject : null
+  let planSummary = isFinish ? fin.planSummary : null
   const failures = []
   const repeatsFailure = (failure) => {
     if (failures.some((previous) => isDeepStrictEqual(previous, failure))) return true
@@ -240,7 +257,8 @@ export async function runLoop(spec, deps = {}) {
       await emit('stage-end', { outcome })
     }
   })
-  const acceptPlan = async (details) => {
+  const acceptPlan = async ({ details, summary }) => {
+    planSummary = summary
     planPath = resolve(spec.taskDir, details.plan_path)
     filesInScope = details.files_in_scope ?? null
     subject = details.subject
@@ -445,7 +463,7 @@ export async function runLoop(spec, deps = {}) {
   const replan = async (envelope, lead) => {
     const planned = await stage('replan', () => seatTurn('planner', [{ id: 'plan-gap', role: 'builder', envelope, ...(lead ? { lead } : {}) }]))
     if (planned.halt) return planned
-    const halt = await acceptPlan(planned.envelope.details)
+    const halt = await acceptPlan(planned.envelope)
     return halt ? { halt } : {}
   }
 
@@ -461,7 +479,7 @@ export async function runLoop(spec, deps = {}) {
     repaired = false
     const planned = await stage('plan', () => seatTurn('planner', [{ id: 'mechanical-restart', reason, ...detail }]))
     if (planned.halt) return planned
-    const halt = await acceptPlan(planned.envelope.details)
+    const halt = await acceptPlan(planned.envelope)
     return halt ? { halt } : {}
   }
 
@@ -500,7 +518,7 @@ export async function runLoop(spec, deps = {}) {
     const planned = isFinish || tier === 'mechanical' ? null : await stage('plan', () => seatTurn('planner'))
     if (planned?.halt) return planned.halt
     if (planned) {
-      const halt = await acceptPlan(planned.envelope.details)
+      const halt = await acceptPlan(planned.envelope)
       if (halt) return halt
     } else if (isFinish) {
       // A --return pass counts the reviews the finish run already spent: it never grants new rounds.
@@ -762,8 +780,14 @@ export async function runLoop(spec, deps = {}) {
     publishedFiles = files
     laneBody = () => {
       const open = [...priorFindings, ...(tier === 'judge' && !isFinish ? secondFindings : [])].filter((f) => f.severity === 'should-fix')
+      const issue = /^issue ([1-9]\d*)$/.exec(spec.source)
+      const title = issue && (/^title:\s*(.+)$/im.exec(spec.brief.split(/^---\s*$/m)[1] ?? '')?.[1]
+        ?? /^\s*(?:>\s*)?issue title:\s*(.+)$/im.exec(spec.brief)?.[1])
+      const ask = !issue ? briefAsk(spec.brief) : ''
       return [
-        '## Summary', `Change: ${oneLine(builderSummary) || oneLine(subject)}`, '', `Source: ${oneLine(spec.source)}`,
+        '## Summary', `Purpose: ${oneLine(planSummary).replace(/^(?:the plan|plan)\s+/i, '') || 'unmeasured.'}`,
+        ...(issue ? [`Closes issue ${issue[1]}${title ? `: ${oneLine(title)}` : ''}`] : ask ? [`Operator request: ${ask}`] : []),
+        `How: ${oneLine(builderSummary) || oneLine(subject)}`, '', `Source: ${oneLine(spec.source)}`,
         ...(isFinish ? ['', `The lane stopped with reason ${oneLine(fin.stop.reason)}. This report covers only this finish run.`, `${finishReviews.length} ${finishReviews.length === 1 ? 'review' : 'reviews'} in this finish run; final verdict: ${oneLine(finishReviews.at(-1)?.verdict) || 'unmeasured'}.`] : []),
         '', '## Changes', ...publishedFiles.map((file) => `- ${oneLine(file)}`),
         '', '## Verification',

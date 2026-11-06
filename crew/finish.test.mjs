@@ -28,7 +28,7 @@ const BUILDER = { role: 'builder', id: 'lane9.builder.2', status: 'done', summar
 const builderRow = { event: 'envelope', role: 'builder', id: BUILDER.id, parsed: BUILDER, defects: [], error: null }
 
 // A temp crew root holding one stopped lane; nothing is spawned and the worktree is a temp directory.
-function fixture({ stage = 'review', builder = true, worktree = true, review = 'changes-needed', rows = null } = {}) {
+function fixture({ stage = 'review', builder = true, worktree = true, review = 'changes-needed', rows = null, planRecorded = true } = {}) {
   const base = scratchDir('crew-finish-')
   const root = join(base, 'crew')
   const taskDir = join(root, 'dt-lane9', 'lane9', 'task')
@@ -38,13 +38,14 @@ function fixture({ stage = 'review', builder = true, worktree = true, review = '
   const spec = { id: 'lane9', cwd, taskDir, tier: 'build', shape: 'standard', brief: 'x', source: 's', branch: 'lane9', base: 'main', closes: [], suite: { command: 'npm', args: ['test'] } }
   writeFileSync(join(taskDir, 'lean.json'), JSON.stringify(spec))
   writeFileSync(join(taskDir, 'planner-1.json'), JSON.stringify(PLANNER))
-  const journal = rows ?? [
+  const journal = rows ? [...rows] : [
     { event: 'run-start', stage: null },
     { event: 'envelope', role: 'planner', id: 'lane9.planner.1', parsed: PLANNER, defects: [], error: null },
     ...(builder ? [builderRow, { event: 'envelope', role: 'reviewer', id: 'lane9.reviewer.3', parsed: { status: 'done' }, defects: [], error: null }] : []),
     { event: 'verdict', stage: 'review', status: 'reviewed', verdict: review, findings: [FINDING] },
     { event: 'verdict', stage, status: 'stopped', reason: STOP.reason, observation: STOP.observation },
   ]
+  if (rows && planRecorded && !journal.some((row) => row.event === 'envelope' && row.role === 'planner')) journal.unshift({ event: 'envelope', role: 'planner', id: PLANNER.id, parsed: PLANNER, defects: [], error: null })
   writeFileSync(join(taskDir, 'journal.jsonl'), `${journal.map((r) => JSON.stringify(r)).join('\n')}\n`)
   return { base, root, taskDir, cwd }
 }
@@ -162,7 +163,7 @@ test('an open tail with a live, unknown or unrecorded run pid is still refused',
 test('a mechanical lane with no planner return is finished on its brief under its builder subject; a build lane without one is still refused', async () => {
   for (const tier of ['mechanical', 'build']) {
     const row = { ...builderRow, parsed: { ...BUILDER, details: { ...BUILDER.details, subject: 'fix: mechanical' } } }
-    const f = fixture({ rows: [{ event: 'run-start' }, row, { event: 'tier-raised', to: 'judge' }, { event: 'verdict', stage: 'build', status: 'stopped', reason: 'round-bound' }] })
+    const f = fixture({ planRecorded: false, rows: [{ event: 'run-start' }, row, { event: 'tier-raised', to: 'judge' }, { event: 'verdict', stage: 'build', status: 'stopped', reason: 'round-bound' }] })
     try {
       const path = join(f.taskDir, 'lean.json')
       writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, 'utf8')), tier }))
@@ -186,7 +187,7 @@ test('finishing a mechanical lane after a resolved conflict keeps the build subj
   const build = { ...builderRow, stage: 'build', parsed: { ...BUILDER, details: { ...BUILDER.details, subject: 'fix: original build' } } }
   const conflict = { ...builderRow, stage: 'conflict', id: 'lane9.builder.3', parsed: { ...BUILDER, id: 'lane9.builder.3', details: { ...BUILDER.details, subject: 'fix: conflict only' } } }
   for (const stage of ['proof', 'suite']) {
-    const f = fixture({ rows: [
+    const f = fixture({ planRecorded: false, rows: [
       { event: 'run-start' }, build, { event: 'commit', head }, conflict,
       { event: 'stage-end', stage: 'rebase', outcome: { status: 'green', head: moved, onto } },
       { event: 'stage-start', stage }, { event: 'verdict', stage: null, status: 'stopped', reason: 'runner-threw' },
@@ -348,7 +349,7 @@ test('a stopped lane with a build is finished: finish.json carries the stop, fin
     assert.equal(spec.shape, 'finish')
     assert.equal(spec.cwd, f.cwd)
     assert.deepEqual(spec.finish, {
-      planPath: '/t/plan.md', subject: 'fix(crew): planned lane', filesInScope: ['src/widget.svelte'],
+      planPath: '/t/plan.md', subject: 'fix(crew): planned lane', filesInScope: ['src/widget.svelte'], planSummary: 'planned',
       stop: STOP, findings: [FINDING], turnOffset: 3,
     })
     assert.equal(r.spawned.length, 1)
@@ -439,11 +440,13 @@ test('a replan the journal records as refused is never the plan finish resumes',
 
 // MUTATION: pass over an unrecorded newer plan for an older accepted one.
 test('a valid newer plan the journal does not mention refuses finish rather than resuming an older plan', () => {
-  const f = fixture()
-  try {
-    writeFileSync(join(f.taskDir, 'planner-3.json'), JSON.stringify({ ...PLANNER, id: 'lane9.planner.3', details: { ...PLANNER.details, plan_path: '/t/plan-3.md', tests: [] } }))
-    assert.throws(() => run(f).go(), { reason: 'finish-premise', message: /planner-3\.json has no journal row/ })
-  } finally { cleanup(f) }
+  for (const recorded of [true, false]) {
+    const f = recorded ? fixture() : fixture({ planRecorded: false, rows: [builderRow, { event: 'verdict', stage: 'review', status: 'stopped', ...STOP }] })
+    try {
+      if (recorded) writeFileSync(join(f.taskDir, 'planner-3.json'), JSON.stringify({ ...PLANNER, id: 'lane9.planner.3', details: { ...PLANNER.details, plan_path: '/t/plan-3.md', tests: [] } }))
+      assert.throws(() => run(f).go(), { reason: 'finish-premise', message: /has no journal row/ })
+    } finally { cleanup(f) }
+  }
 })
 
 // MUTATION: read a journal-refused planner file before skipping it.
@@ -634,7 +637,7 @@ test('--return launches a first finish pass on a lane stopped lead-escalated, ca
       assert.deepEqual([spec.finish.guidance, spec.finish.stop, spec.finish.subject, spec.finish.filesInScope, spec.finish.priorReviewRounds], ['Use approach A', { reason, observation: stop.observation }, PLANNER.details.subject, PLANNER.details.files_in_scope, 0])
       assert.equal(spawned.length, 1)
       const rows = readFileSync(join(f.taskDir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
-      assert.deepEqual(rows.filter((row) => row.event === 'finish-decision'), [{ event: 'finish-decision', lane: 'lane9', choice: 'return', launchedAt: 3, notesSha256: createHash('sha256').update('Use approach A').digest('hex') }])
+      assert.deepEqual(rows.filter((row) => row.event === 'finish-decision'), [{ event: 'finish-decision', lane: 'lane9', choice: 'return', launchedAt: 4, notesSha256: createHash('sha256').update('Use approach A').digest('hex') }])
     } finally { cleanup(f) }
   }
 })
@@ -689,14 +692,14 @@ test('a returned finish pass that escalates carries its spent reviews into the n
     const original = [{ event: 'run-start' }, builderRow, ...review, ...review, ...review]
     const f = fixture({ rows: [...original, ...(recovered ? [] : [stop]), { event: 'finish-decision', choice: 'return' }, ...history, stop] })
     try {
-      if (recovered) writeFileSync(join(f.taskDir, 'finish.json'), JSON.stringify({ finish: { stop: { reason: 'run-died' }, recoveredStopAt: original.length } }))
+      if (recovered) writeFileSync(join(f.taskDir, 'finish.json'), JSON.stringify({ finish: { stop: { reason: 'run-died' }, recoveredStopAt: original.length + 1 } }))
       const file = join(f.base, 'guidance')
       writeFileSync(file, 'answer')
       const spawned = []
       assert.equal(await reasonOf(decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps: { log: () => {}, spawnDetached: () => { spawned.push(true); return 4242 } } })), null)
       const finish = JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish
       assert.equal(finish.priorReviewRounds, 2)
-      if (recovered) assert.equal(finish.recoveredStopAt, original.length)
+      if (recovered) assert.equal(finish.recoveredStopAt, original.length + 1)
       assert.equal(spawned.length, 1)
     } finally { cleanup(f) }
   }
@@ -744,7 +747,7 @@ test('a provably dead returned finish pass is relaunched by --return as run-died
     const f = fixture({ rows })
     try {
       const file = join(f.base, 'guidance'), spawned = []
-      if (recovered) writeFileSync(join(f.taskDir, 'finish.json'), JSON.stringify({ finish: { stop: { reason: 'run-died' }, recoveredStopAt: original.length } }))
+      if (recovered) writeFileSync(join(f.taskDir, 'finish.json'), JSON.stringify({ finish: { stop: { reason: 'run-died' }, recoveredStopAt: original.length + 1 } }))
       writeFileSync(file, 'answer')
       writeFileSync(join(f.taskDir, 'run.pid'), '123\n')
       const deps = { alive: (pid) => pid !== 123, log: () => {}, spawnDetached: () => { spawned.push(true); return 4242 } }
@@ -755,7 +758,7 @@ test('a provably dead returned finish pass is relaunched by --return as run-died
         const finish = JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish
         assert.deepEqual(finish.stop, { reason: 'run-died', observation: { pid: 123 } })
         assert.equal(finish.priorReviewRounds, reviews)
-        assert.equal(finish.recoveredStopAt, recovered ? original.length : rows.length)
+        assert.equal(finish.recoveredStopAt, (recovered ? original.length : rows.length) + 1)
         assert.equal(finish.guidance, 'answer')
       }
     } finally { cleanup(f) }
@@ -787,7 +790,7 @@ test('a returned finish pass from finish-ready that dies is relaunched by --retu
     const deps = { alive: (pid) => pid !== 123, log: () => {}, spawnDetached: () => { spawned.push(true); return 4242 } }
     assert.equal(await reasonOf(decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps })), null)
     const finish = JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish
-    assert.deepEqual([finish.stop, finish.priorReviewRounds, finish.recoveredStopAt], [{ reason: 'run-died', observation: { pid: 123 } }, 2, rows.length])
+    assert.deepEqual([finish.stop, finish.priorReviewRounds, finish.recoveredStopAt], [{ reason: 'run-died', observation: { pid: 123 } }, 2, rows.length + 1])
     assert.equal(spawned.length, 1)
   } finally { cleanup(f) }
 })
@@ -1309,7 +1312,7 @@ test('a committed, unpublished build at HEAD on the lane branch is uncommitted a
         git: (_cwd, args) => {
           calls.push(args)
           if (args[0] === 'ls-remote') {
-            writeFileSync(join(f.taskDir, 'finish-3.claim'), '4242\n')
+            writeFileSync(join(f.taskDir, 'finish-4.claim'), '4242\n')
             if (mode === 'journal') {
               expected += `${JSON.stringify({ event: 'finish-ready', head: 'b'.repeat(40) })}\n`
               writeFileSync(journal, expected)

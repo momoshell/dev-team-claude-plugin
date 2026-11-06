@@ -102,8 +102,8 @@ function requireWorktree(d, spec) {
 }
 
 // The lane's accepted plan and subject, including archived planner returns. Newest first, a planner file that is a
-// valid done return is resumed when the journal records it as accepted, or when the journal records no planner
-// envelope at all (an older journal). One the journal records as refused is skipped. One the journal does not mention
+// valid done return is resumed only when the journal records it as accepted.
+// One the journal records as refused is skipped. One the journal does not mention
 // while it records others is ambiguous (journal writes are not load-bearing, so a missing row proves nothing) and is
 // refused rather than passed over for an older plan.
 function loadPlan(d, lane, taskDir, rows = []) {
@@ -119,7 +119,7 @@ function loadPlan(d, lane, taskDir, rows = []) {
     if (recorded.length && mentioned.has(n) && !accepted.has(n)) continue
     const checked = validateEnvelope('planner', readJson(d, join(taskDir, name), 'the planner return'), { archived: true })
     if (checked.defects.length || checked.envelope?.status !== 'done') continue
-    if (recorded.length === 0 || accepted.has(n)) return checked.envelope.details
+    if (accepted.has(n)) return { ...checked.envelope.details, planSummary: checked.envelope.summary }
     if (!mentioned.has(n)) throw new FinishRefusal('finish-premise', `the planner return ${name} has no journal row, so whether it was accepted is unknown`)
   }
   throw new FinishRefusal('finish-premise', `lane ${lane} has no accepted planner return`)
@@ -142,7 +142,7 @@ function finishFor(rows, stopped, before, plan) {
   const { subject, plan_path: planPath } = plan
   const reviewed = rows.slice(0, before).findLast((row) => row.event === 'verdict' && row.status === 'reviewed')
   return {
-    planPath, subject, filesInScope: plan.files_in_scope ?? null,
+    planPath, subject, filesInScope: plan.files_in_scope ?? null, ...(plan.planSummary ? { planSummary: plan.planSummary } : {}),
     stop: { reason: stopped.reason, observation: stopped.observation ?? null },
     findings: reviewed?.verdict === 'changes-needed' && Array.isArray(reviewed.findings) ? reviewed.findings : [],
     turnOffset: rows.filter((row) => row.event === 'envelope').length,

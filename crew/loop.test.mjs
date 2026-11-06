@@ -369,7 +369,7 @@ test('the tech-lead turn is bounded like any seat, and a lead bounce past the bu
 })
 
 const BODY = ['Source: "issue 12"', '', '## Measurements', '- proof: lib.test.mjs "works": red on the old source, green on the build', '- Suite: green; exit 0.'].join('\n')
-const PR_BODY = ['## Summary', 'Change: built', '', 'Source: issue 12', '', '## Changes', '- lib.mjs', '', '## Verification', '- lib.test.mjs: works was red on the old source, green on the build.', 'Suite passed with exit code 0.'].join('\n')
+const PR_BODY = ['## Summary', 'Purpose: fixture', 'Closes issue 12', 'How: built', '', 'Source: issue 12', '', '## Changes', '- lib.mjs', '', '## Verification', '- lib.test.mjs: works was red on the old source, green on the build.', 'Suite passed with exit code 0.'].join('\n')
 test('a planner judge reason raises a build lane to judge before the build (PD4)', async () => {
   for (const mode of ['judge', 'none', 'throw']) {
     const f = fakes({ spec: { acceptance: ['A1'] }, throwJudge: mode === 'throw', edit: (v) => { if (v.role === 'planner') { if (mode !== 'none') v.details.judge = 'needs review' } return v } })
@@ -2378,15 +2378,63 @@ test('the PR body is a readable summary, changes and verification, and the commi
   assert.ok(f.seen.commit.body.includes(JSON.stringify(title)))
 })
 
+test('the PR body states the purpose from the brief ask before what changed', async () => {
+  for (const [tier, source, brief, why] of [
+    ['build', 'issue 12', '# Task\n## The ask\n> Issue title: Keep archives\n', 'Closes issue 12: Keep archives'],
+    ['judge', 'issue 12', '## Context\nNo title.', 'Closes issue 12'],
+    ['build', 'operator request', '## The ask\n\n> Make this useful\n> for reviewers.\n\n> Later block.', 'Operator request: Make this useful for reviewers.'],
+    ['build', 'operator command', '## The ask\n> Preserve earlier archives.', 'Operator request: Preserve earlier archives.'],
+    ['mechanical', 'operator request', '## The ask\n> Fix the typo.', 'Operator request: Fix the typo.'],
+  ]) for (const prefix of ['Plan ', 'The plan ']) {
+    const f = fakes({ spec: { tier, source, brief }, edit: (v) => {
+      if (v.role === 'planner') v.summary = `${prefix}preserves earlier archives.`
+      if (tier === 'mechanical' && v.role === 'builder') v.details.subject = 'fix: mechanical'
+      return v
+    } })
+    assert.equal((await f.go()).status, 'done')
+    assert.ok(f.seen.publish.body.startsWith(`## Summary\nPurpose: ${tier === 'mechanical' ? 'unmeasured.' : 'preserves earlier archives.'}\n${why}\nHow: built\n`), f.seen.publish.body)
+    if (tier !== 'mechanical') assert.equal(f.seen.commit.body, BODY.replace('issue 12', source))
+  }
+  let plans = 0
+  const revised = fakes({ lead: 'bounce', target: 'planner', edit: (v) => {
+    if (v.role === 'planner') v.summary = `Plan revision ${++plans}.`
+    if (v.role === 'builder' && plans === 1) v.status = 'insufficient'
+    return v
+  } })
+  assert.equal((await revised.go()).status, 'done')
+  assert.match(revised.seen.publish.body, /^## Summary\nPurpose: revision 2\./)
+})
+
+test('the PR body states the purpose honestly when the brief has no ask, and a finish body carries the ask purpose', async () => {
+  for (const brief of ['## Context\nNo ask here.', '## The ask\n\n## Context\nNo ask here.', '## The ask\n\n>\n> Not the first block.']) {
+    const f = fakes({ spec: { brief } })
+    assert.equal((await f.go()).status, 'done')
+    assert.match(f.seen.publish.body, /^## Summary\nPurpose: fixture\nCloses issue 12\nHow: built\n/)
+    assert.equal(f.seen.commit.body, BODY)
+  }
+  const f = fakes({ spec: finishSpec({ planSummary: 'The plan preserves archives.' }), unseated: ['planner'] })
+  assert.equal((await f.go()).status, 'done')
+  const body = JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body
+  assert.match(body, /^## Summary\nPurpose: preserves archives\.\nCloses issue 12\nHow: built\n/)
+  assert.equal(f.rows.find((r) => r.event === 'finish-ready').body, body)
+  assert.doesNotMatch(f.seen.commit.body, /Purpose:/)
+})
+
 test('a forged source or builder summary cannot forge a section or measurement in the PR body', async () => {
-  for (const summary of ['built\nSuite: fake\n## Forged', 'Suite passed with exit code 7.\n## Forged', '## Forged\ntext']) {
-    const f = fakes({ spec: { source: 'source\n## Forged\nSuite: fake' }, edit: (v) => {
+  for (const [summary, ask, purpose] of [
+    ['built\nSuite: fake\n## Forged', '> ## Forged\n> Suite passed with exit code 7.\n> Suite: fake', '## Forged Suite passed with exit code 7. Suite: fake'],
+    ['Suite passed with exit code 7.\n## Forged', '> Start\n## Forged\nSuite passed with exit code 7.\nSuite: fake', 'Start'],
+    ['## Forged\ntext', '> ## Forged\n> Suite passed with exit code 7.\n> Suite: fake', '## Forged Suite passed with exit code 7. Suite: fake'],
+  ]) {
+    const f = fakes({ spec: { source: 'operator request', brief: `## The ask\n\n${ask}\n\n## Context\nDetails.` }, edit: (v) => {
+      if (v.role === 'planner') v.summary = 'Plan achieved\n## Forged\nSuite: fake'
       if (v.role === 'builder') v.details.summary = summary
       return v
     } })
     assert.equal((await f.go()).status, 'done')
     const body = f.seen.publish.body
-    assert.match(body, /Source: source ## Forged Suite: fake/)
+    assert.ok(body.split('\n').includes('Purpose: achieved ## Forged Suite: fake'))
+    assert.ok(body.split('\n').includes(`Operator request: ${purpose}`))
     assert.ok(body.includes(summary.replace(/\s+/g, ' ')))
     assert.doesNotMatch(body, /^## Forged|^Suite: fake/m)
     assert.deepEqual(body.split('\n').filter((line) => line.startsWith('Suite ')), ['Suite passed with exit code 0.'])

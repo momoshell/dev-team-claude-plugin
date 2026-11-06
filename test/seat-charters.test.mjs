@@ -101,6 +101,14 @@ test('CH5: the lead charter keeps the rules the loop depends on', () => {
   assert.doesNotMatch(charter, /bypasses a gate/)
 })
 
+// MUTATION: remove an old-source proof rule from either document.
+test('CH6: planner and test-economy require named tests to compile on the old source', () => {
+  for (const path of ['crew/agents/planner.md', 'skills/test-economy/SKILL.md']) {
+    const text = body(path)
+    for (const phrase of ['must compile against the old source', 'a surface it already has', 'a route, a registered name or an existing public function']) has(text, phrase)
+  }
+})
+
 // MUTATION: remove dev-team attribution from the examples heading (PS4).
 test('PS4 code-less attributes all worked examples', () => {
   const skill = read('skills/code-less/SKILL.md')

@@ -42,7 +42,7 @@ The `subject` is the conventional-commit subject for this change, at most 72 cha
 
 `plan_path` is a bare file path without a line-range suffix; cite plan lines as `file:start-end` in the plan text.
 
-Give `tests` as the test of each property in the plan's order, each `{file, title}`. Use an empty list only when no criterion is machine-checked; only then the PR says `proof: none, no criterion is machine-checked`. An `escalate` carries the operator's decision in `details.question`.
+Give `tests` as the test of each property in the plan's order, each `{file, title}`. Each named test must compile against the old source and reach new behaviour through a surface it already has, such as a route, a registered name or an existing public function. Do not call a function the change adds or use a new test module under `src/` that only the change declares. Use an empty list only when no criterion is machine-checked; only then the PR says `proof: none, no criterion is machine-checked`. An `escalate` carries the operator's decision in `details.question`.
 
 Give `files_in_scope` (the repo-relative files the build touches, tests included).
 

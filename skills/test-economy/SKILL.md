@@ -12,7 +12,11 @@ Test behaviour the change adds or alters, not unchanged behaviour, prose,
 wording, lint or facts a type guarantees. For each property, write one small
 test: the smallest case that fails on the old source. Put several cases for
 one property in one table-driven test. Extend an existing test file and reuse
-its fixtures and helpers; do not add a helper or fixture for one test.
+its fixtures and helpers; do not add a helper or fixture for one test. Each named
+test must compile against the old source and reach new behaviour through a surface
+it already has, such as a route, a registered name or an existing public function.
+Do not call a function the change adds or use a new test module under `src/` that
+only the change declares.
 
 ## Node tests
 

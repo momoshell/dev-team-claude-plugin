@@ -105,15 +105,81 @@ test('discard holds the finish stop claim throughout teardown', () => {
   } finally { w.done() }
 })
 
-test('discard refuses a lane that recorded a pull request, naming plain closeout, with nothing changed', () => {
-  const w = world({ rows: [...STOPPED, PR_ROW] })
-  try {
-    const r = close(w, { argv: [LANE, '--discard'] })
-    assert.equal(r.status, 1)
-    assert.match(r.err, /crew closeout demo/)
-    assert.equal(r.calls.length, 0)
-    assertUnchanged(w)
-  } finally { w.done() }
+test('discard tears down a stopped lane whose recorded PR is closed unmerged', () => {
+  for (const rows of [[PR_ROW, ...STOPPED], [...STOPPED, PR_ROW], [{ event: 'run-start', lane: LANE }, PR_ROW]]) {
+    const w = world({ rows })
+    try {
+      if (rows.length === 2) writeFileSync(join(w.leaf, 'task', 'run.pid'), '123\n')
+      const r = close(w, { state: 'CLOSED', argv: [LANE, '--discard'], alive: () => false, renameSync: (from, to) => {
+        assert.ok(!existsSync(w.worktree))
+        assert.ok(!branchExists(w))
+        renameSync(from, to)
+      } })
+      assert.equal(r.status, 0, r.err)
+      assert.match(r.out, /^discarded demo:/)
+      assert.ok(!existsSync(w.laneDir))
+      assert.equal(readFileSync(join(w.archiveRoot, `dt-${LANE}`, LANE, 'task', 'journal.jsonl'), 'utf8'), w.journalText)
+      assert.deepEqual(r.calls.filter((c) => c[0] === 'gh'), [['gh', 'pr', 'view', PR_ROW.pr.url, '--json', 'state']])
+      assert.deepEqual(r.calls.filter((c) => c[0] === 'git' && (c.includes('remove') || c.includes('-D'))).map((c) => c.slice(3, 5).join(' ')), ['worktree remove', 'branch -D'])
+      assert.ok(!r.calls.some((c) => c.includes('push') || c.includes('--force')))
+    } finally { w.done() }
+  }
+})
+
+test('discard refuses a stopped lane whose recorded PR is not closed, with nothing changed', () => {
+  for (const state of ['OPEN', 'MERGED', 'UNKNOWN', null]) {
+    const w = world({ rows: [PR_ROW, ...STOPPED] })
+    try {
+      const r = close(w, { state, argv: [LANE, '--discard'] })
+      assert.equal(r.status, 1)
+      assert.match(r.err, /lane recorded a pull request; use crew closeout demo/)
+      assert.deepEqual(r.calls, [['gh', 'pr', 'view', PR_ROW.pr.url, '--json', 'state']])
+      assertUnchanged(w)
+    } finally { w.done() }
+  }
+})
+
+test('discard refuses a closed-PR lane when gh cannot prove the PR is closed, with nothing changed', () => {
+  for (const [result, error] of [[{ status: 1, stderr: 'offline' }, /gh pr view failed: offline/], [{ status: 0, stdout: '{' }, /gh pr view returned unparseable output/]]) {
+    const w = world({ rows: [PR_ROW, ...STOPPED] })
+    try {
+      const calls = []
+      const r = close(w, { argv: [LANE, '--discard'], run: (cmd, args) => { calls.push([cmd, ...args]); return result } })
+      assert.equal(r.status, 1)
+      assert.match(r.err, error)
+      assert.deepEqual(calls, [['gh', 'pr', 'view', PR_ROW.pr.url, '--json', 'state']])
+      assertUnchanged(w)
+    } finally { w.done() }
+  }
+})
+
+test('discard of a closed-PR lane still refuses a finish record and a lane not proven stopped, with nothing changed', () => {
+  for (const [rows, error, ghCalls] of [
+    [[PR_ROW, ...STOPPED, { event: 'finish-ready' }], /crew finish demo/, 0],
+    [[PR_ROW, ...STOPPED, { event: 'finish-decision' }], /crew finish demo/, 0],
+    [[PR_ROW, { event: 'stage-start', stage: 'plan' }], /not stopped/, 1],
+    [[{ event: 'run-start', lane: LANE }, PR_ROW], /not stopped/, 1],
+  ]) {
+    const w = world({ rows })
+    try {
+      const r = close(w, { state: 'CLOSED', argv: [LANE, '--discard'] })
+      assert.equal(r.status, 1)
+      assert.match(r.err, error)
+      assert.equal(r.calls.length, ghCalls)
+      if (ghCalls) assert.deepEqual(r.calls[0], ['gh', 'pr', 'view', PR_ROW.pr.url, '--json', 'state'])
+      assertUnchanged(w)
+    } finally { w.done() }
+  }
+  for (const [file, alive] of [['run.pid', true], ['run.pid', null], ['finish-3.claim', true], ['finish-3.reclaim', true]]) {
+    const w = world({ rows: [...STOPPED, PR_ROW] })
+    try {
+      writeFileSync(join(w.leaf, 'task', file), '123\n')
+      const r = close(w, { state: 'CLOSED', argv: [LANE, '--discard'], alive: () => alive })
+      assert.equal(r.status, 1)
+      assert.match(r.err, /not stopped/)
+      assertUnchanged(w)
+    } finally { w.done() }
+  }
 })
 
 test('discard refuses a lane with a finish-ready row, naming crew finish, with nothing changed', () => {

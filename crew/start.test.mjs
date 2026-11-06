@@ -1835,7 +1835,8 @@ test('a started lean spec reaches the PR with its exact P1 source and measured b
   assert.equal((await g.go()).status, 'done')
   assert.equal(seen.commit.subject, 'fix(crew): publish measured lane results')
   assert.equal(seen.publish.title, seen.commit.subject)
-  assert.match(seen.publish.body, /^Source: "issue 1961"\n\n## Measurements\n- proof: lib\.test\.mjs "works": red on the old source, green on the build\n- Suite: green; exit 0\.\n\n## Lane\n- Wall time: (?:\d+ s before publication; publication unmeasured|unmeasured)\./)
+  assert.equal(seen.publish.body, ['## Summary', 'Change: built', '', 'Source: issue 1961', '', '## Changes', '- src/a.mjs', '', '## Verification', '- lib.test.mjs: works was red on the old source, green on the build.', 'Suite passed with exit code 0.'].join('\n'))
+  assert.match(seen.commit.body, /^Source: "issue 1961"\n\n## Measurements\n/)
   assert.equal(spec.source, 'issue 1961')
 })
 

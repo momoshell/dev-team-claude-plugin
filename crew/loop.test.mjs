@@ -194,6 +194,7 @@ function fakes(options = {}) {
       : input.args.includes('reset') || input.args.includes('clean') ? (discardArgs.push(input.args), measured('discard', options.discard ?? green())(input))
       : input.args.includes('add') ? measured('suite-stage', options.stageResult ?? green())(input)
       : input.args.includes('write-tree') ? measured('checked-tree', options.checkedTree ?? { ...green(), stdout: `${'e'.repeat(40)}\n` })(input)
+      : input.args.includes('diff') ? measured('published-paths', options.publishedPaths ?? { ...green(), stdout: 'lib.mjs\0' })(input)
       : input.args.includes('rev-parse') ? measured('post-rebase-head', () => ({ ...green(), stdout: options.cleanHead ?? `${(options.rebase ?? {}).head ?? 'a'.repeat(40)}\n` }))(input)
       : input.args.includes('status') && spec.shape === 'finish' && !calls.includes('seat:builder') ? measured('base-paths', options.baseStatus ?? { ...green(), stdout: ' M lib.mjs\0' })(input)
       : input.args.includes('status') && calls.includes('commit') && calls.lastIndexOf('rebase') > calls.lastIndexOf('uncommit') ? measured('post-rebase-clean', () => ({ ...green(), stdout: options.cleanStatus ?? '' }))(input)
@@ -255,7 +256,7 @@ test('a mechanical lane runs rebase, build, proof and suite with no plan, review
     assert.equal((await f.go()).status, 'done', mode)
     assert.deepEqual(f.calls.slice(1), ['fetch', 'rebase', 'seat:builder', ...(mode === 'repair' ? ['seat:builder'] : []), ...(mode === 'none' ? [] : ['proof']), 'review-paths', 'suite-stage', 'checked-tree', 'suite', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase', 'publish'])
     assert.equal(f.seen.publish.title, 'docs(crew): fix typo')
-    assert.match(f.seen.publish.body, mode === 'none' ? /proof: none, mechanical lane, not reviewed/ : /proof: lib.test.mjs.*red on the old source, green on the build/)
+    assert.match(f.seen.publish.body, /Proof: mechanical lane, not reviewed/)
     assert.equal(f.seen.publish.body.match(/mechanical lane, not reviewed/g)?.length, 1, mode)
     if (mode === 'repair') assert.match(f.requests[1].repair.defects.join(' '), /details.subject is required on a mechanical lane/)
   }
@@ -368,7 +369,7 @@ test('the tech-lead turn is bounded like any seat, and a lead bounce past the bu
 })
 
 const BODY = ['Source: "issue 12"', '', '## Measurements', '- proof: lib.test.mjs "works": red on the old source, green on the build', '- Suite: green; exit 0.'].join('\n')
-const LANE = '\n\n## Lane\n- Wall time: 0 s before publication; publication unmeasured.\n- Rounds: planner 1, builder 1, reviewer 1, tech-lead 0.\n- Suite repairs: 0.\n- Lead consults: 0.'
+const PR_BODY = ['## Summary', 'Change: built', '', 'Source: issue 12', '', '## Changes', '- lib.mjs', '', '## Verification', '- lib.test.mjs: works was red on the old source, green on the build.', 'Suite passed with exit code 0.'].join('\n')
 test('a planner judge reason raises a build lane to judge before the build (PD4)', async () => {
   for (const mode of ['judge', 'none', 'throw']) {
     const f = fakes({ spec: { acceptance: ['A1'] }, throwJudge: mode === 'throw', edit: (v) => { if (v.role === 'planner') { if (mode !== 'none') v.details.judge = 'needs review' } return v } })
@@ -420,7 +421,8 @@ test("the planner's tests alone decide proof: an empty list reaches the PR with 
     } else {
       assert.equal(result.status, 'done')
       assert.ok(!f.calls.includes('proof'))
-      for (const name of ['commit', 'publish']) assert.ok(f.seen[name].body.includes('- proof: none, no criterion is machine-checked'))
+      assert.ok(f.seen.commit.body.includes('- proof: none, no criterion is machine-checked'))
+      assert.ok(f.seen.publish.body.includes('Proof: no criterion is machine-checked.'))
     }
   }
 })
@@ -479,7 +481,7 @@ test('a builder insufficient on build and judge goes to the lead with its envelo
           assert.deepEqual(builders[1].filesInScope, ['crew/loop.mjs'])
           assert.equal(builders[1].tier, 'judge')
           assert.equal(f.seen.publish.title, 'fix(crew): revised plan')
-          assert.ok(f.seen.publish.body.includes('proof: none'))
+          assert.ok(f.seen.publish.body.includes('Proof: no criterion is machine-checked.'))
         }
       }
     }
@@ -603,7 +605,7 @@ test('a green run walks every stage in order and returns the measured PR with ea
   assert.deepEqual(f.seen.commit, { cwd: '/virtual/checkout', files: ['lib.mjs'], subject: 'fix(crew): planned lane', body: BODY, closes: [12] })
   assert.deepEqual(f.seen.fetch, { cwd: '/virtual/checkout', command: 'git', args: ['fetch', 'origin'] })
   assert.deepEqual(f.seen.rebase, { cwd: '/virtual/checkout', base: 'main' })
-  assert.deepEqual(f.seen.publish, { cwd: '/virtual/checkout', branch: 'lane', base: 'main', title: 'fix(crew): planned lane', body: BODY + LANE, closes: [12] })
+  assert.deepEqual(f.seen.publish, { cwd: '/virtual/checkout', branch: 'lane', base: 'main', title: 'fix(crew): planned lane', body: PR_BODY, closes: [12] })
   const planner = f.requests[0]
   assert.deepEqual(Object.keys(planner).sort(), ['brief', 'feedback', 'id', 'planPath', 'returnPath', 'role', 'seat', 'tier'])
   assert.deepEqual(Object.keys(f.requests[1]).sort(), [...Object.keys(planner), 'filesInScope'].sort())
@@ -962,7 +964,7 @@ test('a finish lane runs a red suite once more and a green re-run reaches the co
   assert.deepEqual(inputs[0], { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 1800000 })
   assert.deepEqual(f.calls.filter((c) => ['suite', ...EFFECTS].includes(c)), ['fetch', 'rebase', 'suite', 'suite', ...EFFECTS.filter((c) => c !== 'publish')])
   assert.match(f.seen.commit.body, /Suite: green; exit 0 \(re-run after red; exit 7\)/)
-  assert.ok(JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body.includes('## Lane'))
+  assert.ok(JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body.includes('## Verification'))
   assert.deepEqual(f.rows.filter((r) => r.event === 'check' && r.check === 'suite').map((r) => r.result.status), ['red', 'green'])
 })
 
@@ -1044,7 +1046,7 @@ test('after a suite repair the proof, review and suite run again, then the lane 
   assert.equal(f.inputs.length, 3)
   assert.deepEqual(f.inputs[2], f.inputs[0])
   assert.match(f.seen.commit.body, /Suite: green; exit 0/)
-  assert.ok(JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body.includes('## Lane'))
+  assert.ok(JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body.includes('## Verification'))
 
 })
 
@@ -1405,7 +1407,7 @@ test('the commit and PR carry the planner subject and the generated body, never 
   assert.equal(f.seen.commit.subject, 'fix(crew): planned lane')
   assert.equal(f.seen.publish.title, 'fix(crew): planned lane')
   assert.equal(f.seen.commit.body, BODY)
-  assert.equal(f.seen.publish.body, BODY + LANE)
+  assert.equal(f.seen.publish.body, PR_BODY)
 })
 
 // MUTATION: interpolate the source raw and an embedded newline forges a measurement row.
@@ -1415,11 +1417,9 @@ test('the PR body carries no ## Acceptance block, even for an archived spec with
     spec: { source: forged, acceptance: ['A1', 'A2'], brief: '## Acceptance\n- (A1) old\n- (A2) old' }, review: 1,
   })
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
-  const round = ['- proof: lib.test.mjs "works": red on the old source, green on the build']
-  assert.equal(f.seen.publish.body, [`Source: ${JSON.stringify(forged)}`, '', '## Measurements', ...round, '- Suite: green; exit 0.'].join('\n') + LANE.replace('builder 1, reviewer 1', 'builder 2, reviewer 2'))
+  assert.ok(f.seen.publish.body.includes('Source: x - Suite: green; exit 0.'))
   assert.ok(!f.seen.publish.body.includes('## Acceptance'))
-  assert.equal(f.seen.publish.body.startsWith(f.seen.commit.body + '\n\n## Lane'), true)
-  assert.equal(f.seen.publish.body.split('\n').filter((line) => line.startsWith('- Suite:')).length, 1)
+  assert.equal(f.seen.publish.body.split('\n').filter((line) => line.startsWith('Suite ')).length, 1)
 })
 
 // MUTATION: omit the pre-suite staging, or stage more than the measured paths, and the suite misses a new file or the commit grows.
@@ -1638,7 +1638,7 @@ test('a finish review that asks for changes after the suite repair goes back to 
   assert.deepEqual(f.calls.slice(f.calls.lastIndexOf('seat:builder'), f.calls.lastIndexOf('seat:builder') + 7), ['seat:builder', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'seat:reviewer', 'suite'])
   const report = JSON.parse(f.writes.get('/virtual/task/finish-report.json'))
   assert.deepEqual(report.reviews.map((r) => r.verdict), ['pass', 'changes-needed', 'pass'])
-  assert.match(report.body, /Suite: green/)
+  assert.match(report.body, /Suite passed with exit code 0/)
 })
 
 // MUTATION: reject a null plan path or claim a mechanical finish was not reviewed.
@@ -1667,7 +1667,7 @@ test('finish without named tests reports unmeasured proof and standard reports e
   assert.equal((await f.go()).status, 'done')
   assert.equal(f.calls.includes('proof'), false)
   assert.ok(f.seen.commit.body.includes('- proof: unmeasured'))
-  assert.ok(JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body.includes('- proof: unmeasured'))
+  assert.ok(JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body.includes('Proof: unmeasured.'))
   const standard = fakes()
   assert.equal((await standard.go()).status, 'done')
   assert.equal(standard.seen.commit.body.split('\n').filter((line) => line.startsWith('- proof:')).length, 1)
@@ -1766,10 +1766,9 @@ test('a green finish run writes a fused report and a finish-ready row with the m
   assert.deepEqual(report.reviews, [{ verdict: 'changes-needed', findings: [finding] }, { verdict: 'pass', findings: [] }])
   assert.equal(report.measurements.some((m) => m.startsWith('- Suite')), true)
   const ready = f.rows.at(-1)
-  assert.deepEqual([ready.subject, ready.reviewRounds, ready.body.includes('## Measurements')], ['fix(crew): planned lane', 2, true])
+  assert.deepEqual([ready.subject, ready.reviewRounds, ready.body.includes('## Verification')], ['fix(crew): planned lane', 2, true])
   assert.equal(ready.body, report.body)
-  // SB4: the body names the stop and each review verdict with its findings; a standard body has no Finish section
-  assert.ok(report.body.includes('## Finish\n- Stop: mutations-survived: {"stage":"mutations","detail":"A1 survived"}\n- Review 1: changes-needed; findings: R1 (must-fix) at lib.mjs:1: Fix the defect\n- Review 2: pass; findings: none\n'))
+  assert.ok(report.body.includes('The lane stopped with reason mutations-survived. This report covers only this finish run.\n2 reviews in this finish run; final verdict: pass.'))
   assert.equal(BODY.includes('## Finish'), false)
   assert.equal(Object.hasOwn(ready, 'mutations'), false)
 
@@ -1846,13 +1845,13 @@ test('a mechanical lane whose publishing rebase drops its commit as already upst
 test('a finish report labels its Lane counts as this finish run only and a standard PR body carries no such label (S1-7)', async () => {
   const f = fakes({ spec: finishSpec(), unseated: ['planner'] })
   assert.equal((await f.go()).status, 'done')
-  const label = '\n## Lane\n- Scope: this finish run only; earlier runs of this lane are unmeasured.\n- Wall time:'
+  const label = 'This report covers only this finish run.'
   assert.ok(JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body.includes(label))
   assert.ok(f.rows.find((r) => r.event === 'finish-ready').body.includes(label))
   const standard = fakes()
   assert.equal((await standard.go()).status, 'done')
-  assert.equal(standard.seen.publish.body, BODY + LANE)
-  assert.doesNotMatch(standard.seen.publish.body, /- Scope:/)
+  assert.equal(standard.seen.publish.body, PR_BODY)
+  assert.doesNotMatch(standard.seen.publish.body, /this finish run/)
 })
 
 // MUTATION: drop the early journal write.
@@ -1987,11 +1986,27 @@ test('a rebase that moves the head reruns proof then the suite on the rebased tr
   const f = moved()
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
   const tail = f.calls.slice(f.calls.lastIndexOf('rebase'))
-  assert.deepEqual(tail, ['rebase', 'proof', 'suite', 'post-rebase-clean', 'post-rebase-head', 'publish'])
+  assert.deepEqual(tail, ['rebase', 'published-paths', 'proof', 'suite', 'post-rebase-clean', 'post-rebase-head', 'publish'])
   assert.equal(f.calls.filter((c) => c === 'proof').length, 2)
   assert.equal(f.calls.filter((c) => c === 'suite').length, 2)
   assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: undefined })
   assert.equal(f.seen.proof.base, `${MOVED.head}^`)
+})
+
+test('a mechanical publishing rebase lists only surviving committed paths in the PR', async () => {
+  for (const [publishedPaths, reason] of [
+    [{ ...green(), stdout: 'b.mjs\0' }, null],
+    [{ ...green(), status: 'red', reason: 'exit-nonzero', code: 1 }, 'paths-unmeasured'],
+    [{ ...green(), stdout: 'b.mjs' }, 'paths-unmeasured'],
+    [{ ...green(), stdout: '../unsafe\0' }, 'paths-unmeasured'],
+  ]) {
+    const f = moved({ reviewPaths: ' M a.mjs\0 M b.mjs\0', paths: 'M  a.mjs\0M  b.mjs\0', publishedPaths })
+    assert.equal((await f.go()).reason, reason)
+    assert.deepEqual(f.seen.commit.files, ['a.mjs', 'b.mjs'])
+    if (reason) assert.equal(f.seen.publish, undefined)
+    else assert.match(f.seen.publish.body, /## Changes\n- b\.mjs\n\n## Verification/)
+    assert.deepEqual(f.seen['published-paths'].args, ['diff', '--no-renames', '--name-only', '-z', `${MOVED.head}^`, MOVED.head])
+  }
 })
 
 // MUTATION: keep !isFinish on the moved-head recheck and the finish reports without a fresh review.
@@ -2329,22 +2344,99 @@ test('a red suite on a build or judge lane is never re-run on the unchanged tree
 test("a passing review's should-fix findings are listed in the PR body", async () => {
   const f = fakes({ spec: { tier: 'judge' }, edit: (v) => { if (['reviewer', 'tech-lead'].includes(v.role)) v.details.findings = [{ ...finding, id: v.role === 'reviewer' ? 'S1' : 'S2', severity: 'should-fix' }, { ...finding, id: 'C1', severity: 'consider' }]; return v } })
   assert.equal((await f.go()).status, 'done')
-  assert.match(f.seen.publish.body, /## Should-fix\n- S1 \(reviewer\) at lib.mjs:1: Fix the defect\n- S2 \(tech-lead\) at lib.mjs:1: Fix the defect/)
+  assert.match(f.seen.publish.body, /## Open points\n- Fix the defect \(lib.mjs:1\)\n- Fix the defect \(lib.mjs:1\)/)
   assert.ok(!f.seen.publish.body.includes('C1'))
 })
 
-// MUTATION: drop the label and a pre-publication snapshot reads as a total.
-test('the PR body reports wall time, rounds per role, suite repairs and lead consults, and an unreadable clock as unmeasured', async () => {
+// Clock failures do not prevent publication or add lane telemetry to the PR.
+test('the PR body omits lane telemetry even when the clock is unreadable', async () => {
   for (const broken of [false, true]) {
     let ticks = 0
     const f = sequenced([redRun(), green()], { bounds: { builder: 1 }, lead: 'bounce', deps: { now: () => { if (broken) throw new Error('clock'); return ticks++ * 1000 } } })
     assert.equal((await f.go()).status, 'done')
-    const wall = broken ? 'unmeasured' : `${(f.rows.find((r) => r.event === 'stage-start' && r.stage === 'publish').at - f.rows[0].at) / 1000} s before publication; publication unmeasured`
-    assert.ok(f.seen.publish.body.includes(`- Wall time: ${wall}.`))
-    assert.ok(f.seen.publish.body.includes(`- Rounds: planner ${count(f, 'planner')}, builder ${count(f, 'builder')}, reviewer ${count(f, 'reviewer')}, tech-lead ${count(f, 'tech-lead')}.`))
-    assert.ok(f.seen.publish.body.includes('- Suite repairs: 1.\n- Lead consults: 1.'))
+    assert.doesNotMatch(f.seen.publish.body, /## Lane|Wall time|Rounds:|Suite repairs|Lead consults/)
     assert.ok(!f.seen.commit.body.includes('## Lane'))
   }
+})
+
+test('the PR body is a readable summary, changes and verification, and the commit body is unchanged', async () => {
+  for (const tier of ['build', 'judge']) {
+    const f = fakes({ spec: { tier } })
+    assert.equal((await f.go()).status, 'done')
+    assert.equal(f.seen.publish.body, PR_BODY)
+    assert.equal(f.seen.commit.body, BODY)
+    assert.doesNotMatch(f.seen.publish.body, /## Measurements|## Lane|Wall time|Rounds:|Suite repairs|Lead consults/)
+  }
+  const title = 'handles "quotes"'
+  const f = fakes({ paths: 'M  lib.mjs\0M  other.mjs\0', proof: { status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title, proven: true }] }, edit: (v) => {
+    if (v.role === 'builder') v.details.tests = [{ file: 'lib.test.mjs', title }]
+    return v
+  } })
+  assert.equal((await f.go()).status, 'done')
+  assert.match(f.seen.publish.body, /## Changes\n- lib.mjs\n- other.mjs/)
+  assert.ok(f.seen.publish.body.includes(`lib.test.mjs: ${title} was red on the old source, green on the build.`))
+  assert.ok(f.seen.commit.body.includes(JSON.stringify(title)))
+})
+
+test('a forged source or builder summary cannot forge a section or measurement in the PR body', async () => {
+  for (const summary of ['built\nSuite: fake\n## Forged', 'Suite passed with exit code 7.\n## Forged', '## Forged\ntext']) {
+    const f = fakes({ spec: { source: 'source\n## Forged\nSuite: fake' }, edit: (v) => {
+      if (v.role === 'builder') v.details.summary = summary
+      return v
+    } })
+    assert.equal((await f.go()).status, 'done')
+    const body = f.seen.publish.body
+    assert.match(body, /Source: source ## Forged Suite: fake/)
+    assert.ok(body.includes(summary.replace(/\s+/g, ' ')))
+    assert.doesNotMatch(body, /^## Forged|^Suite: fake/m)
+    assert.deepEqual(body.split('\n').filter((line) => line.startsWith('Suite ')), ['Suite passed with exit code 0.'])
+  }
+})
+
+test('should-fix findings reach the PR as plain open points with no seat name or finding id', async () => {
+  const f = fakes({ spec: { tier: 'judge' }, edit: (v) => {
+    if (['reviewer', 'tech-lead'].includes(v.role)) v.details.findings = [
+      { ...finding, id: v.role === 'reviewer' ? 'S1' : 'S2', severity: 'should-fix', summary: v.role === 'reviewer' ? 'First concern' : 'Second concern' },
+      { ...finding, id: 'C1', severity: 'consider', summary: 'Ignored concern' },
+    ]
+    return v
+  } })
+  assert.equal((await f.go()).status, 'done')
+  assert.match(f.seen.publish.body, /## Open points\n- First concern \(lib.mjs:1\)\n- Second concern \(lib.mjs:1\)/)
+  assert.doesNotMatch(f.seen.publish.body, /S1|S2|C1|reviewer|tech-lead|Ignored concern/)
+  assert.match(f.seen.commit.body, /## Should-fix\n- S1 \(reviewer\)/)
+})
+
+test('the PR body states proof and suite honestly when no test is named, the lane is mechanical, or proof is unmeasured', async () => {
+  for (const mode of ['none', 'mechanical', 'mechanical-named', 'unmeasured', 'rerun']) {
+    const finish = ['unmeasured', 'rerun'].includes(mode)
+    const mechanical = mode.startsWith('mechanical')
+    const options = { spec: finish ? finishSpec() : mechanical ? { tier: 'mechanical' } : {}, edit: (v) => {
+      if (v.role === 'planner' && mode === 'none') v.details.tests = []
+      if (v.role === 'builder') {
+        if (mechanical) v.details.subject = 'fix: mechanical'
+        if (['none', 'mechanical', 'unmeasured', 'rerun'].includes(mode)) v.details.tests = []
+      }
+      return v
+    } }
+    const f = mode === 'rerun' ? sequenced([redRun(7), green()], options) : fakes(options)
+    assert.equal((await f.go()).status, 'done', mode)
+    const body = finish ? JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body : f.seen.publish.body
+    assert.match(body, mode === 'none' ? /Proof: no criterion is machine-checked/ : mechanical ? /Proof: mechanical lane, not reviewed/ : /Proof: unmeasured/)
+    assert.doesNotMatch(body, /red on the old source|green on the build/)
+    assert.match(body, mode === 'rerun' ? /Suite passed with exit code 0 on a re-run after a red exit 7/ : /Suite passed with exit code 0/)
+  }
+})
+
+test('a finish PR body states the stop in plain words and keeps the observation only in the report', async () => {
+  const f = fakes({ spec: finishSpec(), review: 1, bounds: { builder: 3 } })
+  assert.equal((await f.go()).status, 'done')
+  const report = JSON.parse(f.writes.get('/virtual/task/finish-report.json'))
+  assert.deepEqual(report.stop, STOP)
+  assert.match(report.body, /The lane stopped with reason mutations-survived\. This report covers only this finish run\./)
+  assert.match(report.body, /2 reviews in this finish run; final verdict: pass/)
+  assert.doesNotMatch(report.body, /A1 survived|"stage"|R1|Fix the defect/)
+  assert.equal(f.rows.find((r) => r.event === 'finish-ready').body, report.body)
 })
 
 // A planner's plan_path must name an existing regular file inside the task dir.

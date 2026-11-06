@@ -155,9 +155,6 @@ export async function runLoop(spec, deps = {}) {
     if (index > phase) { phase = index; rounds.lead = 0 }
   }
   const last = {}
-  const turns = { planner: 0, builder: 0, reviewer: 0, 'tech-lead': 0, lead: 0 }
-  let suiteRepairs = 0
-  let firstAt, latestAt, clockUnreadable = false
   const context = new AsyncLocalStorage()
   let turn = isFinish ? fin.turnOffset : 0
   let tier = spec.tier
@@ -205,8 +202,7 @@ export async function runLoop(spec, deps = {}) {
   let unwritten = 0, journalError = null
   const emit = async (event, fields) => {
     let at
-    try { at = d.now(); if (!Number.isFinite(at)) clockUnreadable = true } catch { clockUnreadable = true }
-    if (Number.isFinite(at)) { firstAt ??= at; latestAt = at }
+    try { at = d.now() } catch {}
     try { await journal({ event, lane: spec.id, stage: context.getStore() ?? null, ...fields, at }) } catch (error) {
       unwritten++
       if (journalError === null) {
@@ -284,9 +280,7 @@ export async function runLoop(spec, deps = {}) {
         turn += 1
         if (!free) rounds[role] += 1
         free = false
-        turns[role] += 1
         if (role === 'lead') feedback = feedback.map((item) => Object.hasOwn(item, 'last') ? { ...item, last: rounds.lead >= (seats.lead.rounds ?? DEFAULT_ROUNDS) } : item)
-        if (role === 'builder' && feedback.some((item) => item.id === 'suite-repair')) suiteRepairs += 1
         const id = `${spec.id}.${role}.${turn}`
         const returnPath = join(spec.taskDir, `${role}-${turn}.json`)
         const request = { role, tier, seat: seats[role], id, returnPath, brief: spec.brief, planPath, feedback, ...(['builder', 'reviewer', 'tech-lead'].includes(role) ? { filesInScope: filesInScope === null ? null : [...filesInScope] } : {}), ...(['reviewer', 'tech-lead'].includes(role) ? { changedPaths, builderReport } : {}) }
@@ -567,10 +561,11 @@ export async function runLoop(spec, deps = {}) {
 
     let proofLines = [PROOF_UNMEASURED]
     let suiteLine = '- Suite: unmeasured.'
+    let builderSummary = '', proofRows = null, suiteResult = null
     const finishReviews = []
     let feedback = isFinish ? [{ id: 'finish-stop', reason: fin.stop.reason, observation: fin.stop.observation }, ...(fin.guidance !== undefined ? [{ id: 'finish-return', guidance: fin.guidance }] : []), ...fin.findings] : []
     let repairing = false, recheck = false, rechecks = 0
-    let committed, rebased, measurements, laneBody, reviewStatus, checkedTree
+    let committed, rebased, measurements, laneBody, reviewStatus, checkedTree, publishedFiles
     const readTree = () => stage('checked-tree', () => callCheck('checked-tree', d.run, { cwd, command: 'git', args: ['write-tree'] }, { command: true }))
     const stageChecked = async () => {
       if (stagePaths.length > 0) {
@@ -585,11 +580,13 @@ export async function runLoop(spec, deps = {}) {
     for (;;) {
       for (;;) {
         proofLines = [PROOF_UNMEASURED]
+        proofRows = null
         if (!recheck) {
           const built = await stage(repairing ? 'suite-repair' : 'build', () => seatTurn('builder', feedback, { singleTurn: repairing && (isFinish || tier === 'mechanical') }))
           repairing = false
           if (built.halt) return built.halt
           if (!isFinish && tier === 'mechanical') subject = built.envelope.details.subject
+          builderSummary = oneLine(built.envelope.details.summary) || oneLine(built.envelope.summary)
           // Every return names its own tests; an earlier turn's names never stand in for this build.
           namedTests = Array.isArray(built.envelope.details.tests) ? built.envelope.details.tests : []
           builderReport = { tests: namedTests, notes: built.envelope.details.notes ?? null }
@@ -615,6 +612,7 @@ export async function runLoop(spec, deps = {}) {
             continue
           }
           if (!proofOK) return stop(proof.reason ?? 'runner-threw', proof)
+          proofRows = rows
           proofLines = rows.map(({ file, title }) => `- proof: ${file} ${JSON.stringify(oneLine(title))}: red on the old source, green on the build`)
         }
 
@@ -670,6 +668,7 @@ export async function runLoop(spec, deps = {}) {
             }
             continue
           }
+          suiteResult = { code: suite.code }
           suiteLine = `- Suite: green; exit ${suite.code}.`
           if (tier === 'judge') {
             const second = await stage('second-review', () => seatTurn('tech-lead', secondFindings, { free: rebaseOnly }))
@@ -730,9 +729,11 @@ export async function runLoop(spec, deps = {}) {
           continue
         }
         if (rerun.status !== 'green') return stop(rerun.reason, rerun)
+        suiteResult = { code: rerun.code, redCode: suite.code }
         suiteLine = `- Suite: green; exit ${rerun.code} (re-run after red; exit ${suite.code}).`
       } else {
         if (suite.status !== 'green') return stop(suite.reason, suite)
+        suiteResult = { code: suite.code }
         suiteLine = `- Suite: green; exit ${suite.code}.`
       }
       break
@@ -754,17 +755,25 @@ export async function runLoop(spec, deps = {}) {
       ...(!isFinish && tier !== 'mechanical' && [...priorFindings, ...(tier === 'judge' ? secondFindings : [])].some((f) => f.severity === 'should-fix')
         ? ['', '## Should-fix', ...[...priorFindings.map((f) => [f, 'reviewer']), ...(tier === 'judge' ? secondFindings.map((f) => [f, 'tech-lead']) : [])].filter(([f]) => f.severity === 'should-fix').map(([f, role]) => `- ${oneLine(f.id)} (${role}) at ${oneLine(f.location)}: ${oneLine(f.summary)}`)] : []),
     ].join('\n')
-    laneBody = () => [body, '', '## Lane',
-      ...(isFinish ? ['- Scope: this finish run only; earlier runs of this lane are unmeasured.'] : []),
-      `- Wall time: ${clockUnreadable || firstAt === undefined ? 'unmeasured' : `${Math.round((latestAt - firstAt) / 1000)} s before publication; publication unmeasured`}.`,
-      `- Rounds: planner ${turns.planner}, builder ${turns.builder}, reviewer ${turns.reviewer}, tech-lead ${turns['tech-lead']}.`,
-      `- Suite repairs: ${suiteRepairs}.`, `- Lead consults: ${turns.lead}.`,
-    ].join('\n')
-
     // The commit names what git reports changed now, never a list the caller wrote before the build.
     const status = await readStatus('paths')
     const files = status.status === 'green' && typeof status.stdout === 'string' ? parseChangedPaths(status.stdout) : null
     if (!files) return stop('paths-unmeasured', status)
+    publishedFiles = files
+    laneBody = () => {
+      const open = [...priorFindings, ...(tier === 'judge' && !isFinish ? secondFindings : [])].filter((f) => f.severity === 'should-fix')
+      return [
+        '## Summary', `Change: ${oneLine(builderSummary) || oneLine(subject)}`, '', `Source: ${oneLine(spec.source)}`,
+        ...(isFinish ? ['', `The lane stopped with reason ${oneLine(fin.stop.reason)}. This report covers only this finish run.`, `${finishReviews.length} ${finishReviews.length === 1 ? 'review' : 'reviews'} in this finish run; final verdict: ${oneLine(finishReviews.at(-1)?.verdict) || 'unmeasured'}.`] : []),
+        '', '## Changes', ...publishedFiles.map((file) => `- ${oneLine(file)}`),
+        '', '## Verification',
+        ...(!isFinish && tier === 'mechanical' ? ['Proof: mechanical lane, not reviewed.']
+          : proofRows ? proofRows.map(({ file, title }) => `- ${oneLine(file)}: ${oneLine(title)} was red on the old source, green on the build.`)
+            : !isFinish && !testsRequired ? ['Proof: no criterion is machine-checked.'] : ['Proof: unmeasured.']),
+        suiteResult ? `Suite passed with exit code ${suiteResult.code}${Object.hasOwn(suiteResult, 'redCode') ? ` on a re-run after a red exit ${suiteResult.redCode}` : ''}.` : 'Suite: unmeasured.',
+        ...(open.length ? ['', '## Open points', ...open.map((f) => `- ${oneLine(f.summary)} (${oneLine(f.location)})`)] : []),
+      ].join('\n')
+    }
     // A protected path first seen after the review-time check (the suite wrote it) never met the raise: never commit it.
     const unraised = protectedPaths(files).filter((path) => !protectedPaths(changedPaths).includes(path))
     if (unraised.length) return stop('dirty-worktree', { paths: unraised })
@@ -807,12 +816,20 @@ export async function runLoop(spec, deps = {}) {
     }
 
     if (rebased.head !== committed.head) {
+      const paths = await stage('published-paths', () => callCheck('published-paths', d.run, { cwd, command: 'git', args: ['diff', '--no-renames', '--name-only', '-z', `${rebased.head}^`, rebased.head] }, { command: true }))
+      const output = paths.status === 'green' && typeof paths.stdout === 'string' ? paths.stdout : null
+      // Reuse the status path validation on the NUL-framed diff names.
+      publishedFiles = output !== null && (output === '' || output.endsWith('\0'))
+        ? parseChangedPaths(output === '' ? '' : `${output.slice(0, -1).split('\0').map((file) => `M  ${file}`).join('\0')}\0`) : null
+      if (publishedFiles === null) return stop('paths-unmeasured', paths)
       if (namedTests.length) {
         const reproven = await stage('proof', () => callCheck('proof', d.proveTests, { cwd, base: `${rebased.head}^`, tests: namedTests }))
         if (reproven.status !== 'green' || reproven.reason !== null || !Array.isArray(reproven.rows) || reproven.rows.length !== namedTests.length || !reproven.rows.every((row) => row?.proven === true)) return stop(reproven.reason ?? 'runner-threw', reproven)
+        proofRows = reproven.rows
       }
       const postSuite = await suiteRun()
       if (postSuite.status !== 'green') return stop(postSuite.reason, postSuite)
+      suiteResult = { code: postSuite.code }
       // The tree the checks passed on must be the commit that is published or reported ready.
       const cleanStatus = await readStatus('post-rebase-clean')
       const cleanPaths = cleanStatus.status === 'green' && typeof cleanStatus.stdout === 'string' ? parseChangedPaths(cleanStatus.stdout) : null

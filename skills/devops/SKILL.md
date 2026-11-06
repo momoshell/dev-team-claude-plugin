@@ -20,6 +20,11 @@ description: >-
 
 ## Pull requests
 
+- For a hand-opened PR, use `## Summary` with a `Change:` line for reviewer
+  context and a `Source:` line, `## Changes` for the changed files,
+  `## Verification` for test and suite results, and `## Open points` for
+  unresolved should-fix findings when present.
+  Crew lanes generate this body themselves. Follow `prose-plain` for PR prose.
 - Push the lane branch: `git push -u origin <lane>`.
 - Write the body to a file and open with an absolute path:
   `gh pr create --head <lane> --title <title> --body-file <absolute-path>`.

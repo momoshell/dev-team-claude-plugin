@@ -88,7 +88,8 @@ export function acpLaunch(spec = {}) {
   return {
     bin,
     args: ['acp', '--model', model, '-c', 'model_reasoning_efforts=' + JSON.stringify({ [model]: effort }), '-c', 'tools.web_search.mode="off"', '-c', 'tools.web_fetch.enabled=false', ...(writes === 'none' ? ['--disable-write'] : [])],
-    env: { ...env, HOME: home, XDG_CONFIG_HOME: config, XDG_DATA_HOME: data, CLAUDE_CONFIG_DIR: claude, CODEX_HOME: codex, MUSE_EXPERIMENTAL_ACP: '1', MUSE_ENABLE_WEB_TOOLS: '0', MUSE_WEB_SEARCH_MODE: 'off', MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL: '1', CREW_FFF: servers.some((server) => server.name === 'fff') ? '1' : '0' },
+    // HOME stays the operator's: Muse finds the account login through it, and a seat with another HOME is logged out.
+    env: { ...env, XDG_CONFIG_HOME: config, XDG_DATA_HOME: data, CLAUDE_CONFIG_DIR: claude, CODEX_HOME: codex, MUSE_EXPERIMENTAL_ACP: '1', MUSE_ENABLE_WEB_TOOLS: '0', MUSE_WEB_SEARCH_MODE: 'off', MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL: '1', CREW_FFF: servers.some((server) => server.name === 'fff') ? '1' : '0' },
     mode: 'onRequest',
     sessionParams: { cwd, mcpServers: servers.map((server) => ({ name: server.name, command: server.command.bin, args: [...server.command.args], env: Object.entries(builtServers.has(server) ? server.env : {}).map(([name, value]) => ({ name, value })) })), ...(directories.length ? { additionalDirectories: directories } : {}) },
   }

@@ -276,7 +276,8 @@ test('a muse launch prepares an isolated home that links only the operator auth 
   const taskDir = scratchDir('muse-direct-')
   const launch = muse.acpLaunch({ bin: BIN, taskDir, env: { HOME: operator, XDG_CONFIG_HOME: config, XDG_DATA_HOME: operator, CLAUDE_CONFIG_DIR: operator, CODEX_HOME: operator } })
   const home = join(taskDir, 'muse-home')
-  assert.equal(launch.env.HOME, home)
+  // Muse finds the account login through HOME, so only the config and data dirs move.
+  assert.equal(launch.env.HOME, operator)
   assert.deepEqual(readdirSync(home).sort(), ['claude', 'codex', 'config', 'data'])
   for (const key of ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME']) {
     assert.ok(relative(home, launch.env[key]) && !relative(home, launch.env[key]).startsWith('..'), key)
@@ -299,8 +300,8 @@ test('a muse launch prepares an isolated home that links only the operator auth 
   await use('pi-turn', { agent: 'muse', model: 'meta/muse-spark-1.3' }, (run) => {
     assert.equal(run.error, undefined)
     const env = run.launches[0][2].env
-    assert.equal(basename(env.HOME), 'muse-home')
-    for (const key of ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME']) assert.ok(relative(env.HOME, env[key]) && !relative(env.HOME, env[key]).startsWith('..'), key)
+    assert.notEqual(basename(env.HOME ?? ''), 'muse-home')
+    for (const key of ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME']) assert.equal(basename(dirname(env[key])), 'muse-home', key)
   })
 })
 

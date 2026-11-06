@@ -349,7 +349,7 @@ test('a stopped lane with a build is finished: finish.json carries the stop, fin
     assert.equal(spec.shape, 'finish')
     assert.equal(spec.cwd, f.cwd)
     assert.deepEqual(spec.finish, {
-      planPath: '/t/plan.md', subject: 'fix(crew): planned lane', filesInScope: ['src/widget.svelte'], planSummary: 'planned',
+      planPath: '/t/plan.md', subject: 'fix(crew): planned lane', filesInScope: ['src/widget.svelte'],
       stop: STOP, findings: [FINDING], turnOffset: 3,
     })
     assert.equal(r.spawned.length, 1)

@@ -179,7 +179,6 @@ export async function runLoop(spec, deps = {}) {
   let repaired = false
   let planPath = isFinish ? fin.planPath : null
   let subject = isFinish ? fin.subject : null
-  let planSummary = isFinish ? fin.planSummary : null
   const failures = []
   const repeatsFailure = (failure) => {
     if (failures.some((previous) => isDeepStrictEqual(previous, failure))) return true
@@ -257,8 +256,7 @@ export async function runLoop(spec, deps = {}) {
       await emit('stage-end', { outcome })
     }
   })
-  const acceptPlan = async ({ details, summary }) => {
-    planSummary = summary
+  const acceptPlan = async (details) => {
     planPath = resolve(spec.taskDir, details.plan_path)
     filesInScope = details.files_in_scope ?? null
     subject = details.subject
@@ -463,7 +461,7 @@ export async function runLoop(spec, deps = {}) {
   const replan = async (envelope, lead) => {
     const planned = await stage('replan', () => seatTurn('planner', [{ id: 'plan-gap', role: 'builder', envelope, ...(lead ? { lead } : {}) }]))
     if (planned.halt) return planned
-    const halt = await acceptPlan(planned.envelope)
+    const halt = await acceptPlan(planned.envelope.details)
     return halt ? { halt } : {}
   }
 
@@ -479,7 +477,7 @@ export async function runLoop(spec, deps = {}) {
     repaired = false
     const planned = await stage('plan', () => seatTurn('planner', [{ id: 'mechanical-restart', reason, ...detail }]))
     if (planned.halt) return planned
-    const halt = await acceptPlan(planned.envelope)
+    const halt = await acceptPlan(planned.envelope.details)
     return halt ? { halt } : {}
   }
 
@@ -518,7 +516,7 @@ export async function runLoop(spec, deps = {}) {
     const planned = isFinish || tier === 'mechanical' ? null : await stage('plan', () => seatTurn('planner'))
     if (planned?.halt) return planned.halt
     if (planned) {
-      const halt = await acceptPlan(planned.envelope)
+      const halt = await acceptPlan(planned.envelope.details)
       if (halt) return halt
     } else if (isFinish) {
       // A --return pass counts the reviews the finish run already spent: it never grants new rounds.
@@ -785,9 +783,9 @@ export async function runLoop(spec, deps = {}) {
         ?? /^\s*(?:>\s*)?issue title:\s*(.+)$/im.exec(spec.brief)?.[1])
       const ask = !issue ? briefAsk(spec.brief) : ''
       return [
-        '## Summary', `Purpose: ${oneLine(planSummary).replace(/^(?:the plan|plan)\s+/i, '') || 'unmeasured.'}`,
+        '## Summary', `Purpose: ${builderSummary || oneLine(subject) || 'unmeasured.'}`,
         ...(issue ? [`Closes issue ${issue[1]}${title ? `: ${oneLine(title)}` : ''}`] : ask ? [`Operator request: ${ask}`] : []),
-        `How: ${oneLine(builderSummary) || oneLine(subject)}`, '', `Source: ${oneLine(spec.source)}`,
+        '', `Source: ${oneLine(spec.source)}`,
         ...(isFinish ? ['', `The lane stopped with reason ${oneLine(fin.stop.reason)}. This report covers only this finish run.`, `${finishReviews.length} ${finishReviews.length === 1 ? 'review' : 'reviews'} in this finish run; final verdict: ${oneLine(finishReviews.at(-1)?.verdict) || 'unmeasured'}.`] : []),
         '', '## Changes', ...publishedFiles.map((file) => `- ${oneLine(file)}`),
         '', '## Verification',

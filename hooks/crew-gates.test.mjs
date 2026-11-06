@@ -120,3 +120,69 @@ test('PreToolUse allows Claude Code auto-memory writes beside the transcripts an
   for (const name of ['pointer.jsonl', 'up/s.jsonl', 'ghost.jsonl', 'ghostdir/s.jsonl']) denied(invoke('Write', { file_path: join(memory, name) }))
   assert.equal(invoke('Write', { file_path: join(memory, 'new-note.md') }), '')
 })
+
+test('PreToolUse denies writes landing in protected roots through symlinked dirs and dotdot segments', () => {
+  const { home, checkout, env } = fixture()
+  const projects = join(home, '.claude/projects'), memory = join(projects, 'p/memory')
+  const elsewhere = join(home, 'elsewhere')
+  mkdirSync(memory, { recursive: true }); mkdirSync(elsewhere)
+  symlinkSync(join(projects, 'p'), join(memory, 'up'))
+  symlinkSync(join(projects, 'p/gone'), join(memory, 'ghostdir'))
+  mkdirSync(join(projects, 'q/a/b/c'), { recursive: true }); mkdirSync(join(projects, 'q/memory'))
+  symlinkSync(join(projects, 'q/a/b/c'), join(memory, 'link'))
+  symlinkSync(join(projects, 'q/a/b'), join(memory, 'link2'))
+  symlinkSync(elsewhere, join(memory, 'via'))
+  symlinkSync('../.claude/projects/p/evil2.jsonl', join(elsewhere, 'relghost2'))
+  symlinkSync(join(projects, 'p/other.jsonl'), join(elsewhere, 'transcript'))
+  symlinkSync(join(home, '.crew/briefs/started/lane.md'), join(elsewhere, 'snapshot'))
+  writeFileSync(join(elsewhere, 'outside-file'), 'x')
+  writeFileSync(join(projects, 'p/logical.jsonl'), 'x')
+  symlinkSync(join(elsewhere, 'outside-file'), join(projects, 'p/s.jsonl'))
+  const cases = [
+    ...['Write', 'Edit'].flatMap(tool => [
+      [tool, { file_path: `${memory}/up/../s.jsonl` }],
+      [tool, { file_path: `${memory}/ghostdir/../new.jsonl` }],
+      [tool, { file_path: `${memory}/via/relghost2` }],
+      [tool, { file_path: `${memory}/link/../../../memory/note.md` }],
+      [tool, { file_path: `${memory}/link2/../../../q/memory/note.md` }],
+      [tool, { file_path: `${projects}/p/./memory/link/../../../memory/note.md` }],
+    ]),
+    ['Write', { file_path: join(elsewhere, 'transcript') }],
+    ['Edit', { file_path: join(elsewhere, 'snapshot') }],
+    ...['rm -f', 'unlink'].map(command => ['Bash', { command: `${command} ${projects}/p/s.jsonl` }]),
+    ['Bash', { command: `echo x > ${memory}/up/../s.jsonl` }],
+    ['Bash', { command: `echo x > ${memory}/ghostdir/../new.jsonl` }],
+    ['Bash', { command: `echo x > ${memory}/link/../../../memory/note.md` }],
+    ['Bash', { command: `echo x > ${memory}/link2/../../../q/memory/note.md` }],
+    ['Bash', { command: `cd ${memory}/link && echo x > ../../../memory/note.md` }],
+    ['Bash', { command: `cd ${memory}/up && echo x > ../memory/evil.md` }],
+    ['Bash', { command: `cd ${memory}/up/.. && echo x > ../logical.jsonl` }],
+    ['Bash', { command: `cd ${memory} && cd up && echo x > ../memory/evil.md` }],
+  ]
+  for (const [tool_name, tool_input] of cases) {
+    const output = run('PreToolUse', { cwd: checkout, tool_name, tool_input }, env)
+    assert.notEqual(output, '', JSON.stringify([tool_name, tool_input]))
+    denied(output)
+  }
+})
+
+test('PreToolUse allows writes landing in the same project memory through a dangling dir and dotdot segment', () => {
+  const { home, checkout, env } = fixture()
+  const projects = join(home, '.claude/projects'), memory = join(projects, 'p/memory')
+  mkdirSync(memory, { recursive: true })
+  symlinkSync(join(projects, 'p/gone'), join(projects, 'ghostp'))
+  mkdirSync(join(projects, 'q/memory'), { recursive: true })
+  symlinkSync(join(projects, 'q/memory/back'), join(memory, 'roundtrip'))
+  symlinkSync(memory, join(projects, 'q/memory/back'))
+  writeFileSync(join(home, 'outside-file'), 'x')
+  symlinkSync(join(home, 'outside-file'), join(memory, 'outside-link'))
+  for (const [tool_name, tool_input] of [
+    ['Write', { file_path: `${projects}/ghostp/../memory/note.md` }],
+    ['Edit', { file_path: `${projects}/ghostp/../memory/note.md` }],
+    ['Bash', { command: `echo x > ${projects}/ghostp/../memory/note.md` }],
+    ['Write', { file_path: `${memory}/roundtrip/note.md` }],
+    ['Write', { file_path: `${projects}/q/memory/../../p/memory/note.md` }],
+    ['Write', { file_path: `${memory}/new-note.md` }],
+    ['Bash', { command: `unlink ${memory}/outside-link` }],
+  ]) assert.equal(run('PreToolUse', { cwd: checkout, tool_name, tool_input }, env), '', JSON.stringify([tool_name, tool_input]))
+})

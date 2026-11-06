@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { scratchDir } from '../test/helpers.mjs'
 import { createHash } from 'node:crypto'
@@ -11,6 +11,7 @@ import { LOOP_REASONS } from './loop.mjs'
 import { validateEnvelope } from './protocols.mjs'
 import { recordPr } from './record-pr.mjs'
 import { projectHash } from './onboard.mjs'
+import { laneRows } from './lanes.mjs'
 
 const FINDING = { id: 'R1', severity: 'must-fix', location: 'lib.mjs:1', summary: 'Fix the defect' }
 const MUTATION = { check: 'A1', file: 'lib.mjs', find: 'old', replace: 'new' }
@@ -578,6 +579,282 @@ test('a launch that fails releases its claim, so a retry after the fix spawns', 
   } finally { cleanup(f) }
 })
 
+test('bare crew finish reports a stopped lane without spawning or writing anything', async () => {
+  for (const stage of ['review', 'plan', 'baseline', 'none']) {
+    const f = stage === 'none' ? fixture({ rows: [{ event: 'run-start' }, builderRow] }) : fixture({ stage })
+    try {
+      writeFileSync(join(f.taskDir, 'run.pid'), '111\n')
+      writeFileSync(join(f.cwd, 'change'), 'keep')
+      const before = Object.fromEntries(readdirSync(f.taskDir).map((name) => [name, readFileSync(join(f.taskDir, name), 'utf8')]))
+      const logs = [], spawned = [], git = [], errors = []
+      const stderr = process.stderr.write
+      process.stderr.write = (chunk) => { errors.push(String(chunk)); return true }
+      let code
+      try { code = await main(['lane9'], { crewRoot: f.root, alive: () => true, log: (line) => logs.push(line), spawnDetached: () => { spawned.push(true); return 4242 }, git: (...args) => { git.push(args); return { status: 'green', stdout: '' } } }) } finally { process.stderr.write = stderr }
+      assert.equal(code, stage === 'review' ? 0 : 1, stage)
+      if (stage === 'review') assert.match(logs.join('\n'), /lane=lane9.*stop=round-bound/)
+      else assert.match(errors.join(''), /finish-premise/)
+      assert.deepEqual(Object.fromEntries(readdirSync(f.taskDir).map((name) => [name, readFileSync(join(f.taskDir, name), 'utf8')])), before, stage)
+      assert.equal(readFileSync(join(f.cwd, 'change'), 'utf8'), 'keep')
+      assert.deepEqual(spawned, [])
+      assert.equal(git.some(([, args]) => args[0] === 'reset'), false)
+    } finally { cleanup(f) }
+  }
+})
+
+test('bare crew finish reports a finish-ready lane without spawning or writing anything', async () => {
+  const r = ready()
+  try {
+    writeFileSync(join(r.f.taskDir, 'run.pid'), '111\n')
+    writeFileSync(join(r.f.cwd, 'change'), 'keep')
+    const before = Object.fromEntries(readdirSync(r.f.taskDir).map((name) => [name, readFileSync(join(r.f.taskDir, name), 'utf8')]))
+    const logs = [], git = []
+    assert.equal(await main(['lane9'], { ...r.deps, crewRoot: r.f.root, log: (line) => logs.push(line), git: (...args) => { git.push(args); return { status: 'green', stdout: '' } } }), 0)
+    assert.match(logs.join('\n'), /lane=lane9.*stop=finish-ready/)
+    assert.deepEqual(Object.fromEntries(readdirSync(r.f.taskDir).map((name) => [name, readFileSync(join(r.f.taskDir, name), 'utf8')])), before)
+    assert.equal(readFileSync(join(r.f.cwd, 'change'), 'utf8'), 'keep')
+    assert.deepEqual(r.spawned, [])
+    assert.equal(git.some(([, args]) => args[0] === 'reset'), false)
+  } finally { cleanup(r.f) }
+})
+
+test('--return launches a first finish pass on a lane stopped lead-escalated, carrying the guidance and the escalation stop', async () => {
+  for (const reason of ['lead-escalated', 'seat-escalated']) for (const status of ['done', 'insufficient', 'escalate']) {
+    const parsed = { ...BUILDER, status, details: { ...BUILDER.details, question: 'Which approach?' } }
+    const stop = { event: 'verdict', stage: 'build', status: 'stopped', reason, observation: { question: 'Which approach?' } }
+    const f = fixture({ rows: [{ event: 'run-start' }, { ...builderRow, parsed }, stop] })
+    try {
+      const file = join(f.base, 'guidance')
+      writeFileSync(file, 'Use approach A')
+      const spawned = []
+      const result = await reasonOf(decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps: { log: () => {}, spawnDetached: (...args) => { spawned.push(args); return 4242 } } }))
+      assert.equal(result, null, `${reason} ${status}`)
+      const spec = JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8'))
+      assert.equal(spec.shape, 'finish')
+      assert.deepEqual([spec.finish.guidance, spec.finish.stop, spec.finish.subject, spec.finish.filesInScope, spec.finish.priorReviewRounds], ['Use approach A', { reason, observation: stop.observation }, PLANNER.details.subject, PLANNER.details.files_in_scope, 0])
+      assert.equal(spawned.length, 1)
+      const rows = readFileSync(join(f.taskDir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+      assert.deepEqual(rows.filter((row) => row.event === 'finish-decision'), [{ event: 'finish-decision', lane: 'lane9', choice: 'return', launchedAt: 3, notesSha256: createHash('sha256').update('Use approach A').digest('hex') }])
+    } finally { cleanup(f) }
+  }
+})
+
+test('--return on an escalated lane with no schema-valid builder envelope is refused as finish-no-build and writes nothing', async () => {
+  for (const row of [null, { ...builderRow, defects: ['bad'] }, { ...builderRow, parsed: { ...BUILDER, id: 'other' } }, { ...builderRow, parsed: { ...BUILDER, details: {} } }, { ...builderRow, error: 'bad' }]) {
+    const f = fixture({ rows: [{ event: 'run-start' }, ...(row ? [row] : []), { event: 'verdict', stage: 'build', status: 'stopped', reason: 'lead-escalated' }] })
+    try {
+      const file = join(f.base, 'guidance')
+      writeFileSync(file, 'answer')
+      const before = Object.fromEntries(readdirSync(f.taskDir).map((name) => [name, readFileSync(join(f.taskDir, name), 'utf8')]))
+      const spawned = []
+      assert.equal(await reasonOf(decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps: { log: () => {}, spawnDetached: () => { spawned.push(true); return 4242 } } })), 'finish-no-build')
+      assert.deepEqual(Object.fromEntries(readdirSync(f.taskDir).map((name) => [name, readFileSync(join(f.taskDir, name), 'utf8')])), before)
+      assert.deepEqual(spawned, [])
+    } finally { cleanup(f) }
+  }
+})
+
+test('a second --return on an escalated lane is refused as finish-decided and spawns nothing', async () => {
+  const f = fixture({ rows: [{ event: 'run-start' }, builderRow, { event: 'verdict', stage: 'build', status: 'stopped', reason: 'lead-escalated' }] })
+  try {
+    const file = join(f.base, 'guidance')
+    writeFileSync(file, 'answer')
+    const spawned = []
+    const decide = () => decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps: { alive: () => true, log: () => {}, spawnDetached: () => { spawned.push(true); return 4242 } } })
+    assert.equal(await reasonOf(decide()), null)
+    assert.equal(await reasonOf(decide()), 'finish-decided')
+    assert.equal(spawned.length, 1)
+  } finally { cleanup(f) }
+  const failed = fixture({ rows: [{ event: 'run-start' }, builderRow, { event: 'verdict', stage: 'build', status: 'stopped', reason: 'lead-escalated' }] })
+  try {
+    const file = join(failed.base, 'guidance'), spawned = []
+    writeFileSync(file, 'answer')
+    const deps = { alive: () => true, log: () => {}, spawnDetached: () => { spawned.push(true); return 4242 }, appendFileSync: (path, text, ...args) => { if (text.includes('finish-decision')) throw new Error('EPERM'); appendFileSync(path, text, ...args) } }
+    const decide = () => decideFinish({ lane: 'lane9', root: failed.root, choice: 'return', file, deps })
+    await assert.rejects(decide(), /EPERM/)
+    assert.equal(await reasonOf(decide()), 'finish-decided')
+    assert.equal(spawned.length, 1)
+  } finally { cleanup(failed) }
+})
+
+test('a returned finish pass that escalates carries its spent reviews into the next --return', async () => {
+  const review = [{ event: 'envelope', role: 'reviewer' }, { event: 'verdict', status: 'reviewed' }]
+  const stop = { event: 'verdict', stage: 'review', status: 'stopped', reason: 'seat-escalated' }
+  for (const [history, recovered] of [
+    [[{ event: 'finish-ready', reviewRounds: 1 }, { event: 'finish-decision', choice: 'return' }, ...review], false],
+    [[...review, stop, { event: 'finish-decision', choice: 'return' }, ...review], false],
+    [[{ event: 'envelope', role: 'reviewer' }, stop, { event: 'finish-decision', choice: 'return' }, ...review], false],
+    [[...review, ...review], true],
+  ]) {
+    const original = [{ event: 'run-start' }, builderRow, ...review, ...review, ...review]
+    const f = fixture({ rows: [...original, ...(recovered ? [] : [stop]), { event: 'finish-decision', choice: 'return' }, ...history, stop] })
+    try {
+      if (recovered) writeFileSync(join(f.taskDir, 'finish.json'), JSON.stringify({ finish: { stop: { reason: 'run-died' }, recoveredStopAt: original.length } }))
+      const file = join(f.base, 'guidance')
+      writeFileSync(file, 'answer')
+      const spawned = []
+      assert.equal(await reasonOf(decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps: { log: () => {}, spawnDetached: () => { spawned.push(true); return 4242 } } })), null)
+      const finish = JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish
+      assert.equal(finish.priorReviewRounds, 2)
+      if (recovered) assert.equal(finish.recoveredStopAt, original.length)
+      assert.equal(spawned.length, 1)
+    } finally { cleanup(f) }
+  }
+})
+
+test('an escalated lane with three spent finish reviews is refused finish-rounds-spent', async () => {
+  const review = [{ event: 'envelope', role: 'reviewer' }, { event: 'verdict', status: 'reviewed' }]
+  const stop = { event: 'verdict', stage: 'review', status: 'stopped', reason: 'seat-escalated' }
+  for (const history of [
+    [{ event: 'finish-ready', reviewRounds: 2 }, { event: 'finish-decision', choice: 'return' }, ...review],
+    [...review, stop, { event: 'finish-decision', choice: 'return' }, ...review, ...review],
+  ]) {
+    const f = fixture({ rows: [{ event: 'run-start' }, builderRow, stop, { event: 'finish-decision', choice: 'return' }, ...history, stop] })
+    try {
+      const file = join(f.base, 'guidance')
+      writeFileSync(file, 'answer')
+      const before = Object.fromEntries(readdirSync(f.taskDir).map((name) => [name, readFileSync(join(f.taskDir, name), 'utf8')]))
+      const spawned = []
+      assert.equal(await reasonOf(decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps: { log: () => {}, spawnDetached: () => { spawned.push(true); return 4242 } } })), 'finish-rounds-spent')
+      assert.deepEqual(Object.fromEntries(readdirSync(f.taskDir).map((name) => [name, readFileSync(join(f.taskDir, name), 'utf8')])), before)
+      assert.deepEqual(spawned, [])
+    } finally { cleanup(f) }
+  }
+  for (const mode of ['corrupt', 'invalid', 'denied']) {
+    const f = fixture({ rows: [{ event: 'run-start' }, builderRow, ...review, ...review, ...review, stop] })
+    try {
+      const file = join(f.base, 'guidance'), spec = join(f.taskDir, 'finish.json'), spawned = []
+      writeFileSync(file, 'answer')
+      writeFileSync(spec, mode === 'corrupt' ? '{' : mode === 'invalid' ? '{"finish":{"recoveredStopAt":-1}}' : '{"finish":{"recoveredStopAt":2}}')
+      const before = Object.fromEntries(readdirSync(f.taskDir).map((name) => [name, readFileSync(join(f.taskDir, name), 'utf8')]))
+      const deps = { log: () => {}, spawnDetached: () => { spawned.push(true); return 4242 }, readFileSync: (path, ...args) => { if (mode === 'denied' && path === spec) throw Object.assign(new Error('denied'), { code: 'EPERM' }); return readFileSync(path, ...args) } }
+      assert.equal(await reasonOf(decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps })), 'finish-unreadable', mode)
+      assert.deepEqual(Object.fromEntries(readdirSync(f.taskDir).map((name) => [name, readFileSync(join(f.taskDir, name), 'utf8')])), before)
+      assert.deepEqual(spawned, [])
+    } finally { cleanup(f) }
+  }
+})
+
+test('a provably dead returned finish pass is relaunched by --return as run-died, keeping its spent reviews', async () => {
+  const review = { event: 'verdict', status: 'reviewed' }
+  const stop = { event: 'verdict', stage: 'build', status: 'stopped', reason: 'lead-escalated' }
+  for (const [originalStop, reviews, recovered] of [[true, 1, false], [true, 3, false], [false, 0, false], [false, 2, true]]) {
+    const original = [{ event: 'stage-start', stage: 'build' }, builderRow, review, review, review]
+    const rows = [...original, ...(originalStop || recovered ? [ ...(originalStop ? [stop] : []), { event: 'finish-decision', choice: 'return' }] : []), ...Array(reviews).fill(review), { event: 'stage-start', stage: 'review' }]
+    const f = fixture({ rows })
+    try {
+      const file = join(f.base, 'guidance'), spawned = []
+      if (recovered) writeFileSync(join(f.taskDir, 'finish.json'), JSON.stringify({ finish: { stop: { reason: 'run-died' }, recoveredStopAt: original.length } }))
+      writeFileSync(file, 'answer')
+      writeFileSync(join(f.taskDir, 'run.pid'), '123\n')
+      const deps = { alive: (pid) => pid !== 123, log: () => {}, spawnDetached: () => { spawned.push(true); return 4242 } }
+      const reason = await reasonOf(decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps }))
+      assert.equal(reason, reviews === 3 ? 'finish-rounds-spent' : null)
+      assert.equal(spawned.length, reviews === 3 ? 0 : 1)
+      if (reviews !== 3) {
+        const finish = JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish
+        assert.deepEqual(finish.stop, { reason: 'run-died', observation: { pid: 123 } })
+        assert.equal(finish.priorReviewRounds, reviews)
+        assert.equal(finish.recoveredStopAt, recovered ? original.length : rows.length)
+        assert.equal(finish.guidance, 'answer')
+      }
+    } finally { cleanup(f) }
+  }
+  for (const mode of ['liveness-changed', 'spawn-failed']) {
+    const f = fixture({ rows: [{ event: 'stage-start', stage: 'build' }, builderRow, stop, { event: 'finish-decision', choice: 'return' }, { event: 'stage-start', stage: 'review' }] })
+    try {
+      const file = join(f.base, 'guidance'), pid = join(f.taskDir, 'run.pid')
+      writeFileSync(file, 'answer')
+      writeFileSync(pid, '123\n')
+      let probes = 0, spawned = 0
+      const deps = { alive: () => mode === 'liveness-changed' && ++probes > 1 ? null : false, log: () => {}, spawnDetached: () => { spawned++; throw new Error('spawn failed') } }
+      const decide = () => decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps })
+      if (mode === 'liveness-changed') assert.equal(await reasonOf(decide()), 'finish-running')
+      else await assert.rejects(decide(), /spawn failed/)
+      assert.equal(spawned, mode === 'spawn-failed' ? 1 : 0)
+      assert.equal(readFileSync(pid, 'utf8'), '123\n')
+    } finally { cleanup(f) }
+  }
+})
+
+test('a returned finish pass from finish-ready that dies is relaunched by --return', async () => {
+  const rows = [{ event: 'run-start' }, builderRow, { event: 'verdict', stage: 'build', status: 'stopped', reason: 'round-bound' }, { event: 'finish-ready', reviewRounds: 2 }, { event: 'finish-decision', choice: 'return' }, { event: 'stage-start', stage: 'build' }]
+  const f = fixture({ rows })
+  try {
+    const file = join(f.base, 'guidance'), spawned = []
+    writeFileSync(file, 'answer')
+    writeFileSync(join(f.taskDir, 'run.pid'), '123\n')
+    const deps = { alive: (pid) => pid !== 123, log: () => {}, spawnDetached: () => { spawned.push(true); return 4242 } }
+    assert.equal(await reasonOf(decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps })), null)
+    const finish = JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish
+    assert.deepEqual([finish.stop, finish.priorReviewRounds, finish.recoveredStopAt], [{ reason: 'run-died', observation: { pid: 123 } }, 2, rows.length])
+    assert.equal(spawned.length, 1)
+  } finally { cleanup(f) }
+})
+
+test('--return launches a finish pass on a non-escalated stop such as round-bound', async () => {
+  const f = fixture()
+  try {
+    const file = join(f.base, 'guidance'), spawned = []
+    writeFileSync(file, 'fix it')
+    const deps = { alive: () => true, log: () => {}, spawnDetached: () => { spawned.push(true); return 4242 } }
+    assert.equal(await reasonOf(decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps })), null)
+    const finish = JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish
+    assert.deepEqual([finish.stop, finish.guidance, finish.priorReviewRounds], [STOP, 'fix it', 0])
+    assert.equal(spawned.length, 1)
+  } finally { cleanup(f) }
+})
+
+test('--return refuses finish-decided while the returned run is alive or its pid is unproven', async () => {
+  for (const alive of [true, null, 'missing']) {
+    const f = fixture({ rows: [{ event: 'run-start' }, builderRow, { event: 'verdict', stage: 'build', status: 'stopped', reason: 'round-bound' }, { event: 'finish-decision', choice: 'return' }, { event: 'stage-start', stage: 'build' }] })
+    try {
+      const file = join(f.base, 'guidance'), spawned = []
+      writeFileSync(file, 'answer')
+      if (alive !== 'missing') writeFileSync(join(f.taskDir, 'run.pid'), '123\n')
+      const deps = { alive: () => alive, log: () => {}, spawnDetached: () => { spawned.push(true); return 4242 } }
+      assert.equal(await reasonOf(decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps })), 'finish-decided', String(alive))
+      assert.deepEqual(spawned, [])
+    } finally { cleanup(f) }
+  }
+})
+
+test('a return decision recorded after its child ends belongs to the original stop', async () => {
+  for (const initial of ['stop', 'ready']) for (const terminal of ['ready', 'stopped']) {
+    const r = initial === 'ready' ? ready() : null
+    const f = r?.f ?? fixture({ rows: [{ event: 'run-start' }, builderRow, { event: 'verdict', stage: 'build', status: 'stopped', reason: 'lead-escalated' }] })
+    try {
+      writeFileSync(join(f.root, 'dt-lane9', 'lane9', 'crew.json'), JSON.stringify({ members: { planner: { agent: 'pi' } } }))
+      const file = join(f.base, 'guidance'), journal = join(f.taskDir, 'journal.jsonl')
+      writeFileSync(file, 'answer')
+      const child = terminal === 'ready'
+        ? { event: 'finish-ready', head: 'b'.repeat(40), subject: 'fix: child', body: 'measured', reviewRounds: 1 }
+        : { event: 'verdict', status: 'stopped', stage: 'review', reason: 'seat-escalated' }
+      const deps = { ...r?.deps, alive: () => false, log: () => {}, spawnDetached: () => {
+        appendFileSync(journal, `${JSON.stringify({ event: 'stage-start', stage: 'build' })}\n${JSON.stringify(child)}\n`)
+        return 4242
+      } }
+      assert.equal(await reasonOf(decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps })), null, initial)
+      const listed = laneRows({ root: f.root, archiveRoot: join(f.base, 'archive'), alive: () => false })[0]
+      const logs = []
+      const code = await main(['lane9'], { ...deps, crewRoot: f.root, log: (line) => logs.push(line) })
+      if (terminal === 'ready') {
+        const published = []
+        assert.equal(await reasonOf(decideFinish({ lane: 'lane9', root: f.root, choice: 'accept', deps: { ...deps, run: async () => ({ status: 'green', stdout: 'b'.repeat(40) }), openPullRequest: async () => { published.push(true); return { status: 'green', pr: PR } } } })), null)
+        assert.equal(published.length, 1)
+      } else if (initial === 'stop') {
+        let spawned = 0
+        assert.equal(await reasonOf(decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps: { ...deps, spawnDetached: () => { spawned++; return 4243 } } })), null)
+        assert.equal(spawned, 1)
+        assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.stop.reason, 'seat-escalated')
+      }
+      assert.deepEqual([listed.status, listed.reason], terminal === 'ready' ? ['ready-for-operator', null] : ['stopped', 'seat-escalated'])
+      assert.equal(code, 0)
+      assert.match(logs.join('\n'), terminal === 'ready' ? /stop=finish-ready/ : /stop=seat-escalated/)
+    } finally { cleanup(f) }
+  }
+})
+
 // ---- decisions on a ready lane ----
 const PR = { number: 73, url: 'https://github.com/o/r/pull/73' }
 function ready(extra = [], { before = [], legacy = false, spec = {} } = {}) {
@@ -969,7 +1246,7 @@ test('--return on a finish run that spent its three review rounds is refused as 
 })
 
 // MUTATION: skip the HEAD equality check and a moved checkout is reset off its own build.
-test('a committed, unpublished build at HEAD on the lane branch is uncommitted and finished; a moved, pushed, unprobed or other-branch checkout is still finish-committed', () => {
+test('a committed, unpublished build at HEAD on the lane branch is uncommitted and finished; a moved, pushed, unprobed or other-branch checkout is still finish-committed', async () => {
   const head = 'a'.repeat(40)
   for (const mode of ['success', 'retry', 'moved', 'pushed', 'head-red', 'remote-red', 'reset-red', 'other-branch', 'detached']) {
     const f = fixture({ rows: [{ event: 'run-start' }, builderRow, { event: 'commit', head }, { event: 'verdict', stage: 'rebase', status: 'stopped', reason: 'rebase-conflict' }] })
@@ -1002,6 +1279,23 @@ test('a committed, unpublished build at HEAD on the lane branch is uncommitted a
         assert.equal(readFileSync(journal, 'utf8'), original, mode)
         assert.equal(readdirSync(f.taskDir).some((name) => name.endsWith('.claim')), false, mode)
       }
+    } finally { cleanup(f) }
+  }
+  for (const mode of ['success', 'moved']) {
+    const f = fixture({ rows: [{ event: 'run-start' }, builderRow, { event: 'commit', head }, { event: 'verdict', stage: 'rebase', status: 'stopped', reason: 'lead-escalated' }] })
+    try {
+      const file = join(f.base, 'guidance'), calls = [], spawned = []
+      writeFileSync(file, 'answer')
+      const deps = { log: () => {}, spawnDetached: () => { spawned.push(true); return 4242 }, git: (_cwd, args) => {
+        calls.push(args)
+        return { status: 'green', stdout: args[0] === 'rev-parse' ? (mode === 'moved' ? 'b'.repeat(40) : head) : args[0] === 'symbolic-ref' ? 'lane9' : '' }
+      } }
+      const reason = await reasonOf(decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps }))
+      assert.equal(reason, mode === 'success' ? null : 'finish-committed')
+      assert.equal(spawned.length, mode === 'success' ? 1 : 0)
+      assert.equal(calls.filter((args) => args[0] === 'reset').length, mode === 'success' ? 1 : 0)
+      const rows = readFileSync(join(f.taskDir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+      assert.equal(rows.filter((row) => row.event === 'finish-uncommit').length, mode === 'success' ? 1 : 0)
     } finally { cleanup(f) }
   }
   // A prior finish can complete while this caller is probing the remote, before it reclaims the old stop.

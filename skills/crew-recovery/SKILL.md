@@ -24,8 +24,12 @@ Read first, decide second, remove last.
 
 ## Finish it
 
-`crew finish <lane>` re-enters a stopped lane in its own worktree and rebases
-onto the current base, then runs builder triage, proof of the builder's named
+`crew finish <lane>` reports the stop or ready state without changing the lane.
+`crew finish <lane> --return <file>` starts a finish pass on any finishable stop,
+including an escalation or a provably dead run, with the file as builder guidance.
+On an escalation, the file answers the operator question. The pass re-enters the
+lane in its own worktree and rebases onto the current base,
+then runs builder triage, proof of the builder's named
 tests, review, suite, commit and rebase. A base conflict stops before any seat
 with the build left uncommitted. A mechanical lane is finished on its brief; one
 whose diff reaches a protected path stops `raise-needs-plan`, and you restart it
@@ -42,10 +46,12 @@ When that run is ready, decide once:
 
 It refuses, writing nothing, when the worktree is gone, the lane never reached a
 build, a run is still active, the lane is already published or committed, or
-there is no schema-valid done or insufficient builder result (including absent or
-defective returns). A decision is refused when the last run did
-not end ready, the lane already has one, or (for `--accept`) the checkout is no
-longer the head the run measured. Read the refusal; it names the cause.
+there is no schema-valid builder result (including absent or defective returns).
+A committed, unpublished build at HEAD on the lane branch is uncommitted before
+launch when its remote branch is absent. `--accept` and `--abandon` require a
+ready run. A decision is refused if the stop or ready run already has one, or
+(for `--accept`) the checkout is no longer the head the run measured. A provably
+dead open run is a new stop. Read the refusal; it names the cause.
 
 ## Close it out
 

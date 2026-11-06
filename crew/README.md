@@ -13,7 +13,7 @@ crew finish <lane>                                   # report a stopped or ready
 crew finish <lane> --accept [--notes <file>] | --return <file> | --abandon
 crew record-pr <lane> --pr <url>                     # record the PR a stopped lane was hand-finished in
 crew closeout <lane>                                 # remove a merged lane's worktree and branch, archive its directory
-crew closeout <lane> --discard                       # archive a stopped lane with no PR
+crew closeout <lane> --discard                       # archive a stopped lane with no PR or a CLOSED PR
 crew viz                                             # serve the visualizer from the crew home
 crew where                                           # the crew home, its branch and its commit
 crew update [--force]                                # fast-forward the crew home to origin/main and rebuild what changed
@@ -23,11 +23,12 @@ crew update [--force]                                # fast-forward the crew hom
 resolved), or `CREW_HOME` when set. State lives under `~/.crew/dt-<lane>/<lane>/`:
 the brief, the task directory, the lane journal and every seat's session file.
 
-`crew closeout <lane> --discard` clears a stopped no-PR lane from the default
-visualizer list by archiving it; the visualizer itself is unchanged. It refuses
-lanes with a recorded PR (use plain closeout after merge), finish records (use
-`crew finish`), runs not proven stopped, and dirty worktrees. It removes the
-worktree without force before deleting the branch and archiving the journal.
+`crew closeout <lane> --discard` archives a stopped lane with no PR or a PR
+GitHub reports CLOSED, clearing it from the default visualizer list. It refuses
+OPEN or MERGED PRs (use plain closeout after merge or discard after close),
+finish records (use `crew finish`), runs not proven stopped, and dirty worktrees.
+It removes the worktree without force before deleting only the local branch and
+archiving the journal; the remote branch and visualizer are unchanged.
 
 `crew update` refuses unless the crew home is on branch `stable` with no tracked changes; `--force` only overrides the refusal when processes still run from the home.
 

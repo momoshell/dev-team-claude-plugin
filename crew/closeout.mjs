@@ -1,11 +1,12 @@
-// crew closeout <lane> — close a merged lean lane: remove its worktree, delete its branch, archive its lane directory.
+// crew closeout <lane> — close a merged lane, or discard a stopped lane with no PR or a CLOSED PR.
 //
 // Three steps, in this order, each checked:
 //   1. git worktree remove <worktree>   (never --force, so git refuses a worktree with uncommitted changes)
 //   2. git branch -D <lane>             (local only)
 //   3. move ~/.crew/dt-<lane> to ~/.crew-journal-archive/dt-<lane> (or a free .archive-<n> suffix on re-archive)
-// The lane's recorded PR must be MERGED on GitHub, in the worktree's origin repository, with the lane branch's tip
-// as its head; the worktree must be dt-<lane> on that branch. All of it is checked before step 1, so a refusal
+// Plain closeout requires a MERGED PR in the worktree's origin repository, with the lane branch's tip as its head.
+// Discard requires a stopped lane with no PR or a CLOSED PR. The worktree must be dt-<lane> on that branch.
+// All of it is checked before step 1, so a refusal
 // there changes nothing. A failed move in step 3 is refused after steps 1 and 2 ran; the lane directory stays put.
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -81,12 +82,20 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
   }
   try {
   if (discard) {
-    if (rows.some((row) => row.event === 'pr')) refuse(`lane recorded a pull request; use crew closeout ${lane}`)
     if (rows.some((row) => row.event === 'finish-ready' || row.event === 'finish-decision')) refuse(`lane has a finish record; use crew finish ${lane}`)
-    const last = rows.findLast((row) => row.event !== 'stage-end')
-    const died = deadRun({ rows, taskDir, alive })
+    if (rows.some((row) => row.event === 'pr')) {
+      pr = lastPr(rows, lane, taskDir, alive)
+      const viewText = must(run, 'gh pr view', 'gh', ['pr', 'view', pr.url, '--json', 'state'])
+      let view
+      try { view = JSON.parse(viewText) } catch { refuse('gh pr view returned unparseable output') }
+      if (view?.state !== 'CLOSED') refuse(`lane recorded a pull request; use crew closeout ${lane}`)
+    }
+    const tail = rows.findLast((row) => row.event !== 'stage-end')
+    const stopRows = tail?.event === 'pr' ? rows.slice(0, rows.lastIndexOf(tail)) : rows
+    const last = stopRows.findLast((row) => row.event !== 'stage-end')
+    const died = deadRun({ rows: stopRows, taskDir, alive })
     if (!(last?.event === 'verdict' && last.status === 'stopped') && !died) refuse(`lane ${lane} is not stopped`)
-    const stopAt = died ? rows.length : rows.lastIndexOf(last)
+    const stopAt = died ? stopRows.length : rows.lastIndexOf(last)
     try { claim = claimStop({ writeFileSync, readFileSync, rmSync, alive }, lane, taskDir, stopAt) } catch { refuse(`lane ${lane} is not stopped`) }
     try { if (readFileSync(journal, 'utf8') !== text) refuse(`lane ${lane} is not stopped`) } catch { refuse(`lane ${lane} is not stopped`) }
     let claims
@@ -100,7 +109,7 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
       const pid = Number(text.trim())
       if (!/^\d+\n?$/.test(text) || !Number.isSafeInteger(pid) || pid <= 0 || alive(pid) !== false) refuse(`lane ${lane} is not stopped`)
     }
-    if (died && !deadRun({ rows, taskDir, alive })) refuse(`lane ${lane} is not stopped`)
+    if (died && !deadRun({ rows: stopRows, taskDir, alive })) refuse(`lane ${lane} is not stopped`)
   } else pr = lastPr(rows, lane, join(found.dir, 'task'), alive)
 
   const worktree = found.spec.cwd

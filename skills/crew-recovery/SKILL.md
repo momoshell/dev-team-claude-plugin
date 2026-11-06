@@ -55,12 +55,13 @@ dead open run is a new stop. Read the refusal; it names the cause.
 
 ## Close it out
 
-For a stopped lane with no PR that the visualizer keeps showing, use
-`crew closeout <lane> --discard`. It removes the worktree and branch and
-archives the journal; it does not change the visualizer. It refuses lanes with
-any recorded PR (use plain closeout after merge), finish records (use `crew finish`),
-a run not proven stopped, or uncommitted worktree changes. The worktree removal
-is never forced. Inspect the lane first: discard removes its worktree.
+For a stopped lane with no PR or a PR GitHub reports CLOSED, use
+`crew closeout <lane> --discard`. It removes the worktree and local branch and
+archives the journal; it leaves the remote branch and visualizer unchanged. It
+refuses an OPEN or MERGED PR (use plain closeout after merge or discard after
+close), finish records (use `crew finish`), a run not proven stopped, or
+uncommitted worktree changes. The worktree removal is never forced. Inspect the
+lane first: discard removes its worktree.
 
 - Finished by hand: in the lane worktree, commit every change the build made
   (`git status --short` shows nothing left), fetch, and rebase onto the base the
@@ -78,4 +79,4 @@ is never forced. Inspect the lane first: discard removes its worktree.
   archived lane name moves to `dt-<lane>.archive-<n>`, using the smallest free
   `n` from 2 and keeping the earlier archive.
 
-For a lane with a PR, never close out before the merge: the worktree is the only copy of the build.
+Before discarding a closed PR, check whether the worktree is the only copy of the build.

@@ -9,8 +9,9 @@
 //   crew finish <lane> --return <file>  start a pass with guidance on a finishable stop, dead run or ready lane
 //   crew finish <lane> --accept [--notes <file>] | --abandon  decide a ready finish run
 //   crew closeout <lane>         remove a merged lean lane's worktree and branch, archive its lane directory (crew/closeout.mjs)
-//   crew closeout <lane> --discard  archive a stopped no-PR lane; refuses PRs, finish records, running lanes and dirty worktrees
-//                                PRs use plain closeout after merge; finish records use crew finish; the visualizer is unchanged
+//   crew closeout <lane> --discard  archive a stopped lane with no PR or a CLOSED PR; delete only its local branch
+//                                refuses OPEN or MERGED PRs, finish records, running lanes and dirty worktrees
+//                                use plain closeout after merge, discard after close, or crew finish for finish records
 //   crew lanes [--all] [--json]  list lean lanes from their journals (crew/lanes.mjs)
 //   crew viz                     serve the visualizer from the crew home
 //   crew where                   print the crew home, its branch and its commit

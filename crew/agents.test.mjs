@@ -170,6 +170,17 @@ test('lean charter declarations match the P2 schemas and loop ownership', () => 
   assert.ok(reviewer.includes('Read the supplied brief, plan, changed paths and any feedback. Inspect the tracked diff and read every listed untracked file directly; git diff alone omits untracked files.'))
 })
 
+test('a plan-attribution-only finding is a non-blocking should-fix on a pass, never a changes-needed on its own', () => {
+  const reviewer = parseAgent(readFileSync(join(AGENTS_DIR, 'reviewer.md'), 'utf8')).body
+  for (const sentence of [
+    "Flag a criterion whose only basis is brief text that is neither the source's words nor an operator decision.",
+    'If the diff has no defect behind that criterion, report the attribution finding at the plan criterion as a `should-fix`, never a `must-fix`; it must not on its own cause a `changes-needed` verdict.',
+    'If attribution findings are the only findings, return `pass` and do not restate the unattributed criterion as an `unmet` requirement.',
+  ]) assert.ok(reviewer.includes(sentence), sentence)
+  const techLead = parseAgent(readFileSync(join(AGENTS_DIR, 'tech-lead.md'), 'utf8')).body
+  assert.ok(techLead.includes('Review by the [reviewer charter](./reviewer.md), except its scout rule:'))
+})
+
 // MUTATION: change any model, effort or null tier in a definition and this tier drifts from the roster.
 test('every tier resolves to exactly the roster cells, null roles unseated', () => {
   assert.deepEqual(TIERS, Object.keys(roster.tiers))

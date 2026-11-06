@@ -154,7 +154,9 @@ test('lean charter declarations match the P2 schemas and loop ownership', () => 
     if (role === 'builder') {
       assert.ok(body.includes('The loop runs each test the builder names on the old source and on the build.'), role)
       assert.ok(!body.includes('Do not run those stages yourself.'), role)
-      assert.ok(body.includes('You may run targeted tests to check your work. Do not run the full suite, commit, rebase or open the PR.'), role)
+      assert.ok(body.includes('To check your work, run only tests named in your return or touched by the change, selected by test name or file.'), role)
+      assert.ok(body.includes('Do not run whole packages, crates or workspaces'), role)
+      assert.ok(body.includes('Do not run the full suite, commit, rebase or open the PR.'), role)
     } else {
       assert.ok(!body.includes('The loop runs each test the builder names'), role)
       assert.ok(!body.includes('Do not run those stages yourself.'), role)

@@ -158,7 +158,7 @@ test('DM8: conventions hold only the binding entries and the rest are archived',
   assert.equal(entries.filter(e => e.startsWith('- **2026-08-08**')).length, 1)
   assert.doesNotMatch(text, /\bcoder\b/i)
   assert.ok(!text.includes('`the installed copy of `'))
-  for (const [date, phrase] of [['2026-08-01', 'Prefer structural impossibility'], ['2026-08-02', 'Concurrency-unsafe'], ['2026-08-02', 'A raw control character'], ['2026-08-08', "When this repo (dev-team's own source)"], ['2026-09-15', 'The runtime stays dependency-free'], ['2026-11-03', "Seats and suites run with the operator's environment"], ['2026-11-05', 'Prose names the symbol']]) assert.ok(entries.some(e => e.startsWith(`- **${date}**`) && e.includes(phrase)), phrase)
+  for (const [date, phrase] of [['2026-08-01', 'Prefer structural impossibility'], ['2026-08-02', 'Concurrency-unsafe'], ['2026-08-02', 'A raw control character'], ['2026-08-08', "When this repo (dev-team's own source)"], ['2026-09-15', 'The runtime stays dependency-free'], ['2026-11-03', "Seats and suites run with the operator's environment"], ['2026-11-07', 'Prose names the symbol']]) assert.ok(entries.some(e => e.startsWith(`- **${date}**`) && e.includes(phrase)), phrase)
   const archive = 'docs/archive/conventions-earlier-runtimes.md'
   assert.ok(existsSync(resolve(root, archive)))
   assert.ok(read(archive).includes("Verify a dispatched coder's commit"))

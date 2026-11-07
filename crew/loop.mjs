@@ -634,6 +634,7 @@ export async function runLoop(spec, deps = {}) {
         proofLines = [PROOF_UNMEASURED]
         proofRows = null
         if (!recheck) {
+          if (reserveSpent && rounds.reviewer >= (seats.reviewer.rounds ?? DEFAULT_ROUNDS)) return stop('round-bound', { role: 'reviewer', reason: 'round-bound', findings: priorFindings, feedback })
           const built = await stage(repairing ? 'suite-repair' : 'build', () => seatTurn('builder', feedback, { singleTurn: repairing && (isFinish || tier === 'mechanical') }))
           repairing = false
           if (built.halt) return built.halt
@@ -712,7 +713,7 @@ export async function runLoop(spec, deps = {}) {
             if (!rebaseOnly && reservePending) {
               reservePending = false
               if (review.details.verdict === 'changes-needed') return stop('round-bound', { role: 'reviewer', reason: 'round-bound', envelope: review, findings: priorFindings })
-            } else if (!rebaseOnly && !reserveSpent && review.details.verdict === 'changes-needed' && rounds.reviewer >= (seats.reviewer.rounds ?? DEFAULT_ROUNDS)) {
+            } else if (!rebaseOnly && !reserveSpent && (review.details.verdict === 'changes-needed' || suite.status === 'red') && rounds.reviewer >= (seats.reviewer.rounds ?? DEFAULT_ROUNDS)) {
               reserveSpent = true
               reservePending = true
               reserveBase = checkedTree

@@ -219,6 +219,7 @@ export async function runLoop(spec, deps = {}) {
   }
   let namedTests = []
   let priorFindings = isFinish ? fin.findings : []
+  let reservePending = false, reserveSpent = false, reserveBase = null
   let secondFindings = []
   let builderReport = null
   let filesInScope = isFinish ? fin.filesInScope ?? null : null
@@ -318,7 +319,7 @@ export async function runLoop(spec, deps = {}) {
   // One role's turn: issue, await, read back, validate (a schema-refused file gets one repair turn that
   // costs no round). Returns { envelope } for a done envelope or { halt }.
   // Non-done returns route under ADR-055 §12; an exhausted bound goes to the lead, unless singleTurn or the lead's own bound stops it.
-  const seatTurn = async (role, feedback = [], { singleTurn = false, free = false, hold = false } = {}) => {
+  const seatTurn = async (role, feedback = [], { singleTurn = false, free = false, hold = false, reserveReview = null } = {}) => {
     if (role === 'reviewer') enterPhase('review')
     let given = feedback
     for (;;) {
@@ -332,7 +333,7 @@ export async function runLoop(spec, deps = {}) {
         if (role === 'lead') feedback = feedback.map((item) => Object.hasOwn(item, 'last') ? { ...item, last: rounds.lead >= (seats.lead.rounds ?? DEFAULT_ROUNDS) } : item)
         const id = `${spec.id}.${role}.${turn}`
         const returnPath = join(spec.taskDir, `${role}-${turn}.json`)
-        const request = { role, tier, seat: seats[role], id, returnPath, brief: spec.brief, planPath, feedback, ...(['builder', 'reviewer', 'tech-lead'].includes(role) ? { filesInScope: filesInScope === null ? null : [...filesInScope] } : {}), ...(['reviewer', 'tech-lead'].includes(role) ? { changedPaths, builderReport } : {}) }
+        const request = { role, tier, seat: seats[role], id, returnPath, brief: spec.brief, planPath, feedback, ...(['builder', 'reviewer', 'tech-lead'].includes(role) ? { filesInScope: filesInScope === null ? null : [...filesInScope] } : {}), ...(['reviewer', 'tech-lead'].includes(role) ? { changedPaths, builderReport } : {}), ...(reserveReview ? { reserveReview } : {}) }
         // One attempt: run the seat, then read the issued path back, parse it and validate it in full.
         const attempt = async (asked) => {
           let failure = null
@@ -689,7 +690,7 @@ export async function runLoop(spec, deps = {}) {
         if (!isFinish) {
           const halt = await stageChecked()
           if (halt) return halt
-          const runReview = () => stage('review', () => seatTurn('reviewer', priorFindings, { free: rebaseOnly }))
+          const runReview = () => stage('review', () => seatTurn('reviewer', priorFindings, { free: rebaseOnly, singleTurn: !rebaseOnly && reservePending, ...(!rebaseOnly && reservePending ? { reserveReview: { baseTree: reserveBase } } : {}) }))
           let suite, reviewed
           if (tier === 'build') {
             const pair = await Promise.allSettled([suiteRun(), runReview()])
@@ -708,6 +709,15 @@ export async function runLoop(spec, deps = {}) {
             const review = reviewed.envelope
             priorFindings = review.details.findings
             await emit('verdict', { status: 'reviewed', verdict: review.details.verdict, findings: priorFindings })
+            if (!rebaseOnly && reservePending) {
+              reservePending = false
+              if (review.details.verdict === 'changes-needed') return stop('round-bound', { role: 'reviewer', reason: 'round-bound', envelope: review, findings: priorFindings })
+            } else if (!rebaseOnly && !reserveSpent && review.details.verdict === 'changes-needed' && rounds.reviewer >= (seats.reviewer.rounds ?? DEFAULT_ROUNDS)) {
+              reserveSpent = true
+              reservePending = true
+              reserveBase = checkedTree
+              seats.reviewer = { ...seats.reviewer, rounds: (seats.reviewer.rounds ?? DEFAULT_ROUNDS) + 1 }
+            }
             if (review.details.verdict === 'changes-needed') { reviewRed = true; redFindings = priorFindings }
           }
           if (suite.status === 'red' || reviewRed) {

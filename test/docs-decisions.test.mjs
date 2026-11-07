@@ -107,12 +107,24 @@ test('S4-4: README describes no roster UI for the catalog key', () => {
   assert.doesNotMatch(readme, /roster UI/i)
 })
 
-// MUTATION: remove the agents map entry.
-test('S4-14: README map names every operator agent', () => {
-  const names = readdirSync(join(ROOT, 'agents')).filter(n => n.endsWith('.md'))
-  assert.ok(names.length)
-  const map = docSection(readme, "## What's in this repo")
-  for (const name of names) assert.ok(map.includes('`agents/' + name + '`'), name)
+test('the operator agents folder is retired and the repo map names no operator agent', () => {
+  assert.equal(existsSync(join(ROOT, 'agents')), false)
+  assert.doesNotMatch(docSection(readme, "## What's in this repo"), /`agents\//)
+  const entry = read('docs/adr/README.md').split('\n').find((line) => line.startsWith('- **ADR-052'))
+  assert.match(entry, /is retired; `skills\/lane-brief\/SKILL.md` is the lane briefing path/)
+})
+
+test('lane-brief points at the code owners and restates no code-owned list', () => {
+  const skill = read('skills/lane-brief/SKILL.md')
+  for (const owner of ['parseBrief', 'crew/protocols.mjs', 'PROTECTED', 'crew/loop.mjs', 'regenerate', 'crew/checks.mjs']) assert.ok(skill.includes(owner), owner)
+  for (const literal of ['crew/finish.mjs', 'crew/lean.mjs', 'crew/proof.mjs', 'hooks/', '.github/workflows/', 'undeclared-path', 'regenerate-failed', 'conflict-markers', '--check']) assert.ok(!skill.includes(literal), literal)
+  assert.match(skill, /operator makes a decision after the issue was filed[\s\S]*append it to\s+the issue body, quoting the operator/)
+  assert.match(skill, /reads only the body/)
+  assert.match(skill, /Put proposals, premises and measured facts in an issue the operator\s+can read and edit\. A session-filed issue opens with the operator words that asked for it\./)
+  assert.match(skill, /operator's words verbatim,\s+one whole message per quoted block/)
+  assert.match(skill, /askProvenance.*crew\/brief-provenance\.mjs/)
+  assert.doesNotMatch(onboardSkill, /crew start <brief> --check|--check`\s+checks only the checkout/)
+  assert.doesNotMatch(read('docs/adr/README.md'), /start --check/)
 })
 
 // MUTATION: remove the tech-lead from the seat description.

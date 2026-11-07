@@ -117,17 +117,17 @@ test('crew start refuses ask lines the operator never typed: seat prompts, paste
   const brief = BRIEF.replace('source: issue 1961', 'source: operator request')
     .replace('## Context', `## The ask\n\n${typed.map((line) => `> ${line}`).join('\n')}\n\n${excluded.map((line) => `> ${line}`).join('\n\n')}\n\n## Context`)
   const expected = `brief /d/b1.md quotes words the operator did not type (ADR-056):\n${excluded.map((text, i) => `- ask block at line ${12 + 2 * i} is not one whole message the operator typed: ${JSON.stringify(text)}`).join('\n')}`
-  for (const check of [true, false]) {
+  {
     let resolutions = 0
     const { deps, calls } = fakes({ brief, resolve: () => { resolutions++; return { seats: {} } } })
     deps.transcriptRoot = root
-    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps }), (error) => error instanceof StartRefusal && error.message === expected)
+    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), (error) => error instanceof StartRefusal && error.message === expected)
     assert.equal(resolutions, 0)
     assert.deepEqual(effects(calls), [])
   }
   const pass = fakes({ brief: brief.replace(`${excluded.map((line) => `> ${line}`).join('\n\n')}\n\n`, '') })
   pass.deps.transcriptRoot = root
-  assert.equal((await startLane({ briefPath: '/d/b1.md', check: true, deps: pass.deps })).checked, true)
+  await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', deps: pass.deps }))
 })
 
 test('crew start accepts queued operator messages as provenance and refuses words no queued or typed message contains (ADR-056)', async () => {
@@ -147,22 +147,22 @@ test('crew start accepts queued operator messages as provenance and refuses word
   utimesSync(old, then, then)
   const makeBrief = (ask) => BRIEF.replace('source: issue 1961', 'source: operator request').replace('## Context', `## The ask\n\n${ask}\n\n## Context`)
   const excluded = ['unrelated words', 'queued message', 'sdk message', 'system message', 'non-human message', 'array message', 'non-user message', 'stale queued message']
-  for (const check of [true, false]) {
+  {
     let resolutions = 0
     const fail = fakes({ brief: makeBrief(excluded.map((text) => `> ${text}`).join('\n\n')), resolve: () => { resolutions++; return { seats: {} } } })
     fail.deps.transcriptRoot = root
-    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps: fail.deps }), (error) => error instanceof StartRefusal && excluded.every((text) => error.message.includes(JSON.stringify(text))))
+    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: fail.deps }), (error) => error instanceof StartRefusal && excluded.every((text) => error.message.includes(JSON.stringify(text))))
     assert.equal(resolutions, 0)
     assert.deepEqual(effects(fail.calls), [])
     const pass = fakes({ brief: makeBrief('> whole queued message') })
     pass.deps.transcriptRoot = root
-    await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps: pass.deps }))
+    await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: pass.deps }))
     assert.equal(pass.calls.some(([kind, line]) => kind === 'log' && line.includes('ask provenance unmeasured')), false)
   }
   appendFileSyncReal(path, `\n${JSON.stringify(row('whole typed message', 'typed'))}`)
   const both = fakes({ brief: makeBrief('> whole queued message\n\n> whole typed message') })
   both.deps.transcriptRoot = root
-  assert.equal((await startLane({ briefPath: '/d/b1.md', check: true, deps: both.deps })).checked, true)
+  await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', deps: both.deps }))
 })
 
 test('crew start strips pasted content from queued messages and still refuses the pasted text itself (ADR-056)', async () => {
@@ -171,14 +171,14 @@ test('crew start strips pasted content from queued messages and still refuses th
   mkdirSync(dir)
   writeFileSync(join(dir, 'a.jsonl'), JSON.stringify({ type: 'user', origin: { kind: 'human' }, promptSource: 'queued', message: { content: 'before <pasted_content id="p1">pasted words</pasted_content id="p1"> after' } }))
   const makeBrief = (ask) => BRIEF.replace('source: issue 1961', 'source: operator request').replace('## Context', `## The ask\n\n> ${ask}\n\n## Context`)
-  for (const check of [true, false]) {
+  {
     const fail = fakes({ brief: makeBrief('pasted words') })
     fail.deps.transcriptRoot = root
-    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps: fail.deps }), (error) => error instanceof StartRefusal && error.message.includes('"pasted words"'))
+    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: fail.deps }), (error) => error instanceof StartRefusal && error.message.includes('"pasted words"'))
     assert.deepEqual(effects(fail.calls), [])
     const pass = fakes({ brief: makeBrief('before after') })
     pass.deps.transcriptRoot = root
-    await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps: pass.deps }))
+    await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: pass.deps }))
     assert.equal(pass.calls.some(([kind, line]) => kind === 'log' && line.includes('ask provenance unmeasured')), false)
   }
 })
@@ -191,12 +191,12 @@ test('crew start reports ask provenance unmeasured for a malformed queued transc
   const brief = BRIEF.replace('source: issue 1961', 'source: operator request').replace('## Context', '## The ask\n\n> Do this.\n\n## Context')
   for (const readable of [false, true]) {
     writeFileSync(path, `${readable ? `${JSON.stringify({ type: 'user', origin: { kind: 'human' }, promptSource: 'typed', message: { content: 'Unrelated words.' } })}\n` : ''}{"promptSource":"queued",`)
-    for (const check of [true, false]) {
+    {
       const operator = fakes({ brief })
       operator.deps.transcriptRoot = root
-      await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps: operator.deps }))
+      await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: operator.deps }))
       assert.ok(operator.calls.some(([kind, line]) => kind === 'log' && line.includes(`crew start: ask provenance unmeasured: incomplete Claude Code transcript scan under ${root}`)))
-      assert.equal(effects(operator.calls).length > 0, !check)
+      assert.ok(effects(operator.calls).length)
     }
   }
 })
@@ -258,14 +258,14 @@ test('crew start accepts a quoted ask block only as one whole typed message (ADR
   ].map((content) => JSON.stringify({ type: 'user', origin: { kind: 'human' }, promptSource: 'typed', message: { content } })).join('\n'))
   const makeBrief = (ask) => BRIEF.replace('source: issue 1961', 'source: operator request').replace('## Context', `## The ask\n\n${ask}\n\n## Context`)
   const good = '> will this enforce proper\n> briefs now?\n\n> yes, all; probably best as followup\n\n> see please'
-  for (const check of [true, false]) {
+  {
     const pass = fakes({ brief: makeBrief(good) })
     pass.deps.transcriptRoot = root
-    await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps: pass.deps }))
+    await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: pass.deps }))
     for (const ask of ['> yes', '> will this enforce proper briefs now?\n> yes, all; probably best as followup']) {
       const fail = fakes({ brief: makeBrief(ask) })
       fail.deps.transcriptRoot = root
-      await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps: fail.deps }), (error) => error instanceof StartRefusal && error.message.includes('ask block at line 9 is not one whole message the operator typed'))
+      await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: fail.deps }), (error) => error instanceof StartRefusal && error.message.includes('ask block at line 9 is not one whole message the operator typed'))
       assert.deepEqual(effects(fail.calls), [])
     }
   }
@@ -293,7 +293,7 @@ test('crew start reports ask provenance unmeasured with no transcript and starts
     try {
       const operator = fakes({ brief })
       operator.deps.transcriptRoot = root
-      await startLane({ briefPath: '/d/b1.md', check: true, deps: operator.deps })
+      await startLane({ briefPath: '/d/b1.md', deps: operator.deps })
       assert.ok(operator.calls.some(([kind, line]) => kind === 'log' && line.includes(`cannot read Claude Code transcript directory at ${root}: ${code ?? 'unknown error'}`)))
     } finally { fs.readdirSync = original; syncBuiltinESMExports() }
   }
@@ -304,22 +304,22 @@ test('crew start reports ask provenance unmeasured with no transcript and starts
     fs[method] = (...args) => { if (args[0] === path) throw Object.assign(new Error('denied'), { code: 'EACCES' }); return original(...args) }
     syncBuiltinESMExports()
     try {
-      for (const check of [true, false]) {
+      {
         const operator = fakes({ brief })
         operator.deps.transcriptRoot = root
-        await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps: operator.deps })
+        await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: operator.deps })
         assert.ok(operator.calls.some(([kind, line]) => kind === 'log' && line.includes('ask provenance unmeasured: incomplete Claude Code transcript scan')))
-        assert.equal(effects(operator.calls).length > 0, !check)
+        assert.ok(effects(operator.calls).length)
       }
     } finally { fs[method] = original; syncBuiltinESMExports() }
   }
   writeFileSync(hidden, row('Do this.').slice(0, -1))
-  for (const check of [true, false]) {
+  {
     const operator = fakes({ brief })
     operator.deps.transcriptRoot = root
-    await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps: operator.deps })
+    await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: operator.deps })
     assert.ok(operator.calls.some(([kind, line]) => kind === 'log' && line.includes('ask provenance unmeasured: incomplete Claude Code transcript scan')))
-    assert.equal(effects(operator.calls).length > 0, !check)
+    assert.ok(effects(operator.calls).length)
   }
   const issue = fakes()
   issue.deps.transcriptRoot = { [Symbol.toPrimitive]() { throw new Error('transcript root read') } }
@@ -339,7 +339,7 @@ const deps = {
   spawnSync: (file, args) => ({ status: 0, stdout: args.includes('ls-tree') ? (args.at(-1) === '.crew/project.json' ? '100644 blob ' + 'a'.repeat(40) + '\\t.crew/project.json' : (args.at(-1).includes('.') ? '100644 blob ' : '040000 tree ') + 'a'.repeat(40) + '\\t' + args.at(-1) + '\\0') : args.includes('show') ? ${JSON.stringify(JSON.stringify({suite:'npm test',proof:[],onboarded:{hash:createHash('sha256').update(JSON.stringify(['npm test',[]])).digest('hex')}}))} : args.includes('--verify') ? 'a'.repeat(40) : 'origin/main' }),
   spawnDetached: () => { writeSync(3, 'started\\n'); return 4242 }, crewRoot: '/virtual/crew',
 }
-const argv = invalid ? ['/d/b1.md', '--check'] :
+const argv = invalid ? ['/d/b1.md'] :
   ['/d/b1.md', '--checkout', '/virtual/' + 'x'.repeat(1024 * 1024) + '/checkout']
 process.exitCode = await main(argv, deps)
 `
@@ -374,7 +374,7 @@ test('(SE1) a reader closing stdout after the first line does not crash a starte
 })
 
 // MUTATION: change the refusal return to 0 and an invalid brief reports success.
-test('(SE2) invalid --check still refuses with stdout closed', async () => {
+test('(SE2) an invalid brief still refuses with stdout closed', async () => {
   const result = await runPipeChild('invalid')
   assert.equal(result.timedOut, false)
   assert.equal(result.signal, null)
@@ -417,21 +417,11 @@ test('a brief with mechanical: true starts a mechanical lane and a brief without
     const brief = tier === 'mechanical' ? BRIEF.replace('shape: standard', 'mechanical: true\nshape: standard') : BRIEF
     const resolved = []
     const f = fakes({ brief, resolve: (t) => { resolved.push(t); return resolveAgents(t) } })
-    await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', check: true, deps: f.deps }))
     await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps }))
-    assert.deepEqual(resolved, [tier, tier])
-    assert.ok(f.calls.some(([kind, line]) => kind === 'log' && line.includes(`brief ok lane=b1 tier=${tier}`)))
+    assert.deepEqual(resolved, [tier])
     assert.ok(f.calls.some(([kind, line]) => kind === 'log' && line.includes(`loop=lean tier=${tier}`)))
     assert.equal(JSON.parse(written(f.calls, '/task/lean.json')[2]).tier, tier)
   }
-})
-
-test('--check validates the brief and the agent definitions and starts nothing', async () => {
-  const { deps, calls } = fakes()
-  const result = await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check: true, deps })
-  assert.equal(result.checked, true)
-  assert.deepEqual(effects(calls), [])
-  assert.match(calls.at(-1)[1], /brief ok lane=b1 tier=build shape=standard closes=1961/)
 })
 
 test('without a readable origin/HEAD the start is refused before any worktree is made', async () => {
@@ -453,12 +443,11 @@ test('an existing worktree or a failed worktree add stops the start and launches
 test('main reports usage, refusals and success as exit codes', async () => {
   assert.equal(await main([], fakes().deps), 2)
   assert.equal(await main(['a.md', 'b.md'], fakes().deps), 2)
-  assert.equal(await main(['/d/b1.md', '--check'], fakes().deps), 0)
   assert.equal(await main(['/d/b1.md', '--checkout', '/repo/checkout'], fakes({ worktreeStatus: 1 }).deps), 1)
 })
 
-test('--check and a real start need a checkout', async () => {
-  for (const args of [['/d/b1.md', '--check'], ['/d/b1.md']]) assert.equal(await main(args, fakes({ inGit: false }).deps), 2)
+test('a start needs a checkout', async () => {
+  assert.equal(await main(['/d/b1.md'], fakes({ inGit: false }).deps), 2)
 })
 
 // MUTATION: drop the bound-issue slot and the run brief carries no bound issue.
@@ -513,12 +502,10 @@ test('an issue brief starts with the issue body quoted as its ask, and an unread
     assert.equal(failed.calls.some(([kind]) => ['mkdir', 'write', 'detached'].includes(kind)), false)
   }
   const operatorBrief = BRIEF.replace('source: issue 1961', 'source: operator request').replace('## Context', '## The ask\n\n> Do this.\n\n## Context')
-  for (const [brief, check] of [[operatorBrief, false], [BRIEF, true], [operatorBrief, true]]) {
-    const run = fakes({ brief })
-    await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps: run.deps })
-    assert.equal(run.calls.some(([kind, file]) => kind === 'spawn' && file === 'gh'), false)
-    if (!check) assert.equal(JSON.parse(written(run.calls, '/task/lean.json')[2]).brief, runBrief(brief, 1961))
-  }
+  const run = fakes({ brief: operatorBrief })
+  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: run.deps })
+  assert.equal(run.calls.some(([kind, file]) => kind === 'spawn' && file === 'gh'), false)
+  assert.equal(JSON.parse(written(run.calls, '/task/lean.json')[2]).brief, runBrief(operatorBrief, 1961))
 })
 
 // MUTATION: restore the body-wide #N guard and the start refuses the source's words.
@@ -653,10 +640,10 @@ test('start refuses when the selected lane base lacks the approved onboarding', 
   }
 })
 
-test('crew start and --check refuse a checkout that is not onboarded or is stale, naming /onboard, and start nothing (ADR-057)', async () => {
-  for (const project of [null, { suite: 'npm test', proof: [] }, '{', { ...projectFile(), suite: 'cargo test' }, { ...projectFile(), proof: null }]) for (const check of [false, true]) {
+test('crew start refuses a checkout that is not onboarded or is stale, naming /onboard, and starts nothing (ADR-057)', async () => {
+  for (const project of [null, { suite: 'npm test', proof: [] }, '{', { ...projectFile(), suite: 'cargo test' }, { ...projectFile(), proof: null }]) {
     const { deps, calls } = fakes({ project })
-    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check, deps }), (e) => e instanceof StartRefusal && e.message.includes('/onboard') && e.message.includes(project === null || !Object.hasOwn(Object(project), 'onboarded') && typeof project !== 'string' ? 'not-onboarded' : 'onboarding-stale'))
+    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), (e) => e instanceof StartRefusal && e.message.includes('/onboard') && e.message.includes(project === null || !Object.hasOwn(Object(project), 'onboarded') && typeof project !== 'string' ? 'not-onboarded' : 'onboarding-stale'))
     assert.deepEqual(effects(calls), [])
   }
 })
@@ -671,16 +658,49 @@ test('crew start writes the brief generated paths and regenerate command into th
   }
 })
 
-test('main reads only --check and --checkout: --loop, an unknown flag, a duplicate or a missing value is usage', async () => {
+test('main reads only --checkout: --loop, an unknown flag, a duplicate or a missing value is usage', async () => {
   for (const argv of [['a.md', '--loop', 'lean'], ['a.md', '--bogus'], ['a.md', '--check', '--check'], ['a.md', '--checkout', 'x', '--checkout', 'y'], ['a.md', '--checkout'], ['a.md', '--checkout', '--check'], [], ['a.md', 'b.md']]) {
     const f = fakes()
     const { code, stderr } = await mainWithStderr(argv, f.deps)
     assert.equal(code, 2, argv.join(' '))
-    assert.equal(stderr, 'usage: crew start <brief.md> [--check] [--checkout <dir>]\n')
+    assert.equal(stderr, 'usage: crew start <brief.md> [--checkout <dir>]\n')
     assert.deepEqual(effects(f.calls), [])
   }
-  assert.equal(await main(['a.md', '--check'], fakes().deps), 0)
   assert.equal(await main(['a.md', '--checkout', '/repo/checkout'], fakes().deps), 0)
+})
+
+test('main refuses --check as usage and starts nothing', async () => {
+  for (const argv of [['/d/b1.md', '--check'], ['--check', '/d/b1.md'], ['/d/b1.md', '--check', '--check'], ['/d/b1.md', '--checkout', '--check']]) {
+    const { deps, calls } = fakes()
+    assert.deepEqual(await mainWithStderr(argv, deps), { code: 2, stderr: 'usage: crew start <brief.md> [--checkout <dir>]\n' })
+    assert.deepEqual(effects(calls), [])
+  }
+})
+
+test('a plain start is the only validation: defective, missing-context and stale-onboarding briefs refuse before any effect and check:true starts a valid lane', async () => {
+  for (const kind of ['defect', 'missing-context', 'checkout-onboarding', 'base-onboarding']) {
+    const run = fakes({
+      brief: kind === 'defect' ? BRIEF.replace('shape: standard', 'tier: build\nshape: standard') : BRIEF,
+      project: kind === 'checkout-onboarding' ? null : projectFile(),
+    })
+    const spawn = run.deps.spawnSync
+    run.deps.spawnSync = (file, args, options) => {
+      const result = spawn(file, args, options)
+      if (kind === 'missing-context' && args.includes('main:crew/agents.mjs')) return { status: 1 }
+      if (kind === 'base-onboarding' && args.includes('show')) return { status: 0, stdout: JSON.stringify(projectFile('cargo test')) }
+      return result
+    }
+    const expected = kind === 'defect' ? /tier is not a brief field/ : kind === 'missing-context' ? /main[\s\S]*crew\/agents\.mjs/ : /\/onboard/
+    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: run.deps }), (error) => error instanceof StartRefusal && expected.test(error.message))
+    if (kind === 'defect' || kind === 'checkout-onboarding') assert.deepEqual(effects(run.calls), [])
+    assert.equal(run.calls.some(([type, file, args]) => ['mkdir', 'write', 'detached'].includes(type) || (type === 'spawn' && (file === 'gh' || args.includes('worktree')))), false)
+  }
+  const valid = fakes()
+  const result = await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check: true, deps: valid.deps })
+  assert.equal(result.checked, undefined)
+  assert.ok(spawned(valid.calls, 'worktree'))
+  assert.ok(leanLaunch(valid.calls))
+  assert.equal(valid.calls.some(([type, line]) => type === 'log' && line.includes('brief ok')), false)
 })
 
 // A start with no --loop is the lean loop, whether it comes through startLane or main.
@@ -698,17 +718,17 @@ test('(SW1) a start with no --loop, from startLane or main, runs the lean loop',
 })
 
 // MUTATION: allow a finish brief to start without an escalated lane.
-test('(SW4) --check refuses a brief the lean loop cannot run', async () => {
+test('(SW4) start refuses a brief the lean loop cannot run', async () => {
   const finish = fakes({ brief: BRIEF.replace('shape: standard', 'shape: finish') })
-  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', check: true, deps: finish.deps }), /shape finish starts from an escalated lane/)
+  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: finish.deps }), /shape finish starts from an escalated lane/)
 })
 
 // MUTATION: drop the shape refusal and a stepped brief starts a lean lane that runs only the standard loop.
-test('a stepped brief is refused by main --check and startLane before effects', async () => {
+test('a stepped brief is refused by main and startLane before effects', async () => {
   for (const via of ['main', 'startLane']) {
     const { deps, calls } = fakes({ brief: BRIEF.replace('shape: standard', 'shape: stepped') })
     if (via === 'main') {
-      const { code, stderr } = await mainWithStderr(['/d/b1.md', '--check'], deps)
+      const { code, stderr } = await mainWithStderr(['/d/b1.md'], deps)
       assert.equal(code, 1)
       assert.match(stderr, /not a P1 brief:[\s\S]*shape is one of standard, finish/)
     } else {
@@ -723,16 +743,17 @@ test('(LS1) crew/start.mjs imports none of the old driver or roster modules', ()
   assert.doesNotMatch(source, /(?:import\s*\(|from\s+)['"]\.\/(drive|roster|roster-validate|roster-generate|crew)\.mjs['"]/)
 })
 
-test('(LS2) a lean --check in a child process loads no old driver, roster or crew module', () => {
+test('(LS2) a refusing start in a child process loads no old driver, roster or crew module', () => {
   const dir = scratchDir('lean-start-trace-')
   const tracer = join(dir, 'trace.mjs')
   const trace = join(dir, 'trace.log')
   const brief = join(dir, 'b1.md')
-  writeFileSync(brief, BRIEF)
+  writeFileSync(brief, BRIEF.replace('shape: standard', 'shape: stepped'))
   writeFileSync(tracer, `import { registerHooks } from 'node:module'\nimport { appendFileSync } from 'node:fs'\nregisterHooks({ load(url, context, next) { appendFileSync(${JSON.stringify(trace)}, url + '\\n'); return next(url, context) } })\n`)
   const start = fileURLToPath(new URL('./start.mjs', import.meta.url))
-  const child = spawnSync(process.execPath, ['--import', tracer, start, brief, '--check'], { encoding: 'utf8' })
-  assert.equal(child.status, 0, child.stderr)
+  const child = spawnSync(process.execPath, ['--import', tracer, start, brief], { encoding: 'utf8' })
+  assert.equal(child.status, 1, child.stderr)
+  assert.match(child.stderr, /not a P1 brief/)
   const loaded = readFileSync(trace, 'utf8')
   assert.match(loaded, /crew\/start\.mjs/)
   for (const name of ['drive', 'roster', 'roster-validate', 'roster-generate', 'crew']) assert.equal(loaded.includes(`/crew/${name}.mjs`), false, name)

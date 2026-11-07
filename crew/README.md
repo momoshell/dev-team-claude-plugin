@@ -6,7 +6,7 @@ and records it ([ADR-052](../docs/adr/adr-052-agents-do-the-work.md),
 
 ```
 crew onboard --check <draft.json> [--checkout <dir>] # calibrate the checkout
-crew start <brief.md> [--check] [--checkout <dir>]   # worktree + journal + a detached lane
+crew start <brief.md> [--checkout <dir>]             # worktree + journal + a detached lane
 crew lanes [--all] [--json]                          # list lanes from their journals
 crew show <lane> [<role>] [--json]                   # read a lane's recorded seat sessions
 crew finish <lane>                                   # report a stopped or ready lane, read-only

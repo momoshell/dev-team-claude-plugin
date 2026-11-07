@@ -1,36 +1,33 @@
 ---
 name: lane-brief
-description: Use when starting a crew lane from a GitHub issue or an operator request. Writes one short P1 brief (ADR-052), checks its premises on main, validates it and starts the lane with crew start. The planner does the exploring; the brief only points it.
+description: Use when starting a crew lane from a GitHub issue or an operator request. Writes one short P1 brief, checks its premises on the base and starts the lane with crew start.
 ---
 
 # lane-brief
 
-A lane starts from a source, a GitHub issue or an operator request. Write one short brief and start the lane.
-For a build lane, the planner reads the code and declares `files_in_scope` in its plan. A mechanical lane has no
-planner. The brief carries no file list, symbol index, tripwire list or baseline. The format is protocol P1 in
-`docs/adr/adr-055-planner-defines-the-work.md` §1; the validator is `parseBrief` in `crew/protocols.mjs`.
+A lane starts from a GitHub issue or an operator request. Write one short brief; the planner explores the code.
+The brief validator is `parseBrief` in `crew/protocols.mjs`. Read it for the field and Context rules.
+For protected paths, read `PROTECTED` in `crew/loop.mjs`. For generated files, read the regenerate handling
+in `crew/checks.mjs` (`rebase-conflict` and its `regenerate` detail).
 
 ## Steps
 
-1. Read the source: `gh issue view <N>`, or the operator's words. The ask comes from that source: for an issue,
-   write no ask (`crew start` adds the issue body); for an operator request, quote only words the operator typed,
-   verbatim, one whole message per quoted block. Put proposals, premises and measured facts in an issue the
-   operator can read and edit. A session-filed issue opens with the operator words that asked for it.
-2. Check every premise on main (`git grep`, `git show main:<path>`, a quick run). A premise you did not check
-   is either left out or written as "unmeasured: <why>" in the issue.
-3. Write the brief to `~/.crew/briefs/<lane>.md`. The file name is the lane name: lowercase letters, digits
-   and `-`. Use `<project>-<issue>-<slug>` for an issue or `<project>-<slug>` for an operator request.
-   Use a short name for the checkout's repo as the project (`devteam` for this repo) and two to four words
-   naming the change as the slug, separated by `-`. For example, `devteam-1962-lane-names` or
-   `devteam-lane-names`.
-4. Validate: `crew start ~/.crew/briefs/<lane>.md --check`. In this repo, run the checkout's own copy:
-   `node crew/start.mjs <brief> --check`. Fix every defect it names. When typed messages are measured,
-   `crew start` refuses an ask block that is not one whole typed message (ADR-056 Amendment 1).
-5. Start: the same command without `--check`. It creates `../dt-<lane>`, snapshots the brief, writes the lean
-   spec and starts the lean loop detached. Both steps check the P1 brief and ask provenance, then resolve the
-   agent definitions (standard shape only). It prints the worktree,
-   the brief snapshot, the run log and the status command.
-6. Close the lane out after its PR merges with the `crew-recovery` skill, as before.
+1. Read the source: `gh issue view <N>`, or the operator's words. For an issue, put the ask in the issue body;
+   `crew start` reads only the body. If the operator makes a decision after the issue was filed, append it to
+   the issue body, quoting the operator. Put proposals, premises and measured facts in an issue the operator
+   can read and edit. A session-filed issue opens with the operator words that asked for it. For an operator
+   request, quote the operator's words verbatim,
+   one whole message per quoted block; do not use excerpts or combine messages. When provenance is
+   measured, `askProvenance` in `crew/brief-provenance.mjs` checks each block against a typed or queued message.
+2. Check premises on the base branch (`git grep`, `git show main:<path>`, a quick run). Leave unchecked
+   premises out or mark them unmeasured in the issue.
+3. Write the brief to `~/.crew/briefs/<lane>.md`. Use `<project>-<issue>-<slug>` for the lane name (for example,
+   `devteam-1962-lane-names`); see `LANE` in `crew/lane-core.mjs` for the allowed characters. Choose `source`, the issue bound by `closes`, whether the
+   work is `mechanical`, and what is `out_of_scope`. Use Context pointers to the files and symbols the planner
+   should read. A mechanical lane has no planner; use it only for work with no behaviour to judge and no
+   protected paths. A new lane uses `shape: standard`.
+4. Start with `crew start ~/.crew/briefs/<lane>.md`. Fix any refusal and retry. In this repo, the checkout's
+   copy is `node crew/start.mjs <brief>`. Close the lane after its PR merges using `crew-recovery`.
 
 ## Format
 
@@ -64,29 +61,3 @@ out_of_scope: the visualizer
 
 - `crew/agents.mjs` `resolveAgents`
 ```
-
-Context items are bare pointers: each list item contains one or more code spans, `issue N` or `PR N`, separated by spaces or tabs. No links, prose or continuation lines. Code spans cannot start with `/`, `~` or a URL scheme, or contain a `..` path segment. The first span in each item and later spans containing `/` are repo paths checked on the local base branch at start; symlinks and submodules in those paths are refused. Later spans without `/` name symbols. Rules and criteria belong to the planner.
-
-No acceptance ids or `## Acceptance` section: the planner writes the criteria (ADR-055 §1). A brief with an `acceptance` field is refused.
-Field rules (the validator refuses anything else):
-
-- `source`: the issue or the request the lane starts from.
-- `closes`: one issue number, or `null`. It is the only issue binding: `crew start` writes it into the run
-  brief's bound-issue header, and the merged PR closes it. Quote the operator's words verbatim, `#N` included: a quoted `#N` binds nothing. Elsewhere in the body, write "issue 1961" or "PR 1968".
-- `mechanical` (optional): write `mechanical: true` only when the issue shows no behaviour to judge and names none of the protected paths: `crew/loop.mjs`, `crew/checks.mjs`, `crew/finish.mjs`, `crew/lean.mjs`, `crew/proof.mjs`, `crew/proof-reporter.mjs`, `crew/protocols.mjs`, `crew/acp/grants.mjs`, `hooks/`, `crew/agents/`, `.github/workflows/`, and `docs/adr/` (ADR-055 §7). Without it the lane runs the build loop. Judge is reached only by the planner's `judge` reason or a path raise. A `tier` line is refused.
-- `shape`: `standard` only. `finish` is not started from a brief.
-- `out_of_scope` (optional): what the lane must not change. Absent means none.
-- The suite lives in `.crew/project.json`, not the brief; run `/onboard` to calibrate it.
-- `generated` and `regenerate` (optional, declared together): list literal repo-relative tracked files or directories
-  (a trailing `/` marks a directory), for example `generated: [docs/api.json, dist/]`, and give a command line
-  such as `regenerate: npm run generate`. The line is split on whitespace without a shell; quotes and backslashes are refused, so an argument cannot contain a space. On a rebase conflict limited to those paths, the lane takes the base
-  copy and completes the rebase. It runs the command without a shell in a fresh scratch checkout of the rebased
-  lane, with no ignored or untracked files, so it must not need an install or a prior build. Ignored output is
-  discarded and never committed. An undeclared conflict or change stops with `undeclared-path`; a non-zero command
-  stops with `regenerate-failed`; remaining conflict markers stop with `conflict-markers`. An interrupted or
-  unmeasured command keeps its unmeasured reason. The lane restores the checkout before stopping.
-
-## Keep it short
-
-- Point, do not paste. Name the files and functions to read; the planner opens them.
-- One lane per brief. Split work that needs different suites or loops.

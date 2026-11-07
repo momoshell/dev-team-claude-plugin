@@ -202,13 +202,13 @@ out_of_scope: everything else
       return JSON.stringify({ suite: 'npm test', proof: [], onboarded: { hash: createHash('sha256').update(JSON.stringify(['npm test', []])).digest('hex') } })
     },
     resolveAgents: () => { resolutions++; return { seats: {}, advisor: null } },
-    existsSync: forbidden('existsSync'), mkdirSync: forbidden('mkdirSync'),
+    existsSync: () => true, mkdirSync: forbidden('mkdirSync'),
     writeFileSync: forbidden('writeFileSync'), openSync: forbidden('openSync'),
     closeSync: forbidden('closeSync'), spawnSync: forbidden('spawnSync'),
     spawnDetached: forbidden('spawnDetached'), log: () => {},
   }
   let result, error
-  try { result = await startLane({ briefPath, checkout: '/virtual/checkout', check: true, deps }) } catch (caught) { error = caught }
+  try { result = await startLane({ briefPath, checkout: '/virtual/checkout', deps }) } catch (caught) { error = caught }
   return { result, error, effects, resolutions }
 }
 
@@ -220,8 +220,9 @@ test('SH1: brief shape offerings and examples match public start behaviour', asy
     const { result, error, effects, resolutions } = await probe(shape)
     assert.deepEqual(effects, [])
     if (shape === 'standard') {
-      assert.equal(error, undefined)
-      assert.equal(result?.checked, true)
+      assert.ok(error instanceof StartRefusal)
+      assert.match(error.message, /already exists/)
+      assert.equal(result, undefined)
       assert.equal(resolutions, 1)
       accepted.push(shape)
     } else {
@@ -231,10 +232,7 @@ test('SH1: brief shape offerings and examples match public start behaviour', asy
     }
   }
   const skill = read('skills/lane-brief/SKILL.md')
-  const rule = /^- `shape`:[^\S\r\n]*([^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*)/m.exec(skill)?.[1]
-  assert.ok(rule)
-  const offered = [...flat(rule).split(/\.(?:\s|$)/)[0].matchAll(/`([^`]+)`/g)].map((m) => m[1])
-  assert.deepEqual(offered, accepted)
+  assert.match(skill, /new lane uses `shape: standard`/)
   const examples = [...skill.matchAll(/^shape:\s*(\S+)/gm)].map((m) => m[1])
   assert.ok(examples.length)
   assert.ok(examples.every((shape) => accepted.includes(shape)))

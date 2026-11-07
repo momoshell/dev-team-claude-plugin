@@ -81,7 +81,6 @@ before its first lane.
   protocols), `acp/` and `acp-client.mjs` (the ACP seat transport), and the
   verbs `show`, `finish`, `record-pr`, `closeout` and `lanes`. Seat definitions
   and instructions are delivered from `crew/agents/*.md`.
-- **`agents/`** — operator-side agents: `agents/brief-writer.md` turns an issue or command into a P1 brief.
 - **`skills/`, `commands/`** — the operating knowledge as Claude Code surfaces.
   The knowledge skills (`pr-review`, `qa-test-writing`, `test-economy`, `test-strength`, `backend-node`,
   `frontend-svelte`, `ui-design`, `devops`, `ux`, `code-less`, `prose-plain`)

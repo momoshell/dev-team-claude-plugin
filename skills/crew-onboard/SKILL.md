@@ -69,9 +69,8 @@ If you only want the skills, stop here.
    `suiteTimeoutMs` or `proofTimeoutMs` in `.crew/project.json` does not require
    re-onboarding.
    Write a brief with
-   `skills/lane-brief/SKILL.md`, then run `crew start <brief> --check` and
-   `crew start <brief>` in the checkout. The start checks the base; `--check`
-   checks only the checkout.
+   `skills/lane-brief/SKILL.md`, then run `crew start <brief>` in the checkout.
+   The start checks the base.
 
 `crew` on `PATH` is a launcher you set up; installing the plugin does not add
 one. Without it, run `node <dev-team clone>/bin/crew.mjs` with the same verbs.

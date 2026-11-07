@@ -987,6 +987,50 @@ test('a reserve re-review that still asks for changes stops round-bound with no 
   }
 })
 
+test('a pass on the last reviewer round with a red suite grants one reserve re-review of the suite repair that passes and publishes', async () => {
+  let trees = 0
+  const f = sequenced([redRun(), redRun(), green()], { bounds: { builder: 3, reviewer: 2 }, checkedTree: () => ({ ...green(), stdout: ['a', 'b', 'c'][Math.min(trees++, 2)].repeat(40) }) })
+  assert.equal((await f.go()).status, 'done')
+  assert.equal(count(f, 'reviewer'), 3)
+  assert.equal(count(f, 'builder'), 3)
+  assert.equal(count(f, 'lead'), 0)
+  const reviews = f.requests.filter((r) => r.role === 'reviewer')
+  assert.equal(reviews[1].reserveReview, undefined)
+  assert.deepEqual(reviews[2].reserveReview, { baseTree: 'b'.repeat(40) })
+  assert.deepEqual(reviews[2].feedback, [])
+  assert.ok(f.seen.publish)
+})
+
+test('a red suite after the suite-repair reserve re-review stops round-bound with no further builder turn', async () => {
+  const red = { ...redRun(), stdout: 'not ok 1 - failing test' }
+  const f = sequenced([red, red, red], { bounds: { builder: 3, reviewer: 2 } })
+  assert.deepEqual(await f.go(), stopped('round-bound'))
+  assert.equal(count(f, 'reviewer'), 3)
+  assert.equal(count(f, 'builder'), 3)
+  assert.equal(count(f, 'lead'), 0)
+  assert.equal(f.calls.filter((call) => call === 'proof').length, 3)
+  assert.equal(f.calls.includes('commit'), false)
+  assert.equal(f.calls.includes('publish'), false)
+  const observation = f.rows.findLast((row) => row.status === 'stopped').observation
+  assert.deepEqual(observation.findings, [])
+  assert.deepEqual(observation.feedback[0].failingTests, ['failing test'])
+})
+
+test('a reserve re-review that passes with a red suite stops round-bound with no further builder turn', async () => {
+  const red = { ...redRun(), stdout: 'not ok 1 - failing test' }
+  const f = sequenced([green(), green(), red], { review: 2, bounds: { builder: 10, reviewer: 2 } })
+  assert.deepEqual(await f.go(), stopped('round-bound'))
+  assert.equal(count(f, 'reviewer'), 3)
+  assert.equal(count(f, 'builder'), 3)
+  assert.equal(count(f, 'lead'), 0)
+  assert.equal(f.calls.filter((call) => call === 'proof').length, 3)
+  assert.equal(f.calls.includes('commit'), false)
+  assert.equal(f.calls.includes('publish'), false)
+  const observation = f.rows.findLast((row) => row.status === 'stopped').observation
+  assert.deepEqual(observation.findings, [])
+  assert.deepEqual(observation.feedback[0].failingTests, ['failing test'])
+})
+
 test('changes-needed carries the exact findings to the next build and repeats proof and review before the suite', async () => {
   const f = fakes({ review: 1 })
   assert.equal((await f.go()).status, 'done')

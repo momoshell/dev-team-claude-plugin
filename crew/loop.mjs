@@ -316,7 +316,7 @@ export async function runLoop(spec, deps = {}) {
 
   const readStatus = (name) => stage(name, () => callCheck(name, d.run, { cwd, command: 'git', args: [...GIT_STATUS_ARGS] }, { command: true }))
 
-  // One role's turn: issue, await, read back, validate (a schema-refused file gets one repair turn that
+  // One role's turn: issue, await, read back, validate (an envelope attempt gets one repair turn that
   // costs no round). Returns { envelope } for a done envelope or { halt }.
   // Non-done returns route under ADR-055 §12; an exhausted bound goes to the lead, unless singleTurn or the lead's own bound stops it.
   const seatTurn = async (role, feedback = [], { singleTurn = false, free = false, hold = false, reserveReview = null } = {}) => {
@@ -337,7 +337,7 @@ export async function runLoop(spec, deps = {}) {
         // One attempt: run the seat, then read the issued path back, parse it and validate it in full.
         const attempt = async (asked) => {
           let failure = null
-          let parsed = null
+          let parsed = null, parseError = null
           let recording = null, turnError = null, routed = false, providerKind = null, method = null
           try { recording = await d.runSeat(asked, { emit }) } catch (error) {
             turnError = describe(error)
@@ -353,12 +353,12 @@ export async function runLoop(spec, deps = {}) {
           if (!failure) try { raw = await d.readFile(returnPath, 'utf8') } catch (error) { failure = { reason: 'seat-unmeasured', error: describe(error) } }
           if (!failure && (typeof raw !== 'string' || raw.trim() === '')) failure = { reason: 'seat-unmeasured', error: { code: null, message: 'the seat returned an empty file' } }
           if (!failure) {
-            try { parsed = JSON.parse(raw) } catch (error) { failure = { reason: 'envelope-refused', error: describe(error) } }
+            try { parsed = JSON.parse(raw) } catch (error) { parseError = error.message; failure = { reason: 'envelope-refused', error: describe(error) } }
           }
           const checked = failure ? { envelope: null, defects: [] } : validateEnvelope(role, parsed, { prior: (role === 'reviewer' ? priorFindings : role === 'tech-lead' ? secondFindings : []).map((finding) => finding?.id) })
           if (!isFinish && tier === 'mechanical' && role === 'builder' && checked.envelope?.status === 'done' && checked.envelope.details && !Object.hasOwn(checked.envelope.details, 'subject')) checked.defects.push('details.subject is required on a mechanical lane for the commit and PR')
           if (role === 'planner' && checked.envelope && checked.defects.length === 0) checked.defects.push(...await artifactDefects(checked.envelope.details))
-          return { failure, parsed, recording, checked, turnError, routed, providerKind, method }
+          return { failure, parsed, raw, parseError, recording, checked, turnError, routed, providerKind, method }
         }
         const observe = (a) => emit('envelope', { role, id, returnPath, parsed: a.parsed, defects: a.checked.defects, error: a.failure?.error ?? null, turnError: a.turnError })
         const attempts = [await attempt(request)]
@@ -371,10 +371,10 @@ export async function runLoop(spec, deps = {}) {
             attempts.pop()
             rerun = true
             asked = { ...asked, rerun: { error: latest.turnError } }
-          } else if (!latest.turnError && !latest.failure && latest.checked.defects.length > 0 && repairs < MAX_ENVELOPE_REPAIRS) {
+          } else if (!latest.turnError && repairs < MAX_ENVELOPE_REPAIRS && ((!latest.failure && latest.checked.defects.length > 0) || (latest.parseError && latest.raw.trimStart().startsWith('{')))) {
             await observe(latest)
             repairs += 1
-            asked = { ...request, repair: { defects: [...latest.checked.defects] } }
+            asked = { ...request, repair: { defects: latest.parseError ? [latest.parseError] : [...latest.checked.defects] } }
           } else break
           latest = await attempt(asked)
           attempts.push(latest)

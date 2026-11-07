@@ -792,10 +792,81 @@ test('a repaired envelope that is refused again stops the lane with no third tur
   assert.equal(count(lead, 'lead'), 2)
 })
 
+test('a missing-comma envelope gets one repair turn carrying the parse error and the lane continues without a lost round', async () => {
+  let raw
+  const f = fakes({ bounds: { reviewer: 1 }, edit: (v, r) => {
+    if (r.role === 'reviewer' && !r.repair) return (raw = JSON.stringify(v).replace(',', ''))
+    return v
+  } })
+  assert.equal((await f.go()).status, 'done')
+  assert.equal(count(f, 'reviewer'), 2)
+  const [first, repair] = f.requests.filter((r) => r.role === 'reviewer')
+  assert.equal(first.repair, undefined)
+  assert.equal(repair.id, first.id)
+  assert.equal(repair.returnPath, first.returnPath)
+  let message
+  try { JSON.parse(raw) } catch (error) { message = error.message }
+  assert.match(message, /position \d+/)
+  assert.deepEqual(repair.repair, { defects: [message] })
+  assert.equal(count(f, 'lead'), 0)
+  for (const unproven of [1, 2]) {
+    const skills = fakes({
+      edit: (v, r) => r.role === 'builder' && !r.repair ? JSON.stringify(v).replace(',', '') : v,
+      recording: (r) => r.role === 'builder' ? { definition: { agent: 'pi', requires: ['alpha'], skills: ['alpha'], writes: 'repo' }, rows: (r.repair ? 2 : 1) === unproven ? [] : [LOAD, DONE] } : null,
+    })
+    assert.deepEqual(await skills.go(), stopped('envelope-refused'))
+    assert.equal(count(skills, 'builder'), 2)
+    assert.ok(skills.rows.some((r) => r.defects?.includes('required-skills-unproven')))
+  }
+})
+
+test('a repaired envelope that is still unparseable stops at envelope-refused with no second repair turn', async () => {
+  for (const [name, repaired, reason] of [
+    ['unparseable', () => '{', 'envelope-refused'],
+    ['schema', (v) => gaps(v), 'envelope-refused'],
+    ['wrong id', (v) => ({ ...v, id: 'stale' }), 'envelope-refused'],
+    ['empty', () => '', 'seat-unmeasured'],
+  ]) {
+    const f = fakes({ edit: (v, r) => r.role === 'builder' ? (r.repair ? repaired(v) : JSON.stringify(v).replace(',', '')) : v })
+    assert.deepEqual(await f.go(), stopped(reason), name)
+    assert.equal(count(f, 'builder'), 2, name)
+    assert.ok(f.requests.find((r) => r.role === 'builder' && r.repair), name)
+    assert.equal(f.calls.includes('proof'), false, name)
+  }
+})
+
+test("only a '{'-starting unparseable envelope gets a parse repair turn", async () => {
+  for (const [name, options, reason, turns] of [
+    ['brace', { edit: (v, r) => r.role === 'planner' && !r.repair ? '  {' : v }, null, 2],
+    ['empty', { edit: () => '' }, 'seat-unmeasured', 1],
+    ['whitespace', { edit: () => ' \n\t' }, 'seat-unmeasured', 1],
+    ['plain text', { edit: () => 'not JSON' }, 'envelope-refused', 1],
+    ['unreadable', { readError: 'EPERM' }, 'seat-unmeasured', 1],
+  ]) {
+    const f = fakes(options)
+    const result = await f.go()
+    assert.equal(result.status, reason ? 'stopped' : 'done', name)
+    assert.equal(result.reason, reason, name)
+    assert.equal(count(f, 'planner'), turns, name)
+    assert.equal(f.requests.some((r) => r.repair), turns === 2, name)
+  }
+  const f = fakes({ edit: (v, r) => r.role === 'planner' && !r.rerun ? '{' : v })
+  const run = f.deps.runSeat
+  f.deps.runSeat = async (r) => {
+    const result = await run(r)
+    if (r.role === 'planner' && !r.rerun) throw new Error('turn failed')
+    return result
+  }
+  assert.equal((await f.go()).status, 'done')
+  const planners = f.requests.filter((r) => r.role === 'planner')
+  assert.equal(planners.length, 2)
+  assert.ok(planners[1].rerun)
+  assert.equal(planners[1].repair, undefined)
+})
+
 // MUTATION: repair a file that was never JSON, or one refused only for its id or skill proof.
 test('a non-JSON, empty, unreadable, id-only or proof-only refusal gets no repair turn', async () => {
   for (const [options, reason] of [
-    [{ edit: () => '{' }, 'envelope-refused'],
     [{ edit: () => 'not JSON' }, 'envelope-refused'],
     [{ edit: () => '' }, 'seat-unmeasured'],
     [{ readError: 'EPERM' }, 'seat-unmeasured'],
@@ -2088,7 +2159,7 @@ test('a conflict turn that cannot resolve the rebase stops rebase-conflict with 
     const f = fakes({ rebase: answers({ ...MOVED, head: A }, conflict, ...(mode === 'second' ? [{ ...MOVED, onto: O }, conflict] : [conflict])),
       commit: answers({ status: 'green', reason: null, head: A, files: ['lib.mjs'] }, { status: 'green', reason: null, head: C, files: ['lib.mjs'] }),
       discard: (input) => input.args.includes(mode) ? { ...green(), status: 'red', reason: 'exit-nonzero', code: 1 } : green(),
-      edit: (v, r) => r.feedback[0]?.id === 'rebase-conflict' ? mode === 'insufficient' ? { ...v, status: 'insufficient' } : mode === 'unmeasured' ? '' : mode === 'refused' ? '{' : v : v,
+      edit: (v, r) => r.feedback[0]?.id === 'rebase-conflict' ? mode === 'insufficient' ? { ...v, status: 'insufficient' } : mode === 'unmeasured' ? '' : mode === 'refused' ? 'not JSON' : v : v,
     })
     const gitArgs = [], run = f.deps.run
     f.deps.run = (input) => { gitArgs.push(input.args); return run(input) }

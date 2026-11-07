@@ -104,9 +104,13 @@ test('a lead bounce to a planner whose rounds are spent gives the planner one mo
 
 // MUTATION: stop instead of bouncing an accept with no envelope.
 test('a lead accept on a spent bound with nothing to accept is a bounce to that seat (b1487)', async () => {
-  const f = fakes({ review: 1, bounds: { reviewer: 1 }, lead: 'accept' })
+  const A = 'a'.repeat(40), C = 'c'.repeat(40)
+  const f = sequenced([green(), redRun(), green()], { bounds: { reviewer: 1 }, lead: 'accept',
+    rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C }),
+    commit: answers({ status: 'green', reason: null, head: A, files: ['lib.mjs'] }, { status: 'green', reason: null, head: C, files: ['lib.mjs'] }) })
   assert.equal((await f.go()).status, 'done')
-  assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'builder', 'reviewer', 'builder', 'lead', 'reviewer'])
+  assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'builder', 'reviewer', 'reviewer', 'builder', 'lead', 'reviewer'])
+  assert.deepEqual(f.requests.find((r) => r.role === 'lead').feedback[0].reason, 'round-bound')
   assert.ok(f.seen.publish)
 })
 
@@ -853,6 +857,38 @@ test('from round 2 the reviewer hears the earlier findings, and a return that dr
   assert.equal((await malformed.go()).status, 'done')
 })
 
+test('a changes-needed on the last reviewer round grants one reserve re-review that passes and publishes', async () => {
+  let trees = 0
+  const f = fakes({ review: 2, bounds: { builder: 3, reviewer: 2 }, checkedTree: () => ({ ...green(), stdout: ['a', 'b', 'c'][Math.min(trees++, 2)].repeat(40) }) })
+  assert.equal((await f.go()).status, 'done')
+  assert.equal(count(f, 'reviewer'), 3)
+  assert.equal(count(f, 'builder'), 3)
+  assert.equal(count(f, 'lead'), 0)
+  const reviews = f.requests.filter((r) => r.role === 'reviewer')
+  assert.deepEqual(reviews[2].feedback, [finding])
+  assert.equal(reviews[0].reserveReview, undefined)
+  assert.deepEqual(reviews[2].reserveReview, { baseTree: 'b'.repeat(40) })
+  assert.ok(f.seen.publish)
+})
+
+test('a reserve re-review that still asks for changes stops round-bound with no further build or lead consult', async () => {
+  for (const mode of ['changes-needed', 'insufficient']) {
+    let reviews = 0
+    const f = fakes({ review: 10, bounds: { builder: 10, reviewer: 2 }, lead: 'bounce', edit: (v) => {
+      if (v.role === 'reviewer' && ++reviews === 3 && mode === 'insufficient') v.status = 'insufficient'
+      return v
+    } })
+    assert.deepEqual(await f.go(), stopped('round-bound'), mode)
+    assert.equal(count(f, 'reviewer'), 3, mode)
+    assert.equal(count(f, 'builder'), 3, mode)
+    assert.equal(count(f, 'lead'), 0, mode)
+    assert.equal(f.calls.filter((call) => call === 'proof').length, 3, mode)
+    assert.equal(f.calls.includes('commit'), false, mode)
+    assert.equal(f.calls.includes('publish'), false, mode)
+    if (mode === 'changes-needed') assert.deepEqual(f.rows.findLast((row) => row.status === 'stopped').observation.findings, [finding])
+  }
+})
+
 test('changes-needed carries the exact findings to the next build and repeats proof and review before the suite', async () => {
   const f = fakes({ review: 1 })
   assert.equal((await f.go()).status, 'done')
@@ -907,7 +943,7 @@ test('a lead accept releases only a valid non-done envelope and never an exhaust
   assert.equal((await escalated.go()).status, 'done')
   assert.equal(count(escalated, 'lead'), 1)
   assert.deepEqual(escalated.requests.find((r) => r.role === 'lead').feedback.map((x) => [x.role, x.reason, x.envelope.status]), [['planner', 'escalate', 'escalate']])
-  const exhausted = fakes({ lead: 'accept', review: 10, bounds: { builder: 1 } })
+  const exhausted = fakes({ lead: 'accept', review: 10, bounds: { builder: 1, reviewer: 10 } })
   assert.deepEqual(await exhausted.go(), stopped('lead-escalated'))
   assert.equal(count(exhausted, 'lead'), 2)
   assert.equal(exhausted.calls.includes('commit'), false)

@@ -131,6 +131,7 @@ function promptFor({ request, spec, source, charters, body, section }) {
     ...(planPath ? ['', `Plan path: ${planPath}`] : []),
     ...(['reviewer', 'tech-lead'].includes(role) ? ['', '## Builder report', `Tests: ${JSON.stringify(request.builderReport?.tests ?? [])}`, `Notes: ${JSON.stringify(request.builderReport?.notes ?? null)}`, '', '## Changed paths', ...request.changedPaths.map((path) => `- ${JSON.stringify(path)}`)] : []),
     ...(section ? ['', section] : []),
+    ...(request.reserveReview ? ['', '## Reserve re-review', `Review only the fix since tree ${request.reserveReview.baseTree} against the prior findings below, including regressions introduced by that fix. Use git diff ${request.reserveReview.baseTree} to inspect the fix. Do not raise unrelated defects in the earlier diff. This is the final review: pass or stop.`] : []),
     '',
     '## Feedback',
     JSON.stringify(feedback ?? []),

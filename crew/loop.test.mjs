@@ -643,7 +643,7 @@ test('accepted scope survives repaired envelopes, repeated turns and finish', as
 
 // MUTATION: forward spec.timeoutMs or spec.refs and a stale field reaches a check.
 test('a suite timeout override reaches only the suite, and a spec refs list or general timeout reaches no check, commit or PR', async () => {
-  for (const timeoutMs of [1, 1800000, Number.MAX_SAFE_INTEGER]) {
+  for (const timeoutMs of [1, 1800000, 2147483647]) {
     const f = fakes({ spec: { suite: { command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs } } })
     assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
     assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs })
@@ -658,8 +658,35 @@ test('a suite timeout override reaches only the suite, and a spec refs list or g
   }
 })
 
+test('a suite timeoutMs above 2147483647 is refused as invalid-input before any effect and 2147483647 reaches the suite', async () => {
+  for (const timeoutMs of [2147483648, Number.MAX_SAFE_INTEGER]) {
+    const f = fakes({ spec: { suite: { command: 'node', timeoutMs } } })
+    assert.deepEqual(await f.go(), stopped('invalid-input'))
+    assert.deepEqual(f.calls, [])
+    assert.deepEqual(f.rows, [{ event: 'verdict', lane: 'lane', stage: null, status: 'stopped', reason: 'invalid-input', at: 0 }])
+  }
+  const f = fakes({ spec: { suite: { command: 'node', timeoutMs: 2147483647 } } })
+  assert.equal((await f.go()).status, 'done')
+  assert.equal(f.seen.suite.timeoutMs, 2147483647)
+})
+
+test('a proofTimeoutMs above 2147483647 is refused as invalid-input before proof and 2147483647 reaches proveTests', async () => {
+  for (const proofTimeoutMs of [2147483648, Number.MAX_SAFE_INTEGER]) {
+    const f = fakes({ spec: { proofTimeoutMs } })
+    assert.deepEqual(await f.go(), stopped('invalid-input'))
+    assert.deepEqual(f.calls, [])
+    assert.deepEqual(f.rows, [{ event: 'verdict', lane: 'lane', stage: null, status: 'stopped', reason: 'invalid-input', at: 0 }])
+  }
+  const inputs = []
+  const f = fakes({ spec: { tier: 'mechanical', proofTimeoutMs: 2147483647 }, rebase: { status: 'green', reason: null, head: 'b'.repeat(40), onto: 'c'.repeat(40) }, edit: (v) => { if (v.role === 'builder') v.details.subject = 'fix: timeout'; return v } })
+  const prove = f.deps.proveTests
+  f.deps.proveTests = (input) => { inputs.push(input); return prove(input) }
+  assert.equal((await f.go()).status, 'done')
+  assert.deepEqual(inputs.map((input) => input.timeoutMs), [2147483647, 2147483647])
+})
+
 test('a proofTimeoutMs in the lane spec reaches proveTests', async () => {
-  for (const value of [undefined, 1, 360000, Number.MAX_SAFE_INTEGER]) {
+  for (const value of [undefined, 1, 360000, 2147483647]) {
     const inputs = []
     const f = fakes({ spec: { tier: 'mechanical', proofTimeoutMs: value }, rebase: { status: 'green', reason: null, head: 'b'.repeat(40), onto: 'c'.repeat(40) }, edit: (v) => { if (v.role === 'builder') v.details.subject = 'fix: timeout'; return v } })
     const prove = f.deps.proveTests
@@ -670,7 +697,7 @@ test('a proofTimeoutMs in the lane spec reaches proveTests', async () => {
     assert.equal(inputs[0].base, 'HEAD')
     assert.equal(inputs[1].base, `${'b'.repeat(40)}^`)
   }
-  for (const value of [null, 0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '1000', true, {}, []]) {
+  for (const value of [null, 0, -1, 1.5, NaN, Infinity, 2147483648, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1, '1000', true, {}, []]) {
     const f = fakes({ spec: { proofTimeoutMs: value } })
     assert.deepEqual(await f.go(), stopped('invalid-input'))
     assert.equal(f.calls.includes('proof'), false)
@@ -679,7 +706,7 @@ test('a proofTimeoutMs in the lane spec reaches proveTests', async () => {
 
 // MUTATION: drop the suite timeout validation and an unsound override starts the lane.
 test('an invalid suite timeout override is refused before any dependency effect, with one stopped journal row', async () => {
-  const invalid = [0, -1, 1.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1, '1800000', null, true, {}, []]
+  const invalid = [0, -1, 1.5, NaN, Infinity, -Infinity, 2147483648, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1, '1800000', null, true, {}, []]
   for (const timeoutMs of invalid) {
     const f = fakes({ spec: { suite: { command: 'node', timeoutMs } } })
     assert.deepEqual(await f.go(), stopped('invalid-input'), String(timeoutMs))

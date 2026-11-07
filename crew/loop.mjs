@@ -15,7 +15,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { resolveAgents } from './agents.mjs'
 import {
-  CHECK_REASONS, FINISH_REVIEW_ROUNDS, commitChanges, openPullRequest, parseStatus, rebaseBranch, runSuite, validGenerated,
+  CHECK_REASONS, FINISH_REVIEW_ROUNDS, commitChanges, openPullRequest, parseStatus, rebaseBranch, runSuite, validGenerated, validTimeout,
 } from './checks.mjs'
 import { HEX_OID, describeError as describe, GIT_STATUS_ARGS } from './lane-core.mjs'
 import { proveTests } from './proof.mjs'
@@ -162,8 +162,8 @@ export async function runLoop(spec, deps = {}) {
   const isFinish = spec.shape === 'finish'
   const sound = [spec.id, spec.cwd, spec.taskDir, spec.brief, spec.source, spec.branch, spec.base].every(text) && TIERS.includes(spec.tier)
     && text(spec.suite?.command) && (spec.suite.args === undefined || Array.isArray(spec.suite.args))
-    && (spec.suite.timeoutMs === undefined || (Number.isSafeInteger(spec.suite.timeoutMs) && spec.suite.timeoutMs > 0))
-    && (spec.proofTimeoutMs === undefined || (Number.isSafeInteger(spec.proofTimeoutMs) && spec.proofTimeoutMs > 0))
+    && (spec.suite.timeoutMs === undefined || validTimeout(spec.suite.timeoutMs))
+    && (spec.proofTimeoutMs === undefined || validTimeout(spec.proofTimeoutMs))
     && (!Object.hasOwn(spec, 'generated') || validGenerated(spec.generated))
     && (spec.closes === undefined || Array.isArray(spec.closes))
   if (!sound) return early('invalid-input')

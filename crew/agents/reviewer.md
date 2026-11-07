@@ -24,11 +24,13 @@ List up to three `failure_modes`, each with `breaks`, `where`, `trigger`, `teste
 
 State `coverage` as `read` (the paths read) and `complete` (a boolean). An incomplete review is never a pass.
 
-From round 2, Feedback lists earlier findings: carry each under its id in `findings` or close it in `closed` with its id and evidence.
+From round 2, Feedback lists earlier findings. For the must-fixes, carry each under its id in `findings` or close it in `closed` with its id and evidence. Close a resolved should-fix with its id and evidence. In ordinary reviewer rounds from round 2, a must-fix must be an earlier finding still unresolved or a defect in code changed since the previous reviewed tree; raise a new problem elsewhere as a should-fix. Finish reviews and reserve re-reviews follow their own instructions.
 
 Read the `## Builder report`: start where `notes` says the builder did not test. Flag a test the plan does not name when `notes` gives no reason for it.
 
 Review verdicts: `pass`, `changes-needed`.
+
+A `changes-needed` verdict requires at least one `must-fix`.
 
 Finding severities: `must-fix`, `should-fix`, `consider`.
 

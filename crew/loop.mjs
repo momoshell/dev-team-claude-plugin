@@ -221,6 +221,16 @@ export async function runLoop(spec, deps = {}) {
   let priorFindings = isFinish ? fin.findings : []
   let reservePending = false, reserveSpent = false, reserveBase = null
   let secondFindings = []
+  let reviewedTree = null
+  let findingOrder = 0
+  const openFindings = { reviewer: new Map(priorFindings.filter((f) => f.severity === 'should-fix').map((f) => [f.id, { finding: f, order: findingOrder++ }])), 'tech-lead': new Map() }
+  const rememberFindings = (role, details) => {
+    const open = openFindings[role]
+    for (const finding of details.findings) {
+      if (finding.severity === 'should-fix') open.set(finding.id, { finding, order: findingOrder++ })
+    }
+    for (const entry of details.closed ?? []) open.delete(entry.id)
+  }
   let builderReport = null
   let filesInScope = isFinish ? fin.filesInScope ?? null : null
   let changedPaths = []
@@ -319,7 +329,7 @@ export async function runLoop(spec, deps = {}) {
   // One role's turn: issue, await, read back, validate (an envelope attempt gets one repair turn that
   // costs no round). Returns { envelope } for a done envelope or { halt }.
   // Non-done returns route under ADR-055 §12; an exhausted bound goes to the lead, unless singleTurn or the lead's own bound stops it.
-  const seatTurn = async (role, feedback = [], { singleTurn = false, free = false, hold = false, reserveReview = null } = {}) => {
+  const seatTurn = async (role, feedback = [], { singleTurn = false, free = false, hold = false, reserveReview = null, deltaReview = null } = {}) => {
     if (role === 'reviewer') enterPhase('review')
     let given = feedback
     for (;;) {
@@ -333,7 +343,7 @@ export async function runLoop(spec, deps = {}) {
         if (role === 'lead') feedback = feedback.map((item) => Object.hasOwn(item, 'last') ? { ...item, last: rounds.lead >= (seats.lead.rounds ?? DEFAULT_ROUNDS) } : item)
         const id = `${spec.id}.${role}.${turn}`
         const returnPath = join(spec.taskDir, `${role}-${turn}.json`)
-        const request = { role, tier, seat: seats[role], id, returnPath, brief: spec.brief, planPath, feedback, ...(['builder', 'reviewer', 'tech-lead'].includes(role) ? { filesInScope: filesInScope === null ? null : [...filesInScope] } : {}), ...(['reviewer', 'tech-lead'].includes(role) ? { changedPaths, builderReport } : {}), ...(reserveReview ? { reserveReview } : {}) }
+        const request = { role, tier, seat: seats[role], id, returnPath, brief: spec.brief, planPath, feedback, ...(['builder', 'reviewer', 'tech-lead'].includes(role) ? { filesInScope: filesInScope === null ? null : [...filesInScope] } : {}), ...(['reviewer', 'tech-lead'].includes(role) ? { changedPaths, builderReport } : {}), ...(reserveReview ? { reserveReview } : {}), ...(deltaReview ? { deltaReview } : {}) }
         // One attempt: run the seat, then read the issued path back, parse it and validate it in full.
         const attempt = async (asked) => {
           let failure = null
@@ -355,7 +365,7 @@ export async function runLoop(spec, deps = {}) {
           if (!failure) {
             try { parsed = JSON.parse(raw) } catch (error) { parseError = error.message; failure = { reason: 'envelope-refused', error: describe(error) } }
           }
-          const checked = failure ? { envelope: null, defects: [] } : validateEnvelope(role, parsed, { prior: (role === 'reviewer' ? priorFindings : role === 'tech-lead' ? secondFindings : []).map((finding) => finding?.id) })
+          const checked = failure ? { envelope: null, defects: [] } : validateEnvelope(role, parsed, { prior: (role === 'reviewer' ? priorFindings : role === 'tech-lead' ? secondFindings : []).filter((finding) => finding?.severity === 'must-fix').map((finding) => finding.id) })
           if (!isFinish && tier === 'mechanical' && role === 'builder' && checked.envelope?.status === 'done' && checked.envelope.details && !Object.hasOwn(checked.envelope.details, 'subject')) checked.defects.push('details.subject is required on a mechanical lane for the commit and PR')
           if (role === 'planner' && checked.envelope && checked.defects.length === 0) checked.defects.push(...await artifactDefects(checked.envelope.details))
           return { failure, parsed, raw, parseError, recording, checked, turnError, routed, providerKind, method }
@@ -691,7 +701,7 @@ export async function runLoop(spec, deps = {}) {
         if (!isFinish) {
           const halt = await stageChecked()
           if (halt) return halt
-          const runReview = () => stage('review', () => seatTurn('reviewer', priorFindings, { free: rebaseOnly, singleTurn: !rebaseOnly && reservePending, ...(!rebaseOnly && reservePending ? { reserveReview: { baseTree: reserveBase } } : {}) }))
+          const runReview = () => stage('review', () => seatTurn('reviewer', priorFindings, { free: rebaseOnly, singleTurn: !rebaseOnly && reservePending, ...(!rebaseOnly && reservePending ? { reserveReview: { baseTree: reserveBase } } : !rebaseOnly && reviewedTree ? { deltaReview: { baseTree: reviewedTree } } : {}) }))
           let suite, reviewed
           if (tier === 'build') {
             const pair = await Promise.allSettled([suiteRun(), runReview()])
@@ -709,6 +719,8 @@ export async function runLoop(spec, deps = {}) {
           if (reviewed) {
             const review = reviewed.envelope
             priorFindings = review.details.findings
+            rememberFindings('reviewer', review.details)
+            if (!rebaseOnly && !reservePending) reviewedTree = checkedTree
             await emit('verdict', { status: 'reviewed', verdict: review.details.verdict, findings: priorFindings })
             if (!rebaseOnly && reservePending) {
               reservePending = false
@@ -736,6 +748,7 @@ export async function runLoop(spec, deps = {}) {
             const second = await stage('second-review', () => seatTurn('tech-lead', secondFindings, { free: rebaseOnly }))
             if (second.halt) return second.halt
             secondFindings = second.envelope.details.findings
+            rememberFindings('tech-lead', second.envelope.details)
             await emit('verdict', { status: 'reviewed', role: 'tech-lead', verdict: second.envelope.details.verdict, findings: secondFindings })
             if (second.envelope.details.verdict === 'changes-needed') { feedback = secondFindings; continue }
           }
@@ -750,6 +763,7 @@ export async function runLoop(spec, deps = {}) {
         if (reviewed.halt) return reviewed.halt
         const review = reviewed.envelope
         priorFindings = review.details.findings
+        rememberFindings('reviewer', review.details)
         finishReviews.push({ verdict: review.details.verdict, findings: review.details.findings })
         await emit('verdict', { status: 'reviewed', verdict: review.details.verdict, findings: review.details.findings })
         if (review.details.verdict === 'changes-needed') {
@@ -823,7 +837,8 @@ export async function runLoop(spec, deps = {}) {
     if (!files) return stop('paths-unmeasured', status)
     publishedFiles = files
     laneBody = () => {
-      const open = [...priorFindings, ...(tier === 'judge' && !isFinish ? secondFindings : [])].filter((f) => f.severity === 'should-fix')
+      const entries = [...openFindings.reviewer.values(), ...(tier === 'judge' && !isFinish ? openFindings['tech-lead'].values() : [])].sort((a, b) => a.order - b.order)
+      const open = entries.map(({ finding }) => finding)
       const issue = /^issue ([1-9]\d*)$/.exec(spec.source)
       const title = issue && (/^title:\s*(.+)$/im.exec(spec.brief.split(/^---\s*$/m)[1] ?? '')?.[1]
         ?? /^\s*(?:>\s*)?issue title:\s*(.+)$/im.exec(spec.brief)?.[1])

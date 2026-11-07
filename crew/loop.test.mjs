@@ -1854,6 +1854,72 @@ const finishSpec = (over = {}) => ({
 })
 const FINISH_SUCCESS = ['base-paths', 'fetch', 'base-commit', 'rebase', 'base-restore', 'seat:builder', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'seat:reviewer', 'suite', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase']
 
+test('a changes-needed with only should-fix findings gets one repair turn and a repaired pass publishes without a builder bounce', async () => {
+  const f = fakes({ edit: (v, r) => {
+    if (r.role === 'reviewer') {
+      v.details.verdict = r.repair ? 'pass' : 'changes-needed'
+      v.details.findings = [{ ...finding, severity: 'should-fix' }]
+    }
+    return v
+  } })
+  assert.equal((await f.go()).status, 'done')
+  assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'builder', 'reviewer', 'reviewer'])
+  assert.ok(f.requests.at(-1).repair.defects.some((d) => d.includes('no finding is must-fix')))
+  assert.ok(f.seen.publish)
+})
+
+test('a round-2 reviewer request carries the previous reviewed tree while round-1 and finish requests carry none', async () => {
+  let f
+  f = fakes({ review: 2, bounds: { reviewer: 3, builder: 3 }, checkedTree: () => ({ ...green(), stdout: `${'abcdef'[Math.min(f.requests.filter((r) => r.role === 'reviewer').length, 2)].repeat(40)}\n` }) })
+  assert.equal((await f.go()).status, 'done')
+  const reviews = f.requests.filter((r) => r.role === 'reviewer')
+  assert.equal(Object.hasOwn(reviews[0], 'deltaReview'), false)
+  assert.deepEqual(reviews[1].deltaReview, { baseTree: 'a'.repeat(40) })
+  assert.deepEqual(reviews[2].deltaReview, { baseTree: 'b'.repeat(40) })
+  const finish = fakes({ spec: finishSpec(), review: 1, unseated: ['planner'] })
+  assert.equal((await finish.go()).status, 'done')
+  assert.ok(finish.requests.filter((r) => r.role === 'reviewer').every((r) => !Object.hasOwn(r, 'deltaReview')))
+  const reserve = fakes({ review: 1, bounds: { reviewer: 1 } })
+  assert.equal((await reserve.go()).status, 'done')
+  const final = reserve.requests.filter((r) => r.role === 'reviewer').at(-1)
+  assert.deepEqual(final.reserveReview, { baseTree: 'e'.repeat(40) })
+  assert.equal(Object.hasOwn(final, 'deltaReview'), false)
+  const recheck = fakes({ rebase: answers({ ...MOVED, head: 'a'.repeat(40) }, MOVED, { ...MOVED, head: 'a'.repeat(40) }) })
+  assert.equal((await recheck.go()).status, 'done')
+  const recheckReviews = recheck.requests.filter((r) => r.role === 'reviewer')
+  assert.equal(recheckReviews.length, 2)
+  assert.equal(Object.hasOwn(recheckReviews[1], 'deltaReview'), false)
+})
+
+test('an open should-fix from round 1 that is not re-raised still appears in the PR body', async () => {
+  for (const role of ['reviewer', 'tech-lead']) for (const mode of ['omitted', 'closed', 'updated', 'consider']) {
+    let turns = 0
+    const optional = { ...finding, id: role === 'reviewer' ? 'R2' : 'T2', severity: 'should-fix', summary: `${role} open point` }
+    const f = fakes({ spec: { tier: role === 'tech-lead' ? 'judge' : 'build' }, ...(role === 'reviewer' ? { review: 1 } : { secondReview: 1 }), edit: (v) => {
+      if (v.role === role) {
+        if (++turns === 1) v.details.findings.push(optional)
+        else if (mode !== 'closed') {
+          v.details.closed = v.details.closed.filter((entry) => entry.id !== optional.id)
+          if (mode === 'updated') v.details.findings.push({ ...optional, summary: 'Updated open point' })
+          if (mode === 'consider') v.details.findings.push({ ...optional, severity: 'consider' })
+        }
+      }
+      return v
+    } })
+    assert.equal((await f.go()).status, 'done')
+    assert.equal(f.requests.filter((r) => r.role === role).length, 2)
+    assert.equal(f.seen.publish.body.includes(optional.summary), mode === 'omitted' || mode === 'consider')
+    assert.equal(f.seen.publish.body.includes('Updated open point'), mode === 'updated')
+  }
+  const judge = fakes({ spec: { tier: 'judge' }, edit: (v) => {
+    if (['reviewer', 'tech-lead'].includes(v.role)) v.details.findings.push({ ...finding, severity: 'should-fix', summary: `${v.role} same-id point` })
+    return v
+  } })
+  assert.equal((await judge.go()).status, 'done')
+  assert.match(judge.seen.publish.body, /reviewer same-id point/)
+  assert.match(judge.seen.publish.body, /tech-lead same-id point/)
+})
+
 // MUTATION: commit the snapshot with the added-then-deleted entry still staged and the rebase refuses a dirty checkout.
 test('a finish run drops added-then-deleted index entries before its base snapshot and commits only the build', async () => {
   for (const [stdout, files] of [[' M lib.mjs\0AD scratch.mjs\0', ['lib.mjs']], ['AD scratch.mjs\0', null]]) {

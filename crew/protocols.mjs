@@ -368,7 +368,7 @@ export function validateEnvelope(role, envelope, { archived = false, prior = [] 
         }
       }
       if (['reviewer', 'tech-lead'].includes(role)) {
-        if (!archived && envelope.status === 'done' && details.verdict === 'changes-needed' && Array.isArray(details.findings) && !details.findings.some((f) => plain(f) && ['must-fix', 'should-fix'].includes(f.severity))) defects.push('details.verdict is changes-needed but no finding is must-fix or should-fix')
+        if (!archived && envelope.status === 'done' && details.verdict === 'changes-needed' && Array.isArray(details.findings) && !details.findings.some((f) => plain(f) && f.severity === 'must-fix')) defects.push('details.verdict is changes-needed but no finding is must-fix')
         if (details.verdict === 'pass' && Array.isArray(details.requirements) && details.requirements.some((r) => r?.status === 'unmet')) defects.push('details.verdict is pass but a requirement is unmet')
         if (details.verdict === 'pass' && Object.hasOwn(details, 'coverage') && details.coverage?.complete !== true) defects.push('details.verdict is pass but coverage is incomplete')
         if (!archived && Array.isArray(prior)) for (const id of prior) {

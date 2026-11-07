@@ -20,6 +20,14 @@ test('projectHash of an entry without list matches the hash recorded before list
   assert.doesNotThrow(() => requireOnboarded('/repo', () => JSON.stringify({ suite: 'sh tools/crew-suite.sh', proof, onboarded: { hash: before } })))
 })
 
+// MUTATION: compare only against projectHash and a record written while list hashed as null reads stale.
+test('requireOnboarded accepts a record written while an absent list hashed as null', () => {
+  const suite = 'npm test', proof = [{ match: '*.xml', run: 'node run.mjs' }]
+  const hash = createHash('sha256').update(JSON.stringify([suite, [['*.xml', null, 'node run.mjs', null]]])).digest('hex')
+  assert.notEqual(hash, projectHash({ suite, proof }))
+  assert.equal(requireOnboarded('/repo', () => JSON.stringify({ suite, proof, onboarded: { hash } })).hash, hash)
+})
+
 test('requireOnboarded distinguishes missing and stale project records', () => {
   const suite = 'npm test', proof = []
   const hash = createHash('sha256').update(JSON.stringify([suite, proof])).digest('hex')

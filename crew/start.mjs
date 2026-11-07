@@ -1,9 +1,9 @@
-// crew start <brief.md> [--check] [--checkout <dir>]
+// crew start <brief.md> [--checkout <dir>]
 //
 // The lean entry (ADR-052 phase 1): one P1 brief in, one running lane out. It checks the
 // brief, creates the lane worktree and starts the run detached, handing the brief to the
 // planner as its whole input. No compile, no baseline, no gate. The lane name is the
-// brief's file name. --check validates the brief and the checkout's onboarding.
+// brief's file name.
 //
 // The start stands on the brief parser and the agent definitions alone. It refuses before any
 // git call when the brief is not P1 or the definitions do not resolve.
@@ -75,7 +75,7 @@ function suiteSpec(suite, timeoutMs = SUITE_TIMEOUT_DEFAULT_MS) {
   return { command, args, timeoutMs }
 }
 
-export async function startLane({ briefPath, checkout, check = false, deps = {} }) {
+export async function startLane({ briefPath, checkout, deps = {} }) {
   const d = { ...defaultDeps(), ...deps }
   const logLine = (line) => { try { d.log(line) } catch { /* Instrumentation must not affect the start. */ } }
   const lane = laneName(briefPath)
@@ -101,7 +101,6 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
     if (error instanceof OnboardRefusal) throw new StartRefusal(error.message, { cause: error })
     throw error
   }
-  if (check) { logLine(`crew start: brief ok lane=${lane} tier=${tier} shape=${fields.shape} closes=${fields.closes ?? 'none'}`); return { lane, fields, checked: true } }
   const worktree = join(dirname(checkout), `dt-${lane}`)
   const crewDir = join(d.crewRoot, `dt-${lane}`, lane)
   if (d.existsSync(crewDir)) throw new StartRefusal(`crew lane directory ${crewDir} already exists; pick another lane name or close that lane out`)
@@ -200,7 +199,7 @@ export async function startLane({ briefPath, checkout, check = false, deps = {} 
 }
 
 export async function main(argv = process.argv.slice(2), deps = {}) {
-  const FLAGS = { '--check': { value: false }, '--checkout': { value: true } }
+  const FLAGS = { '--checkout': { value: true } }
   const flags = {}, rest = []
   let bad = false
   for (let i = 0; i < argv.length; i++) {
@@ -213,13 +212,13 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     } else flags[arg] = true
   }
   if (bad || rest.length !== 1) {
-    process.stderr.write('usage: crew start <brief.md> [--check] [--checkout <dir>]\n')
+    process.stderr.write('usage: crew start <brief.md> [--checkout <dir>]\n')
     return 2
   }
   // Resolve the checkout only after the brief passes.
   const checkout = flags['--checkout'] ? resolve(flags['--checkout']) : null
   try {
-    await startLane({ briefPath: resolve(rest[0]), checkout, check: flags['--check'] ?? false, deps })
+    await startLane({ briefPath: resolve(rest[0]), checkout, deps })
     return 0
   } catch (error) {
     if (!(error instanceof StartRefusal)) throw error

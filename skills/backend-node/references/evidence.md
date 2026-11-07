@@ -67,7 +67,7 @@ pins EPERM, unknown, interrupted, and empty import-scan outcomes.
 
 No dedicated local test or source exhibit was found for an interrupted flag parse.
 A missing value is measured for `--checkout` in
-`crew/start.test.mjs`; other verbs are unmeasured.
+`crew/start.test.mjs` (`main reads only --checkout: --loop, an unknown flag, a duplicate or a missing value is usage`); other verbs are unmeasured.
 
 Keep those edge rules in `cli-flags.md` marked unbacked until a test pins them.
 

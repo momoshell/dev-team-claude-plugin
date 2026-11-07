@@ -95,8 +95,7 @@ export function junitEvents(xml) {
   })
 }
 
-function nearestTitle(events, title) {
-  const candidates = new Set(events.flatMap((e) => e.classname ? [e.name, `${e.classname}.${e.name}`, `${e.classname}::${e.name}`] : [e.name]))
+function nearestTitle(candidates, title) {
   let best, bestSuffix = -1, bestDistance = Infinity
   for (const candidate of candidates) {
     let suffix = 0
@@ -134,7 +133,7 @@ function safePath(root, file, required) {
   return true
 }
 
-export const validProofEntry = (e) => e && typeof e === 'object' && !Array.isArray(e) && typeof e.match === 'string' && e.match.trim() && typeof e.run === 'string' && e.run.trim() && (!Object.hasOwn(e, 'setup') || (typeof e.setup === 'string' && e.setup.trim()))
+export const validProofEntry = (e) => e && typeof e === 'object' && !Array.isArray(e) && typeof e.match === 'string' && e.match.trim() && typeof e.run === 'string' && e.run.trim() && (!Object.hasOwn(e, 'setup') || (typeof e.setup === 'string' && e.setup.trim())) && (!Object.hasOwn(e, 'list') || (typeof e.list === 'string' && e.list.trim()))
 export const entryCommand = (run, values) => run.trim().split(/\s+/).map((token) => token.replace(/\{(file|title|report|stem)\}/g, (_, key) => values[key]))
 
 export const PROOF_TIMEOUT_DEFAULT_MS = 120_000
@@ -198,7 +197,13 @@ export async function proveTests(input = {}) {
           try { xml = readFileSync(report, 'utf8'); events = junitEvents(xml) } catch {}
           const hits = events?.filter((e) => row.title === e.name || (e.classname && (row.title === `${e.classname}.${e.name}` || row.title === `${e.classname}::${e.name}`)))
           const loadFailure = events && !events.length && /<(?:failure|error)(?:\s|\/?>)/.test(xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>/g, ''))
-          row[side] = hits?.length ? testState(hits) : events && (events.length || loadFailure) ? { state: null, reason: 'title-unmatched', nearest: nearestTitle(events, row.title) } : { state: null, reason: side === 'base' ? 'base-does-not-build' : 'no-report' }
+          let listing
+          if (xml === undefined && entry.list) {
+            const [command, ...args] = entryCommand(entry.list, values)
+            listing = await runSuite({ cwd: dir, command, args, timeoutMs })
+          }
+          const candidates = events?.flatMap((e) => e.classname ? [e.name, `${e.classname}.${e.name}`, `${e.classname}::${e.name}`] : [e.name]) ?? (listing?.status === 'green' ? listing.stdout.split('\n').map((line) => line.trim()).filter(Boolean) : [])
+          row[side] = hits?.length ? testState(hits) : (events && (events.length || loadFailure)) || (xml === undefined && (run.status === 'green' || (run.status === 'red' && listing?.status === 'green'))) ? { state: null, reason: 'title-unmatched', nearest: nearestTitle(candidates, row.title) } : { state: null, reason: side === 'base' ? 'base-does-not-build' : 'no-report' }
         }
         if (row.reason) continue
         row.proven = row.base.state === 'red' && row.build.state === 'green'

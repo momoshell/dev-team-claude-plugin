@@ -100,6 +100,52 @@ test('quoted testcase attributes cannot create a false proof', async () => {
   }
 })
 
+test('a runner that selects no test and writes no report is title-unmatched on both sides', async () => {
+  for (const [list, script, nearest] of [[undefined, '', []], ['node list.mjs', "console.log('app::works')\n", ['app::works']], ['node list.mjs', 'process.exit(1)\n', []]]) {
+    const cwd = scratchDir('proof-zero-selected-')
+    git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew'))
+    writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: [{ match: '*.xml', run: 'node run.mjs', list }] }))
+    writeFileSync(join(cwd, 'run.mjs'), 'process.exit(0)\n'); writeFileSync(join(cwd, 'list.mjs'), script)
+    git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+    writeFileSync(join(cwd, 'test.xml'), '')
+    const result = await proveTests({ cwd, tests: [{ file: 'test.xml', title: 'works' }] })
+    for (const side of ['base', 'build']) assert.deepEqual(result.rows[0][side], { state: null, reason: 'title-unmatched', nearest })
+  }
+})
+
+test('a no-report run whose list succeeds is title-unmatched with the nearest listed name, and a failing list keeps the old reasons', async () => {
+  const cwd = scratchDir('proof-list-')
+  git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew'))
+  writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: [{ match: '*.xml', run: 'node run.mjs', list: 'node list.mjs {file} {title} {report} {stem}' }] }))
+  writeFileSync(join(cwd, 'run.mjs'), 'process.exit(1)\n')
+  writeFileSync(join(cwd, 'list.mjs'), `import { readFileSync } from 'node:fs'
+const [file, title, report, stem] = process.argv.slice(2)
+if (file !== 'test.xml' || title !== 'wiring::works' || !report.endsWith('.xml') || stem !== 'test') process.exit(1)
+console.log(' unrelated \\n  app::' + readFileSync('side', 'utf8').trim() + '::wiring::works  \\n')
+`)
+  writeFileSync(join(cwd, 'side'), 'base')
+  git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+  writeFileSync(join(cwd, 'side'), 'build'); writeFileSync(join(cwd, 'test.xml'), '')
+  const tests = [{ file: 'test.xml', title: 'wiring::works' }]
+  const listed = await proveTests({ cwd, tests })
+  for (const side of ['base', 'build']) assert.deepEqual(listed.rows[0][side], { state: null, reason: 'title-unmatched', nearest: [`app::${side}::wiring::works`] })
+  writeFileSync(join(cwd, 'list.mjs'), 'process.exit(1)\n')
+  git(cwd, 'add', 'list.mjs'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'failing list')
+  const failed = await proveTests({ cwd, tests })
+  for (const [side, reason] of [['base', 'base-does-not-build'], ['build', 'no-report']]) assert.deepEqual(failed.rows[0][side], { state: null, reason })
+})
+
+test('a blank list in a proof entry is unmeasured invalid-project-config', async () => {
+  for (const list of ['', '  ', null, 1]) {
+    const cwd = scratchDir('proof-invalid-list-')
+    git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew'))
+    writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: [{ match: '*.xml', run: 'node run.mjs', list }] }))
+    git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+    const result = await proveTests({ cwd, tests: [{ file: 'test.xml', title: 'works' }] })
+    assert.equal(result.status, 'unmeasured'); assert.equal(result.reason, 'invalid-project-config')
+  }
+})
+
 test('a runner that writes no report on the old source is base-does-not-build, not red', async () => {
   const cwd = scratchDir('proof-no-report-')
   git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew')); mkdirSync(join(cwd, 'tests'))

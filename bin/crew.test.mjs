@@ -81,7 +81,7 @@ test('onboard --check writes .crew/project.json only when the pass probe reads g
     assert.equal(out.status, 0, out.stderr + out.stdout)
     const project = JSON.parse(readFileSync(join(repo, '.crew/project.json'), 'utf8'))
     assert.deepEqual(project.proof, [{ match: entry.match, run: entry.run }])
-    assert.equal(project.onboarded.hash, createHash('sha256').update(JSON.stringify(['npm test', [[entry.match, null, entry.run, null]]])).digest('hex'))
+    assert.equal(project.onboarded.hash, createHash('sha256').update(JSON.stringify(['npm test', [[entry.match, null, entry.run]]])).digest('hex'))
     assert.equal(git(repo, 'status', '--porcelain'), '?? .crew/')
     rmSync(join(repo, '.crew'), { recursive: true })
     entry.calibrate.text = entry.calibrate.text.replace('assert.fail()', '{}')

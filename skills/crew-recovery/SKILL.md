@@ -30,8 +30,8 @@ including an escalation or a provably dead run, with the file as builder guidanc
 On an escalation, the file answers the operator question. The pass re-enters the
 lane in its own worktree and rebases onto the current base,
 then runs builder triage, proof of the builder's named
-tests, review, suite, commit and rebase. A base conflict stops before any seat
-with the build left uncommitted. A mechanical lane is finished on its brief; one
+tests, review, suite, commit and rebase. A base conflict gets one builder conflict
+turn; an unresolved or spent turn stops with the build uncommitted. A mechanical lane is finished on its brief; one
 whose diff reaches a protected path stops `raise-needs-plan`, and you restart it
 from its brief as a build lane.
 Only the checked tree is committed; a rebase that moves the head repeats proof,

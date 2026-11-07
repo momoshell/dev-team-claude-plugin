@@ -1,6 +1,6 @@
 // crew start <brief.md> [--checkout <dir>]
 //
-// The lean entry (ADR-052 phase 1): one P1 brief in, one running lane out. It checks the
+// The lean entry (ADR-052): one P1 brief in, one running lane out. It checks the
 // brief, creates the lane worktree and starts the run detached, handing the brief to the
 // planner as its whole input. No compile, no baseline, no gate. The lane name is the
 // brief's file name.

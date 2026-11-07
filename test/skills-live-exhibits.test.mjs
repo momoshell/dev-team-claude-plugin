@@ -39,7 +39,7 @@ test('QG3 repository evidence is linked and isolated from generic guidance', () 
   assert.equal(skill.split('[dev-team repository evidence](references/dev-team-evidence.md)').length, 2)
   const evidence = read(evidencePath)
   assert.match(evidence, /^# Dev-team repository evidence/m)
-  for (const anchor of ['#476', '#493', '#496', '#581', '#578', '#603', '#543', '#544', 'CHECK_REASONS', 'proveMutations']) assert.ok(evidence.includes(anchor), anchor)
+  for (const anchor of ['#476', '#493', '#496', '#581', '#578', '#603', '#543', '#544', 'CHECK_REASONS', 'PROTECTED']) assert.ok(evidence.includes(anchor), anchor)
   for (const file of docs(qa).filter(file => file !== evidencePath)) assert.doesNotMatch(read(file), /\b(?:crew|hooks)\/|\btest\/helpers\.mjs\b|#\d+\b|\bb\d{3,}\b|\b(?:CHECK_REASONS|proveMutations|runGate)\b/, file)
 })
 
@@ -56,7 +56,7 @@ test('SX1 test writing guidance avoids tripwire declarations and orchestrator ga
 test('SX2 test writing evidence uses current repository vocabulary', () => {
   const all = docs(qa).map(read).join('\n')
   for (const name of ['guardedKill', 'MODIFIER_KINDS', 'openRun', 'foldRpcUsage', 'SHADOW_ABSENT', 'USAGE_ABSENT_CAUSES', 'CREW_BREAKER_THRESHOLD', 'KNOWN_FLAGS']) assert.ok(!all.includes(name), name)
-  for (const name of ['proveMutations', 'CHECK_REASONS', 'crew/checks.mjs']) assert.ok(all.includes(name), name)
+  for (const name of ['PROTECTED', 'CHECK_REASONS', 'crew/checks.mjs']) assert.ok(all.includes(name), name)
   const evidence = read(`${qa}/references/dev-team-evidence.md`)
   assert.ok(!all.includes('stream.jsonl'))
   for (const name of ['task/lean/<role>/<id>.jsonl', 'crew/show.mjs', 'crew/pi/extensions/subagent.ts']) assert.ok(evidence.includes(name))

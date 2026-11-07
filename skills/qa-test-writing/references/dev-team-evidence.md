@@ -22,7 +22,7 @@ a name exists, a key, an export, a method, passes whether the behaviour
 behind it works or not: #578 shipped a `doesNotMatch`
 against a key that is never serialised, #603's tripwire matched only a column-0
 `function`, and #581's guard could only pass by finding hits. Until ADR-055,
-the kill-mutation proof in `crew/checks.mjs` (`proveMutations`) caught that shape.
+the retired kill-mutation proof caught that shape.
 The loop now runs each named test red on the old source and green on the build;
 this is not a kill proof.
 
@@ -320,8 +320,7 @@ code that already exists.
 
 ### Protected paths
 
-A change that touches the loop's own enforcement (`crew/loop.mjs`,
-`crew/checks.mjs`, `crew/acp/grants.mjs`, `hooks/`) belongs at the judge tier.
+A change touching a path in `PROTECTED` in `crew/loop.mjs` belongs at the judge tier.
 Decide that when you plan, not after the build.
 
 
@@ -358,7 +357,6 @@ green run reads as red (#240).
 - Prefix suite greps with `FORCE_COLOR=0`, **or** drop the `^` anchor.
 - An empty grep result on a pipe is **suspect decoration** until proven
   otherwise, check before concluding the thing you grepped for is absent.
-- A gate that shells out to the suite strips ANSI before parsing.
 
 ### Scratch trees
 

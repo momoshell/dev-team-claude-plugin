@@ -26,7 +26,7 @@ crew lanes            # lane state, from the lane journals
 ```
 
 `npm test` is the lane gate. `npm run viz:build` is a RELEASE-TIME check the
-operator runs on main before tagging; it is never a lane's done-means.
+operator runs on main before tagging; it is never a lane's done-means. Before tagging, also run the prose-drift audit on main: read every skill, charter and doc against the code. This is a release-time check, never a lane's done-means.
 
 ## Rules that are easy to get wrong
 
@@ -50,10 +50,10 @@ cited from shipped code as the authority for invariants, so a citation that
 resolves to nothing is a real defect.
 
 **The runtime ships zero dependencies; the visualizer may take build-time ones.** `package.json` has no
-`dependencies` key at all and `crew/acp-client.test.mjs` refuses one: nothing under `crew/` or `scripts/`
-may import a package. `devDependencies` exist only for the visualizer, which vite bundles into `dist/`
-(`svelte`, `vite`, `@sveltejs/vite-plugin-svelte` and `lucide-svelte` for icons). A visualizer
-dependency is still a decision: name it in `docs/conventions.md` with the page that needs it. `jq` is
+`dependencies` key at all and `crew/acp-client.test.mjs` refuses one. Nothing under `crew/` or `scripts/`
+may import a package. The test scans literal imports, not JavaScript syntax exhaustively; review still checks the boundary. `devDependencies` exist only for the visualizer, which vite bundles into `dist/`
+(see the 2026-09-15 entry in `docs/conventions.md`). A visualizer
+dependency is still a decision: name it there with the page that needs it. `jq` is
 not available either — use `node -p` for JSON in shell recipes.
 
 ## Honesty doctrine

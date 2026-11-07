@@ -28,7 +28,8 @@ The limits are part of every interpretation:
 - **Divergence-as-signal — no exhibit:** nothing in the corpus records two
   reviewers on one line; the rule is design guidance.
 - **Posture by tier — no exhibit:** the lean loop runs one reviewer per round and
-  a tech-lead only on escalation (`references/posture.md`). The corpus predates
+  the tech-lead as the judge tier's automatic second review; escalation goes to
+  the lead (`references/posture.md`). The corpus predates
   that loop and carries no tier-by-tier comparison, so the tier-scaled posture
   is design guidance, not a measured yield.
 - **Contract drift as an axis — no exhibit:** the nearest instrument is

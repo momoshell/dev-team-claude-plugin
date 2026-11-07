@@ -89,8 +89,10 @@ test('DM2: visualizer dependencies are used and the lock is pruned', () => {
 
 // MUTATION: DM3 replaces the documented icon package with an undeclared one.
 test('DM3: documented visualizer packages are declared', () => {
-  const doc = read('CLAUDE.md')
-  const paragraph = doc.split('**The runtime ships zero dependencies;')[1].split('\n## ')[0]
+  const claude = read('CLAUDE.md')
+  assert.match(claude, /2026-09-15 entry in `docs\/conventions\.md`/)
+  const doc = read('docs/conventions.md').split('- **2026-09-15**')[1].split('Historically')[0]
+  const paragraph = doc
   const ignored = new Set(['dependencies', 'devDependencies', 'jq', 'node_modules'])
   const names = [...paragraph.matchAll(/`([^`\n]+)`/g)].map(match => match[1]).filter(name => /^(?:@[a-z0-9._-]+\/)?[a-z0-9][a-z0-9._-]*$/i.test(name) && !ignored.has(name) && !/\.(json|mjs|js|md|svelte)$/i.test(name))
   names.push(...[...doc.matchAll(/@[a-z0-9._-]+\/[a-z0-9._-]+/gi)].map(match => match[0]))
@@ -152,11 +154,11 @@ test('DM8: conventions hold only the binding entries and the rest are archived',
   const text = read('docs/conventions.md')
   assert.doesNotMatch(text, /guards are\s+vacuous unless proven by mutation|## Diff mutation proof/)
   const entries = [...text.matchAll(/^- \*\*(\d{4}-\d{2}-\d{2})\*\*[^\n]*/gm)].map(m => m[0])
-  assert.equal(entries.length, 6)
+  assert.equal(entries.length, 7)
   assert.equal(entries.filter(e => e.startsWith('- **2026-08-08**')).length, 1)
   assert.doesNotMatch(text, /\bcoder\b/i)
   assert.ok(!text.includes('`the installed copy of `'))
-  for (const [date, phrase] of [['2026-08-01', 'Prefer structural impossibility'], ['2026-08-02', 'Concurrency-unsafe'], ['2026-08-02', 'A raw control character'], ['2026-08-08', "When this repo (dev-team's own source)"], ['2026-09-15', 'The runtime stays dependency-free'], ['2026-11-03', "Seats and suites run with the operator's environment"]]) assert.ok(entries.some(e => e.startsWith(`- **${date}**`) && e.includes(phrase)), phrase)
+  for (const [date, phrase] of [['2026-08-01', 'Prefer structural impossibility'], ['2026-08-02', 'Concurrency-unsafe'], ['2026-08-02', 'A raw control character'], ['2026-08-08', "When this repo (dev-team's own source)"], ['2026-09-15', 'The runtime stays dependency-free'], ['2026-11-03', "Seats and suites run with the operator's environment"], ['2026-11-05', 'Prose names the symbol']]) assert.ok(entries.some(e => e.startsWith(`- **${date}**`) && e.includes(phrase)), phrase)
   const archive = 'docs/archive/conventions-earlier-runtimes.md'
   assert.ok(existsSync(resolve(root, archive)))
   assert.ok(read(archive).includes("Verify a dispatched coder's commit"))

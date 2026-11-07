@@ -35,7 +35,7 @@ archiving the journal; the remote branch and visualizer are unchanged.
 ## The model
 
 **Agents do the work; code keeps it correct.** A lane starts from one P1 brief
-(`source`, `closes`, `shape`, optional `out_of_scope`, `mechanical`, `suite`, `generated` and `regenerate`; absent `out_of_scope` means none. The
+(`source`, `closes`, `shape`, optional `out_of_scope`, `mechanical`, `generated` and `regenerate`; absent `out_of_scope` means none. The
 body has the quoted operator ask and bare Context pointers, or bare Context pointers alone for an issue; `crew start` quotes the issue body as the ask). `crew/loop.mjs` runs it:
 
 ```
@@ -45,6 +45,8 @@ mechanical: rebase -> build -> per-test proof -> full suite -> PR
 ```
 
 A fix turn carries the red results back to the builder, then repeats proof, the suite and the tier's reviews. Build and judge do not automatically rerun a red suite on an unchanged tree. Before publishing, each lane commits and rebases. A publishing or finish base rebase conflict gets one builder conflict turn per run; an unresolved or spent turn stops `rebase-conflict`. Build, judge and finish commit only the tree their suite and reviews checked. If the head changes, they put the change on the new base tip and repeat every check, including reviews. If Git drops the commit as already upstream, they stop. Mechanical re-proves and re-tests a moved head.
+
+`DEFAULT_ROUNDS` in `crew/loop.mjs` bounds seat rounds. When the reviewer's last round returns `changes-needed` or a red suite, `reservePending` and `reserveSpent` grant a reserve re-review after repair; once spent, the loop stops at `round-bound` before another builder turn. `MAX_ENVELOPE_REPAIRS` in `crew/loop.mjs` permits one envelope repair turn.
 
 A brief may choose `mechanical: true` for a change with no behaviour to judge. With no named test, its PR states `proof: none, mechanical lane, not reviewed`; the operator reviews the diff before merging. Protected paths restart it as judge, and builder insufficiency restarts it as build.
 
@@ -57,7 +59,7 @@ A claim whose run is provably gone is taken over. A committed
 build with no remote branch is uncommitted and finished if HEAD is the commit or
 its journal-recorded one-commit rebase. The latter is reset onto the rebase base;
 the journal records `finish-uncommit`. `--return` refuses with `finish-rounds-spent`
-once three review rounds are spent. On `--accept`, issue tokens in the measured
+once the review rounds in `FINISH_REVIEW_ROUNDS` in `crew/checks.mjs` are spent. On `--accept`, issue tokens in the measured
 text and notes are rewritten; issue numbers appear only on trailer lines.
 Every loop is bounded, every envelope is
 validated against a closed protocol (P2) and refused if it does not parse, and
@@ -67,7 +69,7 @@ measurement that holds work. Journal writes do not throw into the caller. A fail
 ADR-055 §12 routes an escalation without `details.question` back to the same seat. On build and judge, a builder's `insufficient` goes to the lead with its envelope; the lead routes it to the builder or planner, or escalates a §12 case. Mechanical insufficiency restarts as build. The lead's last consult is marked last; a spent lead bound stops for the operator with a question drawn from the held envelope and lead decision. Repeated failures with the same evidence stop as `no-progress` without a seat decision. On build and judge lanes the planner's P2 `details.tests` decides whether P3 proof is required; an empty list means no criterion is machine-checked. A mechanical builder may name no test.
 
 Seat definitions are `crew/agents/<role>.md`; their frontmatter is the only
-place a seat's model, agent (`claude` or `pi`), effort, skills, `requires`
+place a seat's model, agent (`claude`, `pi` or `muse`), effort, skills, `requires`
 and extensions are written, and the body is the charter. Tiers are
 `mechanical`, `build` and `judge`; a tier entry overrides how a seat runs there
 or unseats it. `crew/agents.mjs` resolves a tier and `crew/protocols.mjs` holds
@@ -136,7 +138,7 @@ Everything durable is a file; session chat is never the record.
 - `skills-proof.mjs` — the required-skill proof.
 - `show.mjs`, `lanes.mjs`, `finish.mjs`, `record-pr.mjs`, `closeout.mjs` — the other verbs.
 - `reclaim.mjs` — token-fenced locks and the per-seat reservation markers the ACP client takes (`reserve`, `advance`, `clear`, `probeEvidence`).
-- `adapters/adapter-*.mjs` — per-agent launch shapes for `claude` and `pi`.
+- `adapters/adapter-*.mjs` — per-agent launch shapes for `claude`, `pi` and `muse`.
 - `pi/extensions/` — the kept pi arms (readgate, skeletonread, subagent, advisor).
 - `memory.mjs` — lane memory.
 - `agents/*.md` — delivered seat definitions and instructions.

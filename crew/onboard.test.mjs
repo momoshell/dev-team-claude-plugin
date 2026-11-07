@@ -3,8 +3,14 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { ONBOARD_REASONS, OnboardRefusal, checkOnboarding, requireOnboarded } from './onboard.mjs'
+import { ONBOARD_REASONS, OnboardRefusal, checkOnboarding, projectHash, requireOnboarded } from './onboard.mjs'
 import { git, scratchDir } from '../test/helpers.mjs'
+
+test('projectHash changes when a proof entry gains a list command', () => {
+  const entry = { match: '*.xml', run: 'node run.mjs' }
+  const project = { suite: 'npm test', proof: [entry] }
+  assert.notEqual(projectHash(project), projectHash({ ...project, proof: [{ ...entry, list: 'node list.mjs' }] }))
+})
 
 test('requireOnboarded distinguishes missing and stale project records', () => {
   const suite = 'npm test', proof = []

@@ -17,7 +17,7 @@ export class OnboardRefusal extends Error {
   }
 }
 
-export const projectHash = ({ suite, proof }) => createHash('sha256').update(JSON.stringify([suite, proof.map((e) => [e.match, e.setup ?? null, e.run])])).digest('hex')
+export const projectHash = ({ suite, proof }) => createHash('sha256').update(JSON.stringify([suite, proof.map((e) => [e.match, e.setup ?? null, e.run, e.list ?? null])])).digest('hex')
 const validProject = (p) => p && typeof p === 'object' && !Array.isArray(p) && typeof p.suite === 'string' && p.suite.trim() && !/["'\\\0]/.test(p.suite) && Array.isArray(p.proof) && p.proof.every(validProofEntry) && (p.suiteTimeoutMs === undefined || validTimeout(p.suiteTimeoutMs)) && (p.proofTimeoutMs === undefined || validTimeout(p.proofTimeoutMs))
 
 export function requireOnboarded(checkout, read = readFileSync) {

@@ -4,7 +4,7 @@
 // builder conflict turn; an unresolved or spent turn stops with the build uncommitted. A mechanical finish uses its brief and publishes nothing.
 // A publishing rebase conflict also gets one builder conflict turn per run; an unresolved or spent turn stops rebase-conflict.
 // Mechanical: rebase -> build -> proof -> suite -> PR. A fix turn repeats checks; build, judge and mechanical
-// never automatically rerun a red suite (ADR-054 §1). Finish retains its unchanged-tree rerun (ADR-054:93).
+// never automatically rerun a red suite (ADR-054 §1). Finish retains its unchanged-tree rerun (ADR-054, What this does not decide).
 // Every shape commits only the checked tree; a moved head repeats checks at most three times, stopping if Git dropped the change as upstream.
 // Import-only: every effect (seat turn, filesystem, check, git, journal) crosses an injected seam.
 // A seat's return is never trusted from the callback: the envelope is read back from the path

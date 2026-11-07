@@ -90,7 +90,7 @@ before its first lane.
   procedure. Commands are thin entry points that name the skill owning each
   procedure: `/dispatch`, `/close-out`, `/status`, `/onboard`, `/review`.
 - **`bin/crew.mjs`** — the crew launcher: start, show, record-pr, finish,
-  closeout, lanes, viz, where, update.
+  closeout, lanes, viz, where, update, onboard.
 - **`hooks/`** — the skill-map selector (`hooks/skill-gate.mjs`) and the
   crew gate hooks (`hooks/crew-gates.mjs`, ADR-059).
 - **`visualizer/`** — the local visualizer over lane journals (see Visualizer

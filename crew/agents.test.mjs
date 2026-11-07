@@ -170,6 +170,25 @@ test('lean charter declarations match the P2 schemas and loop ownership', () => 
   assert.ok(reviewer.includes('Read the supplied brief, plan, changed paths and any feedback. Inspect the tracked diff and read every listed untracked file directly; git diff alone omits untracked files.'))
 })
 
+test('charter copies of subject and review limits match protocol rules', () => {
+  const source = readFileSync(new URL('./protocols.mjs', import.meta.url), 'utf8')
+  const types = [...source.match(/const SUBJECT_TYPES = Object\.freeze\(\[([^\]]+)\]/)[1].matchAll(/'([^']+)'/g)].map((m) => m[1])
+  const subjectLimit = source.match(/subject: \[\(v\) => typeof v === 'string' && v\.length <= (\d+)/)[1]
+  for (const role of ['planner', 'builder']) {
+    const body = readFileSync(join(AGENTS_DIR, `${role}.md`), 'utf8')
+    const list = body.match(/The type is one of ([^.]+)\./)[1]
+    assert.deepEqual([...list.matchAll(/`([^`]+)`/g)].map((m) => m[1]), types)
+    assert.ok(body.includes(`at most ${subjectLimit} characters`))
+  }
+  const reviewer = readFileSync(join(AGENTS_DIR, 'reviewer.md'), 'utf8')
+  const findings = Number(source.match(/v\.length > (\d+)\) defects\.push\('details\.findings/)[1])
+  const modes = Number(source.match(/failure_modes: \[\(v\) => Array\.isArray\(v\) && v\.length <= (\d+)/)[1])
+  assert.equal(findings, 5)
+  assert.equal(modes, 3)
+  assert.match(reviewer, /list at most five/)
+  assert.match(reviewer, /List up to three `failure_modes`/)
+})
+
 test('a plan-attribution-only finding is a non-blocking should-fix on a pass, never a changes-needed on its own', () => {
   const reviewer = parseAgent(readFileSync(join(AGENTS_DIR, 'reviewer.md'), 'utf8')).body
   for (const sentence of [

@@ -6,8 +6,8 @@ survives. Adapted from KiroCrew's review prompts (Apache-2.0; licence and
 NOTICE in `THIRD-PARTY-NOTICES.md`), rewritten for this repo's seats, severity
 enum and carriers. Nothing here overrides the return contract in
 `crew/agents/reviewer.md`: one P2 JSON envelope whose details carry the verdict
-and the findings. Severities by seat, review to plan check:
-`must-fix` → `blocker`, `should-fix` → `major`, `consider` → `minor`.
+and the findings. Use `FINDING_SEVERITIES` in `crew/protocols.mjs`:
+`must-fix`, `should-fix` and `consider`.
 
 ## The diff is not evidence
 

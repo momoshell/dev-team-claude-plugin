@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import assert from 'node:assert/strict'
 import {
-  appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync,
+  appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { scratchDir, trackProcessGroupFile } from '../test/helpers.mjs'
@@ -635,13 +635,56 @@ test('RV1-1 reused seat reads only records appended after its launch', () => {
   }
 })
 
-test('the client has only built-in or relative imports and the package has no runtime dependencies', () => {
+const imports = /\b(?:from\s*|import\s*\(\s*|import\s*|require\s*\(\s*)['"]([^'"\n\r]*)['"]/g
+
+function checkImports(source, file) {
+  // Keep quoted strings intact when stripping comments (for example, URLs).
+  source = source.replace(/(?:'[^'\\]*(?:\\[\s\S][^'\\]*)*'|"[^"\\]*(?:\\[\s\S][^"\\]*)*"|`[^`\\]*(?:\\[\s\S][^`\\]*)*`)|(\/\*[\s\S]*?\*\/|\/\/[^\n\r]*)/g, (text, comment) => comment ? ' ' : text)
+  // Comments left in templates can hide an import in an interpolation; refuse them.
+  assert.doesNotMatch(source, /\b(?:import|require|from)\s*(?:\/\*|\/\/)/, `${file}: comment-separated import in template`)
+  // Require a complete literal argument, not a literal prefix of an expression.
+  for (const match of source.matchAll(/\bimport\s*\(/g)) {
+    assert.match(source.slice(match.index + match[0].length), /^\s*(['"])[^'"\n\r]+\1\s*\)/, `${file}: nonliteral dynamic import`)
+  }
+  for (const match of source.matchAll(imports)) {
+    assert.match(match[1], /^(?:node:|\.\.?\/)/, `${file}: ${match[1]}`)
+  }
+}
+
+test('matched literal imports are built-in or relative and the package has no runtime dependencies', () => {
   const packageJson = JSON.parse(readFileSync(join(REGISTER_ROOT, 'package.json'), 'utf8'))
   assert.equal(Object.hasOwn(packageJson, 'dependencies'), false)
-  const source = readFileSync(join(REGISTER_ROOT, 'crew', 'acp-client.mjs'), 'utf8')
-  const specifiers = [...source.matchAll(/from\s+'([^']+)'/g)].map((match) => match[1])
-  assert.equal(specifiers.length > 0, true)
-  assert.equal(specifiers.every((specifier) => specifier.startsWith('node:') || specifier.startsWith('./') || specifier.startsWith('../')), true)
+  for (const dir of ['crew', 'scripts']) {
+    for (const entry of readdirSync(join(REGISTER_ROOT, dir), { recursive: true, withFileTypes: true })) {
+      if (!entry.isFile() || !/\.(?:mjs|ts)$/.test(entry.name) || /\.test\.(?:mjs|ts)$/.test(entry.name)) continue
+      const file = join(entry.parentPath, entry.name)
+      checkImports(readFileSync(file, 'utf8'), file)
+    }
+  }
+})
+
+test('import boundary rejects comment-separated package and nonliteral imports', () => {
+  for (const source of [
+    "const dep = await import /* reason */ ('some-package')",
+    "import /* reason */ 'some-package'",
+    "import'some-package'",
+    "const dep = require ('some-package')",
+    "import ''",
+    "const dep = require('')",
+    "const marker = 1; import 'some-package'",
+    "if (true) {} export { value } from 'some-package'",
+    "export { value } /* reason */ from 'some-package'",
+    "export { value } from // reason\n 'some-package'",
+    "const dep = await import /* reason */ (name)",
+    'const label = `${await import /* reason */ ("some-package")}`',
+    'const label = `${await import // reason\n ("some-package")}`',
+  ]) assert.throws(() => checkImports(source, 'fixture.mjs'))
+  for (const source of [
+    "const dep = await import /* reason */ ('node:fs')",
+    "import /* reason */ './local.mjs'",
+    "const dep = require ('node:fs')",
+    "export const marker = 'some-package'; const url = import.meta.url",
+  ]) assert.doesNotThrow(() => checkImports(source, 'fixture.mjs'))
 })
 
 // MUTATION: unlink the legacy rpc/<role>/cmd.fifo in start().

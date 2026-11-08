@@ -198,6 +198,7 @@ out_of_scope: everything else
     transcriptRoot: '/virtual/no-transcripts',
     readFileSync: (file) => {
       if (file === briefPath) return brief
+      if (file.endsWith('/agents.json')) throw Object.assign(new Error('missing'), { code: 'ENOENT' })
       assert.equal(file, '/virtual/checkout/.crew/project.json')
       return JSON.stringify({ suite: 'npm test', proof: [], onboarded: { hash: createHash('sha256').update(JSON.stringify(['npm test', []])).digest('hex') } })
     },

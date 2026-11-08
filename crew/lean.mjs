@@ -10,6 +10,7 @@ import { runAcpSeat } from './acp/seat.mjs'
 import { openMemory, renderSection } from './memory.mjs'
 import { acpProviderFailureKind, acpTextReset, providerRetryDecision, PROVIDER_RETRY_TOTAL_WAIT_MS } from './acp/provider.mjs'
 import { runLoop } from './loop.mjs'
+import { withRunOverride } from './agents.mjs'
 import { AGENT_ROLES, parseAgent } from './protocols.mjs'
 import { loadMap, resolveSeatSkills } from '../hooks/skill-gate.mjs'
 
@@ -69,11 +70,13 @@ function exampleEnvelope(role, id, tier) {
 
 // The definition one turn runs: the file's fields with the tier override applied, then the
 // received cell's agent, effort and model, which the loop resolved from the same definitions.
-function definitionFor({ role, seat, filesInScope }, tier, d) {
+function definitionFor({ role, seat, filesInScope }, tier, d, overrides) {
   if (!AGENT_ROLES.includes(role)) throw new Error(`unknown role ${JSON.stringify(role)}`)
   const source = join(HERE, 'agents', `${role}.md`)
-  const { fields, body, defects } = parseAgent(d.readFileSync(source, 'utf8'))
+  const parsed = parseAgent(d.readFileSync(source, 'utf8'))
+  const { body, defects } = parsed
   if (defects.length) throw new Error(`agent definition ${source} is refused:\n- ${defects.join('\n- ')}`)
+  const fields = withRunOverride(parsed.fields, Object.hasOwn(overrides ?? {}, role) ? overrides[role] : undefined)
   const override = fields.tiers?.[tier]
   if (override === null) throw new Error(`role ${role} is unseated at tier ${tier}`)
   const effective = { ...fields, ...override }
@@ -163,7 +166,7 @@ export async function runLean(spec, deps = {}) {
 
   const prompts = new Map()
   const runSeat = async (request, { emit }) => {
-    const { definition, source, charters, memory } = definitionFor(request, request.tier ?? spec.tier, d)
+    const { definition, source, charters, memory } = definitionFor(request, request.tier ?? spec.tier, d, spec.roster?.snapshot ?? spec.roster?.overrides)
     const { role, id } = request
     let recording = { definition, recorded: null, cwd: spec.cwd }
     try {

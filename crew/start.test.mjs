@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import fs, { appendFileSync as appendFileSyncReal, existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import fs, { appendFileSync as appendFileSyncReal, cpSync, existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -13,6 +13,53 @@ import { parseAgent, TIERS, validateEnvelope } from './protocols.mjs'
 import { resolveAgents } from './agents.mjs'
 import { PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS } from './acp/provider.mjs'
 import { git, scratchDir } from '../test/helpers.mjs'
+
+test('crew start layers the project file over the personal file field by field and records the result', async () => {
+  const personal = '/home/.crew/agents.json', project = '/repo/checkout/.crew/agents.json'
+  const a = JSON.stringify({ planner: { model: 'local/personal', effort: 'low', tiers: { judge: { model: 'local/old' }, mechanical: { effort: 'high' } } } })
+  const b = JSON.stringify({ planner: { model: 'local/project', tiers: { judge: { model: 'local/new' } } } })
+  const f = fakes({ overrides: { [personal]: a, [project]: b }, resolve: resolveAgents })
+  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps })
+  const spec = JSON.parse(written(f.calls, '/task/lean.json')[2])
+  assert.ok(spec.roster)
+  assert.deepEqual(spec.roster.overrides.planner, { model: 'local/project', effort: 'low', tiers: { judge: { model: 'local/new' }, mechanical: { effort: 'high' } } })
+  assert.deepEqual(spec.roster.files, [[personal, a, 'personal'], [project, b, 'project']].map(([path, raw, layer]) => ({ layer, path, sha256: createHash('sha256').update(raw).digest('hex') })))
+  assert.equal(JSON.parse(written(f.calls, '/crew.json')[2]).members.planner.model, 'local/project')
+  for (const overrides of [{}, { [project]: b }]) {
+    const dir = scratchDir('roster-definitions-')
+    try {
+      cpSync(AGENTS, dir, { recursive: true })
+      const lane = fakes({ overrides, resolve: (tier, _, overlay) => resolveAgents(tier, dir, overlay) })
+      await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: lane.deps })
+      const recorded = JSON.parse(written(lane.calls, '/task/lean.json')[2]).roster
+      const before = Object.fromEntries(TIERS.map((tier) => [tier, resolveAgents(tier, dir, recorded.snapshot)]))
+      const path = join(dir, 'builder.md')
+      writeFileSync(path, readFileSync(path, 'utf8').replace('model: openai/gpt-6.1-terra', 'model: local/changed').replace('"judge":{"effort":"xhigh"}', '"judge":null'))
+      for (const tier of TIERS) assert.deepEqual(resolveAgents(tier, dir, recorded.snapshot), before[tier], tier)
+      assert.notDeepEqual(resolveAgents('build', dir), before.build)
+      assert.equal(recorded.files.length, Object.keys(overrides).length)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  }
+})
+
+test('crew start refuses a bad override file before any worktree, naming the file and the key', async () => {
+  const path = '/repo/checkout/.crew/agents.json'
+  for (const [raw, key] of [
+    ['{', 'root'], ['[]', 'root'], [JSON.stringify({ ghost: {} }), 'ghost'],
+    [JSON.stringify({ planner: { writes: 'repo' } }), 'planner.writes'],
+    [JSON.stringify({ planner: { skills: [] } }), 'planner.skills'],
+    [JSON.stringify({ planner: { effort: 'invalid' } }), 'planner.effort'],
+    [JSON.stringify({ planner: { tiers: { build: { writes: 'repo' } } } }), 'planner.tiers.build.writes'],
+    [JSON.stringify({ planner: { tiers: { unknown: null } } }), 'planner.tiers.unknown'],
+    [JSON.stringify({ builder: { tiers: { judge: null } } }), 'builder.tiers.judge'],
+    [Object.assign(new Error('denied'), { code: 'EACCES' }), 'read'],
+    [JSON.stringify({ planner: { advisor: { agent: 'pi', model: 'local/other', effort: 'low' } } }), 'planner'],
+  ]) {
+    const f = fakes({ overrides: { [path]: raw }, resolve: resolveAgents })
+    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps }), (error) => error instanceof StartRefusal && error.message.includes(path) && error.message.includes(key), String(key))
+    assert.equal(spawned(f.calls, 'worktree'), undefined)
+  }
+})
 
 test('an existing crew lane directory is refused before any worktree is made', async () => {
   const { deps, calls } = fakes({ exists: (path) => path === '/home/.crew/dt-b1/b1' })
@@ -55,10 +102,14 @@ out_of_scope: the visualizer
 // resolution is injected too; the default resolves the committed definitions.
 const projectFile = (suite = 'npm test', proof = [], suiteTimeoutMs, proofTimeoutMs) => ({ suite, proof, ...(suiteTimeoutMs === undefined ? {} : { suiteTimeoutMs }), ...(proofTimeoutMs === undefined ? {} : { proofTimeoutMs }), onboarded: { hash: createHash('sha256').update(JSON.stringify([suite, proof.map((e) => [e.match, e.setup ?? null, e.run])])).digest('hex') } })
 
-function fakes({ brief = BRIEF, project = projectFile(), exists = () => false, worktreeStatus = 0, originHead = 'origin/main', inGit = true, issueBody = 'Refuse roster edits that cannot boot.\n', issueTitle = 'Refuse roster edits', resolve = (tier) => resolveAgents(tier), write = () => {} } = {}) {
+function fakes({ brief = BRIEF, project = projectFile(), overrides = {}, exists = () => false, worktreeStatus = 0, originHead = 'origin/main', inGit = true, issueBody = 'Refuse roster edits that cannot boot.\n', issueTitle = 'Refuse roster edits', resolve = (tier) => resolveAgents(tier), write = () => {} } = {}) {
   const calls = []
   const deps = {
     readFileSync: (path) => {
+      if (path.endsWith('/.crew/agents.json')) {
+        if (Object.hasOwn(overrides, path)) { if (overrides[path] instanceof Error) throw overrides[path]; return overrides[path] }
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' })
+      }
       if (!path.endsWith('/.crew/project.json')) return brief
       if (project === null) throw Object.assign(new Error('missing'), { code: 'ENOENT' })
       return typeof project === 'string' ? project : JSON.stringify(project)
@@ -333,7 +384,7 @@ const invalid = process.argv[1] === 'invalid'
 process.argv[1] = process.execPath
 const { main } = await import(${JSON.stringify(new URL('./start.mjs', import.meta.url).href)})
 const deps = {
-  readFileSync: (path) => path.endsWith('/.crew/project.json') ? ${JSON.stringify(JSON.stringify({suite:'npm test',proof:[],onboarded:{hash:createHash('sha256').update(JSON.stringify(['npm test',[]])).digest('hex')}}))} : invalid ? ${JSON.stringify(BRIEF)}.replace('shape: standard', 'tier: build\\nshape: standard') : ${JSON.stringify(BRIEF)},
+  readFileSync: (path) => path.endsWith('/agents.json') ? (() => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }) })() : path.endsWith('/.crew/project.json') ? ${JSON.stringify(JSON.stringify({suite:'npm test',proof:[],onboarded:{hash:createHash('sha256').update(JSON.stringify(['npm test',[]])).digest('hex')}}))} : invalid ? ${JSON.stringify(BRIEF)}.replace('shape: standard', 'tier: build\\nshape: standard') : ${JSON.stringify(BRIEF)},
   resolveAgents: () => ({ seats: {} }), existsSync: () => false,
   mkdirSync: () => {}, writeFileSync: () => {},
   spawnSync: (file, args) => ({ status: 0, stdout: args.includes('ls-tree') ? (args.at(-1) === '.crew/project.json' ? '100644 blob ' + 'a'.repeat(40) + '\\t.crew/project.json' : (args.at(-1).includes('.') ? '100644 blob ' : '040000 tree ') + 'a'.repeat(40) + '\\t' + args.at(-1) + '\\0') : args.includes('show') ? ${JSON.stringify(JSON.stringify({suite:'npm test',proof:[],onboarded:{hash:createHash('sha256').update(JSON.stringify(['npm test',[]])).digest('hex')}}))} : args.includes('--verify') ? 'a'.repeat(40) : 'origin/main' }),
@@ -551,7 +602,10 @@ test('start detaches the bridge on a measured spec and boots nothing', async () 
   assert.equal(result.pid, 4242)
   const spec = JSON.parse(written(calls, '/task/lean.json')[2])
   assert.match(spec.brief, /\nIssue title: Refuse roster edits\n## The ask\n/)
-  assert.deepEqual(spec, {
+  const { roster, ...otherSpec } = spec
+  assert.deepEqual(roster.files, [])
+  assert.ok(roster.snapshot)
+  assert.deepEqual(otherSpec, {
     id: 'b1', cwd: '/repo/dt-b1', taskDir: '/home/.crew/dt-b1/b1/task', tier: 'build', shape: 'standard', brief: runBrief(BRIEF, 1961, 'Refuse roster edits that cannot boot.\n', 'Refuse roster edits'),
     source: 'issue 1961', branch: 'b1', base: 'main', closes: [1961], suite: { command: 'npm', args: ['test'], timeoutMs: 1800000 }, proofTimeoutMs: 120000, onboarded: projectFile().onboarded.hash,
   })
@@ -1834,6 +1888,34 @@ test('every lean seat turn carries the brief to the seat, and the planner exampl
 })
 
 // MUTATION: take the effort from the file's base fields and a tier override never reaches the seat.
+test('a seat turn runs the recorded override and keeps the definition\'s other fields', async () => {
+  const advisor = { agent: 'pi', model: 'local/advisor', effort: 'low' }
+  const f = leanFixture({ tier: 'mechanical', answers: { 'builder.1': 'escalate' } })
+  f.spec.roster = { overrides: { builder: { tiers: { mechanical: { advisor } } }, lead: { tiers: { mechanical: {} } } }, files: [] }
+  await f.go()
+  const builder = f.requests.find((r) => r.definition.role === 'builder').definition
+  const parsed = parseAgent(readFileSync(join(AGENTS, 'builder.md'), 'utf8'))
+  assert.deepEqual(builder.advisor, advisor)
+  assert.deepEqual(builder.extensions, parsed.fields.tiers.mechanical.extensions)
+  assert.equal(builder.writes, parsed.fields.writes)
+  assert.equal(builder.body, parsed.body)
+  assert.ok(parsed.fields.skills.every((skill) => builder.skills.includes(skill)))
+  assert.ok(f.requests.some((r) => r.definition.role === 'lead'))
+
+  const lane = fakes()
+  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: lane.deps })
+  const recorded = JSON.parse(written(lane.calls, '/task/lean.json')[2]).roster
+  const changed = leanFixture({ deps: { readFileSync: (path, ...args) => {
+    const text = readFileSync(path, ...args)
+    return String(path) === join(AGENTS, 'builder.md') ? text.replace('advisor: {"agent":"pi","model":"openai/gpt-6.1-sol","effort":"medium"}', 'advisor: null').replace('extensions: [fff, readgate, skeletonread]', 'extensions: [fff]') : text
+  } } })
+  changed.spec.roster = recorded
+  await changed.go()
+  const definition = changed.requests.find((r) => r.definition.role === 'builder').definition
+  assert.deepEqual(definition.advisor, recorded.snapshot.builder.tiers.build.advisor)
+  assert.deepEqual(definition.extensions, ['fff'])
+})
+
 test('a tier override applies and an unseating override refuses the turn', async () => {
   const mechanical = leanFixture({ tier: 'mechanical' })
   assert.equal((await mechanical.go()).status, 'done')

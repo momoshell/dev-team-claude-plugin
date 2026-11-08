@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { git as repoGit, scratchDir } from '../test/helpers.mjs'
@@ -9,6 +9,7 @@ import { CHECK_REASONS } from './checks.mjs'
 import { proveTests } from './proof.mjs'
 import { FinishRefusal, finishLane } from './finish.mjs'
 import { DEFAULT_ROUNDS, LOOP_REASONS, runLoop } from './loop.mjs'
+import { resolveAgents } from './agents.mjs'
 
 const PR = { number: 73, url: 'https://example.test/pr/73', state: 'OPEN', headRefName: 'lane', baseRefName: 'main' }
 const finding = { id: 'R1', severity: 'must-fix', location: 'lib.mjs:1', summary: 'Fix the defect', trigger: 'bad input' }
@@ -214,6 +215,68 @@ function fakes(options = {}) {
   }
   return { spec, deps, calls, rows, requests, tiers, seen, writes, discardArgs, go: () => runLoop(spec, deps) }
 }
+test('a tier raise and a finish run seat the roster recorded at start', async () => {
+  const path = join(scratchDir('roster-loop-'), 'agents.json')
+  writeFileSync(path, JSON.stringify({ builder: { model: 'local/recorded' } }))
+  const roster = { overrides: { builder: { model: 'local/recorded', tiers: { judge: { model: 'local/raised' } } } }, files: [{ layer: 'project', path, sha256: 'a'.repeat(64) }] }
+  writeFileSync(path, JSON.stringify({ builder: { model: 'local/changed' } }))
+  for (const finish of [false, true]) {
+    const f = fakes({ spec: { ...(finish ? finishSpec({ filesInScope: ['crew/loop.mjs'] }) : {}), roster }, edit: (v) => { if (v.role === 'planner') v.details.files_in_scope = ['crew/loop.mjs']; return v } })
+    f.deps.resolveAgents = resolveAgents
+    await f.go()
+    assert.equal(f.requests.find((r) => r.role === 'builder').seat.id, 'raised')
+    assert.ok(f.rows.some((row) => row.event === 'tier-raised'))
+    assert.equal(f.rows.filter((row) => row.event === 'roster').length, finish ? 0 : 1)
+  }
+  const dir = scratchDir('roster-plugin-')
+  cpSync(fileURLToPath(new URL('./agents/', import.meta.url)), dir, { recursive: true })
+  const tiers = ['mechanical', 'build', 'judge']
+  const original = Object.fromEntries(tiers.map((tier) => [tier, resolveAgents(tier, dir)]))
+  const snapshot = Object.fromEntries(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'].map((role) => {
+    const cell = (tier) => {
+      const seat = original[tier].seats[role]
+      return seat ? { agent: seat.agent, model: `${seat.provider}/${seat.id}`, effort: seat.effort, advisor: role === 'builder' && original[tier].advisor ? { agent: original[tier].advisor.agent, model: `${original[tier].advisor.provider}/${original[tier].advisor.id}`, effort: original[tier].advisor.effort } : null } : null
+    }
+    return [role, { ...(cell('build') ?? cell('judge')), tiers: Object.fromEntries(tiers.map((tier) => [tier, cell(tier)])) }]
+  }))
+  const builder = join(dir, 'builder.md')
+  writeFileSync(builder, readFileSync(builder, 'utf8').replace('model: openai/gpt-6.1-terra', 'model: local/changed').replace('"judge":{"effort":"xhigh"}', '"judge":null'))
+  for (const finish of [false, true]) {
+    const f = fakes({ spec: { ...(finish ? finishSpec({ filesInScope: ['crew/loop.mjs'] }) : {}), roster: { overrides: {}, files: [], snapshot } }, edit: (v) => { if (v.role === 'planner') v.details.files_in_scope = ['crew/loop.mjs']; return v } })
+    f.deps.resolveAgents = (tier, _, overrides) => resolveAgents(tier, dir, overrides)
+    await f.go()
+    assert.equal(f.requests.find((r) => r.role === 'builder').seat.id, original.judge.seats.builder.id)
+    assert.equal(f.rows.find((r) => r.event === 'tier-raised').seats.builder.effort, original.judge.seats.builder.effort)
+  }
+  for (const roster of [null, {}, { overrides: { ghost: {} }, files: [] }, { overrides: {}, files: [{}] }, { overrides: {}, files: [], snapshot: {} }]) {
+    const f = fakes({ spec: { roster } })
+    assert.equal((await f.go()).reason, 'invalid-input')
+  }
+})
+
+test('the lane journals one roster row naming each seat cell and the applied files', async () => {
+  const roster = { overrides: { builder: { model: 'local/recorded', tiers: { judge: { model: 'local/raised' } } } }, files: [{ layer: 'project', path: '/repo/.crew/agents.json', sha256: 'a'.repeat(64) }] }
+  const f = fakes({ spec: { roster }, edit: (v) => { if (v.role === 'planner') v.details.files_in_scope = ['crew/loop.mjs']; return v } })
+  f.deps.resolveAgents = resolveAgents
+  await f.go()
+  const rows = f.rows.filter((row) => row.event === 'roster')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].tier, 'build')
+  assert.deepEqual(rows[0].files, roster.files)
+  assert.deepEqual(rows[0].seats, Object.fromEntries(Object.entries(resolveAgents('build', undefined, roster.overrides).seats).map(([role, c]) => [role, { agent: c.agent, model: `${c.provider}/${c.id}`, effort: c.effort }])))
+  assert.equal(f.rows.find((row) => row.event === 'tier-raised').seats.builder.model, 'local/raised')
+})
+
+test('a lane with no override files seats the committed roster and journals no applied file', async () => {
+  const f = fakes()
+  f.deps.resolveAgents = resolveAgents
+  await f.go()
+  const row = f.rows.find((r) => r.event === 'roster')
+  assert.ok(row)
+  assert.deepEqual(row.files, [])
+  assert.deepEqual(row.seats.planner, { agent: resolveAgents('build').seats.planner.agent, model: `${resolveAgents('build').seats.planner.provider}/${resolveAgents('build').seats.planner.id}`, effort: resolveAgents('build').seats.planner.effort })
+})
+
 test('every rebase the loop runs carries the spec generated declaration, none when the spec has none, and a malformed declaration is refused', async () => {
   const generated = { paths: ['dist/'], command: 'npm', args: ['run', 'generate'], timeoutMs: 1800000 }
   for (const shape of ['standard', 'finish', 'mechanical']) for (const declared of [true, false]) {

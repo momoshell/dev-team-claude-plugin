@@ -19,7 +19,7 @@ import {
 } from './checks.mjs'
 import { HEX_OID, describeError as describe, GIT_STATUS_ARGS } from './lane-core.mjs'
 import { proveTests } from './proof.mjs'
-import { TIERS, validateEnvelope } from './protocols.mjs'
+import { TIERS, AGENT_ROLES, runOverrideDefects, validateEnvelope } from './protocols.mjs'
 import { proveRequiredSkills } from './skills-proof.mjs'
 
 export const DEFAULT_ROUNDS = 2
@@ -35,6 +35,19 @@ const REQUIRED_ROLES = ['planner', 'builder', 'reviewer']
 const FINISH_ROLES = ['builder', 'reviewer']
 const text = (v) => typeof v === 'string' && v !== ''
 const strings = (v) => Array.isArray(v) && v.every(text)
+const object = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+const rosterSound = (roster) => object(roster) && object(roster.overrides) && Array.isArray(roster.files)
+  && Object.entries(roster.overrides).every(([role, entry]) => AGENT_ROLES.includes(role) && !runOverrideDefects(role, entry).length)
+  && (!Object.hasOwn(roster, 'snapshot') || (object(roster.snapshot) && AGENT_ROLES.every((role) => {
+    const entry = roster.snapshot[role]
+    return object(entry) && ['agent', 'model', 'effort', 'advisor'].every((key) => Object.hasOwn(entry, key))
+      && object(entry.tiers) && TIERS.every((tier) => Object.hasOwn(entry.tiers, tier) && (entry.tiers[tier] === null || (object(entry.tiers[tier]) && ['agent', 'model', 'effort', 'advisor'].every((key) => Object.hasOwn(entry.tiers[tier], key)))))
+      && !runOverrideDefects(role, entry).length
+  }) && Object.keys(roster.snapshot).every((role) => AGENT_ROLES.includes(role))))
+  && roster.files.every((file) => object(file) && ['personal', 'project'].includes(file.layer) && text(file.path) && typeof file.sha256 === 'string' && /^[a-f0-9]{64}$/.test(file.sha256))
+const rosterCells = (seats) => Object.fromEntries(Object.entries(seats).map(([role, cell]) => [role, {
+  agent: cell?.agent ?? null, model: cell?.provider && cell?.id ? `${cell.provider}/${cell.id}` : null, effort: cell?.effort ?? null,
+}]))
 const refusal = (reason) => ({ status: 'stopped', reason, pr: null })
 
 // Extract failure names and locations from Node, Rust and Vitest output, with bounded diagnostics for each run.
@@ -166,6 +179,7 @@ export async function runLoop(spec, deps = {}) {
     && (spec.proofTimeoutMs === undefined || validTimeout(spec.proofTimeoutMs))
     && (!Object.hasOwn(spec, 'generated') || validGenerated(spec.generated))
     && (spec.closes === undefined || Array.isArray(spec.closes))
+    && (!Object.hasOwn(spec, 'roster') || rosterSound(spec.roster))
   if (!sound) return early('invalid-input')
   const fin = spec.finish
   // A finish run re-enters a stopped lane with its accepted plan and open findings.
@@ -185,7 +199,7 @@ export async function runLoop(spec, deps = {}) {
   const seams = ['runSeat', 'resolveAgents', 'mkdir', 'readFile', 'stat', 'realpath', 'writeFile', 'journal', 'proveTests', 'runSuite', 'commitChanges', 'rebaseBranch', 'openPullRequest', 'run', 'now']
   if (!seams.every((name) => typeof d[name] === 'function')) return early('invalid-input')
   let resolved
-  try { resolved = d.resolveAgents(spec.tier) } catch { return early('seat-unmeasured') }
+  try { resolved = d.resolveAgents(spec.tier, undefined, spec.roster?.snapshot ?? spec.roster?.overrides) } catch { return early('seat-unmeasured') }
   const seats = { ...resolved?.seats }
   const requiredRoles = (tier) => isFinish ? FINISH_ROLES : tier === 'mechanical' ? ['builder'] : tier === 'judge' ? [...REQUIRED_ROLES, 'tech-lead'] : REQUIRED_ROLES
   if (!requiredRoles(spec.tier).every((role) => seats[role] && typeof seats[role] === 'object')) return early('seat-unmeasured')
@@ -280,7 +294,7 @@ export async function runLoop(spec, deps = {}) {
     // A planless mechanical finish cannot be raised: the raised seats need a plan. The operator restarts it from its brief.
     if (isFinish && planPath === null) return stop('raise-needs-plan', { reason, ...detail })
     let next
-    try { next = d.resolveAgents(to)?.seats } catch (error) { return stop('seat-unmeasured', { reason, error: describe(error) }) }
+    try { next = d.resolveAgents(to, undefined, spec.roster?.snapshot ?? spec.roster?.overrides)?.seats } catch (error) { return stop('seat-unmeasured', { reason, error: describe(error) }) }
     if (!requiredRoles(to).every((role) => next?.[role] && typeof next[role] === 'object') || !Object.values(next ?? {}).every((cell) => cell == null || (typeof cell === 'object' && bounded(cell)))) return stop('seat-unmeasured', { reason })
     for (const [role, cell] of Object.entries(next)) {
       if (cell && seats[role]?.rounds !== undefined) next[role] = { ...cell, rounds: seats[role].rounds }
@@ -289,7 +303,7 @@ export async function runLoop(spec, deps = {}) {
     Object.assign(seats, next)
     const from = tier
     tier = to
-    await emit('tier-raised', { from, to: tier, reason, ...detail })
+    await emit('tier-raised', { from, to: tier, reason, ...detail, seats: rosterCells(seats) })
     return null
   }
   const stage = (name, work) => context.run(name, async () => {
@@ -557,7 +571,10 @@ export async function runLoop(spec, deps = {}) {
     try { await d.mkdir(spec.taskDir, { recursive: true }) } catch (error) { return await stop('runner-threw', { mkdir: describe(error) }) }
     // The lane's own start, written once: the arms of every seat (and every retry) date the planner's return against it.
     // A finish run appends none: the original row stays the anchor the arms date the accepted plan against.
-    if (!isFinish) await emit('run-start', { run_id: spec.id })
+    if (!isFinish) {
+      await emit('run-start', { run_id: spec.id })
+      await emit('roster', { tier, seats: rosterCells(seats), files: spec.roster?.files ?? [] })
+    }
 
     const planned = isFinish || tier === 'mechanical' ? null : await stage('plan', () => seatTurn('planner'))
     if (planned?.halt) return planned.halt

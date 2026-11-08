@@ -111,6 +111,20 @@ function withScratch(fn) {
   try { return fn(dir) } finally { rmSync(dir, { recursive: true, force: true }) }
 }
 
+test('resolveAgents seats a recorded override and merges its tiers per tier name', () => {
+  withScratch((dir) => {
+    edit(dir, 'builder', (text) => text.replace('"judge":{"effort":"xhigh"}', '"judge":{"effort":"xhigh","extensions":["fff"]}'))
+    const overrides = { planner: { model: 'local/base', effort: 'low', tiers: { judge: { model: 'local/judge' } } }, builder: { tiers: { mechanical: null, judge: { model: 'local/builder' } } }, lead: { tiers: { mechanical: { model: 'local/lead' } } } }
+    assert.equal(resolveAgents('build', dir, overrides).seats.planner.id, 'base')
+    assert.equal(resolveAgents('judge', dir, overrides).seats.planner.effort, 'low')
+    assert.equal(resolveAgents('judge', dir, overrides).seats.planner.id, 'judge')
+    assert.equal(resolveAgents('mechanical', dir, overrides).seats.builder, undefined)
+    assert.equal(resolveAgents('mechanical', dir, overrides).seats.lead.id, 'lead')
+    assert.equal(resolveAgents('judge', dir, overrides).seats.builder.id, 'builder')
+    assert.equal(resolveAgents('mechanical', dir, overrides).seats.planner.effort, 'medium')
+  })
+})
+
 test('the five committed definitions parse clean with standalone lean charters', () => {
   for (const role of AGENT_ROLES) {
     const { fields, body, defects } = parseAgent(readFileSync(join(AGENTS_DIR, `${role}.md`), 'utf8'))

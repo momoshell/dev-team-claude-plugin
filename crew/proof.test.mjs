@@ -113,6 +113,34 @@ test('a runner that selects no test and writes no report is title-unmatched on b
   }
 })
 
+test('a report with zero test cases is title-unmatched on both sides with nearest from the list', async () => {
+  const nextest = `<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="0" skipped="0" failures="0" errors="0" uuid="828c3f15-7663-4cfa-b642-140f3f2b7eec" timestamp="2026-11-08T17:39:17.839+01:00" time="0.004">
+</testsuites>`
+  const cases = [
+    [nextest, 4, undefined, '', []],
+    [nextest, 4, 'node list.mjs', "console.log('app::works')\n", ['app::works']],
+    [nextest, 4, 'node list.mjs', 'process.exit(1)\n', []],
+    ['<testsuite/>', 0, undefined, '', []],
+    ['<testsuite><!-- <error/> --><![CDATA[<failure/>]]><?info <error/>?></testsuite>', 4, undefined, '', []],
+    [null, 1, undefined, '', null],
+  ]
+  for (const [xml, exit, list, script, nearest] of cases) {
+    const cwd = scratchDir('proof-zero-cases-')
+    git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew'))
+    writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: [{ match: '*.xml', run: 'node run.mjs {report}', list }] }))
+    writeFileSync(join(cwd, 'run.mjs'), `import { writeFileSync } from 'node:fs'\n${xml === null ? '' : `writeFileSync(process.argv[2], ${JSON.stringify(xml)})`}\nprocess.exit(${exit})\n`)
+    writeFileSync(join(cwd, 'list.mjs'), script)
+    git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+    writeFileSync(join(cwd, 'test.xml'), '')
+    const result = await proveTests({ cwd, tests: [{ file: 'test.xml', title: 'works' }] })
+    for (const side of ['base', 'build']) {
+      const expected = nearest === null ? { state: null, reason: side === 'base' ? 'base-does-not-build' : 'no-report' } : { state: null, reason: 'title-unmatched', nearest }
+      assert.deepEqual(result.rows[0][side], expected)
+    }
+  }
+})
+
 test('a no-report run whose list succeeds is title-unmatched with the nearest listed name, and a failing list keeps the old reasons', async () => {
   const cwd = scratchDir('proof-list-')
   git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew'))
@@ -157,7 +185,7 @@ test('a runner that writes no report on the old source is base-does-not-build, n
   const result = await proveTests({ cwd, tests: [{ file: 'tests/report.xml', title: 'works' }] })
   assert.deepEqual(result.rows[0].base, { state: null, reason: 'base-does-not-build' })
   assert.equal(result.rows[0].build.state, 'green'); assert.equal(result.rows[0].reason, 'proof-not-red-on-base')
-  for (const xml of ['<testsuite><testcase name="works"/>', '<testsuite/>', '<testsuite><!-- <error/> --><![CDATA[<failure/>]]><?info <error/>?></testsuite>', 'not XML']) {
+  for (const xml of ['<testsuite><testcase name="works"/>', 'not XML']) {
     writeFileSync(join(cwd, 'tests/report.xml'), xml)
     const invalid = await proveTests({ cwd, tests: [{ file: 'tests/report.xml', title: 'works' }] })
     assert.deepEqual(invalid.rows[0].build, { state: null, reason: 'no-report' })

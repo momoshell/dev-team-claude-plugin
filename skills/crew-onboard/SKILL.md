@@ -86,9 +86,11 @@ The probe is implemented in `crew/seat-probe.mjs`.
    in a scratch worktree and writes `.crew/project.json` only when the passing
    title reads green and the failing title reads red by JUnit `<failure>`.
    Correct any reported failure and retry. No probe is left in the checkout.
-5. Commit `.crew/project.json` on the local base branch selected by `origin/HEAD`
-   before starting a lane. The checkout and base must have matching onboarding;
-   proof reads runner entries from the lane's old-source worktree. Re-run
+5. Commit `.crew/project.json` on the base branch named by `origin/HEAD` and push
+   it before starting a lane. `crew start` reads onboarding from the fetched
+   `origin/<base>`, so a local commit is not enough. The checkout and base must
+   have matching onboarding; proof reads runner entries from the lane's
+   old-source worktree. Re-run
    onboarding after changing the suite or proof entries. Changing only
    `suiteTimeoutMs` or `proofTimeoutMs` in `.crew/project.json` does not require
    re-onboarding.

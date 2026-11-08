@@ -196,14 +196,13 @@ export async function proveTests(input = {}) {
           let xml, events = null
           try { xml = readFileSync(report, 'utf8'); events = junitEvents(xml) } catch {}
           const hits = events?.filter((e) => row.title === e.name || (e.classname && (row.title === `${e.classname}.${e.name}` || row.title === `${e.classname}::${e.name}`)))
-          const loadFailure = events && !events.length && /<(?:failure|error)(?:\s|\/?>)/.test(xml.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>/g, ''))
           let listing
-          if (xml === undefined && entry.list) {
+          if ((xml === undefined || events?.length === 0) && entry.list) {
             const [command, ...args] = entryCommand(entry.list, values)
             listing = await runSuite({ cwd: dir, command, args, timeoutMs })
           }
-          const candidates = events?.flatMap((e) => e.classname ? [e.name, `${e.classname}.${e.name}`, `${e.classname}::${e.name}`] : [e.name]) ?? (listing?.status === 'green' ? listing.stdout.split('\n').map((line) => line.trim()).filter(Boolean) : [])
-          row[side] = hits?.length ? testState(hits) : (events && (events.length || loadFailure)) || (xml === undefined && (run.status === 'green' || (run.status === 'red' && listing?.status === 'green'))) ? { state: null, reason: 'title-unmatched', nearest: nearestTitle(candidates, row.title) } : { state: null, reason: side === 'base' ? 'base-does-not-build' : 'no-report' }
+          const candidates = events?.length ? events.flatMap((e) => e.classname ? [e.name, `${e.classname}.${e.name}`, `${e.classname}::${e.name}`] : [e.name]) : (listing?.status === 'green' ? listing.stdout.split('\n').map((line) => line.trim()).filter(Boolean) : [])
+          row[side] = hits?.length ? testState(hits) : events || (xml === undefined && (run.status === 'green' || (run.status === 'red' && listing?.status === 'green'))) ? { state: null, reason: 'title-unmatched', nearest: nearestTitle(candidates, row.title) } : { state: null, reason: side === 'base' ? 'base-does-not-build' : 'no-report' }
         }
         if (row.reason) continue
         row.proven = row.base.state === 'red' && row.build.state === 'green'

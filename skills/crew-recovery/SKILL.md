@@ -14,8 +14,9 @@ Read first, decide second, remove last.
 ## Read a stopped lane
 
 - `crew lanes [--all] [--json]` lists lanes with status, latest stage, stop
-  reason and PR, all read from each lane journal (`crew/lanes.mjs`). It does not
-  say whether a process is alive.
+  reason and PR, read from each lane journal (`crew/lanes.mjs`). A run its
+  recorded pid proves dead lists as `stopped` with reason `run-died` (`deadRun`
+  in `crew/run-pid.mjs`). It never reports a process as alive.
 - `crew show <lane>` lists each seat and its recorded sessions;
   `crew show <lane> <role>` prints that seat's session as text and `--json`
   prints the recorded JSONL untouched (`crew/show.mjs`). Read-only.
@@ -44,14 +45,10 @@ When that run is ready, decide once:
   as the builder's guidance; it counts against the three review rounds.
 - `crew finish <lane> --abandon` ends the lane unpublished.
 
-It refuses, writing nothing, when the worktree is gone, the lane never reached a
-build, a run is still active, the lane is already published or committed, or
-there is no schema-valid builder result (including absent or defective returns).
-A committed, unpublished build at HEAD on the lane branch is uncommitted before
-launch when its remote branch is absent. `--accept` and `--abandon` require a
-ready run. A decision is refused if the stop or ready run already has one, or
-(for `--accept`) the checkout is no longer the head the run measured. A provably
-dead open run is a new stop. Read the refusal; it names the cause.
+It refuses, writing nothing, for a cause in `FINISH_REASONS` in
+`crew/finish.mjs`; read the refusal, it names the cause. A committed, unpublished
+build at HEAD on the lane branch is uncommitted before launch when its remote
+branch is absent. A provably dead open run is a new stop.
 
 ## Close it out
 

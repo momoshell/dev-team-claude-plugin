@@ -41,12 +41,10 @@ place that runs the review flow.
   both positions and resolve it using `references/divergence.md`.
 - Never report a rate without its denominator. A measured yield is a claim about
   the corpus and its denominator, not a free-floating percentage.
-- The reviewer envelope's finding object is `{id, severity, location, summary}`
-  with optional `trigger`, `start_line`, `end_line`, `uncertain` and `disposition`,
-  and a `patch` only for `auto-fix` (`crew/agents/reviewer.md`). A reviewer
-  must-fix needs a `trigger`; `confidence` appears only in the scout shape. A
-  pass cannot carry a `must-fix`. Reviewer details also carry `requirements`,
-  `failure_modes` and `coverage`, with optional `closed` and `findings_omitted`.
+- The reviewer envelope's details keys are `REVIEW_KEYS` in `crew/protocols.mjs`
+  and its finding keys are `FINDING_RULES` in `crew/protocols.mjs`, enforced by
+  `validateEnvelope` in `crew/protocols.mjs`; `crew/agents/reviewer.md` states
+  them for the seat. `confidence` appears only in the scout shape.
 
 - The do-not-flag guidelines are repo data loaded by the procedure layer, and a
   review is in exactly one of two states: the guidelines loaded, or they did not

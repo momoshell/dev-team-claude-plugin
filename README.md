@@ -21,7 +21,7 @@ The design is [ADR-052](docs/adr/adr-052-agents-do-the-work.md) and
 and where each piece lives.
 
 ```bash
-crew onboard --check /abs/path/draft.json # calibrate the checkout
+crew onboard (--check <draft.json> | --seats) [--checkout <dir>] # calibrate the checkout or probe its seats
 crew start /abs/path/brief.md          # worktree + journal + a detached lane
 crew lanes                              # list lanes from their journals
 crew show <lane> [<role>]               # read a seat's recorded session

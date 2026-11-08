@@ -79,6 +79,14 @@ test('the skill documents that shape and no other', () => {
   assert.ok(doc.includes(CLOSED))
 })
 
+test('the skill names the owner of the reviewer keys instead of restating them', () => {
+  const text = skill.replace(/\s+/g, ' ')
+  assert.ok(text.includes('`REVIEW_KEYS` in `crew/protocols.mjs`'))
+  assert.ok(text.includes('`FINDING_RULES` in `crew/protocols.mjs`'))
+  assert.ok(text.includes('`validateEnvelope` in `crew/protocols.mjs`'))
+  assert.doesNotMatch(text, /`failure_modes`|`findings_omitted`|`start_line`/)
+})
+
 test('the skill names the definition it is pinned to', () => {
   assert.ok(doc.includes('`scout.json` under `crew/pi/agents/`'))
   assert.ok(doc.includes('skills/pr-review/findings-shape.test.mjs'))

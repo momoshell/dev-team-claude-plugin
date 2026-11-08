@@ -5,7 +5,7 @@ and records it ([ADR-052](../docs/adr/adr-052-agents-do-the-work.md),
 [`docs/plan-lean-runtime.md`](../docs/plan-lean-runtime.md)).
 
 ```
-crew onboard --check <draft.json> [--checkout <dir>] # calibrate the checkout
+crew onboard (--check <draft.json> | --seats) [--checkout <dir>] # calibrate the checkout or probe its seats
 crew start <brief.md> [--checkout <dir>]             # worktree + journal + a detached lane
 crew lanes [--all] [--json]                          # list lanes from their journals
 crew show <lane> [<role>] [--json]                   # read a lane's recorded seat sessions

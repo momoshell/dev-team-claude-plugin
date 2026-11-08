@@ -54,9 +54,10 @@ The probe is implemented in `crew/seat-probe.mjs`.
    `proof` to an array of runner entries. Node's built-in test runner is the
    default for JavaScript tests, so use `proof: []` if it covers all proof tests.
    Optionally set `suiteTimeoutMs` to a safe integer from 1 to `2**31-1` ms;
-   if absent, the suite timeout is 1800000 ms. Optionally set top-level
-   `proofTimeoutMs` to a safe integer from 1 to `2**31-1` ms for every proof
-   run; if absent, it defaults to 120000 ms. It is not set per runner entry.
+   if absent, the suite timeout is `SUITE_TIMEOUT_DEFAULT_MS` (`crew/onboard.mjs`).
+   Optionally set top-level `proofTimeoutMs` to a safe integer from 1 to
+   `2**31-1` ms for every proof run; if absent, it defaults to
+   `PROOF_TIMEOUT_DEFAULT_MS` (`crew/proof.mjs`). It is not set per runner entry.
 3. For each other runner, add `match` (a file glob), optional `setup`, `run`, and
    `calibrate`. The latter holds `file` (a literal relative path matched first
    by this entry), `text` (the throwaway test source), and distinct `pass` and

@@ -13,8 +13,8 @@ import { homedir } from 'node:os'
 import { basename, dirname, join, posix, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { LANE } from './lane-core.mjs'
-import { ISSUE_SOURCE, parseBrief } from './protocols.mjs'
-import { resolveAgents } from './agents.mjs'
+import { ISSUE_SOURCE, parseBrief, TIERS } from './protocols.mjs'
+import { resolveAgents, loadRoster, snapshotRoster } from './agents.mjs'
 import { writeRunPid } from './run-pid.mjs'
 import { askProvenance, readOperatorMessages } from './brief-provenance.mjs'
 import { OnboardRefusal, requireOnboarded, SUITE_TIMEOUT_DEFAULT_MS } from './onboard.mjs'
@@ -48,7 +48,7 @@ function logStdout(line) {
 }
 
 const defaultDeps = () => ({
-  readFileSync, existsSync, mkdirSync, writeFileSync, rmSync, openSync, closeSync, resolveAgents,
+  readFileSync, existsSync, mkdirSync, writeFileSync, rmSync, openSync, closeSync, resolveAgents, snapshotRoster,
   spawnSync: (file, args, options) => spawnSync(file, args, { encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024, ...options }),
   spawnDetached: (file, args, { cwd, log, env }) => {
     const out = openSync(log, 'a')
@@ -100,6 +100,23 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
   try { project = requireOnboarded(checkout, d.readFileSync) } catch (error) {
     if (error instanceof OnboardRefusal) throw new StartRefusal(error.message, { cause: error })
     throw error
+  }
+  let roster
+  try {
+    roster = loadRoster({ personal: join(d.crewRoot, 'agents.json'), project: join(checkout, '.crew', 'agents.json'), readFileSync: d.readFileSync })
+    if (roster.files.length) for (const t of TIERS) {
+      let result
+      try { result = d.resolveAgents(t, undefined, roster.overrides) } catch (cause) {
+        const keys = Object.entries(roster.overrides).flatMap(([role, entry]) => Object.keys(entry).map((key) => `${role}.${key}`))
+        throw new Error(`${keys.join(', ')}: ${cause.message}`, { cause })
+      }
+      const required = t === 'mechanical' ? ['builder'] : t === 'judge' ? ['planner', 'builder', 'reviewer', 'tech-lead'] : ['planner', 'builder', 'reviewer']
+      for (const role of required) if (!result.seats?.[role]) throw new Error(`${role}.tiers.${t} leaves a required seat unseated`)
+      if (t === tier) resolved = result
+    }
+    roster.snapshot = d.snapshotRoster(roster.overrides)
+  } catch (cause) {
+    throw new StartRefusal(`cannot resolve roster ${roster?.files.map((file) => file.path).join(', ') ?? ''}: ${cause.message}`, { cause })
   }
   const worktree = join(dirname(checkout), `dt-${lane}`)
   const crewDir = join(d.crewRoot, `dt-${lane}`, lane)
@@ -173,6 +190,7 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
     source: fields.source, branch: lane, base, closes: fields.closes === null ? [] : [fields.closes],
     suite: suiteSpec(project.suite, project.suiteTimeoutMs), proofTimeoutMs: project.proofTimeoutMs, onboarded: project.hash,
     ...(fields.generated === undefined ? {} : { generated: { paths: fields.generated, ...suiteSpec(fields.regenerate) } }),
+    roster,
   }
   try {
     d.mkdirSync(taskDir, { recursive: true })

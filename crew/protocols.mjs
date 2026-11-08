@@ -7,6 +7,7 @@
 export const ISSUE_SOURCE = /^issue ([1-9]\d*)$/
 export const BRIEF_FIELDS = Object.freeze(['source', 'closes', 'mechanical', 'shape', 'out_of_scope', 'generated', 'regenerate'])
 export const TIERS = Object.freeze(['mechanical', 'build', 'judge'])
+export const RUN_FIELDS = Object.freeze(['agent', 'model', 'effort', 'advisor', 'tiers'])
 export const SHAPES = Object.freeze(['standard', 'finish'])
 export const AGENT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
 const ID = /^[A-Za-z][A-Za-z0-9._-]*$/
@@ -204,6 +205,25 @@ function validateAgentFields(fields, prefix = '') {
   for (const [key, v] of Object.entries(fields)) {
     if (Object.hasOwn(AGENT_RULES, key)) { if (!AGENT_RULES[key][0](v)) out.push(`${prefix}${key} ${AGENT_RULES[key][1]}`) }
     else if (key === 'advisor' && v !== null) out.push(...entryDefects(v, `${prefix}advisor`, ['agent', 'model', 'effort']))
+  }
+  return out
+}
+
+export function runOverrideDefects(role, entry) {
+  if (!plain(entry)) return [`${role} is an object`]
+  const out = []
+  for (const key of Object.keys(entry)) if (!RUN_FIELDS.includes(key)) out.push(`${role}.${key} is not a run field`)
+  out.push(...validateAgentFields(entry, `${role}.`))
+  if (Object.hasOwn(entry, 'tiers')) {
+    if (!plain(entry.tiers)) out.push(`${role}.tiers is an object`)
+    else for (const [tier, value] of Object.entries(entry.tiers)) {
+      const path = `${role}.tiers.${tier}`
+      if (!TIERS.includes(tier)) out.push(`${path} is not a tier`)
+      if (value === null) continue
+      if (!plain(value)) { out.push(`${path} is an object or null`); continue }
+      for (const key of Object.keys(value)) if (!RUN_FIELDS.slice(0, 4).includes(key)) out.push(`${path}.${key} is not a run field`)
+      out.push(...validateAgentFields(value, `${path}.`))
+    }
   }
   return out
 }

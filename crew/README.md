@@ -68,14 +68,16 @@ measurement that holds work. Journal writes do not throw into the caller. A fail
 
 ADR-055 §12 routes an escalation without `details.question` back to the same seat. On build and judge, a builder's `insufficient` goes to the lead with its envelope; the lead routes it to the builder or planner, or escalates a §12 case. Mechanical insufficiency restarts as build. The lead's last consult is marked last; a spent lead bound stops for the operator with a question drawn from the held envelope and lead decision. Repeated failures with the same evidence stop as `no-progress` without a seat decision. On build and judge lanes the planner's P2 `details.tests` decides whether P3 proof is required; an empty list means no criterion is machine-checked. A mechanical builder may name no test.
 
-Seat definitions are `crew/agents/<role>.md`; their frontmatter is the only
-place a seat's model, agent (`claude`, `pi` or `muse`), effort, skills, `requires`
-and extensions are written, and the body is the charter. Tiers are
+Seat definitions are `crew/agents/<role>.md`; their frontmatter supplies the
+default model, agent (`claude`, `pi` or `muse`), effort, skills, `requires`
+and extensions, and the body is the charter. Tiers are
 `mechanical`, `build` and `judge`; a tier entry overrides how a seat runs there
 or unseats it. `crew/agents.mjs` resolves a tier and `crew/protocols.mjs` holds
 the brief, envelope and agent-definition validators. ADR-055 §7 raises lanes to judge for the planner's reason or protected paths; it never lowers them.
 
-A tier override replaces only the fields it names and keeps a raw override model id exactly as written, with no namespace translation. A provider failure does not reseat the seat on another cell: the retry ladder in `crew/acp/provider.mjs` backs off and retries, and once the retry bound is exhausted the lane stops with the provider failure named.
+Local roster files layer project `<checkout>/.crew/agents.json` over personal `~/.crew/agents.json` over the committed defaults. They may change only `agent`, `model`, `effort`, `advisor` and `tiers`; the charter and other fields stay with the plugin. Start validates the layers and records the effective run fields for every tier, even without override files. Later plugin or override changes do not reseat that lane. The journal records file hashes and effective cells. See [ADR-060](../docs/adr/adr-060-local-roster-overrides.md).
+
+A frontmatter tier override replaces only the fields it names and keeps a raw override model id exactly as written, with no namespace translation. A provider failure does not reseat the seat on another cell: the retry ladder in `crew/acp/provider.mjs` backs off and retries, and once the retry bound is exhausted the lane stops with the provider failure named.
 
 ## Runtime feature map
 | Feature | Where it lives | ADR | Doc |

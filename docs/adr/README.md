@@ -1,7 +1,7 @@
 # Architecture decision register
 
 Every ADR number this repo has ever minted, ratified or not. **Grep here before
-minting a new one** — the next free number is **060**.
+minting a new one** — the next free number is **061**.
 
 That instruction is the point of the file. ADR numbers are cited from shipped
 code as the authority for invariants (`crew/loop.mjs`), and those citations name *numbers,
@@ -79,7 +79,7 @@ not free.
 | 049 | Builder edits: answer a failed edit with the file's own text before adding a new edit tool | superseded by ADR-055, was **ratified 2026-09-29, amended 2026-10-18 (Amendment 1: the A/B window starts at PR 1860)**, operator decision | [full document](adr-049-builder-edit-assist.md) |
 | 050 | Seat skills are selected at dispatch, granted lazily, and their loads are measured | ratified 2026-10-16, operator decision; amendment: lines 147-150 describe retired mechanisms: `hooks/skill-gate.mjs` has no deny `main` or `DEVTEAM_WORKER` early return, and `crew/pi/extensions/builderloop.ts` no longer exists | [full document](adr-050-seat-skills-are-granted-not-pasted.md) |
 | 051 | Escalated lanes are finished by a `finish` shape: the builder codes, Sol reviews, the operator decides | ratified 2026-10-16, amended 2026-10-17 (Amendment 1), lane 1 built, operator decision | [full document](adr-051-finish-shape.md) |
-| 052 | Agents do the work; code keeps it correct | ratified 2026-10-24, operator decision; Amendment 1 (2026-10-24), Amendment 2 (2026-10-26, withdrawn 2026-11-04), Amendments 3 and 4 (2026-11-01), Amendment 5 (2026-11-04), Amendment 6 (2026-11-04, `fallback` retired by PR 2182); ADR-055 amends the acceptance parts (§1 item 4, P1 `acceptance`, P3, §6's gate) | [full document](adr-052-agents-do-the-work.md) |
+| 052 | Agents do the work; code keeps it correct | ratified 2026-10-24, operator decision; Amendment 1 (2026-10-24), Amendment 2 (2026-10-26, withdrawn 2026-11-04), Amendments 3 and 4 (2026-11-01), Amendment 5 (2026-11-04), Amendment 6 (2026-11-04, `fallback` retired by PR 2182); ADR-055 amends the acceptance parts (§1 item 4, P1 `acceptance`, P3, §6's gate); ADR-060 amends roster defaults | [full document](adr-052-agents-do-the-work.md) |
 | 053 | Build first, prove after: the builder writes the acceptance tests and the loop proves them | proposed 2026-11-01, rejected by ADR-055 on its own measurement (2026-11-02) | [full document](adr-053-build-first-prove-after.md) |
 | 054 | Each tier runs its own loop, and every stage earns its place | proposed 2026-11-01, operator direction; §2–§4 amended by ADR-055 | [full document](adr-054-each-tier-runs-its-own-loop.md) |
 | 055 | The planner defines the work, code checks red and green, the reviewer judges | amendment: §10's map-grant list is incomplete; the tech-lead also receives grants alongside builder and reviewer (`crew/lean.mjs`). §2 and §3 ratified 2026-11-03; §1, §7, §8 and §12 ratified 2026-11-04 by operator decision D14; §6 proposed until about 10 lanes run on b1514's round budgets | [full document](adr-055-planner-defines-the-work.md) |
@@ -87,6 +87,7 @@ not free.
 | 057 | Project onboarding gate | proposed 2026-11-04, operator request, issue #2193 | below |
 | 058 | Proof runners are project-declared; crew reads JUnit | proposed 2026-11-04, operator session proposal | below |
 | 059 | Plugin hooks for the brief and onboarding gates; amends ADR-050 Amendment 1 | proposed 2026-11-04, operator decision, issue #2195 | [full document](adr-059-plugin-hooks-for-the-gates.md) |
+| 060 | Local roster overrides over committed defaults; amends ADR-052 | proposed, operator decision, issue #2256 | [full document](adr-060-local-roster-overrides.md) |
 
 ### The 014–019 tangle, recorded so nobody re-derives it
 

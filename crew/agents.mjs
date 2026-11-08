@@ -1,8 +1,9 @@
 // Resolve a tier's seats from the agent definitions in crew/agents.
 import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { parseAgent, AGENT_ROLES, TIERS } from './protocols.mjs'
+import { parseAgent, AGENT_ROLES, TIERS, RUN_FIELDS, runOverrideDefects } from './protocols.mjs'
 
 const DEFAULT_DIRECTORY = fileURLToPath(new URL('./agents/', import.meta.url))
 
@@ -19,10 +20,43 @@ const cellOf = (model, agent, effort) => {
   return { agent, effort, provider, id }
 }
 
-// Returns { seats, advisor }: a null tier override
-// unseats a role, any other override replaces the base fields it names.
-export function resolveAgents(tier, directory = DEFAULT_DIRECTORY) {
-  if (!TIERS.includes(tier)) throw new Error(`unknown tier "${tier}" — valid tiers: ${TIERS.join(', ')}`)
+export function withRunOverride(fields, override) {
+  if (!override) return fields
+  const tiers = { ...fields.tiers }
+  for (const [tier, entry] of Object.entries(override.tiers ?? {})) {
+    if (entry === null) tiers[tier] = null
+    else {
+      const nonRun = Object.fromEntries(Object.entries(fields.tiers?.[tier] ?? {}).filter(([key]) => !RUN_FIELDS.includes(key)))
+      tiers[tier] = { ...nonRun, ...entry }
+    }
+  }
+  return { ...fields, ...override, tiers }
+}
+
+export function loadRoster({ personal, project, readFileSync }) {
+  const overrides = {}, files = []
+  for (const [layer, path] of Object.entries({ personal, project })) {
+    let raw
+    try { raw = readFileSync(path, 'utf8') } catch (error) {
+      if (error?.code === 'ENOENT') continue
+      throw new Error(`${path}: cannot read: ${error?.message}`, { cause: error })
+    }
+    let data
+    try { data = JSON.parse(raw) } catch (error) { throw new Error(`${path}: root is not valid JSON: ${error.message}`, { cause: error }) }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error(`${path}: root must be an object`)
+    for (const [role, entry] of Object.entries(data)) {
+      if (!AGENT_ROLES.includes(role)) throw new Error(`${path}: ${role} is not a role`)
+      const defects = runOverrideDefects(role, entry)
+      if (defects.length) throw new Error(`${path}: ${defects.join('; ')}`)
+      const previous = Object.hasOwn(overrides, role) ? overrides[role] : {}
+      overrides[role] = { ...previous, ...entry, ...(Object.hasOwn(entry, 'tiers') ? { tiers: { ...previous.tiers, ...entry.tiers } } : {}) }
+    }
+    files.push({ layer, path, sha256: createHash('sha256').update(raw).digest('hex') })
+  }
+  return { overrides, files }
+}
+
+function readDefinitions(directory) {
   const problems = []
   const definitions = AGENT_ROLES.map((role) => {
     const path = join(directory, `${role}.md`)
@@ -33,10 +67,29 @@ export function resolveAgents(tier, directory = DEFAULT_DIRECTORY) {
     return fields
   })
   if (problems.length) throw new Error(`agent definitions are refused:\n${problems.join('\n')}`)
+  return definitions
+}
+
+// Capture complete run fields per tier, including absent advisors and unseated roles.
+export function snapshotRoster(overrides = {}, directory = DEFAULT_DIRECTORY) {
+  const definitions = readDefinitions(directory)
+  const cell = (fields) => ({ agent: fields.agent, model: fields.model, effort: fields.effort, advisor: fields.advisor ?? null })
+  return Object.fromEntries(AGENT_ROLES.map((role, index) => {
+    const fields = withRunOverride(definitions[index], Object.hasOwn(overrides, role) ? overrides[role] : undefined)
+    const tiers = Object.fromEntries(TIERS.map((tier) => [tier, fields.tiers?.[tier] === null ? null : cell({ ...fields, ...fields.tiers?.[tier] })]))
+    return [role, { ...cell(fields), tiers }]
+  }))
+}
+
+// Returns { seats, advisor }: a null tier override
+// unseats a role, any other override replaces the base fields it names.
+export function resolveAgents(tier, directory = DEFAULT_DIRECTORY, overrides = {}) {
+  if (!TIERS.includes(tier)) throw new Error(`unknown tier "${tier}" — valid tiers: ${TIERS.join(', ')}`)
+  const definitions = readDefinitions(directory)
   const seats = {}
   const declared = new Map()
   AGENT_ROLES.forEach((role, index) => {
-    const base = definitions[index]
+    const base = withRunOverride(definitions[index], Object.hasOwn(overrides ?? {}, role) ? overrides[role] : undefined)
     const override = base.tiers?.[tier]
     if (override === null) return
     const effective = { ...base, ...override }

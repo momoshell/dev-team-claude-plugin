@@ -36,6 +36,15 @@ or per-name `tiers` entries only; tier entries can be null to unseat a role.
 Start validates the files and records them for the lane. A later edit affects
 only new lanes. See [ADR-060](../../docs/adr/adr-060-local-roster-overrides.md).
 
+## Checking seat availability
+
+`crew onboard --check` probes each distinct seat in the effective roster and
+refuses to record onboarding if an agent refuses a cell. Run `crew onboard
+--seats --checkout <dir>` after editing overrides to probe without calibrating
+proof. Each cell is reported as available, unavailable with the refusal, or
+unmeasured with a reason. `crew start` stays offline and does not probe seats.
+The probe is implemented in `crew/seat-probe.mjs`.
+
 ## Onboarding a checkout for lean lanes
 
 1. Pick the checkout's suite command, such as `npm test`, and run it on a clean

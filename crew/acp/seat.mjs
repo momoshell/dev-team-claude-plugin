@@ -81,7 +81,7 @@ function resolveBinary(label, explicit, name, env) {
     const candidate = join(dir, name)
     if (executable(candidate)) return candidate
   }
-  throw new Error(`${label} binary "${name}" was not found on an absolute PATH directory`)
+  throw Object.assign(new Error(`${label} binary "${name}" was not found on an absolute PATH directory`), { code: 'ACP_BINARY_MISSING' })
 }
 
 // A bare identifier names a checkout skill; a string with a slash or .md suffix is a path.

@@ -1,7 +1,7 @@
 // Calibrate project proof runners in a disposable worktree (ADR-057).
 import { createHash, randomUUID } from 'node:crypto'
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, extname, join, matchesGlob, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { literalRelative, runSuite, validTimeout } from './checks.mjs'
@@ -114,22 +114,38 @@ export async function checkOnboarding({ checkout, draft, timeoutMs = 120_000 }) 
   }
 }
 
-export async function main(argv = process.argv.slice(2)) {
-  let draft, checkout, bad = false
+export async function main(argv = process.argv.slice(2), deps = {}) {
+  let draft, checkout, seats = false, bad = false
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]
+    if (flag === '--seats') { if (seats) bad = true; seats = true; continue }
     if (!['--check', '--checkout'].includes(flag) || !argv[i + 1] || argv[i + 1].startsWith('-') || (flag === '--check' ? draft : checkout)) { bad = true; break }
     if (flag === '--check') draft = resolve(argv[++i]); else checkout = resolve(argv[++i])
   }
-  if (bad || !draft) { process.stderr.write('usage: crew onboard --check <draft.json> [--checkout <dir>]\n'); return 2 }
+  if (bad || Boolean(draft) === seats) { process.stderr.write('usage: crew onboard (--check <draft.json> | --seats) [--checkout <dir>]\n'); return 2 }
   if (!checkout) {
     const git = await runSuite({ cwd: process.cwd(), command: 'git', args: ['rev-parse', '--show-toplevel'] })
     if (git.status !== 'green') { process.stderr.write('crew onboard: not inside a git checkout; pass --checkout <dir>\n'); return 1 }
     checkout = git.stdout.trim()
   }
+  const write = deps.write ?? ((text) => process.stdout.write(text))
+  let cells
+  try {
+    const { probeRoster } = await import('./seat-probe.mjs')
+    cells = await probeRoster({ checkout, crewRoot: deps.crewRoot ?? join(homedir(), '.crew'), binaries: deps.binaries, clientFactory: deps.clientFactory, env: deps.env })
+  } catch (error) { write(`crew onboard: roster: ${error.message}\n`); return 1 }
+  for (const cell of cells) {
+    const uses = cell.uses.map(({ role, tier }) => `${role}@${tier}`).join(', ')
+    write(`crew onboard: seat ${cell.agent} ${cell.model} ${cell.effort} (${uses}): ${cell.status}${cell.status === 'unavailable' ? `: ${cell.text}` : cell.status === 'unmeasured' ? `: ${cell.reason}` : ''}\n`)
+  }
+  if (cells.some((cell) => cell.status === 'unavailable')) {
+    write(`crew onboard: unavailable seats above; override in ~/.crew/agents.json or ${join(checkout, '.crew', 'agents.json')}\n`)
+    return 1
+  }
+  if (seats) return 0
   const result = await checkOnboarding({ checkout, draft })
-  for (const row of result.rows) process.stdout.write(`crew onboard: ${row.match}: ${row.reason ?? 'proven'}\n`)
-  if (!result.rows.length) process.stdout.write(`crew onboard: ${result.status === 'green' ? 'no proof entries; project recorded' : 'failed'}\n`)
+  for (const row of result.rows) write(`crew onboard: ${row.match}: ${row.reason ?? 'proven'}\n`)
+  if (!result.rows.length) write(`crew onboard: ${result.status === 'green' ? 'no proof entries; project recorded' : 'failed'}\n`)
   return result.status === 'green' ? 0 : 1
 }
 

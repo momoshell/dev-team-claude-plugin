@@ -76,7 +76,10 @@ test('onboard --check writes .crew/project.json only when the pass probe reads g
     const draft = join(root, 'draft.json')
     const entry = { match: 'probe/**', run: 'node --test --test-reporter=junit --test-reporter-destination={report} {file}', calibrate: { file: 'probe/calibrate.mjs', text: "import { test } from 'node:test'\nimport assert from 'node:assert/strict'\ntest('passes', () => {})\ntest('fails', () => assert.fail())\n", pass: 'passes', fail: 'fails' } }
     writeFileSync(draft, JSON.stringify({ suite: 'npm test', proof: [entry] }))
-    const env = { CREW_HOME: '' }
+    const gitPath = spawnSync('which', ['git'], { encoding: 'utf8' }).stdout.trim()
+    const dir = fakeBin(root, 'git', `exec "${gitPath}" "$@"`)
+    fakeBin(root, 'node', `exec "${process.execPath}" "$@"`)
+    const env = { CREW_HOME: '', HOME: root, PATH: dir }
     const out = crew(['onboard', '--check', draft, '--checkout', repo], { cwd: root, env })
     assert.equal(out.status, 0, out.stderr + out.stdout)
     const project = JSON.parse(readFileSync(join(repo, '.crew/project.json'), 'utf8'))

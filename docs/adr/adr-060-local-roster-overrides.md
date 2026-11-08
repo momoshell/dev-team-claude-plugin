@@ -28,4 +28,4 @@ committed model needs a local choice that survives plugin updates.
 5. The journal records each initial effective seat's agent, model and effort and
    each applied file's path and SHA-256 hash. Tier raises record the new cells.
 
-The availability probe is outside this decision (issue #2257).
+The availability probe is outside this decision (issue #2257). Note: it has since shipped in `crew/seat-probe.mjs` with `crew onboard --seats`.

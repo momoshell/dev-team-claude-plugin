@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path'
 import { ROOT } from './helpers.mjs'
 
 const read = (path) => readFileSync(join(ROOT, path), 'utf8')
+const flat = (text) => text.replace(/\s+/g, ' ')
 const lineCount = (text) => text === '' ? 0 : text.split('\n').length - Number(text.endsWith('\n'))
 const files = (dir) => readdirSync(join(ROOT, dir), { recursive: true, withFileTypes: true })
   .filter((e) => e.isFile()).map((e) => join(e.parentPath, e.name).slice(ROOT.length + 1))
@@ -130,6 +131,61 @@ const limit = 1 // ADR-998
   assert.match(errors, /ADR-998 missing from register/)
   assert.match(errors, /ADR-997 missing from register/)
   assert.doesNotMatch(errors, /ADR-999/)
+})
+
+test('crew-recovery says crew lanes reports a pid-proven dead run as run-died and never claims liveness', () => {
+  const bullet = flat(read('skills/crew-recovery/SKILL.md').split('\n- `crew lanes')[1].split('\n- ')[0])
+  assert.match(bullet, /recorded pid proves dead lists as `stopped` with reason `run-died`/)
+  assert.match(bullet, /`deadRun` in `crew\/run-pid\.mjs`/)
+  assert.match(bullet, /never reports a process as alive/)
+  assert.doesNotMatch(bullet, /does not say whether a process is alive/)
+})
+
+test('the README onboard usage lines match the crew onboard usage', () => {
+  const usage = read('crew/onboard.mjs').match(/usage: (crew onboard [^\\]+)\\n/)
+  assert.ok(usage)
+  for (const path of ['README.md', 'crew/README.md']) {
+    const line = read(path).split('\n').find((entry) => entry.startsWith('crew onboard '))
+    assert.ok(line?.includes(usage[1]), `${path} does not contain ${usage[1]}`)
+  }
+})
+
+test('the tech-lead charter says which reviewer rules do not apply to it', () => {
+  const charter = flat(read('crew/agents/tech-lead.md'))
+  for (const phrase of [
+    'Its round-2 delta limit on new must-fixes is not yours',
+    'only the reviewer receives a base tree',
+    'a new defect anywhere may be a must-fix',
+    'still carry or close your earlier must-fixes',
+    'your frontmatter grants no skills',
+    'read `code-less` only when the lane grants it',
+    'read every skill granted for the lane',
+  ]) assert.ok(charter.includes(phrase), phrase)
+  assert.doesNotMatch(charter, /Its skill rule/)
+})
+
+test('adr-060 and its register entry point at the shipped seat probe and stay proposed', () => {
+  const adr = read('docs/adr/adr-060-local-roster-overrides.md')
+  const row = register.split('\n').find((line) => line.startsWith('| 060 |'))
+  assert.match(adr, /\*\*Status:\*\* Proposed/)
+  assert.match(row, /proposed/)
+  for (const text of [adr, row]) {
+    assert.ok(text.includes('crew/seat-probe.mjs'))
+    assert.ok(text.includes('crew onboard --seats'))
+  }
+})
+
+test('crew-onboard names the timeout default constants instead of restating them', () => {
+  const skill = flat(read('skills/crew-onboard/SKILL.md'))
+  assert.ok(skill.includes('`SUITE_TIMEOUT_DEFAULT_MS` (`crew/onboard.mjs`)'))
+  assert.ok(skill.includes('`PROOF_TIMEOUT_DEFAULT_MS` (`crew/proof.mjs`)'))
+  assert.doesNotMatch(skill, /1800000|120000/)
+})
+
+test('crew-recovery names FINISH_REASONS instead of listing finish refusal causes', () => {
+  const skill = flat(read('skills/crew-recovery/SKILL.md'))
+  assert.ok(skill.includes('`FINISH_REASONS` in `crew/finish.mjs`'))
+  assert.doesNotMatch(skill, /the worktree is gone|schema-valid builder result/)
 })
 
 test('adr register records the ADR-050 and ADR-055 amendment notes', () => {

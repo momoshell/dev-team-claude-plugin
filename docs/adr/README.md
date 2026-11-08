@@ -87,7 +87,7 @@ not free.
 | 057 | Project onboarding gate | proposed 2026-11-04, operator request, issue #2193 | below |
 | 058 | Proof runners are project-declared; crew reads JUnit | proposed 2026-11-04, operator session proposal | below |
 | 059 | Plugin hooks for the brief and onboarding gates; amends ADR-050 Amendment 1 | proposed 2026-11-04, operator decision, issue #2195 | [full document](adr-059-plugin-hooks-for-the-gates.md) |
-| 060 | Local roster overrides over committed defaults; amends ADR-052 | proposed, operator decision, issue #2256 | [full document](adr-060-local-roster-overrides.md) |
+| 060 | Local roster overrides over committed defaults; amends ADR-052 | proposed, operator decision, issue #2256; note: the availability probe (issue #2257) shipped in `crew/seat-probe.mjs` with `crew onboard --seats` | [full document](adr-060-local-roster-overrides.md) |
 
 ### The 014–019 tangle, recorded so nobody re-derives it
 

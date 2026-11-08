@@ -1,6 +1,6 @@
 # ADR-056 — The ask is operator words
 
-**Status:** proposed 2026-11-04, operator request; ratified by merging this PR; Amendment 1 proposed 2026-11-04; Amendment 2 proposed, operator request
+**Status:** proposed 2026-11-04, operator request; ratified by merging this PR; Amendment 1 proposed 2026-11-04; Amendment 2 proposed, operator request; Amendment 3 proposed, issue 2263
 
 **Relates to:** ADR-055 §1 (amended here), ADR-050 Amendment 1 (no Claude Code hook)
 
@@ -21,6 +21,10 @@ The allowance for `~/.crew/notes` in Context is withdrawn. Put proposals, premis
 ## Amendment 2 (operator request)
 
 Queued operator messages count alongside typed messages under the same guards and pasted-content removal.
+
+## Amendment 3 (issue 2263)
+
+The Context path check reads the base commit fetched from origin, not the local base branch. If the fetch fails, `crew start` refuses.
 
 ## Measurement and limits
 

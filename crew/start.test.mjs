@@ -258,7 +258,7 @@ test('crew start refuses a ## Context path missing on the base before the worktr
     const spawnSync = missing.deps.spawnSync
     missing.deps.spawnSync = (file, args, options) => {
       const result = spawnSync(file, args, options)
-      return file === 'git' && args.includes('main:crew/missing.mjs') ? { status } : result
+      return file === 'git' && args.includes(`${'a'.repeat(40)}:crew/missing.mjs`) ? { status } : result
     }
     await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: missing.deps }), (error) => error instanceof StartRefusal && error.message.includes('could not verify') && error.message.includes('main') && error.message.includes('crew/missing.mjs'))
     assert.equal(missing.calls.some(([kind, file, args]) => kind === 'spawn' && (file === 'gh' || args.includes('worktree'))), false)
@@ -267,7 +267,7 @@ test('crew start refuses a ## Context path missing on the base before the worktr
   const pass = fakes({ brief: BRIEF.replace('`crew/agents.mjs`', '`crew/agents.mjs` `resolveAgents`\n- `crew/`') })
   await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: pass.deps })
   const checks = pass.calls.filter(([kind, file, args]) => kind === 'spawn' && file === 'git' && args.includes('cat-file')).map(([, , args]) => args.at(-1))
-  assert.deepEqual(checks, ['main:crew/agents.mjs', 'main:crew'])
+  assert.deepEqual(checks, [`${'a'.repeat(40)}:crew/agents.mjs`, `${'a'.repeat(40)}:crew`])
 
   const repo = scratchDir('context-base-')
   for (const args of [['init', '-b', 'main'], ['config', 'user.name', 'Test'], ['config', 'user.email', 'test@example.com']]) {
@@ -283,14 +283,16 @@ test('crew start refuses a ## Context path missing on the base before the worktr
   for (const args of [['add', '.'], ['commit', '-m', 'remote'], ['update-ref', 'refs/remotes/origin/main', 'HEAD'], ['reset', '--hard', 'HEAD^']]) {
     assert.equal(spawnSync('git', args, { cwd: repo }).status, 0)
   }
-  for (const path of ['tracked', 'remote-only', 'notes.md', 'linked-dir/file']) {
+  writeFileSync(join(repo, 'local-only'), 'local')
+  for (const args of [['add', 'local-only'], ['commit', '-m', 'local']]) assert.equal(spawnSync('git', args, { cwd: repo }).status, 0)
+  for (const path of ['tracked', 'remote-only', 'local-only', 'notes.md', 'linked-dir/file']) {
     const fail = fakes({ brief: BRIEF.replace('`crew/agents.mjs`', `\`${path}\``) })
     const fakeSpawn = fail.deps.spawnSync
     fail.deps.spawnSync = (file, args, options) => {
       const result = fakeSpawn(file, args, options)
-      return file === 'git' && !args.includes('symbolic-ref') && !args.includes('worktree') ? spawnSync(file, args, { encoding: 'utf8' }) : result
+      return file === 'git' && !args.includes('symbolic-ref') && !args.includes('worktree') && !args.includes('fetch') ? spawnSync(file, args, { encoding: 'utf8' }) : result
     }
-    if (path === 'tracked') await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: repo, deps: fail.deps }))
+    if (path === 'tracked' || path === 'remote-only') await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: repo, deps: fail.deps }))
     else {
       await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: repo, deps: fail.deps }), (error) => error instanceof StartRefusal && error.message.includes(path) && error.message.includes('main'))
       assert.equal(fail.calls.some(([kind, file, args]) => kind === 'spawn' && (file === 'gh' || args.includes('worktree'))), false)
@@ -662,6 +664,9 @@ test('start refuses when the selected lane base lacks the approved onboarding', 
     git(repo, 'add', '.')
     git(repo, 'commit', '-m', 'base')
     const baseCommit = git(repo, 'rev-parse', 'HEAD').trim()
+    git(root, 'init', '--bare', '-b', 'main', join(root, 'origin.git'))
+    git(repo, 'remote', 'add', 'origin', join(root, 'origin.git'))
+    git(repo, 'push', 'origin', 'main')
     git(repo, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main')
     git(repo, 'checkout', '-b', 'feature')
     mkdirSync(join(repo, '.crew'), { recursive: true })
@@ -691,6 +696,88 @@ test('start refuses when the selected lane base lacks the approved onboarding', 
       assert.equal(existsSync(join(lane.worktree, 'feature-only')), false)
       assert.equal(JSON.parse(readFileSync(lane.specPath, 'utf8')).base, 'main')
     }
+  }
+})
+
+function originBaseFixture(change) {
+  const root = scratchDir('start-origin-base-')
+  const seed = join(root, 'seed'), checkout = join(root, 'checkout'), origin = join(root, 'origin.git')
+  mkdirSync(seed)
+  git(root, 'init', '--bare', '-b', 'main', origin)
+  git(seed, 'init', '-b', 'main')
+  git(seed, 'config', 'user.email', 'test@example.test')
+  git(seed, 'config', 'user.name', 'Test')
+  mkdirSync(join(seed, '.crew'))
+  writeFileSync(join(seed, '.crew', 'project.json'), JSON.stringify(projectFile()))
+  git(seed, 'add', '.')
+  git(seed, 'commit', '-m', 'base')
+  git(seed, 'remote', 'add', 'origin', origin)
+  git(seed, 'push', 'origin', 'main')
+  const a = git(seed, 'rev-parse', 'HEAD').trim()
+  git(root, 'clone', origin, checkout)
+  change(seed)
+  git(seed, 'add', '.')
+  git(seed, 'commit', '-m', 'origin update')
+  git(seed, 'push', 'origin', 'main')
+  const b = git(seed, 'rev-parse', 'HEAD').trim()
+  const briefPath = join(root, 'b1.md')
+  writeFileSync(briefPath, BRIEF.replace('`crew/agents.mjs`', '`origin-only`'))
+  const calls = []
+  const deps = {
+    crewRoot: join(root, 'crew'), transcriptRoot: '/virtual/no-transcripts', resolveAgents: () => ({ seats: {} }),
+    spawnSync: (file, args, options) => {
+      calls.push([file, args])
+      return file === 'git' ? spawnSync(file, args, { ...options, encoding: 'utf8' }) : { status: 0, stdout: 'issue body' }
+    },
+    spawnDetached: () => { calls.push(['launch']); return 1 }, log: () => {},
+  }
+  return { root, checkout, briefPath, deps, calls, a, b }
+}
+
+test('crew start bases the lane on the origin commit when the local default branch is one commit behind', async () => {
+  for (const customRefspec of [false, true]) {
+    const f = originBaseFixture((seed) => writeFileSync(join(seed, 'origin-only'), 'origin'))
+    if (customRefspec) {
+      git(f.checkout, 'checkout', '-b', 'feature')
+      git(f.checkout, 'config', 'remote.origin.fetch', '+refs/heads/main:refs/heads/main')
+    }
+    let lane
+    await assert.doesNotReject(async () => { lane = await startLane({ briefPath: f.briefPath, checkout: f.checkout, deps: f.deps }) })
+    assert.equal(git(f.checkout, 'rev-parse', 'b1').trim(), f.b)
+    assert.equal(git(f.checkout, 'rev-parse', 'refs/heads/main').trim(), f.a)
+    assert.equal(git(f.checkout, 'rev-parse', 'HEAD').trim(), f.a)
+    assert.equal(JSON.parse(readFileSync(lane.specPath, 'utf8')).base, 'main')
+  }
+})
+
+test('crew start reads the onboarding check from the origin commit, not the local default branch', async () => {
+  const f = originBaseFixture((seed) => writeFileSync(join(seed, '.crew', 'project.json'), JSON.stringify(projectFile('cargo test'))))
+  writeFileSync(f.briefPath, BRIEF.replace('`crew/agents.mjs`', '`.crew/project.json`'))
+  await assert.rejects(startLane({ briefPath: f.briefPath, checkout: f.checkout, deps: f.deps }), (error) => error instanceof StartRefusal && error.message.includes('onboarding-stale'))
+  assert.equal(existsSync(join(f.root, 'dt-b1')), false)
+  assert.equal(f.calls.some(([file]) => file === 'launch'), false)
+})
+
+test('crew start refuses when the origin fetch fails and does not fall back to the local branch', async () => {
+  const f = originBaseFixture((seed) => writeFileSync(join(seed, 'origin-only'), 'origin'))
+  writeFileSync(f.briefPath, BRIEF.replace('`crew/agents.mjs`', '`.crew/project.json`'))
+  git(f.checkout, 'remote', 'set-url', 'origin', join(f.root, 'gone.git'))
+  await assert.rejects(startLane({ briefPath: f.briefPath, checkout: f.checkout, deps: f.deps }), (error) => error instanceof StartRefusal && error.message.includes('fetch') && error.message.includes('gone.git'))
+  assert.equal(existsSync(join(f.root, 'dt-b1')), false)
+  assert.equal(f.calls.some(([file]) => file === 'launch'), false)
+  assert.notEqual(spawnSync('git', ['-C', f.checkout, 'show-ref', '--verify', '--quiet', 'refs/heads/b1']).status, 0)
+})
+
+test('crew start names the signal when the origin fetch is interrupted', async () => {
+  for (const stderr of ['', 'fetch interrupted']) {
+    const f = fakes()
+    const spawn = f.deps.spawnSync
+    f.deps.spawnSync = (file, args, options) => args.includes('fetch')
+      ? { status: null, signal: 'SIGTERM', stderr }
+      : spawn(file, args, options)
+    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps }), (error) => error instanceof StartRefusal && error.message.includes('fetch') && error.message.includes('SIGTERM') && error.message.includes(stderr))
+    assert.equal(spawned(f.calls, 'worktree'), undefined)
+    assert.equal(f.calls.some(([kind]) => kind === 'detached'), false)
   }
 })
 
@@ -740,7 +827,7 @@ test('a plain start is the only validation: defective, missing-context and stale
     const spawn = run.deps.spawnSync
     run.deps.spawnSync = (file, args, options) => {
       const result = spawn(file, args, options)
-      if (kind === 'missing-context' && args.includes('main:crew/agents.mjs')) return { status: 1 }
+      if (kind === 'missing-context' && args.includes(`${'a'.repeat(40)}:crew/agents.mjs`)) return { status: 1 }
       if (kind === 'base-onboarding' && args.includes('show')) return { status: 0, stdout: JSON.stringify(projectFile('cargo test')) }
       return result
     }

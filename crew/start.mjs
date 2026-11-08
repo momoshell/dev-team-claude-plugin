@@ -125,19 +125,21 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
   const remoteHead = git(d, checkout, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
   if (!remoteHead) throw new StartRefusal('cannot read origin/HEAD; repair it with git remote set-head origin --auto')
   const base = remoteHead.replace(/^origin\//, '')
+  const fetch = d.spawnSync('git', ['-C', checkout, 'fetch', '--refmap=', 'origin', `+refs/heads/${base}:refs/remotes/origin/${base}`])
+  if (fetch.status !== 0) throw new StartRefusal(`cannot fetch ${base} from origin: ${fetch.error?.message || String(fetch.stderr ?? '').trim() || (fetch.signal ? 'git interrupted' : `git exited with status ${fetch.status}`)}${fetch.signal ? ` (signal ${fetch.signal})` : ''}; the lane was not started and the local branch was not used`)
+  const baseCommit = git(d, checkout, ['rev-parse', '--verify', `refs/remotes/origin/${base}^{commit}`])
+  if (!baseCommit) throw new StartRefusal(`cannot resolve lane base origin/${base}`)
   const missing = paths.filter((path) => {
     const name = posix.normalize(path).replace(/\/+$/, '') || '.'
-    if (git(d, checkout, ['cat-file', '-e', `${base}:${name}`]) === null) return true
+    if (git(d, checkout, ['cat-file', '-e', `${baseCommit}:${name}`]) === null) return true
     const parts = name === '.' ? [] : name.split('/')
     return parts.some((_, i) => {
       const prefix = parts.slice(0, i + 1).join('/')
-      const entry = git(d, checkout, ['--literal-pathspecs', 'ls-tree', '-z', base, '--', prefix])
+      const entry = git(d, checkout, ['--literal-pathspecs', 'ls-tree', '-z', baseCommit, '--', prefix])
       return !entry || !/^(?:040000 tree|100(?:644|755) blob) [0-9a-f]+\t/.test(entry) || entry.slice(entry.indexOf('\t') + 1).replace(/\0$/, '') !== prefix
     })
   })
-  if (missing.length) throw new StartRefusal(`brief ${briefPath} could not verify ## Context paths on ${base} (ADR-056 Amendment 1); they may be missing, symlinks, submodules, or the git check may have failed:\n- ${missing.join('\n- ')}`)
-  const baseCommit = git(d, checkout, ['rev-parse', '--verify', `${base}^{commit}`])
-  if (!baseCommit) throw new StartRefusal(`cannot resolve lane base ${base}`)
+  if (missing.length) throw new StartRefusal(`brief ${briefPath} could not verify ## Context paths on origin/${base} (ADR-056 Amendment 1); they may be missing, symlinks, submodules, or the git check may have failed:\n- ${missing.join('\n- ')}`)
   const entry = git(d, checkout, ['ls-tree', baseCommit, '--', '.crew/project.json'])
   const config = /^100(?:644|755) blob [0-9a-f]+\t\.crew\/project\.json$/.test(entry ?? '')
     ? git(d, checkout, ['show', `${baseCommit}:.crew/project.json`]) : null

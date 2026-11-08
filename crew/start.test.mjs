@@ -758,6 +758,14 @@ test('crew start reads the onboarding check from the origin commit, not the loca
   assert.equal(f.calls.some(([file]) => file === 'launch'), false)
 })
 
+test('crew start onboarding refusal names origin/<base> and says the commit must reach origin', async () => {
+  const f = originBaseFixture((seed) => writeFileSync(join(seed, '.crew', 'project.json'), JSON.stringify(projectFile('cargo test'))))
+  writeFileSync(f.briefPath, BRIEF.replace('`crew/agents.mjs`', '`.crew/project.json`'))
+  await assert.rejects(startLane({ briefPath: f.briefPath, checkout: f.checkout, deps: f.deps }), (error) => error instanceof StartRefusal && error.message.includes('lane base origin/main: onboarding-stale') && error.message.includes('reaches origin/main before starting'))
+  assert.equal(existsSync(join(f.root, 'dt-b1')), false)
+  assert.equal(f.calls.some(([file]) => file === 'launch'), false)
+})
+
 test('crew start refuses when the origin fetch fails and does not fall back to the local branch', async () => {
   const f = originBaseFixture((seed) => writeFileSync(join(seed, 'origin-only'), 'origin'))
   writeFileSync(f.briefPath, BRIEF.replace('`crew/agents.mjs`', '`.crew/project.json`'))

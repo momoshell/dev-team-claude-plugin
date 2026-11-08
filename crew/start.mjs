@@ -150,7 +150,7 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
     })
     if (baseProject.hash !== project.hash) throw new OnboardRefusal('onboarding-stale')
   } catch (error) {
-    if (error instanceof OnboardRefusal) throw new StartRefusal(`lane base ${base}: ${error.message}; commit the approved .crew/project.json to ${base} before starting`, { cause: error })
+    if (error instanceof OnboardRefusal) throw new StartRefusal(`lane base origin/${base}: ${error.message}; commit the approved .crew/project.json to ${base} and push it so the commit reaches origin/${base} before starting`, { cause: error })
     throw error
   }
   let ask = null, title = null

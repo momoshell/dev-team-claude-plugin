@@ -1323,7 +1323,11 @@ test('an expired real seat turn reads its late invalid envelope and reruns once 
 
 test('a muse planner turn that adds, rewrites or deletes a lean record, or writes its own session file, stops seat-unmeasured with no return, and one that writes only task artifacts completes', async () => {
   for (const [mutation, throws] of [['none', false], ['add', false], ['rewrite', false], ['delete', false], ['session', false], ['add', true]]) {
-    const f = leanFixture()
+    const f = leanFixture({ loopDeps: { resolveAgents: (tier) => {
+      const resolved = resolveAgents(tier)
+      resolved.seats.planner = { ...resolved.seats.planner, agent: 'muse', provider: 'meta', id: 'muse-wonder-1.0-contributor' }
+      return resolved
+    } } })
     const prior = join(f.spec.taskDir, 'lean', 'reviewer', 'prior.jsonl')
     mkdirSync(join(f.spec.taskDir, 'lean', 'reviewer'), { recursive: true })
     writeFileSync(prior, 'prior')
@@ -1355,7 +1359,11 @@ test('a muse planner turn that adds, rewrites or deletes a lean record, or write
 test('a muse planner whose lean records cannot be read before or after its turn stops seat-unmeasured with no return', async () => {
   for (const [failAt, deletionFails] of [[1, false], [2, false], [2, true]]) {
     let calls = 0
-    const f = leanFixture({ deps: { recordState: () => ++calls === failAt ? null : 'measured', ...(deletionFails ? { rmSync: () => { throw EPERM } } : {}) } })
+    const f = leanFixture({ deps: { recordState: () => ++calls === failAt ? null : 'measured', ...(deletionFails ? { rmSync: () => { throw EPERM } } : {}) }, loopDeps: { resolveAgents: (tier) => {
+      const resolved = resolveAgents(tier)
+      resolved.seats.planner = { ...resolved.seats.planner, agent: 'muse', provider: 'meta', id: 'muse-wonder-1.0-contributor' }
+      return resolved
+    } } })
     mkdirSync(f.spec.taskDir, { recursive: true })
     writeFileSync(join(f.spec.taskDir, 'planner-1.json'), 'unearned')
     assert.deepEqual(await f.go(), { status: 'stopped', reason: 'seat-unmeasured', pr: null }, String(failAt))

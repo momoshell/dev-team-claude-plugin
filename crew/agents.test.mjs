@@ -87,7 +87,7 @@ const roster = {
       },
       "tech-lead": {
         "provider": "anthropic",
-        "id": "claude-fable-5-1",
+        "id": "claude-fable-5-2",
         "agent": "claude",
         "effort": "high"
       }

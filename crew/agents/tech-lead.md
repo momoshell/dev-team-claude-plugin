@@ -4,7 +4,7 @@ description: Gives judge lanes a second review after the reviewer and suite pass
 role: tech-lead
 writes: task-dir
 agent: claude
-model: anthropic/claude-fable-5-1
+model: anthropic/claude-fable-5-2
 effort: high
 advisor: null
 tiers: {"mechanical":null,"build":null}

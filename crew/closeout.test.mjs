@@ -53,13 +53,13 @@ function runner(state, head, calls) {
 
 const tipOf = (w) => String(git(w.checkout, 'rev-parse', `refs/heads/${LANE}`)).trim()
 
-function close(w, { state = 'MERGED', head = tipOf(w), argv = [LANE], psCommand, ...extra } = {}) {
+function close(w, { state = 'MERGED', head = tipOf(w), argv = [LANE], psCommand, psStart = 0, ...extra } = {}) {
   const calls = [], err = [], out = [], run = runner(state, head, calls)
   const status = main(argv, { root: w.root, archiveRoot: w.archiveRoot, run: (cmd, args) => {
     if (cmd !== 'ps') return run(cmd, args)
     const file = join(w.leaf, 'seat-runtime', 'acp-seat-test', 'acp', 'planner', 'pgid')
     const marker = JSON.parse(readFileSync(join(file, '..', '..', '.planner.active.json'), 'utf8'))
-    const date = new Date(marker.startedAt).toString().split(' ')
+    const date = new Date(marker.startedAt + psStart).toString().split(' ')
     return { status: 0, stdout: `${args.at(-1)} ${args.at(-1)} ${date[0]} ${date[1]} ${date[2]} ${date[4]} ${date[3]} ${psCommand ?? `sh -c pgid=${file}`}\n` }
   }, stdout: (t) => out.push(t), stderr: (t) => err.push(t), ...extra })
   return { status, calls, err: err.join(''), out: out.join('') }
@@ -292,6 +292,30 @@ test('merged closeout stops a proven live seat process group recorded under seat
     assert.equal(r.status, 0, r.err)
     assert.throws(() => process.kill(-pgid, 0), { code: 'ESRCH' })
     assert.match(r.out, new RegExp(`stopped.*planner.*${pgid}`))
+  } finally { if (pgid) try { process.kill(-pgid, 'SIGKILL') } catch {} ; w.done() }
+})
+
+test('merged closeout leaves a seat group whose marker owner is alive and reports it unproven', () => {
+  const w = world()
+  let pgid
+  try {
+    pgid = seat(w)
+    const r = close(w, { alive: () => true })
+    assert.equal(r.status, 0, r.err)
+    assert.doesNotThrow(() => process.kill(-pgid, 0))
+    assert.match(r.out, new RegExp(`planner.*${pgid}.*not proven`))
+  } finally { if (pgid) try { process.kill(-pgid, 'SIGKILL') } catch {} ; w.done() }
+})
+
+test('merged closeout leaves a seat group whose ps start time is outside the marker window and reports it unproven', () => {
+  const w = world()
+  let pgid
+  try {
+    pgid = seat(w)
+    const r = close(w, { alive: () => false, psStart: -3_600_000 })
+    assert.equal(r.status, 0, r.err)
+    assert.doesNotThrow(() => process.kill(-pgid, 0))
+    assert.match(r.out, new RegExp(`planner.*${pgid}.*not proven`))
   } finally { if (pgid) try { process.kill(-pgid, 'SIGKILL') } catch {} ; w.done() }
 })
 

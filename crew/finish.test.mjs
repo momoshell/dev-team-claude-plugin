@@ -1,8 +1,9 @@
 import { test } from 'node:test'
+import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { scratchDir } from '../test/helpers.mjs'
+import { scratchDir, trackProcessGroupFile } from '../test/helpers.mjs'
 import { createHash } from 'node:crypto'
 import * as finishModule from './finish.mjs'
 import { FinishRefusal, decideFinish, finishLane, main } from './finish.mjs'
@@ -88,6 +89,31 @@ test('a lane whose run died with no terminal row is finished as run-died', () =>
       assert.deepEqual(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.stop, { reason: 'run-died', observation: { pid: 123 } })
     } finally { cleanup(f) }
   }
+})
+
+test('finish of a dead run stops a proven live seat process group before launching and logs it', () => {
+  const f = fixture({ rows: [{ event: 'stage-start', stage: 'build' }, builderRow, { event: 'verdict', status: 'reviewed' }] })
+  let pgid
+  try {
+    writeFileSync(join(f.taskDir, 'run.pid'), '123\n')
+    const file = join(f.taskDir, '..', 'seat-runtime', 'acp-seat-test', 'acp', 'planner', 'pgid')
+    mkdirSync(join(file, '..'), { recursive: true })
+    const tracked = trackProcessGroupFile(join(f.base, 'seat-pgid')), startedAt = Date.now()
+    const spawned = spawnSync(process.execPath, ['-e', `const {spawn} = require('node:child_process'); const {writeFileSync} = require('node:fs'); const child = spawn('sleep', ['300'], {detached:true, stdio:'ignore'}); writeFileSync(process.argv[1], String(child.pid)); child.unref()`, tracked], { encoding: 'utf8' })
+    assert.equal(spawned.status, 0, spawned.stderr)
+    pgid = Number(readFileSync(tracked, 'utf8'))
+    writeFileSync(file, String(pgid))
+    writeFileSync(join(file, '..', '..', '.planner.active.json'), JSON.stringify({ phase: 'running', dir: join(file, '..'), startedAt, owner: { pid: 123, startedAt }, at: Date.now(), pid: pgid, evidence: { kind: 'pgid', file } }))
+    const date = new Date(startedAt).toString().split(' '), logs = []
+    const r = run(f, { alive: (pid) => pid !== 123, log: (line) => logs.push(line), spawnSync: () => ({ status: 0, stdout: `${pgid} ${pgid} ${date[0]} ${date[1]} ${date[2]} ${date[4]} ${date[3]} sh -c pgid=${file}\n` }), spawnDetached: () => {
+      assert.throws(() => process.kill(-pgid, 0), { code: 'ESRCH' })
+      r.spawned.push(true)
+      return 4242
+    } })
+    r.go()
+    assert.equal(r.spawned.length, 1)
+    assert.ok(logs.some((line) => line.includes(`stopped seat planner pgid ${pgid}`)))
+  } finally { if (pgid) try { process.kill(-pgid, 'SIGKILL') } catch {} ; cleanup(f) }
 })
 
 test('a dead open tail remains recoverable after finish spawning fails', () => {

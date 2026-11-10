@@ -15,6 +15,7 @@ import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLeanSource } from '../visualizer/server/lean-source.mjs'
 import { LANE, isObject, within } from './lane-core.mjs'
+import { reapLaneSeats } from './seat-reap.mjs'
 import { parsePrUrl } from './record-pr.mjs'
 import { deadRun, probeAlive } from './run-pid.mjs'
 import { claimStop } from './finish.mjs'
@@ -23,7 +24,7 @@ class CloseoutRefusal extends Error {}
 
 const refuse = (message) => { throw new CloseoutRefusal(message) }
 const isDir = (path) => { try { return statSync(path).isDirectory() } catch { return false } }
-const defaultRun = (cmd, args) => spawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024 })
+const defaultRun = (cmd, args, options = {}) => spawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024, ...options })
 
 function journalRows(text) {
   const rows = []
@@ -57,7 +58,7 @@ function must(run, what, cmd, args) {
   return String(result.stdout ?? '')
 }
 
-function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), archiveRoot, run = defaultRun, renameSync: rename = renameSync, mkdirSync: mkdir = mkdirSync, alive = probeAlive } = {}) {
+function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), archiveRoot, run = defaultRun, renameSync: rename = renameSync, mkdirSync: mkdir = mkdirSync, alive = probeAlive, kill = process.kill, sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms), now = Date.now } = {}) {
   if (typeof lane !== 'string' || !LANE.test(lane)) refuse('lane must be a lean lane slug')
   const archive = archiveRoot ?? join(dirname(root), '.crew-journal-archive')
   const found = createLeanSource({ crewRoot: root, archiveRoot: archive }).resolveLane(lane)
@@ -138,12 +139,13 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
   }
   must(run, 'git worktree remove', 'git', ['-C', mainCheckout, 'worktree', 'remove', worktree])
   must(run, 'git branch -D', 'git', ['-C', mainCheckout, 'branch', '-D', lane])
+  const reaped = reapLaneSeats({ dir: found.dir, alive, kill, spawnSync: run, sleep, now })
   try {
     mkdir(archive, { recursive: true })
     rename(laneDir, archivedDir)
     moved = true
   } catch (error) { refuse(`could not move ${laneDir} to ${archivedDir}: ${error?.code ?? error?.message}`) }
-  return { lane, pr, worktree, archivedDir }
+  return { lane, pr, worktree, archivedDir, ...reaped }
   } finally {
     if (claim) {
       rmSync(claim, { force: true })
@@ -160,8 +162,10 @@ export function main(argv = process.argv.slice(2), deps = {}) {
     return 2
   }
   try {
-    const done = closeoutLane({ lane, discard: extra.length === 1, root: d.root, archiveRoot: d.archiveRoot, run: d.run, renameSync: d.renameSync, mkdirSync: d.mkdirSync, alive: d.alive })
+    const done = closeoutLane({ lane, discard: extra.length === 1, root: d.root, archiveRoot: d.archiveRoot, run: d.run, renameSync: d.renameSync, mkdirSync: d.mkdirSync, alive: d.alive, kill: d.kill, sleep: d.sleep, now: d.now })
     d.stdout(`${extra.length ? 'discarded' : 'closed out'} ${lane}: removed ${done.worktree}, deleted branch ${lane}, archived to ${done.archivedDir}\n`)
+    for (const record of done.stopped) d.stdout(`stopped seat ${record.role} pgid ${record.pgid}\n`)
+    for (const record of done.unproven) d.stdout(`seat ${record.role}${record.pgid == null ? '' : ` pgid ${record.pgid}`}: not proven stopped\n`)
     return 0
   } catch (error) {
     if (!(error instanceof CloseoutRefusal)) throw error

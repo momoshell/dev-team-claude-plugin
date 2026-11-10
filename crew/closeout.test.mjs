@@ -5,7 +5,7 @@ import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, r
 import { join } from 'node:path'
 import { main } from './closeout.mjs'
 import { laneRows } from './lanes.mjs'
-import { git, gitResult, scratchDir } from '../test/helpers.mjs'
+import { git, gitResult, scratchDir, trackProcessGroupFile } from '../test/helpers.mjs'
 
 const LANE = 'demo'
 const PR_ROW = { event: 'pr', lane: LANE, pr: { number: 7, url: 'https://github.com/o/r/pull/7' } }
@@ -53,9 +53,15 @@ function runner(state, head, calls) {
 
 const tipOf = (w) => String(git(w.checkout, 'rev-parse', `refs/heads/${LANE}`)).trim()
 
-function close(w, { state = 'MERGED', head = tipOf(w), argv = [LANE], ...extra } = {}) {
-  const calls = [], err = [], out = []
-  const status = main(argv, { root: w.root, archiveRoot: w.archiveRoot, run: runner(state, head, calls), stdout: (t) => out.push(t), stderr: (t) => err.push(t), ...extra })
+function close(w, { state = 'MERGED', head = tipOf(w), argv = [LANE], psCommand, ...extra } = {}) {
+  const calls = [], err = [], out = [], run = runner(state, head, calls)
+  const status = main(argv, { root: w.root, archiveRoot: w.archiveRoot, run: (cmd, args) => {
+    if (cmd !== 'ps') return run(cmd, args)
+    const file = join(w.leaf, 'seat-runtime', 'acp-seat-test', 'acp', 'planner', 'pgid')
+    const marker = JSON.parse(readFileSync(join(file, '..', '..', '.planner.active.json'), 'utf8'))
+    const date = new Date(marker.startedAt).toString().split(' ')
+    return { status: 0, stdout: `${args.at(-1)} ${args.at(-1)} ${date[0]} ${date[1]} ${date[2]} ${date[4]} ${date[3]} ${psCommand ?? `sh -c pgid=${file}`}\n` }
+  }, stdout: (t) => out.push(t), stderr: (t) => err.push(t), ...extra })
   return { status, calls, err: err.join(''), out: out.join('') }
 }
 
@@ -206,6 +212,87 @@ test('a dead run with no pull request and no stop verdict is discarded', () => {
     assert.equal(readFileSync(join(w.archiveRoot, `dt-${LANE}`, LANE, 'task', 'journal.jsonl'), 'utf8'), w.journalText)
     assert.ok(!r.calls.some((c) => c[0] === 'gh'))
   } finally { w.done() }
+})
+
+function seat(w, unbound = false) {
+  const file = join(w.leaf, 'seat-runtime', 'acp-seat-test', 'acp', 'planner', 'pgid')
+  mkdirSync(join(file, '..'), { recursive: true })
+  const tracked = trackProcessGroupFile(join(w.home, 'seat-pgid'))
+  const startedAt = Date.now()
+  const spawned = spawnSync(process.execPath, ['-e', `const {spawn} = require('node:child_process'); const {writeFileSync} = require('node:fs'); const child = spawn('sleep', ['300'], {detached:true, stdio:'ignore'}); writeFileSync(process.argv[1], String(child.pid)); child.unref()`, tracked], { encoding: 'utf8' })
+  assert.equal(spawned.status, 0, spawned.stderr)
+  const pgid = Number(readFileSync(tracked, 'utf8'))
+  writeFileSync(file, String(pgid))
+  writeFileSync(join(file, '..', '..', '.planner.active.json'), JSON.stringify({ phase: 'running', dir: join(file, '..'), startedAt, owner: { pid: 123, startedAt }, at: Date.now(), pid: pgid, evidence: { kind: 'pgid', file: unbound ? file + '-other' : file } }))
+  return pgid
+}
+
+test('discard of a dead run stops a proven live seat process group recorded under seat-runtime and names it', () => {
+  const w = world({ rows: [{ event: 'stage-start', stage: 'plan' }] })
+  let pgid
+  try {
+    writeFileSync(join(w.leaf, 'task', 'run.pid'), '123\n')
+    pgid = seat(w)
+    const r = close(w, { argv: [LANE, '--discard'], alive: () => false })
+    assert.equal(r.status, 0, r.err)
+    assert.throws(() => process.kill(-pgid, 0), { code: 'ESRCH' })
+    assert.match(r.out, new RegExp(`stopped.*planner.*${pgid}`))
+    assert.ok(existsSync(join(w.archiveRoot, `dt-${LANE}`, LANE)))
+  } finally { if (pgid) try { process.kill(-pgid, 'SIGKILL') } catch {} ; w.done() }
+})
+
+test('closeout leaves a reused pgid whose live leader is not the recorded seat alone and reports it unproven', () => {
+  const w = world({ rows: [{ event: 'stage-start', stage: 'plan' }] })
+  let pgid
+  try {
+    writeFileSync(join(w.leaf, 'task', 'run.pid'), '123\n')
+    pgid = seat(w)
+    const r = close(w, { argv: [LANE, '--discard'], alive: () => false, psCommand: 'sleep 300' })
+    assert.equal(r.status, 0, r.err)
+    assert.doesNotThrow(() => process.kill(-pgid, 0))
+    assert.match(r.out, new RegExp(`planner.*${pgid}.*not proven`))
+    assert.ok(existsSync(join(w.archiveRoot, `dt-${LANE}`, LANE)))
+  } finally { if (pgid) try { process.kill(-pgid, 'SIGKILL') } catch {} ; w.done() }
+})
+
+test('closeout reports an unreadable seat-runtime entry as not proven instead of skipping it', () => {
+  const w = world({ rows: [{ event: 'stage-start', stage: 'plan' }] })
+  try {
+    writeFileSync(join(w.leaf, 'task', 'run.pid'), '123\n')
+    const acp = join(w.leaf, 'seat-runtime', 'acp-seat-test', 'acp')
+    mkdirSync(join(acp, '..'), { recursive: true })
+    writeFileSync(acp, 'not a directory')
+    const r = close(w, { argv: [LANE, '--discard'], alive: () => false })
+    assert.equal(r.status, 0, r.err)
+    assert.ok(r.out.includes(acp) && r.out.includes('not proven'))
+    assert.ok(existsSync(join(w.archiveRoot, `dt-${LANE}`, LANE)))
+  } finally { w.done() }
+})
+
+test('closeout leaves a recorded pgid it cannot prove is the seat alone and reports it unproven', () => {
+  const w = world({ rows: [{ event: 'stage-start', stage: 'plan' }] })
+  let pgid
+  try {
+    writeFileSync(join(w.leaf, 'task', 'run.pid'), '123\n')
+    pgid = seat(w, true)
+    const r = close(w, { argv: [LANE, '--discard'], alive: () => false })
+    assert.equal(r.status, 0, r.err)
+    assert.doesNotThrow(() => process.kill(-pgid, 0))
+    assert.match(r.out, new RegExp(`planner.*${pgid}.*not proven`))
+    assert.ok(existsSync(join(w.archiveRoot, `dt-${LANE}`, LANE)))
+  } finally { if (pgid) try { process.kill(-pgid, 'SIGKILL') } catch {} ; w.done() }
+})
+
+test('merged closeout stops a proven live seat process group recorded under seat-runtime and names it', () => {
+  const w = world()
+  let pgid
+  try {
+    pgid = seat(w)
+    const r = close(w, { alive: () => false })
+    assert.equal(r.status, 0, r.err)
+    assert.throws(() => process.kill(-pgid, 0), { code: 'ESRCH' })
+    assert.match(r.out, new RegExp(`stopped.*planner.*${pgid}`))
+  } finally { if (pgid) try { process.kill(-pgid, 'SIGKILL') } catch {} ; w.done() }
 })
 
 test('discard refuses a lane whose recorded pid is still alive, with nothing changed', () => {
@@ -407,6 +494,18 @@ test('CL4 an unmerged PR is refused with nothing changed', () => {
     assertUnchanged(w)
     assert.ok(!r.calls.some((c) => c.includes('remove') || c.includes('-D')))
   } finally { w.done() }
+})
+
+test('an unmerged closeout does not signal a proven seat', () => {
+  const w = world()
+  let pgid
+  try {
+    pgid = seat(w)
+    const r = close(w, { state: 'OPEN', alive: () => false })
+    assert.equal(r.status, 1)
+    assert.doesNotThrow(() => process.kill(-pgid, 0))
+    assertUnchanged(w)
+  } finally { if (pgid) try { process.kill(-pgid, 'SIGKILL') } catch {} ; w.done() }
 })
 
 // MUTATION CL5: pass --force to git worktree remove and the dirty worktree is deleted.

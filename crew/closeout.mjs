@@ -5,7 +5,7 @@
 //   2. git branch -D <lane>             (local only)
 //   3. move ~/.crew/dt-<lane> to ~/.crew-journal-archive/dt-<lane> (or a free .archive-<n> suffix on re-archive)
 // Plain closeout requires a MERGED PR in the worktree's origin repository, with the lane branch's tip as its head.
-// Discard requires a stopped lane with no PR or a CLOSED PR. The worktree must be dt-<lane> on that branch.
+// Discard requires a stopped or abandoned lane with no PR or a CLOSED PR. The worktree must be dt-<lane> on that branch.
 // All of it is checked before step 1, so a refusal
 // there changes nothing. A failed move in step 3 is refused after steps 1 and 2 ran; the lane directory stays put.
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -83,7 +83,9 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
   }
   try {
   if (discard) {
-    if (rows.some((row) => row.event === 'finish-ready' || row.event === 'finish-decision')) refuse(`lane has a finish record; use crew finish ${lane}`)
+    const lastFinish = rows.findLast((row) => row.event === 'finish-ready' || row.event === 'finish-decision')
+    const abandoned = lastFinish?.event === 'finish-decision' && lastFinish.choice === 'abandon'
+    if (lastFinish && !abandoned) refuse(`lane has a finish record; use crew finish ${lane}`)
     if (rows.some((row) => row.event === 'pr')) {
       pr = lastPr(rows, lane, taskDir, alive)
       const viewText = must(run, 'gh pr view', 'gh', ['pr', 'view', pr.url, '--json', 'state'])
@@ -95,7 +97,7 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
     const stopRows = tail?.event === 'pr' ? rows.slice(0, rows.lastIndexOf(tail)) : rows
     const last = stopRows.findLast((row) => row.event !== 'stage-end')
     const died = deadRun({ rows: stopRows, taskDir, alive })
-    if (!(last?.event === 'verdict' && last.status === 'stopped') && !died) refuse(`lane ${lane} is not stopped`)
+    if (!(last?.event === 'verdict' && last.status === 'stopped') && !(abandoned && tail === lastFinish) && !died) refuse(`lane ${lane} is not stopped`)
     const stopAt = died ? stopRows.length : rows.lastIndexOf(last)
     try { claim = claimStop({ writeFileSync, readFileSync, rmSync, alive }, lane, taskDir, stopAt) } catch { refuse(`lane ${lane} is not stopped`) }
     try { if (readFileSync(journal, 'utf8') !== text) refuse(`lane ${lane} is not stopped`) } catch { refuse(`lane ${lane} is not stopped`) }

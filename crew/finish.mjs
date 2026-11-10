@@ -9,7 +9,7 @@
 // `--accept [--notes <file>]` publishes the PR the finish run measured (merging stays the operator's),
 // `--return <file>` runs a finish pass on a finishable stop, dead run or ready lane with the file as guidance
 // (later passes count against the three review rounds) and
-// `--abandon` ends the lane unpublished. Each appends a `finish-decision` row; a lane takes one decision per stop or ready.
+// `--abandon` ends a stopped or ready lane unpublished. Each appends a `finish-decision` row; a lane takes one decision per stop or ready.
 // Refused, with nothing written: `finish-worktree` (the worktree is gone), `finish-premise` (the lane never reached
 // a build), `finish-running` (a run re-entered or claimed the lane after its stop), `finish-published` and
 // `finish-committed` (the build is committed and cannot be proven to be the unpublished HEAD), `finish-no-build`
@@ -18,7 +18,7 @@
 // is uncommitted and recorded as `finish-uncommit` before launch; a rebased build is reset onto its rebase base.
 // The PR's measured subject, body and notes have issue tokens rewritten as in openPullRequest; issue numbers ride
 // only on trailer lines.
-// A decision is refused as `finish-not-ready` (the last run did not end finish-ready), `finish-decided` (it already
+// Accept is refused as `finish-not-ready` (the last run did not end finish-ready), a decision as `finish-decided` (it already
 // has one), `finish-head-moved` (accept: the checkout is no longer the head the run measured) or `finish-publish`
 // (the PR did not open; nothing is recorded, so it can be retried), or `finish-rounds-spent` (return has no review
 // rounds left).
@@ -318,7 +318,7 @@ const reviewCount = (rows) => Math.max(
   rows.filter((row) => row.event === 'envelope' && row.role === 'reviewer').length,
 )
 
-// One decision per ready row: the claim is exclusive and taken before any effect, so overlapping decisions cannot both act.
+// One decision per stop or ready row: the claim is exclusive and taken before any effect, so overlapping decisions cannot both act.
 function claimDecision(d, lane, taskDir, at) {
   const claim = join(taskDir, `finish-decision-${at}.claim`)
   try { d.writeFileSync(claim, `${process.pid}\n`, { flag: 'wx' }) } catch (error) {
@@ -328,7 +328,7 @@ function claimDecision(d, lane, taskDir, at) {
   return claim
 }
 
-// The operator's decision on a lane whose last run ended finish-ready: accept (publish), return (one more pass) or abandon.
+// The operator's decision on a ready lane: accept (publish), return (one more pass) or abandon; a stopped lane can also be returned or abandoned.
 // The claim is kept once the decision is recorded and released on any failure, so a failed decision can be retried.
 export async function decideFinish({ lane, root, choice, file, deps = {} }) {
   const d = { ...defaultDeps(), ...deps }
@@ -378,6 +378,19 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
       if (!launched) try { d.rmSync(claim, { force: true }) } catch { /* the decision error is the one reported */ }
       throw error
     }
+  }
+  if (choice === 'abandon' && stopAt >= 0 && stopAt > readyAt) {
+    if (rows.slice(stopAt + 1).some((row) => decidedAt(row, stopAt))) throw new FinishRefusal('finish-decided', `lane ${lane} already has a decision on this stop`)
+    if (rows.slice(stopAt + 1).some((row) => row.event === 'stage-start' || row.event === 'finish-ready')) throw new FinishRefusal('finish-running', `lane ${lane} has run again since it stopped`)
+    const claim = claimDecision(d, lane, taskDir, stopAt)
+    try {
+      d.appendFileSync(join(taskDir, 'journal.jsonl'), `${JSON.stringify({ event: 'finish-decision', lane, choice, notesSha256: null })}\n`)
+    } catch (error) {
+      try { d.rmSync(claim, { force: true }) } catch { /* the append error is the one reported */ }
+      throw error
+    }
+    d.log(`crew finish: lane=${lane} abandoned`)
+    return { lane, choice }
   }
   // A run that started or stopped after the ready row means the lane's last run did not end finish-ready.
   if (readyAt < 0 || rows.slice(readyAt + 1).some((row) => row.event === 'stage-start' || (row.event === 'verdict' && row.status === 'stopped'))) throw new FinishRefusal('finish-not-ready', `lane ${lane}'s last run did not end finish-ready`)

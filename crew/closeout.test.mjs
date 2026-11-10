@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { main } from './closeout.mjs'
+import { decideFinish } from './finish.mjs'
 import { laneRows } from './lanes.mjs'
 import { git, gitResult, scratchDir, trackProcessGroupFile } from '../test/helpers.mjs'
 
@@ -90,6 +91,31 @@ test('a lane stopped in plan with no pull request is discarded: worktree and bra
     assert.equal(readFileSync(join(w.archiveRoot, `dt-${LANE}`, LANE, 'task', 'journal.jsonl'), 'utf8'), w.journalText)
     assert.deepEqual(r.calls.filter((c) => c[0] === 'git' && (c.includes('remove') || c.includes('-D'))).map((c) => c.slice(3, 5).join(' ')), ['worktree remove', 'branch -D'])
     assert.ok(!r.calls.some((c) => c[0] === 'gh'))
+  } finally { w.done() }
+})
+
+test('a lane whose returned finish pass stopped is abandoned with crew finish and then discarded', async () => {
+  const w = world({ rows: [
+    { event: 'run-start', lane: LANE },
+    { event: 'stage-start', stage: 'build' },
+    { event: 'verdict', status: 'stopped', reason: 'round-bound' },
+    { event: 'finish-decision', lane: LANE, choice: 'return', launchedAt: 3, notesSha256: 'x' },
+    { event: 'stage-start', stage: 'triage' },
+    { event: 'verdict', status: 'stopped', reason: 'lead-escalated' },
+    { event: 'stage-end', stage: 'triage' },
+  ] })
+  try {
+    const refused = close(w, { argv: [LANE, '--discard'] })
+    assert.equal(refused.status, 1)
+    assert.match(refused.err, /crew finish demo/)
+    await assert.doesNotReject(decideFinish({ lane: LANE, root: w.root, choice: 'abandon', deps: { log: () => {} } }))
+    const result = close(w, { argv: [LANE, '--discard'], alive: () => false })
+    assert.equal(result.status, 0, result.err)
+    assert.ok(!existsSync(w.worktree))
+    assert.ok(!branchExists(w))
+    const rows = readFileSync(join(w.archiveRoot, `dt-${LANE}`, LANE, 'task', 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    assert.deepEqual(rows.at(-1), { event: 'finish-decision', lane: LANE, choice: 'abandon', notesSha256: null })
+    assert.equal(rows.filter((row) => row.event === 'finish-decision' && row.choice === 'abandon').length, 1)
   } finally { w.done() }
 })
 

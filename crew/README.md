@@ -24,11 +24,14 @@ resolved), or `CREW_HOME` when set. State lives under `~/.crew/dt-<lane>/<lane>/
 the brief, the task directory, the lane journal and every seat's session file.
 
 `crew closeout <lane> --discard` archives a stopped lane with no PR or a PR
-GitHub reports CLOSED, clearing it from the default visualizer list. It refuses
-OPEN or MERGED PRs (use plain closeout after merge or discard after close),
-finish records (use `crew finish`), runs not proven stopped, and dirty worktrees.
-It removes the worktree without force before deleting only the local branch and
-archiving the journal; the remote branch and visualizer are unchanged.
+GitHub reports CLOSED, clearing it from the default visualizer list. It also
+archives a lane ended with `crew finish <lane> --abandon`. It refuses OPEN or
+MERGED PRs (use plain closeout after merge or discard after close), other finish
+records (use `crew finish`), runs not proven stopped, and dirty worktrees. It
+removes the worktree without force before deleting only the local branch and
+archiving the journal; the remote branch and visualizer are unchanged. Closeout
+and discard stop proven seat groups and report unproven ones (`reapLaneSeats` in
+`crew/seat-reap.mjs`).
 
 `crew update` refuses unless the crew home is on branch `stable` with no tracked changes; `--force` only overrides the refusal when processes still run from the home.
 

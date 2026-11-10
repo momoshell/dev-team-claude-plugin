@@ -42,8 +42,9 @@ only new lanes. See [ADR-060](../../docs/adr/adr-060-local-roster-overrides.md).
 refuses to record onboarding if an agent refuses a cell. Run `crew onboard
 --seats --checkout <dir>` after editing overrides to probe without calibrating
 proof. Each cell is reported as available, unavailable with the refusal, or
-unmeasured with a reason. `crew start` stays offline and does not probe seats.
-The probe is implemented in `crew/seat-probe.mjs`.
+unmeasured with a reason. `crew start` fetches `origin/<base>` and refuses if
+the fetch fails; it does not probe seats. The probe is implemented in
+`crew/seat-probe.mjs`.
 
 ## Onboarding a checkout for lean lanes
 

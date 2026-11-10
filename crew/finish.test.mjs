@@ -974,6 +974,32 @@ test('a PR that does not open is refused as finish-publish and records nothing',
   } finally { cleanup(r.f) }
 })
 
+test('--abandon ends a lane whose finish pass stopped after a --return, once per stop', async () => {
+  const r = ready([
+    { event: 'finish-decision', lane: 'lane9', choice: 'return', launchedAt: 6, notesSha256: 'x' },
+    { event: 'stage-start', stage: 'triage' },
+    { event: 'verdict', stage: null, status: 'stopped', reason: 'lead-escalated' },
+  ])
+  try {
+    const before = r.rowsOf()
+    assert.deepEqual(await r.decide('abandon').catch((error) => error.reason), { lane: 'lane9', choice: 'abandon' })
+    const after = [...before, { event: 'finish-decision', lane: 'lane9', choice: 'abandon', notesSha256: null }]
+    assert.deepEqual(r.rowsOf(), after)
+    for (const [choice, reason] of [['abandon', 'finish-decided'], ['return', 'finish-decided'], ['accept', 'finish-not-ready']]) {
+      assert.equal(await reasonOf(r.decide(choice)), reason)
+      assert.deepEqual(r.rowsOf(), after)
+    }
+    assert.deepEqual([r.published.length, r.spawned.length], [0, 0])
+  } finally { cleanup(r.f) }
+
+  const f = fixture({ rows: [{ event: 'verdict', status: 'stopped' }, { event: 'stage-start', stage: 'triage' }] })
+  try {
+    const journal = join(f.taskDir, 'journal.jsonl'), before = readFileSync(journal, 'utf8')
+    assert.equal(await reasonOf(decideFinish({ lane: 'lane9', root: f.root, choice: 'abandon', deps: { log: () => {} } })), 'finish-running')
+    assert.equal(readFileSync(journal, 'utf8'), before)
+  } finally { cleanup(f) }
+})
+
 // MUTATION: publish or spawn on abandon and a lane the operator ended is still pushed.
 test('--abandon records only the decision (FD6)', async () => {
   const r = ready()
@@ -1022,20 +1048,18 @@ test('--return spawns a finish run whose spec carries the guidance and the spent
 // MUTATION: skip the ready test and a decision publishes a lane that never finished.
 test('a decision on a lane whose last run did not end finish-ready is refused as finish-not-ready (FD8)', async () => {
   const stoppedAfter = { event: 'verdict', stage: null, status: 'stopped', reason: 'round-bound' }
-  for (const choice of ['accept', 'abandon']) {
-    const none = fixture()
+  const none = fixture()
+  try {
+    const published = []
+    assert.equal(await reasonOf(decideFinish({ lane: 'lane9', root: none.root, choice: 'accept', deps: { openPullRequest: async (i) => { published.push(i) }, log: () => {} } })), 'finish-not-ready')
+    assert.equal(published.length, 0)
+  } finally { cleanup(none) }
+  for (const [choice, extra] of [['accept', [stoppedAfter]], ['accept', [{ event: 'stage-start', stage: 'build' }]], ['abandon', [{ event: 'stage-start', stage: 'build' }]]]) {
+    const r = ready(extra)
     try {
-      const published = []
-      assert.equal(await reasonOf(decideFinish({ lane: 'lane9', root: none.root, choice, deps: { openPullRequest: async (i) => { published.push(i) }, log: () => {} } })), 'finish-not-ready')
-      assert.equal(published.length, 0)
-    } finally { cleanup(none) }
-    for (const extra of [[stoppedAfter], [{ event: 'stage-start', stage: 'build' }]]) {
-      const r = ready(extra)
-      try {
-        assert.equal(await reasonOf(r.decide(choice)), 'finish-not-ready')
-        assert.deepEqual([r.published.length, r.spawned.length], [0, 0])
-      } finally { cleanup(r.f) }
-    }
+      assert.equal(await reasonOf(r.decide(choice)), 'finish-not-ready')
+      assert.deepEqual([r.published.length, r.spawned.length], [0, 0])
+    } finally { cleanup(r.f) }
   }
 })
 

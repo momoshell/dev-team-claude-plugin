@@ -7,11 +7,12 @@
 //   crew record-pr <lane> --pr <url>  record the PR a stopped lean lane was hand-finished in (crew/record-pr.mjs)
 //   crew finish <lane>           report a stopped or ready lane, read-only (crew/finish.mjs)
 //   crew finish <lane> --return <file>  start a pass with guidance on a finishable stop, dead run or ready lane
-//   crew finish <lane> --accept [--notes <file>] | --abandon  decide a ready finish run
+//   crew finish <lane> --accept [--notes <file>]  publish a ready finish run
+//   crew finish <lane> --abandon  end a stopped or ready lane unpublished
 //   crew closeout <lane>         remove a merged lean lane's worktree and branch, archive its lane directory (crew/closeout.mjs)
 //   crew closeout <lane> --discard  archive a stopped lane with no PR or a CLOSED PR; delete only its local branch
-//                                refuses OPEN or MERGED PRs, finish records, running lanes and dirty worktrees
-//                                use plain closeout after merge, discard after close, or crew finish for finish records
+//                                refuses OPEN or MERGED PRs, non-abandon finish records, running lanes and dirty worktrees
+//                                use plain closeout after merge, discard after close, or crew finish for other finish records
 //   crew lanes [--all] [--json]  list lean lanes from their journals (crew/lanes.mjs)
 //   crew viz                     serve the visualizer from the crew home
 //   crew where                   print the crew home, its branch and its commit

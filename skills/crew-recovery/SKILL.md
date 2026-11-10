@@ -30,6 +30,11 @@ Read first, decide second, remove last.
 `crew finish <lane>` reports the stop or ready state without changing the lane.
 `crew finish <lane> --return <file>` starts a finish pass on any finishable stop,
 including an escalation or a provably dead run, with the file as builder guidance.
+Use `--return` when the existing plan still fits the build. A finish pass keeps
+the plan and recorded roster; it cannot return work to the planner (ADR-051).
+If the stop's lead names a plan gap or asks to reopen planning, end the lane with
+`crew finish <lane> --abandon` and `crew closeout <lane> --discard`, then start
+it again from its brief so the planner writes a new plan.
 On an escalation, the file answers the operator question. The pass re-enters the
 lane in its own worktree and rebases onto the current base,
 then runs builder triage, proof of the builder's named
@@ -45,7 +50,8 @@ When that run is ready, decide once:
   measured. Merging stays yours.
 - `crew finish <lane> --return <file>` runs one more finish pass with the file
   as the builder's guidance; it counts against the three review rounds.
-- `crew finish <lane> --abandon` ends the lane unpublished.
+- `crew finish <lane> --abandon` ends the lane unpublished. It also decides a
+  stopped lane, once per stop.
 
 It refuses, writing nothing, for a cause in `FINISH_REASONS` in
 `crew/finish.mjs`; read the refusal, it names the cause. A committed, unpublished
@@ -55,12 +61,16 @@ branch is absent. A provably dead open run is a new stop.
 ## Close it out
 
 For a stopped lane with no PR or a PR GitHub reports CLOSED, use
-`crew closeout <lane> --discard`. It removes the worktree and local branch and
+`crew closeout <lane> --discard`. It also archives a lane ended with
+`crew finish <lane> --abandon`. It removes the worktree and local branch and
 archives the journal; it leaves the remote branch and visualizer unchanged. It
 refuses an OPEN or MERGED PR (use plain closeout after merge or discard after
-close), finish records (use `crew finish`), a run not proven stopped, or
+close), other finish records (use `crew finish`), a run not proven stopped, or
 uncommitted worktree changes. The worktree removal is never forced. Inspect the
 lane first: discard removes its worktree.
+
+Closeout and discard stop proven seat groups and report unproven ones
+(`reapLaneSeats` in `crew/seat-reap.mjs`).
 
 - Finished by hand: in the lane worktree, commit every change the build made
   (`git status --short` shows nothing left), fetch, and rebase onto the base the

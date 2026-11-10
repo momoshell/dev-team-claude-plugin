@@ -9,7 +9,7 @@
 // `--accept [--notes <file>]` publishes the PR the finish run measured (merging stays the operator's),
 // `--return <file>` runs a finish pass on a finishable stop, dead run or ready lane with the file as guidance
 // (later passes count against the three review rounds) and
-// `--abandon` ends a stopped or ready lane unpublished. Each appends a `finish-decision` row; a lane takes one decision per stop or ready.
+// `--abandon` ends a stopped, dead run or ready lane unpublished. Each appends a `finish-decision` row; a lane takes one decision per stop or ready.
 // Refused, with nothing written: `finish-worktree` (the worktree is gone), `finish-premise` (the lane never reached
 // a build), `finish-running` (a run re-entered or claimed the lane after its stop), `finish-published` and
 // `finish-committed` (the build is committed and cannot be proven to be the unpublished HEAD), `finish-no-build`
@@ -336,8 +336,8 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
   if (!['accept', 'return', 'abandon'].includes(choice)) throw new FinishRefusal('finish-unreadable', `${JSON.stringify(choice)} is not a decision`)
   const { taskDir, spec, rows, recordedTier } = loadLane(d, lane, crewRoot)
   const readyAt = rows.findLastIndex((row) => row.event === 'finish-ready')
-  // A dead open tail is a new stop, even after a decision or a ready row.
-  const died = choice === 'return' && deadRun({ rows, taskDir, readFileSync: d.readFileSync, alive: d.alive })
+  // For return and abandon, a dead open tail is a new stop, even after a decision or a ready row.
+  const died = (choice === 'return' || choice === 'abandon') && deadRun({ rows, taskDir, readFileSync: d.readFileSync, alive: d.alive })
   const stopAt = died ? rows.length : rows.findLastIndex((row) => row.event === 'verdict' && row.status === 'stopped')
   if (choice === 'return' && (died || stopAt > readyAt)) {
     if (rows.slice(stopAt + 1).some((row) => decidedAt(row, stopAt))) throw new FinishRefusal('finish-decided', `lane ${lane} already has a decision on this stop`)
@@ -384,9 +384,13 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
     if (rows.slice(stopAt + 1).some((row) => row.event === 'stage-start' || row.event === 'finish-ready')) throw new FinishRefusal('finish-running', `lane ${lane} has run again since it stopped`)
     const claim = claimDecision(d, lane, taskDir, stopAt)
     try {
+      if (died) {
+        const current = loadLane(d, lane, crewRoot).rows
+        if (current.length !== rows.length || deadRun({ rows: current, taskDir, readFileSync: d.readFileSync, alive: d.alive })?.pid !== died.pid) throw new FinishRefusal('finish-running', `lane ${lane}'s run is no longer proven dead`)
+      }
       d.appendFileSync(join(taskDir, 'journal.jsonl'), `${JSON.stringify({ event: 'finish-decision', lane, choice, notesSha256: null })}\n`)
     } catch (error) {
-      try { d.rmSync(claim, { force: true }) } catch { /* the append error is the one reported */ }
+      try { d.rmSync(claim, { force: true }) } catch { /* the decision error is the one reported */ }
       throw error
     }
     d.log(`crew finish: lane=${lane} abandoned`)

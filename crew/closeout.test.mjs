@@ -119,6 +119,40 @@ test('a lane whose returned finish pass stopped is abandoned with crew finish an
   } finally { w.done() }
 })
 
+test('a lane whose returned finish pass died is abandoned with crew finish and then discarded', async () => {
+  const w = world({ rows: [
+    { event: 'run-start', lane: LANE },
+    { event: 'stage-start', stage: 'build' },
+    { event: 'verdict', status: 'stopped', reason: 'round-bound' },
+    { event: 'finish-decision', lane: LANE, choice: 'return', launchedAt: 3, notesSha256: 'x' },
+    { event: 'stage-start', stage: 'triage' },
+  ] })
+  try {
+    const journal = join(w.leaf, 'task', 'journal.jsonl')
+    const pidFile = join(w.leaf, 'task', 'run.pid')
+    const decide = (alive) => decideFinish({ lane: LANE, root: w.root, choice: 'abandon', deps: { log: () => {}, alive } })
+    for (const [hasPid, alive] of [[false, () => false], [true, () => true], [true, () => null]]) {
+      if (hasPid) writeFileSync(pidFile, '123\n')
+      await assert.rejects(decide(alive), { reason: 'finish-decided' })
+      assert.equal(readFileSync(journal, 'utf8'), w.journalText)
+    }
+    let result
+    await assert.doesNotReject(async () => { result = await decide((pid) => pid !== 123) })
+    assert.deepEqual(result, { lane: LANE, choice: 'abandon' })
+    const recorded = readFileSync(journal, 'utf8')
+    const rows = recorded.trim().split('\n').map(JSON.parse)
+    assert.equal(rows.length, 6)
+    assert.deepEqual(rows.at(-1), { event: 'finish-decision', lane: LANE, choice: 'abandon', notesSha256: null })
+    await assert.rejects(decide((pid) => pid !== 123), { reason: 'finish-decided' })
+    assert.equal(readFileSync(journal, 'utf8'), recorded)
+    const closed = close(w, { argv: [LANE, '--discard'], alive: () => false })
+    assert.equal(closed.status, 0, closed.err)
+    assert.ok(!existsSync(w.worktree))
+    assert.ok(!branchExists(w))
+    assert.equal(readFileSync(join(w.archiveRoot, `dt-${LANE}`, LANE, 'task', 'journal.jsonl'), 'utf8'), recorded)
+  } finally { w.done() }
+})
+
 test('discard holds the finish stop claim throughout teardown', () => {
   const w = world({ rows: STOPPED })
   try {

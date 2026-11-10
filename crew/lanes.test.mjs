@@ -46,26 +46,30 @@ function seat(w, n) {
   return { pgid, ps: `${pgid} ${pgid} ${date[0]} ${date[1]} ${date[2]} ${date[4]} ${date[3]} sh -c pgid=${file}\n` }
 }
 
-test('lanes stops a proven live seat process group of a dead plan-stage run and names it', () => {
-  const w = world(), groups = []
+test('lanes signals no seat process group of a dead run, in text or --json', () => {
+  const w = world(), groups = [], calls = []
   try {
     w.lane('deadplan', [{ event: 'stage-start', stage: 'plan' }])
     put(join(w.root, 'dt-deadplan', 'deadplan', 'task', 'run.pid'), '123\n')
     const run = (argv, group) => {
       const out = [], err = []
-      const status = main(argv, { root: w.root, archiveRoot: w.archiveRoot, alive: () => false, spawnSync: () => ({ status: 0, stdout: group.ps }), stdout: (t) => out.push(t), stderr: (t) => err.push(t) })
+      const status = main(argv, { root: w.root, archiveRoot: w.archiveRoot, alive: () => false, spawnSync: () => ({ status: 0, stdout: group.ps }), kill: (pid, sig) => { calls.push([pid, sig]); return process.kill(pid, sig) }, stdout: (t) => out.push(t), stderr: (t) => err.push(t) })
       assert.equal(status, 0, err.join(''))
       return out.join('')
     }
     const first = seat(w, 1); groups.push(first.pgid)
     const text = run([], first)
-    assert.throws(() => process.kill(-first.pgid, 0), { code: 'ESRCH' })
-    assert.equal(lines(text).at(-1), `stopped seat planner pgid ${first.pgid}`)
+    assert.deepEqual(calls, [])
+    assert.doesNotThrow(() => process.kill(-first.pgid, 0))
+    assert.ok(!lines(text).some((line) => line.startsWith('stopped seat') || line.includes('not proven stopped')))
+    assert.ok(lines(text).includes('deadplan | stopped | plan | run-died | not recorded | not archived'))
     const second = seat(w, 2); groups.push(second.pgid)
     const rows = JSON.parse(run(['--json'], second))
-    assert.throws(() => process.kill(-second.pgid, 0), { code: 'ESRCH' })
-    assert.deepEqual(rows.find((row) => row.lane === 'deadplan').seats, { stopped: [{ role: 'planner', pgid: second.pgid }], unproven: [] })
-    for (const row of rows.filter((row) => row.lane !== 'deadplan')) assert.deepEqual(row.seats, { stopped: [], unproven: [] })
+    assert.deepEqual(calls, [])
+    assert.doesNotThrow(() => process.kill(-second.pgid, 0))
+    const row = rows.find((row) => row.lane === 'deadplan')
+    assert.deepEqual([row.status, row.reason], ['stopped', 'run-died'])
+    assert.ok(!Object.hasOwn(row, 'seats'))
   } finally { for (const pgid of groups) try { process.kill(-pgid, 'SIGKILL') } catch {} ; w.done() }
 })
 
@@ -110,7 +114,7 @@ test('an archived lane with no terminal row lists as stopped archived-without-te
     const delta = rows.find((row) => row.lane === 'delta')
     assert.deepEqual([delta.status, delta.reason, delta.archived], ['stopped', 'archived-without-terminal-row', true])
     assert.equal(rows.find((row) => row.lane === 'alpha').status, 'reviewed')
-    assert.deepEqual(JSON.parse(w.run(['--all', '--json'], alive).out), rows.map((row) => ({ ...row, seats: { stopped: [], unproven: [] } })))
+    assert.deepEqual(JSON.parse(w.run(['--all', '--json'], alive).out), rows)
     assert.ok(lines(w.run(['--all'], alive).out).includes('delta | stopped | gate | archived-without-terminal-row | not recorded | archived'))
   } finally { w.done() }
 })
@@ -143,7 +147,7 @@ test('--json prints the same rows', () => {
   try {
     const rows = JSON.parse(w.run(['--json', '--all']).out)
     assert.deepEqual(rows.map((row) => row.lane), ['alpha', 'beta', 'delta', 'gamma'])
-    assert.deepEqual(rows.find((row) => row.lane === 'beta'), { lane: 'beta', status: 'stopped', latest_stage: 'build', reason: 'seat-unmeasured', pr: null, archived: false, unreadable_rows: 0, unreadable_rows_reason: null, seats: { stopped: [], unproven: [] } })
+    assert.deepEqual(rows.find((row) => row.lane === 'beta'), { lane: 'beta', status: 'stopped', latest_stage: 'build', reason: 'seat-unmeasured', pr: null, archived: false, unreadable_rows: 0, unreadable_rows_reason: null })
     assert.equal(rows.find((row) => row.lane === 'gamma').pr, PR)
     assert.equal(rows.find((row) => row.lane === 'delta').archived, true)
   } finally { w.done() }

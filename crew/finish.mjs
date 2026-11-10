@@ -33,6 +33,7 @@ import { LANE, isObject } from './lane-core.mjs'
 import { TIERS, validateEnvelope } from './protocols.mjs'
 import { deadRun, probeAlive, writeRunPid } from './run-pid.mjs'
 import { OnboardRefusal, requireOnboarded } from './onboard.mjs'
+import { reapLaneSeats } from './seat-reap.mjs'
 
 const HOME = dirname(dirname(fileURLToPath(import.meta.url)))
 const LEAN = join(HOME, 'crew', 'lean.mjs')
@@ -53,7 +54,7 @@ export class FinishRefusal extends Error {
 
 const defaultDeps = () => ({
   readFileSync, readdirSync, existsSync, statSync, mkdirSync, writeFileSync, appendFileSync, rmSync, openPullRequest, run: runSuite,
-  alive: probeAlive,
+  alive: probeAlive, kill: process.kill, spawnSync, sleep: (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms), now: Date.now,
   git: (cwd, args) => {
     const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024 })
     return { status: r.status === 0 && !r.error ? 'green' : 'red', stdout: r.stdout ?? '' }
@@ -291,6 +292,11 @@ export function finishLane({ lane, root, deps = {}, guidance, priorReviewRounds 
       try { d.appendFileSync(join(taskDir, 'journal.jsonl'), `${JSON.stringify({ event: 'finish-uncommit', lane, ...undo })}\n`) } catch (error) {
         throw new FinishRefusal('finish-unreadable', `cannot record finish-uncommit for lane ${lane}: ${error?.code ?? error?.message}`)
       }
+    }
+    if (died) {
+      const reaped = reapLaneSeats({ dir: dirname(taskDir), alive: d.alive, kill: d.kill, spawnSync: d.spawnSync, sleep: d.sleep, now: d.now })
+      for (const record of reaped.stopped) d.log(`stopped seat ${record.role} pgid ${record.pgid}`)
+      for (const record of reaped.unproven) d.log(`seat ${record.role}${record.pgid == null ? '' : ` pgid ${record.pgid}`}: not proven stopped`)
     }
   } catch (error) {
     try { d.rmSync(claim, { force: true }) } catch { /* the validation, reset or journal error is the one reported */ }

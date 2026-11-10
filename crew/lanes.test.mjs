@@ -1,9 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { laneRows, main } from './lanes.mjs'
-import { scratchDir } from '../test/helpers.mjs'
+import { scratchDir, trackProcessGroupFile } from '../test/helpers.mjs'
 
 const PR = 'https://github.com/o/r/pull/7'
 const jsonl = (rows) => rows.map((row) => JSON.stringify(row)).join('\n') + '\n'
@@ -31,6 +32,42 @@ function world() {
   return { root, archiveRoot, run, lane: (name, rows) => lane(root, name, rows), done: () => rmSync(home, { recursive: true, force: true }) }
 }
 const lines = (text) => text.trim().split('\n')
+
+function seat(w, n) {
+  const file = join(w.root, 'dt-deadplan', 'deadplan', 'seat-runtime', `acp-seat-${n}`, 'acp', 'planner', 'pgid')
+  mkdirSync(dirname(file), { recursive: true })
+  const tracked = trackProcessGroupFile(join(w.root, `seat-pgid-${n}`)), startedAt = Date.now()
+  const spawned = spawnSync(process.execPath, ['-e', `const {spawn} = require('node:child_process'); const {writeFileSync} = require('node:fs'); const child = spawn('sleep', ['300'], {detached:true, stdio:'ignore'}); writeFileSync(process.argv[1], String(child.pid)); child.unref()`, tracked], { encoding: 'utf8' })
+  assert.equal(spawned.status, 0, spawned.stderr)
+  const pgid = Number(readFileSync(tracked, 'utf8'))
+  put(file, String(pgid))
+  put(join(file, '..', '..', '.planner.active.json'), JSON.stringify({ phase: 'running', dir: dirname(file), startedAt, owner: { pid: 123, startedAt }, at: Date.now(), pid: pgid, evidence: { kind: 'pgid', file } }))
+  const date = new Date(startedAt).toString().split(' ')
+  return { pgid, ps: `${pgid} ${pgid} ${date[0]} ${date[1]} ${date[2]} ${date[4]} ${date[3]} sh -c pgid=${file}\n` }
+}
+
+test('lanes stops a proven live seat process group of a dead plan-stage run and names it', () => {
+  const w = world(), groups = []
+  try {
+    w.lane('deadplan', [{ event: 'stage-start', stage: 'plan' }])
+    put(join(w.root, 'dt-deadplan', 'deadplan', 'task', 'run.pid'), '123\n')
+    const run = (argv, group) => {
+      const out = [], err = []
+      const status = main(argv, { root: w.root, archiveRoot: w.archiveRoot, alive: () => false, spawnSync: () => ({ status: 0, stdout: group.ps }), stdout: (t) => out.push(t), stderr: (t) => err.push(t) })
+      assert.equal(status, 0, err.join(''))
+      return out.join('')
+    }
+    const first = seat(w, 1); groups.push(first.pgid)
+    const text = run([], first)
+    assert.throws(() => process.kill(-first.pgid, 0), { code: 'ESRCH' })
+    assert.equal(lines(text).at(-1), `stopped seat planner pgid ${first.pgid}`)
+    const second = seat(w, 2); groups.push(second.pgid)
+    const rows = JSON.parse(run(['--json'], second))
+    assert.throws(() => process.kill(-second.pgid, 0), { code: 'ESRCH' })
+    assert.deepEqual(rows.find((row) => row.lane === 'deadplan').seats, { stopped: [{ role: 'planner', pgid: second.pgid }], unproven: [] })
+    for (const row of rows.filter((row) => row.lane !== 'deadplan')) assert.deepEqual(row.seats, { stopped: [], unproven: [] })
+  } finally { for (const pgid of groups) try { process.kill(-pgid, 'SIGKILL') } catch {} ; w.done() }
+})
 
 test('a lane whose run died with no terminal row lists as stopped run-died; terminal tails and unproven pids are unchanged', () => {
   const home = realpathSync(scratchDir('lanes-'))
@@ -73,7 +110,7 @@ test('an archived lane with no terminal row lists as stopped archived-without-te
     const delta = rows.find((row) => row.lane === 'delta')
     assert.deepEqual([delta.status, delta.reason, delta.archived], ['stopped', 'archived-without-terminal-row', true])
     assert.equal(rows.find((row) => row.lane === 'alpha').status, 'reviewed')
-    assert.deepEqual(JSON.parse(w.run(['--all', '--json'], alive).out), rows)
+    assert.deepEqual(JSON.parse(w.run(['--all', '--json'], alive).out), rows.map((row) => ({ ...row, seats: { stopped: [], unproven: [] } })))
     assert.ok(lines(w.run(['--all'], alive).out).includes('delta | stopped | gate | archived-without-terminal-row | not recorded | archived'))
   } finally { w.done() }
 })
@@ -106,7 +143,7 @@ test('--json prints the same rows', () => {
   try {
     const rows = JSON.parse(w.run(['--json', '--all']).out)
     assert.deepEqual(rows.map((row) => row.lane), ['alpha', 'beta', 'delta', 'gamma'])
-    assert.deepEqual(rows.find((row) => row.lane === 'beta'), { lane: 'beta', status: 'stopped', latest_stage: 'build', reason: 'seat-unmeasured', pr: null, archived: false, unreadable_rows: 0, unreadable_rows_reason: null })
+    assert.deepEqual(rows.find((row) => row.lane === 'beta'), { lane: 'beta', status: 'stopped', latest_stage: 'build', reason: 'seat-unmeasured', pr: null, archived: false, unreadable_rows: 0, unreadable_rows_reason: null, seats: { stopped: [], unproven: [] } })
     assert.equal(rows.find((row) => row.lane === 'gamma').pr, PR)
     assert.equal(rows.find((row) => row.lane === 'delta').archived, true)
   } finally { w.done() }

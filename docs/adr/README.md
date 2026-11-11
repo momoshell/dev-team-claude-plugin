@@ -83,11 +83,11 @@ not free.
 | 053 | Build first, prove after: the builder writes the acceptance tests and the loop proves them | proposed 2026-11-01, rejected by ADR-055 on its own measurement (2026-11-02) | [full document](adr-053-build-first-prove-after.md) |
 | 054 | Each tier runs its own loop, and every stage earns its place | proposed 2026-11-01, operator direction; §2–§4 amended by ADR-055 | [full document](adr-054-each-tier-runs-its-own-loop.md) |
 | 055 | The planner defines the work, code checks red and green, the reviewer judges | amendment: §10's map-grant list is incomplete; the tech-lead also receives grants alongside builder and reviewer (`crew/lean.mjs`). §2 and §3 ratified 2026-11-03; §1, §7, §8 and §12 ratified 2026-11-04 by operator decision D14; §6 proposed until about 10 lanes run on b1514's round budgets | [full document](adr-055-planner-defines-the-work.md) |
-| 056 | The ask is operator words | proposed 2026-11-04, operator request; ratified by merging this PR; Amendment 1 proposed 2026-11-04 | [full document](adr-056-the-ask-is-operator-words.md) |
+| 056 | The ask is operator words | ratified 2026-11-11, operator decision (proposed 2026-11-04, operator request); Amendments 1, 2 and 3 ratified 2026-11-11 | [full document](adr-056-the-ask-is-operator-words.md) |
 | 057 | Project onboarding gate | proposed 2026-11-04, operator request, issue #2193 | below |
 | 058 | Proof runners are project-declared; crew reads JUnit | proposed 2026-11-04, operator session proposal | below |
 | 059 | Plugin hooks for the brief and onboarding gates; amends ADR-050 Amendment 1 | proposed 2026-11-04, operator decision, issue #2195 | [full document](adr-059-plugin-hooks-for-the-gates.md) |
-| 060 | Local roster overrides over committed defaults; amends ADR-052 | proposed, operator decision, issue #2256; note: the availability probe (issue #2257) shipped in `crew/seat-probe.mjs` with `crew onboard --seats` | [full document](adr-060-local-roster-overrides.md) |
+| 060 | Local roster overrides over committed defaults; amends ADR-052 | ratified 2026-11-11, operator decision, issue #2256; note: the availability probe (issue #2257) shipped in `crew/seat-probe.mjs` with `crew onboard --seats` | [full document](adr-060-local-roster-overrides.md) |
 
 ### The 014–019 tangle, recorded so nobody re-derives it
 

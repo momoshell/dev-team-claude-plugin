@@ -1,6 +1,6 @@
 # ADR-056 — The ask is operator words
 
-**Status:** proposed 2026-11-04, operator request; ratified by merging this PR; Amendment 1 proposed 2026-11-04; Amendment 2 proposed, operator request; Amendment 3 proposed, issue 2263
+**Status:** ratified 2026-11-11, operator decision; proposed 2026-11-04, operator request; Amendments 1 (2026-11-04), 2 (operator request) and 3 (issue 2263) ratified 2026-11-11, operator decision
 
 **Relates to:** ADR-055 §1 (amended here), ADR-050 Amendment 1 (no Claude Code hook)
 

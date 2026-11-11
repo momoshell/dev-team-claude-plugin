@@ -1,6 +1,6 @@
 # ADR-060: Local roster overrides
 
-**Status:** Proposed, operator decision, issue #2256. Amends ADR-052.
+**Status:** Ratified 2026-11-11, operator decision; proposed in issue #2256. Amends ADR-052.
 
 ## Context
 

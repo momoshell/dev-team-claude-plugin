@@ -164,11 +164,11 @@ test('the tech-lead charter says which reviewer rules do not apply to it', () =>
   assert.doesNotMatch(charter, /Its skill rule/)
 })
 
-test('adr-060 and its register entry point at the shipped seat probe and stay proposed', () => {
+test('adr-060 and its register entry point at the shipped seat probe and record the ratification', () => {
   const adr = read('docs/adr/adr-060-local-roster-overrides.md')
   const row = register.split('\n').find((line) => line.startsWith('| 060 |'))
-  assert.match(adr, /\*\*Status:\*\* Proposed/)
-  assert.match(row, /proposed/)
+  assert.match(adr, /\*\*Status:\*\* Ratified 2026-11-11, operator decision/)
+  assert.match(row, /\| ratified 2026-11-11, operator decision, issue #2256;/)
   for (const text of [adr, row]) {
     assert.ok(text.includes('crew/seat-probe.mjs'))
     assert.ok(text.includes('crew onboard --seats'))

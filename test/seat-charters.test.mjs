@@ -109,6 +109,13 @@ test('CH6: planner and test-economy require named tests to compile on the old so
   }
 })
 
+// MUTATION: remove the plan-named new test file exception from either document.
+test('CH7: builder and test-economy let a plan-named new test file override the extend-existing rule', () => {
+  for (const path of ['crew/agents/builder.md', 'skills/test-economy/SKILL.md']) {
+    has(body(path), 'Extend an existing test file unless the plan names a new one')
+  }
+})
+
 // MUTATION: remove dev-team attribution from the examples heading (PS4).
 test('PS4 code-less attributes all worked examples', () => {
   const skill = read('skills/code-less/SKILL.md')

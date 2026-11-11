@@ -238,6 +238,12 @@ function reportLane({ lane, root, deps = {} }) {
   d.log(`crew finish: lane=${lane} stop=${stopped.reason}`)
 }
 
+function reapDeadRunSeats(d, taskDir) {
+  const reaped = reapLaneSeats({ dir: dirname(taskDir), alive: d.alive, kill: d.kill, spawnSync: d.spawnSync, sleep: d.sleep, now: d.now })
+  for (const record of reaped.stopped) d.log(`stopped seat ${record.role} pgid ${record.pgid}`)
+  for (const record of reaped.unproven) d.log(`seat ${record.role}${record.pgid == null ? '' : ` pgid ${record.pgid}`}: not proven stopped`)
+}
+
 export function finishLane({ lane, root, deps = {}, guidance, priorReviewRounds = 0, recoveredStopAt, expected }) {
   const d = { ...defaultDeps(), ...deps }
   const crewRoot = root ?? d.crewRoot
@@ -293,11 +299,7 @@ export function finishLane({ lane, root, deps = {}, guidance, priorReviewRounds 
         throw new FinishRefusal('finish-unreadable', `cannot record finish-uncommit for lane ${lane}: ${error?.code ?? error?.message}`)
       }
     }
-    if (died) {
-      const reaped = reapLaneSeats({ dir: dirname(taskDir), alive: d.alive, kill: d.kill, spawnSync: d.spawnSync, sleep: d.sleep, now: d.now })
-      for (const record of reaped.stopped) d.log(`stopped seat ${record.role} pgid ${record.pgid}`)
-      for (const record of reaped.unproven) d.log(`seat ${record.role}${record.pgid == null ? '' : ` pgid ${record.pgid}`}: not proven stopped`)
-    }
+    if (died) reapDeadRunSeats(d, taskDir)
   } catch (error) {
     try { d.rmSync(claim, { force: true }) } catch { /* the validation, reset or journal error is the one reported */ }
     throw error
@@ -387,6 +389,7 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
       if (died) {
         const current = loadLane(d, lane, crewRoot).rows
         if (current.length !== rows.length || deadRun({ rows: current, taskDir, readFileSync: d.readFileSync, alive: d.alive })?.pid !== died.pid) throw new FinishRefusal('finish-running', `lane ${lane}'s run is no longer proven dead`)
+        reapDeadRunSeats(d, taskDir)
       }
       d.appendFileSync(join(taskDir, 'journal.jsonl'), `${JSON.stringify({ event: 'finish-decision', lane, choice, notesSha256: null })}\n`)
     } catch (error) {

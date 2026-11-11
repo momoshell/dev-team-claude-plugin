@@ -1643,6 +1643,42 @@ function triggerSeat({ severity = 'high', claim = 'must-fix: the empty path is u
   return { f, journal, diff, a, ground, payloads, prompts, spawned: () => spawned, ret: join(f.taskDir, 'builder-1.json') }
 }
 
+test('GD1 a growth-divergence note names the measured, baseline and threshold bytes and tells the builder to continue a planned change', async () => {
+  for (const { baseline, measured, threshold, prefix, fallback } of [
+    { baseline: 1000, measured: { bytes: 2500, truncated: false }, threshold: 2000, prefix: '' },
+    { baseline: 0, measured: { bytes: 120000, truncated: true }, threshold: 120000, prefix: 'at least ' },
+    { baseline: null, measured: null, threshold: 120000, fallback: 'both' },
+    { baseline: 1000, measured: null, threshold: 2000, fallback: 'content' },
+    { baseline: null, measured: { bytes: 120000, truncated: false }, threshold: 120000, fallback: 'baseline' },
+  ]) {
+    let size = baseline === null ? null : { bytes: baseline, truncated: false }
+    const sent = []
+    const s = triggerSeat({ extraDeps: { diffSize: () => size, send: (m) => sent.push(m) } })
+    try {
+      const input = { path: join(s.f.tree, 'lib/widget.mjs'), content: fallback ? 'x'.repeat(120000) : 'x' }
+      await s.a.onToolCall(call('w1', 'write', input), {})
+      size = measured
+      s.a.onToolResult({ toolCallId: 'w1', toolName: 'write', input, content: [{ type: 'text', text: 'ok' }] }, {})
+      await s.a.settled()
+      const message = sent.find((m) => m.details.kind === 'growth-divergence')
+      assert.ok(message)
+      if (fallback) {
+        assert.ok(message.content.includes('Working-diff measurement was unavailable'))
+        assert.ok(message.content.includes(fallback === 'baseline' ? 'working diff size of 120000 bytes' : 'write content size of 120000 bytes'))
+        assert.ok(message.content.includes(`${baseline ?? 0}-byte ${fallback === 'content' ? 'measured' : 'fallback'} baseline`))
+        assert.ok(message.content.includes(`${threshold}-byte threshold`))
+        assert.ok(message.content.includes('may not reflect diff growth'))
+      } else {
+        assert.ok(message.content.includes(`${prefix}${measured.bytes} bytes`))
+        assert.ok(message.content.includes(`${baseline}-byte baseline`))
+        assert.ok(message.content.includes(`${threshold}-byte growth threshold`))
+      }
+      assert.ok(message.content.includes('This measures size only, not a fault'))
+      assert.ok(message.content.includes('if the plan asks for this change, continue it'))
+    } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+  }
+})
+
 for (const severity of ['medium', 'high']) test(`a ${severity} diff-growth finding is delivered and never refuses the call it rides on or a later write`, async () => {
   const sent = []
   const s = triggerSeat({ severity, claim: 'the diff leaves an edge unanswered', extraDeps: { send: (message) => { sent.push(message) } } })

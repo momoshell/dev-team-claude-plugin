@@ -803,10 +803,13 @@ function systemPrompt(trigger, context) {
   return BUILDER_SYSTEM_PROMPT + PRE_RETURN_WINDOW + (context?.criteria?.length || context?.tests?.length ? PRE_RETURN_NOTE : PRE_RETURN_NO_BASIS)
 }
 
-function noteTextForTier0(kind, target, signature, role) {
+function noteTextForTier0(kind, target, signature, role, growth) {
   if (kind === REPEATED_FAILURE) return `Repeated validation failure at ${target || 'an unknown location'}: ${signature || 'the same failure signature recurred'}`
   if (kind === SCOPE_BREACH) return `The ${role} seat touched ${target || 'an unknown path'} outside the declared scope.`
-  return 'The repository growth crossed the measured divergence threshold.'
+  const measured = growth?.baselineFallback || growth?.contentFallback
+    ? `Working-diff measurement was unavailable. The growth check used ${growth.contentFallback ? 'write content size' : 'working diff size'} of ${growth.truncated ? 'at least ' : ''}${growth.bytes} bytes and a ${growth.baseline}-byte ${growth.baselineFallback ? 'fallback' : 'measured'} baseline, crossing the ${growth.threshold}-byte threshold; this may not reflect diff growth.`
+    : growth ? `The working diff grew to ${growth.truncated ? 'at least ' : ''}${growth.bytes} bytes from a ${growth.baseline}-byte baseline, crossing the ${growth.threshold}-byte growth threshold.` : 'The working diff crossed the growth threshold.'
+  return `${measured} This measures size only, not a fault: if the plan asks for this change, continue it.`
 }
 
 const REPLY_EXCERPT_CAP_BYTES = 512
@@ -951,7 +954,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     return ''
   }
 
-  function emitTier0({ kind, target, targetKind, signature, trigger = 'predicate', callOrdinal = calls }) {
+  function emitTier0({ kind, target, targetKind, signature, growth, trigger = 'predicate', callOrdinal = calls }) {
     const cleanTarget = boundTarget(target || '')
     const key = `${kind}\0${cleanTarget}`
     if (fired.has(key)) return false
@@ -964,7 +967,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       role, outcome: 'injected',
       ...(signature ? { signature: boundText(signature, SIGNATURE_CAP_BYTES) } : {}),
     }
-    const tier0Text = noteTextForTier0(kind, cleanTarget, payload.signature, role)
+    const tier0Text = noteTextForTier0(kind, cleanTarget, payload.signature, role, growth)
     Object.assign(payload, contentIdentity(tier0Text))
     const ok = appendAdvisorRow('advisor_note', payload)
     if (!ok) return false
@@ -1056,9 +1059,13 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     return null
   }
 
+  function growthThreshold(base) {
+    return base.bytes === 0 ? GROWTH_FLOOR_BYTES : GROWTH_DIVERGENCE_RATIO * base.bytes
+  }
+
   function growthCrossed(base, current) {
     if (!base || base.truncated || !current) return false
-    const threshold = base.bytes === 0 ? GROWTH_FLOOR_BYTES : GROWTH_DIVERGENCE_RATIO * base.bytes
+    const threshold = growthThreshold(base)
     if (current.truncated) return current.bytes >= threshold
     return current.bytes >= threshold
   }
@@ -1133,11 +1140,9 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     if (tool === 'write' || tool === 'edit') {
       if (growthBaseline === null) {
         growthBaseline = measureDiff()
-        // A constructed transcript may carry a large write while its fake git
-        // seam is intentionally unavailable; the content itself is the only
-        // measured lower bound available in that fixture.
+        // Keep the large-write fallback when git is unavailable, but mark the baseline as assumed.
         if (!growthBaseline && tool === 'write' && byteLength(input.content) >= GROWTH_FLOOR_BYTES) {
-          growthBaseline = { bytes: 0, truncated: false }
+          growthBaseline = { bytes: 0, truncated: false, fallback: true }
         }
       }
       const target = targetForInput(input)
@@ -1173,10 +1178,11 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       appendDelta(tool === 'edit' ? editDelta(input) : writeDelta(input))
       let measured = measureDiff()
       if (!measured && tool === 'write' && byteLength(input.content) >= GROWTH_FLOOR_BYTES) {
-        measured = { bytes: byteLength(input.content), truncated: false }
+        measured = { bytes: byteLength(input.content), truncated: false, fallback: true }
       }
       if (growthBaseline && measured && growthCrossed(growthBaseline, measured)) {
-        if (emitTier0({ kind: GROWTH_DIVERGENCE, target: 'repository', targetKind: 'repo', callOrdinal: callOrdinals.get(id) ?? calls })) queue(id, 'tier0-note', callOrdinals.get(id) ?? calls)
+        const growth = { bytes: measured.bytes, truncated: measured.truncated, baseline: growthBaseline.bytes, threshold: growthThreshold(growthBaseline), baselineFallback: growthBaseline.fallback, contentFallback: measured.fallback }
+        if (emitTier0({ kind: GROWTH_DIVERGENCE, target: 'repository', targetKind: 'repo', growth, callOrdinal: callOrdinals.get(id) ?? calls })) queue(id, 'tier0-note', callOrdinals.get(id) ?? calls)
       }
     } else if (tool === 'read' && !event?.isError) {
       appendDelta(readDelta(event))

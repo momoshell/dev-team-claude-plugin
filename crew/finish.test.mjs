@@ -116,6 +116,74 @@ test('finish of a dead run stops a proven live seat process group before launchi
   } finally { if (pgid) try { process.kill(-pgid, 'SIGKILL') } catch {} ; cleanup(f) }
 })
 
+test('--abandon of a dead run stops its proven seat process groups and logs unproven ones; an abandon of a live-run stop signals nothing', async () => {
+  const stopped = fixture()
+  try {
+    const file = join(stopped.taskDir, '..', 'seat-runtime', 'acp-seat-test', 'acp', 'planner', 'pgid')
+    mkdirSync(join(file, '..'), { recursive: true })
+    writeFileSync(file, '999999')
+    const startedAt = Date.now()
+    writeFileSync(join(file, '..', '..', '.planner.active.json'), JSON.stringify({ phase: 'running', dir: join(file, '..'), startedAt, owner: { pid: 123, startedAt }, at: startedAt, pid: 999999, evidence: { kind: 'pgid', file } }))
+    const signals = [], logs = []
+    assert.deepEqual(await decideFinish({ lane: 'lane9', root: stopped.root, choice: 'abandon', deps: { alive: () => true, kill: (...args) => signals.push(args), log: (line) => logs.push(line) } }), { lane: 'lane9', choice: 'abandon' })
+    assert.deepEqual(signals, [])
+    assert.ok(!logs.some((line) => line.includes('seat ')))
+  } finally { cleanup(stopped) }
+
+  const f = fixture({ rows: [{ event: 'stage-start', stage: 'build' }, builderRow, { event: 'verdict', status: 'reviewed' }] })
+  let pgid
+  try {
+    writeFileSync(join(f.taskDir, 'run.pid'), '123\n')
+    const file = join(f.taskDir, '..', 'seat-runtime', 'acp-seat-test', 'acp', 'planner', 'pgid')
+    mkdirSync(join(file, '..'), { recursive: true })
+    const tracked = trackProcessGroupFile(join(f.base, 'seat-pgid')), startedAt = Date.now()
+    const spawned = spawnSync(process.execPath, ['-e', `const {spawn} = require('node:child_process'); const {writeFileSync} = require('node:fs'); const child = spawn('sleep', ['300'], {detached:true, stdio:'ignore'}); writeFileSync(process.argv[1], String(child.pid)); child.unref()`, tracked], { encoding: 'utf8' })
+    assert.equal(spawned.status, 0, spawned.stderr)
+    pgid = Number(readFileSync(tracked, 'utf8'))
+    writeFileSync(file, String(pgid))
+    writeFileSync(join(file, '..', '..', '.planner.active.json'), JSON.stringify({ phase: 'running', dir: join(file, '..'), startedAt, owner: { pid: 123, startedAt }, at: Date.now(), pid: pgid, evidence: { kind: 'pgid', file } }))
+    const reviewer = join(file, '..', '..', 'reviewer', 'pgid')
+    mkdirSync(join(reviewer, '..'), { recursive: true })
+    writeFileSync(reviewer, '999999')
+    const date = new Date(startedAt).toString().split(' '), logs = []
+    const result = await decideFinish({ lane: 'lane9', root: f.root, choice: 'abandon', deps: { alive: (pid) => pid !== 123, log: (line) => logs.push(line), spawnSync: () => ({ status: 0, stdout: `${pgid} ${pgid} ${date[0]} ${date[1]} ${date[2]} ${date[4]} ${date[3]} sh -c pgid=${file}\n` }) } })
+    assert.deepEqual(result, { lane: 'lane9', choice: 'abandon' })
+    assert.throws(() => process.kill(-pgid, 0), { code: 'ESRCH' })
+    assert.ok(logs.includes(`stopped seat planner pgid ${pgid}`))
+    assert.ok(logs.includes('seat reviewer pgid 999999: not proven stopped'))
+    assert.deepEqual(JSON.parse(readFileSync(join(f.taskDir, 'journal.jsonl'), 'utf8').trim().split('\n').at(-1)), { event: 'finish-decision', lane: 'lane9', choice: 'abandon', notesSha256: null })
+  } finally { if (pgid) try { process.kill(-pgid, 'SIGKILL') } catch {} ; cleanup(f) }
+})
+
+// MUTATION: replace the dead-run re-check under the claim with false and the abandon is recorded for a run that is alive again.
+test('--abandon refuses finish-running, appends nothing and releases the claim when the dead run is no longer proven dead under the claim', async () => {
+  for (const change of ['alive', 'journal']) {
+    const f = fixture({ rows: [{ event: 'stage-start', stage: 'build' }, builderRow, { event: 'verdict', status: 'reviewed' }] })
+    try {
+      writeFileSync(join(f.taskDir, 'run.pid'), '123\n')
+      const journal = join(f.taskDir, 'journal.jsonl'), before = readFileSync(journal, 'utf8')
+      const added = `${JSON.stringify({ event: 'verdict', status: 'reviewed' })}\n`
+      let revived = false
+      const signals = []
+      const deps = {
+        alive: (pid) => pid !== 123 || revived,
+        kill: (...args) => signals.push(args), log: () => {},
+        writeFileSync: (path, ...args) => {
+          writeFileSync(path, ...args)
+          if (path.endsWith('.claim')) {
+            if (change === 'alive') revived = true
+            else appendFileSync(journal, added)
+          }
+        },
+      }
+      await assert.rejects(decideFinish({ lane: 'lane9', root: f.root, choice: 'abandon', deps }), { reason: 'finish-running' }, change)
+      assert.equal(readFileSync(journal, 'utf8'), before + (change === 'journal' ? added : ''), change)
+      assert.ok(!readdirSync(f.taskDir).some((name) => /^finish-decision-.*\.claim$/.test(name)), change)
+      assert.deepEqual(signals, [], change)
+    } finally { cleanup(f) }
+  }
+})
+
 test('a dead open tail remains recoverable after finish spawning fails', () => {
   for (const recovery of ['finish', 'record-pr']) for (const failure of ['throw', 'no-pid']) {
     const f = fixture({ rows: [{ event: 'stage-start', stage: 'build' }, builderRow, { event: 'verdict', status: 'reviewed' }] })

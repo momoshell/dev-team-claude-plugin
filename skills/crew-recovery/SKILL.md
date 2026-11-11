@@ -17,8 +17,8 @@ Read first, decide second, remove last.
   reason and PR, read from each lane journal (`crew/lanes.mjs`). A run its
   recorded pid proves dead lists as `stopped` with reason `run-died` (`deadRun`
   in `crew/run-pid.mjs`). It never reports a process as alive. `crew lanes`
-  signals no process; `crew closeout` and `crew finish --return` of a dead run
-  stop proven seat groups.
+  signals no process; `crew closeout`, and `crew finish --return` or
+  `--abandon` of a dead run, stop proven seat groups.
 - `crew show <lane>` lists each seat and its recorded sessions;
   `crew show <lane> <role>` prints that seat's session as text and `--json`
   prints the recorded JSONL untouched (`crew/show.mjs`). Read-only.

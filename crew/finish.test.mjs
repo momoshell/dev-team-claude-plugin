@@ -161,6 +161,11 @@ test('--abandon refuses finish-running, appends nothing and releases the claim w
     const f = fixture({ rows: [{ event: 'stage-start', stage: 'build' }, builderRow, { event: 'verdict', status: 'reviewed' }] })
     try {
       writeFileSync(join(f.taskDir, 'run.pid'), '123\n')
+      // A recorded seat whose owner (123) stays dead in the journal case, so a reap before the re-check would probe it.
+      const file = join(f.taskDir, '..', 'seat-runtime', 'acp-seat-test', 'acp', 'planner', 'pgid'), startedAt = Date.now()
+      mkdirSync(join(file, '..'), { recursive: true })
+      writeFileSync(file, '999999')
+      writeFileSync(join(file, '..', '..', '.planner.active.json'), JSON.stringify({ phase: 'running', dir: join(file, '..'), startedAt, owner: { pid: 123, startedAt }, at: startedAt, pid: 999999, evidence: { kind: 'pgid', file } }))
       const journal = join(f.taskDir, 'journal.jsonl'), before = readFileSync(journal, 'utf8')
       const added = `${JSON.stringify({ event: 'verdict', status: 'reviewed' })}\n`
       let revived = false

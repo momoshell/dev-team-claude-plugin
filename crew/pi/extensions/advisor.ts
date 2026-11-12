@@ -97,6 +97,7 @@ const CRITERION_CAP_BYTES = 512
 const TEST_CAP_BYTES = 256
 export const READ_CAP_BYTES = 65_536
 export const RESPONSE_CAP_BYTES = 65_536
+const STDERR_TAIL_BYTES = 512
 export const CLAIM_CAP_BYTES = 500
 export const EVIDENCE_MAX = 5
 export const EVIDENCE_ITEM_CAP_BYTES = 200
@@ -1355,6 +1356,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       let timedOut = false
       let parseFault = false // an invalid frame, mid-stream or trailing partial at close
       let childExit = null // { code, signal } from 'close', when the child closed
+      let childStderr = null
       try {
         {
           const resolved = resolveBinary(deps.binaryDeps || {})
@@ -1367,13 +1369,14 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
             writeFileSync(promptFile, systemPrompt(trigger, context), { mode: 0o600 })
             const childArgs = ['-p','--mode','json','--no-session','--model',consultModel(cell),'--thinking',cell.effort,'--no-tools','--no-context-files','--no-extensions','--no-skills','--append-system-prompt',promptFile]
             const child = spawn(binary, [...prefix, ...childArgs], { cwd, stdio: ['pipe','pipe','pipe'] })
+            childStderr = ''
             const reducer = createStreamReducer()
             const pushFrame = (frame: any) => {
               if (carriesOwnSpend(frame)) ownSpendFrames += 1
               if (ownSpendIncomplete(frame)) usageIncomplete = true
               reducer.push(frame)
             }
-            let stdout = '', stderr = '', settled = false, streamBytes = 0
+            let stdout = '', settled = false, streamBytes = 0
             // Incremental decoding: a UTF-8 character split across two chunks
             // must not be decoded half by half (the shared subagent reader's rule).
             const outDecoder = new StringDecoder('utf8'), errDecoder = new StringDecoder('utf8')
@@ -1406,14 +1409,8 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
               timeout = scheduleTimeout(onTimeout, consultTimeoutMs)
               const abort = () => { if (!settled && !failure) epochAborted = true; fail(new Error('aborted')) }
               captured.controller.signal.addEventListener('abort', abort, { once: true })
-              // Two bounds, as the subagent reader keeps them. The TOTAL raw bytes
-              // the child wrote are capped at STREAM_CAP_BYTES: pi's JSON mode
-              // replays messages across message_end/turn_end/agent_end, so a child
-              // that reads files emits far more than its judgment, and a total cap
-              // at the response size would reject it. Each FRAME, complete or still
-              // unparsed, is capped at RESPONSE_CAP_BYTES: the memory held for one
-              // line is bounded, and several small frames in one chunk are not
-              // measured as one oversize frame.
+              // The total stream cap bounds every line, including pi's input replays.
+              // The response cap bounds the folded assistant reply, not those replays.
               const oversize = () => fail(Object.assign(new Error('oversize'), { code: 'body-too-large' }))
               child.stdout?.on('data', (chunk) => {
                 if (failure) return
@@ -1424,13 +1421,19 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
                 let index
                 while ((index = stdout.indexOf('\n')) >= 0) {
                   const frameLine = stdout.slice(0, index); stdout = stdout.slice(index + 1)
-                  if (byteLength(frameLine) > RESPONSE_CAP_BYTES) { oversize(); return }
                   if (!frameLine.trim()) continue
-                  try { pushFrame(JSON.parse(frameLine)) } catch { parseFault = true; fail(Object.assign(new Error('invalid frame'), { code: 'body-not-json' })); return }
+                  let frame
+                  try { frame = JSON.parse(frameLine); pushFrame(frame) } catch { parseFault = true; fail(Object.assign(new Error('invalid frame'), { code: 'body-not-json' })); return }
+                  if (carriesOwnSpend(frame) && byteLength(reducer.text()) > RESPONSE_CAP_BYTES) { oversize(); return }
                 }
-                if (byteLength(stdout) > RESPONSE_CAP_BYTES) { oversize(); return }
               })
-              child.stderr?.on('data', (chunk) => { if (failure) return; stderr += errDecoder.write(Buffer.from(chunk)); if (byteLength(stderr) > RESPONSE_CAP_BYTES) fail(Object.assign(new Error('oversize'), { code: 'body-too-large' })) })
+              child.stderr?.on('data', (chunk) => {
+                childStderr += errDecoder.write(Buffer.from(chunk))
+                if (byteLength(childStderr) > RESPONSE_CAP_BYTES) {
+                  if (!failure) fail(Object.assign(new Error('oversize'), { code: 'body-too-large' }))
+                  childStderr = Buffer.from(childStderr).subarray(-RESPONSE_CAP_BYTES).toString('utf8')
+                }
+              })
               if (typeof child.stdout?.on === 'function') child.stdout.on('error', () => fail(new Error('stdout failed')))
               if (typeof child.stderr?.on === 'function') child.stderr.on('error', () => fail(new Error('stderr failed')))
               child.on('error', () => { consultFailed = true; settle(new Error('spawn failed')) })
@@ -1439,7 +1442,12 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
                 if (settled) return
                 if (failure) { settle(failure); return }
                 stdout += outDecoder.end()
-                if (stdout.trim()) { try { pushFrame(JSON.parse(stdout)) } catch { parseFault = true; settle(Object.assign(new Error('invalid frame'), { code: 'body-not-json' })); return } }
+                childStderr += errDecoder.end()
+                if (stdout.trim()) {
+                  let frame
+                  try { frame = JSON.parse(stdout); pushFrame(frame) } catch { parseFault = true; settle(Object.assign(new Error('invalid frame'), { code: 'body-not-json' })); return }
+                  if (carriesOwnSpend(frame) && byteLength(reducer.text()) > RESPONSE_CAP_BYTES) { consultFailed = true; settle(Object.assign(new Error('oversize'), { code: 'body-too-large' })); return }
+                }
                 if (code !== 0 || signal) { settle(new Error('child failed')); return }
                 settle(null, { text: reducer.text(), usage: reducer.usage() })
               })
@@ -1490,7 +1498,12 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
         else if (!spendMeasured) consultPayload.usage_partial = true
       }
       const transportFailure = timedOut || consultFailed || parseFault || uncleanExit
-      const failurePayload = { consult_id: consultId, run_started_at: consultPayload.run_started_at, role, provider: cell.provider, model_id: cell.id, agent: cell.agent, effort: cell.effort, model: cell.model, kind: timedOut ? 'timeout' : 'transport-error', detail: timedOut ? 'consult timed out' : 'pi child transport failed' }
+      const reason = codes[0]
+      const kind = ['timeout', 'body-too-large', 'body-not-json'].includes(reason) ? reason : 'transport-error'
+      const stderrBytes = childStderr === null ? null : Buffer.from(redactDelta(childStderr).text)
+      let tailStart = stderrBytes === null ? 0 : Math.max(0, stderrBytes.length - STDERR_TAIL_BYTES)
+      while (stderrBytes && tailStart < stderrBytes.length && (stderrBytes[tailStart] & 0xc0) === 0x80) tailStart++
+      const failurePayload = { consult_id: consultId, run_started_at: consultPayload.run_started_at, role, provider: cell.provider, model_id: cell.id, agent: cell.agent, effort: cell.effort, model: cell.model, kind, detail: `pi child consult failed: ${reason}`, exit_code: childExit?.code ?? null, signal: childExit?.signal ?? null, stderr_tail: stderrBytes === null ? null : stderrBytes.subarray(tailStart).toString('utf8') }
       if (transportFailure) appendAdvisorRow('advisor_cell_failure', failurePayload)
       Object.assign(consultPayload, replyRecord(replyText, codes))
       appendAdvisorRow('advisor_consult', consultPayload)

@@ -6,7 +6,7 @@
 //   3. move ~/.crew/dt-<lane> to ~/.crew-journal-archive/dt-<lane> (or a free .archive-<n> suffix on re-archive)
 // Plain closeout requires a MERGED PR in the worktree's origin repository, with the lane branch's tip as its head.
 // Discard permits stopped, abandoned or accepted lanes with a CLOSED PR, and quiet lanes without a journal.
-// It refuses tips on neither a remote-tracking ref nor the base. An absent worktree skips git on retry.
+// It refuses tips on neither a remote-tracking ref nor the base. Discard skips git for an absent worktree.
 // Checks precede removal; a failed archive move leaves the lane directory for a retry.
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -138,7 +138,7 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
     if (view?.state !== 'MERGED') refuse(`pull request #${pr.number} is not merged (${String(view?.state)})`)
   }
 
-  let tip
+  let tip, branch = 'unchecked'
   if (!absent) {
   const mainCheckout = dirname(must(run, 'git rev-parse', 'git', ['-C', worktree, 'rev-parse', '--path-format=absolute', '--git-common-dir']).trim())
   if (!discard) {
@@ -158,6 +158,39 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
   }
   must(run, 'git worktree remove', 'git', ['-C', mainCheckout, 'worktree', 'remove', worktree])
   must(run, 'git branch -D', 'git', ['-C', mainCheckout, 'branch', '-D', lane])
+  branch = 'deleted'
+  } else if (!discard) {
+    const parent = dirname(worktree)
+    let siblings
+    try { siblings = readdirSync(parent) } catch { refuse(`could not list ${parent}; branch ${lane} not checked`) }
+    const prRepo = repoOf(pr.url.replace(/\/pull\/\d+$/, ''))
+    const matches = []
+    for (const name of siblings) {
+      const checkout = join(parent, name)
+      if (name === basename(worktree) || !isDir(join(checkout, '.git'))) continue
+      const origin = run('git', ['-C', checkout, 'remote', 'get-url', 'origin'])
+      if (origin && !origin.error && origin.status === 2) continue
+      if (!origin || origin.error || origin.status !== 0) refuse(`could not check origin in ${checkout}; branch ${lane} not checked`)
+      if (repoOf(String(origin.stdout ?? '').trim()) === prRepo) matches.push(checkout)
+    }
+    if (!matches.length) refuse(`worktree ${worktree} is absent and no checkout of ${prRepo} sits beside it; branch ${lane} not checked`)
+    let holder
+    for (const checkout of matches) {
+      const result = run('git', ['-C', checkout, 'rev-parse', '--verify', '--quiet', `refs/heads/${lane}^{commit}`])
+      if (!result || result.error || (result.status !== 0 && !(result.status === 1 && !String(result.stdout ?? '').trim()))) refuse(`could not check branch ${lane} in ${checkout}`)
+      if (result.status === 0) {
+        if (holder) refuse(`branch ${lane} is present in more than one checkout; checkout is ambiguous`)
+        holder = checkout
+        tip = String(result.stdout ?? '').trim()
+      }
+    }
+    if (holder) {
+      if (typeof view.headRefOid !== 'string' || tip !== view.headRefOid) refuse(`branch ${lane} is at ${tip}, not the merged head ${String(view.headRefOid)}`)
+      const worktrees = must(run, 'git worktree list', 'git', ['-C', holder, 'worktree', 'list', '--porcelain'])
+      if (worktrees.split('\n').includes(`worktree ${worktree}`)) must(run, 'git worktree remove', 'git', ['-C', holder, 'worktree', 'remove', worktree])
+      must(run, 'git branch -D', 'git', ['-C', holder, 'branch', '-D', lane])
+      branch = 'deleted'
+    } else branch = 'absent'
   }
   const reaped = reapLaneSeats({ dir: found.dir, alive, kill, spawnSync: run, sleep, now })
   try {
@@ -165,7 +198,7 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
     rename(laneDir, archivedDir)
     moved = true
   } catch (error) { refuse(`could not move ${laneDir} to ${archivedDir}: ${error?.code ?? error?.message}`) }
-  return { lane, pr, worktree, archivedDir, absent, tip, ...reaped }
+  return { lane, pr, worktree, archivedDir, absent, tip, branch, ...reaped }
   } finally {
     if (claim) {
       rmSync(claim, { force: true })
@@ -183,7 +216,10 @@ export function main(argv = process.argv.slice(2), deps = {}) {
   }
   try {
     const done = closeoutLane({ lane, discard: extra.length === 1, root: d.root, archiveRoot: d.archiveRoot, run: d.run, renameSync: d.renameSync, mkdirSync: d.mkdirSync, alive: d.alive, kill: d.kill, sleep: d.sleep, now: d.now })
-    const removal = done.absent ? `worktree ${done.worktree} already absent; branch ${lane} not checked` : `removed ${done.worktree}, deleted branch ${lane} (was ${done.tip})`
+    const removal = !done.absent ? `removed ${done.worktree}, deleted branch ${lane} (was ${done.tip})`
+      : done.branch === 'deleted' ? `worktree ${done.worktree} already absent; deleted branch ${lane} (was ${done.tip})`
+      : done.branch === 'absent' ? `worktree ${done.worktree} and branch ${lane} already absent`
+      : `worktree ${done.worktree} already absent; branch ${lane} not checked`
     d.stdout(`${extra.length ? 'discarded' : 'closed out'} ${lane}: ${removal}, archived to ${done.archivedDir}\n`)
     for (const record of done.stopped) d.stdout(`stopped seat ${record.role} pgid ${record.pgid}\n`)
     for (const record of done.unproven) d.stdout(`seat ${record.role}${record.pgid == null ? '' : ` pgid ${record.pgid}`}: not proven stopped\n`)

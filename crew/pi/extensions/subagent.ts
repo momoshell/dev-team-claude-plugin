@@ -900,7 +900,7 @@ export function createAgentTool(deps: any = {}) {
       }
 
       // The nested LLM call happened whether or not it produced findings, so
-      // whenever it was measured pi is told what it cost (docs/extensions.md:1986;
+      // whenever it was measured pi is told what it cost (pi's docs/extensions.md;
       // pi-agent-core/dist/types.d.ts:316-322). Attaching usage only on success
       // makes every failed spawn free in pi's own footer, /session and RPC totals.
       return finish({ findings, refused, usage, piUsage })

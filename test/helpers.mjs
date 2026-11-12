@@ -182,13 +182,7 @@ export function sqliteAvailable() {
 }
 
 // D2: the one git contract.
-// Six copies disagreed about the -c flags, primitive and argument shape; the
-// surviving contract uses three flags. crew/seat-io-runclean.test.mjs omitted
-// `protocol.file.allow=always`; runclean ran no file-transport command
-// (only `init`/`add`/`commit`/`worktree add`/`stash`), so the flag is inert
-// there and the three-flag config is the survivor. crew/arms.test.mjs trimmed,
-// and now trims explicitly at its nine value-capturing call sites, so `git()`
-// still does not trim.
+// The contract uses three flags and leaves output untrimmed.
 const GIT_CONFIG = [
   '-c', 'user.email=crew@example.invalid',
   '-c', 'user.name=Crew Test',

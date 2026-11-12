@@ -1,8 +1,7 @@
 // ACP Wave 0 recorder (#793). Drives ONE turn against a live ACP server and
 // records every frame, both directions, as NDJSON.
 //
-// Framing: split on LF by hand. node:readline mis-splits around U+2028 —
-// crew/headless-rpc.mjs:55 records the measured trap.
+// Framing: split on LF by hand. node:readline mis-splits around U+2028.
 import { spawn } from 'node:child_process'
 import { mkdirSync, createWriteStream } from 'node:fs'
 import { dirname } from 'node:path'

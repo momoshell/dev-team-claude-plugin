@@ -1,8 +1,9 @@
 # crew — the lean runtime
 
 One brief in, one lane out. Agents do the work; code only starts it, checks it
-and records it ([ADR-052](../docs/adr/adr-052-agents-do-the-work.md),
-[`docs/plan-lean-runtime.md`](../docs/plan-lean-runtime.md)).
+and records it ([ADR-052](../docs/adr/adr-052-agents-do-the-work.md)).
+[`docs/plan-lean-runtime.md`](../docs/plan-lean-runtime.md) is the historical
+plan, superseded by this README.
 
 ```
 crew onboard (--check <draft.json> | --seats) [--checkout <dir>] # calibrate the checkout or probe its seats
@@ -145,6 +146,10 @@ Everything durable is a file; session chat is never the record.
 
 - `start.mjs` — `crew start`: checks the brief, creates the worktree, starts the detached run.
 - `lean.mjs` — the detached entry; plays each seat turn over ACP and writes the session files.
+- `lean-source.mjs`: read-only view of live and archived lanes.
+- `lean-journal-order.mjs`: journal row ordering and superseded returns.
+- `run-pid.mjs`: run PID records and liveness probes.
+- `lane-core.mjs`: shared lane validation and repository state helpers.
 - `loop.mjs` — the loop: bounded rounds, lead consults, the `finish` shape, journal rows.
 - `proof.mjs` — per-test proof.
 - `checks.mjs` — suite, commit, rebase, PR.

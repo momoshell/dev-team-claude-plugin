@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
 const object = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
 const validGlob = (g) => typeof g === 'string' && g.length > 0 && !g.startsWith('/') && !g.endsWith('/') && !g.includes('\\') && !g.includes('?') && g.split('/').every((s) => s.length > 0 && s !== '.' && s !== '..' && (!s.includes('**') || s === '**'))
 const keySet = (o, keys) => object(o) && Object.keys(o).every((k) => keys.includes(k))
@@ -20,10 +19,10 @@ function parseSkillEntry(s) {
 export function validateMap(map, root = process.cwd(), { requireSkillFiles = true } = {}) {
   if (!keySet(map, ['version', 'exempt', 'rules']) || map.version !== 1 || !Array.isArray(map.exempt) || !map.exempt.length || !map.exempt.every(validGlob) || !Array.isArray(map.rules) || !map.rules.length) return false
   return map.rules.every((rule) => {
-    if (!keySet(rule, ['when', 'skills', 'delivery']) || !keySet(rule.when, ['paths', 'roles']) || (!own(rule.when, 'paths') && !own(rule.when, 'roles')) || !Array.isArray(rule.skills) || !rule.skills.length) return false
-    if (own(rule, 'delivery') && rule.delivery !== 'inline' && rule.delivery !== 'grant') return false
-    if (own(rule.when, 'paths') && (!Array.isArray(rule.when.paths) || !rule.when.paths.length || !rule.when.paths.every(validGlob))) return false
-    if (own(rule.when, 'roles') && (!Array.isArray(rule.when.roles) || !rule.when.roles.length || !rule.when.roles.every((r) => typeof r === 'string' && r.length))) return false
+    if (!keySet(rule, ['when', 'skills', 'delivery']) || !keySet(rule.when, ['paths', 'roles']) || (!Object.hasOwn(rule.when, 'paths') && !Object.hasOwn(rule.when, 'roles')) || !Array.isArray(rule.skills) || !rule.skills.length) return false
+    if (Object.hasOwn(rule, 'delivery') && rule.delivery !== 'inline' && rule.delivery !== 'grant') return false
+    if (Object.hasOwn(rule.when, 'paths') && (!Array.isArray(rule.when.paths) || !rule.when.paths.length || !rule.when.paths.every(validGlob))) return false
+    if (Object.hasOwn(rule.when, 'roles') && (!Array.isArray(rule.when.roles) || !rule.when.roles.length || !rule.when.roles.every((r) => typeof r === 'string' && r.length))) return false
     return rule.skills.every((s) => {
       const parsed = parseSkillEntry(s)
       if (!parsed) return false
@@ -66,8 +65,8 @@ export function matchGlob(glob, path) {
 }
 
 function collectSeatEntries({ map, role, files }) {
-  const roleRules = map.rules.filter((rule) => !own(rule.when, 'paths') && rule.when.roles?.includes(role))
-  const pathRules = files === null ? [] : map.rules.filter((rule) => (!own(rule.when, 'roles') || rule.when.roles.includes(role)) && rule.when.paths?.some((glob) => files.some((file) => !map.exempt.some((exempt) => matchGlob(exempt, file)) && matchGlob(glob, file))))
+  const roleRules = map.rules.filter((rule) => !Object.hasOwn(rule.when, 'paths') && rule.when.roles?.includes(role))
+  const pathRules = files === null ? [] : map.rules.filter((rule) => (!Object.hasOwn(rule.when, 'roles') || rule.when.roles.includes(role)) && rule.when.paths?.some((glob) => files.some((file) => !map.exempt.some((exempt) => matchGlob(exempt, file)) && matchGlob(glob, file))))
   const byPath = new Map()
   const order = []
   for (const rule of [...roleRules, ...pathRules]) {
@@ -76,12 +75,12 @@ function collectSeatEntries({ map, role, files }) {
       if (!parsed) continue
       const prior = byPath.get(parsed.path)
       if (!prior) {
-        const entry = { path: parsed.path, delivery: rule.delivery || 'grant', selected_by: own(rule.when, 'paths') ? 'map-path' : 'map-role', globs: own(rule.when, 'paths') ? [...rule.when.paths] : [] }
+        const entry = { path: parsed.path, delivery: rule.delivery || 'grant', selected_by: Object.hasOwn(rule.when, 'paths') ? 'map-path' : 'map-role', globs: Object.hasOwn(rule.when, 'paths') ? [...rule.when.paths] : [] }
         byPath.set(parsed.path, entry)
         order.push(parsed.path)
       } else {
         if (rule.delivery === 'inline') prior.delivery = 'inline'
-        if (own(rule.when, 'paths')) for (const g of rule.when.paths) if (!prior.globs.includes(g)) prior.globs.push(g)
+        if (Object.hasOwn(rule.when, 'paths')) for (const g of rule.when.paths) if (!prior.globs.includes(g)) prior.globs.push(g)
       }
     }
   }

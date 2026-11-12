@@ -105,37 +105,36 @@ test('#887 provider retry decisions consume kind, attempt, and total-wait bounds
   assert.equal(PROVIDER_RETRY_ACTIONS[PROVIDER_FAILURE_KINDS.SERVER_ERROR], 'backoff')
   assert.equal(PROVIDER_RETRY_ACTIONS[PROVIDER_FAILURE_KINDS.RATE_LIMIT], 'park')
   assert.equal(PROVIDER_RETRY_ACTIONS[PROVIDER_FAILURE_KINDS.AUTHENTICATION_FAILED], 'refuse')
-  assert.equal(PROVIDER_RETRY_ACTIONS[PROVIDER_FAILURE_KINDS.UNCLASSIFIED], 'none')
 
-  const parked = providerRetryDecision({ kind: PROVIDER_FAILURE_KINDS.RATE_LIMIT, status: 429, reset: { at_ms: 1000 }, at: 1000 })
+  const parked = providerRetryDecision({ kind: PROVIDER_FAILURE_KINDS.RATE_LIMIT, reset: { at_ms: 1000 }, at: 1000 })
   assert.equal(parked.retry, true)
   assert.equal(parked.waited_on, 'reset-time')
   assert.equal(parked.wait_ms, 60_000)
-  const past = providerRetryDecision({ kind: PROVIDER_FAILURE_KINDS.RATE_LIMIT, status: 429, reset: { at_ms: 1000 }, at: 100_000 })
+  const past = providerRetryDecision({ kind: PROVIDER_FAILURE_KINDS.RATE_LIMIT, reset: { at_ms: 1000 }, at: 100_000 })
   assert.equal(past.retry, true)
   assert.equal(past.wait_ms, 0)
   assert.equal(past.waited_on, 'reset-time')
-  const unknown = providerRetryDecision({ kind: PROVIDER_FAILURE_KINDS.RATE_LIMIT, status: 429, reset: { at_ms: null, absent_reason: PROVIDER_RESET_ABSENT.NO_FRAME } })
+  const unknown = providerRetryDecision({ kind: PROVIDER_FAILURE_KINDS.RATE_LIMIT, reset: { at_ms: null, absent_reason: PROVIDER_RESET_ABSENT.NO_FRAME } })
   assert.equal(unknown.retry, false)
   assert.equal(unknown.attempts_spent, 0)
   assert.match(unknown.why, /no reset time/)
-  const auth = providerRetryDecision({ kind: PROVIDER_FAILURE_KINDS.AUTHENTICATION_FAILED, status: 401 })
+  const auth = providerRetryDecision({ kind: PROVIDER_FAILURE_KINDS.AUTHENTICATION_FAILED })
   assert.equal(auth.retry, false)
   assert.equal(auth.action, 'refuse')
-  const spent = providerRetryDecision({ kind: PROVIDER_FAILURE_KINDS.SERVER_ERROR, status: 529, attempts: PROVIDER_RETRY_MAX })
+  const spent = providerRetryDecision({ kind: PROVIDER_FAILURE_KINDS.SERVER_ERROR, attempts: PROVIDER_RETRY_MAX })
   assert.equal(spent.retry, false)
   assert.equal(spent.attempts_spent, PROVIDER_RETRY_MAX)
-  const none = providerRetryDecision({ kind: PROVIDER_FAILURE_KINDS.UNCLASSIFIED, status: 418 })
+  const none = providerRetryDecision({ kind: null })
   assert.equal(none.retry, false)
   assert.equal(none.action, 'none')
   const exactTotalWait = providerRetryDecision({
-    kind: PROVIDER_FAILURE_KINDS.RATE_LIMIT, status: 429,
+    kind: PROVIDER_FAILURE_KINDS.RATE_LIMIT,
     reset: { at_ms: PROVIDER_RETRY_TOTAL_WAIT_MS - PROVIDER_RESET_SETTLE_MS }, at: 0,
   })
   assert.equal(exactTotalWait.retry, true)
   assert.equal(exactTotalWait.wait_ms, PROVIDER_RETRY_TOTAL_WAIT_MS)
   const beyondTotalWait = providerRetryDecision({
-    kind: PROVIDER_FAILURE_KINDS.RATE_LIMIT, status: 429,
+    kind: PROVIDER_FAILURE_KINDS.RATE_LIMIT,
     reset: { at_ms: PROVIDER_RETRY_TOTAL_WAIT_MS - PROVIDER_RESET_SETTLE_MS }, waitedMs: 1, at: 0,
   })
   assert.equal(beyondTotalWait.retry, false)

@@ -301,5 +301,5 @@ export function leanLaneFixture({ prefix = 'crew-lean-lane-', details = {}, plan
   for (const dir of [join(parent, 'returns'), join(parent, 'returns', 'foreign')]) {
     put(join(dir, 'd88.planner.json'), { role: 'planner', status: 'done', details: { ...base, files_in_scope: ['FOREIGN'], validation_lane: 'node --test foreign.test.mjs' } })
   }
-  return { parent, taskDir, at, details: base, write, env: { CREW_CONTEXT_LAYOUT: 'lean', CREW_ROLE: 'builder', CREW_TASK_DIR: taskDir } }
+  return { parent, taskDir, at, details: base, write, env: { CREW_ROLE: 'builder', CREW_TASK_DIR: taskDir } }
 }

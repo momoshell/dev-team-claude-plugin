@@ -943,8 +943,7 @@ export async function runLoop(spec, deps = {}) {
       const issue = /^issue ([1-9]\d*)$/.exec(spec.source)
       const closing = issue && (spec.closes ?? []).includes(Number(issue[1]))
       const proved = [...provedTests.values()]
-      const title = issue && (/^title:\s*(.+)$/im.exec(spec.brief.split(/^---\s*$/m)[1] ?? '')?.[1]
-        ?? /^\s*(?:>\s*)?issue title:\s*(.+)$/im.exec(spec.brief)?.[1])
+      const title = issue && /^\s*(?:>\s*)?issue title:\s*(.+)$/im.exec(spec.brief)?.[1]
       const ask = !issue ? briefAsk(spec.brief) : ''
       const purpose = oneLine(planSummary).replace(/^(?:the plan|plan)(?:\s+|$)/i, '')
       return [

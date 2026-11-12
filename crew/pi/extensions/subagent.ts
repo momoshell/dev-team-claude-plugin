@@ -175,8 +175,7 @@ export const SUBAGENT_SPAWN_BUDGET = 24
 // subagent that ran and failed is a bound nobody can tune.
 export const SPAWN_BUDGET_OUTCOME = 'budget-refused'
 
-// The counter's file name. It sits beside the task dir, in the same directory
-// the journal already occupies (journalPathFrom below).
+// The counter sits inside the task directory beside the journal.
 const SPAWN_COUNT_FILE = 'subagent-spawns.json'
 
 // Every code this validator can return, as a closed set. The refusal text is
@@ -477,14 +476,6 @@ function boundAgentName(name: string): string {
   return new StringDecoder('utf8').write(Buffer.from(out, 'utf8').subarray(0, AGENT_NAME_CAP_BYTES))
 }
 
-export function journalPathFrom(taskDir: string, env?: any): string {
-  return journalPathOf(taskDir)
-}
-
-export function spawnCountPathFrom(taskDir: string, env?: any): string {
-  return spawnCountPathOf(taskDir, SPAWN_COUNT_FILE)
-}
-
 // A sentinel, so the unparseable branch is one decidable line rather than a
 // control-flow trick inside a catch.
 const SPAWN_COUNT_UNPARSEABLE = Symbol('spawn-count-unparseable')
@@ -517,7 +508,7 @@ export function readSpawnCount(path: string, readFile: any): any {
 export function reserveSpawn({ taskDir, env, readFile, writeFile, budget = SUBAGENT_SPAWN_BUDGET }: any): any {
   const dir = String(taskDir || '')
   if (!dir) return { error: `refused: the subagent spawn budget cannot be scoped to a run because CREW_TASK_DIR is unset; the budget of ${budget} spawns per run is enforced against the task dir` }
-  const path = spawnCountPathFrom(dir, env)
+  const path = spawnCountPathOf(dir, SPAWN_COUNT_FILE)
   const read = readSpawnCount(path, readFile)
   if (read.error) return { error: `refused: ${read.error}, at ${path}` }
   const count = read.count
@@ -669,7 +660,7 @@ export function createAgentTool(deps: any = {}) {
         // null model, because no child was ever chosen.
         try {
           if (taskDir) {
-            appendFile(journalPathFrom(taskDir, env), `${JSON.stringify(usageRow({
+            appendFile(journalPathOf(taskDir), `${JSON.stringify(usageRow({
               at: now(), role, agent: agentName, spawnId, model: null, usage: null, outcome: SPAWN_BUDGET_OUTCOME,
             }))}\n`)
           }
@@ -901,7 +892,7 @@ export function createAgentTool(deps: any = {}) {
         try { if (dir) removeDir(dir) } catch { /* nothing to do */ }
         try {
           if (taskDir) {
-            appendFile(journalPathFrom(taskDir, env), `${JSON.stringify(usageRow({
+            appendFile(journalPathOf(taskDir), `${JSON.stringify(usageRow({
               at: now(), role, agent: agentName, spawnId, model, usage, outcome: findings ? 'ok' : 'refused',
             }))}\n`)
           }
@@ -954,7 +945,7 @@ export function createScoutNudge(deps: any = {}): any {
           const taskDir = env.CREW_TASK_DIR
           if (taskDir) {
             try {
-              appendFile(journalPathFrom(taskDir, env), `${JSON.stringify({
+              appendFile(journalPathOf(taskDir), `${JSON.stringify({
                 at: now(), scout_nudge: { reads: count, directories: dirs.size }, role: String(env.CREW_ROLE || 'unknown'),
               })}\n`)
             } catch { /* the journal never throws into the seat */ }

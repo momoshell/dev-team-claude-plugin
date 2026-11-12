@@ -10,10 +10,8 @@ import { join, isAbsolute } from 'node:path'
 export const PI_PROVIDERS = Object.freeze({ openai: 'openai-codex', anthropic: 'anthropic', meta: 'meta' })
 
 // An own-property lookup prevents Object.prototype names from resolving as providers (#739).
-const own = (obj, key) => Boolean(obj) && typeof obj === 'object' && Object.hasOwn(obj, key)
-
 export function modelString({ provider, id }) {
-  const p = own(PI_PROVIDERS, provider) ? PI_PROVIDERS[provider] : undefined
+  const p = Object.hasOwn(PI_PROVIDERS, provider) ? PI_PROVIDERS[provider] : undefined
   if (!p) {
     const known = Object.keys(PI_PROVIDERS)
     throw new Error(`adapter-pi: no pi provider for roster provider "${provider}" (known: ${known.join(', ')}) — refusing a guessed passthrough: pi synthesizes phantom models on narrowed lookups`)
@@ -82,7 +80,7 @@ export const PI_MCP_SERVER_TOOLS = Object.freeze({
 function piMcpTools(mcpServers) {
   const activated = new Set()
   for (const server of mcpServers || []) {
-    if (!own(PI_MCP_SERVER_TOOLS, server.name)) throw piExtensionRefusal(server.name, 'a declared pi MCP server', 'missing declaration')
+    if (!Object.hasOwn(PI_MCP_SERVER_TOOLS, server.name)) throw piExtensionRefusal(server.name, 'a declared pi MCP server', 'missing declaration')
     for (const tool of PI_MCP_SERVER_TOOLS[server.name] || []) activated.add(tool)
   }
   return [...activated]

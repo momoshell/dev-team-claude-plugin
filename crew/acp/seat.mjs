@@ -13,7 +13,7 @@ import { gitRepoState } from '../lane-core.mjs'
 import * as claudeAdapter from '../adapters/adapter-claude.mjs'
 import * as piAdapter from '../adapters/adapter-pi.mjs'
 import * as museAdapter from '../adapters/adapter-muse.mjs'
-import { CONTEXT_LAYOUT_ENV, LEAN_LAYOUT, journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../pi/context-layout.mjs'
+import { journalPathOf, plannerReturnNumber } from '../pi/context-layout.mjs'
 import { ADVISOR_MANIFEST_FILE, ADVISOR_CONFIG_VERSION, SAFE_MODEL, ADVISED_ROLES, READ_CAP_BYTES, boundText, createAdvisor, loadContext as advisorContext } from '../pi/extensions/advisor.ts'
 import { loadAcceptedContext } from '../pi/extensions/skeletonread.ts'
 import { createReadGate } from '../pi/extensions/readgate.ts'
@@ -195,7 +195,6 @@ function advisorCellOf(advisor) {
 function laneContext({ arms, role, laneTaskDir, workdir, definition, deps, requirePlan = false }) {
   const refusal = (why) => { throw refuse('grant-unsupported', `seat ${role} declares ${arms.join(', ')}, which read the lane context, and ${why} — refusing to boot a silently weaker seat`) }
   if (!laneTaskDir) return refusal('it has no task dir')
-  const layout = { [CONTEXT_LAYOUT_ENV]: LEAN_LAYOUT }
   const read = deps.readFileSync ?? readFileSync
   let journal
   try { journal = read(journalPathOf(laneTaskDir), 'utf8') } catch { return refusal(`the lane journal ${journalPathOf(laneTaskDir)} is unreadable`) }
@@ -212,7 +211,7 @@ function laneContext({ arms, role, laneTaskDir, workdir, definition, deps, requi
   if (role !== 'planner' || requirePlan) {
     const needs = [...new Set(arms.flatMap((arm) => CONTEXT_ARMS[arm]))]
     try {
-      const dir = plannerReturnsDirOf(laneTaskDir)
+      const dir = laneTaskDir
       const candidates = readdirSync(dir)
         .map((name) => ({ name, number: plannerReturnNumber(name) }))
         .filter((entry) => entry.number !== null && statSync(join(dir, entry.name)).mtimeMs >= anchor)
@@ -226,14 +225,14 @@ function laneContext({ arms, role, laneTaskDir, workdir, definition, deps, requi
     const missing = details === null ? needs : needs.filter((key) => (Array.isArray(details[key]) ? details[key].length === 0 : !nonempty(details[key])))
     if (missing.length) return refusal(`the lane's planner return written since its start does not carry ${missing.join(', ')}`)
     // The arms' own readers have the last word, so a return this check accepts is one each arm can read.
-    const env = { [CONTEXT_LAYOUT_ENV]: LEAN_LAYOUT, CREW_TASK_DIR: laneTaskDir }
+    const env = { CREW_TASK_DIR: laneTaskDir }
     const unread = arms.filter((arm) => arm === 'skeletonread' && loadAcceptedContext({ taskDir: laneTaskDir, cwd: workdir, env }) === null)
     if (unread.length) return refusal(`${unread.join(', ')} cannot read the lane's planner return`)
   }
   if (!arms.includes('advisor')) return
   const cell = advisorCellOf(definition.advisor)
   if (!cell) return refusal('the advisor cell is not a pi provider/id with an effort')
-  const accepted = role !== 'planner' ? loadAcceptedContext({ taskDir: laneTaskDir, cwd: workdir, env: layout }) : null
+  const accepted = role !== 'planner' ? loadAcceptedContext({ taskDir: laneTaskDir, cwd: workdir }) : null
   const criteria = planCriteria(accepted?.plan_text)
   const tests = Array.isArray(planner?.details?.tests) ? planner.details.tests.filter((test) => nonempty(test?.file) && nonempty(test?.title)).map(({ file, title }) => ({ file, title })) : []
   const manifest = { schema_version: ADVISOR_CONFIG_VERSION, generated_at: new Date().toISOString(), task: basename(dirname(laneTaskDir)), run_started_at: anchor, criteria, tests, cell }
@@ -253,7 +252,7 @@ function laneContext({ arms, role, laneTaskDir, workdir, definition, deps, requi
     const written = JSON.parse(read(target, 'utf8'))
     if (written?.run_started_at !== anchor || written.cell?.model !== cell.model) throw new Error('the manifest read back differs from the one written')
   } catch (error) { refusal(`the advisor manifest could not be written: ${error.message}`) }
-  if (role !== 'planner' && advisorContext({ taskDir: laneTaskDir, env: { [CONTEXT_LAYOUT_ENV]: LEAN_LAYOUT, CREW_TASK_DIR: laneTaskDir } }).scope_source === 'absent') refusal(`the advisor cannot read the lane's planner return`)
+  if (role !== 'planner' && advisorContext({ taskDir: laneTaskDir, env: { CREW_TASK_DIR: laneTaskDir } }).scope_source === 'absent') refusal(`the advisor cannot read the lane's planner return`)
 }
 
 export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile, binaries = {}, deps = {} }) {
@@ -335,10 +334,10 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
   // Wall-clock receipt time is recording evidence; the runner's `now` is monotonic.
   const toolCalls = new Map()
   const advisorNotes = []
-  const nudge = isMuse && grants.subagent && grants.agents.length ? createScoutNudge({ env: { ...env, CREW_ROLE: role, CREW_TASK_DIR: laneTaskDir, [CONTEXT_LAYOUT_ENV]: LEAN_LAYOUT }, send: (message) => advisorNotes.push(message.content) }) : null
+  const nudge = isMuse && grants.subagent && grants.agents.length ? createScoutNudge({ env: { ...env, CREW_ROLE: role, CREW_TASK_DIR: laneTaskDir }, send: (message) => advisorNotes.push(message.content) }) : null
   const seenNudge = new Set()
   const resolveConsultPi = () => { try { return { command: resolveBinary('pi', binaries.pi, 'pi', env) } } catch { return { error: 'pi binary unresolved' } } }
-  const advisor = isMuse && grants.advisor ? createAdvisor({ env: { ...env, CREW_ROLE: role, CREW_TASK_DIR: laneTaskDir, [CONTEXT_LAYOUT_ENV]: LEAN_LAYOUT }, deps: { ...deps.advisorDeps, cwd: workdir, resolveBinary: resolveConsultPi, send: (message) => advisorNotes.push(message.content) } }) : null
+  const advisor = isMuse && grants.advisor ? createAdvisor({ env: { ...env, CREW_ROLE: role, CREW_TASK_DIR: laneTaskDir }, deps: { ...deps.advisorDeps, cwd: workdir, resolveBinary: resolveConsultPi, send: (message) => advisorNotes.push(message.content) } }) : null
   const advised = new Map()
   const seenAdvice = new Set()
   const completed = new Set()
@@ -446,7 +445,7 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
     const spec = {
       role, cwd: workdir, effort: definition.effort, promptFile, taskDir: runtime, grants, tools, deny, writableDirs,
       env: {
-        ...(laneTaskDir ? { CREW_ROLE: role, CREW_TASK_DIR: laneTaskDir, [CONTEXT_LAYOUT_ENV]: LEAN_LAYOUT } : { CREW_ROLE: role }),
+        ...(laneTaskDir ? { CREW_ROLE: role, CREW_TASK_DIR: laneTaskDir } : { CREW_ROLE: role }),
         // Launch-authoritative: an inherited value never decides whether the seat's refusals carry a reason.
         CREW_READ_ONLY: writes === 'repo' ? '0' : '1', CREW_READ_ONLY_NODE: process.execPath, CREW_READ_ONLY_HOOK: READ_ONLY_HOOK,
       },

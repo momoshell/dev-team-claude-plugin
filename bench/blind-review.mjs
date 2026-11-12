@@ -110,7 +110,7 @@ export async function prepareReviews({ runs, kind, out, keyPath, corpusDir = COR
 // in so tools, auth and git config still resolve, while ~/.crew/reviews is a fresh directory inside the output.
 // The private key is never reachable from it: the key file is left out, and a directory that holds it (directly
 // or through a link) is staged as a real directory whose other entries are linked, so no link leads to the key.
-export function confinedHome(dir, realHome = homedir(), keyPath = null) {
+function confinedHome(dir, realHome = homedir(), keyPath = null) {
   mkdirSync(dir, { recursive: true })
   const keyReal = keyPath ? realThrough(resolve(keyPath)) : null
   const realOf = (path) => { try { return realpathSync(path) } catch { return null } }

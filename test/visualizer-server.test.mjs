@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { cpSync, mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, realpathSync, statSync, symlinkSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, posix, resolve } from 'node:path'
 import { request } from 'node:http'
 import { runInNewContext } from 'node:vm'
 import { createServer, connect } from 'node:net'
@@ -1042,21 +1042,48 @@ test('/api/health answers schema, crew_root, readonly false and the write list o
 })
 
 test('VC1 visualizer server imports only admitted crew modules and pins run-pid dependencies', () => {
-  const allowed = new Set(['crew/protocols.mjs', 'crew/agents.mjs'])
+  const allowed = new Set(['crew/protocols.mjs', 'crew/agents.mjs', 'crew/lean-source.mjs'])
   const bad = []
   for (const name of readdirSync(join(ROOT, 'visualizer/server')).filter((file) => file.endsWith('.mjs'))) {
     const source = readFileSync(join(ROOT, 'visualizer/server', name), 'utf8')
     for (const match of source.matchAll(/(?:from|import)\s*\(?\s*['"](\.[^'"]+)['"]/g)) {
       const target = join('visualizer/server', match[1]).split('\\').join('/')
-      if ((target.startsWith('crew/') || target.startsWith('scripts/')) && !allowed.has(target) && !(name === 'lean-source.mjs' && target === 'crew/run-pid.mjs')) bad.push(`${name} -> ${match[1]}`)
+      if ((target.startsWith('crew/') || target.startsWith('scripts/')) && !allowed.has(target)) bad.push(`${name} -> ${match[1]}`)
     }
   }
   assert.deepEqual(bad, [])
   const imports = (path) => [...readFileSync(join(ROOT, path), 'utf8').matchAll(/(?:from|import)\s*\(?\s*['"]([^'"]+)['"]/g)].map((match) => match[1])
   const pidImports = imports('crew/run-pid.mjs')
-  assert.ok(pidImports.includes('../visualizer/server/lean-journal-order.mjs'))
-  assert.deepEqual(pidImports.filter((path) => !path.startsWith('node:')), ['../visualizer/server/lean-journal-order.mjs'])
-  assert.deepEqual(imports('visualizer/server/lean-journal-order.mjs'), [])
+  assert.ok(pidImports.includes('./lean-journal-order.mjs'))
+  assert.deepEqual(pidImports.filter((path) => !path.startsWith('node:')), ['./lean-journal-order.mjs'])
+  assert.deepEqual(imports('crew/lean-journal-order.mjs'), [])
+})
+
+test('VC2 nothing under crew/ or bin/ imports from visualizer/ and the lean modules live in crew/', () => {
+  function walk(dir) {
+    return readdirSync(join(ROOT, dir), { withFileTypes: true }).flatMap((entry) => {
+      const path = posix.join(dir, entry.name)
+      if (entry.isDirectory()) return entry.name === 'node_modules' ? [] : walk(path)
+      return entry.isFile() && path.endsWith('.mjs') ? [path] : []
+    })
+  }
+  const bad = []
+  for (const path of [...walk('crew'), ...walk('bin')]) {
+    const source = readFileSync(join(ROOT, path), 'utf8')
+    for (const match of source.matchAll(/(?:from\s*|import\s*(?:\(\s*)?)['"](\.[^'"]+)['"]/g)) {
+      if (posix.join(dirname(path), match[1]).startsWith('visualizer/')) bad.push(`${path} -> ${match[1]}`)
+    }
+  }
+  assert.deepEqual(bad, [])
+  for (const name of ['lean-source.mjs', 'lean-journal-order.mjs']) {
+    assert.equal(existsSync(join(ROOT, 'visualizer/server', name)), false)
+    assert.equal(existsSync(join(ROOT, 'crew', name)), true)
+  }
+  const source = readFileSync(join(ROOT, 'crew/lean-source.mjs'), 'utf8')
+  assert.match(source, /import\s*\{[^}]*\bwithin\b[^}]*\}\s*from\s*'\.\/lane-core\.mjs'/)
+  assert.match(source, /import\s*\{[^}]*\bisObject\b[^}]*\}\s*from\s*'\.\/lane-core\.mjs'/)
+  assert.doesNotMatch(source, /function\s+within\s*\(/)
+  assert.doesNotMatch(source, /const\s+isObject\s*=/)
 })
 
 test('api.js has no client for a route the server no longer serves', () => {

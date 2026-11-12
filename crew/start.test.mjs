@@ -1009,6 +1009,37 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
   const sessionOf = (role, n) => join(spec.taskDir, 'lean', role, `lane.${role}.${n}.jsonl`)
   return { spec, requests, logs, go: () => runLean(spec, options), sessionOf, options }
 }
+test('a lean seat turn journals its agent, model, effort, distinct tool calls, stop reason and usage (#2287)', async () => {
+  const rows = [], usage = { inputTokens: 10, outputTokens: 5, cachedReadTokens: 2, cachedWriteTokens: 1, totalTokens: 15 }
+  const f = leanFixture({ loopDeps: { journal: async (row) => rows.push(row) }, acp: async (input) => {
+    const role = input.definition.role
+    const id = /^Envelope id: (.+)$/m.exec(input.prompt)[1]
+    const path = /^Return path: (.+)$/m.exec(input.prompt)[1]
+    for (const [sessionUpdate, toolCallId] of [['tool_call', 'a'], ['tool_call', 'b'], ['tool_call_update', 'a'], ['tool_call', 'a']]) {
+      input.deps.appendFileSync(input.sessionFile, `${JSON.stringify({ sessionId: 's', update: { sessionUpdate, toolCallId, title: 'read', kind: 'read', status: 'in_progress', rawInput: { path: 'file' } } })}\n`, 'utf8')
+    }
+    input.deps.appendFileSync(input.sessionFile, 'not json\n', 'utf8')
+    mkdirSync(f.spec.taskDir, { recursive: true })
+    if (role === 'planner') writeFileSync(join(f.spec.taskDir, 'plan.md'), '')
+    const details = role === 'planner' ? { subject: 'fix(crew): planned', plan_path: 'plan.md', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
+      : role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
+      : { verdict: 'pass', findings: [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['a'], complete: true } }
+    writeFileSync(path, JSON.stringify({ role, id, status: 'done', summary: 'ok', details }))
+    return { stopReason: 'end_turn', usage: role === 'reviewer' ? null : usage, ...(role === 'reviewer' ? { usage_reason: 'usage-unavailable' } : {}), refusal: null }
+  } })
+  assert.equal((await f.go()).status, 'done')
+  const planner = rows.find((row) => row.event === 'seat-turn' && row.role === 'planner')
+  assert.ok(planner)
+  const definition = f.requests.find((request) => request.definition.role === 'planner').definition
+  for (const field of ['agent', 'model', 'effort']) assert.equal(planner[field], definition[field])
+  assert.equal(planner.tool_calls, 2)
+  assert.equal(planner.stop_reason, 'end_turn')
+  assert.deepEqual(planner.usage, usage)
+  const reviewer = rows.find((row) => row.event === 'seat-turn' && row.role === 'reviewer')
+  assert.equal(reviewer.usage, null)
+  assert.equal(reviewer.unmeasured.usage, 'usage-unavailable')
+})
+
 test('a Muse seat refused at session/new for being logged out stops as authentication_failed with no rerun', async () => {
   const message = 'log in to Muse before opening a session'
   for (const [errorKind, errorMessage, frozen] of [[null, message, false], ['authentication_failed', 'denied', true], ['oauth_org_not_allowed', 'denied', false], ['verification_required', 'denied', false]]) {

@@ -215,6 +215,68 @@ function fakes(options = {}) {
   }
   return { spec, deps, calls, rows, requests, tiers, seen, writes, discardArgs, go: () => runLoop(spec, deps) }
 }
+test('every seat turn journals one seat-turn row whose unmeasured values are null with one closed reason (#2287)', async () => {
+  for (const reject of [false, true]) {
+    let state = 0
+    const issued = [], rows = []
+    const f = fakes({ deps: { repoState: () => String(state++), journal: async (row) => {
+      if (reject && row.event === 'seat-turn') throw new Error('journal denied')
+      rows.push(row)
+    } } })
+    const run = f.deps.runSeat
+    f.deps.runSeat = async (request) => {
+      issued.push(request)
+      if (request.role === 'planner' && !request.rerun) throw new Error('turn failed')
+      await run(request)
+      if (request.role === 'builder') return { definition: { agent: 'pi', model: 'local/model', effort: 'high', writes: 'repo' }, recorded: null, toolCalls: 3, stopReason: 'end_turn', usage: { inputTokens: 12 } }
+      if (request.role === 'reviewer') return { definition: { agent: 7 }, toolCalls: -1, usage: 'x' }
+    }
+    assert.equal((await f.go()).status, 'done')
+    if (reject) continue
+    const turns = rows.filter((row) => row.event === 'seat-turn')
+    assert.deepEqual(turns.map(({ role, id }) => ({ role, id })), issued.map(({ role, id }) => ({ role, id })))
+    for (const turn of turns) {
+      const index = rows.indexOf(turn)
+      assert.equal(rows.slice(index + 1).find((row) => row.event === 'envelope' && row.id === turn.id)?.role, turn.role)
+    }
+    const [failed, planner, builder, reviewer] = turns
+    assert.deepEqual(Object.fromEntries(['agent', 'model', 'effort', 'tool_calls', 'stop_reason', 'usage', 'seconds', 'status', 'worktree_changed', 'unmeasured'].map((key) => [key, builder[key]])), {
+      agent: 'pi', model: 'local/model', effort: 'high', tool_calls: 3, stop_reason: 'end_turn', usage: { inputTokens: 12 }, seconds: 0, status: 'done', worktree_changed: true, unmeasured: {},
+    })
+    for (const [row, reason] of [[failed, 'turn-failed'], [planner, 'not-reported'], [reviewer, 'not-reported']]) {
+      for (const field of ['agent', 'model', 'effort', 'tool_calls', 'stop_reason', 'usage']) {
+        assert.equal(row[field], null, field)
+        assert.equal(row.unmeasured[field], reason, field)
+      }
+      assert.equal(row.worktree_changed, null)
+      assert.equal(row.unmeasured.worktree_changed, 'not-repo-seat')
+    }
+    assert.equal(failed.status, null)
+    assert.equal(failed.unmeasured.status, 'no-return')
+    assert.equal(planner.status, 'done')
+  }
+  for (const mode of ['throws', 'nonfinite']) {
+    const f = fakes({ deps: { repoState: () => null, now: () => { if (mode === 'throws') throw new Error('clock'); return Infinity } } })
+    assert.equal((await f.go()).status, 'done')
+    const row = f.rows.find((item) => item.event === 'seat-turn' && item.role === 'builder')
+    assert.equal(row.seconds, null)
+    assert.equal(row.unmeasured.seconds, 'clock-unmeasured')
+    assert.equal(row.worktree_changed, null)
+    assert.equal(row.unmeasured.worktree_changed, 'worktree-unmeasured')
+  }
+  let state = 0, clock = 0
+  const repaired = fakes({ deps: { repoState: () => String(state++), now: () => clock++ }, edit: (value, request) => request.role === 'builder' && !request.repair ? { ...value, status: 'invalid' } : value })
+  assert.equal((await repaired.go()).status, 'done')
+  const builderRows = repaired.rows.filter((row) => row.event === 'seat-turn' && row.role === 'builder')
+  assert.equal(builderRows.length, 2)
+  assert.deepEqual(builderRows.map((row) => [row.status, row.worktree_changed, row.seconds]), [[null, true, 0.001], ['done', true, 0.001]])
+  assert.equal(builderRows[0].unmeasured.status, 'no-return')
+  const getter = fakes()
+  const run = getter.deps.runSeat
+  getter.deps.runSeat = async (request) => { await run(request); return { get toolCalls() { throw new Error('bad recording') } } }
+  assert.equal((await getter.go()).status, 'done')
+})
+
 test('a tier raise and a finish run seat the roster recorded at start', async () => {
   const path = join(scratchDir('roster-loop-'), 'agents.json')
   writeFileSync(path, JSON.stringify({ builder: { model: 'local/recorded' } }))
@@ -2717,7 +2779,8 @@ test('every journaled row carries one read of the injected clock, and a throwing
   const f = fakes({ deps: { now: () => 1_700_000_000_000 + ticks++ } })
   await f.go()
   assert.ok(f.rows.length > 8)
-  assert.deepEqual(f.rows.map((r) => r.at), f.rows.map((_, i) => 1_700_000_000_000 + i))
+  assert.ok(f.rows.every((row, i) => i === 0 || row.at > f.rows[i - 1].at))
+  assert.equal(ticks, f.rows.length + 2 * f.rows.filter((row) => row.event === 'seat-turn').length)
   assert.equal(f.rows.filter((r) => r.event === 'run-start').length, 1)
   const plain = fakes()
   await plain.go()

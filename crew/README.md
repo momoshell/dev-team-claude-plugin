@@ -129,7 +129,12 @@ Everything durable is a file; session chat is never the record.
 - **P3 gate**: retired by ADR-055; proof reads builder `details.tests`.
 - **P4 journal and sessions**: one append-only JSONL per lane and one session
   file per seat turn holding its full ACP update stream, under
-  `<task>/lean/<role>/`. `crew show` reads them; the visualizer reads them.
+  `<task>/lean/<role>/`. Each `seat-turn` journal row carries `role`, `id`,
+  `agent`, `model`, `effort`, `seconds`, `tool_calls`, `stop_reason`, `status`,
+  `usage`, `worktree_changed` and `unmeasured`; each null field has one reason
+  in `unmeasured`: `not-reported`, `turn-failed`, `usage-unavailable`,
+  `no-return`, `clock-unmeasured`, `not-repo-seat` or `worktree-unmeasured`.
+  `crew show` reads them; the visualizer reads them.
 
 ## Files
 

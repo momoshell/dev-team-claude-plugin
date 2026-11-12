@@ -227,7 +227,14 @@ export async function runLean(spec, deps = {}) {
       const recorded = relayed.join('')
       let intact = false
       try { intact = d.readFileSync(sessionFile, 'utf8') === header + recorded } catch { /* unreadable is not intact */ }
-      recording = { definition, recorded: !failed && intact ? recorded : null, cwd: spec.cwd, museSkillsRoot: turn?.museSkillsRoot }
+      const toolIds = new Set()
+      for (const line of recorded.split('\n')) {
+        try {
+          const update = JSON.parse(line)?.update
+          if (update?.sessionUpdate === 'tool_call' && typeof update.toolCallId === 'string') toolIds.add(update.toolCallId)
+        } catch { /* skip malformed session lines */ }
+      }
+      recording = { definition, recorded: !failed && intact ? recorded : null, cwd: spec.cwd, museSkillsRoot: turn?.museSkillsRoot, stopReason: turn?.stopReason ?? null, usage: turn?.usage ?? null, ...(typeof turn?.usage_reason === 'string' ? { usage_reason: turn.usage_reason } : {}), toolCalls: recordError ? null : toolIds.size }
       if (checkRecords) {
         const after = fingerprint()
         if (typeof after !== 'string') throw violation('acp-seat-record-unmeasured')

@@ -17,7 +17,7 @@ import { createLeanSource } from '../visualizer/server/lean-source.mjs'
 import { LANE, isObject, within } from './lane-core.mjs'
 import { reapLaneSeats } from './seat-reap.mjs'
 import { parsePrUrl } from './record-pr.mjs'
-import { deadRun, probeAlive } from './run-pid.mjs'
+import { deadRun, parsePidRecord, probeAlive } from './run-pid.mjs'
 import { claimStop } from './finish.mjs'
 
 class CloseoutRefusal extends Error {}
@@ -121,8 +121,8 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
         if (name === 'run.pid' && error?.code === 'ENOENT') continue
         refuse(`lane ${lane} is not stopped`)
       }
-      const pid = Number(text.trim())
-      if (!/^\d+\n?$/.test(text) || !Number.isSafeInteger(pid) || pid <= 0 || alive(pid) !== false) refuse(`lane ${lane} is not stopped`)
+      const record = parsePidRecord(text)
+      if (!record || alive(record.pid, record.startedAt) !== false) refuse(`lane ${lane} is not stopped`)
     }
     if (died && !deadRun({ rows: stopRows, taskDir, alive })) refuse(`lane ${lane} is not stopped`)
   } else pr = lastPr(rows, lane, join(found.dir, 'task'), alive)

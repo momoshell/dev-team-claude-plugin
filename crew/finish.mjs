@@ -31,7 +31,7 @@ import { fileURLToPath } from 'node:url'
 import { FINISH_REVIEW_ROUNDS, composeLanePrBody, openPullRequest, runSuite, withoutIssueTokens } from './checks.mjs'
 import { LANE, isObject } from './lane-core.mjs'
 import { TIERS, validateEnvelope } from './protocols.mjs'
-import { deadRun, probeAlive, writeRunPid } from './run-pid.mjs'
+import { deadRun, parsePidRecord, pidRecord, probeAlive, selfStartedAt, writeRunPid } from './run-pid.mjs'
 import { OnboardRefusal, requireOnboarded } from './onboard.mjs'
 import { reapLaneSeats } from './seat-reap.mjs'
 
@@ -151,11 +151,11 @@ function finishFor(rows, stopped, before, plan) {
 }
 
 // Writes finish.json and spawns the detached run; a launch that fails releases the claim, so the lane can be retried.
-function launch(d, { crewRoot, taskDir, spec, finish, claim, recoveryPid }) {
+function launch(d, { crewRoot, taskDir, spec, finish, claim, recovery }) {
   const specPath = join(taskDir, 'finish.json')
   const started = join(crewRoot, 'briefs', 'started')
   const log = join(started, `${spec.id}.run.log`)
-  let pid
+  let pid, startedAt
   try {
     d.mkdirSync(started, { recursive: true })
     d.writeFileSync(specPath, `${JSON.stringify({ ...spec, shape: 'finish', finish }, null, 2)}\n`)
@@ -164,17 +164,18 @@ function launch(d, { crewRoot, taskDir, spec, finish, claim, recoveryPid }) {
     d.rmSync(join(taskDir, 'run.pid'), { force: true })
     try {
       pid = d.spawnDetached(process.execPath, [LEAN, specPath], { cwd: spec.cwd, log })
+      startedAt = d.now()
       if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('no valid pid')
     } catch (error) {
-      if (recoveryPid) writeRunPid(taskDir, recoveryPid, d)
+      if (recovery) writeRunPid(taskDir, recovery.pid, d, recovery.startedAt)
       throw error
     }
   } catch (error) {
     try { d.rmSync(claim, { force: true }) } catch { /* the launch error is the one reported */ }
     throw error
   }
-  writeRunPid(taskDir, pid, d)
-  try { d.writeFileSync(claim, `${pid}\n`) } catch { /* the detached run may already be active */ }
+  writeRunPid(taskDir, pid, d, startedAt)
+  try { d.writeFileSync(claim, pidRecord(pid, startedAt)) } catch { /* the detached run may already be active */ }
   d.log(`crew finish: lane=${spec.id} stop=${finish.stop.reason} findings=${finish.findings.length} pid=${pid}`)
   d.log(`  worktree ${spec.cwd}`)
   d.log(`  log      ${log}`)
@@ -185,21 +186,22 @@ function launch(d, { crewRoot, taskDir, spec, finish, claim, recoveryPid }) {
 export function claimStop(d, lane, taskDir, at) {
   // The claim is exclusive and names the stop it finishes, so two calls before the run's first row cannot both spawn.
   const claim = join(taskDir, `finish-${at}.claim`)
-  try { d.writeFileSync(claim, `${process.pid}\n`, { flag: 'wx' }) } catch (error) {
+  const self = pidRecord(process.pid, selfStartedAt())
+  try { d.writeFileSync(claim, self, { flag: 'wx' }) } catch (error) {
     if (error?.code !== 'EEXIST') throw new FinishRefusal('finish-unreadable', `cannot claim lane ${lane}: ${error?.code ?? error?.message}`)
     const running = () => new FinishRefusal('finish-running', `lane ${lane} may still be running; claim ${claim}`)
-    let text, pid
+    let text, record
     try {
       text = d.readFileSync(claim, 'utf8')
-      pid = Number(text.trim())
-      if (!/^\d+\n?$/.test(text) || !Number.isSafeInteger(pid) || pid <= 0 || d.alive(pid) !== false) throw running()
+      record = parsePidRecord(text)
+      if (!record || d.alive(record.pid, record.startedAt) !== false) throw running()
     } catch { throw running() }
     const lock = join(taskDir, `finish-${at}.reclaim`)
-    try { d.writeFileSync(lock, `${process.pid}\n`, { flag: 'wx' }) } catch { throw running() }
+    try { d.writeFileSync(lock, self, { flag: 'wx' }) } catch { throw running() }
     try {
-      if (d.readFileSync(claim, 'utf8') !== text || d.alive(pid) !== false) throw running()
+      if (d.readFileSync(claim, 'utf8') !== text || d.alive(record.pid, record.startedAt) !== false) throw running()
       d.rmSync(claim)
-      d.writeFileSync(claim, `${process.pid}\n`, { flag: 'wx' })
+      d.writeFileSync(claim, self, { flag: 'wx' })
     } catch { throw running() } finally { d.rmSync(lock, { force: true }) }
   }
   return claim
@@ -228,6 +230,13 @@ function reportLane({ lane, root, deps = {} }) {
   const d = { ...defaultDeps(), ...deps }
   const { taskDir, spec, rows } = loadLane(d, lane, root ?? d.crewRoot)
   requireWorktree(d, spec)
+  const pr = rows.findLast((row) => row.event === 'pr')
+  if (pr) { d.log(`crew finish: lane=${lane} published ${pr.pr?.url ?? ''}`); return }
+  const decisionAt = rows.findLastIndex((row) => row.event === 'finish-decision')
+  if (decisionAt >= 0 && rows[decisionAt].choice === 'abandon' && !rows.slice(decisionAt + 1).some((row) => row.event === 'stage-start' || (row.event === 'verdict' && row.status === 'stopped'))) {
+    d.log(`crew finish: lane=${lane} abandoned`)
+    return
+  }
   const readyAt = rows.findLastIndex((row) => row.event === 'finish-ready')
   if (readyAt >= 0 && !rows.slice(readyAt + 1).some((row) => row.event === 'stage-start' || (row.event === 'verdict' && row.status === 'stopped') || decidedAt(row, readyAt))) {
     d.log(`crew finish: lane=${lane} stop=finish-ready`)
@@ -295,7 +304,7 @@ export function finishLane({ lane, root, deps = {}, guidance, priorReviewRounds 
       // The reset moves whichever branch is checked out: another branch at the same commit must never be reset.
       if (!onLaneBranch(d, spec)) throw new FinishRefusal('finish-committed', `lane ${lane}'s checkout is not on its branch ${spec.branch}`)
       if (d.git(spec.cwd, ['reset', '--soft', undo.onto])?.status !== 'green') throw new FinishRefusal('finish-committed', `lane ${lane}'s committed build could not be reset`)
-      try { d.appendFileSync(join(taskDir, 'journal.jsonl'), `${JSON.stringify({ event: 'finish-uncommit', lane, ...undo })}\n`) } catch (error) {
+      try { d.appendFileSync(join(taskDir, 'journal.jsonl'), `${JSON.stringify({ event: 'finish-uncommit', lane, at: d.now(), ...undo })}\n`) } catch (error) {
         throw new FinishRefusal('finish-unreadable', `cannot record finish-uncommit for lane ${lane}: ${error?.code ?? error?.message}`)
       }
     }
@@ -304,7 +313,7 @@ export function finishLane({ lane, root, deps = {}, guidance, priorReviewRounds 
     try { d.rmSync(claim, { force: true }) } catch { /* the validation, reset or journal error is the one reported */ }
     throw error
   }
-  return launch(d, { crewRoot, taskDir, spec, finish, claim, recoveryPid: died?.pid })
+  return launch(d, { crewRoot, taskDir, spec, finish, claim, recovery: died })
 }
 
 const NOTES_HEADING = '## Operator notes'
@@ -317,7 +326,7 @@ function readText(d, file, what) {
 
 const reviewCount = (rows) => Math.max(
   rows.filter((row) => row.event === 'verdict' && row.status === 'reviewed').length,
-  rows.filter((row) => row.event === 'envelope' && row.role === 'reviewer').length,
+  new Set(rows.flatMap((row, index) => row.event === 'envelope' && row.role === 'reviewer' ? [typeof row.id === 'string' ? row.id : index] : [])).size,
 )
 
 // One decision per stop or ready row: the claim is exclusive and taken before any effect, so overlapping decisions cannot both act.
@@ -373,7 +382,7 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
     try {
       const started = finishLane({ lane, root: crewRoot, deps: d, guidance: notes, priorReviewRounds, recoveredStopAt, expected: { rows, spec, recordedTier, died } })
       launched = true
-      d.appendFileSync(join(taskDir, 'journal.jsonl'), `${JSON.stringify({ event: 'finish-decision', lane, choice, launchedAt: rows.length, notesSha256: createHash('sha256').update(notes).digest('hex') })}\n`)
+      d.appendFileSync(join(taskDir, 'journal.jsonl'), `${JSON.stringify({ event: 'finish-decision', lane, choice, at: d.now(), launchedAt: rows.length, notesSha256: createHash('sha256').update(notes).digest('hex') })}\n`)
       return { ...started, choice }
     } catch (error) {
       // Once spawned, keep the decision claim even if recording fails: a retry must not launch another pass.
@@ -391,7 +400,7 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
         if (current.length !== rows.length || deadRun({ rows: current, taskDir, readFileSync: d.readFileSync, alive: d.alive })?.pid !== died.pid) throw new FinishRefusal('finish-running', `lane ${lane}'s run is no longer proven dead`)
         reapDeadRunSeats(d, taskDir)
       }
-      d.appendFileSync(join(taskDir, 'journal.jsonl'), `${JSON.stringify({ event: 'finish-decision', lane, choice, notesSha256: null })}\n`)
+      d.appendFileSync(join(taskDir, 'journal.jsonl'), `${JSON.stringify({ event: 'finish-decision', lane, choice, at: d.now(), notesSha256: null })}\n`)
     } catch (error) {
       try { d.rmSync(claim, { force: true }) } catch { /* the decision error is the one reported */ }
       throw error
@@ -437,7 +446,7 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
   try {
     const notes = typeof file === 'string' ? readText(d, file, choice === 'return' ? 'the guidance file' : 'the notes file') : null
     const journal = join(taskDir, 'journal.jsonl')
-    const decision = () => d.appendFileSync(journal, `${JSON.stringify({ event: 'finish-decision', lane, choice, ...(choice === 'return' ? { launchedAt: rows.length } : {}), notesSha256: notes === null ? null : createHash('sha256').update(notes).digest('hex') })}\n`)
+    const decision = () => d.appendFileSync(journal, `${JSON.stringify({ event: 'finish-decision', lane, choice, at: d.now(), ...(choice === 'return' ? { launchedAt: rows.length } : {}), notesSha256: notes === null ? null : createHash('sha256').update(notes).digest('hex') })}\n`)
 
     if (choice === 'abandon') {
       decision()
@@ -459,7 +468,7 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
       // A reused PR has its own text; apply the same issue-token rewriting as openPullRequest.
       const edited = await d.run({ cwd: spec.cwd, command: 'gh', args: ['pr', 'edit', String(published.pr.number), '--title', withoutIssueTokens(ready.subject), '--body', composeLanePrBody({ body, closes, refs: [] })], timeoutMs: 60_000 })
       if (edited?.status !== 'green') throw new FinishRefusal('finish-publish', `the pull request ${published.pr.number} (${published.pr.url ?? 'no url'}) is open but could not be updated with the measured text, and is not recorded: ${edited?.reason ?? 'unmeasured'}`)
-      d.appendFileSync(journal, `${JSON.stringify({ event: 'pr', lane, stage: 'publish', pr: published.pr })}\n`)
+      d.appendFileSync(journal, `${JSON.stringify({ event: 'pr', lane, stage: 'publish', at: d.now(), pr: published.pr })}\n`)
       decision()
       d.log(`crew finish: lane=${lane} published ${published.pr.url ?? ''}`)
       return { lane, choice, pr: published.pr }

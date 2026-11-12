@@ -9,9 +9,10 @@
 // Lean ACP seats record JSONL under task/lean/<role>/<lane>.<role>.<turn>[.repair][.rerun][.retry-N].jsonl.
 import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { LANE, isObject } from './lane-core.mjs'
+import { createLeanSource } from '../visualizer/server/lean-source.mjs'
 const ROLE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/
 class ShowRefusal extends Error {}
 
@@ -82,7 +83,9 @@ export function showLane({ lane, role, json = false, deps = {} }) {
     const archives = (attempt(laneDir, d.readdirSync) ?? []).filter((name) => name.startsWith(`${lane}.archive-`)).sort().reverse()
     crewDir = archives.map((name) => join(laneDir, name)).find((path) => stat(path)?.isDirectory()) ?? null
   }
-  if (!crewDir) throw new ShowRefusal(`unknown lane ${lane}: no crew directory ${join(laneDir, lane)} and no ${lane}.archive-* beside it`)
+  const archiveRoot = d.archiveRoot ?? join(dirname(d.crewRoot), '.crew-journal-archive')
+  if (!crewDir) crewDir = createLeanSource({ crewRoot: d.crewRoot, archiveRoot }).resolveLane(lane)?.dir ?? null
+  if (!crewDir) throw new ShowRefusal(`unknown lane ${lane}: no crew directory ${join(laneDir, lane)}, no ${lane}.archive-* beside it, and none in ${archiveRoot}`)
 
   const crewPath = join(crewDir, 'crew.json')
   const crewText = text(crewPath)

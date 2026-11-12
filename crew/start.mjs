@@ -59,6 +59,7 @@ const defaultDeps = () => ({
       return child.pid
     } finally { closeSync(out) }
   },
+  now: Date.now,
   crewRoot: join(homedir(), '.crew'),
   transcriptRoot: join(homedir(), '.claude', 'projects'),
   log: logStdout,
@@ -201,14 +202,15 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
   } catch (cause) {
     throw new StartRefusal(`cannot record lean lane ${lane} in ${crewDir}: ${cause.code ?? cause.message}; the worktree ${worktree} and branch ${lane} are left for inspection`, { cause })
   }
-  let pid
+  let pid, startedAt
   try {
     pid = d.spawnDetached(process.execPath, [LEAN, specPath], { cwd: worktree, log, env: process.env })
+    startedAt = d.now()
     if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('no valid pid')
   } catch (cause) {
     throw new StartRefusal(`cannot launch lane ${lane}; the worktree ${worktree} and branch ${lane} are left for inspection`, { cause })
   }
-  if (!writeRunPid(taskDir, pid, d)) logLine('crew start: run pid not recorded; finish, record-pr and closeout cannot prove this run dead')
+  if (!writeRunPid(taskDir, pid, d, startedAt)) logLine('crew start: run pid not recorded; finish, record-pr and closeout cannot prove this run dead')
   logLine(`crew start: lane=${lane} loop=lean tier=${tier} shape=${fields.shape} closes=${fields.closes ?? 'none'} pid=${pid}`)
   logLine(`  worktree ${worktree}`)
   logLine(`  brief    ${brief}`)

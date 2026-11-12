@@ -139,6 +139,14 @@ test('probeAlive compares process start in UTC across the repeated DST hour', ()
   assert.equal(probeAlive(process.pid, start + 3_600_000, ps), false)
 })
 
+test('probeAlive reads a start a few seconds off as alive and minutes off as dead (#2347)', () => {
+  const ps = () => ({ status: 0, stdout: 'Sun Oct 25 01:30:00 2026\n' })
+  const start = Date.UTC(2026, 9, 25, 1, 30)
+  for (const [skew, alive] of [[5_000, true], [-5_000, true], [60_000, true], [60_001, false], [300_000, false]]) {
+    assert.equal(probeAlive(process.pid, start + skew, ps), alive, `skew ${skew}`)
+  }
+})
+
 test('a claim whose pid now names a later process is taken over (S3-4)', () => {
   for (const [startedAt, dead] of [[Date.now() - 86_400_000, true], [Math.round(performance.timeOrigin), false]]) {
     const f = fixture()

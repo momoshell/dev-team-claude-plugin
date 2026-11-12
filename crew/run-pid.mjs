@@ -4,6 +4,8 @@ import { join } from 'node:path'
 import { stateless, supersededReturn } from './lean-journal-order.mjs'
 
 const RUN_PID_FILE = 'run.pid'
+// Allow whole-second lstart and loaded Node boot delay; pid reuse requires free + reuse within this window.
+const START_TOLERANCE_MS = 60_000
 export function parsePidRecord(text) {
   const match = /^(\d+)(?: (\d+))?\n?$/.exec(text)
   const pid = Number(match?.[1])
@@ -23,7 +25,7 @@ export function probeAlive(pid, startedAt, ps = spawnSync) {
     const result = ps('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 1000, env: { ...process.env, LC_ALL: 'C', TZ: 'UTC0' } })
     const start = result.status === 0 ? Date.parse(`${result.stdout.trim()} UTC`) : NaN
     if (!Number.isFinite(start)) return null
-    if (Math.abs(start - startedAt) > 2000) return false
+    if (Math.abs(start - startedAt) > START_TOLERANCE_MS) return false
   }
   return alive
 }

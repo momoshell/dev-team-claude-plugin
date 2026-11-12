@@ -142,10 +142,12 @@ function planFor(d, lane, taskDir, recordedTier, rows) {
 function finishFor(rows, stopped, before, plan) {
   const { subject, plan_path: planPath } = plan
   const reviewed = rows.slice(0, before).findLast((row) => row.event === 'verdict' && row.status === 'reviewed')
+  const rulings = rows.slice(0, before).findLast((row) => row.event === 'lead-rulings')?.rulings
   return {
     planPath, subject, filesInScope: plan.files_in_scope ?? null, testsRequired: planPath !== null && (!Array.isArray(plan.tests) || plan.tests.length > 0), ...(plan.planSummary ? { planSummary: plan.planSummary } : {}),
     stop: { reason: stopped.reason, observation: stopped.observation ?? null },
     findings: reviewed?.verdict === 'changes-needed' && Array.isArray(reviewed.findings) ? reviewed.findings : [],
+    ...(Array.isArray(rulings) && rulings.length ? { rulings } : {}),
     turnOffset: rows.filter((row) => row.event === 'envelope').length,
   }
 }

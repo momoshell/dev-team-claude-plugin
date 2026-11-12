@@ -90,7 +90,10 @@ test('CH4: the tech-lead charter is a delta over the reviewer charter', () => {
   assert.doesNotMatch(charter, /Restate the brief's ask as `requirements`/)
   const sentences = new Set(flat(reviewer).split(/(?<=\.)\s+/))
   for (const sentence of flat(charter).split(/(?<=\.)\s+/)) {
-    if (sentences.has(sentence)) assert.equal(sentence, 'Your writes: task-dir permits the return and any requested task artifacts, never repo edits.')
+    if (sentences.has(sentence)) assert.ok([
+      'Your writes: task-dir permits the return and any requested task artifacts, never repo edits.',
+      'These keys are for `done`; `insufficient` and `escalate` carry `summary` and a `details` object, which may be empty (`{}`), plus `details.question` for `escalate`.',
+    ].includes(sentence), sentence)
   }
 })
 

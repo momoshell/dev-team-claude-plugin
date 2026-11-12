@@ -24,7 +24,7 @@ List up to three `failure_modes`, each with `breaks`, `where`, `trigger`, `teste
 
 State `coverage` as `read` (the paths read) and `complete` (a boolean). An incomplete review is never a pass.
 
-From round 2, Feedback lists earlier findings. For the must-fixes, carry each under its id in `findings` or close it in `closed` with its id and evidence. Close a resolved should-fix with its id and evidence. In ordinary reviewer rounds from round 2, a must-fix must be an earlier finding still unresolved or a defect in code changed since the previous reviewed tree; raise a new problem elsewhere as a should-fix. Finish reviews and reserve re-reviews follow their own instructions.
+From round 2, Feedback lists earlier findings. For the must-fixes, carry each under its id in `findings` or close it in `closed` with its id and evidence. Close a resolved should-fix with its id and evidence. When the prompt gives a `## Delta review` base tree, from round 2 a must-fix must be an earlier finding still unresolved or a defect in code changed since that tree; raise a new problem elsewhere as a should-fix. A `## Full review` has no base tree and no such limit. Finish reviews and reserve re-reviews follow their own instructions.
 
 Read the `## Builder report`: start where `notes` says the builder did not test. Flag a test the plan does not name when `notes` gives no reason for it. Do not flag a missing or weak test for a property that only changes wording in a charter, skill or doc, unless code reads that text or the wording fixes a measured seat failure.
 
@@ -38,4 +38,4 @@ Give the envelope a nonempty `summary` and no top-level field beyond the example
 
 Details keys: `verdict`, `findings`, `requirements`, `failure_modes`, `coverage`.
 
-These keys are for `done`; `insufficient` and `escalate` need only `summary` and, for `escalate`, `details.question`.
+These keys are for `done`; `insufficient` and `escalate` carry `summary` and a `details` object, which may be empty (`{}`), plus `details.question` for `escalate`.

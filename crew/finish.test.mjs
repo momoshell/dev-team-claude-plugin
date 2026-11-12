@@ -538,6 +538,20 @@ test('a lane whose worktree is missing is refused as finish-worktree before any 
   } finally { cleanup(f) }
 })
 
+test('a finish spec carries the lead rulings journaled before the stop (#2341)', () => {
+  const rulings = [{ id: 'lead-bounce', summary: 'ruling 1' }]
+  const f = fixture({ rows: [
+    { event: 'run-start' }, builderRow,
+    { event: 'lead-rulings', rulings },
+    { event: 'verdict', stage: 'review', status: 'stopped', ...STOP },
+    { event: 'lead-rulings', rulings: [{ id: 'lead-bounce', summary: 'later' }] },
+  ] })
+  try {
+    run(f).go()
+    assert.deepEqual(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.rulings, rulings)
+  } finally { cleanup(f) }
+})
+
 // MUTATION: rewrite lean.json instead of finish.json and the stopped lane's own spec is lost.
 test('a stopped lane with a build is finished: finish.json carries the stop, findings, plan and offset, and the run is spawned in the worktree', () => {
   const f = fixture({ rows: [

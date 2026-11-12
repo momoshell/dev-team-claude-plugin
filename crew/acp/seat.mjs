@@ -539,11 +539,12 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
         promptId = client.beginPrompt([{ type: 'text', text: advisorNotes.splice(0).join('\n\n') }])
         return null
       }
-      return isMuse ? { ...turn, usage: null, usage_reason: 'usage-unavailable', ...(grantedSkills.length ? { museSkillsRoot: join(runtime, 'muse-skills') } : {}) } : turn
+      return isMuse ? { ...turn, usage: null, usage_reason: 'usage-unavailable' } : turn
     }
     while (now() < deadline) {
       // Nothing can repair a lost runtime, and the stream it held would stay silent until the deadline.
-      if (!existsSync(runtime)) {
+      try { (deps.statSync ?? statSync)(runtime) } catch (error) {
+        if (error.code !== 'ENOENT') throw error
         throw Object.assign(new Error(`${role} runtime ${runtime} disappeared mid-turn (acp-seat-runtime-missing)`), { reason: 'acp-seat-runtime-missing' })
       }
       const turn = client.pollPrompt(promptId)

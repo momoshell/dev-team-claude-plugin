@@ -715,6 +715,31 @@ test('a builder turn after repeated lead bounces carries every earlier lead ruli
   assert.deepEqual(builders[2].feedback, [{ id: 'lead-bounce', summary: 'ruling 2' }, { id: 'lead-bounce', summary: 'ruling 1' }])
 })
 
+test('a lead ruling to the builder is journaled with every ruling that still holds (#2341)', async () => {
+  let builds = 0, leads = 0
+  const f = fakes({ lead: 'bounce', deps: { repoState: () => 'same' }, edit: (v) => {
+    if (v.role === 'builder' && ++builds <= 2) return { ...v, status: 'insufficient', details: { ...v.details, gap: `gap ${builds}` } }
+    if (v.role === 'lead') v.summary = `ruling ${++leads}`
+    return v
+  } })
+  assert.equal((await f.go()).status, 'done')
+  const rows = f.rows.filter((r) => r.event === 'lead-rulings')
+  assert.equal(rows.length, 2)
+  assert.deepEqual(rows.at(-1).rulings, [{ id: 'lead-bounce', summary: 'ruling 2' }, { id: 'lead-bounce', summary: 'ruling 1' }])
+})
+
+test('a lead bounce to the planner drops the lead rulings about the replaced plan (#2341)', async () => {
+  let builds = 0, leads = 0
+  const f = fakes({ lead: 'bounce', deps: { repoState: () => 'same' }, edit: (v) => {
+    if (v.role === 'builder' && ++builds <= 2) return { ...v, status: 'insufficient', details: { ...v.details, gap: `gap ${builds}` } }
+    if (v.role === 'lead') { v.summary = `ruling ${++leads}`; v.details.target = leads === 1 ? 'builder' : 'planner' }
+    return v
+  } })
+  assert.equal((await f.go()).status, 'done')
+  assert.equal(builderTurns(f)[2].feedback.some((item) => item.id === 'lead-bounce'), false)
+  assert.deepEqual(f.rows.filter((r) => r.event === 'lead-rulings').at(-1).rulings, [])
+})
+
 test('a builder-continue turn keeps the lead rulings made earlier in the stage (#2291)', async () => {
   let builds = 0, state = 0
   const f = fakes({ lead: 'bounce', deps: { repoState: () => String(state++) }, edit: (v) => {
@@ -2144,6 +2169,16 @@ const finishSpec = (over = {}) => ({
   shape: 'finish',
   finish: { planPath: '/virtual/task/plan.md', subject: 'fix(crew): planned lane', mutations: [MUTATION], stop: STOP, findings: [finding], turnOffset: 3, ...over },
 })
+test('a finish run builder receives the lead rulings from its finish spec (#2341)', async () => {
+  const rulings = [{ id: 'lead-bounce', summary: 'ruling 0' }]
+  const f = fakes({ spec: finishSpec({ rulings }), unseated: ['planner'] })
+  assert.equal((await f.go()).status, 'done')
+  assert.ok(builderTurns(f)[0].feedback.some((item) => item.id === rulings[0].id && item.summary === rulings[0].summary))
+  for (const bad of [null, {}, [null], [{}], [{ summary: '' }]]) {
+    assert.equal((await fakes({ spec: finishSpec({ rulings: bad }), unseated: ['planner'] }).go()).reason, 'invalid-input')
+  }
+})
+
 const FINISH_SUCCESS = ['base-paths', 'fetch', 'base-commit', 'rebase', 'base-restore', 'seat:builder', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'seat:reviewer', 'suite', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase']
 
 test('a changes-needed with only should-fix findings gets one repair turn and a repaired pass publishes without a builder bounce', async () => {

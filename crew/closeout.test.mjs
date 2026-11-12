@@ -130,6 +130,80 @@ test('discard ends an accepted lane whose published PR GitHub reports CLOSED', (
   }
 })
 
+test('closeout with the worktree directory gone refuses a branch whose tip is not the merged PR head, with nothing archived', () => {
+  const w = world()
+  try {
+    const tip = tipOf(w), head = 'f'.repeat(40)
+    rmSync(w.worktree, { recursive: true, force: true })
+    const r = close(w, { head })
+    assert.equal(r.status, 1)
+    assert.match(r.err, /not the merged head/)
+    assert.ok(r.err.includes(tip) && r.err.includes(head))
+    assert.ok(existsSync(w.laneDir))
+    assert.ok(branchExists(w))
+    assert.ok(!existsSync(join(w.archiveRoot, `dt-${LANE}`)))
+  } finally { w.done() }
+})
+
+test('closeout with the worktree directory gone checks the branch tip against the merged head and deletes the branch', () => {
+  const w = world()
+  try {
+    rmSync(w.worktree, { recursive: true, force: true })
+    const r = close(w)
+    assert.equal(r.status, 0, r.err)
+    assert.ok(!branchExists(w))
+    assert.match(r.out, /already absent; deleted branch demo \(was [0-9a-f]{40}\)/)
+    assert.ok(existsSync(join(w.archiveRoot, `dt-${LANE}`)))
+  } finally { w.done() }
+})
+
+test('closeout with the worktree directory gone refuses when no checkout of the PR repository sits beside it', () => {
+  const w = world({ origin: 'git@github.com:x/y.git' })
+  try {
+    rmSync(w.worktree, { recursive: true, force: true })
+    const r = close(w)
+    assert.equal(r.status, 1)
+    assert.match(r.err, /no checkout of o\/r/)
+    assert.ok(existsSync(w.laneDir))
+  } finally { w.done() }
+})
+
+test('closeout skips an origin-less sibling and checks and deletes the branch', () => {
+  const w = world()
+  try {
+    const other = join(w.home, 'repos', 'local-only')
+    mkdirSync(other)
+    git(other, 'init', '-q', '-b', 'main')
+    rmSync(w.worktree, { recursive: true, force: true })
+    const r = close(w)
+    assert.equal(r.status, 0, r.err)
+    assert.ok(r.calls.some((c) => c[0] === 'git' && c[2] === w.checkout && c[3] === 'rev-parse' && c.includes(`refs/heads/${LANE}^{commit}`)))
+    assert.ok(!branchExists(w))
+    assert.ok(existsSync(join(w.archiveRoot, `dt-${LANE}`)))
+  } finally { w.done() }
+})
+
+test('closeout refuses a failed origin probe even when another checkout matches', () => {
+  const w = world()
+  try {
+    const other = join(w.home, 'repos', 'aaa')
+    mkdirSync(other)
+    git(other, 'init', '-q', '-b', 'main')
+    git(other, 'remote', 'add', 'origin', 'git@github.com:o/r.git')
+    rmSync(w.worktree, { recursive: true, force: true })
+    const calls = [], run = runner('MERGED', 'f'.repeat(40), calls)
+    const r = close(w, { run: (cmd, args) => {
+      if (cmd === 'git' && args[1] === w.checkout && args[2] === 'remote') return { status: 128, stdout: '', stderr: 'bad config' }
+      return run(cmd, args)
+    } })
+    assert.equal(r.status, 1)
+    assert.match(r.err, /could not check origin.*branch demo not checked/)
+    assert.ok(existsSync(w.laneDir))
+    assert.ok(branchExists(w))
+    assert.ok(!existsSync(join(w.archiveRoot, `dt-${LANE}`)))
+  } finally { w.done() }
+})
+
 test('closeout retried after a failed move archives the lane, treating the absent worktree and branch as done', () => {
   const w = world()
   try {
@@ -138,9 +212,8 @@ test('closeout retried after a failed move archives the lane, treating the absen
     assert.equal(first.status, 1)
     const retry = close(w, { head })
     assert.equal(retry.status, 0, retry.err)
-    assert.match(retry.out, /already absent/)
+    assert.match(retry.out, /worktree \S+ and branch demo already absent/)
     assert.ok(existsSync(join(w.archiveRoot, `dt-${LANE}`)))
-    assert.ok(!retry.calls.some((c) => c[0] === 'git'))
   } finally { w.done() }
   const other = world()
   try {

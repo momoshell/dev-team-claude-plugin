@@ -14,8 +14,9 @@ with `crew finish <lane> --return <file>`. The same flag starts another pass on 
 recorded, so any lane can be inspected afterwards, and the visualizer reads
 those journals and session files.
 
-The design is [ADR-052](docs/adr/adr-052-agents-do-the-work.md) and
-[`docs/plan-lean-runtime.md`](docs/plan-lean-runtime.md).
+[ADR-052](docs/adr/adr-052-agents-do-the-work.md) records the design.
+[`docs/plan-lean-runtime.md`](docs/plan-lean-runtime.md) is the historical plan,
+superseded by [crew/README.md](crew/README.md).
 
 **→ [crew/README.md](crew/README.md)** for the loop, the seats, the contracts
 and where each piece lives.

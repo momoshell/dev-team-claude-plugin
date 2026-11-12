@@ -86,8 +86,12 @@ Closeout and discard stop proven seat groups and report unproven ones
 - After the PR merges: `crew closeout <lane>` removes the worktree (never
   forced), deletes the lane branch and moves the lane directory to
   `~/.crew-journal-archive/` (`crew/closeout.mjs`). It refuses unless the
-  recorded PR is merged with the lane branch tip as its head. A previously
-  archived lane name moves to `dt-<lane>.archive-<n>`, using the smallest free
+  recorded PR is merged. With the worktree present, it checks its origin and
+  requires the branch tip to match the PR head. With the worktree absent, it
+  looks for a sibling checkout of the PR repository: if the branch is present,
+  its tip must match the PR head before deletion; if the branch is gone, it
+  archives the lane. If no checkout of the PR repository is found, it refuses.
+  A previously archived lane name moves to `dt-<lane>.archive-<n>`, using the smallest free
   `n` from 2 and keeping the earlier archive.
 
 Before discarding a closed PR, check whether the worktree is the only copy of the build.

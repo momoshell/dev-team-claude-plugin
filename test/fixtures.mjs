@@ -51,9 +51,4 @@ export function testCheckout(prefix, parent = tmpdir()) {
 //   its root with the raw mkdtempSync primitive that scratchDir owns. Routing it
 //   through scratchDir would also register the directory for draining, which is
 //   a behaviour change this lane is not scoped to make; and this module's single
-//   raw temp call site is an AUDITED, FROZEN exemption of the temp-sandbox
-//   tripwire in test/factory-env.test.mjs, whose warranty for this file is an
-//   EXACT count and whose exemption total is pinned. Converting it here would
-//   redden a tripwire that lives outside this lane's write fence. The surviving
-//   behaviour is the raw mint, unchanged, and the conversion belongs to whichever
-//   lane owns test/factory-env.test.mjs.
+//   raw temp call site keeps the existing raw mint behaviour.

@@ -6,10 +6,10 @@
 import { appendFileSync, closeSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs'
 import { StringDecoder } from 'node:string_decoder'
 import { join, relative, resolve } from 'node:path'
-import { journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../context-layout.mjs'
+import { journalPathOf, plannerReturnNumber } from '../context-layout.mjs'
 import { validateEnvelope } from '../../protocols.mjs'
 import { exportEntries } from '../../acp/export-entries.mjs'
-import { DEFAULT_MAX_LINES, MAX_LINES_ENV } from './readgate.ts'
+import { MAX_LINES_ENV, parseMaxLines } from './readgate.ts'
 
 const READ_CAP_BYTES = 256 * 1024
 const JOURNAL_CAP_BYTES = 64 * 1024
@@ -22,8 +22,6 @@ const MAX_REASON_BYTES = 256
 const CITATION_RE = /(?<![\w./\\-])(?<file>[A-Za-z0-9_@.+-]+(?:\/[A-Za-z0-9_@.+-]+)*):(?<start>[1-9][0-9]*)(?:-(?<end>[1-9][0-9]*))?(?![\w/-])/g
 const RUN_START_EVENT = 'run-start'
 
-const INCLUDE_SIGNATURE_ROWS = true
-const SELECT_LATEST_PLANNER_RETURN = true
 const NO_CITED_RANGES = '(no cited ranges in accepted plan)'
 export const BLIND_SPOT = 'Line-scan blind spot: export var, export * from, export interface, and code outside .js/.mjs/.ts are not indexed.'
 const RETRIEVE_TOOL_NAME = 'retrieve'
@@ -409,18 +407,6 @@ function countTextLines(text) {
   return sourceLines(text).length
 }
 
-function parseMaxLines(value) {
-  if (value === undefined) return DEFAULT_MAX_LINES
-  if (typeof value === 'number') {
-    if (Number.isSafeInteger(value) && value > 0) return value
-    throw new Error(`${MAX_LINES_ENV} must be a positive integer`)
-  }
-  if (typeof value !== 'string' || !/^[1-9]\d*$/.test(value)) throw new Error(`${MAX_LINES_ENV} must be a positive integer`)
-  const parsed = Number(value)
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${MAX_LINES_ENV} must be a positive integer`)
-  return parsed
-}
-
 function parseCitations(plan, filesInScope, sourceFor) {
   const ranges = []
   const seen = new Set()
@@ -474,11 +460,10 @@ export function loadAcceptedContext(value = {}, extraDeps = {}) {
   const cwd = String(input.cwd || deps.cwd || process.cwd())
   if (!taskDir) return null
   const read = deps.readFile || deps.readFileSync || defaultRead
-  const env = input.env || process.env
   const journalPath = journalPathOf(taskDir)
   const runStart = journalRunStart(journalPath, deps, read)
   if (runStart === null) return null
-  const returnsDir = plannerReturnsDirOf(taskDir)
+  const returnsDir = taskDir
   let names
   try { names = (deps.readDir || deps.readdirSync || defaultReadDir)(returnsDir) } catch { return null }
   if (!Array.isArray(names) || names.length > MAX_RETURN_ENTRIES) return null
@@ -491,9 +476,7 @@ export function loadAcceptedContext(value = {}, extraDeps = {}) {
     if (mtime === null) return null
     candidates.push({ number, path, mtime })
   }
-  const currentCandidates = SELECT_LATEST_PLANNER_RETURN
-    ? candidates.filter((candidate) => candidate.mtime > runStart).sort((left, right) => right.number - left.number)
-    : candidates.sort((left, right) => left.number - right.number)
+  const currentCandidates = candidates.filter((candidate) => candidate.mtime > runStart).sort((left, right) => right.number - left.number)
   let candidate, raw
   for (const entry of currentCandidates) {
     const plannerText = readBounded(entry.path, read, PLAN_CAP_BYTES)
@@ -547,11 +530,9 @@ function renderSkeleton({ target, source, lineCount, maxLines, context, readSour
   parts.push(`Configuration: ${MAX_LINES_ENV}=${String(maxLines)}`)
   parts.push('Indexed signatures:')
   const indexed = index(source, target)
-  if (INCLUDE_SIGNATURE_ROWS) {
-    for (const entry of indexed) {
-      const span = entry.signatureSpan ? `${entry.signatureSpan.start}-${entry.signatureSpan.end}` : String(entry.line)
-      parts.push(`- ${entry.name} · line ${entry.line} · ${span} · ${entry.signature || ''}`)
-    }
+  for (const entry of indexed) {
+    const span = entry.signatureSpan ? `${entry.signatureSpan.start}-${entry.signatureSpan.end}` : String(entry.line)
+    parts.push(`- ${entry.name} · line ${entry.line} · ${span} · ${entry.signature || ''}`)
   }
   parts.push('Accepted-plan ranges:')
   const ranges = Array.isArray(context.ranges) ? context.ranges : []
@@ -758,7 +739,7 @@ export function createSkeletonRead(options = {}) {
   return { onToolResult, retrieve, fallback }
 }
 
-export const SKELETON_TOOL_NAME = 'skeleton'
+const SKELETON_TOOL_NAME = 'skeleton'
 
 // Muse cannot replace a native read result, so its seats deny the whole-file read and call this tool for the
 // same replacement: same eligibility, same text.

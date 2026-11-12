@@ -20,8 +20,6 @@ export const PROVIDER_FAILURE_KINDS = Object.freeze({
   RATE_LIMIT: 'rate_limit',
   AUTHENTICATION_FAILED: 'authentication_failed',
   SERVER_ERROR: 'server_error',
-  UNCLASSIFIED: 'provider-unclassified',
-  STREAM_STALL: 'stream-stall',
 })
 
 export function acpProviderFailureKind(errorKind, errorMessage) {
@@ -62,8 +60,8 @@ export const PROVIDER_RETRY_MAX = 3
 
 export const PROVIDER_RETRY_TOTAL_WAIT_MS = (5 * 60 + 30) * 60 * 1000
 
-// Minutes, not the worker's seconds: the one retry budget that already existed
-// was at the wrong altitude. The ladder SATURATES on its last rung rather than
+// Minutes, not seconds: the earlier retry budget was at the wrong altitude.
+// The ladder SATURATES on its last rung rather than
 // running off the end, so the attempt bound above is the only thing that stops
 // it.
 
@@ -99,8 +97,6 @@ export const PROVIDER_RETRY_ACTIONS = Object.freeze({
   [PROVIDER_FAILURE_KINDS.SERVER_ERROR]: 'backoff',
   [PROVIDER_FAILURE_KINDS.RATE_LIMIT]: 'park',
   [PROVIDER_FAILURE_KINDS.AUTHENTICATION_FAILED]: 'refuse',
-  [PROVIDER_FAILURE_KINDS.UNCLASSIFIED]: 'none',
-  [PROVIDER_FAILURE_KINDS.STREAM_STALL]: 'backoff',
 })
 
 // A reset instant nobody stated is UNKNOWN with a closed reason, never a
@@ -108,29 +104,28 @@ export const PROVIDER_RETRY_ACTIONS = Object.freeze({
 // the journal.
 export const PROVIDER_RESET_ABSENT = Object.freeze({
   NO_FRAME: 'the stream carries no rejected rate_limit_event frame, so the provider stated no reset time',
-  NO_RESET_FIELD: 'the rejected rate_limit_event carries no reset time this driver can read as unix seconds',
   ACP_TEXT_UNPARSEABLE: 'ACP rate-limit text not parseable: no valid reset wall-clock time and IANA zone',
-  BEYOND_BOUND: 'the stated reset is further out than the total wait this driver will spend',
+  BEYOND_BOUND: 'the stated reset is further out than the total wait the lane will spend',
 })
 
-// PURE, so the routing is unit-testable without a worker. Every refusal names
+// PURE, so the routing is unit-testable without a lane. Every refusal names
 // the kind and what has already been spent; every retry names what it will wait
 // on. Nothing here reads a clock of its own — `at` is the caller's.
-export function providerRetryDecision({ kind = null, status = null, reset = null, attempts = 0, waitedMs = 0, at = 0 }) {
+export function providerRetryDecision({ kind = null, reset = null, attempts = 0, waitedMs = 0, at = 0 }) {
   const action = PROVIDER_RETRY_ACTIONS[kind] ?? 'none'
   const bound = { attempts: PROVIDER_RETRY_MAX, total_wait_ms: PROVIDER_RETRY_TOTAL_WAIT_MS }
   const no = (why, extra = {}) => ({ retry: false, action, wait_ms: null, waited_on: null, reset_at: null, attempts_spent: attempts, bound, why, ...extra })
-  if (action === 'none') return no(`provider failure ${String(kind)} is not a kind this driver routes, so the run keeps the behaviour it has always had`)
-  if (action === 'refuse') return no(`a ${kind} (status ${String(status)}) is a credential fault: a second ask cannot succeed and would spend the remaining budget against a wall`)
-  if (attempts >= PROVIDER_RETRY_MAX) return no(`the provider retry bound of ${PROVIDER_RETRY_MAX} attempts is spent for ${kind} (status ${String(status)}); ${attempts} attempts were taken over ${waitedMs}ms`)
+  if (action === 'none') return no(`provider failure ${String(kind)} is not a kind the lane routes, so the run keeps the behaviour it has always had`)
+  if (action === 'refuse') return no(`a ${kind} is a credential fault: a second ask cannot succeed and would spend the remaining budget against a wall`)
+  if (attempts >= PROVIDER_RETRY_MAX) return no(`the provider retry bound of ${PROVIDER_RETRY_MAX} attempts is spent for ${kind}; ${attempts} attempts were taken over ${waitedMs}ms`)
   if (action === 'park') {
     const resetAt = Number.isFinite(reset?.at_ms) ? reset.at_ms : null
-    if (resetAt === null) return no(`a ${kind} (status ${String(status)}) stated no reset time this driver could read: ${reset?.absent_reason ?? PROVIDER_RESET_ABSENT.NO_FRAME}`)
+    if (resetAt === null) return no(`a ${kind} stated no reset time the lane could read: ${reset?.absent_reason ?? PROVIDER_RESET_ABSENT.NO_FRAME}`)
     const waitMs = Math.max(0, resetAt + PROVIDER_RESET_SETTLE_MS - at)
     if (waitedMs + waitMs > PROVIDER_RETRY_TOTAL_WAIT_MS) return no(`${PROVIDER_RESET_ABSENT.BEYOND_BOUND}: ${kind} resets at ${new Date(resetAt).toISOString()}, ${waitMs}ms out against a ${PROVIDER_RETRY_TOTAL_WAIT_MS}ms bound`, { reset_at: resetAt })
-    return { retry: true, action, wait_ms: waitMs, waited_on: 'reset-time', reset_at: resetAt, attempts_spent: attempts, bound, why: `${kind} (status ${String(status)}) stated a reset; attempt ${attempts + 1} of ${PROVIDER_RETRY_MAX} parks ${waitMs}ms` }
+    return { retry: true, action, wait_ms: waitMs, waited_on: 'reset-time', reset_at: resetAt, attempts_spent: attempts, bound, why: `${kind} stated a reset; attempt ${attempts + 1} of ${PROVIDER_RETRY_MAX} parks ${waitMs}ms` }
   }
   const waitMs = PROVIDER_BACKOFF_LADDER_MS[Math.min(attempts, PROVIDER_BACKOFF_LADDER_MS.length - 1)]
-  if (waitedMs + waitMs > PROVIDER_RETRY_TOTAL_WAIT_MS) return no(`the total provider wait bound of ${PROVIDER_RETRY_TOTAL_WAIT_MS}ms is spent for ${kind} (status ${String(status)}); ${attempts} attempts were taken over ${waitedMs}ms`)
-  return { retry: true, action, wait_ms: waitMs, waited_on: 'backoff-ladder', reset_at: null, attempts_spent: attempts, bound, why: `${kind} (status ${String(status)}) is transient; attempt ${attempts + 1} of ${PROVIDER_RETRY_MAX} backs off ${waitMs}ms` }
+  if (waitedMs + waitMs > PROVIDER_RETRY_TOTAL_WAIT_MS) return no(`the total provider wait bound of ${PROVIDER_RETRY_TOTAL_WAIT_MS}ms is spent for ${kind}; ${attempts} attempts were taken over ${waitedMs}ms`)
+  return { retry: true, action, wait_ms: waitMs, waited_on: 'backoff-ladder', reset_at: null, attempts_spent: attempts, bound, why: `${kind} is transient; attempt ${attempts + 1} of ${PROVIDER_RETRY_MAX} backs off ${waitMs}ms` }
 }

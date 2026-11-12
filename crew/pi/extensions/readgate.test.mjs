@@ -685,7 +685,7 @@ test('readgate is zero-dependency, erasable, and exposes three lifecycle registr
   // The lane layout's journal path is the one shared resolver; nothing else is imported.
   assert.ok(imports.every((specifier) => specifier.startsWith('node:') || specifier === '../context-layout.mjs'), imports.join(', '))
   assert.doesNotMatch(source, /^\s*(enum|namespace)\s/m)
-  assert.deepEqual(Object.keys(mod).sort(), ['DEFAULT_MAX_LINES', 'MAX_LINES_ENV', 'DEFAULT_MAX_BYTES', 'MAX_BYTES_ENV', 'attachReadGate', 'createReadGate', 'default', 'fffSearchProgram'].sort())
+  assert.deepEqual(Object.keys(mod).sort(), ['DEFAULT_MAX_LINES', 'MAX_LINES_ENV', 'DEFAULT_MAX_BYTES', 'MAX_BYTES_ENV', 'attachReadGate', 'createReadGate', 'default', 'fffSearchProgram', 'parseMaxLines'].sort())
 
   const registrations = []
   const gate = mod.attachReadGate({ on: (...args) => registrations.push(args) }, { env: {} })

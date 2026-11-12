@@ -572,10 +572,6 @@ test('cleanup removes the prompt file and its temp dir on every path', async () 
 // Budget refusals interpolate `at ${path}`. Every assertion in this block
 // therefore uses a sentence this file owns or structured data; no refusal
 // assertion may match a bare token that can occur in a filesystem path.
-test('the spawn counter path is inside the task directory', () => {
-  assert.equal(mod.spawnCountPathFrom('/tmp/example-run/task'), '/tmp/example-run/task/subagent-spawns.json')
-})
-
 test('an absent spawn counter starts at zero while other read errors refuse', () => {
   const absent = mod.readSpawnCount('/tmp/missing-counter', () => {
     const error = new Error('missing')
@@ -626,7 +622,7 @@ test('the budget refusal fires', async () => {
   const root = scratchDir('subagent-budget-refusal-')
   const taskDir = join(root, 'task')
   mkdirSync(taskDir, { recursive: true })
-  writeFileSync(mod.spawnCountPathFrom(taskDir), `${JSON.stringify({ spawns: mod.SUBAGENT_SPAWN_BUDGET })}\n`)
+  writeFileSync(join(taskDir, 'subagent-spawns.json'), `${JSON.stringify({ spawns: mod.SUBAGENT_SPAWN_BUDGET })}\n`)
   const run = await driven(mod, {
     root,
     env: {
@@ -649,7 +645,7 @@ test('the last allowance spawns and the next does not', async () => {
   const root = scratchDir('subagent-budget-last-')
   const taskDir = join(root, 'task')
   mkdirSync(taskDir, { recursive: true })
-  const counter = mod.spawnCountPathFrom(taskDir)
+  const counter = join(taskDir, 'subagent-spawns.json')
   writeFileSync(counter, `${JSON.stringify({ spawns: mod.SUBAGENT_SPAWN_BUDGET - 1 })}\n`)
   const first = await driven(mod, { root })
   assert.equal(first.calls.length, 1)
@@ -666,7 +662,7 @@ test('a corrupt spawn counter refuses rather than resetting', async () => {
     const root = scratchDir('subagent-budget-corrupt-')
     const taskDir = join(root, 'task')
     mkdirSync(taskDir, { recursive: true })
-    const counter = mod.spawnCountPathFrom(taskDir)
+    const counter = join(taskDir, 'subagent-spawns.json')
     writeFileSync(counter, bytes)
     const run = await driven(mod, { root })
     assert.equal(run.calls.length, 0, bytes)
@@ -699,12 +695,12 @@ test('depth and the budget are independent bounds', async () => {
   const depth = await driven(mod, { env: { [mod.DEPTH_ENV]: '1' } })
   assert.equal(refusedOf(depth.result).includes('spawn depth is already 1'), true)
   assert.equal(depth.calls.length, 0)
-  assert.equal(existsSync(mod.spawnCountPathFrom(depth.taskDir)), false)
+  assert.equal(existsSync(join(depth.taskDir, 'subagent-spawns.json')), false)
 
   const spentRoot = scratchDir('subagent-budget-depth-')
   const spentTaskDir = join(spentRoot, 'task')
   mkdirSync(spentTaskDir, { recursive: true })
-  writeFileSync(mod.spawnCountPathFrom(spentTaskDir), `${JSON.stringify({ spawns: mod.SUBAGENT_SPAWN_BUDGET })}\n`)
+  writeFileSync(join(spentTaskDir, 'subagent-spawns.json'), `${JSON.stringify({ spawns: mod.SUBAGENT_SPAWN_BUDGET })}\n`)
   const budget = await driven(mod, { root: spentRoot })
   assert.equal(budget.calls.length, 0)
   assert.equal(refusedOf(budget.result).includes('The seat is fine and nothing failed; the budget is spent'), true)
@@ -714,7 +710,7 @@ test('the refusal is bounded and payload-free', async () => {
   const root = scratchDir('subagent-budget-payload-')
   const taskDir = join(root, 'task')
   mkdirSync(taskDir, { recursive: true })
-  writeFileSync(mod.spawnCountPathFrom(taskDir), `${JSON.stringify({ spawns: mod.SUBAGENT_SPAWN_BUDGET })}\n`)
+  writeFileSync(join(taskDir, 'subagent-spawns.json'), `${JSON.stringify({ spawns: mod.SUBAGENT_SPAWN_BUDGET })}\n`)
   const taskMarker = 'TASK_PAYLOAD_MARKER'
   const agentMarker = 'AGENT_NAME_PAYLOAD_MARKER'
   const allowedAgentName = 'A'.repeat(mod.AGENT_NAME_CAP_BYTES)
@@ -848,8 +844,6 @@ test('a lean lane counts its spawns inside its task dir and leaves the parent bu
   const lane = leanLaneFixture()
   const parentCounter = join(lane.parent, 'subagent-spawns.json')
   writeFileSync(parentCounter, '{"spawns":8}\n')
-  assert.equal(mod.spawnCountPathFrom(lane.taskDir, lane.env), join(lane.taskDir, 'subagent-spawns.json'))
-  assert.equal(mod.journalPathFrom(lane.taskDir, lane.env), join(lane.taskDir, 'journal.jsonl'))
   for (const count of [1, 2]) {
     const out = mod.reserveSpawn({ taskDir: lane.taskDir, env: lane.env, readFile: readFileSync, writeFile: writeFileSync })
     assert.equal(out.count, count)
@@ -868,7 +862,7 @@ function nudgeFixture(overrides = {}) {
   const env = { CREW_ROLE: 'planner', CREW_TASK_DIR: taskDir }
   const sends = []
   const nudge = mod.createScoutNudge({ env, send: (message, options) => sends.push({ message, options }), now: () => '2026-10-29T00:00:00.000Z', ...overrides })
-  const journal = mod.journalPathFrom(taskDir, env)
+  const journal = join(taskDir, 'journal.jsonl')
   const rows = () => (existsSync(journal) ? readFileSync(journal, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((r) => r.scout_nudge) : [])
   return { nudge, sends, rows, journal }
 }

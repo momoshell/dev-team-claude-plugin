@@ -47,10 +47,6 @@ function ownerState(owner, d) {
   }
 }
 
-function nonblank(v) {
-  return typeof v === 'string' && v.trim() !== ''
-}
-
 function finiteNow(now) {
   let value
   try { value = now() } catch (cause) {

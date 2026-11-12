@@ -1971,7 +1971,6 @@ test('a lean pi builder declaring advisor and skeletonread launches with both on
   leanLane(probe.taskDir, { anchor })
   await probe.run()
   const [launch] = probe.created
-  assert.equal(launch.env.CREW_CONTEXT_LAYOUT, 'lean')
   assert.equal(launch.env.CREW_TASK_DIR, probe.taskDir)
   assert.equal(launch.env.CREW_ADVISOR, '1')
   for (const name of ['advisor', 'skeletonread']) assert.ok(piExtensions(launch).includes(join(ROOT, 'crew', 'pi', 'extensions', `${name}.ts`)), name)
@@ -1989,7 +1988,7 @@ test('a lean pi builder declaring advisor and skeletonread launches with both on
   writeFileSync(join(replanned.taskDir, 'planner-4.json'), JSON.stringify({ ...accepted, details: { ...accepted.details, subject: 'invalid' } }))
   writeFileSync(join(replanned.taskDir, 'planner-5.json'), JSON.stringify({ ...accepted, status: 'insufficient', details: { ...accepted.details, files_in_scope: ['wrong.mjs'] } }))
   await replanned.run()
-  const env = { CREW_CONTEXT_LAYOUT: 'lean', CREW_TASK_DIR: replanned.taskDir }
+  const env = { CREW_TASK_DIR: replanned.taskDir }
   assert.equal(loadAcceptedContext({ taskDir: replanned.taskDir, cwd: replanned.cwd, env })?.planner_number, 3)
   assert.deepEqual(advisorContext({ taskDir: replanned.taskDir, env }).files_in_scope, ['a.mjs'])
 })

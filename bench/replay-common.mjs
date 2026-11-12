@@ -6,7 +6,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-export const BENCH_DIR = dirname(fileURLToPath(import.meta.url))
+const BENCH_DIR = dirname(fileURLToPath(import.meta.url))
 export const CHECKOUT = resolve(BENCH_DIR, '..')
 export const CORPUS_DIR = join(BENCH_DIR, 'corpus')
 
@@ -286,7 +286,7 @@ export function prepareLane({ role, lane, outDir, onCleanup, charterBody, buildF
   return { prompt, briefText: readFileSync(join(dir, 'brief.md'), 'utf8'), cwd: tree, taskDir: task, returnName, plan: planDetails }
 }
 
-export async function loadSeat(deps) {
+async function loadSeat(deps) {
   if (deps.runAcpSeat) return deps.runAcpSeat
   return (await import(new URL('../crew/acp/seat.mjs', import.meta.url).href)).runAcpSeat
 }

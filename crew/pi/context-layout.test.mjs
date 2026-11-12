@@ -8,7 +8,7 @@ const { journalPathOf, plannerReturnNumber, plannerReturnsDirOf, spawnCountPathO
 // MUTATION: restore the dirname branch in laneDir
 test('every resolver places the lane context inside the task dir whatever the environment names', () => {
   const task = '/runs/lane/task'
-  for (const env of [{}, { CREW_CONTEXT_LAYOUT: 'old' }]) assert.equal(journalPathOf(task, env), join(task, 'journal.jsonl'))
+  assert.equal(journalPathOf(task), join(task, 'journal.jsonl'))
   assert.equal(spawnCountPathOf(task, 'spawns.json'), join(task, 'spawns.json'))
   assert.equal(plannerReturnsDirOf(task), task)
   assert.equal(plannerReturnNumber('d12.planner.json'), null)

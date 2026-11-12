@@ -73,7 +73,6 @@ const defaultSnapshotFile = (path) => {
 }
 const defaultAppend = (path, text) => appendFileSync(path, text)
 const defaultNow = () => new Date().toISOString()
-const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key)
 
 function countTextLines(raw) {
   const text = Buffer.isBuffer(raw) ? raw.toString('utf8') : String(raw ?? '')
@@ -87,7 +86,7 @@ function defaultCountLines(path) {
   return countTextLines(defaultRead(path))
 }
 
-function parseMaxLines(value) {
+export function parseMaxLines(value) {
   if (value === undefined) return DEFAULT_MAX_LINES
   if (typeof value === 'number') {
     if (Number.isSafeInteger(value) && value > 0) return value
@@ -142,7 +141,7 @@ function capReadText(text, maxBytes, start, path) {
 }
 
 function hasRange(input) {
-  return Boolean(input && typeof input === 'object' && (own(input, 'offset') || own(input, 'limit')))
+  return Boolean(input && typeof input === 'object' && (Object.hasOwn(input, 'offset') || Object.hasOwn(input, 'limit')))
 }
 
 function isReadTool(toolName) { return toolName === 'read' }
@@ -515,8 +514,8 @@ export function createReadGate(options = {}) {
   }
 
   function normalizeRange(input, lineCount) {
-    const start = own(input, 'offset') ? validPositiveInteger(input.offset, 'offset') : 1
-    const limit = own(input, 'limit') ? validPositiveInteger(input.limit, 'limit') : undefined
+    const start = Object.hasOwn(input, 'offset') ? validPositiveInteger(input.offset, 'offset') : 1
+    const limit = Object.hasOwn(input, 'limit') ? validPositiveInteger(input.limit, 'limit') : undefined
     const end = limit === undefined ? lineCount : Math.min(lineCount, start + limit - 1)
     return { start, end }
   }

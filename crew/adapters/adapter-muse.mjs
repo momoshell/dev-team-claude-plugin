@@ -76,7 +76,7 @@ export function acpLaunch(spec = {}) {
   const extras = [...(grants.skeletonread ? ['retrieve', 'skeleton'] : []), ...(grants.subagent ? ['agent'] : [])]
   if (extras.length) {
     const server = { name: 'crew-extras', command: { bin: process.execPath, args: [EXTRAS] }, url: null, env: {
-      CREW_TASK_DIR: env.CREW_TASK_DIR || '', CREW_ROLE: env.CREW_ROLE || '', CREW_CONTEXT_LAYOUT: env.CREW_CONTEXT_LAYOUT || '',
+      CREW_TASK_DIR: env.CREW_TASK_DIR || '', CREW_ROLE: env.CREW_ROLE || '',
       CREW_EXTRAS: JSON.stringify(extras), CREW_PI_AGENTS: JSON.stringify(grants.agents || []), CREW_PI_BINARY: piBinary || '',
     } }
     builtServers.add(server)

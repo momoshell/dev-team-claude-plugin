@@ -26,7 +26,7 @@ test('crew-extras lists only granted tools and dispatches retrieve and agent thr
       { id: 5, method: 'tools/call', params: { name: 'other', arguments: {} } },
     ]
     for (const grants of [[], ['retrieve'], ['agent'], ['retrieve', 'agent']]) {
-      const child = spawnSync(process.execPath, [join(ROOT, 'crew/mcp/crew-extras.mjs')], { cwd: root, input: requests.map((request) => JSON.stringify({ jsonrpc: '2.0', ...request })).join('\n') + '\n', encoding: 'utf8', timeout: 10000, env: { ...process.env, CREW_CONTEXT_LAYOUT: 'lean', CREW_TASK_DIR: task, CREW_ROLE: 'builder', CREW_EXTRAS: JSON.stringify(grants), CREW_PI_AGENTS: agent } })
+      const child = spawnSync(process.execPath, [join(ROOT, 'crew/mcp/crew-extras.mjs')], { cwd: root, input: requests.map((request) => JSON.stringify({ jsonrpc: '2.0', ...request })).join('\n') + '\n', encoding: 'utf8', timeout: 10000, env: { ...process.env, CREW_TASK_DIR: task, CREW_ROLE: 'builder', CREW_EXTRAS: JSON.stringify(grants), CREW_PI_AGENTS: agent } })
       assert.equal(child.status, 0, child.stderr)
       const rows = child.stdout.trim().split('\n').map((line) => JSON.parse(line).result)
       assert.deepEqual(rows[0].tools.map((tool) => tool.name), grants)
@@ -43,7 +43,7 @@ test('crew-extras lists only granted tools and dispatches retrieve and agent thr
     writeFileSync(pi, `#!${process.execPath}\nprocess.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: JSON.stringify(${JSON.stringify(findings)}) } }) + '\\n')\n`, { mode: 0o755 })
     const scout = JSON.stringify({ jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'agent', arguments: { agent: 'scout', task: 'inspect inside' } } }) + '\n'
     for (const binary of ['', pi]) {
-      const child = spawnSync(process.execPath, [join(ROOT, 'crew/mcp/crew-extras.mjs')], { cwd: root, input: scout, encoding: 'utf8', timeout: 10000, env: { ...process.env, CREW_CONTEXT_LAYOUT: 'lean', CREW_TASK_DIR: task, CREW_ROLE: 'builder', CREW_EXTRAS: '["agent"]', CREW_PI_AGENTS: agent, CREW_PI_BINARY: binary } })
+      const child = spawnSync(process.execPath, [join(ROOT, 'crew/mcp/crew-extras.mjs')], { cwd: root, input: scout, encoding: 'utf8', timeout: 10000, env: { ...process.env, CREW_TASK_DIR: task, CREW_ROLE: 'builder', CREW_EXTRAS: '["agent"]', CREW_PI_AGENTS: agent, CREW_PI_BINARY: binary } })
       assert.equal(child.status, 0, child.stderr)
       const result = JSON.parse(child.stdout.trim()).result
       if (binary) assert.deepEqual(JSON.parse(result.content[0].text), findings)

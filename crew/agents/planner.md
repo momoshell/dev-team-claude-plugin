@@ -40,7 +40,9 @@ For a `done` envelope, write `summary` as a one-line, present-tense statement of
 
 Give the envelope a nonempty `summary` and no top-level field beyond the example's.
 
-Details keys: `subject`, `plan_path`, `tests`.
+Details keys: `subject`, `plan_path`, `tests`, `files_in_scope`.
+
+These keys are for `done`; `insufficient` and `escalate` need only `summary` and, for `escalate`, `details.question`.
 
 The `subject` is the conventional-commit subject for this change, at most 72 characters, written `type(scope): summary` with an optional scope and optional `!` after it. The type is one of `chore`, `ci`, `crew`, `docs`, `feat`, `fix`, `merge`, `perf`, `refactor`, `revert`, `spike`, `test`, `wip`, `workflow`. It names both the commit and the PR. Do not write a PR body: the loop generates it from the measured results.
 

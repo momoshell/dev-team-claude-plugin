@@ -145,7 +145,7 @@ function fakes(options = {}) {
   }
   const envelope = (request) => ({
     role: request.role, id: request.id, status: 'done', summary: 'fixture',
-    details: request.role === 'planner' ? { subject: 'fix(crew): planned lane', plan_path: '/virtual/task/plan.md', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
+    details: request.role === 'planner' ? { subject: 'fix(crew): planned lane', plan_path: '/virtual/task/plan.md', tests: [{ file: 'lib.test.mjs', title: 'works' }], files_in_scope: ['lib.mjs'] }
       : request.role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
       : request.role === 'lead' ? { decision: options.lead ?? 'escalate', ...((options.lead ?? 'escalate') === 'escalate' ? { question: 'Which way should the lane go?' } : options.lead === 'bounce' ? { target: options.target ?? 'builder' } : {}) }
       : (() => {
@@ -883,6 +883,37 @@ test('plan-revised, mechanical-restart, finish-stop and finish-return feedback c
 const count = (f, role) => f.requests.filter((r) => r.role === role).length
 const stopped = (reason) => ({ status: 'stopped', reason, pr: null })
 
+test('a planner done without files_in_scope gets a repair turn and the lane continues', async () => {
+  const f = fakes({ edit: (v, r) => { if (r.role === 'planner' && !r.repair) delete v.details.files_in_scope; return v } })
+  assert.equal((await f.go()).status, 'done')
+  const planners = f.requests.filter((r) => r.role === 'planner')
+  assert.equal(planners.length, 2)
+  assert.ok(planners[1].repair.defects.includes('details.files_in_scope is required'))
+})
+
+test('a planner escalate with only a question reaches the lead instead of stopping envelope-refused', async () => {
+  const f = fakes({ edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate', details: { question: 'Which plan?' } } : v })
+  assert.deepEqual(await f.go(), stopped('lead-escalated'))
+  assert.equal(count(f, 'planner'), 1)
+  assert.equal(f.requests.find((r) => r.role === 'lead').feedback[0].envelope.details.question, 'Which plan?')
+})
+
+test('a lead accept of a planner insufficient without done fields bounces the planner', async () => {
+  const f = fakes({ lead: 'accept', edit: (v) => v.role === 'planner' ? { ...v, status: 'insufficient', details: {} } : v })
+  assert.deepEqual(await f.go(), stopped('no-progress'))
+  assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'lead', 'planner'])
+})
+
+test('an envelope with a stale id is refused with a named id defect in the envelope row and the stop observation', async () => {
+  const f = fakes({ edit: (v) => v.role === 'builder' ? { ...v, id: 'lane.planner.1' } : v })
+  assert.deepEqual(await f.go(), stopped('envelope-refused'))
+  const rows = f.rows.filter((r) => r.event === 'envelope' && r.role === 'builder')
+  assert.ok(rows.length > 0)
+  for (const row of rows) assert.match(row.defects.join(' '), /issued id lane\.builder\./)
+  assert.match(f.rows.find((r) => r.event === 'verdict').observation.defects.join(' '), /issued id lane\.builder\./)
+  assert.match(f.requests.find((r) => r.role === 'builder' && r.repair).repair.defects.join(' '), /issued id lane\.builder\./)
+})
+
 // MUTATION: return pr null from the success result and the published PR is lost.
 test('a green run walks every stage in order and returns the measured PR with each input forwarded', async () => {
   const f = fakes()
@@ -899,7 +930,7 @@ test('a green run walks every stage in order and returns the measured PR with ea
   assert.deepEqual(f.seen.publish, { cwd: '/virtual/checkout', branch: 'lane', base: 'main', title: 'fix(crew): planned lane', body: PR_BODY, closes: [12] })
   const planner = f.requests[0]
   assert.deepEqual(Object.keys(planner).sort(), ['brief', 'feedback', 'id', 'planPath', 'returnPath', 'role', 'seat', 'tier'])
-  assert.deepEqual(Object.keys(f.requests[1]).sort(), [...Object.keys(planner), 'filesInScope'].sort())
+  assert.deepEqual(Object.keys(f.requests[1]).sort(), [...Object.keys(planner), 'filesInScope', 'testsRequired'].sort())
   assert.deepEqual(Object.keys(f.requests[2]).sort(), [...Object.keys(planner), 'filesInScope', 'changedPaths', 'builderReport'].sort())
   assert.deepEqual(f.requests[1], { ...f.requests[1], role: 'builder', planPath: '/virtual/task/plan.md', feedback: [] })
   assert.equal(new Set(f.requests.map((r) => r.id)).size, f.requests.length)
@@ -918,9 +949,6 @@ test('accepted scope survives repaired envelopes, repeated turns and finish', as
   assert.ok(f.requests.some((r) => r.role === 'planner' && r.repair))
   assert.ok(f.requests.some((r) => r.role === 'builder' && r.repair))
   for (const request of f.requests.filter((r) => ['builder', 'reviewer'].includes(r.role))) assert.deepEqual(request.filesInScope, scope)
-  const absent = fakes()
-  assert.equal((await absent.go()).status, 'done')
-  for (const request of absent.requests.slice(1)) assert.equal(request.filesInScope, null)
   const finish = fakes({ spec: finishSpec({ filesInScope: scope }), unseated: ['planner'] })
   assert.equal((await finish.go()).status, 'done')
   for (const request of finish.requests) assert.deepEqual(request.filesInScope, scope)
@@ -1151,14 +1179,13 @@ test("only a '{'-starting unparseable envelope gets a parse repair turn", async 
   assert.equal(planners[1].repair, undefined)
 })
 
-// MUTATION: repair a file that was never JSON, or one refused only for its id or skill proof.
-test('a non-JSON, empty, unreadable, id-only or proof-only refusal gets no repair turn', async () => {
+// MUTATION: repair a file that was never JSON, or one refused only for skill proof.
+test('a non-JSON, empty, unreadable or proof-only refusal gets no repair turn', async () => {
   for (const [options, reason] of [
     [{ edit: () => 'not JSON' }, 'envelope-refused'],
     [{ edit: () => '' }, 'seat-unmeasured'],
     [{ readError: 'EPERM' }, 'seat-unmeasured'],
     [{ seatThrows: 'planner' }, 'seat-unmeasured'],
-    [{ edit: (v) => ({ ...v, id: 'stale-return' }) }, 'envelope-refused'],
     [required([]), 'envelope-refused'],
   ]) {
     const f = fakes(options)

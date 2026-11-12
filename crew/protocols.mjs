@@ -277,7 +277,7 @@ export const FINDING_DISPOSITIONS = Object.freeze(['auto-fix', 'ask-user', 'no-o
 const FINDING_ID = /^[A-Za-z0-9_-]{1,64}$/
 const REVIEW_KEYS = Object.freeze(['verdict', 'findings', 'requirements', 'failure_modes', 'coverage'])
 const DETAIL_KEYS = Object.freeze({
-  planner: ['subject', 'plan_path', 'tests'],
+  planner: ['subject', 'plan_path', 'tests', 'files_in_scope'],
   builder: ['summary'],
   reviewer: REVIEW_KEYS,
   'tech-lead': REVIEW_KEYS,
@@ -285,13 +285,13 @@ const DETAIL_KEYS = Object.freeze({
 })
 // Fields a role may carry beyond its required ones. A planner states the context the builder's arms read.
 const OPTIONAL_DETAIL_KEYS = Object.freeze({
-  planner: ['files_in_scope', 'validation_lane', 'judge', 'question'],
+  planner: ['validation_lane', 'judge', 'question'],
   builder: ['tests', 'notes', 'question', 'subject', 'gap'],
   reviewer: ['question', 'closed', 'findings_omitted'],
   'tech-lead': ['question', 'closed', 'findings_omitted'],
   lead: ['question', 'target', 'instructions'],
 })
-const ARCHIVED_OPTIONAL = Object.freeze({ planner: ['tests'], reviewer: ['requirements', 'failure_modes', 'coverage'], 'tech-lead': ['requirements', 'failure_modes', 'coverage'] })
+const ARCHIVED_OPTIONAL = Object.freeze({ planner: ['tests', 'files_in_scope'], reviewer: ['requirements', 'failure_modes', 'coverage'], 'tech-lead': ['requirements', 'failure_modes', 'coverage'] })
 // ADR-055 §8: archived planner returns still carry these fields.
 const LEGACY_DETAIL_KEYS = Object.freeze({
   planner: ['acceptance', 'gate_path', 'gate_cmd', 'mutations'],
@@ -362,7 +362,7 @@ export function validateEnvelope(role, envelope, { archived = false, prior = [] 
         else if (!required.includes(key) && !(archived && (LEGACY_DETAIL_KEYS[role] ?? []).includes(key))) defects.push(`details.${key} is not a field of ${role} details`)
       }
       for (const key of required) {
-        if (!Object.hasOwn(details, key)) { if (!archived || !(ARCHIVED_OPTIONAL[role] ?? []).includes(key)) defects.push(`details.${key} is required`); continue }
+        if (!Object.hasOwn(details, key)) { if (!(['planner', 'reviewer', 'tech-lead'].includes(role) && ['insufficient', 'escalate'].includes(envelope.status)) && (!archived || !(ARCHIVED_OPTIONAL[role] ?? []).includes(key))) defects.push(`details.${key} is required`); continue }
         const v = details[key]
         if (Object.hasOwn(DETAIL_RULES, key)) { if (!DETAIL_RULES[key][0](v)) defects.push(`details.${key} ${DETAIL_RULES[key][1]}`) }
         else if (key === 'findings' && !Array.isArray(v)) defects.push('details.findings is a list of findings')
@@ -393,7 +393,7 @@ export function validateEnvelope(role, envelope, { archived = false, prior = [] 
         if (!archived && envelope.status === 'done' && details.verdict === 'changes-needed' && Array.isArray(details.findings) && !details.findings.some((f) => plain(f) && f.severity === 'must-fix')) defects.push('details.verdict is changes-needed but no finding is must-fix')
         if (details.verdict === 'pass' && Array.isArray(details.requirements) && details.requirements.some((r) => r?.status === 'unmet')) defects.push('details.verdict is pass but a requirement is unmet')
         if (details.verdict === 'pass' && Object.hasOwn(details, 'coverage') && details.coverage?.complete !== true) defects.push('details.verdict is pass but coverage is incomplete')
-        if (!archived && Array.isArray(prior)) for (const id of prior) {
+        if (!archived && (envelope.status === 'done' || Object.hasOwn(details, 'findings')) && Array.isArray(prior)) for (const id of prior) {
           if (typeof id === 'string' && FINDING_ID.test(id) && !(Array.isArray(details.findings) && details.findings.some((f) => f?.id === id)) && !(Array.isArray(details.closed) && details.closed.some((c) => c?.id === id))) defects.push(`details must carry or close prior finding ${id}`)
         }
       }

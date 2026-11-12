@@ -344,7 +344,7 @@ test('P5 tier overrides are validated by path', () => {
 
 // P2, the seat envelope.
 const DETAILS = {
-  planner: { subject: 'fix(crew): name the lane change', plan_path: '/task/plan.md', tests: [] },
+  planner: { subject: 'fix(crew): name the lane change', plan_path: '/task/plan.md', tests: [], files_in_scope: ['lib.mjs'] },
   builder: { summary: 'Implemented the change.' },
   reviewer: { verdict: 'pass', findings: [], requirements: [{ requirement: 'build it', status: 'met', evidence: 'read it' }], failure_modes: [], coverage: { read: ['lib.mjs'], complete: true } },
   'tech-lead': { verdict: 'pass', findings: [], requirements: [{ requirement: 'build it', status: 'met', evidence: 'read it' }], failure_modes: [], coverage: { read: ['lib.mjs'], complete: true } },
@@ -354,6 +354,29 @@ const envelope = (role, overrides = {}) => ({ role, id: 'd1', status: 'done', su
 const finding = (overrides = {}) => ({ id: 'RV1-1', severity: 'should-fix', location: 'crew/protocols.mjs:1', summary: 'Malformed input is accepted.', ...overrides })
 const review = (findings, verdict = 'changes-needed', role = 'reviewer') => envelope(role, { details: { ...structuredClone(DETAILS[role]), verdict, findings } })
 const refusedFor = (role, value, needle) => validateEnvelope(role, value).defects.filter((d) => d.includes(needle))
+
+test('P2 a planner, reviewer or tech-lead insufficient or escalate needs only a summary and, for escalate, a question', () => {
+  for (const role of ['planner', 'reviewer', 'tech-lead']) for (const status of ['insufficient', 'escalate']) {
+    const details = status === 'escalate' ? { question: 'Which way?' } : {}
+    const value = envelope(role, { status, details })
+    const options = { prior: ['R1'] }
+    assert.deepEqual(validateEnvelope(role, value, options).defects, [], `${role}/${status}`)
+    const key = role === 'planner' ? 'tests' : 'verdict'
+    value.details[key] = role === 'planner' ? {} : 'maybe'
+    assert.ok(validateEnvelope(role, value, options).defects.some((d) => d.startsWith(`details.${key} `)))
+    if (role !== 'planner') {
+      value.details.findings = []
+      assert.ok(validateEnvelope(role, value, options).defects.includes('details must carry or close prior finding R1'))
+    }
+  }
+})
+
+test('P2 a done planner return requires files_in_scope unless archived', () => {
+  const value = envelope('planner')
+  delete value.details.files_in_scope
+  assert.ok(validateEnvelope('planner', value).defects.includes('details.files_in_scope is required'))
+  assert.deepEqual(validateEnvelope('planner', value, { archived: true }).defects, [])
+})
 
 test('P2 vocabularies are closed and frozen', () => {
   assert.deepEqual(ENVELOPE_FIELDS, ['role', 'id', 'status', 'summary', 'details'])
@@ -464,7 +487,7 @@ test('P2 planner details need no acceptance and may carry a one-line judge reaso
 test('P2 planner details may carry the context its builder arms read, and refuse it malformed', () => {
   const full = envelope('planner'); Object.assign(full.details, { files_in_scope: ['crew/a.mjs'], validation_lane: 'node --test crew/a.test.mjs' })
   assert.deepEqual(validateEnvelope('planner', full).defects, [])
-  assert.deepEqual(validateEnvelope('planner', envelope('planner')).defects, [], 'the fields are optional')
+  assert.deepEqual(validateEnvelope('planner', envelope('planner')).defects, [], 'validation_lane is optional')
   for (const [key, bad] of [['files_in_scope', []], ['files_in_scope', 'a.mjs'], ['files_in_scope', ['a.mjs', '']], ['files_in_scope', [3]], ['validation_lane', ''], ['validation_lane', 5]]) {
     const value = envelope('planner'); value.details[key] = bad
     assert.equal(refusedFor('planner', value, `details.${key}`).length, 1, `${key} ${JSON.stringify(bad)}`)

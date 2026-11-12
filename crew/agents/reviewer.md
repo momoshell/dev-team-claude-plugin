@@ -37,3 +37,5 @@ Finding severities: `must-fix`, `should-fix`, `consider`.
 Give the envelope a nonempty `summary` and no top-level field beyond the example's.
 
 Details keys: `verdict`, `findings`, `requirements`, `failure_modes`, `coverage`.
+
+These keys are for `done`; `insufficient` and `escalate` need only `summary` and, for `escalate`, `details.question`.

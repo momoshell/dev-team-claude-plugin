@@ -957,7 +957,7 @@ const EINTR = Object.assign(new Error('turn interrupted'), { code: 'EINTR' })
 const EPERM = Object.assign(new Error('denied'), { code: 'EPERM' })
 
 // A lane's whole loop with every outside effect faked: seats answer by envelope id, recordings are real files.
-function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = {}, scope, repairPlan = false, repairBuilder = false, status = 'M  src/a.mjs\0' } = {}) {
+function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = {}, scope = ['src/a.mjs'], planTests = [{ file: 'lib.test.mjs', title: 'works' }], repairPlan = false, repairBuilder = false, status = 'M  src/a.mjs\0' } = {}) {
   const dir = scratchDir('lean-')
   const spec = {
     id: 'lane', cwd: join(dir, 'worktree'), taskDir: join(dir, 'task'), tier, shape: 'standard', brief: BRIEF,
@@ -969,7 +969,7 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
   const envelope = (role, id) => {
     const n = Number(id.split('.').at(-1))
     const own = answers[`${role}.${n}`]
-    const details = role === 'planner' ? { subject: 'fix(crew): publish measured lane results', tests: [{ file: 'lib.test.mjs', title: 'works' }], plan_path: join(spec.taskDir, 'plan.md'), ...(scope === undefined ? {} : { files_in_scope: scope }) }
+    const details = role === 'planner' ? { subject: 'fix(crew): publish measured lane results', tests: planTests, plan_path: join(spec.taskDir, 'plan.md'), files_in_scope: scope }
       : role === 'builder' ? { summary: 'built', ...(tier === 'mechanical' ? { subject: 'docs(crew): fix typo' } : {}), tests: [{ file: 'lib.test.mjs', title: 'works' }], notes: `builder turn ${n}` }
       : role === 'lead' ? { decision: 'bounce', target: 'builder' }
       : { verdict: reviews[review] ?? 'pass', findings: reviews[review++] === 'changes-needed' ? [{ id: 'F1', severity: 'must-fix', location: 'a:1', summary: 'redo-this', trigger: 'bad input' }] : [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['a'], complete: true }, ...(review > 1 ? { closed: [{ id: 'F1', evidence: 'fixed' }] } : {}) }
@@ -987,7 +987,7 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
     if (input.definition.role === 'planner') for (const name of ['plan.md', 'gate.mjs']) writeFileSync(join(spec.taskDir, name), '')
     const value = envelope(input.definition.role, id)
     if (repairPlan && input.definition.role === 'planner' && !input.prompt.startsWith('Your envelope was refused.')) value.details.files_in_scope = [123]
-    if (repairBuilder && input.definition.role === 'builder' && !input.prompt.startsWith('Your envelope was refused.')) delete value.details.subject
+    if (repairBuilder && input.definition.role === 'builder' && !input.prompt.startsWith('Your envelope was refused.')) delete value.details[tier === 'mechanical' && spec.shape !== 'finish' ? 'subject' : 'summary']
     writeFileSync(path, JSON.stringify(value))
     return { stopReason: 'end_turn', usage: null, refusal: null }
   })
@@ -1028,7 +1028,7 @@ test('a lean seat turn journals its agent, model, effort, distinct tool calls, s
     input.deps.appendFileSync(input.sessionFile, 'not json\n', 'utf8')
     mkdirSync(f.spec.taskDir, { recursive: true })
     if (role === 'planner') writeFileSync(join(f.spec.taskDir, 'plan.md'), '')
-    const details = role === 'planner' ? { subject: 'fix(crew): planned', plan_path: 'plan.md', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
+    const details = role === 'planner' ? { subject: 'fix(crew): planned', plan_path: 'plan.md', tests: [{ file: 'lib.test.mjs', title: 'works' }], files_in_scope: ['src/a.mjs'] }
       : role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
       : { verdict: 'pass', findings: [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['a'], complete: true } }
     writeFileSync(path, JSON.stringify({ role, id, status: 'done', summary: 'ok', details }))
@@ -1115,6 +1115,29 @@ test('a session/new refusal that is not a logged-out message keeps seat-unmeasur
     const verdicts = rows.filter((row) => row.event === 'verdict')
     assert.equal(verdicts.length, 1)
     assert.match(verdicts[0].observation.error.message, /\[acp-protocol-mismatch\]/)
+  }
+})
+
+test("a builder prompt's P2 example names tests only when the lane requires them", async () => {
+  for (const [tier, planTests, required, finish] of [
+    ['mechanical', undefined, false, false], ['build', [], false, false], ['build', undefined, true, false],
+    ['mechanical', undefined, false, true], ['build', [], false, true], ['build', undefined, true, true],
+  ]) {
+    const f = leanFixture({ tier, planTests, repairBuilder: true })
+    if (finish) {
+      f.spec.shape = 'finish'
+      f.spec.finish = { planPath: tier === 'mechanical' ? null : 'plan.md', subject: 'fix: test', filesInScope: ['src/a.mjs'], testsRequired: required, stop: { reason: 'stopped' }, findings: [], turnOffset: 3 }
+      f.options.loopDeps.rebaseBranch = async () => ({ status: 'green', reason: null, head: 'b'.repeat(40), onto: 'c'.repeat(40) })
+    }
+    await f.go()
+    const prompts = f.requests.filter((r) => r.definition.role === 'builder').map((r) => r.prompt)
+    assert.equal(prompts.length, 2)
+    for (const prompt of prompts) {
+      const example = JSON.parse(prompt.slice(prompt.lastIndexOf('{\n  "role"'), prompt.lastIndexOf('}') + 1))
+      assert.equal(Object.hasOwn(example.details, 'tests'), required)
+      if (required) assert.deepEqual(example.details.tests, [{ file: '<repo-relative test file>', title: '<exact test title>' }])
+      assert.deepEqual(validateEnvelope('builder', example).defects, [])
+    }
   }
 })
 
@@ -1723,7 +1746,7 @@ test('a refused ACP turn is read after the turn: a valid return is accepted, an 
       const path = /^Return path: (.+)$/m.exec(input.prompt)[1]
       mkdirSync(f.spec.taskDir, { recursive: true })
       if (role === 'planner') writeFileSync(join(f.spec.taskDir, 'plan.md'), '')
-      const details = role === 'planner' ? { subject: 'fix(crew): planned', plan_path: 'plan.md', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
+      const details = role === 'planner' ? { subject: 'fix(crew): planned', plan_path: 'plan.md', tests: [{ file: 'lib.test.mjs', title: 'works' }], files_in_scope: ['src/a.mjs'] }
         : role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
         : { verdict: 'pass', findings: [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['a'], complete: true } }
       writeFileSync(path, role === 'planner' && mode !== 'valid' ? '{' : JSON.stringify({ role, id, status: 'done', summary: 'ok', details }))
@@ -1834,7 +1857,7 @@ async function retryRun(refusals, { oversleep = 0 } = {}) {
       if (refusal) return { stopReason: null, usage: null, refusal }
       mkdirSync(f.spec.taskDir, { recursive: true })
       if (input.definition.role === 'planner') for (const name of ['plan.md', 'gate.mjs']) writeFileSync(join(f.spec.taskDir, name), '')
-      const details = input.definition.role === 'planner' ? { subject: 'fix(crew): publish measured lane results', tests: [{ file: 'lib.test.mjs', title: 'works' }], plan_path: 'plan.md' }
+      const details = input.definition.role === 'planner' ? { subject: 'fix(crew): publish measured lane results', tests: [{ file: 'lib.test.mjs', title: 'works' }], plan_path: 'plan.md', files_in_scope: ['src/a.mjs'] }
         : input.definition.role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }] } : { verdict: 'pass', findings: [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['a'], complete: true } }
       writeFileSync(path, JSON.stringify({ role: input.definition.role, id, status: 'done', summary: 'x', details }))
       return { stopReason: 'end_turn', usage: { input_tokens: 1 }, refusal: null }
@@ -1965,7 +1988,7 @@ test('a schema-refused builder envelope gets one fresh repair-only turn at the s
     const n = turns[role] = (turns[role] ?? 0) + 1
     mkdirSync(f.spec.taskDir, { recursive: true })
     if (role === 'planner') for (const name of ['plan.md', 'gate.mjs']) writeFileSync(join(f.spec.taskDir, name), '')
-    const value = { role, id, status: 'done', summary: 'fixture', details: role === 'planner' ? { subject: 'fix(crew): publish measured lane results', tests: [{ file: 'lib.test.mjs', title: 'works' }], plan_path: join(f.spec.taskDir, 'plan.md') } : role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }], ...(n === 1 ? { gaps: [] } : {}) } : { verdict: 'pass', findings: [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['a'], complete: true } } }
+    const value = { role, id, status: 'done', summary: 'fixture', details: role === 'planner' ? { subject: 'fix(crew): publish measured lane results', tests: [{ file: 'lib.test.mjs', title: 'works' }], plan_path: join(f.spec.taskDir, 'plan.md'), files_in_scope: ['src/a.mjs'] } : role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }], ...(n === 1 ? { gaps: [] } : {}) } : { verdict: 'pass', findings: [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['a'], complete: true } } }
     mkdirSync(f.spec.taskDir, { recursive: true })
     writeFileSync(path, JSON.stringify(value))
     return { stopReason: 'end_turn', usage: null, refusal: null }
@@ -1998,11 +2021,12 @@ test('lean prompts contain only the lean contract', async () => {
   for (const { prompt, definition } of f.requests) {
     assert.doesNotMatch(prompt, /^Charter file/m, definition.role)
     assert.doesNotMatch(prompt, /\]\([^)]*roles\//, definition.role)
-    // Only the planner states the context the builder's arms read; no other turn names it.
+    // Feedback may quote the planner's scope; the other charters and examples do not state it.
+    const contract = prompt.split('## Feedback')[0] + prompt.split('## Return').at(-1)
     for (const field of ['validation_lane', 'files_in_scope']) {
       const matcher = new RegExp(`\\b${field}\\b`)
-      if (definition.role === 'planner') assert.match(prompt, matcher, `planner: ${field}`)
-      else assert.doesNotMatch(prompt, matcher, `${definition.role}: ${field}`)
+      if (definition.role === 'planner') assert.match(contract, matcher, `planner: ${field}`)
+      else assert.doesNotMatch(contract, matcher, `${definition.role}: ${field}`)
     }
     for (const field of ['commit_subject', 'closes', 'exemplars', 'exemplars_none', 'consult_questions']) {
       assert.doesNotMatch(prompt, new RegExp(`\\b${field}\\b`), `${definition.role}: ${field}`)

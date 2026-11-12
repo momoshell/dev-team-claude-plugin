@@ -4,6 +4,7 @@
 import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import { supersededReturn } from './lean-journal-order.mjs'
+import { deadRun, probeAlive } from '../../crew/run-pid.mjs'
 
 const LEAN_SPEC_FILE = 'lean.json'
 const VERDICT_EVENT = 'verdict'
@@ -41,9 +42,22 @@ function within(root, path) {
   } catch { return false }
 }
 
-export function createLeanSource({ crewRoot, archiveRoot } = {}) {
+export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive } = {}) {
   const root = resolve(crewRoot)
   const archive = resolve(archiveRoot ?? join(dirname(root), '.crew-journal-archive'))
+  const cache = new Map()
+  function cacheEntry(path, laneDir) {
+    try {
+      if (!within(laneDir, path)) return null
+      const { mtimeMs, size } = statSync(path)
+      let entry = cache.get(path)
+      if (!entry || entry.mtimeMs !== mtimeMs || entry.size !== size) {
+        entry = { mtimeMs, size }
+        cache.set(path, entry)
+      }
+      return entry
+    } catch { return null }
+  }
 
   // Live lanes and their sibling archives come first, followed by the newest closeout archive.
   function candidates(lane) {
@@ -57,8 +71,13 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
           let at = null
           try {
             if (within(base, laneDir) && within(laneDir, path)) {
-              const value = JSON.parse(readFileSync(path, 'utf8').split('\n')[0]).at
-              if (Number.isFinite(value)) at = value
+              const entry = cacheEntry(path, laneDir)
+              if (entry && Object.hasOwn(entry, 'at')) at = entry.at
+              else {
+                const value = JSON.parse(readFileSync(path, 'utf8').split('\n')[0]).at
+                if (Number.isFinite(value)) at = value
+                if (entry) entry.at = at
+              }
             }
           } catch { /* An unreadable first row has unknown time. */ }
           return { name, at, suffix: name === `dt-${lane}` ? 1 : Number(name.slice(prefix.length)) }
@@ -145,11 +164,15 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
   function readSeatSessions(found, role) {
     if (typeof role !== 'string' || !ROLE.test(role) || !Object.hasOwn(found.members, role)) return { status: 400, error: `${JSON.stringify(role)} is not a member of lane ${found.lane}` }
     const roleDir = join(found.dir, 'task', LEAN_SESSIONS_DIR, role)
-    const turn = new RegExp(`^[A-Za-z0-9._-]+\\.${role}\\.([0-9]+)(?:\\.[A-Za-z0-9-]+)*\\.jsonl$`)
-    const files = dirs(roleDir).flatMap((name) => (turn.test(name) ? [[Number(name.match(turn)[1]), name]] : []))
-      .sort((a, b) => a[0] - b[0] || (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0))
+    const turn = new RegExp(`^[A-Za-z0-9._-]+\\.${role}\\.([0-9]+)((?:\\.[A-Za-z0-9-]+)*)\\.jsonl$`)
+    const files = dirs(roleDir).flatMap((name) => {
+      const match = name.match(turn)
+      if (!match) return []
+      const suffixes = match[2].split('.')
+      return [[Number(match[1]), (suffixes.includes('repair') ? 2 : 0) + (suffixes.includes('rerun') ? 1 : 0), Number(suffixes.find((s) => /^retry-[1-9]\d*$/.test(s))?.slice(6) ?? 0), name]]
+    }).sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2] || (a[3] < b[3] ? -1 : a[3] > b[3] ? 1 : 0))
     const sessions = [], errors = []
-    for (const [, name] of files) {
+    for (const [, , , name] of files) {
       const path = join(roleDir, name)
       const file = `task/${LEAN_SESSIONS_DIR}/${role}/${name}`
       if (!within(found.dir, path)) { errors.push({ file, error: 'recording resolves outside the lane' }); continue }
@@ -179,6 +202,16 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
     }
   }
 
+  function stageOutcome(outcome) {
+    if (nonEmpty(outcome?.status)) return { status: outcome.status, reason: null }
+    if (typeof outcome?.code === 'number') return { status: outcome.code !== 0 ? 'failed' : 'done', reason: null }
+    if (outcome?.halt) return { status: nonEmpty(outcome.halt.status) ? outcome.halt.status : 'stopped', reason: outcome.halt.reason ?? null }
+    if (outcome?.held) return { status: 'held', reason: outcome.held.reason ?? null }
+    if (outcome?.envelope) return nonEmpty(outcome.envelope.status) ? { status: outcome.envelope.status, reason: null } : { status: 'unknown', reason: 'envelope records no status' }
+    if (outcome?.threw) return { status: 'failed', reason: 'stage threw' }
+    return { status: 'unknown', reason: outcome == null ? 'stage-end records no outcome' : 'stage-end outcome records no status' }
+  }
+
   function summarize(found) {
     const { rows, skipped_malformed, error } = readJournalRows(found)
     const phases = []
@@ -186,16 +219,15 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
     let hand_finished = false, pr_actor = null, lastAt = null
     for (const row of rows) {
       const at = rowTime(row.at)
-      if (row.event === 'run-start') started_at = at
+      if (row.event === 'run-start') { started_at = at; lastAt = null }
       else if (at !== null) lastAt = at
       const stage = nonEmpty(row.stage) ? row.stage : null
       if (stage) latest_stage = stage
       if (row.event === 'stage-start' && stage) phases.push({ id: phases.length + 1, name: stage, status: 'running', checks: [], started_at: at, ended_at: null })
       else if (row.event === 'stage-end' && stage) {
         const phase = phases.findLast((entry) => entry.name === stage && entry.status === 'running')
-        const code = row.outcome?.code
-        const outcome = nonEmpty(row.outcome?.status) ? row.outcome.status : (typeof code === 'number' && code !== 0 ? 'failed' : 'done')
-        if (phase) { phase.status = outcome; phase.ended_at = at } else phases.push({ id: phases.length + 1, name: stage, status: outcome, checks: [], started_at: null, ended_at: at })
+        const outcome = stageOutcome(row.outcome)
+        if (phase) { Object.assign(phase, outcome); phase.ended_at = at } else phases.push({ id: phases.length + 1, name: stage, ...outcome, checks: [], started_at: null, ended_at: at })
       } else if (row.event === 'envelope' && stage && nonEmpty(row.role)) {
         const phase = phases.findLast((entry) => entry.name === stage)
         if (phase) phase.role = row.role
@@ -244,6 +276,10 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
       status = 'running'; running = true
     }
     if (found.archived && running) { status = 'stopped'; reason = 'archived-without-terminal-row'; running = false }
+    if (!found.archived && !error && deadRun({ rows, taskDir: join(found.dir, 'task'), alive, readFileSync: (path, encoding) => {
+      if (!within(found.dir, path)) throw new Error('run pid resolves outside the lane')
+      return readFileSync(path, encoding)
+    } })) { status = 'stopped'; reason = 'run-died'; running = false }
     let ended_at = null, duration_ms = null
     if (!running && lastAt !== null) ended_at = lastAt
     if (started_at !== null && ended_at !== null) duration_ms = Date.parse(ended_at) - Date.parse(started_at)
@@ -257,8 +293,14 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
     const pending = { ...pendingReasons }
     if (!turns.length) pending.tokens = 'no seat-turn rows recorded'
     else if (missing) pending.tokens = nonEmpty(missing.unmeasured?.usage) ? missing.unmeasured.usage : 'usage-malformed'
+    const startIndex = rows.findLastIndex((row) => row.event === 'run-start')
+    const endReason = error || !rows.length ? reason : running ? 'the lane is still open: no terminal row recorded'
+      : startIndex >= 0 && startIndex === rows.length - 1 ? 'the lane journal records no row after run-start'
+        : 'lean journal rows after run-start carry no timestamps'
     if (ended_at !== null) delete pending.ended_at
+    else pending.ended_at = endReason
     if (duration_ms !== null) delete pending.duration_ms
+    else pending.duration_ms = started_at === null ? 'the lane journal records no valid run-start time' : endReason
     if (started_at === null) pending.started_at = 'the lane journal records no valid run-start time'
     const seats = Object.entries(found.members).map(([role, member]) => ({
       role, agent: nonEmpty(member.agent) ? member.agent : null, model: nonEmpty(member.model) ? member.model : null,
@@ -284,7 +326,13 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
       const at = Date.parse(run.started_at)
       return (!filters.since || at >= Date.parse(filters.since)) && (!filters.until || at < Date.parse(filters.until))
     }
-    return lanes().map(summarize).filter((run) => !filters.mode && (!filters.status || filters.status === run.status) && inWindow(run))
+    return lanes().map((found) => {
+      const entry = found.archived ? cacheEntry(join(found.dir, 'task', LEAN_JOURNAL_FILE), found.dir) : null
+      if (entry?.summary) return entry.summary
+      const summary = summarize(found)
+      if (entry) entry.summary = summary
+      return summary
+    }).filter((run) => !filters.mode && (!filters.status || filters.status === run.status) && inWindow(run))
   }
 
   return { listRuns, identify, readJournalRows, readSeatSessions, resolveLane }

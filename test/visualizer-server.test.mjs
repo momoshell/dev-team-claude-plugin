@@ -1052,17 +1052,22 @@ test('/api/health answers schema, crew_root, readonly false and the write list o
   } finally { await stopInProcess(started.server) }
 })
 
-test('VC1 no module under visualizer/server imports crew/ or scripts/ except protocols and agents', () => {
+test('VC1 visualizer server imports only admitted crew modules and pins run-pid dependencies', () => {
   const allowed = new Set(['crew/protocols.mjs', 'crew/agents.mjs'])
   const bad = []
   for (const name of readdirSync(join(ROOT, 'visualizer/server')).filter((file) => file.endsWith('.mjs'))) {
     const source = readFileSync(join(ROOT, 'visualizer/server', name), 'utf8')
     for (const match of source.matchAll(/(?:from|import)\s*\(?\s*['"](\.[^'"]+)['"]/g)) {
       const target = join('visualizer/server', match[1]).split('\\').join('/')
-      if ((target.startsWith('crew/') || target.startsWith('scripts/')) && !allowed.has(target)) bad.push(`${name} -> ${match[1]}`)
+      if ((target.startsWith('crew/') || target.startsWith('scripts/')) && !allowed.has(target) && !(name === 'lean-source.mjs' && target === 'crew/run-pid.mjs')) bad.push(`${name} -> ${match[1]}`)
     }
   }
   assert.deepEqual(bad, [])
+  const imports = (path) => [...readFileSync(join(ROOT, path), 'utf8').matchAll(/(?:from|import)\s*\(?\s*['"]([^'"]+)['"]/g)].map((match) => match[1])
+  const pidImports = imports('crew/run-pid.mjs')
+  assert.ok(pidImports.includes('../visualizer/server/lean-journal-order.mjs'))
+  assert.deepEqual(pidImports.filter((path) => !path.startsWith('node:')), ['../visualizer/server/lean-journal-order.mjs'])
+  assert.deepEqual(imports('visualizer/server/lean-journal-order.mjs'), [])
 })
 
 test('api.js has no client for a route the server no longer serves', () => {

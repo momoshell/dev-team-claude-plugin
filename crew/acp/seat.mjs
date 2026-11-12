@@ -16,7 +16,7 @@ import * as museAdapter from '../adapters/adapter-muse.mjs'
 import { CONTEXT_LAYOUT_ENV, LEAN_LAYOUT, journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../pi/context-layout.mjs'
 import { ADVISOR_MANIFEST_FILE, ADVISOR_CONFIG_VERSION, SAFE_MODEL, ADVISED_ROLES, READ_CAP_BYTES, boundText, createAdvisor, loadContext as advisorContext } from '../pi/extensions/advisor.ts'
 import { loadAcceptedContext } from '../pi/extensions/skeletonread.ts'
-import { createReadGate, fffSearchProgram } from '../pi/extensions/readgate.ts'
+import { createReadGate } from '../pi/extensions/readgate.ts'
 import { createScoutNudge } from '../pi/extensions/subagent.ts'
 
 const ROLE = 'seat'
@@ -315,17 +315,17 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
   const append = deps.appendFileSync ?? appendFileSync
   const real = deps.realpathSync ?? realpathSync
   const laneTaskDir = nonempty(taskDir) ? resolve(taskDir) : null
-  let gateFailed = false
   const readgate = grants.readgate ? createReadGate({ cwd: workdir, taskDir: laneTaskDir, env: { ...env, CREW_FFF: grants.mcp_servers.some((server) => server.name === 'fff') ? '1' : '0' }, recordFailure: (row) => {
-    gateFailed = true
     if (laneTaskDir) append(journalPathOf(laneTaskDir), `${JSON.stringify({ at: new Date().toISOString(), ...row })}\n`)
   } }) : null
   if (contextArms.length) laneContext({ arms: contextArms, role, laneTaskDir, workdir, definition, deps, requirePlan: isMuse && grants.skeletonread })
   const workRoot = canonicalRoot(workdir, real)
   const taskRoot = laneTaskDir ? canonicalRoot(laneTaskDir, real) : null
-  // lean.mjs records every turn under <taskDir>/lean; a seat never edits the record of a turn.
+  // Refuse edit, write and delete requests under <taskDir>/lean; repo Bash is not confined.
+  // crew/lean.mjs protects records with the relayed in-memory copy and lean/ fingerprint.
   // Case is folded because the default macOS volume resolves LEAN and Lean to the same directory.
   const leanRoot = taskRoot ? canonicalWritePath(join(taskRoot, 'lean'), taskRoot, real) : null
+  const journal = taskRoot ? canonicalWritePath(journalPathOf(taskRoot), taskRoot, real) : null
 
   function record(row) {
     try {
@@ -387,16 +387,17 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
         const isRead = toolCall.kind === 'read'
         const path = input?.path ?? input?.file_path
         if (isRead ? nonempty(path) : nonempty(input?.command)) {
-          gateFailed = false
           const event = { toolName: isRead ? 'read' : 'bash', input: isRead ? { ...input, path } : input, toolCallId: toolCall.toolCallId }
           const result = readgate.onToolCall(event, { cwd: workdir })
           if (result?.block) return false
-          // The shared gate handles cd + rg; apply its direct-search rule to the other certain cd shapes too.
-          const cd = !isRead && /^\s*cd\s+((?:"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|\\.|[^\s;&|])+)\s+&&\s+([\s\S]*)$/.exec(input.command)
-          if (cd && !/[`$]/.test(cd[1]) && /^(?:grep|rg|find|fd)(?:\s|$)/.test(cd[2]) && fffSearchProgram(cd[2]) && readgate.onToolCall({ ...event, input: { command: cd[2] } }, { cwd: workdir })?.block) return false
-          if (isRead && !gateFailed) return true
+          if (isRead) return true
         }
-      } catch { /* fall through to the existing permission decision */ }
+      } catch (error) {
+        if (toolCall?.kind === 'read') {
+          try { if (laneTaskDir) append(journalPathOf(laneTaskDir), `${JSON.stringify({ at: new Date().toISOString(), read_gate_failure: { reason: String(error), tool: 'read', target: '' } })}\n`) } catch { /* journaling cannot block the read */ }
+          return true
+        }
+      }
     }
     if (toolCall?.kind === 'execute') {
       if (!nonempty(toolCall.rawInput?.command)) return false
@@ -409,6 +410,9 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
     const target = canonicalWritePath(named[0], workRoot, real)
     if (target == null) return false
     if (inside(target.toLowerCase(), leanRoot?.toLowerCase())) return false
+    if (journal && target.toLowerCase() === journal.toLowerCase()) return false
+    const name = basename(target).toLowerCase()
+    if (taskRoot && dirname(target).toLowerCase() === taskRoot.toLowerCase() && /^[a-z][a-z0-9-]*-\d+\.json$/i.test(name) && !new RegExp('^' + role + '-\\d+\\.json$', 'i').test(name)) return false
     if (writes === 'task-dir') return inside(target, taskRoot)
     if (writes === 'repo') return inside(target, workRoot) || inside(target, taskRoot)
     return false
@@ -506,7 +510,6 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
     const priorReturns = returnHashes()
     let blockedReturns = null
     let promptId = client.beginPrompt([{ type: 'text', text: prompt + guidance + extraGuidance }])
-    let settleTimedOut = false
     const finishTurn = async (turn) => {
       if (blockedReturns) {
         for (const [path, hash] of returnHashes()) if (hash !== null && blockedReturns.get(path) === hash) try { rmSync(path, { force: true }) } catch { /* the block was still delivered */ }
@@ -525,11 +528,13 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
           new Promise((resolve) => { timer = setTimeout(() => resolve(null), Math.max(0, deadline - now())) }),
         ])
         clearTimeout(timer)
-        if (settled === null || now() >= deadline) { settleTimedOut = true; return null }
-        advised.clear()
-        const blocks = settled.filter((verdict) => verdict?.block && nonempty(verdict.reason))
-        for (const verdict of blocks) advisorNotes.push(verdict.reason)
-        if (isMuse && blocks.length) blockedReturns = new Map([...returnHashes()].filter(([path, hash]) => hash !== null && (!priorReturns.has(path) || (priorReturns.get(path) !== null && priorReturns.get(path) !== hash))))
+        if (settled === null || now() >= deadline) advisorNotes.length = 0
+        else {
+          advised.clear()
+          const blocks = settled.filter((verdict) => verdict?.block && nonempty(verdict.reason))
+          for (const verdict of blocks) advisorNotes.push(verdict.reason)
+          if (isMuse && blocks.length) blockedReturns = new Map([...returnHashes()].filter(([path, hash]) => hash !== null && (!priorReturns.has(path) || (priorReturns.get(path) !== null && priorReturns.get(path) !== hash))))
+        }
       }
       if (advisorNotes.length && !terminal) {
         promptId = client.beginPrompt([{ type: 'text', text: advisorNotes.splice(0).join('\n\n') }])
@@ -543,22 +548,19 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
         throw Object.assign(new Error(`${role} runtime ${runtime} disappeared mid-turn (acp-seat-runtime-missing)`), { reason: 'acp-seat-runtime-missing' })
       }
       const turn = client.pollPrompt(promptId)
-      if (now() >= deadline) break
       if (turn) {
         const finished = await finishTurn(turn)
         if (finished) return finished
-        if (settleTimedOut) break
         continue
       }
+      if (now() >= deadline) break
       // A seat that died with no answer would otherwise hold the turn until its deadline.
       if (client.hasExitMarker?.()) {
         // The answer may have settled between the empty poll and the marker.
         const exitedTurn = client.pollPrompt(promptId)
-        if (now() >= deadline) break
         if (exitedTurn) {
           const finished = await finishTurn(exitedTurn)
           if (finished) return finished
-          if (settleTimedOut) break
           continue
         }
         throw Object.assign(new Error(`${role} exited before answering (acp-seat-closed)`), { reason: 'acp-seat-closed' })

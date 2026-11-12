@@ -171,6 +171,26 @@ test('D1 direct and listed-wrapper search refusals remain enforced', () => {
   }
 })
 
+test('cd-prefixed grep, find and fd searches are refused by pi readgate and the claude hook alike', () => {
+  const pi = createReadGate({ env: { CREW_FFF: '1' }, hasUnquotedPipe: () => false })
+  for (const [command, replacement] of [
+    ['cd src && grep -rn foo .', 'mcp__fff__grep'],
+    ['cd src && find . -name x', 'mcp__fff__find_files'],
+    ['cd src && fd x', 'mcp__fff__find_files'],
+    ['cd /tmp/wt && grep -rn "needle" crew/', 'mcp__fff__grep'],
+  ]) {
+    const result = pi.onToolCall({ toolName: 'bash', input: { command } }, { cwd: '/tmp' })
+    assert.equal(result?.block, true, command)
+    assert.match(result.reason, new RegExp(replacement))
+    const decision = fffHookDecision({ tool_name: 'Bash', tool_input: { command } }, { env: { CREW_FFF: '1' } })
+    assert.equal(decision?.hookSpecificOutput?.permissionDecision, 'deny', command)
+    assert.match(decision.hookSpecificOutput.permissionDecisionReason, new RegExp(replacement))
+  }
+  const command = 'cd src && grep foo && echo done'
+  assert.equal(pi.onToolCall({ toolName: 'bash', input: { command } }, { cwd: '/tmp' }), undefined)
+  assert.equal(fffHookDecision({ tool_name: 'Bash', tool_input: { command } }, { env: { CREW_FFF: '1' } }), undefined)
+})
+
 test('RV1-1 quoted and escaped direct fff searches remain withheld', () => {
   const cases = [
     ["'grep' needle", 'mcp__fff__grep', 'mcp__fff__grep'],

@@ -59,7 +59,7 @@ export function fffSearchProgram(command) {
   }
 
   const cdWrapper = /^\s*cd\s+((?:\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|\\.|[^\s;&|])+)\s+&&\s+([\s\S]*)$/.exec(trimmed)
-  if (cdWrapper && !/[`$]/.test(cdWrapper[1])) return directFffSearchProgram(cdWrapper[2]) === 'rg' ? 'rg' : undefined
+  if (cdWrapper && !/[`$]/.test(cdWrapper[1])) return directFffSearchProgram(cdWrapper[2])
   return undefined
 }
 

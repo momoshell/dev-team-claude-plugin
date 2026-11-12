@@ -665,6 +665,9 @@ test('fffSearchProgram keeps measured direct and wrapper forms closed', () => {
     ['env rg needle', 'rg'],
     ['command find .', 'find'],
     ['cd src && rg needle', 'rg'],
+    ['cd src && grep -rn foo .', 'grep'],
+    ['cd src && find . -name x', 'find'],
+    ['cd src && fd x', 'fd'],
   ]) assert.equal(mod.fffSearchProgram(command), program, command)
   for (const command of [
     'echo grep needle', 'git -C src grep needle',

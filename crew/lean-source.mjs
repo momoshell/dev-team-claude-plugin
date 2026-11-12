@@ -1,11 +1,12 @@
 // Read-only view of lean lanes (ADR-052): ~/.crew/dt-<lane>/<lane>/{crew.json,task/...}.
 // Lanes are found live, then as the newest sibling <lane>.archive-*, then under the separate
 // archive root ordered by the first journal row's time. Nothing here writes, spawns, or trusts a path the lane's own files name.
-import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
-import { dirname, join, resolve, sep } from 'node:path'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { stateless, supersededReturn } from './lean-journal-order.mjs'
-import { deadRun, probeAlive } from '../../crew/run-pid.mjs'
-import { deriveMembers } from '../../crew/protocols.mjs'
+import { deadRun, probeAlive } from './run-pid.mjs'
+import { deriveMembers } from './protocols.mjs'
+import { isObject, within } from './lane-core.mjs'
 
 const LEAN_SPEC_FILE = 'lean.json'
 const VERDICT_EVENT = 'verdict'
@@ -15,7 +16,6 @@ const LEAN_SESSIONS_DIR = 'lean'
 const LANE = /^[a-z0-9][a-z0-9-]{0,62}$/
 const ROLE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/
 const PREFIX = 'lean:'
-const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 const nonEmpty = (value) => typeof value === 'string' && value.trim() !== ''
 
 // A row time is an epoch-ms number inside the Date range (past it, toISOString throws); anything else is unknown.
@@ -40,13 +40,6 @@ function readJson(path, laneDir) {
   if (!within(laneDir, path)) return null
   try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return null }
 }
-function within(root, path) {
-  try {
-    const real = realpathSync(path), base = realpathSync(root)
-    return real === base || real.startsWith(`${base}${sep}`)
-  } catch { return false }
-}
-
 export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive } = {}) {
   const root = resolve(crewRoot)
   const archive = resolve(archiveRoot ?? join(dirname(root), '.crew-journal-archive'))

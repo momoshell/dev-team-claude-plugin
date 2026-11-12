@@ -6,7 +6,7 @@ server with `npm run viz:serve` (or pass `--port`, `--host`, `--crew-root`,
 `DEVTEAM_VIZ_CHECKOUT` sets the default checkout.
 
 Lanes, their events and their seat sessions are read from the lane journals
-under `~/.crew` by `server/lean-source.mjs` and `server/journal-source.mjs`. The ledger is no longer read: a lane that
+under `~/.crew` by `crew/lean-source.mjs` and `server/journal-source.mjs`. The ledger is no longer read: a lane that
 only the ledger knew is not listed (its journal stays in the archive), a
 non-lean `/api/events` request answers `degraded: true` with an `absent` reason.
 A value the

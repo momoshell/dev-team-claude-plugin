@@ -1,6 +1,6 @@
 // crew lanes [--all] [--json] — list lean lanes from their journals.
 //
-// Status, latest stage, stop reason and PR come from the lane journal only (the visualizer's lean source).
+// Status, latest stage, stop reason and PR come from the lane journal only (crew/lean-source.mjs).
 // A recorded pid can prove an open live run dead. A journal with
 // unreadable rows is flagged on its status, since the status was read past a gap.
 // The listing signals no process.
@@ -8,7 +8,7 @@ import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createLeanSource } from '../visualizer/server/lean-source.mjs'
+import { createLeanSource } from './lean-source.mjs'
 import { probeAlive } from './run-pid.mjs'
 
 const shown = (value) => (typeof value === 'string' && value !== '' ? value : 'not recorded')

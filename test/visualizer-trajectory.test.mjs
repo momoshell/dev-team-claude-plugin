@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { startServer } from '../visualizer/server/server.mjs'
 import { createJournalSource } from '../visualizer/server/journal-source.mjs'
-import { createLeanSource } from '../visualizer/server/lean-source.mjs'
+import { createLeanSource } from '../crew/lean-source.mjs'
 import { scratchDir, treeDigest } from './helpers.mjs'
 
 const LEDGER_SANDBOX = scratchDir('visualizer-trajectory-ledger-', { parent: tmpdir() })

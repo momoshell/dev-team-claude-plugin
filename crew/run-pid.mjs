@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process'
 import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { stateless, supersededReturn } from '../visualizer/server/lean-journal-order.mjs'
+import { stateless, supersededReturn } from './lean-journal-order.mjs'
 
 const RUN_PID_FILE = 'run.pid'
 export function parsePidRecord(text) {

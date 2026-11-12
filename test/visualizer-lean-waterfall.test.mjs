@@ -4,7 +4,7 @@ import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { layoutTimeline, formatLeanDuration } from '../visualizer/web/src/lib/timeline.js'
-import { createLeanSource } from '../visualizer/server/lean-source.mjs'
+import { createLeanSource } from '../crew/lean-source.mjs'
 
 const source = (name) => readFileSync(new URL(`../visualizer/web/src/lib/${name}`, import.meta.url), 'utf8')
 const base = 1700000000000

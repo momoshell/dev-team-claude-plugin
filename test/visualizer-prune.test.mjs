@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, posix } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createJournalSource } from '../visualizer/server/journal-source.mjs'
-import { createLeanSource } from '../visualizer/server/lean-source.mjs'
+import { createLeanSource } from '../crew/lean-source.mjs'
 
 function exportAudit(files, entries) {
   const sources = {}, uses = {}, exports = {}, edges = {}, unresolved = new Set(), orphans = []
@@ -107,17 +107,19 @@ test('every web export has a production caller', () => {
 // MUTATION: DV2 inject an old-ledger read helper after the server schema constant.
 test('journal refuses a legacy directory and reads a lean journal with diagnostics', () => {
   const serverDir = new URL('../visualizer/server/', import.meta.url)
+  function scanFile(path) {
+    const source = readFileSync(path, 'utf8')
+    assert.doesNotMatch(source, /ledger[\\/]run\.json|['"`]ledger['"`][\s\S]{0,100}?['"`]run\.json['"`]/, path)
+  }
   function scan(dir) {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const path = join(dir, entry.name)
       if (entry.isDirectory()) scan(path)
-      else if (/\.(?:js|mjs)$/.test(entry.name)) {
-        const source = readFileSync(path, 'utf8')
-        assert.doesNotMatch(source, /ledger[\\/]run\.json|['"`]ledger['"`][\s\S]{0,100}?['"`]run\.json['"`]/, path)
-      }
+      else if (/\.(?:js|mjs)$/.test(entry.name)) scanFile(path)
     }
   }
   scan(fileURLToPath(serverDir))
+  for (const file of ['lean-source.mjs', 'lean-journal-order.mjs']) scanFile(fileURLToPath(new URL(`../crew/${file}`, import.meta.url)))
   const root = mkdtempSync(join(tmpdir(), 'viz-journal-prune-'))
   try {
     const legacy = join(root, 'repo', 'task')

@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { LANE, isObject } from './lane-core.mjs'
 import { deriveMembers } from './protocols.mjs'
-import { createLeanSource } from '../visualizer/server/lean-source.mjs'
+import { createLeanSource } from './lean-source.mjs'
 const ROLE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/
 class ShowRefusal extends Error {}
 

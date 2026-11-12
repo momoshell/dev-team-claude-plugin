@@ -165,6 +165,48 @@ function briefAsk(brief) {
   return oneLine(block.join('\n'))
 }
 
+export function seatTurnRow({ role, id, recording, turnError, parsed, started, ended, turnBefore, turnAfter }) {
+  const unmeasured = {}, row = { role, id }
+  const measure = (field, value, valid, reason) => {
+    row[field] = valid ? value : null
+    if (!valid) unmeasured[field] = reason
+  }
+  const reason = turnError ? 'turn-failed' : 'not-reported'
+  for (const field of ['agent', 'model', 'effort']) {
+    const value = recording?.definition?.[field]
+    measure(field, value, typeof value === 'string', reason)
+  }
+  const calls = recording?.toolCalls, stopReason = recording?.stopReason, usage = recording?.usage
+  measure('tool_calls', calls, Number.isSafeInteger(calls) && calls >= 0, reason)
+  measure('stop_reason', stopReason, typeof stopReason === 'string', reason)
+  measure('usage', usage, usage !== null && typeof usage === 'object' && (Object.getPrototypeOf(usage) === Object.prototype || Object.getPrototypeOf(usage) === null), turnError ? reason : recording?.usage_reason === 'usage-unavailable' ? 'usage-unavailable' : reason)
+  const seconds = (ended - started) / 1000
+  measure('seconds', seconds, typeof started === 'number' && typeof ended === 'number' && Number.isFinite(seconds), 'clock-unmeasured')
+  const status = parsed?.status
+  measure('status', status, ['done', 'insufficient', 'escalate'].includes(status), 'no-return')
+  measure('worktree_changed', turnBefore !== turnAfter, role === 'builder' && turnBefore !== null && turnAfter !== null, role === 'builder' ? 'worktree-unmeasured' : 'not-repo-seat')
+  return { ...row, unmeasured }
+}
+
+export function commitBody({ source, isFinish, tier, stop, finishReviews, measurements, priorFindings, secondFindings }) {
+  const finishLines = !isFinish ? [] : [
+    '## Finish',
+    `- Stop: ${oneLine(stop.reason)}${stop.observation == null ? '' : `: ${oneLine(JSON.stringify(stop.observation))}`}`,
+    ...(finishReviews.length === 0 ? ['- Reviews: unmeasured.'] : finishReviews.map((r, at) => {
+      const findings = Array.isArray(r.findings) && r.findings.length > 0
+        ? r.findings.map((f) => `${oneLine(f?.id)} (${oneLine(f?.severity)}) at ${oneLine(f?.location)}: ${oneLine(f?.summary)}`).join('; ')
+        : 'none'
+      return `- Review ${at + 1}: ${oneLine(r.verdict)}; findings: ${findings}`
+    })),
+    '',
+  ]
+  return [
+    `Source: ${JSON.stringify(source)}`, '', ...finishLines, '## Measurements', ...measurements,
+    ...(!isFinish && tier !== 'mechanical' && [...priorFindings, ...(tier === 'judge' ? secondFindings : [])].some((f) => f.severity === 'should-fix')
+      ? ['', '## Should-fix', ...[...priorFindings.map((f) => [f, 'reviewer']), ...(tier === 'judge' ? secondFindings.map((f) => [f, 'tech-lead']) : [])].filter(([f]) => f.severity === 'should-fix').map(([f, role]) => `- ${oneLine(f.id)} (${role}) at ${oneLine(f.location)}: ${oneLine(f.summary)}`)] : []),
+  ].join('\n')
+}
+
 export async function runLoop(spec, deps = {}) {
   if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return refusal('invalid-input')
   const early = async (reason) => {
@@ -414,26 +456,7 @@ export async function runLoop(spec, deps = {}) {
           const checked = failure ? { envelope: null, defects: [] } : validateEnvelope(role, parsed, { prior: (role === 'reviewer' ? priorFindings : role === 'tech-lead' ? secondFindings : []).filter((finding) => finding?.severity === 'must-fix').map((finding) => finding.id) })
           if (typeof checked.envelope?.id === 'string' && checked.envelope.id !== '' && checked.envelope.id !== id) checked.defects.push(`id must be the issued id ${id}`)
           try {
-            const unmeasured = {}, row = { role, id: asked.id }
-            const measure = (field, value, valid, reason) => {
-              row[field] = valid ? value : null
-              if (!valid) unmeasured[field] = reason
-            }
-            const reason = turnError ? 'turn-failed' : 'not-reported'
-            for (const field of ['agent', 'model', 'effort']) {
-              const value = recording?.definition?.[field]
-              measure(field, value, typeof value === 'string', reason)
-            }
-            const calls = recording?.toolCalls, stopReason = recording?.stopReason, usage = recording?.usage
-            measure('tool_calls', calls, Number.isSafeInteger(calls) && calls >= 0, reason)
-            measure('stop_reason', stopReason, typeof stopReason === 'string', reason)
-            measure('usage', usage, usage !== null && typeof usage === 'object' && (Object.getPrototypeOf(usage) === Object.prototype || Object.getPrototypeOf(usage) === null), turnError ? reason : recording?.usage_reason === 'usage-unavailable' ? 'usage-unavailable' : reason)
-            const seconds = (ended - started) / 1000
-            measure('seconds', seconds, typeof started === 'number' && typeof ended === 'number' && Number.isFinite(seconds), 'clock-unmeasured')
-            const status = parsed?.status
-            measure('status', status, ['done', 'insufficient', 'escalate'].includes(status), 'no-return')
-            measure('worktree_changed', turnBefore !== turnAfter, role === 'builder' && turnBefore !== null && turnAfter !== null, role === 'builder' ? 'worktree-unmeasured' : 'not-repo-seat')
-            await emit('seat-turn', { ...row, unmeasured })
+            await emit('seat-turn', seatTurnRow({ role, id: asked.id, recording, turnError, parsed, started, ended, turnBefore, turnAfter }))
           } catch { /* journal measurements must not affect the turn */ }
           if (!isFinish && tier === 'mechanical' && role === 'builder' && checked.envelope?.status === 'done' && checked.envelope.details && !Object.hasOwn(checked.envelope.details, 'subject')) checked.defects.push('details.subject is required on a mechanical lane for the commit and PR')
           if (role === 'planner' && checked.envelope && checked.defects.length === 0 && Object.hasOwn(checked.envelope.details, 'plan_path')) checked.defects.push(...await artifactDefects(checked.envelope.details))
@@ -902,22 +925,7 @@ export async function runLoop(spec, deps = {}) {
       break
     }
     measurements = [...proofLines, suiteLine, ...(!isFinish && tier === 'mechanical' && namedTests.length ? ['- Review: none, mechanical lane, not reviewed.'] : [])]
-    const finishLines = !isFinish ? [] : [
-      '## Finish',
-      `- Stop: ${oneLine(fin.stop.reason)}${fin.stop.observation == null ? '' : `: ${oneLine(JSON.stringify(fin.stop.observation))}`}`,
-      ...(finishReviews.length === 0 ? ['- Reviews: unmeasured.'] : finishReviews.map((r, at) => {
-        const findings = Array.isArray(r.findings) && r.findings.length > 0
-          ? r.findings.map((f) => `${oneLine(f?.id)} (${oneLine(f?.severity)}) at ${oneLine(f?.location)}: ${oneLine(f?.summary)}`).join('; ')
-          : 'none'
-        return `- Review ${at + 1}: ${oneLine(r.verdict)}; findings: ${findings}`
-      })),
-      '',
-    ]
-    const body = [
-      `Source: ${JSON.stringify(spec.source)}`, '', ...finishLines, '## Measurements', ...measurements,
-      ...(!isFinish && tier !== 'mechanical' && [...priorFindings, ...(tier === 'judge' ? secondFindings : [])].some((f) => f.severity === 'should-fix')
-        ? ['', '## Should-fix', ...[...priorFindings.map((f) => [f, 'reviewer']), ...(tier === 'judge' ? secondFindings.map((f) => [f, 'tech-lead']) : [])].filter(([f]) => f.severity === 'should-fix').map(([f, role]) => `- ${oneLine(f.id)} (${role}) at ${oneLine(f.location)}: ${oneLine(f.summary)}`)] : []),
-    ].join('\n')
+    const body = commitBody({ source: spec.source, isFinish, tier, stop: isFinish ? fin.stop : null, finishReviews, measurements, priorFindings, secondFindings })
     // The commit names what git reports changed now, never a list the caller wrote before the build.
     const status = await readStatus('paths')
     const files = status.status === 'green' && typeof status.stdout === 'string' ? parseChangedPaths(status.stdout) : null

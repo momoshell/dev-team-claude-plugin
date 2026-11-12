@@ -709,27 +709,7 @@ export function createReadGate(options = {}) {
     }
   }
 
-  // A host that runs each hook in a fresh process (the claude seat plugin) keeps what the gate has seen between calls.
-  // Pi never calls these: its closure lives for the whole session.
-  function exportState() {
-    return {
-      turn: currentTurn,
-      ranges: [...readRanges].map(([file, byFingerprint]) => [file, [...byFingerprint]]),
-      pending: [...pendingReads],
-    }
-  }
-
-  function importState(state) {
-    const rows = (value) => { if (!Array.isArray(value) || !value.every((row) => Array.isArray(row) && row.length === 2)) throw new Error('read gate state is malformed'); return value }
-    if (!state || typeof state !== 'object' || !Number.isSafeInteger(state.turn) || state.turn < 1) throw new Error('read gate state is malformed')
-    const ranges = new Map(rows(state.ranges).map(([file, byFingerprint]) => [String(file), new Map(rows(byFingerprint))]))
-    const pending = new Map(rows(state.pending))
-    currentTurn = state.turn
-    readRanges.clear(); for (const [file, byFingerprint] of ranges) readRanges.set(file, byFingerprint)
-    pendingReads.clear(); for (const [id, read] of pending) pendingReads.set(id, read)
-  }
-
-  return { onToolCall, onToolResult, onTurnStart, exportState, importState }
+  return { onToolCall, onToolResult, onTurnStart }
 }
 
 export function attachReadGate(pi, options = {}) {

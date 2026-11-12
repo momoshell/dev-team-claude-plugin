@@ -120,8 +120,8 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
   }
   const worktree = join(dirname(checkout), `dt-${lane}`)
   const crewDir = join(d.crewRoot, `dt-${lane}`, lane)
-  if (d.existsSync(crewDir)) throw new StartRefusal(`crew lane directory ${crewDir} already exists; pick another lane name or close that lane out`)
-  if (d.existsSync(worktree)) throw new StartRefusal(`worktree ${worktree} already exists; pick another lane name or close that lane out`)
+  if (d.existsSync(crewDir)) throw new StartRefusal(`crew lane directory ${crewDir} already exists; pick another lane name or use crew closeout ${lane} or crew closeout ${lane} --discard`)
+  if (d.existsSync(worktree)) throw new StartRefusal(`worktree ${worktree} already exists; pick another lane name or use crew closeout ${lane} or crew closeout ${lane} --discard`)
   const remoteHead = git(d, checkout, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
   if (!remoteHead) throw new StartRefusal('cannot read origin/HEAD; repair it with git remote set-head origin --auto')
   const base = remoteHead.replace(/^origin\//, '')

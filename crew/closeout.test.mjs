@@ -37,7 +37,7 @@ function world({ rows = [{ event: 'run-start', lane: LANE }, PR_ROW], cwd, origi
   git(checkout, 'worktree', 'add', '-q', '-b', LANE, worktree, 'main')
   writeFileSync(join(leaf, 'crew.json'), JSON.stringify({ members: { planner: { agent: 'pi' } } }))
   git(checkout, 'worktree', 'add', '-q', '-b', 'other', join(home, 'repos', 'dt-other'), 'main')
-  writeFileSync(join(leaf, 'task', 'lean.json'), JSON.stringify({ id: LANE, cwd: cwd?.(home) ?? worktree, branch: LANE }))
+  writeFileSync(join(leaf, 'task', 'lean.json'), JSON.stringify({ id: LANE, cwd: cwd?.(home) ?? worktree, branch: LANE, base: 'main' }))
   const journalText = jsonl(rows)
   writeFileSync(join(leaf, 'task', 'journal.jsonl'), journalText)
   return { home, checkout, worktree, root, archiveRoot, laneDir, leaf, journalText, done: () => rmSync(home, { recursive: true, force: true }) }
@@ -74,6 +74,77 @@ function assertUnchanged(w) {
   assert.equal(readFileSync(join(w.leaf, 'task', 'journal.jsonl'), 'utf8'), w.journalText)
   assert.ok(!existsSync(join(w.archiveRoot, `dt-${LANE}`)), 'no archive destination')
 }
+
+test('discard ends an accepted lane whose published PR GitHub reports CLOSED', () => {
+  for (const state of ['CLOSED', 'OPEN', 'MERGED', 'missing']) {
+    const w = world({ rows: [...STOPPED, { event: 'finish-ready' }, ...(state === 'missing' ? [] : [PR_ROW]), { event: 'finish-decision', choice: 'accept' }] })
+    try {
+      const r = close(w, { state, argv: [LANE, '--discard'], alive: () => false })
+      assert.equal(r.status, state === 'CLOSED' ? 0 : 1, r.err)
+      if (state === 'CLOSED') assert.ok(existsSync(join(w.archiveRoot, `dt-${LANE}`)))
+      else {
+        assert.match(r.err, state === 'missing' ? /crew finish demo/ : /lane recorded a pull request; use crew closeout demo/)
+        assertUnchanged(w)
+      }
+    } finally { w.done() }
+  }
+})
+
+test('closeout retried after a failed move archives the lane, treating the absent worktree and branch as done', () => {
+  const w = world()
+  try {
+    const head = tipOf(w)
+    const first = close(w, { renameSync: () => { throw Object.assign(new Error('move'), { code: 'EXDEV' }) } })
+    assert.equal(first.status, 1)
+    const retry = close(w, { head })
+    assert.equal(retry.status, 0, retry.err)
+    assert.match(retry.out, /already absent/)
+    assert.ok(existsSync(join(w.archiveRoot, `dt-${LANE}`)))
+    assert.ok(!retry.calls.some((c) => c[0] === 'git'))
+  } finally { w.done() }
+  const other = world()
+  try {
+    git(other.checkout, 'worktree', 'remove', other.worktree)
+    const r = close(other, { state: 'OPEN' })
+    assert.equal(r.status, 1)
+    assert.match(r.err, /not merged/)
+    assert.ok(existsSync(other.laneDir))
+    assert.ok(!r.calls.some((c) => c[0] === 'git'))
+  } finally { other.done() }
+})
+
+test('discard ends a lane with no journal whose run pid is absent or dead', () => {
+  for (const [pid, live] of [[false, false], [true, false], [true, true], [true, null]]) {
+    const w = world()
+    try {
+      rmSync(join(w.leaf, 'task', 'journal.jsonl'))
+      if (pid) writeFileSync(join(w.leaf, 'task', 'run.pid'), '123\n')
+      const r = close(w, { argv: [LANE, '--discard'], alive: () => live })
+      assert.equal(r.status, live === false ? 0 : 1, r.err)
+      if (live === false) assert.ok(existsSync(join(w.archiveRoot, `dt-${LANE}`)))
+      else { assert.match(r.err, /not stopped/); assert.ok(existsSync(w.laneDir)) }
+      assert.ok(!r.calls.some((c) => c[0] === 'gh'))
+    } finally { w.done() }
+  }
+})
+
+test('discard refuses a branch tip on neither a remote ref nor the base and prints the sha it deletes', () => {
+  const w = world({ rows: STOPPED })
+  try {
+    writeFileSync(join(w.worktree, 'new.txt'), 'build\n')
+    git(w.worktree, 'add', 'new.txt')
+    git(w.worktree, 'commit', '-qm', 'build')
+    const tip = tipOf(w)
+    const refused = close(w, { argv: [LANE, '--discard'] })
+    assert.equal(refused.status, 1)
+    assert.ok(refused.err.includes(tip))
+    assertUnchanged(w)
+    git(w.checkout, 'update-ref', 'refs/remotes/origin/demo', tip)
+    const result = close(w, { argv: [LANE, '--discard'] })
+    assert.equal(result.status, 0, result.err)
+    assert.ok(result.out.includes(`(was ${tip})`))
+  } finally { w.done() }
+})
 
 test('a lane stopped in plan with no pull request is discarded: worktree and branch removed, lane archived, no gh call', () => {
   const w = world({ rows: STOPPED })

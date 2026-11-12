@@ -11,8 +11,9 @@
 //   crew finish <lane> --abandon  end a stopped or ready lane unpublished
 //   crew closeout <lane>         remove a merged lean lane's worktree and branch, archive its lane directory (crew/closeout.mjs)
 //   crew closeout <lane> --discard  archive a stopped lane with no PR or a CLOSED PR; delete only its local branch
-//                                refuses OPEN or MERGED PRs, non-abandon finish records, running lanes and dirty worktrees
-//                                use plain closeout after merge, discard after close, or crew finish for other finish records
+//                                accepts an accepted lane after its PR closes; refuses OPEN or MERGED PRs and live runs
+//                                a quiet lane without a journal can be discarded; unpushed tips are refused
+//                                an absent worktree is skipped on retry; use crew finish for other finish records
 //   crew lanes [--all] [--json]  list lean lanes from their journals (crew/lanes.mjs)
 //   crew viz                     serve the visualizer from the crew home
 //   crew where                   print the crew home, its branch and its commit

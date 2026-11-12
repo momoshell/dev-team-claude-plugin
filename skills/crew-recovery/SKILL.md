@@ -62,12 +62,14 @@ branch is absent. A provably dead open run is a new stop.
 
 For a stopped lane with no PR or a PR GitHub reports CLOSED, use
 `crew closeout <lane> --discard`. It also archives a lane ended with
-`crew finish <lane> --abandon`. It removes the worktree and local branch and
-archives the journal; it leaves the remote branch and visualizer unchanged. It
-refuses an OPEN or MERGED PR (use plain closeout after merge or discard after
-close), other finish records (use `crew finish`), a run not proven stopped, or
-uncommitted worktree changes. The worktree removal is never forced. Inspect the
-lane first: discard removes its worktree.
+`crew finish <lane> --abandon` or accepted before its PR closed. A lane without
+a journal can be discarded if its run is not live. It removes the worktree and
+local branch and archives the lane; it leaves the remote branch and visualizer
+unchanged. It refuses an OPEN or MERGED PR (use plain closeout after merge or
+discard after close), other finish records, a run not proven stopped, uncommitted
+changes, or a tip on neither a remote-tracking ref nor the base. Removal is never
+forced. An absent worktree is skipped on retry and its branch is not checked.
+Inspect the lane first: discard removes its worktree.
 
 Closeout and discard stop proven seat groups and report unproven ones
 (`reapLaneSeats` in `crew/seat-reap.mjs`).

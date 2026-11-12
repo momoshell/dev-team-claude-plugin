@@ -5,9 +5,9 @@
 //   2. git branch -D <lane>             (local only)
 //   3. move ~/.crew/dt-<lane> to ~/.crew-journal-archive/dt-<lane> (or a free .archive-<n> suffix on re-archive)
 // Plain closeout requires a MERGED PR in the worktree's origin repository, with the lane branch's tip as its head.
-// Discard requires a stopped or abandoned lane with no PR or a CLOSED PR. The worktree must be dt-<lane> on that branch.
-// All of it is checked before step 1, so a refusal
-// there changes nothing. A failed move in step 3 is refused after steps 1 and 2 ran; the lane directory stays put.
+// Discard permits stopped, abandoned or accepted lanes with a CLOSED PR, and quiet lanes without a journal.
+// It refuses tips on neither a remote-tracking ref nor the base. An absent worktree skips git on retry.
+// Checks precede removal; a failed archive move leaves the lane directory for a retry.
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { homedir } from 'node:os'
@@ -65,10 +65,16 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
   if (!found) refuse(`no lean lane ${lane}`)
   if (found.archived) refuse(`lane ${lane} is already archived`)
   const journal = join(found.dir, 'task', 'journal.jsonl')
-  if (!within(found.dir, journal)) refuse('task journal is missing or resolves outside the lane')
   let text
-  try { text = readFileSync(journal, 'utf8') } catch (error) { refuse(`task journal unreadable: ${error?.code ?? error?.message}`) }
-  const rows = journalRows(text)
+  if (!within(found.dir, journal)) {
+    try { lstatSync(journal); refuse('task journal is missing or resolves outside the lane') } catch (error) {
+      if (!discard || error?.code !== 'ENOENT' || !within(found.dir, dirname(journal))) refuse('task journal is missing or resolves outside the lane')
+      text = null
+    }
+  } else {
+    try { text = readFileSync(journal, 'utf8') } catch (error) { refuse(`task journal unreadable: ${error?.code ?? error?.message}`) }
+  }
+  const rows = text === null ? [] : journalRows(text)
   let pr, claim, moved = false
   const taskDir = join(found.dir, 'task')
   let archivedDir = join(archive, `dt-${lane}`)
@@ -85,7 +91,9 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
   if (discard) {
     const lastFinish = rows.findLast((row) => row.event === 'finish-ready' || row.event === 'finish-decision')
     const abandoned = lastFinish?.event === 'finish-decision' && lastFinish.choice === 'abandon'
-    if (lastFinish && !abandoned) refuse(`lane has a finish record; use crew finish ${lane}`)
+    const accepted = lastFinish?.event === 'finish-decision' && lastFinish.choice === 'accept'
+    if (lastFinish && !abandoned && !accepted) refuse(`lane has a finish record; use crew finish ${lane}`)
+    if (accepted && !rows.some((row) => row.event === 'pr')) refuse(`lane has a finish record; use crew finish ${lane}`)
     if (rows.some((row) => row.event === 'pr')) {
       pr = lastPr(rows, lane, taskDir, alive)
       const viewText = must(run, 'gh pr view', 'gh', ['pr', 'view', pr.url, '--json', 'state'])
@@ -97,10 +105,14 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
     const stopRows = tail?.event === 'pr' ? rows.slice(0, rows.lastIndexOf(tail)) : rows
     const last = stopRows.findLast((row) => row.event !== 'stage-end')
     const died = deadRun({ rows: stopRows, taskDir, alive })
-    if (!(last?.event === 'verdict' && last.status === 'stopped') && !(abandoned && tail === lastFinish) && !died) refuse(`lane ${lane} is not stopped`)
-    const stopAt = died ? stopRows.length : rows.lastIndexOf(last)
+    if (text !== null && !(last?.event === 'verdict' && last.status === 'stopped') && !((abandoned || accepted) && tail === lastFinish) && !died) refuse(`lane ${lane} is not stopped`)
+    const stopAt = text === null ? 0 : died ? stopRows.length : rows.lastIndexOf(last)
     try { claim = claimStop({ writeFileSync, readFileSync, rmSync, alive }, lane, taskDir, stopAt) } catch { refuse(`lane ${lane} is not stopped`) }
-    try { if (readFileSync(journal, 'utf8') !== text) refuse(`lane ${lane} is not stopped`) } catch { refuse(`lane ${lane} is not stopped`) }
+    if (text === null) {
+      try { lstatSync(journal); refuse(`lane ${lane} is not stopped`) } catch (error) { if (error?.code !== 'ENOENT') refuse(`lane ${lane} is not stopped`) }
+    } else {
+      try { if (readFileSync(journal, 'utf8') !== text) refuse(`lane ${lane} is not stopped`) } catch { refuse(`lane ${lane} is not stopped`) }
+    }
     let claims
     try { claims = readdirSync(taskDir).filter((name) => /^finish-\d+\.(claim|reclaim)$/.test(name) && name !== basename(claim)) } catch { refuse(`lane ${lane} is not stopped`) }
     for (const name of ['run.pid', ...claims]) {
@@ -116,8 +128,14 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
   } else pr = lastPr(rows, lane, join(found.dir, 'task'), alive)
 
   const worktree = found.spec.cwd
-  if (typeof worktree !== 'string' || !worktree || !isDir(worktree)) refuse('lean.json names no existing worktree')
+  if (typeof worktree !== 'string' || !worktree) refuse('lean.json names no existing worktree')
   if (basename(worktree) !== `dt-${lane}`) refuse(`worktree ${worktree} is not dt-${lane}`)
+  let absent = false
+  try { lstatSync(worktree) } catch (error) {
+    if (error?.code === 'ENOENT') absent = true
+    else refuse('lean.json names no existing worktree')
+  }
+  if (!absent && !isDir(worktree)) refuse('lean.json names no existing worktree')
   const laneDir = join(root, `dt-${lane}`)
 
   let view
@@ -127,6 +145,8 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
     if (view?.state !== 'MERGED') refuse(`pull request #${pr.number} is not merged (${String(view?.state)})`)
   }
 
+  let tip
+  if (!absent) {
   const mainCheckout = dirname(must(run, 'git rev-parse', 'git', ['-C', worktree, 'rev-parse', '--path-format=absolute', '--git-common-dir']).trim())
   if (!discard) {
     const origin = repoOf(must(run, 'git remote get-url', 'git', ['-C', worktree, 'remote', 'get-url', 'origin']).trim())
@@ -135,19 +155,24 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
   }
   const head = must(run, 'git symbolic-ref', 'git', ['-C', worktree, 'symbolic-ref', '-q', 'HEAD']).trim()
   if (head !== `refs/heads/${lane}`) refuse(`worktree ${worktree} is on ${head || 'a detached HEAD'}, not ${lane}`)
+  tip = must(run, 'git rev-parse', 'git', ['-C', mainCheckout, 'rev-parse', '--verify', `refs/heads/${lane}^{commit}`]).trim()
   if (!discard) {
-    const tip = must(run, 'git rev-parse', 'git', ['-C', mainCheckout, 'rev-parse', '--verify', `refs/heads/${lane}^{commit}`]).trim()
     if (typeof view.headRefOid !== 'string' || tip !== view.headRefOid) refuse(`branch ${lane} is at ${tip}, not the merged head ${String(view.headRefOid)}`)
+  } else {
+    const base = found.spec.base
+    const refs = ['refs/remotes/', ...(typeof base === 'string' ? [`refs/heads/${base}`] : [])]
+    if (!must(run, 'git for-each-ref', 'git', ['-C', mainCheckout, 'for-each-ref', '--contains', tip, '--format=%(refname)', ...refs]).trim()) refuse(`branch ${lane} tip ${tip} is on neither a remote-tracking ref nor ${base}; push it or delete the branch by hand`)
   }
   must(run, 'git worktree remove', 'git', ['-C', mainCheckout, 'worktree', 'remove', worktree])
   must(run, 'git branch -D', 'git', ['-C', mainCheckout, 'branch', '-D', lane])
+  }
   const reaped = reapLaneSeats({ dir: found.dir, alive, kill, spawnSync: run, sleep, now })
   try {
     mkdir(archive, { recursive: true })
     rename(laneDir, archivedDir)
     moved = true
   } catch (error) { refuse(`could not move ${laneDir} to ${archivedDir}: ${error?.code ?? error?.message}`) }
-  return { lane, pr, worktree, archivedDir, ...reaped }
+  return { lane, pr, worktree, archivedDir, absent, tip, ...reaped }
   } finally {
     if (claim) {
       rmSync(claim, { force: true })
@@ -165,7 +190,8 @@ export function main(argv = process.argv.slice(2), deps = {}) {
   }
   try {
     const done = closeoutLane({ lane, discard: extra.length === 1, root: d.root, archiveRoot: d.archiveRoot, run: d.run, renameSync: d.renameSync, mkdirSync: d.mkdirSync, alive: d.alive, kill: d.kill, sleep: d.sleep, now: d.now })
-    d.stdout(`${extra.length ? 'discarded' : 'closed out'} ${lane}: removed ${done.worktree}, deleted branch ${lane}, archived to ${done.archivedDir}\n`)
+    const removal = done.absent ? `worktree ${done.worktree} already absent; branch ${lane} not checked` : `removed ${done.worktree}, deleted branch ${lane} (was ${done.tip})`
+    d.stdout(`${extra.length ? 'discarded' : 'closed out'} ${lane}: ${removal}, archived to ${done.archivedDir}\n`)
     for (const record of done.stopped) d.stdout(`stopped seat ${record.role} pgid ${record.pgid}\n`)
     for (const record of done.unproven) d.stdout(`seat ${record.role}${record.pgid == null ? '' : ` pgid ${record.pgid}`}: not proven stopped\n`)
     return 0

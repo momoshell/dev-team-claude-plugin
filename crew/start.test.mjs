@@ -1433,6 +1433,24 @@ test('missing memory boots and journals the backend reason without fallback', as
   }
 })
 
+test('an over-budget memory index journals memory-empty with reason over-budget and the dropped list (S1-6)', async () => {
+  const previous = process.env.CREW_MEMORY_DIR
+  try {
+    const rows = []
+    const f = leanFixture({ deps: { readFileSync: memoryDefinition('memory: true\ntiers: {}') }, loopDeps: { journal: async (row) => rows.push(row) } })
+    process.env.CREW_MEMORY_DIR = join(f.spec.cwd, 'override')
+    populateMemory(process.env.CREW_MEMORY_DIR, 'entry')
+    writeFileSync(join(process.env.CREW_MEMORY_DIR, 'MEMORY.md'), `- [entry](entry.md)\n${'x'.repeat(8000)}`)
+    assert.equal((await f.go()).status, 'done')
+    const event = rows.find((row) => row.event === 'memory-empty')
+    assert.equal(event.reason, 'over-budget')
+    assert.deepEqual(event.dropped.map(({ path, reason }) => [path, reason]), [['MEMORY.md', 'over-budget'], ['entry.md', 'over-budget']])
+  } finally {
+    if (previous === undefined) delete process.env.CREW_MEMORY_DIR
+    else process.env.CREW_MEMORY_DIR = previous
+  }
+})
+
 test('false or absent effective memory neither injects nor journals memory', async () => {
   const previous = process.env.CREW_MEMORY_DIR
   try {
@@ -2212,7 +2230,7 @@ test('a started lean spec reaches the PR with its exact P1 source and measured b
   assert.equal((await g.go()).status, 'done')
   assert.equal(seen.commit.subject, 'fix(crew): publish measured lane results')
   assert.equal(seen.publish.title, seen.commit.subject)
-  assert.equal(seen.publish.body, ['## Summary', 'Purpose: Fixture', 'Closes issue 1961: Refuse roster edits', 'How: built', '', '## Changes', '- src/a.mjs', '', '## Verification', '- lib.test.mjs: works was red on the old source, green on the build.', 'Suite passed with exit code 0.'].join('\n'))
+  assert.equal(seen.publish.body, ['## Summary', 'Purpose: Fixture', 'Issue 1961: Refuse roster edits', 'How: built', '', '## Changes', '- src/a.mjs', '', '## Verification', '- lib.test.mjs: works was red on the old source, green on the build.', 'Suite passed with exit code 0.'].join('\n'))
   assert.match(seen.commit.body, /^Source: "issue 1961"\n\n## Measurements\n/)
   assert.equal(spec.source, 'issue 1961')
 })

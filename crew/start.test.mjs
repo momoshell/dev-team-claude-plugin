@@ -82,12 +82,19 @@ test('a failed detached launch is a StartRefusal that names the left worktree', 
   }
 })
 
+test('crew start records the run start time beside the pid in run.pid (S3-4)', async () => {
+  const { deps, calls } = fakes()
+  deps.now = () => 1_700_000_000_000
+  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
+  assert.equal(written(calls, '/task/run.pid')[2], '4242 1700000000000\n')
+})
+
 test('a started lane records its run pid, and a failed pid write only logs', async () => {
   for (const fail of [false, true]) {
     const { deps, calls } = fakes({ write: (kind, path) => { if (fail && path.endsWith('/run.pid')) throw new Error('disk') } })
     const result = await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
     assert.equal(result.pid, 4242)
-    assert.equal(written(calls, '/task/run.pid')?.[2], '4242\n')
+    assert.match(written(calls, '/task/run.pid')?.[2], /^4242 \d+\n$/)
     assert.equal(calls.some(([kind, line]) => kind === 'log' && line.includes('run pid not recorded')), fail)
   }
 })

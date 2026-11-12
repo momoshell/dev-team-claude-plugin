@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { main } from './closeout.mjs'
 import { decideFinish } from './finish.mjs'
 import { laneRows } from './lanes.mjs'
+import { probeAlive } from './run-pid.mjs'
 import { git, gitResult, scratchDir, trackProcessGroupFile } from '../test/helpers.mjs'
 
 const LANE = 'demo'
@@ -74,6 +75,15 @@ function assertUnchanged(w) {
   assert.equal(readFileSync(join(w.leaf, 'task', 'journal.jsonl'), 'utf8'), w.journalText)
   assert.ok(!existsSync(join(w.archiveRoot, `dt-${LANE}`)), 'no archive destination')
 }
+
+test('discard is not blocked by a claim whose pid now names a later process (S3-4)', () => {
+  const w = world({ rows: [...STOPPED, PR_ROW] })
+  try {
+    writeFileSync(join(w.leaf, 'task', 'finish-1.claim'), `${process.pid} ${Date.now() - 86_400_000}\n`)
+    const result = close(w, { state: 'CLOSED', argv: [LANE, '--discard'], alive: probeAlive })
+    assert.equal(result.status, 0, result.err)
+  } finally { w.done() }
+})
 
 test('discard ends an accepted lane whose published PR GitHub reports CLOSED', () => {
   for (const state of ['CLOSED', 'OPEN', 'MERGED', 'missing']) {
@@ -185,7 +195,8 @@ test('a lane whose returned finish pass stopped is abandoned with crew finish an
     assert.ok(!existsSync(w.worktree))
     assert.ok(!branchExists(w))
     const rows = readFileSync(join(w.archiveRoot, `dt-${LANE}`, LANE, 'task', 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
-    assert.deepEqual(rows.at(-1), { event: 'finish-decision', lane: LANE, choice: 'abandon', notesSha256: null })
+    assert.ok(Number.isFinite(rows.at(-1).at))
+    assert.deepEqual({ ...rows.at(-1), at: 0 }, { event: 'finish-decision', lane: LANE, choice: 'abandon', at: 0, notesSha256: null })
     assert.equal(rows.filter((row) => row.event === 'finish-decision' && row.choice === 'abandon').length, 1)
   } finally { w.done() }
 })
@@ -213,7 +224,8 @@ test('a lane whose returned finish pass died is abandoned with crew finish and t
     const recorded = readFileSync(journal, 'utf8')
     const rows = recorded.trim().split('\n').map(JSON.parse)
     assert.equal(rows.length, 6)
-    assert.deepEqual(rows.at(-1), { event: 'finish-decision', lane: LANE, choice: 'abandon', notesSha256: null })
+    assert.ok(Number.isFinite(rows.at(-1).at))
+    assert.deepEqual({ ...rows.at(-1), at: 0 }, { event: 'finish-decision', lane: LANE, choice: 'abandon', at: 0, notesSha256: null })
     await assert.rejects(decide((pid) => pid !== 123), { reason: 'finish-decided' })
     assert.equal(readFileSync(journal, 'utf8'), recorded)
     const closed = close(w, { argv: [LANE, '--discard'], alive: () => false })

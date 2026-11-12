@@ -2836,12 +2836,13 @@ test('a mechanical stop after a rebase that moved the head is finishable: crew f
         return { status: 'green', stdout: '' }
       },
       spawnDetached: (...args) => { spawned.push(args); return 4242 },
+      now: () => 1_700_000_000_000,
       log: () => {},
     }
     if (['suite', 'proof', 'publish'].includes(variant)) {
       assert.doesNotThrow(() => finishLane({ lane: 'lane', root, deps }), variant)
       assert.deepEqual(calls.filter((args) => args[0] === 'reset'), [['reset', '--soft', MOVED.onto]], variant)
-      assert.deepEqual(JSON.parse(readFileSync(journal, 'utf8').trim().split('\n').at(-1)), { event: 'finish-uncommit', lane: 'lane', head: MOVED.head, onto: MOVED.onto, committed: 'a'.repeat(40) }, variant)
+      assert.deepEqual(JSON.parse(readFileSync(journal, 'utf8').trim().split('\n').at(-1)), { event: 'finish-uncommit', lane: 'lane', at: 1_700_000_000_000, head: MOVED.head, onto: MOVED.onto, committed: 'a'.repeat(40) }, variant)
       assert.equal(spawned.length, 1, variant)
     } else {
       assert.throws(() => finishLane({ lane: 'lane', root, deps }), (error) => error instanceof FinishRefusal && error.reason === 'finish-committed', variant)

@@ -46,6 +46,20 @@ function seat(w, n) {
   return { pgid, ps: `${pgid} ${pgid} ${date[0]} ${date[1]} ${date[2]} ${date[4]} ${date[3]} sh -c pgid=${file}\n` }
 }
 
+test('a lane whose recorded run pid now names a later process lists as stopped run-died (S3-4)', () => {
+  const w = world()
+  try {
+    w.lane('recycled', [{ event: 'stage-start', stage: 'build' }])
+    const pid = join(w.root, 'dt-recycled', 'recycled', 'task', 'run.pid')
+    for (const [startedAt, dead] of [[Date.now() - 86_400_000, true], [Math.round(performance.timeOrigin), false]]) {
+      put(pid, `${process.pid} ${startedAt}\n`)
+      const row = laneRows({ root: w.root, archiveRoot: w.archiveRoot }).find((r) => r.lane === 'recycled')
+      if (dead) assert.deepEqual([row.status, row.reason], ['stopped', 'run-died'])
+      else assert.notEqual(row.reason, 'run-died')
+    }
+  } finally { w.done() }
+})
+
 test('lanes signals no seat process group of a dead run, in text or --json', () => {
   const w = world(), groups = [], calls = []
   try {

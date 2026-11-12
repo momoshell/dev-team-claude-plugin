@@ -81,6 +81,16 @@ test('a seat recorded on a retired transport lists no session file even when its
   }
 })
 
+test('CS1 a closed-out lane resolves from the journal archive beside the crew root (S3-6)', () => {
+  const { home, crewRoot } = fixture()
+  const dir = lane(join(home, '.crew-journal-archive'), 'closed', { turns: [['builder', 1, RAW]] })
+  put(join(dir, 'task', 'lean.json'), JSON.stringify({ id: 'closed' }))
+  let listing
+  assert.doesNotThrow(() => { listing = showLane({ lane: 'closed', deps: { crewRoot } }) })
+  assert.match(listing, /builder.*lean-acp/)
+  assert.match(showLane({ lane: 'closed', role: 'builder', deps: { crewRoot } }), /ASSISTANT\nhello/)
+})
+
 test('CS1 a seat with absent metadata prints unknown, and a transport nothing reads names that reason', () => {
   const { crewRoot } = fixture()
   lane(crewRoot, 'beta', { members: { solo: {}, scribe: { agent: 'x', transport: 'acp' } }, turns: [] })

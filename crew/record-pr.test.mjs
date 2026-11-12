@@ -33,6 +33,18 @@ const run = (w, lane, url = URL1, extra = {}) => {
   return { status, err: err.join('') }
 }
 
+test('record-pr names an abandoned lane as abandoned, not as not stopped (S3-9)', () => {
+  const w = world()
+  try {
+    const file = w.lane('abandoned', { rows: [...STOP, { event: 'finish-decision', choice: 'abandon' }] })
+    const before = readFileSync(file, 'utf8'), result = run(w, 'abandoned')
+    assert.equal(result.status, 1)
+    assert.match(result.err, /abandoned.*crew finish --abandon/)
+    assert.doesNotMatch(result.err, /not stopped/)
+    assert.equal(readFileSync(file, 'utf8'), before)
+  } finally { w.done() }
+})
+
 test('a lane whose run died with no terminal row records the operator pr; a live or unrecorded run is refused', () => {
   const w = world()
   try {

@@ -51,46 +51,6 @@ test('a valid return written before a turn error is accepted with the error on i
   assert.deepEqual(f.rows.find((r) => r.event === 'envelope' && r.role === 'tech-lead').turnError, { code: -32603, message })
 })
 
-// MUTATION: ignore the failed turn's skill recording.
-test('a return read after a turn error is validated in full, required-skill proof included', async () => {
-  for (const proven of [false, true]) {
-    const f = fakes()
-    const run = f.deps.runSeat
-    f.deps.runSeat = async (r) => {
-      const result = await run(r)
-      if (r.role === 'planner') throw Object.assign(new Error('turn failed'), { recording: { definition: { agent: 'pi', requires: ['alpha'], skills: ['alpha'], writes: 'repo' }, recorded: (proven ? [LOAD, DONE] : []).map(JSON.stringify).join('\n') } })
-      return result
-    }
-    const result = await f.go()
-    assert.equal(result.status, proven ? 'done' : 'stopped')
-    if (!proven) { assert.equal(result.reason, 'envelope-refused'); assert.ok(f.rows.some((r) => r.defects?.includes('required-skills-unproven'))) }
-  }
-})
-
-// MUTATION: prove every attempt, the replaced thrown one included.
-test('a thrown first attempt with no recording never blocks a rerun that proves its required skills', async () => {
-  for (const proven of [true, false]) {
-    const definition = { agent: 'pi', requires: ['alpha'], skills: ['alpha'], writes: 'repo' }
-    const f = fakes({ recording: (r) => r.role === 'planner' ? { definition, rows: proven ? [LOAD, DONE] : [] } : null })
-    const run = f.deps.runSeat, planners = []
-    f.deps.runSeat = async (r) => {
-      if (r.role === 'planner') {
-        planners.push(r)
-        if (!r.rerun) throw Object.assign(new Error('turn failed'), { recording: { definition, recorded: null } })
-      }
-      return run(r)
-    }
-    const result = await f.go()
-    assert.equal(planners.length, 2)
-    assert.ok(planners[1].rerun)
-    assert.equal(result.status, proven ? 'done' : 'stopped')
-    if (!proven) {
-      assert.equal(result.reason, 'envelope-refused')
-      assert.ok(f.rows.some((r) => r.defects?.includes('required-skills-unproven')))
-    }
-  }
-})
-
 // MUTATION: stop immediately on a failed turn or rerun it without a bound.
 test('an absent or invalid return after a turn error gets one rerun of the turn, then the lane stops seat-unmeasured', async () => {
   for (const mode of ['absent', 'json', 'schema', 'id', 'twice', 'provider']) {
@@ -1196,15 +1156,6 @@ test('a missing-comma envelope gets one repair turn carrying the parse error and
   assert.match(message, /position \d+/)
   assert.deepEqual(repair.repair, { defects: [message] })
   assert.equal(count(f, 'lead'), 0)
-  for (const unproven of [1, 2]) {
-    const skills = fakes({
-      edit: (v, r) => r.role === 'builder' && !r.repair ? JSON.stringify(v).replace(',', '') : v,
-      recording: (r) => r.role === 'builder' ? { definition: { agent: 'pi', requires: ['alpha'], skills: ['alpha'], writes: 'repo' }, rows: (r.repair ? 2 : 1) === unproven ? [] : [LOAD, DONE] } : null,
-    })
-    assert.deepEqual(await skills.go(), stopped('envelope-refused'))
-    assert.equal(count(skills, 'builder'), 2)
-    assert.ok(skills.rows.some((r) => r.defects?.includes('required-skills-unproven')))
-  }
 })
 
 test('a repaired envelope that is still unparseable stops at envelope-refused with no second repair turn', async () => {
@@ -1251,38 +1202,19 @@ test("only a '{'-starting unparseable envelope gets a parse repair turn", async 
   assert.equal(planners[1].repair, undefined)
 })
 
-// MUTATION: repair a file that was never JSON, or one refused only for skill proof.
-test('a non-JSON, empty, unreadable or proof-only refusal gets no repair turn', async () => {
+// MUTATION: repair a file that was never JSON.
+test('a non-JSON, empty or unreadable refusal gets no repair turn', async () => {
   for (const [options, reason] of [
     [{ edit: () => 'not JSON' }, 'envelope-refused'],
     [{ edit: () => '' }, 'seat-unmeasured'],
     [{ readError: 'EPERM' }, 'seat-unmeasured'],
     [{ seatThrows: 'planner' }, 'seat-unmeasured'],
-    [required([]), 'envelope-refused'],
   ]) {
     const f = fakes(options)
     assert.deepEqual(await f.go(), stopped(reason))
     assert.equal(count(f, 'planner'), options.seatThrows ? 2 : 1)
     assert.equal(f.requests.some((r) => r.repair), false)
   }
-})
-
-// MUTATION: prove only the repair turn's recording and unproven work is laundered by a fresh repair.
-test('a repair does not launder an unproven original and must itself prove its required skills', async () => {
-  for (const unproven of [1, 2]) {
-    const f = fakes({
-      edit: (v, r) => (r.role === 'builder' && !r.repair ? gaps(v) : v),
-      recording: (r) => (r.role === 'builder' ? { definition: { agent: 'pi', requires: ['alpha'], skills: ['alpha'], writes: 'repo' }, rows: (r.repair ? 2 : 1) === unproven ? [] : [LOAD, DONE] } : null),
-    })
-    assert.deepEqual(await f.go(), stopped('envelope-refused'), `turn ${unproven}`)
-    assert.equal(count(f, 'builder'), 2)
-    assert.equal(f.calls.includes('proof'), false)
-  }
-  const both = fakes({
-    edit: (v, r) => (r.role === 'builder' && !r.repair ? gaps(v) : v),
-    recording: (r) => (r.role === 'builder' ? { definition: { agent: 'pi', requires: ['alpha'], skills: ['alpha'], writes: 'repo' }, rows: [LOAD, DONE] } : null),
-  })
-  assert.equal((await both.go()).status, 'done')
 })
 
 // MUTATION: treat every envelope as valid and a refused return advances the loop.
@@ -2054,7 +1986,7 @@ test('the loop imports only its pinned modules and only the lean bridge imports 
   const dir = fileURLToPath(new URL('.', import.meta.url))
   const source = readFileSync(join(dir, 'loop.mjs'), 'utf8')
   const specifiers = [...source.matchAll(/^(?:import|} from|export [^\n]* from)[^'\n]*'([^']+)'/gm)].map((m) => m[1]).sort()
-  assert.deepEqual(specifiers, ['./agents.mjs', './checks.mjs', './lane-core.mjs', './proof.mjs', './protocols.mjs', './skills-proof.mjs', 'node:async_hooks', 'node:fs/promises', 'node:path', 'node:util'])
+  assert.deepEqual(specifiers, ['./agents.mjs', './checks.mjs', './lane-core.mjs', './proof.mjs', './protocols.mjs', 'node:async_hooks', 'node:fs/promises', 'node:path', 'node:util'])
   const laneCore = readFileSync(join(dir, 'lane-core.mjs'), 'utf8')
   const laneCoreImports = [...laneCore.matchAll(/from ['"]([^'"]+)['"]/g)].map((m) => m[1])
   assert.ok(laneCoreImports.length > 0 && laneCoreImports.every((name) => name.startsWith('node:')))
@@ -2148,43 +2080,10 @@ test('an unmeasured suite or incomplete proof stops before any commit or publica
   assert.deepEqual([f.calls.includes('suite'), f.seen.commit, f.seen.publish], [false, undefined, undefined])
 })
 
-const callRow = (id, title, kind, rawInput) => ({ sessionId: 's', update: { sessionUpdate: 'tool_call', toolCallId: id, title, kind, status: 'in_progress', rawInput } })
-// The proof binds a load to the granted path, <checkout>/skills/<name>/SKILL.md (crew/acp/seat.mjs SKILLS_ROOT).
-const GRANTED_ALPHA = fileURLToPath(new URL('../skills/alpha/SKILL.md', import.meta.url))
-const LOAD = callRow('r1', 'read', 'read', { path: GRANTED_ALPHA })
-const DONE = { sessionId: 's', update: { sessionUpdate: 'tool_call_update', toolCallId: 'r1', status: 'completed' } }
-const WRITE = callRow('w1', 'write', 'edit', { path: '/c/a.mjs' })
-const required = (rows) => ({ recording: () => ({ definition: { agent: 'pi', requires: ['alpha'], skills: ['alpha'], writes: 'repo' }, rows }) })
-
-// MUTATION: skip the proof in seatTurn and a seat that never loaded its required skill advances.
-test('a seat whose recording shows every required skill before its first write is accepted', async () => {
-  const f = fakes(required([LOAD, DONE, WRITE]))
+test('a seat whose definition requires a skill its recording never loads is accepted', async () => {
+  const f = fakes({ recording: () => ({ definition: { agent: 'pi', requires: ['alpha'], skills: ['alpha'], writes: 'repo' }, rows: [] }) })
   assert.equal((await f.go()).status, 'done')
-})
-
-// MUTATION: accept a late load and a write before the skill passes.
-test('a required skill loaded after the first write, or never, refuses the envelope and nothing advances', async () => {
-  for (const rows of [[WRITE, LOAD, DONE], [LOAD, WRITE], [WRITE], [], [{ sessionId: 's', update: { sessionUpdate: 'agent_message_chunk' } }]]) {
-    const f = fakes(required(rows))
-    assert.deepEqual(await f.go(), stopped('envelope-refused'))
-    assert.deepEqual(f.rows.find((r) => r.event === 'envelope').defects, ['required-skills-unproven'])
-    assert.deepEqual(f.calls.filter((c) => c !== 'mkdir'), ['seat:planner'])
-  }
-})
-
-// MUTATION: treat a missing recording as proof.
-test('a missing recording refuses when a skill is required and is ignored when none is', async () => {
-  const f = fakes({ recording: () => ({ definition: { agent: 'pi', requires: ['alpha'], skills: ['alpha'], writes: 'repo' } }) })
-  assert.deepEqual(await f.go(), stopped('envelope-refused'))
-  assert.deepEqual(f.rows.find((r) => r.event === 'envelope').defects, ['required-skills-unproven'])
-  const none = fakes({ recording: () => ({ definition: { requires: [], writes: 'repo' } }) })
-  assert.equal((await none.go()).status, 'done')
-})
-
-// MUTATION: let a refused lead envelope through the proof.
-test('a lead whose recording does not show its required skill is refused', async () => {
-  const f = fakes({ spec: {}, lead: 'bounce', edit: (value) => (value.role === 'planner' ? { ...value, status: 'insufficient' } : value), recording: (r) => (r.role === 'lead' ? { definition: { requires: ['alpha'], writes: 'task-dir' }, rows: [] } : null) })
-  assert.deepEqual(await f.go(), stopped('lead-refused'))
+  assert.ok(f.rows.filter((row) => row.event === 'envelope').every((row) => !row.defects.includes('required-skills-unproven')))
 })
 
 test('the lane writes one run-start with its identity before the first seat, and repairs, bounces and retries never write another', async () => {

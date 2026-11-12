@@ -1786,37 +1786,6 @@ test('a refused ACP turn is read after the turn: a valid return is accepted, an 
   }
 })
 
-// MUTATION: ignore the relayed skill rows when a refused turn leaves a valid return.
-test('a refused ACP turn with a valid return must prove its required skills', async () => {
-  const planner = join(AGENTS, 'planner.md')
-  const load = JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'tool_call', toolCallId: 'r1', title: 'Skill', kind: 'other', status: 'in_progress', rawInput: { skill: 'crew-skills-planner:alpha' }, _meta: { claudeCode: { toolName: 'Skill' } } } })
-  const loaded = JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'tool_call_update', toolCallId: 'r1', status: 'completed' } })
-  for (const proven of [false, true]) {
-    const rows = []
-    const f = leanFixture({ deps: { readFileSync: (path, ...args) => {
-      const text = readFileSync(path, ...args)
-      return path === planner ? text.replace('advisor: null', 'advisor: null\nskills: ["alpha"]\nrequires: ["alpha"]') : text
-    } }, loopDeps: { journal: async (row) => rows.push(row), resolveAgents: (tier) => {
-      const resolved = resolveAgents(tier)
-      resolved.seats.planner = { ...resolved.seats.planner, provider: 'anthropic', id: 'claude-opus-4-6', agent: 'claude' }
-      return resolved
-    } } })
-    const answered = f.options.runAcpSeat
-    f.options.runAcpSeat = async (input) => {
-      const turn = await answered(input)
-      if (input.definition.role !== 'planner') return turn
-      if (proven) input.deps.appendFileSync(input.sessionFile, `${load}\n${loaded}\n`, 'utf8')
-      return { stopReason: null, refusal: { code: -32603, errorKind: 'incomplete_tool_call', message: 'Claude ended the turn without returning results for tool calls' } }
-    }
-    const result = await f.go()
-    assert.equal(result.status, proven ? 'done' : 'stopped')
-    if (!proven) {
-      assert.equal(result.reason, 'envelope-refused')
-      assert.ok(rows.some((r) => r.event === 'envelope' && r.defects.includes('required-skills-unproven')))
-    }
-  }
-})
-
 // MUTATION: drop the missing-stop-reason clause and a turn that never measured a stop is accepted on its envelope.
 test('an ACP turn with no stop reason (null, empty, absent, no turn at all) is read and rerun once', async () => {
   for (const turn of [{ stopReason: null, usage: null, refusal: null }, { stopReason: '', usage: null, refusal: null }, { usage: null, refusal: null }, undefined, null]) {
@@ -2242,67 +2211,21 @@ test('a started lean spec reaches the PR with its exact P1 source and measured b
   assert.equal(spec.source, 'issue 1961')
 })
 
-// MUTATION: drop effective.requires from the dispatched definition and the proof has nothing to check.
-test('the requires a seat receives are the effective definition list, tier override included, and its recording decides the envelope', async () => {
+// MUTATION: drop effective.requires from the dispatched definition.
+test('the requires a seat receives are the effective definition list, tier override included', async () => {
   const planner = join(AGENTS, 'planner.md')
   const edit = (from, to) => (path, ...args) => {
     const text = readFileSync(path, ...args)
     return path === planner ? text.replace(from, to) : text
   }
-  // Pin a Claude planner: its load is a Skill call in its own crew-skills-planner plugin.
-  const load = JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'tool_call', toolCallId: 'r1', title: 'Skill', kind: 'other', status: 'in_progress', rawInput: { skill: 'crew-skills-planner:alpha' }, _meta: { claudeCode: { toolName: 'Skill' } } } })
-  const loaded = JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'tool_call_update', toolCallId: 'r1', status: 'completed' } })
   const based = leanFixture({ deps: { readFileSync: edit('advisor: null', 'advisor: null\nrequires: ["alpha"]') } })
-  assert.equal((await based.go()).status, 'stopped')
+  await based.go()
   assert.deepEqual(based.requests[0].definition.requires, ['alpha'])
   const tiered = leanFixture({ deps: { readFileSync: edit(/tiers: .*/, 'skills: ["alpha"]\nrequires: ["base"]\ntiers: {"build":{"requires":["alpha"]}}') }, loopDeps: { resolveAgents: (tier) => {
     const resolved = resolveAgents(tier)
     resolved.seats.planner = { ...resolved.seats.planner, provider: 'anthropic', id: 'claude-opus-4-6', agent: 'claude' }
     return resolved
   } } })
-  const answered = tiered.options.runAcpSeat
-  tiered.options.runAcpSeat = async (input) => {
-    const turn = await answered(input)
-    if (input.definition.role === 'planner') input.deps.appendFileSync(input.sessionFile, `${load}\n${loaded}\n`, 'utf8')
-    return turn
-  }
-  assert.equal((await tiered.go()).status, 'done')
+  await tiered.go()
   assert.deepEqual(tiered.requests[0].definition.requires, ['alpha'])
-})
-
-// MUTATION: prove from the session file on disk instead of the relayed rows and a forged recording passes.
-test('a seat that rewrites its own session file with forged loads is still refused', async () => {
-  const planner = join(AGENTS, 'planner.md')
-  const forgedLoad = JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'tool_call', toolCallId: 'f1', title: 'read', kind: 'read', status: 'completed', rawInput: { path: fileURLToPath(new URL('../skills/alpha/SKILL.md', import.meta.url)) } } })
-  const forged = leanFixture({ deps: { readFileSync: (path, ...args) => {
-    const text = readFileSync(path, ...args)
-    return path === planner ? text.replace('advisor: null', 'advisor: null\nskills: ["alpha"]\nrequires: ["alpha"]') : text
-  } } })
-  const answered = forged.options.runAcpSeat
-  forged.options.runAcpSeat = async (input) => {
-    const turn = await answered(input)
-    if (input.definition.role === 'planner') writeFileSync(input.sessionFile, `${forgedLoad}\n`)
-    return turn
-  }
-  assert.equal((await forged.go()).status, 'stopped')
-})
-
-// MUTATION: skip the on-disk check and a seat that deletes or rewrites its recording after a real load passes.
-test('a seat that deletes or rewrites its session file after a relayed load is refused', async () => {
-  const planner = join(AGENTS, 'planner.md')
-  const load = JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'tool_call', toolCallId: 'r1', title: 'read', kind: 'read', status: 'in_progress', rawInput: { path: fileURLToPath(new URL('../skills/alpha/SKILL.md', import.meta.url)) } } })
-  const loaded = JSON.stringify({ sessionId: 's', update: { sessionUpdate: 'tool_call_update', toolCallId: 'r1', status: 'completed' } })
-  for (const tamper of [(file) => rmSync(file), (file) => writeFileSync(file, 'replaced\n')]) {
-    const lane = leanFixture({ deps: { readFileSync: (path, ...args) => {
-      const text = readFileSync(path, ...args)
-      return path === planner ? text.replace('advisor: null', 'advisor: null\nskills: ["alpha"]\nrequires: ["alpha"]') : text
-    } } })
-    const answered = lane.options.runAcpSeat
-    lane.options.runAcpSeat = async (input) => {
-      const turn = await answered(input)
-      if (input.definition.role === 'planner') { input.deps.appendFileSync(input.sessionFile, `${load}\n${loaded}\n`, 'utf8'); tamper(input.sessionFile) }
-      return turn
-    }
-    assert.equal((await lane.go()).status, 'stopped')
-  }
 })

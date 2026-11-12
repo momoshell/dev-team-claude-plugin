@@ -177,11 +177,18 @@ test('S4-12: CLAUDE.md names the tech-lead among the seats', () => {
 })
 
 // MUTATION: remove the session-write exception.
-test('D16: CLAUDE.md states the session-write exception', () => {
+test('D16: CLAUDE.md states the session-write exception as an operator decision, not a skill-proof need', () => {
   const start = claude.indexOf('**Instrumentation is never load-bearing.**')
   assert.notEqual(start, -1)
   const bullet = claude.slice(start).split(/\n- |\n\n/)[0].replace(/\s+/g, ' ')
-  for (const phrase of ['session-file write', 'fails the turn', 'skill proof', 'crew/lean.mjs']) assert.ok(bullet.includes(phrase), phrase)
+  for (const phrase of ['session-file write', 'fails the turn', 'crew/lean.mjs', 'operator']) assert.ok(bullet.includes(phrase), phrase)
+  assert.ok(!bullet.includes('because the skill proof reads'))
+})
+
+test('S6-15: crew/README claims no required-skill refusal and defines the seat-turn tool call', () => {
+  assert.doesNotMatch(crewReadme, /or its envelope is\s+refused/)
+  assert.ok(!crewReadme.includes('skills-proof.mjs'))
+  assert.ok(crewReadme.includes('counts the distinct `toolCallId`s'))
 })
 
 // MUTATION: rename a knob in the README table.

@@ -1,9 +1,9 @@
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { scratchDir } from '../test/helpers.mjs'
+import { ROOT, scratchDir } from '../test/helpers.mjs'
 import assert from 'node:assert/strict'
 import {
-  mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync,
+  existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, resolve as resolvePath } from 'node:path'
@@ -162,6 +162,19 @@ test('the shipped team memory store renders every indexed entry within the defau
   assert.ok(extract.included.length >= 2, 'the index and at least one entry')
   assert.equal(extract.included[0].path, 'MEMORY.md')
   assert.ok(extract.bytes <= memory.DEFAULT_BUDGET_BYTES)
+})
+
+test('the dev-team folder keeps no retired runtime config and no unindexed memory note', () => {
+  const dir = join(ROOT, '.claude/dev-team/memory')
+  assert.equal(existsSync(join(ROOT, '.claude/dev-team/config.md')), false)
+  const index = readFileSync(join(dir, 'MEMORY.md'), 'utf8')
+  const linked = [...index.matchAll(/\]\(([^)]+)\)/g)].map((match) => match[1])
+  for (const name of readdirSync(dir).filter((name) => name.endsWith('.md'))) {
+    assert.ok(['MEMORY.md', 'architecture-notes.md', ...linked].includes(name), name)
+  }
+  for (const name of ['config.md', 'backend-notes.md', 'qa-notes.md', 'devops-notes.md', 'frontend-notes.md']) {
+    assert.ok(existsSync(join(ROOT, 'docs/archive', name)), name)
+  }
 })
 
 test('the shipped team memory teaches no deleted gate, kill-mutation proof or steer arm', () => {

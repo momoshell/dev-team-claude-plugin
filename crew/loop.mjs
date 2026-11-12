@@ -20,7 +20,6 @@ import {
 import { HEX_OID, describeError as describe, GIT_STATUS_ARGS, gitRepoState } from './lane-core.mjs'
 import { proveTests } from './proof.mjs'
 import { TIERS, AGENT_ROLES, runOverrideDefects, validateEnvelope } from './protocols.mjs'
-import { proveRequiredSkills } from './skills-proof.mjs'
 
 export const DEFAULT_ROUNDS = 2
 const MAX_ENVELOPE_REPAIRS = 1
@@ -438,7 +437,7 @@ export async function runLoop(spec, deps = {}) {
           } catch { /* journal measurements must not affect the turn */ }
           if (!isFinish && tier === 'mechanical' && role === 'builder' && checked.envelope?.status === 'done' && checked.envelope.details && !Object.hasOwn(checked.envelope.details, 'subject')) checked.defects.push('details.subject is required on a mechanical lane for the commit and PR')
           if (role === 'planner' && checked.envelope && checked.defects.length === 0 && Object.hasOwn(checked.envelope.details, 'plan_path')) checked.defects.push(...await artifactDefects(checked.envelope.details))
-          return { failure, parsed, raw, parseError, recording, checked, turnError, routed, providerKind, method, turnBefore, turnAfter }
+          return { failure, parsed, raw, parseError, checked, turnError, routed, providerKind, method, turnBefore, turnAfter }
         }
         const observe = (a) => emit('envelope', { role, id, returnPath, parsed: a.parsed, defects: a.checked.defects, error: a.failure?.error ?? null, turnError: a.turnError })
         const attempts = [await attempt(request)]
@@ -448,8 +447,6 @@ export async function runLoop(spec, deps = {}) {
           const acceptable = !latest.failure && latest.checked.defects.length === 0 && latest.checked.envelope?.id === id
           if (latest.turnError && !acceptable && !latest.routed && !rerun) {
             await observe(latest)
-            // The rerun replaces the thrown attempt; repairs still keep their original.
-            attempts.pop()
             rerun = true
             asked = { ...asked, rerun: { error: latest.turnError } }
           } else if (!latest.turnError && repairs < MAX_ENVELOPE_REPAIRS && ((!latest.failure && latest.checked.defects.length > 0) || (latest.parseError && latest.raw.trimStart().startsWith('{')))) {
@@ -458,22 +455,11 @@ export async function runLoop(spec, deps = {}) {
             asked = { ...request, repair: { defects: latest.parseError ? [latest.parseError] : [...latest.checked.defects] } }
           } else break
           latest = await attempt(asked)
-          attempts.push(latest)
         }
         let { failure, parsed, checked } = latest
-        const returnValid = !failure && checked.defects.length === 0 && checked.envelope?.id === id
-        // The proof reads the rows the runner relayed for each turn, after the schema and id are sound;
-        // a repair turn never launders the work that came before it.
-        if (!failure && checked.defects.length === 0 && checked.envelope?.id === id) {
-          for (const { recording } of attempts) {
-            if (!recording?.definition) continue
-            const unproven = proveRequiredSkills({ definition: recording.definition, recorded: recording.recorded, cwd: recording.cwd, museSkillsRoot: recording.museSkillsRoot })
-            if (unproven) checked.defects.push(unproven)
-          }
-        }
-        const valid = checked.defects.length === 0 && checked.envelope?.id === id
+        const valid = !failure && checked.defects.length === 0 && checked.envelope?.id === id
         await emit('envelope', { role, id, returnPath, parsed, defects: checked.defects, error: failure?.error ?? null, turnError: latest.turnError })
-        if (latest.turnError && !returnValid) failure = { reason: latest.providerKind === 'authentication_failed' && latest.method === 'session/new' ? 'authentication_failed' : 'seat-unmeasured', error: latest.turnError }
+        if (latest.turnError && !valid) failure = { reason: latest.providerKind === 'authentication_failed' && latest.method === 'session/new' ? 'authentication_failed' : 'seat-unmeasured', error: latest.turnError }
         if (!failure && !valid) failure = { reason: 'envelope-refused', defects: checked.defects }
         if (failure) return hold ? { held: { ...failure, envelope: null } } : { halt: await stop(role === 'lead' && failure.reason !== 'authentication_failed' ? 'lead-refused' : failure.reason, { role, id, ...failure }) }
         last[role] = checked.envelope

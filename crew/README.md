@@ -70,7 +70,7 @@ text and notes are rewritten; issue numbers appear only on trailer lines.
 Every loop is bounded, every envelope is
 validated against a closed protocol (P2) and refused if it does not parse, and
 the loop adds no other gate: no host-load gate, no dispatch-time baseline, no
-measurement that holds work. Journal writes do not throw into the caller. A failed session-file write fails the turn because skill proof reads that recording (`lean.mjs`, `guardedAppend`).
+measurement that holds work. Journal writes do not throw into the caller. A failed session-file write fails the turn (`crew/lean.mjs`, `guardedAppend`). No reader needs the complete recording since the skill proof was removed (#2323); keeping this exception is an operator decision.
 
 ADR-055 §12 routes an escalation without `details.question` back to the same seat. On build and judge and in finish runs, a builder's `insufficient` goes to the lead with its envelope unless it names no `details.gap` after a turn that changed the worktree, in which case it continues without a round up to the lane's progress cap. Finish and mechanical suite-repair turns do not continue this way: a non-done finish suite-repair return stops, and non-finish mechanical insufficiency restarts as build. The lead routes other insufficient returns to the builder or planner where available, or escalates a §12 case. The lead's last consult in a phase is marked last; a phase reset or refunded bounce can reopen consults, and a spent lead bound stops for the operator with a question drawn from the held envelope and lead decision. Repeated failures with the same evidence stop as `no-progress` without a seat decision. On build and judge lanes the planner's P2 `details.tests` decides whether P3 proof is required; an empty list means no criterion is machine-checked. A mechanical builder may name no test.
 
@@ -109,8 +109,7 @@ A frontmatter tier override replaces only the fields it names and keeps a raw ov
 | `lead` | answers an escalation with one closed decision | none |
 | `tech-lead` | judge loop's automatic second review | none |
 
-A seat loads its `requires` skills before its first write, or its envelope is
-refused (`crew/skills-proof.mjs`). Scope is context, not enforcement
+`requires` is validated and carried in the definition, but no check reads it since the required-skill proof was removed (#2323). Scope is context, not enforcement
 (ADR-045): a lane may write any file.
 
 A seat's `wait_s` in `crew/acp/seat.mjs` starts after ACP setup; setup has its own budget, `ACP_SETUP_TIMEOUT_MS` plus `ACP_FIFO_WAIT_MS` in `crew/acp-client.mjs`, as a fixed cost on top of `wait_s`.
@@ -139,6 +138,7 @@ Everything durable is a file; session chat is never the record.
   `usage`, `worktree_changed` and `unmeasured`; each null field has one reason
   in `unmeasured`: `not-reported`, `turn-failed`, `usage-unavailable`,
   `no-return`, `clock-unmeasured`, `not-repo-seat` or `worktree-unmeasured`.
+  `tool_calls` counts the distinct `toolCallId`s of the `tool_call` updates relayed into the turn's session file (`crew/lean.mjs`); it is null when a session-file write failed.
   `crew show` reads them; the visualizer reads them.
 
 ## Files
@@ -150,7 +150,6 @@ Everything durable is a file; session chat is never the record.
 - `checks.mjs` — suite, commit, rebase, PR.
 - `agents.mjs`, `protocols.mjs` — agent definitions, tiers, and the closed protocols.
 - `acp/`, `acp-client.mjs`, `acp-permission.mjs` — the ACP seat transport, grants and permission handling.
-- `skills-proof.mjs` — the required-skill proof.
 - `show.mjs`, `lanes.mjs`, `finish.mjs`, `record-pr.mjs`, `closeout.mjs` — the other verbs.
 - `reclaim.mjs` — token-fenced locks and the per-seat reservation markers the ACP client takes (`reserve`, `advance`, `clear`, `probeEvidence`).
 - `adapters/adapter-*.mjs` — per-agent launch shapes for `claude`, `pi` and `muse`.

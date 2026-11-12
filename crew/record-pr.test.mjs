@@ -130,6 +130,9 @@ test('HF1 refuses open, reviewed, empty, torn, non-lean, missing lanes and bad a
     files.esc = outside
     const before = Object.fromEntries(Object.entries(files).map(([k, f]) => [k, readFileSync(f, 'utf8')]))
     for (const name of [...Object.keys(files), 'missing']) assert.equal(run(w, name).status, 1, name)
+    for (const [name, kind] of [['torn', 'malformed'], ['scalar', 'non-object']]) {
+      assert.equal(run(w, name).err, `crew record-pr: task journal has a ${kind} row; refusing to append\n`)
+    }
     for (const [k, f] of Object.entries(files)) assert.equal(readFileSync(f, 'utf8'), before[k], k)
     const f = w.lane('args'), text = readFileSync(f, 'utf8')
     for (const url of ['http://github.com/o/r/pull/1', 'https://github.com/o/r/pull/0', 'https://github.com/o/r/pull/1/files', 'https://github.com/o/r/pull/99999999999999999999', 'https://evil.example/o/r/pull/1', 'https://github.com/../r/pull/12', 'https://github.com/o/./pull/12', 'https://github.com/o/../pull/12']) {

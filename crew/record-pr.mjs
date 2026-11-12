@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLeanSource } from '../visualizer/server/lean-source.mjs'
 import { stateless, supersededReturn } from '../visualizer/server/lean-journal-order.mjs'
-import { LANE, isObject, within } from './lane-core.mjs'
+import { LANE, parseJournalRows, within } from './lane-core.mjs'
 import { deadRun, probeAlive } from './run-pid.mjs'
 
 class RecordPrRefusal extends Error {}
@@ -27,14 +27,7 @@ export function parsePrUrl(url) {
 }
 
 function parseRows(text) {
-  const rows = []
-  for (const line of text.split('\n')) {
-    if (!line.trim()) continue
-    let row
-    try { row = JSON.parse(line) } catch { refuse('task journal has a malformed row; refusing to append') }
-    if (!isObject(row)) refuse('task journal has a non-object row; refusing to append')
-    rows.push(row)
-  }
+  const rows = parseJournalRows(text, (kind) => refuse(kind === 'malformed' ? 'task journal has a malformed row; refusing to append' : 'task journal has a non-object row; refusing to append'))
   if (!rows.length) refuse('task journal is empty')
   return rows
 }

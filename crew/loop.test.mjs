@@ -250,6 +250,34 @@ function fakes(options = {}) {
   }
   return { spec, deps, calls, rows, requests, tiers, seen, writes, discardArgs, go: () => runLoop(spec, deps) }
 }
+test('a builder seat turn fingerprints the worktree once before and once after each attempt (#2324)', async () => {
+  for (const [mode, expected] of [['done', 2], ['repair', 4], ['rerun', 4]]) {
+    let count = 0, builderRequests = 0
+    const f = fakes({ deps: { repoState: () => { count++; return 'same' } }, edit: (value, request) => mode === 'repair' && request.role === 'builder' && !request.repair ? { ...value, status: 'invalid' } : value })
+    const run = f.deps.runSeat
+    f.deps.runSeat = async (request) => {
+      if (request.role === 'builder' && ++builderRequests === 1 && mode === 'rerun') throw new Error('turn failed')
+      return run(request)
+    }
+    assert.equal((await f.go()).status, 'done', mode)
+    assert.equal(count, expected, mode)
+    assert.equal(count, 2 * builderRequests, mode)
+  }
+})
+
+test("builder progress compares the first attempt's before with the last attempt's after across a rerun (#2324)", async () => {
+  let tree = 'a'
+  const f = fakes({ bounds: { builder: 1 }, deps: { repoState: () => tree }, edit: (value, request) => request.role === 'builder' && request.rerun ? { ...value, status: 'insufficient' } : value })
+  const run = f.deps.runSeat
+  f.deps.runSeat = async (request) => {
+    if (request.role === 'builder' && !request.rerun && tree === 'a') { tree = 'b'; throw new Error('turn failed') }
+    return run(request)
+  }
+  assert.equal((await f.go()).status, 'done')
+  assert.equal(f.rows.filter((row) => row.event === 'builder-continue').length, 1)
+  assert.equal(f.requests.filter((request) => request.role === 'lead').length, 0)
+})
+
 test('every seat turn journals one seat-turn row whose unmeasured values are null with one closed reason (#2287)', async () => {
   for (const reject of [false, true]) {
     let state = 0

@@ -76,6 +76,19 @@ function assertUnchanged(w) {
   assert.ok(!existsSync(join(w.archiveRoot, `dt-${LANE}`)), 'no archive destination')
 }
 
+test('closeout preserves journal refusal messages for malformed and non-object rows (#2324)', () => {
+  const w = world()
+  try {
+    const journal = join(w.leaf, 'task', 'journal.jsonl')
+    for (const [text, kind] of [['{torn\n', 'malformed'], ['3\n', 'non-object']]) {
+      writeFileSync(journal, w.journalText + text)
+      const result = close(w)
+      assert.equal(result.status, 1)
+      assert.equal(result.err, `crew closeout: task journal has a ${kind} row\n`)
+    }
+  } finally { w.done() }
+})
+
 test('discard is not blocked by a claim whose pid now names a later process (S3-4)', () => {
   const w = world({ rows: [...STOPPED, PR_ROW] })
   try {

@@ -3,12 +3,22 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { scratchDir } from '../test/helpers.mjs'
+import { parseJournalRows } from './lane-core.mjs'
+
+test('journal parser preserves ordered objects and delegates invalid rows (#2324)', () => {
+  const kinds = []
+  assert.deepEqual(parseJournalRows(' \n{"n":1}\n{broken\n3\n{"n":2}\n', (kind) => kinds.push(kind)), [{ n: 1 }, { n: 2 }])
+  assert.deepEqual(kinds, ['malformed', 'non-object'])
+  for (const [text, kind] of [['{broken', 'malformed'], ['null', 'non-object']]) {
+    assert.throws(() => parseJournalRows(text, (actual) => { throw new Error(actual) }), { message: kind })
+  }
+})
 
 test('lane-core helpers are defined once, in crew/lane-core.mjs', () => {
   const modules = {
-    'finish.mjs': ['LANE', 'isObject'],
-    'record-pr.mjs': ['LANE', 'isObject', 'within'],
-    'closeout.mjs': ['LANE', 'isObject', 'within'],
+    'finish.mjs': ['LANE', 'isObject', 'parseJournalRows'],
+    'record-pr.mjs': ['LANE', 'parseJournalRows', 'within'],
+    'closeout.mjs': ['LANE', 'isObject', 'parseJournalRows', 'within'],
     'show.mjs': ['LANE', 'isObject'],
     'start.mjs': ['LANE'],
     'loop.mjs': ['HEX_OID', 'describeError', 'GIT_STATUS_ARGS'],

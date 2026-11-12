@@ -678,6 +678,33 @@ test('builder continuations are capped per lane, then a no-gap insufficient goes
   assert.deepEqual(f.rows.filter((r) => r.event === 'builder-continue').map((r) => r.progressTurns), [1, 2, 3, 4, 5, 6])
 })
 
+test('a builder turn after repeated lead bounces carries every earlier lead ruling of the stage (#2291)', async () => {
+  let builds = 0, leads = 0
+  const f = fakes({ lead: 'bounce', deps: { repoState: () => 'same' }, edit: (v) => {
+    if (v.role === 'builder' && ++builds <= 2) return { ...v, status: 'insufficient', details: { ...v.details, gap: `gap ${builds}` } }
+    if (v.role === 'lead') v.summary = `ruling ${++leads}`
+    return v
+  } })
+  const result = await f.go()
+  const builders = f.requests.filter((r) => r.role === 'builder')
+  assert.equal(result.status, 'done')
+  assert.deepEqual(builders[2].feedback, [{ id: 'lead-bounce', summary: 'ruling 2' }, { id: 'lead-bounce', summary: 'ruling 1' }])
+})
+
+test('a builder-continue turn keeps the lead rulings made earlier in the stage (#2291)', async () => {
+  let builds = 0, state = 0
+  const f = fakes({ lead: 'bounce', deps: { repoState: () => String(state++) }, edit: (v) => {
+    if (v.role === 'builder' && ++builds <= 2) return { ...v, status: 'insufficient', details: { ...v.details, ...(builds === 1 ? { gap: 'gap 1' } : {}) } }
+    if (v.role === 'lead') v.summary = 'ruling 1'
+    return v
+  } })
+  const result = await f.go()
+  const builders = f.requests.filter((r) => r.role === 'builder')
+  assert.equal(result.status, 'done')
+  assert.equal(builders[2].feedback[0].id, 'builder-continue')
+  assert.deepEqual(builders[2].feedback.filter((item) => item.id === 'lead-bounce').map((item) => item.summary), ['ruling 1'])
+})
+
 test('a lead bounce to a builder whose turn changed the worktree does not spend the lead bound (#2279)', async () => {
   for (const changed of [true, false]) {
     let builds = 0, state = 0

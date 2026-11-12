@@ -92,14 +92,15 @@ test('the tier-zero kinds and the loaded context carry no tripwire', () => {
   rmSync(f.root, { recursive: true, force: true })
 })
 
-function fakeChild({ exitCode = 0, invalid = false, hang = false } = {}) {
+function fakeChild({ exitCode = 0, invalid = false, hang = false, stderr = '' } = {}) {
   const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kills = []
   child.stdin = { end(value) { if (hang) return; setImmediate(() => {
     const request = JSON.parse(value)
     const anchor = request.delta.flatMap((entry) => String(entry.text).split('\n')).map((line) => /^([^:]+(?:\/[^:]+)*:\d+): /.exec(line)?.[1]).find(Boolean) || 'lib/widget.mjs:2'
     const judgment = { class: 'edge-path', severity: 'medium', claim: 'guard handles a grounded edge case', evidence: [anchor] }
     child.stdout.write(invalid ? 'not-json\n' : `${JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: JSON.stringify(judgment), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } } })}\n`)
-    child.emit('close', exitCode)
+    if (stderr) child.stderr.write(stderr)
+    setImmediate(() => child.emit('close', exitCode))
   }) } }
   child.kill = (signal) => { child.kills.push(signal); return true }
   return child
@@ -229,6 +230,17 @@ test('result-time repeated-failure notes and queued triggers retain the result c
 })
 test('ADR47-L2 F1 timeout journals bounded cell failure', async () => { const callbacks=[]; const timers={setTimeout(fn){callbacks.push(fn);return callbacks.length},clearTimeout(){}}; const f=fixture(); const m=JSON.parse(readFileSync(join(f.taskDir,advisor.ADVISOR_MANIFEST_FILE))); m.cell={provider:'local',id:'advisor-v1',agent:'pi',effort:'high',model:'local/advisor-v1'}; writeFileSync(join(f.taskDir,advisor.ADVISOR_MANIFEST_FILE),JSON.stringify(m)); const journal=sink(); const a=advisor.createAdvisor({env:env({CREW_TASK_DIR:f.taskDir}),deps:{cwd:f.tree,taskDir:f.taskDir,appendFile:journal.appendFile,readFile:(p)=>readFileSync(p,'utf8'),fileMtime:()=>2,resolveBinary:()=>({command:'/fake/pi'}),spawn:()=>fakeChild({hang:true}),setTimeout:timers.setTimeout,clearTimeout:timers.clearTimeout,consultTimeoutMs:5,childKillGraceMs:1}}); a.onToolResult(result('g','read',{path:join(f.tree,'lib/widget.mjs')},'lib/widget.mjs:2: grounded'),{}); const path=join(f.tree,'widget.test.mjs'); a.onToolCall(call('f','write',{path,content:'x'}),{}); a.onToolResult(result('f','write',{path,content:'x'},'ok'),{}); for(let i=0;i<8;i++){callbacks.shift()?.();await new Promise(r=>setImmediate(r))} await a.settled(); const row=journal.rows.find(x=>x.advisor_cell_failure)?.advisor_cell_failure; assert.equal(row.kind,'timeout'); assert.equal(row.model_id,'advisor-v1'); assert.equal(row.provider,'local'); rmSync(f.root,{recursive:true,force:true}) })
 test('ADR47-L2 F2 timeout rejection uses timeout code', async () => { const callbacks=[]; const f=fixture(); const m=JSON.parse(readFileSync(join(f.taskDir,advisor.ADVISOR_MANIFEST_FILE))); m.cell={provider:'local',id:'advisor-v1',agent:'pi',effort:'high',model:'local/advisor-v1'}; writeFileSync(join(f.taskDir,advisor.ADVISOR_MANIFEST_FILE),JSON.stringify(m)); const journal=sink(); const a=advisor.createAdvisor({env:env({CREW_TASK_DIR:f.taskDir}),deps:{cwd:f.tree,taskDir:f.taskDir,appendFile:journal.appendFile,readFile:(p)=>readFileSync(p,'utf8'),fileMtime:()=>2,resolveBinary:()=>({command:'/fake/pi'}),spawn:()=>fakeChild({hang:true}),setTimeout(fn){callbacks.push(fn);return callbacks.length},clearTimeout(){},consultTimeoutMs:5,childKillGraceMs:1}}); a.onToolResult(result('g','read',{path:join(f.tree,'lib/widget.mjs')},'lib/widget.mjs:2: grounded'),{}); const path=join(f.tree,'widget.test.mjs'); a.onToolCall(call('f','write',{path,content:'x'}),{}); a.onToolResult(result('f','write',{path,content:'x'},'ok'),{}); for(let i=0;i<8;i++){callbacks.shift()?.();await new Promise(r=>setImmediate(r))} await a.settled(); assert.ok(journal.rows.find(x=>x.advisor_note?.outcome==='rejected').advisor_note.codes.includes('timeout')); rmSync(f.root,{recursive:true,force:true}) })
+test('a nonzero child exit journals its exit code and stderr tail on the cell failure row', async () => {
+  const r = await runManifestConsult({ childOptions: { exitCode: 1, stderr: 'pi: provider refused the request\n' } })
+  try {
+    const rows = r.journal.rows.filter((row) => row.advisor_cell_failure).map((row) => row.advisor_cell_failure)
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].kind, 'transport-error')
+    assert.equal(rows[0].exit_code, 1)
+    assert.equal(rows[0].signal, null)
+    assert.ok(rows[0].stderr_tail.includes('provider refused'))
+  } finally { rmSync(r.f.root, { recursive: true, force: true }) }
+})
 test('ADR47-L2 F3 nonzero child exit journals transport failure', async () => { const r=await runManifestConsult({childOptions:{exitCode:1}}); const row=r.journal.rows.find(x=>x.advisor_cell_failure)?.advisor_cell_failure; assert.equal(row.kind,'transport-error'); assert.equal(r.journal.rows.filter(x=>x.advisor_cell_failure).length,1) })
 test('a pre-spawn pi resolution failure writes exactly one transport-error cell-failure audit', async () => {
   const r = await runManifestConsult({ resolveBinary: () => ({}) })
@@ -663,7 +675,7 @@ test('A3 clockfree pi-child timeout, oversize output and invalid frames are clos
     const spawn = () => {
       const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
       child.stdin = { end() { if (mode === 'timeout') return; setImmediate(() => {
-        child.stdout.write(mode === 'oversize' ? Buffer.alloc(advisor.RESPONSE_CAP_BYTES + 1) : 'not-json\\n')
+        child.stdout.write(mode === 'oversize' ? JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: 'r'.repeat(advisor.RESPONSE_CAP_BYTES + 1) } }) + '\n' : 'not-json\\n')
         child.emit('close', 0)
       }) } }
       child.kill = () => true
@@ -959,9 +971,10 @@ test('A2 clockfree consult timeout is injected and explicitly fired', async () =
   } finally { finish?.(); c.cleanup() }
 })
 
-// failure guard (consultFailed), cap path: a partial frame past RESPONSE_CAP_BYTES after complete frames.
+// failure guard (consultFailed), cap path: the over-cap reply's usage is folded before failure.
 test('spend stream (i): a stream that hits a cap after complete frames leaves the spend unmeasured', async () => {
-  assertPartial(await spendRun([ownFrame(COMPLETE_USAGE)], { raw: 'x'.repeat(advisor.RESPONSE_CAP_BYTES + 1), close: null }), 5)
+  const frame = ownFrame(COMPLETE_USAGE); frame.message.content = 'x'.repeat(advisor.RESPONSE_CAP_BYTES + 1)
+  assertPartial(await spendRun([ownFrame(COMPLETE_USAGE)], { raw: JSON.stringify(frame) + '\n', close: null }), 10)
 })
 
 test('a judgment child that ignores SIGTERM is killed and has closed before the consult settles', async () => {
@@ -1074,6 +1087,19 @@ function framesChild(frames, { chunked = false } = {}) {
 }
 const judgmentFrame = (claim) => JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: JSON.stringify({ class: 'edge-path', severity: 'low', claim, evidence: ['lib/widget.mjs:2'] }) } }) + '\n'
 
+test('a consult whose reply is over the response cap journals a body-too-large cell failure, not transport', async () => {
+  const replyFrame = JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: 'r'.repeat(advisor.RESPONSE_CAP_BYTES + 1) } }) + '\n'
+  const c = childConsult({ childSpawn: framesChild([replyFrame]), extraDeps: { childKillGraceMs: 5 } })
+  try {
+    await c.run()
+    const failures = c.journal.rows.filter((row) => row.advisor_cell_failure).map((row) => row.advisor_cell_failure)
+    assert.equal(failures.length, 1)
+    assert.equal(failures[0].kind, 'body-too-large')
+    assert.notEqual(failures[0].detail, 'pi child transport failed')
+    assert.equal(c.journal.rows.find((row) => row.advisor_consult).advisor_consult.reply_reason, 'body-too-large')
+  } finally { c.cleanup() }
+})
+
 test('many small frames whose TOTAL exceeds the stream cap are rejected body-too-large', async () => {
   const { STREAM_CAP_BYTES } = await import('./subagent.ts')
   const filler = JSON.stringify({ type: 'turn_start', pad: 'x'.repeat(1000) }) + '\n'
@@ -1103,10 +1129,10 @@ test('frames under 40 KB delivered in one chunk over 64 KiB are parsed frame by 
   } finally { c.cleanup() }
 })
 
-test('a single complete frame over 64 KiB within the stream total is rejected body-too-large', async () => {
+test('a reply over 64 KiB within the stream total is rejected body-too-large', async () => {
   const { STREAM_CAP_BYTES } = await import('./subagent.ts')
-  const big = JSON.stringify({ type: 'tool_execution_end', result: 'z'.repeat(advisor.RESPONSE_CAP_BYTES + 1024) }) + '\n'
-  const frames = [big, judgmentFrame('Guard at lib/widget.mjs:2 misses the null path.')]
+  const big = JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: 'z'.repeat(advisor.RESPONSE_CAP_BYTES + 1024) } }) + '\n'
+  const frames = [big]
   assert.ok(Buffer.byteLength(big) > advisor.RESPONSE_CAP_BYTES)
   assert.ok(Buffer.byteLength(frames.join('')) < STREAM_CAP_BYTES)
   const c = childConsult({ childSpawn: framesChild(frames), extraDeps: { childKillGraceMs: 5 } })
@@ -1327,9 +1353,9 @@ async function rjDrive(reply, { mode = 'reply', digest, repeated = false } = {})
         setImmediate(() => {
           const current = childIndex++
           if (mode === 'bad-frame') child.stdout.write('not-json\n')
-          else if (mode === 'oversize') child.stdout.write('x'.repeat(66000))
+          else if (mode === 'oversize') child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: 'x'.repeat(66000) } }) + '\n')
           else child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: Array.isArray(reply) ? reply[current] : reply, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } } }) + '\n')
-          if (mode !== 'oversize') child.emit('close', mode === 'exit' ? 1 : 0)
+          child.emit('close', mode === 'exit' ? 1 : 0)
         })
       } }
       return child
@@ -1993,6 +2019,32 @@ test('gitDiffLines counts added plus removed lines against HEAD, untracked files
 // ---- pre-return whole-diff window --------------------------------------------------------------------------------
 const deltaOf = (payload) => payload.delta.map((entry) => entry.text).join('\n')
 const consultRow = (s) => s.journal.rows.find((row) => row.advisor_consult?.trigger === 'pre-return').advisor_consult
+
+test('a pre-return consult on a full 48 KiB short-line window keeps the judgment when pi replays the input in frames over 64 KiB', async () => {
+  const claim = 'the short-line diff misses an edge'
+  const files = [{ path: 'big.mjs', lines: Array.from({ length: 8000 }, (_, i) => `big.mjs:${i + 1}: v${i}`) }]
+  let largest = 0
+  const spawn = () => {
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => true
+    child.stdin = { end(value) { setImmediate(() => {
+      const user = { role: 'user', content: [{ type: 'text', text: value }] }
+      const assistant = { role: 'assistant', content: [{ type: 'text', text: JSON.stringify({ class: 'edge-path', severity: 'high', claim, evidence: ['big.mjs:1'] }) }], usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } }
+      for (const frame of [{ type: 'agent_start' }, { type: 'turn_start' }, { type: 'message_start', message: user }, { type: 'message_end', message: user }, { type: 'message_start', message: assistant }, { type: 'message_end', message: assistant }, { type: 'turn_end', message: assistant, toolResults: [] }, { type: 'agent_end', messages: [user, assistant] }]) {
+        const line = JSON.stringify(frame) + '\n'; largest = Math.max(largest, Buffer.byteLength(line)); child.stdout.write(line)
+      }
+      child.emit('close', 0)
+    }) } }
+    return child
+  }
+  const s = triggerSeat({ severity: 'high', claim, evidence: ['big.mjs:1'], extraDeps: { diffLines: () => ({ lines: 8000, entries: [], files }), spawn, childKillGraceMs: 5 } })
+  try {
+    const verdict = await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
+    assert.deepEqual(verdict, { block: true, reason: claim })
+    assert.ok(largest > advisor.RESPONSE_CAP_BYTES)
+    assert.ok(consultRow(s).window_bytes > 40 * 1024)
+    assert.equal(s.journal.rows.some((row) => row.advisor_cell_failure), false)
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
 
 test('PW1 a pre-return consult carries a change on line 200 of a committed file, with no prior grounding', async () => {
   const s = triggerSeat({ severity: 'medium', extraDeps: { diffLines: (cwd) => advisor.gitDiffLines({ cwd }) } })

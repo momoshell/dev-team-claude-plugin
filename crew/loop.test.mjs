@@ -2722,6 +2722,7 @@ test('a rebase that moves the head reruns proof then the suite on the rebased tr
   assert.equal(f.calls.filter((c) => c === 'suite').length, 2)
   assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: undefined })
   assert.equal(f.seen.proof.base, `${MOVED.head}^`)
+  assert.ok(f.seen.publish.body.split('\n').includes('- lib.test.mjs: works was red on the old source, green on the build.'))
 })
 
 test('a mechanical publishing rebase lists only surviving committed paths in the PR', async () => {

@@ -176,7 +176,7 @@ export async function runLean(spec, deps = {}) {
         const dir = process.env.CREW_MEMORY_DIR || join(spec.cwd, '.claude', 'dev-team', 'memory')
         const extract = openMemory({ dir }).context({ task: request.brief, role })
         const section = renderSection(extract)
-        if (!section) await emit('memory-empty', { role, id, reason: extract.reason ?? 'empty' })
+        if (!section) await emit('memory-empty', { role, id, reason: extract.reason ?? 'empty', dropped: extract.dropped ?? [] })
         else sectionText = section
       }
     }

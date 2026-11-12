@@ -385,7 +385,8 @@ test('a mechanical lane runs rebase, build, proof and suite with no plan, review
     assert.equal((await f.go()).status, 'done', mode)
     assert.deepEqual(f.calls.slice(1), ['fetch', 'rebase', 'seat:builder', ...(mode === 'repair' ? ['seat:builder'] : []), ...(mode === 'none' ? [] : ['proof']), 'review-paths', 'suite-stage', 'checked-tree', 'suite', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase', 'publish'])
     assert.equal(f.seen.publish.title, 'docs(crew): fix typo')
-    assert.match(f.seen.publish.body, /Proof: mechanical lane, not reviewed/)
+    assert.match(f.seen.publish.body, mode === 'none' ? /Proof: mechanical lane, not reviewed/ : /Review: none, mechanical lane, not reviewed/)
+    if (mode !== 'none') assert.match(f.seen.publish.body, /lib\.test\.mjs: works was red on the old source, green on the build/)
     assert.equal(f.seen.publish.body.match(/mechanical lane, not reviewed/g)?.length, 1, mode)
     if (mode === 'repair') assert.match(f.requests[1].repair.defects.join(' '), /details.subject is required on a mechanical lane/)
   }
@@ -2543,6 +2544,84 @@ test('an early refusal journals one stopped verdict row with its reason, and non
   }
 })
 
+test('a recheck review resets the delta base so the next delta review diffs from the rebased tree (S1-2)', async () => {
+  const A = 'a'.repeat(40)
+  let reviews = 0
+  const f = fakes({ rebase: answers({ ...MOVED, head: A }, MOVED, { ...MOVED, head: A }),
+    checkedTree: () => ({ ...green(), stdout: `${String.fromCharCode(97 + f.calls.filter((c) => c === 'seat:builder' || c === 'uncommit').length).repeat(40)}\n` }),
+    edit: (v) => {
+      if (v.role === 'reviewer' && ++reviews === 2) { v.details.verdict = 'changes-needed'; v.details.findings = [finding] }
+      return v
+    },
+  })
+  assert.equal((await f.go()).status, 'done')
+  assert.equal(f.requests.filter((r) => r.role === 'reviewer')[2].deltaReview.baseTree, 'c'.repeat(40))
+})
+
+test('a lead accept of a mechanical builder escalate stops seat-escalated with the builder question and never commits (S1-4)', async () => {
+  const f = fakes({ spec: { tier: 'mechanical' }, lead: 'accept', edit: (v) => {
+    if (v.role === 'builder') { v.status = 'escalate'; v.details.question = 'Which file?' }
+    return v
+  } })
+  assert.deepEqual(await f.go(), stopped('seat-escalated'))
+  assert.equal(f.rows.find((r) => r.event === 'verdict' && r.reason === 'seat-escalated').observation.question, 'Which file?')
+  assert.equal(f.calls.some((c) => c === 'commit' || c === 'publish'), false)
+})
+
+test('the PR body says Closes issue N only when the lane closes issue N (S6-11)', async () => {
+  for (const closes of [[], undefined, [12]]) {
+    const f = fakes({ spec: { closes } })
+    assert.equal((await f.go()).status, 'done')
+    assert.match(f.seen.publish.body, closes?.includes(12) ? /^Closes issue 12/m : /^Issue 12/m)
+    if (!closes?.includes(12)) assert.doesNotMatch(f.seen.publish.body, /Closes issue/)
+  }
+})
+
+test('a mechanical lane that proved a named test lists that proof in Verification (S6-11)', async () => {
+  const f = fakes({ spec: { tier: 'mechanical' }, edit: (v) => { if (v.role === 'builder') v.details.subject = 'fix: mechanical'; return v } })
+  assert.equal((await f.go()).status, 'done')
+  const body = f.seen.publish.body.split('## Verification')[1]
+  assert.match(body, /- lib\.test\.mjs: works was red on the old source, green on the build\./)
+  assert.match(body, /Review: none, mechanical lane, not reviewed\./)
+  assert.doesNotMatch(body, /Proof: mechanical lane/)
+})
+
+test('Verification lists every test proved across the lane build turns (S6-11)', async () => {
+  let builds = 0
+  const f = fakes({ review: 1, proof: (input) => ({ status: 'green', reason: null, rows: input.tests.map((t) => ({ ...t, proven: true })) }), edit: (v) => {
+    if (v.role === 'builder') {
+      const named = { file: 'lib.test.mjs', title: ++builds === 1 ? 'first' : 'second' }
+      v.details.tests = builds === 1 ? [named] : [named, named]
+    }
+    return v
+  } })
+  assert.equal((await f.go()).status, 'done')
+  for (const title of ['first', 'second']) assert.equal(f.seen.publish.body.split(`- lib.test.mjs: ${title} was red on the old source, green on the build.`).length - 1, 1)
+
+  let turns = 0
+  const restarted = fakes({ spec: { tier: 'mechanical' }, reviewPaths: [' M crew/loop.mjs\0', ' M lib.mjs\0'], proof: (input) => ({ status: 'green', reason: null, rows: input.tests.map((t) => ({ ...t, proven: true })) }), edit: (v) => {
+    if (v.role === 'builder') { v.details.subject = 'fix: mechanical'; v.details.tests = [{ file: 'lib.test.mjs', title: ++turns === 1 ? 'discarded' : 'kept' }] }
+    return v
+  } })
+  assert.equal((await restarted.go()).status, 'done')
+  assert.doesNotMatch(restarted.seen.publish.body, /discarded was red/)
+  assert.match(restarted.seen.publish.body, /kept was red on the old source/)
+})
+
+test('a reviewer findings_omitted count reaches the builder fix turn (S6-12)', async () => {
+  for (const [mode, role, count] of [['build', 'reviewer', 3], ['judge', 'tech-lead', 2], ['finish', 'reviewer', 4]]) {
+    const f = fakes({ spec: mode === 'finish' ? finishSpec() : { tier: mode }, unseated: mode === 'finish' ? ['planner'] : [], review: mode === 'judge' ? 0 : 1, secondReview: mode === 'judge' ? 1 : 0, edit: (v) => {
+      if (v.role === role && v.details.verdict === 'changes-needed') v.details.findings_omitted = count
+      return v
+    } })
+    assert.equal((await f.go()).status, 'done', mode)
+    const item = f.requests.filter((r) => r.role === 'builder')[1].feedback.find((x) => x.id === 'findings-omitted')
+    assert.equal(item?.role, role, mode)
+    assert.equal(item?.count, count, mode)
+    assert.match(item.summary, new RegExp(`omitted ${count}`))
+  }
+})
+
 const MOVED = { status: 'green', reason: null, head: 'b'.repeat(40), onto: 'c'.repeat(40) }
 const O = 'd'.repeat(40)
 // A check answering from a sequence (the last answer repeats), for proof and suite seams that must differ across calls.
@@ -3144,8 +3223,9 @@ test('the PR body states proof and suite honestly when no test is named, the lan
     const f = mode === 'rerun' ? sequenced([redRun(7), green()], options) : fakes(options)
     assert.equal((await f.go()).status, 'done', mode)
     const body = finish ? JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body : f.seen.publish.body
-    assert.match(body, mode === 'none' ? /Proof: no criterion is machine-checked/ : mechanical ? /Proof: mechanical lane, not reviewed/ : /Proof: unmeasured/)
-    assert.doesNotMatch(body, /red on the old source|green on the build/)
+    assert.match(body, mode === 'none' ? /Proof: no criterion is machine-checked/ : mode === 'mechanical-named' ? /Review: none, mechanical lane, not reviewed/ : mechanical ? /Proof: mechanical lane, not reviewed/ : /Proof: unmeasured/)
+    if (mode === 'mechanical-named') assert.match(body, /lib\.test\.mjs: works was red on the old source, green on the build/)
+    else assert.doesNotMatch(body, /red on the old source|green on the build/)
     assert.match(body, mode === 'rerun' ? /Suite passed with exit code 0 on a re-run after a red exit 7/ : /Suite passed with exit code 0/)
   }
 })

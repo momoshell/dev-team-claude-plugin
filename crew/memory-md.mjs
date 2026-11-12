@@ -115,6 +115,7 @@ export function openMarkdownMemory({ dir, budgetBytes = Infinity } = {}) {
         included.push({ path: target.label, bytes: byteLength(piece) })
       }
 
+      if (pieces.length === 0 && droppedFiles.some((entry) => entry.reason === 'over-budget')) reason = 'over-budget'
       const text = pieces.join('\n\n')
       return { text, bytes: byteLength(text), included, dropped: droppedFiles, reason }
     } catch {

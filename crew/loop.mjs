@@ -238,12 +238,14 @@ export async function runLoop(spec, deps = {}) {
     return false
   }
   let namedTests = []
+  const provedTests = new Map()
   let priorFindings = isFinish ? fin.findings : []
   let reservePending = false, reserveSpent = false, reserveBase = null
   let secondFindings = []
   let reviewedTree = null
   let findingOrder = 0
   const openFindings = { reviewer: new Map(priorFindings.filter((f) => f.severity === 'should-fix').map((f) => [f.id, { finding: f, order: findingOrder++ }])), 'tech-lead': new Map() }
+  const omitted = (role, details) => Number.isSafeInteger(details.findings_omitted) && details.findings_omitted > 0 ? [{ id: 'findings-omitted', role, count: details.findings_omitted, summary: `The ${role} listed ${details.findings.length} findings and omitted ${details.findings_omitted} more; fix the listed ones and check the same code for the omitted ones.` }] : []
   const rememberFindings = (role, details) => {
     const open = openFindings[role]
     for (const finding of details.findings) {
@@ -528,7 +530,10 @@ export async function runLoop(spec, deps = {}) {
       }
       const decided = await consultLead(role, held, given, progressed)
       if (decided.halt) return decided
-      if (decided.decision === 'accept') return { envelope: held.envelope }
+      if (decided.decision === 'accept') {
+        if (!isFinish && tier === 'mechanical' && role === 'builder' && held.envelope?.status !== 'done') return { halt: await stop('seat-escalated', { role, reason: held.envelope.status, envelope: held.envelope, question: held.envelope.details?.question ?? null, lead: decided.summary }) }
+        return { envelope: held.envelope }
+      }
       if (!isFinish && role === 'builder' && decided.target === 'planner') {
         const mechanical = tier === 'mechanical'
         // ADR-055 §7 and §12: a planner bounce spends the planner's round, or restarts a mechanical lane.
@@ -595,6 +600,7 @@ export async function runLoop(spec, deps = {}) {
     if (raised) return { halt: raised }
     rounds.builder = 0
     repaired = false
+    provedTests.clear()
     rulings.length = 0
     const planned = await stage('plan', () => seatTurn('planner', [{ id: 'mechanical-restart', summary: 'The mechanical build was discarded; plan the restarted lane.', reason, ...detail }]))
     if (planned.halt) return planned
@@ -701,7 +707,7 @@ export async function runLoop(spec, deps = {}) {
 
     let proofLines = [PROOF_UNMEASURED]
     let suiteLine = '- Suite: unmeasured.'
-    let builderSummary = '', proofRows = null, suiteResult = null
+    let builderSummary = '', suiteResult = null
     const finishReviews = []
     let feedback = isFinish ? [{ id: 'finish-stop', summary: 'The previous lane stopped with the given reason and observation.', reason: fin.stop.reason, observation: fin.stop.observation }, ...(fin.guidance !== undefined ? [{ id: 'finish-return', summary: 'The operator supplied guidance for this finish run.', guidance: fin.guidance }] : []), ...fin.findings] : []
     let repairing = false, recheck = false, rechecks = 0
@@ -720,7 +726,6 @@ export async function runLoop(spec, deps = {}) {
     for (;;) {
       for (;;) {
         proofLines = [PROOF_UNMEASURED]
-        proofRows = null
         if (!recheck) {
           if (reserveSpent && rounds.reviewer >= (seats.reviewer.rounds ?? DEFAULT_ROUNDS)) return stop('round-bound', { role: 'reviewer', reason: 'round-bound', findings: priorFindings, feedback })
           const built = await stage(repairing ? 'suite-repair' : 'build', () => seatTurn('builder', feedback, { singleTurn: repairing && (isFinish || tier === 'mechanical') }))
@@ -753,7 +758,7 @@ export async function runLoop(spec, deps = {}) {
             continue
           }
           if (!proofOK) return stop(proof.reason ?? 'runner-threw', proof)
-          proofRows = rows
+          for (const row of rows) provedTests.set(`${row.file}\0${row.title}`, row)
           proofLines = rows.map(({ file, title }) => `- proof: ${file} ${JSON.stringify(oneLine(title))}: red on the old source, green on the build`)
         }
 
@@ -798,7 +803,7 @@ export async function runLoop(spec, deps = {}) {
             const review = reviewed.envelope
             priorFindings = review.details.findings
             rememberFindings('reviewer', review.details)
-            if (!rebaseOnly && !reservePending) reviewedTree = checkedTree
+            if (rebaseOnly || !reservePending) reviewedTree = checkedTree
             await emit('verdict', { status: 'reviewed', verdict: review.details.verdict, findings: priorFindings })
             if (!rebaseOnly && reservePending) {
               reservePending = false
@@ -812,7 +817,7 @@ export async function runLoop(spec, deps = {}) {
             if (review.details.verdict === 'changes-needed') { reviewRed = true; redFindings = priorFindings }
           }
           if (suite.status === 'red' || reviewRed) {
-            feedback = [...redFindings]
+            feedback = [...redFindings, ...(reviewRed ? omitted('reviewer', reviewed.envelope.details) : [])]
             if (suite.status === 'red') {
               const failures = suiteFailures([suite])
               feedback.push({ id: 'suite-repair', severity: 'must-fix', summary: 'The full suite is red after your change. Fix the failing tests.', checkout: cwd, failingTests: failures.tests, failingFiles: failures.files, ...(failures.tail.length ? { outputTail: failures.tail } : {}) })
@@ -828,7 +833,7 @@ export async function runLoop(spec, deps = {}) {
             secondFindings = second.envelope.details.findings
             rememberFindings('tech-lead', second.envelope.details)
             await emit('verdict', { status: 'reviewed', role: 'tech-lead', verdict: second.envelope.details.verdict, findings: secondFindings })
-            if (second.envelope.details.verdict === 'changes-needed') { feedback = secondFindings; continue }
+            if (second.envelope.details.verdict === 'changes-needed') { feedback = [...secondFindings, ...omitted('tech-lead', second.envelope.details)]; continue }
           }
           break
         }
@@ -845,7 +850,7 @@ export async function runLoop(spec, deps = {}) {
         finishReviews.push({ verdict: review.details.verdict, findings: review.details.findings })
         await emit('verdict', { status: 'reviewed', verdict: review.details.verdict, findings: review.details.findings })
         if (review.details.verdict === 'changes-needed') {
-          feedback = review.details.findings
+          feedback = [...review.details.findings, ...omitted('reviewer', review.details)]
           continue
         }
         break
@@ -918,20 +923,22 @@ export async function runLoop(spec, deps = {}) {
       const entries = [...openFindings.reviewer.values(), ...(tier === 'judge' && !isFinish ? openFindings['tech-lead'].values() : [])].sort((a, b) => a.order - b.order)
       const open = entries.map(({ finding }) => finding)
       const issue = /^issue ([1-9]\d*)$/.exec(spec.source)
+      const closing = issue && (spec.closes ?? []).includes(Number(issue[1]))
+      const proved = [...provedTests.values()]
       const title = issue && (/^title:\s*(.+)$/im.exec(spec.brief.split(/^---\s*$/m)[1] ?? '')?.[1]
         ?? /^\s*(?:>\s*)?issue title:\s*(.+)$/im.exec(spec.brief)?.[1])
       const ask = !issue ? briefAsk(spec.brief) : ''
       const purpose = oneLine(planSummary).replace(/^(?:the plan|plan)(?:\s+|$)/i, '')
       return [
         '## Summary', `Purpose: ${purpose && !/plan\.md|^(?:written|drafted)\b/i.test(purpose) ? purpose[0].toUpperCase() + purpose.slice(1) : 'unmeasured.'}`,
-        ...(issue ? [`Closes issue ${issue[1]}${title ? `: ${oneLine(title)}` : ''}`] : ask ? [`Operator request: ${ask}`] : []),
+        ...(issue ? [`${closing ? 'Closes issue' : 'Issue'} ${issue[1]}${title ? `: ${oneLine(title)}` : ''}`] : ask ? [`Operator request: ${ask}`] : []),
         `How: ${oneLine(builderSummary) || oneLine(subject)}`,
         ...(!issue && !ask ? ['', `Source: ${oneLine(spec.source)}`] : []),
         ...(isFinish ? ['', `The lane stopped with reason ${oneLine(fin.stop.reason)}. This report covers only this finish run.`, `${finishReviews.length} ${finishReviews.length === 1 ? 'review' : 'reviews'} in this finish run; final verdict: ${oneLine(finishReviews.at(-1)?.verdict) || 'unmeasured'}.`] : []),
         '', '## Changes', ...publishedFiles.map((file) => `- ${oneLine(file)}`),
         '', '## Verification',
-        ...(!isFinish && tier === 'mechanical' ? ['Proof: mechanical lane, not reviewed.']
-          : proofRows ? proofRows.map(({ file, title }) => `- ${oneLine(file)}: ${oneLine(title)} was red on the old source, green on the build.`)
+        ...(proved.length ? [...proved.map(({ file, title }) => `- ${oneLine(file)}: ${oneLine(title)} was red on the old source, green on the build.`), ...(!isFinish && tier === 'mechanical' ? ['Review: none, mechanical lane, not reviewed.'] : [])]
+          : !isFinish && tier === 'mechanical' ? ['Proof: mechanical lane, not reviewed.']
             : !isFinish && !testsRequired ? ['Proof: no criterion is machine-checked.'] : ['Proof: unmeasured.']),
         suiteResult ? `Suite passed with exit code ${suiteResult.code}${Object.hasOwn(suiteResult, 'redCode') ? ` on a re-run after a red exit ${suiteResult.redCode}` : ''}.` : 'Suite: unmeasured.',
         ...(open.length ? ['', '## Open points', ...open.map((f) => `- ${oneLine(f.summary)} (${oneLine(f.location)})`)] : []),
@@ -988,7 +995,7 @@ export async function runLoop(spec, deps = {}) {
       if (namedTests.length) {
         const reproven = await stage('proof', () => callCheck('proof', d.proveTests, { cwd, base: `${rebased.head}^`, tests: namedTests, timeoutMs: spec.proofTimeoutMs }))
         if (reproven.status !== 'green' || reproven.reason !== null || !Array.isArray(reproven.rows) || reproven.rows.length !== namedTests.length || !reproven.rows.every((row) => row?.proven === true)) return stop(reproven.reason ?? 'runner-threw', reproven)
-        proofRows = reproven.rows
+        for (const row of reproven.rows) provedTests.set(`${row.file}\0${row.title}`, row)
       }
       const postSuite = await suiteRun()
       if (postSuite.status !== 'green') return stop(postSuite.reason, postSuite)

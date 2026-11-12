@@ -16,6 +16,7 @@ import { loadMap, resolveSeatSkills } from '../hooks/skill-gate.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CHARTER_LINK = /\]\((\.\.?\/[^)\s]+\.md)\)/g
+const MAX_DROPPED = 10
 const LOOP_STAGES = 'The loop runs each test the builder names on the old source and on the build. It then runs the suite, commits, rebases and opens the PR. Do not run those stages yourself.'
 const stopped = (reason) => ({ status: 'stopped', reason, pr: null })
 
@@ -132,6 +133,7 @@ function promptFor({ request, spec, source, charters, body, section }) {
     '## Brief',
     brief,
     ...(planPath ? ['', `Plan path: ${planPath}`] : []),
+    ...(role === 'reviewer' && spec.shape !== 'finish' && !request.deltaReview && !request.reserveReview ? ['', '## Full review', 'No earlier reviewed tree is given: review the whole diff. The round-2 must-fix limit does not apply; any defect in the diff may be a must-fix. Still carry or close each earlier must-fix.'] : []),
     ...(request.deltaReview ? ['', '## Delta review', `A must-fix must be an earlier finding still unresolved or a defect in code changed since tree ${request.deltaReview.baseTree}. Use git diff ${request.deltaReview.baseTree} to inspect the delta. Raise a new problem elsewhere as a should-fix.`] : []),
     ...(['reviewer', 'tech-lead'].includes(role) ? ['', '## Builder report', `Tests: ${JSON.stringify(request.builderReport?.tests ?? [])}`, `Notes: ${JSON.stringify(request.builderReport?.notes ?? null)}`, '', '## Changed paths', ...request.changedPaths.map((path) => `- ${JSON.stringify(path)}`)] : []),
     ...(section ? ['', section] : []),
@@ -176,8 +178,10 @@ export async function runLean(spec, deps = {}) {
         const dir = process.env.CREW_MEMORY_DIR || join(spec.cwd, '.claude', 'dev-team', 'memory')
         const extract = openMemory({ dir }).context({ task: request.brief, role })
         const section = renderSection(extract)
-        if (!section) await emit('memory-empty', { role, id, reason: extract.reason ?? 'empty', dropped: extract.dropped ?? [] })
-        else sectionText = section
+        if (!section) {
+          const dropped = extract.dropped ?? []
+          await emit('memory-empty', { role, id, reason: extract.reason ?? 'empty', dropped: dropped.slice(0, MAX_DROPPED), dropped_omitted: Math.max(0, dropped.length - MAX_DROPPED) })
+        } else sectionText = section
       }
     }
     const baseStem = request.repair ? `${id}.repair` : id

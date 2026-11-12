@@ -242,6 +242,7 @@ export async function runLoop(spec, deps = {}) {
     && (fin.filesInScope == null || strings(fin.filesInScope))
     && (fin.testsRequired === undefined || typeof fin.testsRequired === 'boolean')
     && (fin.guidance === undefined || typeof fin.guidance === 'string')
+    && (fin.rulings === undefined || (Array.isArray(fin.rulings) && fin.rulings.every((r) => plainObject(r) && text(r.summary))))
     && (fin.priorReviewRounds === undefined || (Number.isSafeInteger(fin.priorReviewRounds) && fin.priorReviewRounds >= 0)))) return early('invalid-input')
   const d = {
     resolveAgents, mkdir, readFile, stat, realpath, writeFile, proveTests, runSuite, commitChanges, rebaseBranch, openPullRequest,
@@ -283,7 +284,7 @@ export async function runLoop(spec, deps = {}) {
   let subject = isFinish ? fin.subject : null
   let planSummary = isFinish ? fin.planSummary : null
   const failures = []
-  const rulings = []
+  const rulings = isFinish && Array.isArray(fin.rulings) ? fin.rulings.map((r) => ({ id: 'lead-bounce', summary: r.summary })) : []
   const repeatsFailure = (failure) => {
     if (failures.some((previous) => isDeepStrictEqual(previous, failure))) return true
     failures.push(failure)
@@ -567,6 +568,7 @@ export async function runLoop(spec, deps = {}) {
         feedback = mechanical ? [] : [{ id: 'plan-revised', summary: 'The planner revised the plan at plan_path: continue on the revised plan.', plan_path: planPath }, ...given]
       } else if (role === 'builder') {
         rulings.unshift({ id: 'lead-bounce', summary: decided.summary })
+        await emit('lead-rulings', { rulings: [...rulings] })
         feedback = given
       } else feedback = [{ id: 'lead-bounce', summary: decided.summary }, ...given]
       // bounce: exactly one more turn for this role, beyond its bound only if the bound is spent; the counter keeps its history
@@ -608,6 +610,7 @@ export async function runLoop(spec, deps = {}) {
     const planned = await stage('replan', () => seatTurn('planner', [{ id: 'plan-gap', role: 'builder', envelope, ...(lead ? { lead } : {}) }]))
     if (planned.halt) return planned
     const halt = await acceptPlan(planned.envelope)
+    if (!halt && rulings.length) { rulings.length = 0; await emit('lead-rulings', { rulings: [] }) }
     return halt ? { halt } : {}
   }
 
@@ -623,7 +626,7 @@ export async function runLoop(spec, deps = {}) {
     repaired = false
     provedTests.clear()
     lastProved.clear()
-    rulings.length = 0
+    if (rulings.length) { rulings.length = 0; await emit('lead-rulings', { rulings: [] }) }
     const planned = await stage('plan', () => seatTurn('planner', [{ id: 'mechanical-restart', summary: 'The mechanical build was discarded; plan the restarted lane.', reason, ...detail }]))
     if (planned.halt) return planned
     const halt = await acceptPlan(planned.envelope)

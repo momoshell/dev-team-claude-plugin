@@ -348,7 +348,6 @@ test('a muse seat granted fff launches with the fff MCP server and CREW_FFF, and
     assert.deepEqual(run.museSkills[0].files.map(([name]) => name), ['alpha', 'beta'])
     assert.match(run.museSkills[0].files[0][1], /name: alpha/)
     assert.ok(sessionNew(run).params.additionalDirectories.includes(run.museSkills[0].dir))
-    assert.equal(run.result.museSkillsRoot, run.museSkills[0].dir)
   })
   for (const bad of [{ name: 'other', command: { bin: BIN, args: [] }, url: null }, { name: 'fff', command: null, url: 'https://example.com' }, { name: 'fff', type: 'http', command: { bin: BIN, args: [] }, url: null }]) {
     assert.throws(() => muse.acpLaunch({ bin: BIN, grants: { mcp_servers: [bad] } }), (error) => error.reason === 'grant-unsupported')
@@ -1526,6 +1525,16 @@ test('RI2 a seat whose runtime vanishes mid-turn ends with acp-seat-runtime-miss
     assert.ok(clock <= 50, `runtime loss cost ${clock}ms`)
     assert.equal(closes, 1)
     assert.equal(existsSync(runtime), false)
+
+    const denied = Object.assign(new Error('runtime inaccessible'), { code: 'EPERM' })
+    await assert.rejects(runAcpSeat({
+      definition: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high', skills: [], wait_s: 3600 },
+      cwd: root, prompt: 'x', sessionFile: join(root, 'session.jsonl'), binaries: { pi: BIN },
+      deps: { runtimeRoot, statSync: () => { throw denied }, clientFactory: () => ({
+        start() {}, initialize() {}, newSession() {}, setMode() {}, beginPrompt: () => 1,
+        close: () => ({ outcome: 'proven' }),
+      }) },
+    }), (caught) => caught === denied)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

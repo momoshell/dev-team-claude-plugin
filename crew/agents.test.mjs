@@ -96,6 +96,16 @@ const roster = {
 }
 const AGENTS_DIR = fileURLToPath(new URL('./agents/', import.meta.url))
 
+test('planner, reviewer and tech-lead charters describe a non-done return that validateEnvelope accepts (#2341)', () => {
+  for (const role of ['planner', 'reviewer', 'tech-lead']) {
+    const charter = readFileSync(join(AGENTS_DIR, `${role}.md`), 'utf8')
+    assert.doesNotMatch(charter, /need only `summary`/)
+    assert.match(charter, /`details` object, which may be empty \(`\{\}`\)/)
+    assert.match(charter, /`details\.question` for `escalate`/)
+    assert.deepEqual(validateEnvelope(role, { role, id: `lane.${role}.1`, status: 'insufficient', summary: 'gap', details: {} }).defects, [])
+  }
+})
+
 // A private copy of the committed definitions, so a test can edit them.
 function scratch() {
   const dir = scratchDir('agents-test-')

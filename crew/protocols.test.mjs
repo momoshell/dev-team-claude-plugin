@@ -698,9 +698,21 @@ test('P2 a reviewer must-fix names its trigger, and at most five findings are li
   const value = review(Array.from({ length: 6 }, (_, i) => finding({ id: `R${i}` })), 'pass')
   assert.ok(validateEnvelope('reviewer', value).defects.some((d) => d.includes('five') && d.includes('details.findings_omitted')))
   value.details.findings.pop()
-  for (const n of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) { value.details.findings_omitted = n; assert.ok(refusedFor('reviewer', value, 'details.findings_omitted').length) }
+  for (const n of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) { value.details.findings_omitted = n; assert.ok(refusedFor('reviewer', value, 'details.findings_omitted').length) }
   value.details.findings_omitted = 1
   assert.deepEqual(validateEnvelope('reviewer', value).defects, [])
+})
+
+test('a reviewer or tech-lead findings_omitted of 0 is accepted and means none were omitted (#2341)', () => {
+  for (const role of ['reviewer', 'tech-lead']) {
+    const value = review([], 'pass', role)
+    for (const n of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      value.details.findings_omitted = n
+      const defects = validateEnvelope(role, value).defects
+      if (n === 0) assert.deepEqual(defects, [])
+      else assert.ok(defects.some((d) => d.includes('details.findings_omitted')), `${role}: ${n}`)
+    }
+  }
 })
 
 test('a builder envelope carries the tests it names and its notes, refused when malformed', () => {

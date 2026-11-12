@@ -1200,6 +1200,15 @@ test('a thrown loop and a failing journal reach the result and the loop-result l
   }
 })
 
+test('a standard-lane reviewer prompt with no delta or reserve base tree says it is a full review (#2341)', async () => {
+  const f = leanFixture({ answers: { reviews: ['changes-needed', 'pass'] } })
+  assert.equal((await f.go()).status, 'done')
+  const [first, second] = f.requests.filter((r) => r.definition.role === 'reviewer').map((r) => r.prompt)
+  assert.match(first, /^## Full review$/m)
+  assert.match(second, /^## Delta review$/m)
+  assert.doesNotMatch(second, /^## Full review$/m)
+})
+
 // MUTATION: send a request without the role's definition, effort, prompt or recording and a seat turn loses it.
 test('every turn gets its role definition, the complete brief and P2, and its own recording', async () => {
   const f = leanFixture({ answers: { reviews: ['changes-needed', 'pass'] } })
@@ -1452,6 +1461,26 @@ test('an over-budget memory index journals memory-empty with reason over-budget 
     const event = rows.find((row) => row.event === 'memory-empty')
     assert.equal(event.reason, 'over-budget')
     assert.deepEqual(event.dropped.map(({ path, reason }) => [path, reason]), [['MEMORY.md', 'over-budget'], ['entry.md', 'over-budget']])
+  } finally {
+    if (previous === undefined) delete process.env.CREW_MEMORY_DIR
+    else process.env.CREW_MEMORY_DIR = previous
+  }
+})
+
+test('a memory-empty row lists at most ten dropped entries and counts the rest (#2341)', async () => {
+  const previous = process.env.CREW_MEMORY_DIR
+  try {
+    const rows = []
+    const f = leanFixture({ deps: { readFileSync: memoryDefinition('memory: true\ntiers: {}') }, loopDeps: { journal: async (row) => rows.push(row) } })
+    process.env.CREW_MEMORY_DIR = join(f.spec.cwd, 'override')
+    mkdirSync(process.env.CREW_MEMORY_DIR, { recursive: true })
+    const names = Array.from({ length: 15 }, (_, i) => `entry-${i}.md`)
+    for (const name of names) writeFileSync(join(process.env.CREW_MEMORY_DIR, name), 'entry')
+    writeFileSync(join(process.env.CREW_MEMORY_DIR, 'MEMORY.md'), `${names.map((name) => `- [entry](${name})`).join('\n')}\n${'x'.repeat(8000)}`)
+    assert.equal((await f.go()).status, 'done')
+    const event = rows.find((row) => row.event === 'memory-empty')
+    assert.equal(event.dropped.length, 10)
+    assert.equal(event.dropped_omitted, 6)
   } finally {
     if (previous === undefined) delete process.env.CREW_MEMORY_DIR
     else process.env.CREW_MEMORY_DIR = previous

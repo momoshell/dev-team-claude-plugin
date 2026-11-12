@@ -340,7 +340,7 @@ const DETAIL_RULES = {
   requirements: [(v) => Array.isArray(v) && v.length > 0 && v.every((r) => plain(r) && Object.keys(r).length === 3 && nonempty(r.requirement) && REQUIREMENT_STATUSES.includes(r.status) && nonempty(r.evidence)), 'is a nonempty list of {requirement, status, evidence}'],
   failure_modes: [(v) => Array.isArray(v) && v.length <= 3 && v.every((f) => plain(f) && Object.keys(f).length === 5 && nonempty(f.breaks) && nonempty(f.where) && nonempty(f.trigger) && typeof f.tested === 'boolean' && typeof f.covered === 'boolean'), 'is a list of at most three {breaks, where, trigger, tested, covered}'],
   coverage: [(v) => plain(v) && Object.keys(v).length === 2 && list(v.read) && v.read.length > 0 && typeof v.complete === 'boolean', 'is {read, complete} with a nonempty read list and a boolean'],
-  findings_omitted: [(v) => Number.isSafeInteger(v) && v > 0, 'is a positive safe integer'],
+  findings_omitted: [(v) => Number.isSafeInteger(v) && v >= 0, 'is a non-negative safe integer'],
   closed: [(v) => Array.isArray(v) && v.every((c) => plain(c) && Object.keys(c).length === 2 && typeof c.id === 'string' && FINDING_ID.test(c.id) && nonempty(c.evidence)), 'is a list of {id, evidence}'],
 }
 const FINDING_REQUIRED = Object.freeze(['id', 'severity', 'location', 'summary'])

@@ -289,7 +289,7 @@ const OPTIONAL_DETAIL_KEYS = Object.freeze({
   builder: ['tests', 'notes', 'question', 'subject', 'gap'],
   reviewer: ['question', 'closed', 'findings_omitted'],
   'tech-lead': ['question', 'closed', 'findings_omitted'],
-  lead: ['question', 'target'],
+  lead: ['question', 'target', 'instructions'],
 })
 const ARCHIVED_OPTIONAL = Object.freeze({ planner: ['tests'], reviewer: ['requirements', 'failure_modes', 'coverage'], 'tech-lead': ['requirements', 'failure_modes', 'coverage'] })
 // ADR-055 §8: archived planner returns still carry these fields.
@@ -313,6 +313,7 @@ const DETAIL_RULES = {
   notes: [nonempty, 'is a nonempty string'],
   gap: [nonempty, 'is a nonempty string'],
   question: [nonempty, 'is a nonempty string'],
+  instructions: [nonempty, 'is a nonempty string'],
   target: [(v) => ['builder', 'planner'].includes(v), 'is one of builder, planner'],
   requirements: [(v) => Array.isArray(v) && v.length > 0 && v.every((r) => plain(r) && Object.keys(r).length === 3 && nonempty(r.requirement) && REQUIREMENT_STATUSES.includes(r.status) && nonempty(r.evidence)), 'is a nonempty list of {requirement, status, evidence}'],
   failure_modes: [(v) => Array.isArray(v) && v.length <= 3 && v.every((f) => plain(f) && Object.keys(f).length === 5 && nonempty(f.breaks) && nonempty(f.where) && nonempty(f.trigger) && typeof f.tested === 'boolean' && typeof f.covered === 'boolean'), 'is a list of at most three {breaks, where, trigger, tested, covered}'],

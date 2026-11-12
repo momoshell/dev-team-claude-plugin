@@ -744,6 +744,23 @@ test('a lead bounce names its target: planner revises the plan from the builder\
   }
 })
 
+test('a lead bounce with details.instructions is accepted on its first return and the instructions reach the bounced seat', async () => {
+  for (const target of ['builder', 'planner']) {
+    let builds = 0
+    const f = fakes({ lead: 'bounce', target, edit: (v) => {
+      if (v.role === 'lead') v.details.instructions = 'apply the fix to R1'
+      if (v.role === 'builder' && ++builds === 1) return { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } }
+      return v
+    } })
+    const result = await f.go()
+    assert.deepEqual(f.requests.map((r) => r.role), target === 'builder' ? ['planner', 'builder', 'lead', 'builder', 'reviewer'] : ['planner', 'builder', 'lead', 'planner', 'builder', 'reviewer'])
+    assert.ok(!f.requests.some((r) => r.role === 'lead' && r.repair))
+    assert.equal(result.status, 'done')
+    if (target === 'builder') assert.deepEqual(f.requests[3].feedback[0], { id: 'lead-bounce', summary: 'apply the fix to R1' })
+    else assert.equal(f.requests[3].feedback[0].lead, 'apply the fix to R1')
+  }
+})
+
 test('the same failure with the same evidence twice stops the lane no-progress and no seat decides it', async () => {
   for (const mode of ['envelope', 'insufficient', 'insufficient-reordered', 'lead', 'proof-no-tests', 'proof-unproven']) {
     let turns = 0

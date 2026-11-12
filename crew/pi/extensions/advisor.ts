@@ -20,8 +20,8 @@
 // invented: that checkout is not present in the build environment.
 
 import { createHash, randomUUID } from 'node:crypto'
-import { execFileSync, spawn as nodeSpawn } from 'node:child_process'
-import { appendFileSync, closeSync, openSync, readFileSync, readSync, readdirSync, statSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { spawn as nodeSpawn } from 'node:child_process'
+import { appendFileSync, readFileSync, readdirSync, statSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { StringDecoder } from 'node:string_decoder'
 import { isAbsolute, join, relative, resolve } from 'node:path'
@@ -29,6 +29,10 @@ import { journalPathOf, plannerReturnNumber, plannerReturnsDirOf } from '../cont
 import { validateEnvelope } from '../../protocols.mjs'
 import { resolvePiBinary, createStreamReducer, carriesOwnSpend, STREAM_CAP_BYTES } from './subagent.ts'
 import { modelString } from '../../adapters/adapter-pi.mjs'
+import { redactDelta } from './advisor-redaction.ts'
+import { gitDiffSize, gitDiffLines, preReturnDiff, EXCERPT_LINES, PRE_RETURN_DIFF_BUDGET_BYTES, PRE_RETURN_INCOMPLETE } from './advisor-diff.ts'
+
+export { redactDelta, gitDiffLines, preReturnDiff, PRE_RETURN_DIFF_BUDGET_BYTES, PRE_RETURN_INCOMPLETE }
 
 export const ADVISOR_CONFIG_VERSION = 1
 export const ADVISOR_GRANT_ENV = 'CREW_ADVISOR'
@@ -50,47 +54,12 @@ const CADENCE_CALLS = 25
 export const TIER1_MAX_CONSULTS = 20
 // Lines added plus removed against HEAD (untracked files counted) that the working diff must grow by, since the last consult, to queue one.
 export const DIFF_GROWTH_LINES = 200
-// An untracked file past this size is counted by an estimate rather than read.
-const UNTRACKED_READ_CAP_BYTES = 1024 * 1024
-// Past the read cap an untracked file's lines are counted by streaming up to this size; beyond it they are unknown.
-const UNTRACKED_COUNT_CAP_BYTES = 64 * 1024 * 1024
-const UNTRACKED_HEAD_BYTES = 64 * 1024
-
-function readFileHead(path, bytes) {
-  const fd = openSync(path, 'r')
-  try { const buffer = Buffer.alloc(bytes); return buffer.subarray(0, readSync(fd, buffer, 0, bytes, 0)) } finally { closeSync(fd) }
-}
-
-// Newlines in the file plus a last unterminated line, or null past the cap.
-function countFileLines(path, cap) {
-  const fd = openSync(path, 'r')
-  try {
-    const buffer = Buffer.alloc(1024 * 1024)
-    let total = 0, count = 0, last = 10
-    for (;;) {
-      const got = readSync(fd, buffer, 0, buffer.length, null)
-      if (!got) break
-      total += got
-      if (total > cap) return null
-      for (let i = 0; i < got; i += 1) if (buffer[i] === 10) count += 1
-      last = buffer[got - 1]
-    }
-    return total === 0 ? 0 : count + (last === 10 ? 0 : 1)
-  } finally { closeSync(fd) }
-}
-// How long a trigger queued by a call's start waits for that call's own result before a later result sends it as orphaned.
-const ORPHAN_PENDING_MS = 10 * 60 * 1000
 const DEDUPE_CAP = 256
 const SIGNATURE_CAP_BYTES = 256
 const NOTE_TEXT_CAP_BYTES = 4096
 const TARGET_CAP_BYTES = 256
 export const DELTA_ENTRIES = 12
 export const DELTA_ENTRY_CAP_BYTES = 512
-const EXCERPT_LINES = 12
-// The pre-return consult's own, larger view: the whole working diff, bounded by bytes rather than by entries.
-export const PRE_RETURN_DIFF_BUDGET_BYTES = 48 * 1024
-// The omitted_files entries that say the window is incomplete in a way names cannot (not file paths).
-export const PRE_RETURN_INCOMPLETE = '(working diff over the git output limit: list may be incomplete)'
 export const PRE_RETURN_UNAVAILABLE = '(working diff unavailable: git could not read it)'
 const CRITERIA_MAX = 32
 const CRITERION_CAP_BYTES = 512
@@ -105,9 +74,6 @@ const CONSULT_TIMEOUT_MS = 20_000
 // A judgment child that ignores SIGTERM gets SIGKILL after this grace, and a
 // consult settles only once the child has closed (or a second grace has passed).
 const CHILD_KILL_GRACE_MS = 2_000
-const GIT_TIMEOUT_MS = 5000
-const DIFF_MAX_BUFFER_BYTES = 16 * 1024 * 1024
-
 export const JUDGMENT_CLASSES = Object.freeze(['edge-path', 'over-claim'])
 export const SEVERITIES = Object.freeze(['low', 'medium', 'high'])
 // A model id reaches a shell command line, so it is an allowlist, not a filter.
@@ -456,112 +422,6 @@ function entryFromText(text, cap = DELTA_ENTRY_CAP_BYTES) {
   return { text: bounded, anchors: [...anchors] }
 }
 
-// --- delta redaction --------------------------------------------------------
-// High-signal shapes only, each named. The bias is deliberately toward
-// UNDER-redacting: the advisor's whole value is grounded, specific advice, and a
-// delta scrubbed into mush produces confident advice about nothing — a failure
-// that is invisible, unlike a miss. A shape that would plausibly match ordinary
-// source code is left out, and each omission is stated where it is made.
-const redactionPlaceholder = (kind) => `<redacted:${kind}>`
-
-// A value only counts as a credential when it mixes a digit and an upper-case
-// letter. Measured over this checkout, that one requirement is the difference
-// between redacting a single planted fixture secret and also redacting
-// `payloadKey: 'advisor_unavailable'` and `const UNKNOWN_KEY = 'unknown-key'`,
-// which are ordinary code. An all-lowercase secret is under-redacted on purpose.
-const CREDENTIAL_VALUE_STRENGTH = /(?=.*[0-9])(?=.*[A-Z])/
-
-// Order is meaning: the first shape that recognises a run of text owns it, so a
-// token inside an Authorization header is reported as the header and counted
-// once. No value class admits `<`, so a placeholder already written cannot be
-// re-matched by a later rule.
-const REDACTION_RULES = Object.freeze([
-  // A PEM private key block, BEGIN line through its END line. Nothing in
-  // ordinary source carries one, and the block is matched whole so no fragment
-  // of the key body survives.
-  {
-    kind: 'private-key',
-    pattern: /-----BEGIN (?:[A-Z][A-Z ]*)?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z][A-Z ]*)?PRIVATE KEY-----/g,
-    render: () => redactionPlaceholder('private-key'),
-  },
-  // An Authorization header value. The header NAME is kept so the shape stays
-  // legible to the model; only the credential after the colon is removed.
-  {
-    kind: 'authorization',
-    pattern: /(Authorization\s*:\s*)([^\r\n<]+)/gi,
-    render: (m) => `${m[1]}${redactionPlaceholder('authorization')}`,
-  },
-  // A bearer credential anywhere else. The `Bearer ` marker is unambiguous and
-  // ordinary source does not carry a 12-character opaque run behind it.
-  {
-    kind: 'bearer-token',
-    pattern: /(Bearer\s+)([A-Za-z0-9._~+\/=-]{12,})/gi,
-    render: (m) => `${m[1]}${redactionPlaceholder('bearer-token')}`,
-  },
-  // An assignment to a name containing KEY, TOKEN, SECRET, PASSWORD, PASSWD or
-  // CREDENTIAL whose value is a quoted literal — the env-var, JSON-field and
-  // `k = v` forms all reduce to this one shape. The strength requirement above
-  // is what keeps ordinary constants out.
-  {
-    kind: 'credential',
-    pattern: /((?:^|[^A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_-]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Za-z0-9_-]*\s*[:=]\s*)(["'`])([A-Za-z0-9_.\/+=~-]{16,})\2/gi,
-    strong: 3,
-    render: (m) => `${m[1]}${m[2]}${redactionPlaceholder('credential')}${m[2]}`,
-  },
-  // The same assignment unquoted, which is the dotenv and shell-export form.
-  {
-    kind: 'credential',
-    pattern: /((?:^|\s)[A-Za-z_][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL)[A-Za-z0-9_]*=)([A-Za-z0-9_.\/+=~-]{16,})/gi,
-    strong: 2,
-    render: (m) => `${m[1]}${redactionPlaceholder('credential')}`,
-  },
-  // A JWT: three base64url segments whose FIRST is anchored to `eyJ`, the
-  // base64url of `{"`. The generic three-segment form is deliberately not used —
-  // it matches ordinary dotted code such as `a.b.c` — so a JWT whose header is
-  // not JSON is under-redacted on purpose.
-  {
-    kind: 'jwt',
-    pattern: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
-    render: () => redactionPlaceholder('jwt'),
-  },
-  // GitHub's own documented token prefixes plus their opaque body. Nothing in
-  // source starts a 20-character alphanumeric run with `ghp_`.
-  {
-    kind: 'github-token',
-    pattern: /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g,
-    render: () => redactionPlaceholder('github-token'),
-  },
-  // OpenAI-style keys: the `sk-` prefix and at least 16 opaque characters.
-  {
-    kind: 'openai-key',
-    pattern: /\bsk-[A-Za-z0-9_-]{16,}\b/g,
-    render: () => redactionPlaceholder('openai-key'),
-  },
-  // Slack tokens. The bare `xox` trigram is too short to be unambiguous, so the
-  // type letter and its dash are required.
-  {
-    kind: 'slack-token',
-    pattern: /\bxox[abeoprs]-[A-Za-z0-9-]{10,}\b/g,
-    render: () => redactionPlaceholder('slack-token'),
-  },
-])
-
-// Returns the scrubbed text and a per-kind count of what was removed. Pure: the
-// caller owns where it is applied, and it is applied at exactly one place.
-export function redactDelta(value) {
-  let text = String(value ?? '')
-  const counts = {}
-  for (const rule of REDACTION_RULES) {
-    text = text.replace(rule.pattern, (...args) => {
-      const groups = args.slice(0, -2)
-      if (rule.strong && !CREDENTIAL_VALUE_STRENGTH.test(String(groups[rule.strong] ?? ''))) return groups[0]
-      counts[rule.kind] = (counts[rule.kind] || 0) + 1
-      return rule.render(groups)
-    })
-  }
-  return { text, counts }
-}
-
 function safeRead(readFile, path) {
   try {
     const raw = readFile(path, 'utf8')
@@ -570,188 +430,7 @@ function safeRead(readFile, path) {
   } catch { return null }
 }
 
-function gitOverflow(err) {
-  const code = String(err?.code || '')
-  const message = String(err?.message || err || '')
-  return code === 'ENOBUFS' || /maxbuffer|stdout maxBuffer|buffer length/i.test(`${code} ${message}`)
-}
-
-function gitDiffSize({ cwd, deps = {} } = {}) {
-  if (typeof cwd !== 'string' || !cwd) return null
-  const exec = deps.execFileSync || execFileSync
-  const statSize = deps.fileSize || ((path) => statSync(path).size)
-  const run = (args) => exec('git', args, {
-    cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: DIFF_MAX_BUFFER_BYTES, encoding: null,
-    stdio: ['ignore', 'pipe', 'ignore'],
-  })
-  let diff
-  try { diff = run(['--no-pager', 'diff', 'HEAD']) } catch (err) {
-    return gitOverflow(err) ? { bytes: DIFF_MAX_BUFFER_BYTES, truncated: true } : null
-  }
-  let untracked
-  try { untracked = run(['ls-files', '--others', '--exclude-standard', '-z']) } catch (err) {
-    return gitOverflow(err) ? { bytes: DIFF_MAX_BUFFER_BYTES, truncated: true } : null
-  }
-  const diffBytes = Buffer.isBuffer(diff) ? diff.length : byteLength(diff)
-  const names = (Buffer.isBuffer(untracked) ? untracked.toString('utf8') : String(untracked ?? '')).split('\0').filter(Boolean)
-  let bytes = diffBytes
-  try {
-    for (const name of names) bytes += Number(statSize(resolve(String(cwd || ''), name))) || 0
-  } catch { return null }
-  return { bytes, truncated: false }
-}
-
 function escapeRegExp(text) { return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }
-
-// The lane checkout's working diff against HEAD, untracked files included, as a line count (added plus removed)
-// and as grounded `path:line: text` entries (one per changed file) the consult's delta can anchor to.
-// null when git cannot say: the seat is unaffected.
-export function gitDiffLines({ cwd, deps = {} } = {}) {
-  if (typeof cwd !== 'string' || !cwd) return null
-  const exec = deps.execFileSync || execFileSync
-  const read = deps.readFileBytes || ((path) => readFileSync(path))
-  const statSize = deps.fileSize || ((path) => statSync(path).size)
-  const head = deps.readFileHead || readFileHead
-  const countLines = deps.countFileLines || countFileLines
-  const run = (args) => exec('git', args, {
-    cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: DIFF_MAX_BUFFER_BYTES, encoding: null,
-    stdio: ['ignore', 'pipe', 'ignore'],
-  })
-  const asText = (value) => Buffer.isBuffer(value) ? value.toString('utf8') : String(value ?? '')
-  let diff, untracked
-  // Past the output cap the hunks are not read at all; the changed names (a far smaller listing) still say which
-  // files the consult could not see. A listing that fails too is an empty list, never a guess.
-  const overflowShape = () => {
-    const names = []
-    for (const args of [['-c', 'core.quotepath=off', '--no-pager', 'diff', '--name-only', '-z', 'HEAD'], ['ls-files', '--others', '--exclude-standard', '-z']]) {
-      try { for (const name of asText(run(args)).split('\0').filter(Boolean)) if (!names.includes(name)) names.push(name) } catch { /* unnamed */ }
-    }
-    return { lines: DIFF_MAX_BUFFER_BYTES, text: '', entries: [], files: [], truncated: true, unread_files: names }
-  }
-  try { diff = asText(run(['-c', 'core.quotepath=off', '--no-pager', 'diff', '--no-color', '--no-ext-diff', '-U0', 'HEAD'])) } catch (err) {
-    return gitOverflow(err) ? overflowShape() : null
-  }
-  try { untracked = asText(run(['ls-files', '--others', '--exclude-standard', '-z'])) } catch (err) {
-    return gitOverflow(err) ? overflowShape() : null
-  }
-  let lines = 0
-  const files = new Map()
-  let current = null
-  let removed = null
-  let header = false
-  let newLine = 0
-  let oldLine = 0
-  const keep = (name, text) => {
-    if (!files.has(name)) files.set(name, [])
-    files.get(name).push(text)
-  }
-  for (const row of diff.split('\n')) {
-    // '--- ' and '+++ ' are file headers only before a file's first hunk; inside a hunk they are content.
-    if (row.startsWith('diff --git ')) { current = null; removed = null; header = true; continue }
-    if (header && row.startsWith('+++ ')) {
-      const name = row.slice(4).replace(/\t.*$/, '')
-      if (name !== '/dev/null') { current = name.replace(/^b\//, ''); if (!files.has(current)) files.set(current, []) }
-      continue
-    }
-    // A removed line is grounded at its old path and line, so a deletion-only change can still be reviewed.
-    if (header && row.startsWith('--- ')) {
-      const name = row.slice(4).replace(/\t.*$/, '')
-      removed = name === '/dev/null' ? null : name.replace(/^a\//, '')
-      continue
-    }
-    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(row)
-    if (hunk) { header = false; oldLine = Number(hunk[1]); newLine = Number(hunk[2]); continue }
-    if (header) continue
-    if (row.startsWith('+')) {
-      lines += 1
-      const kept = current === null ? null : files.get(current)
-      if (kept) kept.push(`${current}:${newLine}: ${row.slice(1)}`)
-      newLine += 1
-    } else if (row.startsWith('-')) {
-      lines += 1
-      if (removed !== null) keep(removed, `${removed}:${oldLine}: (removed) ${row.slice(1)}`)
-      oldLine += 1
-    }
-  }
-  // Every grounded line is kept per file; the small excerpt window below takes the first EXCERPT_LINES of each, and
-  // the pre-return consult packs the rest by bytes.
-  const allFiles = [...files].filter(([, kept]) => kept.length).map(([path, kept]) => ({ path, lines: kept }))
-  const entries = allFiles.map(({ lines: kept }) => kept.slice(0, EXCERPT_LINES).join('\n'))
-  let unknown = false
-  const partialFiles = []
-  try {
-    for (const name of untracked.split('\0').filter(Boolean)) {
-      const absolute = resolve(String(cwd), name)
-      const size = Number(statSize(absolute)) || 0
-      // Past the read cap only the head is read and the lines are counted by streaming; past the count cap they are
-      // unknown, reported as the overflow shape, never as zero and never estimated.
-      const large = size > UNTRACKED_READ_CAP_BYTES
-      const buffer = large ? head(absolute, UNTRACKED_HEAD_BYTES) : read(absolute)
-      const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(String(buffer ?? ''))
-      if (bytes.includes(0)) continue
-      const text = bytes.toString('utf8')
-      if (!text) continue
-      if (large) partialFiles.push(name)
-      const rows = text.endsWith('\n') ? text.slice(0, -1).split('\n') : text.split('\n')
-      const counted = large ? countLines(absolute, UNTRACKED_COUNT_CAP_BYTES) : rows.length
-      if (counted === null) unknown = true
-      else lines += counted
-      const grounded = rows.map((item, index) => `${name}:${index + 1}: ${item}`)
-      allFiles.push({ path: name, lines: grounded })
-      entries.push(grounded.slice(0, EXCERPT_LINES).join('\n'))
-    }
-  } catch { return null }
-  if (unknown) return { lines: DIFF_MAX_BUFFER_BYTES, text: entries.join('\n'), entries, files: allFiles, partial_files: partialFiles, truncated: true }
-  return { lines, text: entries.join('\n'), entries, files: allFiles, partial_files: partialFiles, truncated: false }
-}
-
-// The pre-return consult's view of the working diff: every grounded line in order, packed into `budgetBytes`
-// (UTF-8 bytes of the entries joined by newlines). A file with any line left out is named once in `omitted_files`,
-// a partly shown file included, so the consult is told what it did not see. Null when git cannot say.
-export function preReturnDiff({ cwd, deps = {}, budgetBytes = PRE_RETURN_DIFF_BUDGET_BYTES, scrub = null } = {}) {
-  const diff = (deps.diffLines || ((path) => gitDiffLines({ cwd: path, deps })))(cwd)
-  if (!diff || typeof diff !== 'object') return null
-  let files
-  if (Array.isArray(diff.files)) files = diff.files.map((file) => ({ path: String(file?.path ?? ''), lines: (file?.lines || []).map(String) }))
-  else {
-    const entries = Array.isArray(diff.entries) ? diff.entries.map(String) : [String(diff.text ?? '')]
-    files = entries.filter(Boolean).map((entry) => {
-      const lines = entry.split('\n')
-      return { path: /^(.+?):\d+: /.exec(lines[0])?.[1] ?? '', lines }
-    })
-  }
-  const entries = []
-  const omittedFiles = []
-  const redactions = {}
-  let bytes = 0
-  let count = 0
-  // A file git could not give hunks for (output over the cap) or gave only the head of is left out, by name.
-  for (const name of [...(Array.isArray(diff.unread_files) ? diff.unread_files : []), ...(Array.isArray(diff.partial_files) ? diff.partial_files : [])]) {
-    if (!omittedFiles.includes(String(name))) omittedFiles.push(String(name))
-  }
-  // An incomplete read is stated, never passed off as a whole diff, even when no file could be named.
-  if (diff.truncated === true) omittedFiles.push(PRE_RETURN_INCOMPLETE)
-  for (const file of files) {
-    const taken = []
-    let omitted = false
-    let fileLines = file.lines
-    // `scrub` runs before the budget is spent, so the bytes counted are the bytes sent: a redaction that expands text
-    // cannot push the window past the budget.
-    if (scrub && fileLines.length) {
-      const scrubbed = scrub(fileLines.join('\n'))
-      fileLines = scrubbed.text ? scrubbed.text.split('\n') : []
-      for (const [kind, n] of Object.entries(scrubbed.counts || {})) redactions[kind] = (redactions[kind] || 0) + n
-    }
-    for (const line of fileLines) {
-      const cost = byteLength(line) + (count ? 1 : 0)
-      if (bytes + cost > budgetBytes) { omitted = true; break }
-      bytes += cost; count += 1; taken.push(line)
-    }
-    if (taken.length) entries.push(taken.join('\n'))
-    if (omitted && !omittedFiles.includes(file.path)) omittedFiles.push(file.path)
-  }
-  return { entries, bytes, omitted_files: omittedFiles, lines: count, redactions }
-}
 
 export const JUDGMENT_REPLY_MAX = 4
 
@@ -1213,19 +892,12 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     if (normalized) addFifo(injected, normalized, DEDUPE_CAP)
   }
 
-  // A host whose consults run in separate processes serialises acceptance across them (exclusiveTier1Acceptance):
-  // inside it the host merges what the other consults accepted (mergeTier1Memory) before this one is judged.
-  function acceptTier1Note(args) {
-    if (typeof deps.exclusiveTier1Acceptance !== 'function') return acceptTier1NoteNow(args)
-    try { return deps.exclusiveTier1Acceptance(() => acceptTier1NoteNow(args)) === true } catch { return false }
-  }
-
   // A pre-return finding of medium or high severity refuses the return write.
   function blocksReturn(trigger, judgment) {
     return trigger === 'pre-return' && (judgment?.severity === 'medium' || judgment?.severity === 'high')
   }
 
-  function acceptTier1NoteNow({ judgment, trigger, eventId, captured }) {
+  function acceptTier1Note({ judgment, trigger, eventId, captured }) {
     const text = boundText(judgment.claim, NOTE_TEXT_CAP_BYTES)
     const normalized = normalizeNote(text)
     let code
@@ -1266,9 +938,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     return true
   }
 
-  async function consult(trigger, eventId, callOrdinal, { inline = false, preReturn = null } = {}) {
-    // A host whose hooks are fresh processes (the claude seat plugin) cannot hold a consult open: tier 0 only.
-    if (deps.tier1 === false) return
+  async function consult(trigger, eventId, callOrdinal, { preReturn = null } = {}) {
     const context = currentContext()
     if (!context?.cell) return
     if (consults >= TIER1_MAX_CONSULTS) return
@@ -1305,17 +975,6 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
       window_bytes: byteLength(wholeDiff.map((entry) => entry.text).join('\n')),
       window_entries: wholeDiff.length, omitted_files: preReturn.omitted_files,
     } : null
-    // A host whose hooks are fresh short processes hands the prepared consult to a detached worker
-    // (runTier1Consult) instead of holding it open here. Nothing below this line is duplicated for it.
-    if (!inline && typeof deps.deferTier1Consult === 'function') {
-      try {
-        deps.deferTier1Consult({
-          trigger, eventId, callOrdinal, consultId, redacted, epoch: contextEpoch,
-          snapshot: snapshot.map((entry) => entry.text), injected: [...injected], dedupe: [...dedupe],
-        })
-      } catch { /* a consult that cannot start costs the seat nothing */ }
-      return
-    }
     return runConsult({ trigger, eventId, callOrdinal, snapshot: effective, context, consultId, redacted, window })
   }
 
@@ -1534,43 +1193,6 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     return request
   }
 
-  // The detached worker's entry: run a consult a hook prepared and deferred, through the same execution and
-  // acceptance code as the inline path. A request from another epoch, or one this advisor cannot trust, is dropped.
-  async function runTier1Consult(request) {
-    if (!request || typeof request !== 'object' || typeof request.consultId !== 'string' || typeof request.eventId !== 'string'
-      || !TRIGGERS.includes(request.trigger) || !Number.isSafeInteger(request.callOrdinal)
-      || !Array.isArray(request.snapshot) || !request.snapshot.every((text) => typeof text === 'string')
-      || !Array.isArray(request.injected) || !request.injected.every((text) => typeof text === 'string')
-      || !Array.isArray(request.dedupe) || !request.dedupe.every((text) => typeof text === 'string')
-      || !request.redacted || typeof request.redacted !== 'object' || typeof request.epoch !== 'string') return
-    if (epochKey(manifestEpoch({ taskDir, readFile })) !== request.epoch) return
-    contextEpoch = request.epoch
-    contextRowEpoch = request.epoch
-    const current = ensureContext()
-    if (!current?.cell || contextEpoch !== request.epoch) return
-    injected = new Set(request.injected)
-    dedupe = new Set(request.dedupe)
-    const snapshot = Object.freeze(request.snapshot.map((text) => {
-      const rebuilt = entryFromText(text)
-      return Object.freeze({ text: rebuilt.text, anchors: Object.freeze(rebuilt.anchors) })
-    }).filter((entry) => entry.text))
-    await runConsult({
-      trigger: request.trigger, eventId: request.eventId, callOrdinal: request.callOrdinal, snapshot,
-      context: current, consultId: request.consultId, redacted: request.redacted,
-    })
-  }
-
-  // What a detached consult learned by having its claim accepted: the dedupe and self-echo memory a host that
-  // keeps the advisor's state elsewhere merges back, so later consults see a delivered claim as the pi advisor does.
-  function tier1Memory() { return { dedupe: [...dedupe], injected: [...injected], events: [...acceptedEvents] } }
-
-  function mergeTier1Memory(memory) {
-    const strings = (value) => Array.isArray(value) && value.every((text) => typeof text === 'string') ? value : []
-    for (const text of strings(memory?.dedupe)) addFifo(dedupe, text, DEDUPE_CAP)
-    for (const text of strings(memory?.injected)) addFifo(injected, text, DEDUPE_CAP)
-    for (const text of strings(memory?.events)) addFifo(acceptedEvents, text, DEDUPE_CAP)
-  }
-
   function dispatch(id) {
     const triggers = pending.get(String(id)) || []
     pending.delete(String(id))
@@ -1583,7 +1205,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   async function preReturnVerdict(event, { spend, claim = null }) {
     const id = String(event?.toolCallId || '')
     const preReturn = preReturnWindow()
-    const result = await consult('pre-return', id, calls, { inline: true, preReturn })
+    const result = await consult('pre-return', id, calls, { preReturn })
     if (result?.ran && spend) preReturnSpent = true
     // A maybe whose consult never ran (no grounded delta, no cell, the cap) gives its slot back, if it still holds it.
     if (!result?.ran && claim && preReturnMaybeSpent === claim) preReturnMaybeSpent = false
@@ -1612,21 +1234,11 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
     ensureContext()
     processResult(event)
     dispatch(String(event?.toolCallId || ''))
-    // A host that runs each hook as its own process (deferTier1Consult) can see a call's Pre without its Post
-    // (a denied or interrupted call). Calls run in parallel, so another call's result does not end a live call:
-    // what a call queued waits for its own result, matched by call id alone, or is sent once older than ORPHAN_PENDING_MS.
-    if (typeof deps.deferTier1Consult === 'function') {
-      const cutoff = nowMs() - ORPHAN_PENDING_MS
-      for (const [orphan, triggers] of [...pending]) {
-        if (triggers.every((entry) => Number.isFinite(entry.queued_at) && entry.queued_at <= cutoff)) dispatch(orphan)
-      }
-    }
     callOrdinals.delete(String(event?.toolCallId || ''))
     return undefined
   }
 
-  // What the tier-0 predicates keep between calls: a host that runs each hook in a fresh process stores it
-  // and hands it back. Pi never calls these. The judgment channel's delta is not part of it.
+  // Snapshot the advisor state for inspection and restoration.
   function exportState() {
     return {
       context_epoch: contextEpoch, context_row_epoch: contextRowEpoch, calls, consults, growth_baseline: growthBaseline,
@@ -1671,7 +1283,7 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   }
 
   return {
-    onToolCall, onToolResult, exportState, importState, runTier1Consult, tier1Memory, mergeTier1Memory,
+    onToolCall, onToolResult, exportState, importState,
     notes: () => [...notes],
     settled: async () => { await Promise.allSettled([...inFlight]) },
   }

@@ -25,7 +25,9 @@ const PRIVATE_BINDINGS = Object.freeze([
   ['crew/run-pid.mjs', ['RUN_PID_FILE', 'openTail']],
   ['crew/pi/extensions/skeletonread.ts', ['NO_CITED_RANGES', 'RETRIEVE_TOOL_NAME', 'RETRIEVE_PARAMS', 'normalizePath', 'countTextLines', 'parseCitations', 'renderSkeleton', 'attachSkeletonRead']],
   ['crew/pi/extensions/subagent.ts', ['AGENT_TOOL_NAME', 'SUBAGENT_DENY', 'agentParams', 'SPAWN_COUNT_FILE', 'resolveDefCell', 'boundAgentName', 'usageRow', 'SCOUT_NUDGE_MIN_DIRECTORIES', 'SCOUT_NUDGE_TEXT']],
-  ['crew/pi/extensions/advisor.ts', ['ADVISOR_MESSAGE_TYPE', 'GROWTH_DIVERGENCE', 'TIER1_FINDING', 'TRIGGERS', 'REPEAT_FAILURE_THRESHOLD', 'GROWTH_DIVERGENCE_RATIO', 'GROWTH_FLOOR_BYTES', 'CADENCE_CALLS', 'DEDUPE_CAP', 'SIGNATURE_CAP_BYTES', 'NOTE_TEXT_CAP_BYTES', 'TARGET_CAP_BYTES', 'EXCERPT_LINES', 'CONSULT_TIMEOUT_MS', 'CHILD_KILL_GRACE_MS', 'GIT_TIMEOUT_MS', 'DIFF_MAX_BUFFER_BYTES', 'ownSpendIncomplete', 'boundTarget', 'journalPathFrom', 'repoRelative', 'scopeMatcher', 'isContentFree', 'isSelfEcho', 'redactionPlaceholder', 'gitDiffSize', 'REPLY_EXCERPT_CAP_BYTES']],
+  ['crew/pi/extensions/advisor.ts', ['ADVISOR_MESSAGE_TYPE', 'GROWTH_DIVERGENCE', 'TIER1_FINDING', 'TRIGGERS', 'REPEAT_FAILURE_THRESHOLD', 'GROWTH_DIVERGENCE_RATIO', 'GROWTH_FLOOR_BYTES', 'CADENCE_CALLS', 'DEDUPE_CAP', 'SIGNATURE_CAP_BYTES', 'NOTE_TEXT_CAP_BYTES', 'TARGET_CAP_BYTES', 'CONSULT_TIMEOUT_MS', 'CHILD_KILL_GRACE_MS', 'ownSpendIncomplete', 'boundTarget', 'journalPathFrom', 'repoRelative', 'scopeMatcher', 'isContentFree', 'isSelfEcho', 'REPLY_EXCERPT_CAP_BYTES']],
+  ['crew/pi/extensions/advisor-redaction.ts', ['redactionPlaceholder', 'CREDENTIAL_VALUE_STRENGTH', 'REDACTION_RULES']],
+  ['crew/pi/extensions/advisor-diff.ts', ['GIT_TIMEOUT_MS', 'DIFF_MAX_BUFFER_BYTES', 'UNTRACKED_READ_CAP_BYTES', 'UNTRACKED_COUNT_CAP_BYTES', 'UNTRACKED_HEAD_BYTES', 'readFileHead', 'countFileLines', 'gitOverflow', 'byteLength']],
   ['crew/pi/extensions/acp-server.ts', ['GATED_TOOLS_ENV', 'PERMISSION_TIMEOUT_ENV', 'DEFAULT_GATED_TOOLS', 'DEFAULT_PERMISSION_TIMEOUT_MS', 'MAX_PARTIAL_FRAME_BYTES', 'toolKindFor', 'permissionTimeoutFrom']],
 ])
 

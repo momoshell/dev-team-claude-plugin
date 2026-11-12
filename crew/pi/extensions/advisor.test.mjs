@@ -334,7 +334,12 @@ test('E1 advisor module is node-only, erasable, and exposes no callable registra
   const source = readFileSync(new URL('./advisor.ts', import.meta.url), 'utf8')
   const imports = [...source.matchAll(/^import[\s\S]*?from\s+["']([^"']+)["']/gm)].map((match) => match[1])
   assert.ok(imports.length > 0)
-  assert.ok(imports.every((specifier) => specifier.startsWith('node:') || ['./subagent.ts', '../context-layout.mjs', '../../adapters/adapter-pi.mjs', '../../protocols.mjs'].includes(specifier)))
+  assert.ok(imports.every((specifier) => specifier.startsWith('node:') || ['./subagent.ts', './advisor-redaction.ts', './advisor-diff.ts', '../context-layout.mjs', '../../adapters/adapter-pi.mjs', '../../protocols.mjs'].includes(specifier)))
+  for (const leaf of ['./advisor-redaction.ts', './advisor-diff.ts']) {
+    const leafSource = readFileSync(new URL(leaf, import.meta.url), 'utf8')
+    const leafImports = [...leafSource.matchAll(/^import[\s\S]*?from\s+["']([^"']+)["']/gm)].map((match) => match[1])
+    assert.ok(leafImports.every((specifier) => specifier.startsWith('node:')), leaf)
+  }
   assert.doesNotMatch(readFileSync(new URL('../../protocols.mjs', import.meta.url), 'utf8'), /^import\s/m)
   assert.doesNotMatch(source, /registerTool/)
   assert.doesNotMatch(source, /^\s*(enum|namespace)\s/m)
@@ -1498,7 +1503,7 @@ test('a lean lane gives the advisor its scope from the lane planner return writt
 })
 
 
-// A deferred consult: the host hands the prepared request to a detached worker (runTier1Consult) on a fresh advisor.
+// Shared fixture for consult and advisor state tests.
 async function deferredDrive({ replyClaim = 'the deferred consult found the edge' } = {}) {
   const root = scratchDir('advisor-defer-')
   const taskDir = join(root, 'task'), tree = join(root, 'tree'), rows = [], sends = [], requests = []
@@ -1536,45 +1541,17 @@ async function deferredDrive({ replyClaim = 'the deferred consult found the edge
   return { root, rows, sends, requests, base, envOf, drive, spawned: () => spawned }
 }
 
-test('a deferred tier-1 consult hands a serializable request to the host and spawns nothing', async () => {
+test('createAdvisor ignores the retired fresh-process deps and exposes no fresh-process surface', async () => {
   const h = await deferredDrive()
   try {
-    const seat = advisor.createAdvisor({ env: h.envOf, deps: { ...h.base, deferTier1Consult: (request) => h.requests.push(JSON.parse(JSON.stringify(request))) } })
+    const seat = advisor.createAdvisor({ env: h.envOf, deps: { ...h.base, tier1: false, deferTier1Consult: (r) => h.requests.push(r), exclusiveTier1Acceptance: () => false } })
     h.drive(seat)
     await seat.settled()
-    assert.equal(h.spawned(), 0)
-    assert.equal(h.requests.length, 1)
-    assert.equal(h.rows.some((row) => row.advisor_consult), false)
-    assert.equal(seat.exportState().consults, 1)
-    assert.equal(h.requests[0].trigger, 'tier0-note')
-    assert.ok(h.requests[0].snapshot.length > 0)
+    assert.ok(h.spawned() > 0)
+    assert.equal(h.requests.length, 0)
+    assert.ok(h.rows.some((row) => row.advisor_note?.tier === 1 && row.advisor_note.outcome === 'injected'))
+    for (const name of ['runTier1Consult', 'tier1Memory', 'mergeTier1Memory']) assert.ok(!(name in seat))
   } finally { rmSync(h.root, { recursive: true, force: true }) }
-})
-
-test('a deferred consult run by a fresh advisor journals the note fields the inline consult journals', async () => {
-  const inline = await deferredDrive()
-  const deferred = await deferredDrive()
-  try {
-    const seat = advisor.createAdvisor({ env: inline.envOf, deps: inline.base })
-    inline.drive(seat)
-    await seat.settled()
-    const host = advisor.createAdvisor({ env: deferred.envOf, deps: { ...deferred.base, deferTier1Consult: (request) => deferred.requests.push(JSON.parse(JSON.stringify(request))) } })
-    deferred.drive(host)
-    const worker = advisor.createAdvisor({ env: deferred.envOf, deps: deferred.base })
-    await worker.runTier1Consult(deferred.requests[0])
-    const noteOf = (rows) => rows.find((row) => row.advisor_note?.tier === 1 && row.advisor_note.outcome === 'injected').advisor_note
-    const keys = (rows) => Object.keys(noteOf(rows)).sort()
-    assert.deepEqual(keys(deferred.rows), keys(inline.rows))
-    assert.equal(noteOf(deferred.rows).consult_id, deferred.requests[0].consultId)
-    for (const key of ['advisor_consult', 'advisor_usage']) {
-      assert.deepEqual(Object.keys(deferred.rows.find((row) => row[key])[key]).sort(), Object.keys(inline.rows.find((row) => row[key])[key]).sort())
-    }
-    assert.equal(deferred.sends.filter((s) => s.message.details?.tier === 1).length, 1)
-    // a request from another epoch is dropped
-    const before = deferred.rows.length
-    await worker.runTier1Consult({ ...deferred.requests[0], epoch: 'number:99' })
-    assert.equal(deferred.rows.length, before)
-  } finally { rmSync(inline.root, { recursive: true, force: true }); rmSync(deferred.root, { recursive: true, force: true }) }
 })
 
 test('advisor state carries the delta, queued triggers and consult count between processes', async () => {
@@ -1591,42 +1568,6 @@ test('advisor state carries the delta, queued triggers and consult count between
     assert.deepEqual(fresh.exportState(), state)
     assert.throws(() => fresh.importState({ ...state, delta: [{ text: 1 }] }))
     assert.throws(() => fresh.importState({ ...state, pending: [['w', [{ trigger: 'nope', call_ordinal: 1 }]]] }))
-  } finally { rmSync(h.root, { recursive: true, force: true }) }
-})
-
-test('a parallel call\'s result does not dispatch a live call\'s queued trigger; a stale one is sent as orphaned', async () => {
-  const h = await deferredDrive()
-  try {
-    let clock = Date.parse('2026-01-01T00:00:00Z')
-    const deps = { ...h.base, now: () => new Date(clock).toISOString(), deferTier1Consult: (request) => h.requests.push(JSON.parse(JSON.stringify(request))) }
-    const seat = advisor.createAdvisor({ env: h.envOf, deps })
-    const readInput = { path: join(h.base.cwd, 'lib/widget.mjs') }
-    const input = { path: join(h.base.cwd, 'outside.mjs'), content: 'const outside = null\n' }
-    seat.onToolCall({ toolCallId: 'w', toolName: 'write', input }, {})
-    seat.onToolCall({ toolCallId: 'r', toolName: 'read', input: readInput }, {})
-    seat.onToolResult({ toolCallId: 'r', toolName: 'read', input: readInput, content: [{ type: 'text', text: 'const widget = null' }] }, {})
-    assert.equal(h.requests.length, 0, 'the read result leaves the live write\'s trigger queued')
-    assert.deepEqual(seat.exportState().pending.map(([id]) => id), ['w'])
-    seat.onToolResult({ toolCallId: 'w', toolName: 'write', input, content: [{ type: 'text', text: 'ok' }] }, {})
-    assert.equal(h.requests.length, 1)
-    assert.ok(h.requests[0].snapshot.some((text) => text.includes('const outside = null')), 'the consult sees the written content')
-    // a call that never returns: its trigger waits, then a later result past the bound sends it
-    const second = advisor.createAdvisor({ env: h.envOf, deps })
-    second.onToolCall({ toolCallId: 'lost', toolName: 'write', input }, {})
-    second.onToolResult({ toolCallId: 'r2', toolName: 'read', input: readInput, content: [{ type: 'text', text: 'const widget = null' }] }, {})
-    assert.equal(h.requests.length, 1)
-    clock += 11 * 60 * 1000
-    second.onToolResult({ toolCallId: 'r3', toolName: 'read', input: readInput, content: [{ type: 'text', text: 'const widget = null' }] }, {})
-    assert.equal(h.requests.length, 2)
-    // two live calls on the same input: the second's result never sends the first's trigger
-    const third = advisor.createAdvisor({ env: h.envOf, deps })
-    third.onToolCall({ toolCallId: 'w1', toolName: 'write', input }, {})
-    third.onToolCall({ toolCallId: 'w2', toolName: 'write', input }, {})
-    third.onToolResult({ toolCallId: 'w2', toolName: 'write', input, content: [{ type: 'text', text: 'failed' }] }, {})
-    assert.equal(h.requests.length, 2, 'the other write\'s result leaves the live write\'s trigger queued')
-    assert.deepEqual(third.exportState().pending.map(([id]) => id), ['w1'])
-    third.onToolResult({ toolCallId: 'w1', toolName: 'write', input, content: [{ type: 'text', text: 'ok' }] }, {})
-    assert.equal(h.requests.length, 3)
   } finally { rmSync(h.root, { recursive: true, force: true }) }
 })
 

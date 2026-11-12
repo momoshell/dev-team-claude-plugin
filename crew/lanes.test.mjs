@@ -60,6 +60,44 @@ test('a lane whose recorded run pid now names a later process lists as stopped r
   } finally { w.done() }
 })
 
+test('a stop verdict followed by the in-flight suite\'s check and stage-end rows lists as stopped with its reason, live or dead run (#2304)', () => {
+  const w = world()
+  try {
+    w.lane('concurrent', [
+      { event: 'stage-start', stage: 'suite' }, { event: 'stage-start', stage: 'review' },
+      { event: 'verdict', stage: 'review', status: 'stopped', reason: 'seat-unmeasured' },
+      { event: 'stage-end', stage: 'review' }, { event: 'check', stage: 'suite', check: 'suite', result: { status: 'green', code: 0 } },
+      { event: 'stage-end', stage: 'suite' },
+    ])
+    put(join(w.root, 'dt-concurrent', 'concurrent', 'task', 'run.pid'), '123\n')
+    for (const live of [true, false]) {
+      const row = laneRows({ root: w.root, archiveRoot: w.archiveRoot, alive: () => live }).find((r) => r.lane === 'concurrent')
+      assert.deepEqual([row.status, row.reason], ['stopped', 'seat-unmeasured'])
+    }
+    w.lane('resumed', [
+      { event: 'verdict', status: 'stopped', reason: 'x' }, { event: 'stage-start', stage: 'suite' },
+      { event: 'check', stage: 'suite', check: 'suite', result: { status: 'green', code: 0 } },
+    ])
+    assert.equal(laneRows({ root: w.root, archiveRoot: w.archiveRoot, alive: () => true }).find((r) => r.lane === 'resumed').status, 'running')
+  } finally { w.done() }
+})
+
+test('an advisor row after the terminal row never becomes the lane state (#2304)', () => {
+  const w = world()
+  try {
+    const advisor = { at: 1, role: 'builder', advisor_usage: { provider: 'openai', billed_input_tokens: 1 } }
+    for (const [name, terminal, expected] of [
+      ['stop', { event: 'verdict', status: 'stopped', reason: 'x' }, ['stopped', 'x']],
+      ['published', { event: 'pr', pr: { number: 7, url: PR } }, ['done', null]],
+    ]) {
+      w.lane(name, [terminal, advisor])
+      put(join(w.root, `dt-${name}`, name, 'task', 'run.pid'), '123\n')
+      const row = laneRows({ root: w.root, archiveRoot: w.archiveRoot, alive: () => false }).find((r) => r.lane === name)
+      assert.deepEqual([row.status, row.reason], expected)
+    }
+  } finally { w.done() }
+})
+
 test('lanes signals no seat process group of a dead run, in text or --json', () => {
   const w = world(), groups = [], calls = []
   try {

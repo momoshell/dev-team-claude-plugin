@@ -37,6 +37,17 @@ const FINISH_ROLES = ['builder', 'reviewer']
 const text = (v) => typeof v === 'string' && v !== ''
 const strings = (v) => Array.isArray(v) && v.every(text)
 const object = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+const plainObject = (v) => object(v) && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null)
+const JOURNAL_OUTPUT_TAIL = 4096
+function journaled(result) {
+  if (!plainObject(result)) return result
+  const copy = { ...result }
+  for (const key of ['stdout', 'stderr']) if (typeof result[key] === 'string') {
+    copy[key] = result[key].slice(-JOURNAL_OUTPUT_TAIL)
+    copy[`${key}Bytes`] = Buffer.byteLength(result[key], 'utf8')
+  }
+  return copy
+}
 const rosterSound = (roster) => object(roster) && object(roster.overrides) && Array.isArray(roster.files)
   && Object.entries(roster.overrides).every(([role, entry]) => AGENT_ROLES.includes(role) && !runOverrideDefects(role, entry).length)
   && (!Object.hasOwn(roster, 'snapshot') || (object(roster.snapshot) && AGENT_ROLES.every((role) => {
@@ -318,7 +329,10 @@ export async function runLoop(spec, deps = {}) {
     await emit('stage-start', {})
     let outcome = null
     try { outcome = await work(); return outcome } catch (error) { outcome = { threw: describe(error) }; throw error } finally {
-      await emit('stage-end', { outcome })
+      if (plainObject(outcome)) {
+        const { stdout, stderr, ...rest } = outcome
+        await emit('stage-end', { outcome: rest })
+      } else await emit('stage-end', { outcome })
     }
   })
   const acceptPlan = async ({ details, summary }) => {
@@ -338,7 +352,7 @@ export async function runLoop(spec, deps = {}) {
   const callCheck = async (name, fn, input, { command = false } = {}) => {
     let result
     try { result = await fn(input) } catch (error) { result = { status: 'unmeasured', reason: 'runner-threw', error: describe(error) } }
-    await emit('check', { check: name, result })
+    await emit('check', { check: name, result: journaled(result) })
     const sound = result !== null && typeof result === 'object' && !Array.isArray(result)
       && (result.reason === null || CHECK_REASONS.includes(result.reason))
       && ['green', 'red', 'unmeasured'].includes(result.status) && (result.status === 'green') === (result.reason === null)

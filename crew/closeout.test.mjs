@@ -85,6 +85,23 @@ test('discard is not blocked by a claim whose pid now names a later process (S3-
   } finally { w.done() }
 })
 
+test('discard ends a lane whose review stop is followed by the in-flight suite\'s rows (#2304)', () => {
+  const rows = [
+    { event: 'run-start', lane: LANE }, { event: 'stage-start', stage: 'suite' }, { event: 'stage-start', stage: 'review' },
+    { event: 'verdict', stage: 'review', status: 'stopped', reason: 'seat-unmeasured' },
+    { event: 'stage-end', stage: 'review' }, { event: 'check', stage: 'suite', check: 'suite', result: { status: 'green', code: 0 } },
+    { event: 'stage-end', stage: 'suite' },
+  ]
+  for (const tail of [rows, [rows[0], rows[3], { at: 1, role: 'builder', advisor_usage: { provider: 'openai', billed_input_tokens: 1 } }]]) {
+    const w = world({ rows: tail })
+    try {
+      const result = close(w, { argv: [LANE, '--discard'] })
+      assert.equal(result.status, 0, result.err)
+      assert.ok(existsSync(join(w.archiveRoot, `dt-${LANE}`)))
+    } finally { w.done() }
+  }
+})
+
 test('discard ends an accepted lane whose published PR GitHub reports CLOSED', () => {
   for (const state of ['CLOSED', 'OPEN', 'MERGED', 'missing']) {
     const w = world({ rows: [...STOPPED, { event: 'finish-ready' }, ...(state === 'missing' ? [] : [PR_ROW]), { event: 'finish-decision', choice: 'accept' }] })

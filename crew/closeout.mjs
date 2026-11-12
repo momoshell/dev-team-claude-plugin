@@ -14,6 +14,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLeanSource } from '../visualizer/server/lean-source.mjs'
+import { stateless } from '../visualizer/server/lean-journal-order.mjs'
 import { LANE, isObject, within } from './lane-core.mjs'
 import { reapLaneSeats } from './seat-reap.mjs'
 import { parsePrUrl } from './record-pr.mjs'
@@ -101,9 +102,9 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
       try { view = JSON.parse(viewText) } catch { refuse('gh pr view returned unparseable output') }
       if (view?.state !== 'CLOSED') refuse(`lane recorded a pull request; use crew closeout ${lane}`)
     }
-    const tail = rows.findLast((row) => row.event !== 'stage-end')
+    const tail = rows.findLast((row, index) => !stateless(rows, row, index))
     const stopRows = tail?.event === 'pr' ? rows.slice(0, rows.lastIndexOf(tail)) : rows
-    const last = stopRows.findLast((row) => row.event !== 'stage-end')
+    const last = stopRows.findLast((row, index) => !stateless(rows, row, index))
     const died = deadRun({ rows: stopRows, taskDir, alive })
     if (text !== null && !(last?.event === 'verdict' && last.status === 'stopped') && !((abandoned || accepted) && tail === lastFinish) && !died) refuse(`lane ${lane} is not stopped`)
     const stopAt = text === null ? 0 : died ? stopRows.length : rows.lastIndexOf(last)

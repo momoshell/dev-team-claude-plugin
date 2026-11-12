@@ -45,6 +45,24 @@ test('record-pr names an abandoned lane as abandoned, not as not stopped (S3-9)'
   } finally { w.done() }
 })
 
+test('a review stop followed by the in-flight suite\'s rows records the operator pr (#2304)', () => {
+  const w = world()
+  try {
+    const rows = [
+      { event: 'stage-start', stage: 'suite' }, { event: 'stage-start', stage: 'review' },
+      { event: 'verdict', stage: 'review', status: 'stopped', reason: 'seat-unmeasured' },
+      { event: 'stage-end', stage: 'review' }, { event: 'check', stage: 'suite', check: 'suite', result: { status: 'green', code: 0 } },
+      { event: 'stage-end', stage: 'suite' },
+    ]
+    for (const [name, tail] of [['concurrent', rows], ['advisor', [rows[2], { at: 1, role: 'builder', advisor_usage: { provider: 'openai', billed_input_tokens: 1 } }]]]) {
+      const file = w.lane(name, { rows: tail })
+      const result = run(w, name)
+      assert.equal(result.status, 0, result.err)
+      assert.equal(JSON.parse(readFileSync(file, 'utf8').trim().split('\n').at(-1)).event, 'pr')
+    }
+  } finally { w.done() }
+})
+
 test('a lane whose run died with no terminal row records the operator pr; a live or unrecorded run is refused', () => {
   const w = world()
   try {

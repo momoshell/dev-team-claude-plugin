@@ -140,6 +140,21 @@ test('a claim whose pid now names a later process is taken over (S3-4)', () => {
   }
 })
 
+test('a review stop followed by the in-flight suite\'s rows is finished on that stop, not run-died (#2304)', () => {
+  const f = fixture({ rows: [
+    { event: 'stage-start', stage: 'build' }, builderRow,
+    { event: 'stage-start', stage: 'suite' }, { event: 'stage-start', stage: 'review' },
+    { event: 'verdict', stage: 'review', status: 'stopped', reason: 'round-bound' },
+    { event: 'stage-end', stage: 'review' }, { event: 'check', stage: 'suite', check: 'suite', result: { status: 'green', code: 0 } },
+    { event: 'stage-end', stage: 'suite' },
+  ] })
+  try {
+    writeFileSync(join(f.taskDir, 'run.pid'), '123\n')
+    run(f, { alive: (pid) => pid !== 123 }).go()
+    assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.stop.reason, 'round-bound')
+  } finally { cleanup(f) }
+})
+
 test('a finish launch replaces run.pid with the finish run pid', () => {
   for (const fail of [false, true]) {
     const f = fixture()

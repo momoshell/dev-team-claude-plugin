@@ -250,6 +250,7 @@ export async function runLoop(spec, deps = {}) {
   }
   let namedTests = []
   const provedTests = new Map()
+  const lastProved = new Set()
   let priorFindings = isFinish ? fin.findings : []
   let reservePending = false, reserveSpent = false, reserveBase = null
   let secondFindings = []
@@ -615,6 +616,7 @@ export async function runLoop(spec, deps = {}) {
     rounds.builder = 0
     repaired = false
     provedTests.clear()
+    lastProved.clear()
     rulings.length = 0
     const planned = await stage('plan', () => seatTurn('planner', [{ id: 'mechanical-restart', summary: 'The mechanical build was discarded; plan the restarted lane.', reason, ...detail }]))
     if (planned.halt) return planned
@@ -749,6 +751,7 @@ export async function runLoop(spec, deps = {}) {
           builderSummary = oneLine(built.envelope.details.summary) || oneLine(built.envelope.summary)
           // Every return names its own tests; an earlier turn's names never stand in for this build.
           namedTests = Array.isArray(built.envelope.details.tests) ? built.envelope.details.tests : []
+          lastProved.clear()
           builderReport = { tests: namedTests, notes: built.envelope.details.notes ?? null }
           if (!namedTests.length && !isFinish && testsRequired) {
             const failure = { role: 'builder', failure: 'proof-no-tests' }
@@ -772,7 +775,11 @@ export async function runLoop(spec, deps = {}) {
             continue
           }
           if (!proofOK) return stop(proof.reason ?? 'runner-threw', proof)
-          for (const row of rows) provedTests.set(`${row.file}\0${row.title}`, row)
+          for (const row of rows) {
+            const key = `${row.file}\0${row.title}`
+            provedTests.set(key, row)
+            lastProved.add(key)
+          }
           proofLines = rows.map(({ file, title }) => `- proof: ${file} ${JSON.stringify(oneLine(title))}: red on the old source, green on the build`)
         }
 
@@ -951,7 +958,7 @@ export async function runLoop(spec, deps = {}) {
         ...(isFinish ? ['', `The lane stopped with reason ${oneLine(fin.stop.reason)}. This report covers only this finish run.`, `${finishReviews.length} ${finishReviews.length === 1 ? 'review' : 'reviews'} in this finish run; final verdict: ${oneLine(finishReviews.at(-1)?.verdict) || 'unmeasured'}.`] : []),
         '', '## Changes', ...publishedFiles.map((file) => `- ${oneLine(file)}`),
         '', '## Verification',
-        ...(proved.length ? [...proved.map(({ file, title }) => `- ${oneLine(file)}: ${oneLine(title)} was red on the old source, green on the build.`), ...(!isFinish && tier === 'mechanical' ? ['Review: none, mechanical lane, not reviewed.'] : [])]
+        ...(proved.length ? [...proved.map(({ file, title }) => `- ${oneLine(file)}: ${oneLine(title)} was red on the old source, green on ${lastProved.has(`${file}\0${title}`) ? 'the build.' : 'an earlier build turn; the last build turn did not name it.'}`), ...(!isFinish && tier === 'mechanical' ? ['Review: none, mechanical lane, not reviewed.'] : [])]
           : !isFinish && tier === 'mechanical' ? ['Proof: mechanical lane, not reviewed.']
             : !isFinish && !testsRequired ? ['Proof: no criterion is machine-checked.'] : ['Proof: unmeasured.']),
         suiteResult ? `Suite passed with exit code ${suiteResult.code}${Object.hasOwn(suiteResult, 'redCode') ? ` on a re-run after a red exit ${suiteResult.redCode}` : ''}.` : 'Suite: unmeasured.',
@@ -992,6 +999,7 @@ export async function runLoop(spec, deps = {}) {
         if (uncommitted.status !== 'green') return stop(uncommitted.reason, uncommitted)
         enterPhase('recheck')
         rechecks++
+        reviewedTree = null
         recheck = true
         continue
       }
@@ -1009,7 +1017,12 @@ export async function runLoop(spec, deps = {}) {
       if (namedTests.length) {
         const reproven = await stage('proof', () => callCheck('proof', d.proveTests, { cwd, base: `${rebased.head}^`, tests: namedTests, timeoutMs: spec.proofTimeoutMs }))
         if (reproven.status !== 'green' || reproven.reason !== null || !Array.isArray(reproven.rows) || reproven.rows.length !== namedTests.length || !reproven.rows.every((row) => row?.proven === true)) return stop(reproven.reason ?? 'runner-threw', reproven)
-        for (const row of reproven.rows) provedTests.set(`${row.file}\0${row.title}`, row)
+        lastProved.clear()
+        for (const row of reproven.rows) {
+          const key = `${row.file}\0${row.title}`
+          provedTests.set(key, row)
+          lastProved.add(key)
+        }
       }
       const postSuite = await suiteRun()
       if (postSuite.status !== 'green') return stop(postSuite.reason, postSuite)

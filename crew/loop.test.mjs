@@ -151,6 +151,22 @@ test('a mechanical lane whose builder the lead bounces to the planner restarts a
   assert.doesNotMatch(f.seen.publish.body, /mechanical lane, not reviewed/)
 })
 
+test('a mechanical restart drops the lead rulings about the discarded build (#2320)', async () => {
+  let builds = 0
+  const f = fakes({ spec: { tier: 'mechanical' }, lead: 'bounce', edit: (v) => {
+    if (v.role === 'builder') {
+      builds++
+      if (builds === 1) return { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } }
+      if (builds === 2) return { ...v, status: 'insufficient' }
+    }
+    return v
+  } })
+  assert.equal((await f.go()).status, 'done')
+  const turns = builderTurns(f)
+  assert.ok(turns[1].feedback.some((item) => item.id === 'lead-bounce'))
+  assert.equal(turns[2].feedback.some((item) => item.id === 'lead-bounce'), false)
+})
+
 // Every effect is a recorded call; nothing touches a model, git, gh, the network or the disk.
 // A seat "returns" by writing its envelope into a virtual file the loop then reads back.
 function fakes(options = {}) {
@@ -924,6 +940,14 @@ test('a lead accept of a planner insufficient without done fields bounces the pl
   assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'lead', 'planner'])
 })
 
+test('a lead accept of a reviewer or tech-lead insufficient with empty details bounces that seat (#2320)', async () => {
+  for (const [tier, role] of [['build', 'reviewer'], ['judge', 'tech-lead']]) {
+    const f = fakes({ spec: { tier }, lead: 'accept', edit: (v) => v.role === role ? { ...v, status: 'insufficient', details: {} } : v })
+    assert.deepEqual(await f.go(), stopped('no-progress'), role)
+    assert.equal(f.calls.includes('commit'), false, role)
+  }
+})
+
 test('an envelope with a stale id is refused with a named id defect in the envelope row and the stop observation', async () => {
   const f = fakes({ edit: (v) => v.role === 'builder' ? { ...v, id: 'lane.planner.1' } : v })
   assert.deepEqual(await f.go(), stopped('envelope-refused'))
@@ -1504,6 +1528,13 @@ const TAP_OUT = ['not ok 1 - exhibit census remains current', '  ---', "  locati
 const redOut = (stdout) => ({ ...redRun(1), stdout })
 const redErr = (stderr) => ({ ...redRun(1), stderr })
 const builderTurns = (f) => f.requests.filter((r) => r.role === 'builder')
+
+test('callCheck returns the full suite output while the journal keeps a bounded tail (#2320)', async () => {
+  const f = sequenced([redOut(`✖ far failure (2ms)\n${'x'.repeat(5000)}\n`), green()])
+  assert.equal((await f.go()).status, 'done')
+  assert.ok(builderTurns(f)[1].feedback.find((item) => item.id === 'suite-repair').failingTests.includes('far failure'))
+  assert.doesNotMatch(f.rows.find((row) => row.event === 'check' && row.check === 'suite').result.stdout, /far failure/)
+})
 
 test('a red suite on stderr names nextest and cargo test failures in the repair feedback', async () => {
   const stderr = [
@@ -2578,6 +2609,15 @@ test('a recheck review resets the delta base so the next delta review diffs from
   assert.equal(f.requests.filter((r) => r.role === 'reviewer')[2].deltaReview.baseTree, 'c'.repeat(40))
 })
 
+test('a judge recheck whose suite is red makes the next review a full review (#2320)', async () => {
+  const A = 'a'.repeat(40)
+  const f = sequenced([green(), redRun(), green()], { spec: { tier: 'judge' }, rebase: answers({ ...MOVED, head: A }, MOVED, { ...MOVED, head: A }) })
+  assert.equal((await f.go()).status, 'done')
+  const reviews = f.requests.filter((r) => r.role === 'reviewer')
+  assert.equal(reviews.length, 2)
+  assert.equal(Object.hasOwn(reviews[1], 'deltaReview'), false)
+})
+
 test('a lead accept of a mechanical builder escalate stops seat-escalated with the builder question and never commits (S1-4)', async () => {
   const f = fakes({ spec: { tier: 'mechanical' }, lead: 'accept', edit: (v) => {
     if (v.role === 'builder') { v.status = 'escalate'; v.details.question = 'Which file?' }
@@ -2606,6 +2646,19 @@ test('a mechanical lane that proved a named test lists that proof in Verificatio
   assert.doesNotMatch(body, /Proof: mechanical lane/)
 })
 
+test('Verification marks a test the last build turn did not name as proved on an earlier turn (#2320)', async () => {
+  let builds = 0
+  const f = fakes({ review: 1, proof: (input) => ({ status: 'green', reason: null, rows: input.tests.map((t) => ({ ...t, proven: true })) }), edit: (v) => {
+    if (v.role === 'builder') v.details.tests = [{ file: 'lib.test.mjs', title: ++builds === 1 ? 'first' : 'second' }]
+    return v
+  } })
+  assert.equal((await f.go()).status, 'done')
+  const body = f.seen.publish.body
+  assert.ok(body.split('\n').includes('- lib.test.mjs: first was red on the old source, green on an earlier build turn; the last build turn did not name it.'))
+  assert.ok(body.split('\n').includes('- lib.test.mjs: second was red on the old source, green on the build.'))
+  assert.doesNotMatch(body, /first was red on the old source, green on the build\./)
+})
+
 test('Verification lists every test proved across the lane build turns (S6-11)', async () => {
   let builds = 0
   const f = fakes({ review: 1, proof: (input) => ({ status: 'green', reason: null, rows: input.tests.map((t) => ({ ...t, proven: true })) }), edit: (v) => {
@@ -2616,7 +2669,8 @@ test('Verification lists every test proved across the lane build turns (S6-11)',
     return v
   } })
   assert.equal((await f.go()).status, 'done')
-  for (const title of ['first', 'second']) assert.equal(f.seen.publish.body.split(`- lib.test.mjs: ${title} was red on the old source, green on the build.`).length - 1, 1)
+  assert.equal(f.seen.publish.body.split('- lib.test.mjs: first was red on the old source, green on an earlier build turn; the last build turn did not name it.').length - 1, 1)
+  assert.equal(f.seen.publish.body.split('- lib.test.mjs: second was red on the old source, green on the build.').length - 1, 1)
 
   let turns = 0
   const restarted = fakes({ spec: { tier: 'mechanical' }, reviewPaths: [' M crew/loop.mjs\0', ' M lib.mjs\0'], proof: (input) => ({ status: 'green', reason: null, rows: input.tests.map((t) => ({ ...t, proven: true })) }), edit: (v) => {

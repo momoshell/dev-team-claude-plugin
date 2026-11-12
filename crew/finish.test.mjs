@@ -270,7 +270,7 @@ test('a mechanical lane with no planner return is finished on its brief under it
       if (tier === 'build') { assert.equal(refusal(f)?.reason, 'finish-premise'); continue }
       assert.doesNotThrow(() => run(f).go())
       const finish = JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish
-      assert.deepEqual([finish.planPath, finish.subject, finish.filesInScope], [null, 'fix: mechanical', null])
+      assert.deepEqual([finish.planPath, finish.subject, finish.filesInScope, finish.testsRequired], [null, 'fix: mechanical', null, false])
       const journal = join(f.taskDir, 'journal.jsonl')
       writeFileSync(journal, `${readFileSync(journal, 'utf8')}${JSON.stringify({ event: 'finish-ready', reviewRounds: 1 })}\n`)
       const guidance = join(f.taskDir, 'guidance.txt')
@@ -448,7 +448,7 @@ test('a stopped lane with a build is finished: finish.json carries the stop, fin
     assert.equal(spec.shape, 'finish')
     assert.equal(spec.cwd, f.cwd)
     assert.deepEqual(spec.finish, {
-      planPath: '/t/plan.md', subject: 'fix(crew): planned lane', filesInScope: ['src/widget.svelte'], planSummary: 'planned',
+      planPath: '/t/plan.md', subject: 'fix(crew): planned lane', filesInScope: ['src/widget.svelte'], testsRequired: true, planSummary: 'planned',
       stop: STOP, findings: [FINDING], turnOffset: 3,
     })
     assert.equal(r.spawned.length, 1)
@@ -459,6 +459,17 @@ test('a stopped lane with a build is finished: finish.json carries the stop, fin
     assert.equal(r.spawned[0].opts.log, join(f.root, 'briefs', 'started', 'lane9.run.log'))
     assert.deepEqual(out, { lane: 'lane9', worktree: f.cwd, specPath: join(f.taskDir, 'finish.json'), pid: 4242 })
   } finally { cleanup(f) }
+  for (const [tests, required] of [[[], false], [undefined, true]]) {
+    const f = fixture()
+    try {
+      const plan = structuredClone(PLANNER)
+      if (tests === undefined) delete plan.details.tests
+      else plan.details.tests = tests
+      writeFileSync(join(f.taskDir, 'planner-1.json'), JSON.stringify(plan))
+      run(f).go()
+      assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.testsRequired, required)
+    } finally { cleanup(f) }
+  }
 })
 
 // MUTATION: pass any env in the spawn options.

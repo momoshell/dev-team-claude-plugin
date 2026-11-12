@@ -188,6 +188,7 @@ export async function runLoop(spec, deps = {}) {
     && Array.isArray(fin.findings) && text(fin.stop?.reason)
     && Number.isSafeInteger(fin.turnOffset) && fin.turnOffset >= 0
     && (fin.filesInScope == null || strings(fin.filesInScope))
+    && (fin.testsRequired === undefined || typeof fin.testsRequired === 'boolean')
     && (fin.guidance === undefined || typeof fin.guidance === 'string')
     && (fin.priorReviewRounds === undefined || (Number.isSafeInteger(fin.priorReviewRounds) && fin.priorReviewRounds >= 0)))) return early('invalid-input')
   const d = {
@@ -223,7 +224,7 @@ export async function runLoop(spec, deps = {}) {
   let turn = isFinish ? fin.turnOffset : 0
   let progressTurns = 0
   let tier = spec.tier
-  let testsRequired = isFinish || tier !== 'mechanical'
+  let testsRequired = isFinish ? fin.testsRequired ?? fin.planPath !== null : tier !== 'mechanical'
   let rebasedHead = null
   let repaired = false
   let planPath = isFinish ? fin.planPath : null
@@ -362,7 +363,7 @@ export async function runLoop(spec, deps = {}) {
         if (role === 'lead') feedback = feedback.map((item) => Object.hasOwn(item, 'last') ? { ...item, last: rounds.lead >= (seats.lead.rounds ?? DEFAULT_ROUNDS) } : item)
         const id = `${spec.id}.${role}.${turn}`
         const returnPath = join(spec.taskDir, `${role}-${turn}.json`)
-        const request = { role, tier, seat: seats[role], id, returnPath, brief: spec.brief, planPath, feedback: role === 'builder' ? [...feedback, ...rulings] : feedback, ...(['builder', 'reviewer', 'tech-lead'].includes(role) ? { filesInScope: filesInScope === null ? null : [...filesInScope] } : {}), ...(['reviewer', 'tech-lead'].includes(role) ? { changedPaths, builderReport } : {}), ...(reserveReview ? { reserveReview } : {}), ...(deltaReview ? { deltaReview } : {}) }
+        const request = { role, tier, seat: seats[role], id, returnPath, brief: spec.brief, planPath, feedback: role === 'builder' ? [...feedback, ...rulings] : feedback, ...(role === 'builder' ? { testsRequired } : {}), ...(['builder', 'reviewer', 'tech-lead'].includes(role) ? { filesInScope: filesInScope === null ? null : [...filesInScope] } : {}), ...(['reviewer', 'tech-lead'].includes(role) ? { changedPaths, builderReport } : {}), ...(reserveReview ? { reserveReview } : {}), ...(deltaReview ? { deltaReview } : {}) }
         // One attempt: run the seat, then read the issued path back, parse it and validate it in full.
         const attempt = async (asked) => {
           let failure = null
@@ -395,6 +396,7 @@ export async function runLoop(spec, deps = {}) {
             try { parsed = JSON.parse(raw) } catch (error) { parseError = error.message; failure = { reason: 'envelope-refused', error: describe(error) } }
           }
           const checked = failure ? { envelope: null, defects: [] } : validateEnvelope(role, parsed, { prior: (role === 'reviewer' ? priorFindings : role === 'tech-lead' ? secondFindings : []).filter((finding) => finding?.severity === 'must-fix').map((finding) => finding.id) })
+          if (typeof checked.envelope?.id === 'string' && checked.envelope.id !== '' && checked.envelope.id !== id) checked.defects.push(`id must be the issued id ${id}`)
           try {
             const unmeasured = {}, row = { role, id: asked.id }
             const measure = (field, value, valid, reason) => {
@@ -418,7 +420,7 @@ export async function runLoop(spec, deps = {}) {
             await emit('seat-turn', { ...row, unmeasured })
           } catch { /* journal measurements must not affect the turn */ }
           if (!isFinish && tier === 'mechanical' && role === 'builder' && checked.envelope?.status === 'done' && checked.envelope.details && !Object.hasOwn(checked.envelope.details, 'subject')) checked.defects.push('details.subject is required on a mechanical lane for the commit and PR')
-          if (role === 'planner' && checked.envelope && checked.defects.length === 0) checked.defects.push(...await artifactDefects(checked.envelope.details))
+          if (role === 'planner' && checked.envelope && checked.defects.length === 0 && Object.hasOwn(checked.envelope.details, 'plan_path')) checked.defects.push(...await artifactDefects(checked.envelope.details))
           return { failure, parsed, raw, parseError, recording, checked, turnError, routed, providerKind, method }
         }
         const observe = (a) => emit('envelope', { role, id, returnPath, parsed: a.parsed, defects: a.checked.defects, error: a.failure?.error ?? null, turnError: a.turnError })
@@ -567,7 +569,7 @@ export async function runLoop(spec, deps = {}) {
         continue
       }
       // ADR-055 §7: pass the lead's instruction to the bounced seat, falling back to its summary.
-      if (decision === 'accept' && !held.envelope) return { decision: 'bounce', target: role, summary: instructions ?? asked.envelope.summary }
+      if (decision === 'accept' && (!held.envelope || (['planner', 'reviewer', 'tech-lead'].includes(role) && held.envelope.status !== 'done' && validateEnvelope(role, { ...held.envelope, status: 'done' }).defects.length > 0))) return { decision: 'bounce', target: role, summary: instructions ?? asked.envelope.summary }
       if (decision === 'bounce' && target === 'builder' && role === 'builder' && progressed && progressTurns < MAX_PROGRESS_TURNS) {
         rounds.lead = Math.max(0, rounds.lead - 1)
         progressTurns += 1

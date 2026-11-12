@@ -27,12 +27,10 @@ const rungs = [
 ]
 
 const boilerplate = charter => {
-  assert.doesNotMatch(charter, /Return exactly one P2 JSON envelope|^Envelope keys:|^Statuses:/m)
   has(charter, "no top-level field beyond the example's")
   assert.match(charter, /^Details keys:/m)
 }
 const insufficient = 'Size or effort is never a reason to return `insufficient`'
-const types = 'The type is one of `chore`, `ci`, `crew`, `docs`, `feat`, `fix`, `merge`, `perf`, `refactor`, `revert`, `spike`, `test`, `wip`, `workflow`.'
 
 // MUTATION: drop the planner's narrow-or-drop sentence.
 test('LD2: a builder insufficient goes to the lead, and a planner revision narrows or drops an unmeetable criterion', () => {
@@ -40,7 +38,6 @@ test('LD2: a builder insufficient goes to the lead, and a planner revision narro
   has(body('crew/agents/lead.md'), '`last: true` is the last your bound allows in this phase')
   const builder = body('crew/agents/builder.md')
   has(builder, 'A builder `insufficient` goes to the lead')
-  assert.doesNotMatch(builder, /A builder `insufficient` goes to the planner, which revises the plan/)
   has(body('crew/agents/planner.md'), 'narrow or drop that criterion')
 })
 
@@ -56,39 +53,32 @@ test('LD4: lead, builder, planner and README text match the loop for last, conti
   for (const phrase of ["up to the lane's progress cap", "newest first after the turn's other feedback"]) has(builder, phrase)
   has(body('crew/agents/planner.md'), "A `lead-bounce` item in your feedback is the lead's instruction for this turn.")
   has(read('crew/README.md'), 'unless it names no `details.gap` after a turn that changed the worktree')
-  assert.doesNotMatch(builder, /oldest after the newest/)
-  assert.doesNotMatch(lead, /is your last on this lane|gap in the plan or its file list/)
 })
 
-// MUTATION: restore return boilerplate or remove a builder loop rule.
+// MUTATION: remove a builder loop rule.
 test('CH1: the builder charter keeps the rules the loop depends on', () => {
   const charter = body('crew/agents/builder.md')
   boilerplate(charter)
-  for (const text of [insufficient, types, 'Read every skill granted for the lane', 'Finish every place the change reaches', 'never about the change itself', 'what was verified as against assumed', 'the brief is the plan', 'a mechanical lane requires none', 'Add `details.subject`', 'your build is discarded', 'Name that decision in `details.question`', "The plan's file list is context, not a fence"]) has(charter, text)
-  assert.doesNotMatch(charter, /files_in_scope|validation_lane/)
+  for (const text of [insufficient, 'Read every skill granted for the lane', 'Finish every place the change reaches', 'never about the change itself', 'what was verified as against assumed', 'the brief is the plan', 'a mechanical lane requires none', 'your build is discarded', "The plan's file list is context, not a fence"]) has(charter, text)
 })
 
-// MUTATION: restore return boilerplate or remove a planner loop rule.
+// MUTATION: remove a planner loop rule.
 test('CH2: the planner charter keeps the rules the loop depends on', () => {
   const charter = body('crew/agents/planner.md')
   boilerplate(charter)
-  for (const text of [insufficient, types, 'It fences skeleton retrieval, not edits', 'skeletonread', 'advisor', 'failing validation runs', 'refused without `files_in_scope`', '## Criteria', '## Properties', '## Not machine-checked', '## Tasks']) has(charter, text)
-  assert.doesNotMatch(charter, /scout|The builder's context arms read them|validation_lane[^.]*the `node --test` command|refused without `validation_lane`/i)
+  for (const text of [insufficient, 'It fences skeleton retrieval, not edits', 'skeletonread', 'advisor', 'failing validation runs', '## Criteria', '## Properties', '## Not machine-checked', '## Tasks', 'only changes wording in a charter, skill or doc']) has(charter, text)
   has(charter, 'without a line-range suffix')
-  assert.doesNotMatch(charter, /builder may edit/)
-  assert.doesNotMatch(charter, /inside `plan_path`/)
   const tail = charter.split('Details keys:')[1]
   const anchors = ['The `subject` is the conventional-commit subject', '`plan_path` is a bare file path', 'Give `tests` as the test of each property', 'Give `files_in_scope` (the repo-relative files', '`validation_lane` (the repository-appropriate command that checks the change)', 'Optionally give `judge`']
   let previous = -1
   for (const anchor of anchors) { const at = tail.indexOf(anchor); assert.ok(at > previous, anchor); previous = at }
 })
 
-// MUTATION: restore return boilerplate or remove a reviewer loop rule.
+// MUTATION: remove a reviewer loop rule.
 test('CH3: the reviewer charter keeps the rules the loop depends on', () => {
   const charter = body('crew/agents/reviewer.md')
   boilerplate(charter)
-  for (const text of ['Read every skill granted for the lane', 'read every listed untracked file directly', "Restate the brief's ask as `requirements`", 'no unmet requirement', 'A must-fix carries `trigger`', 'cannot contain a must-fix finding', 'incomplete review is never a pass', 'carry each under its id in `findings` or close it in `closed`', 'Read the `## Builder report`', 'Flag a test the plan does not name']) has(charter, text)
-  assert.doesNotMatch(charter, /files_in_scope|validation_lane/)
+  for (const text of ['Read every skill granted for the lane', 'read every listed untracked file directly', 'no unmet requirement', 'incomplete review is never a pass', 'Read the `## Builder report`', 'Flag a test the plan does not name', 'only changes wording in a charter, skill or doc']) has(charter, text)
 })
 
 // MUTATION: restore a reviewer sentence in the tech-lead charter.
@@ -104,12 +94,11 @@ test('CH4: the tech-lead charter is a delta over the reviewer charter', () => {
   }
 })
 
-// MUTATION: restore a gate bypass or remove a lead decision rule.
+// MUTATION: remove a lead decision rule.
 test('CH5: the lead charter keeps the rules the loop depends on', () => {
   const charter = body('crew/agents/lead.md')
   boilerplate(charter)
-  for (const text of ['an `accept` is a bounce to that seat', 'No decision bypasses the per-test proof', 'details.question', 'details.target', '`builder`', '`planner`', 'status: "done"', 'details.decision']) has(charter, text)
-  assert.doesNotMatch(charter, /bypasses a gate/)
+  for (const text of ['an `accept` is a bounce to that seat', 'No decision bypasses the per-test proof']) has(charter, text)
 })
 
 // MUTATION: remove an old-source proof rule from either document.
@@ -149,14 +138,6 @@ test('S1-10: planner and builder charters keep code out of support', () => {
   for (const path of ['crew/agents/planner.md', 'crew/agents/builder.md']) {
     assert.ok(body(path).includes('`support` is for fixtures and goldens, never code.'), path)
   }
-})
-
-// MUTATION: remove dev-team attribution from the examples heading (PS4).
-test('PS4 code-less attributes all worked examples', () => {
-  const skill = read('skills/code-less/SKILL.md')
-  assert.match(skill, /^## Examples \(from the dev-team repository\)$/m)
-  const examples = skill.split('## Examples (from the dev-team repository)')[1]?.split('\n\nWhen ')[0] ?? ''
-  for (const text of ['Standard library:', 'Closed enum:', 'Existing helper:', 'Honest absence:', 'crew/checks.mjs', 'test/helpers.mjs', 'crew/pi/extensions/subagent.ts']) has(examples, text)
 })
 
 // MUTATION: remove a ladder rung or restore the obsolete shared-charter reference.

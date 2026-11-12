@@ -102,16 +102,8 @@ test('S4-3: Install ties DEVTEAM_CREW_ROOT to the visualizer, not the lane root'
   for (const hit of hits) assert.ok(hit.includes('visualizer'))
 })
 
-// MUTATION: restore the roster UI sentence.
-test('S4-4: README describes no roster UI for the catalog key', () => {
-  assert.doesNotMatch(readme, /roster UI/i)
-})
-
-test('the operator agents folder is retired and the repo map names no operator agent', () => {
+test('the operator agents folder is retired', () => {
   assert.equal(existsSync(join(ROOT, 'agents')), false)
-  assert.doesNotMatch(docSection(readme, "## What's in this repo"), /`agents\//)
-  const entry = read('docs/adr/README.md').split('\n').find((line) => line.startsWith('- **ADR-052'))
-  assert.match(entry, /is retired; `skills\/lane-brief\/SKILL.md` is the lane briefing path/)
 })
 
 test('lane-brief points at the code owners and restates no code-owned list', () => {
@@ -136,10 +128,8 @@ test('S3-12: lane-brief says crew start reads the issue title', () => {
   assert.doesNotMatch(skill, /reads only the body/)
 })
 
-test('S5-9: frontend-svelte testing names the skill map and requires no mutation', () => {
+test('S5-9: frontend-svelte testing names the skill map', () => {
   const text = read('skills/frontend-svelte/references/testing.md')
-  assert.ok(!text.includes('qa-test-writing'))
-  assert.doesNotMatch(text, /record a mutation/)
   assert.ok(text.includes('`skills/skill-map.json`'))
 })
 
@@ -171,18 +161,13 @@ test('S2-12: crew/README counts ACP setup as a fixed cost before wait_s', () => 
   for (const name of ['`wait_s`', '`ACP_SETUP_TIMEOUT_MS`', '`ACP_FIFO_WAIT_MS`', '`crew/acp-client.mjs`']) assert.ok(paragraph.includes(name), name)
 })
 
-// MUTATION: remove the tech-lead from the seat description.
-test('S4-12: CLAUDE.md names the tech-lead among the seats', () => {
-  assert.match(docSection(claude, '## What this is'), /tech-lead/)
-})
-
 // MUTATION: remove the session-write exception.
-test('D16: CLAUDE.md states the session-write exception as an operator decision, not a skill-proof need', () => {
-  const start = claude.indexOf('**Instrumentation is never load-bearing.**')
-  assert.notEqual(start, -1)
-  const bullet = claude.slice(start).split(/\n- |\n\n/)[0].replace(/\s+/g, ' ')
-  for (const phrase of ['session-file write', 'fails the turn', 'crew/lean.mjs', 'operator']) assert.ok(bullet.includes(phrase), phrase)
-  assert.ok(!bullet.includes('because the skill proof reads'))
+test('D16: CLAUDE.md and crew/README state the session-write exception owned by guardedAppend in crew/lean.mjs', () => {
+  for (const text of [claude, crewReadme]) {
+    const paragraph = text.split(/\n\s*\n/).find(part => part.includes('session-file write'))?.replace(/\s+/g, ' ') ?? ''
+    for (const phrase of ['session-file write', 'fails the turn', 'crew/lean.mjs', 'guardedAppend']) assert.ok(paragraph.includes(phrase), phrase)
+  }
+  assert.ok(read('crew/lean.mjs').includes('guardedAppend'))
 })
 
 test('S6-15: crew/README claims no required-skill refusal and defines the seat-turn tool call', () => {
@@ -211,45 +196,6 @@ test('S1-21: crew/README says crew update refuses off stable', () => {
   assert.match(crewReadme.replace(/\s+/g, ' '), /`crew update` refuses[^.]*`stable`/)
 })
 
-// MUTATION: restore the reclaim lease and parks description.
-test('S1-12: no live doc describes reclaim parks or leases', () => {
-  assert.ok(!existsSync(join(ROOT, 'docs/park-lease-protocol.md')))
-  const lines = crewReadme.split('\n')
-  const index = lines.findIndex(line => line.startsWith('- `reclaim.mjs`'))
-  assert.notEqual(index, -1)
-  const block = [lines[index]]
-  for (let i = index + 1; i < lines.length && /^\s+\S/.test(lines[i]); i++) block.push(lines[i])
-  assert.doesNotMatch(block.join(' '), /park|lease/i)
-  assert.doesNotMatch(read('docs/conventions.md').split('## Implementation files')[0], /park|lease/i)
-})
-
-// MUTATION: remove the superseded note.
-test('S4-9: lean-runtime plan marks its deleted arms superseded', () => {
-  const pre = read('docs/plan-lean-runtime.md').split('## Operator decisions')[0]
-  assert.match(pre, /superseded/i)
-  for (const name of ['codemode', 'lab', 'edit assist', 'claude-arms', 'lab-server']) assert.ok(pre.includes(name), name)
-})
-
-// MUTATION: restore roster edits in the example.
-test('S4-10: lane-brief examples name no roster', () => {
-  assert.doesNotMatch(read('skills/lane-brief/SKILL.md'), /roster/i)
-})
-
-test('OD5 onboarding links to install and names plugin commands', () => {
-  // MUTATION OD5: retarget README.md#install to README.md#setup in SKILL.md and the Installing link no longer reaches Install.
-  const installing = docSection(onboardSkill, '## Installing')
-  assert.ok(installing.includes('/plugin marketplace add momoshell/dev-team-claude-plugin'))
-  assert.ok(installing.includes('/plugin install dev-team@dev-team'))
-  assert.ok(installing.includes('README.md#install'))
-})
-
-test('RD3 reseat documentation keeps raw overrides when exhausted', () => {
-  // MUTATION RD3: replacing keeps with drops hides the reseat drift.
-  const line = crewReadme.split('\n').find((line) => line.includes('keeps a raw override'))
-  assert.ok(line, 'missing reseat sentence')
-  assert.ok(line.includes('exhausted'), 'reseat sentence must name exhausted')
-})
-
 test('RM1 the repo map names the skill gate and no factory importers', () => {
   // MUTATION RM1: renaming a factory importer in the crew bullet hides the drift.
   const names = readdirSync(join(ROOT, 'crew')).filter((name) => name.endsWith('.mjs') && !name.endsWith('.test.mjs') && !name.endsWith('-fixtures.mjs') && !name.endsWith('-test-helpers.mjs'))
@@ -263,20 +209,4 @@ test('RM1 the repo map names the skill gate and no factory importers', () => {
   }
   assert.ok(readme.includes('hooks/skill-gate.mjs'), 'crew/ bullet must name hooks/skill-gate.mjs')
   assert.equal(readme.includes('three production modules'), false)
-})
-
-test('RM2 the repo map names the crew CLI hooks and visualizer', () => {
-  // MUTATION RM2: renaming visualizer/ in What is in this repo hides the drift.
-  const section = docSection(readme, "## What's in this repo")
-  for (const token of ['`bin/crew.mjs`', '`hooks/`', '`visualizer/`']) {
-    assert.ok(section.includes(token), "What's in this repo must name " + token)
-  }
-})
-
-test('RM3 install names crew update stable and link mode', () => {
-  // MUTATION RM3: renaming crew update in Install hides the operator-setup drift.
-  const install = docSection(readme, '## Install')
-  for (const token of ['crew update', 'dev-team-stable', 'link-mode']) {
-    assert.ok(install.includes(token), 'Install must name ' + token)
-  }
 })

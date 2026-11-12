@@ -248,6 +248,62 @@ test('a body failure on the old source and a pass on the build proves the test',
   assert.equal(result.rows[1].reason, 'proof-not-red-on-base')
 })
 
+test("a named test's support files are copied to the old source, so a missing fixture never supplies the red", async () => {
+  for (const runner of ['node', 'junit']) {
+    const cwd = scratchDir('proof-support-')
+    git(cwd, 'init', '-q')
+    if (runner === 'junit') {
+      mkdirSync(join(cwd, '.crew'))
+      writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: [{ match: '*.test.mjs', setup: 'node setup.mjs', run: 'node --test --test-reporter=junit --test-reporter-destination={report} {file}' }] }))
+      writeFileSync(join(cwd, 'setup.mjs'), "import { readFileSync } from 'node:fs'; readFileSync('fixtures/golden.json')\n")
+    }
+    writeFileSync(join(cwd, 'add.mjs'), 'export const add = (a, b) => a + b\nexport const mul = () => 0\n')
+    git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+    writeFileSync(join(cwd, 'add.mjs'), 'export const add = (a, b) => a + b\nexport const mul = (a, b) => a * b\n')
+    mkdirSync(join(cwd, 'fixtures'))
+    writeFileSync(join(cwd, 'fixtures/golden.json'), '{"sum":5,"product":6}')
+    writeFileSync(join(cwd, 'add.test.mjs'), `import test from 'node:test'
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { add, mul } from './add.mjs'
+test('add matches the golden', () => assert.equal(add(2, 3), JSON.parse(readFileSync(new URL('./fixtures/golden.json', import.meta.url))).sum))
+test('mul matches the golden', () => assert.equal(mul(2, 3), JSON.parse(readFileSync(new URL('./fixtures/golden.json', import.meta.url))).product))
+`)
+    const tests = ['add matches the golden', 'mul matches the golden'].map((title) => ({ file: 'add.test.mjs', title, support: ['fixtures/golden.json'] }))
+    const result = await proveTests({ cwd, tests })
+    assert.equal(result.rows[0].base.state, 'green')
+    assert.equal(result.rows[0].reason, 'proof-not-red-on-base')
+    assert.equal(result.rows[1].proven, true)
+    assert.ok(result.rows.every((row) => !Object.hasOwn(row, 'support')))
+  }
+})
+
+test('unsafe or missing support paths are refused per row and a malformed support list is invalid input', async () => {
+  const cwd = scratchDir('proof-support-path-'), outside = scratchDir('proof-support-outside-')
+  git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew'))
+  writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: [{ match: '*.xml', setup: 'node setup.mjs', run: 'cp {file} {report}' }] }))
+  writeFileSync(join(cwd, 'setup.mjs'), "import { existsSync } from 'node:fs'; if (existsSync('test.mjs') || existsSync('actual.json')) process.exit(1)\n")
+  writeFileSync(join(cwd, 'old'), 'base'); symlinkSync(outside, join(cwd, 'base-link'))
+  git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+  rmSync(join(cwd, 'base-link')); mkdirSync(join(cwd, 'base-link'))
+  writeFileSync(join(cwd, 'base-link/file.json'), '{}')
+  writeFileSync(join(cwd, 'actual.json'), '{}'); symlinkSync('actual.json', join(cwd, 'link.json'))
+  writeFileSync(join(cwd, 'test.mjs'), "import test from 'node:test'; test('x', () => {})\n")
+  writeFileSync(join(cwd, 'check.xml'), '<testsuite><testcase name="check"/></testsuite>')
+  writeFileSync(join(outside, 'sentinel'), 'keep')
+  for (const support of [['../outside.json'], ['missing.json'], ['link.json'], ['base-link/file.json'], ['base-link'], ['actual.json', 'missing.json']]) {
+    const result = await proveTests({ cwd, tests: [{ file: 'test.mjs', title: 'x', support }, { file: 'check.xml', title: 'check' }] })
+    assert.equal(result.rows[0].reason, 'unsafe-path', String(support))
+    assert.equal(result.rows[1].reason, 'proof-not-red-on-base')
+    assert.equal(readFileSync(join(outside, 'sentinel'), 'utf8'), 'keep')
+    assert.deepEqual(readdirSync(outside), ['sentinel'])
+  }
+  for (const support of [[], 'x', ['']]) {
+    const result = await proveTests({ cwd, tests: [{ file: 'test.mjs', title: 'x', support }] })
+    assert.equal(result.status, 'unmeasured'); assert.equal(result.reason, 'invalid-input')
+  }
+})
+
 // MUTATION: run the old source from a git archive copy instead of a worktree.
 test('a test that only needs a git checkout is not proven by the old source lacking one', async () => {
   const cwd = scratchDir('proof-env-')

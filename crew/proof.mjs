@@ -143,7 +143,7 @@ export async function proveTests(input = {}) {
   let tmp, added = null, result, rows = []
   try {
     const { cwd, base = 'HEAD', tests, timeoutMs = PROOF_TIMEOUT_DEFAULT_MS } = input ?? {}
-    if (typeof cwd !== 'string' || !cwd || typeof base !== 'string' || !/^[^-\s]\S*$/.test(base) || !Array.isArray(tests) || !tests.length || !tests.every((t) => t && typeof t.file === 'string' && t.file && typeof t.title === 'string' && t.title)) return unmeasured('invalid-input')
+    if (typeof cwd !== 'string' || !cwd || typeof base !== 'string' || !/^[^-\s]\S*$/.test(base) || !Array.isArray(tests) || !tests.length || !tests.every((t) => t && typeof t.file === 'string' && t.file && typeof t.title === 'string' && t.title && (!Object.hasOwn(t, 'support') || (Array.isArray(t.support) && t.support.length > 0 && t.support.every((p) => typeof p === 'string' && p))))) return unmeasured('invalid-input')
     const notRun = () => ({ state: null, reason: 'not-run' })
     rows = tests.map(({ file, title }) => ({ file, title, base: notRun(), build: notRun(), proven: false, reason: null }))
     tmp = mkdtempSync(join(tmpdir(), 'crew-proof-'))
@@ -166,15 +166,16 @@ export async function proveTests(input = {}) {
         }
       } catch { result = unmeasured('invalid-project-config', rows) }
       const runners = new Map()
-      for (const row of result ? [] : rows) {
+      for (const [i, row] of (result ? [] : rows).entries()) {
+        const paths = [row.file, ...(tests[i].support ?? [])]
         const entry = entries.find((e) => matchesGlob(row.file, e.match))
         if (entry) runners.set(row, entry)
         if (!entry && !/\.[cm]?js$/.test(row.file)) row.reason = 'unsupported-runner'
-        else if (!literalRelative(row.file) || !safePath(cwd, row.file, true) || !safePath(root, row.file, false)) row.reason = 'unsafe-path'
-        else {
-          const dest = join(root, row.file)
+        else if (!paths.every((p) => literalRelative(p) && safePath(cwd, p, true) && safePath(root, p, false))) row.reason = 'unsafe-path'
+        else for (const p of paths) {
+          const dest = join(root, p)
           mkdirSync(dirname(dest), { recursive: true })
-          copyFileSync(join(cwd, row.file), dest)
+          copyFileSync(join(cwd, p), dest)
         }
       }
       for (const entry of new Set([...runners].filter(([row]) => !row.reason).map(([, entry]) => entry))) {

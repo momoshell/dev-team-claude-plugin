@@ -128,6 +128,12 @@ test('CH8: planner, builder and lead charters keep suite regression locks out of
   }
 })
 
+test('planner and builder charters tell a named test to list the added files it reads as support', () => {
+  for (const path of ['crew/agents/planner.md', 'crew/agents/builder.md']) {
+    has(body(path), "A named test that reads a file the build adds, such as a fixture or golden, lists its repo-relative path in the `support` list of `{file, title, support}`, so the loop copies it to the old source and the test's red there comes from the old source.")
+  }
+})
+
 // MUTATION: remove dev-team attribution from the examples heading (PS4).
 test('PS4 code-less attributes all worked examples', () => {
   const skill = read('skills/code-less/SKILL.md')

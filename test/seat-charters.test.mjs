@@ -37,7 +37,7 @@ const types = 'The type is one of `chore`, `ci`, `crew`, `docs`, `feat`, `fix`, 
 // MUTATION: drop the planner's narrow-or-drop sentence.
 test('LD2: a builder insufficient goes to the lead, and a planner revision narrows or drops an unmeetable criterion', () => {
   has(body('crew/agents/lead.md'), 'bounce it to `builder` for unfinished work')
-  has(body('crew/agents/lead.md'), '`last: true` is your last on this lane')
+  has(body('crew/agents/lead.md'), '`last: true` is the last your bound allows in this phase')
   const builder = body('crew/agents/builder.md')
   has(builder, 'A builder `insufficient` goes to the lead')
   assert.doesNotMatch(builder, /A builder `insufficient` goes to the planner, which revises the plan/)
@@ -47,6 +47,17 @@ test('LD2: a builder insufficient goes to the lead, and a planner revision narro
 // MUTATION: drop the finish targets sentence from the lead charter.
 test('LD3: the lead charter says a finish run lists only builder in targets and has no planner to route to', () => {
   has(body('crew/agents/lead.md'), 'a finish run lists only `builder`')
+})
+
+test('LD4: lead, builder, planner and README text match the loop for last, continuation, rulings and the file-list route (#2296)', () => {
+  const lead = body('crew/agents/lead.md')
+  for (const phrase of ['is the last your bound allows in this phase', 'a refunded bounce can reopen consults', 'the loop passes it to the held seat as a `lead-bounce` feedback item', "a file missing from the plan's file list is a `builder` bounce"]) has(lead, phrase)
+  const builder = body('crew/agents/builder.md')
+  for (const phrase of ["up to the lane's progress cap", "newest first after the turn's other feedback"]) has(builder, phrase)
+  has(body('crew/agents/planner.md'), "A `lead-bounce` item in your feedback is the lead's instruction for this turn.")
+  has(read('crew/README.md'), 'unless it names no `details.gap` after a turn that changed the worktree')
+  assert.doesNotMatch(builder, /oldest after the newest/)
+  assert.doesNotMatch(lead, /is your last on this lane|gap in the plan or its file list/)
 })
 
 // MUTATION: restore return boilerplate or remove a builder loop rule.

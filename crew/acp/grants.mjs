@@ -1,4 +1,4 @@
-// crew/acp/grants.mjs — the runtime capability register loader and grant policy the lean seat path arms from.
+// crew/acp/grants.mjs — the runtime capability register and grant policy the lean seat path arms from.
 
 import { existsSync, readFileSync } from 'node:fs'
 import { join, dirname, resolve as resolvePath } from 'node:path'
@@ -10,8 +10,6 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 export const CAPABILITY_REFUSALS = Object.freeze([
   'register-invalid', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'agent-def-invalid',
 ])
-const CAPABILITIES_PATH = join(HERE, '..', 'capabilities.json')
-const CAPABILITIES_SCHEMA_PATH = join(HERE, '..', 'capabilities.schema.json')
 export const REGISTER_ROOT = resolvePath(join(HERE, '..', '..'))
 
 function deepFreeze(value) {
@@ -25,178 +23,17 @@ export function refuse(reason, message) {
   return Object.assign(new Error(`${message} [${reason}]`), { reason })
 }
 
-export function validateCapabilities(schema, value) {
-  const errors = []
-  walk(schema, value, '$')
-  return errors
-
-  function resolve(node) {
-    if (!node || typeof node !== 'object' || !node.$ref) return node
-    return resolve(byPath(node.$ref))
-  }
-
-  function byPath(ref) {
-    let node = schema
-    const parts = String(ref).replace(/^#\/?/, '').split('/').filter(Boolean)
-    for (const part of parts) node = node?.[part.replace(/~1/g, '/').replace(/~0/g, '~')]
-    return node
-  }
-
-  function matchedTypes(current) {
-    const matched = new Set()
-    if (current === null) matched.add('null')
-    else if (Array.isArray(current)) matched.add('array')
-    else if (typeof current === 'number') {
-      matched.add('number')
-      if (Number.isInteger(current)) matched.add('integer')
-    } else if (typeof current === 'string') matched.add('string')
-    else if (typeof current === 'boolean') matched.add('boolean')
-    else if (typeof current === 'object') matched.add('object')
-    return matched
-  }
-
-  function walk(schemaNode, current, path, report = errors) {
-    const s = resolve(schemaNode)
-    if (!s || typeof s !== 'object') {
-      report.push(`${path}: invalid schema reference`)
-      return
-    }
-    if (Object.hasOwn(s, 'const')) {
-      if (current !== s.const) report.push(`${path}: expected const ${JSON.stringify(s.const)}, got ${JSON.stringify(current)}`)
-      return
-    }
-    if (s.enum && !s.enum.includes(current)) {
-      report.push(`${path}: ${JSON.stringify(current)} not in enum ${JSON.stringify(s.enum)}`)
-      return
-    }
-
-    const matched = matchedTypes(current)
-    if (s.type) {
-      const types = Array.isArray(s.type) ? s.type : [s.type]
-      if (!types.some((type) => matched.has(type))) {
-        report.push(`${path}: expected type ${types.join('|')}, got ${[...matched].join('|') || typeof current}`)
-        return
-      }
-    }
-    if (Array.isArray(s.oneOf)) {
-      let matches = 0
-      for (const branch of s.oneOf) {
-        const branchErrors = []
-        walk(branch, current, path, branchErrors)
-        if (branchErrors.length === 0) matches += 1
-      }
-      if (matches !== 1) report.push(`${path}: expected exactly one oneOf schema to match, got ${matches}`)
-    }
-    if (current === null) return
-    if (typeof current === 'string' && s.pattern) {
-      let valid = false
-      try { valid = new RegExp(s.pattern).test(current) } catch { valid = false }
-      if (!valid) report.push(`${path}: ${JSON.stringify(current)} does not match pattern ${s.pattern}`)
-    }
-    if (Array.isArray(current) && Number.isInteger(s.minItems) && current.length < s.minItems) {
-      report.push(`${path}: expected at least ${s.minItems} item(s), got ${current.length}`)
-    }
-    if (Array.isArray(current) && s.items) {
-      current.forEach((item, index) => walk(s.items, item, `${path}[${index}]`, report))
-    }
-    if (current && typeof current === 'object' && !Array.isArray(current)) {
-      for (const key of s.required || []) {
-        if (!Object.hasOwn(current, key)) report.push(`${path}: missing required property ${JSON.stringify(key)}`)
-      }
-      const patterns = Object.entries(s.patternProperties || {}).map(([pattern, child]) => [new RegExp(pattern), child])
-      for (const [key, childValue] of Object.entries(current)) {
-        const matchedSchemas = []
-        if (s.properties && Object.hasOwn(s.properties, key)) matchedSchemas.push(s.properties[key])
-        for (const [pattern, child] of patterns) if (pattern.test(key)) matchedSchemas.push(child)
-        if (!matchedSchemas.length && s.additionalProperties === false) {
-          report.push(`${path}: additional property ${JSON.stringify(key)} not allowed`)
-          continue
-        }
-        for (const child of matchedSchemas) walk(child, childValue, `${path}.${key}`, report)
-      }
-    }
-  }
-}
-
-function cloneJson(value) {
-  return JSON.parse(JSON.stringify(value))
-}
-
-// The register is runtime policy: grant paths resolve against this checkout,
-// not the target checkout. The register carries agent definitions and MCP
-// servers, including the planner's pi scout definition.
-export function loadCapabilities({ path = CAPABILITIES_PATH, schemaPath = CAPABILITIES_SCHEMA_PATH, register = null } = {}) {
-  let schema
-  try {
-    schema = JSON.parse(readFileSync(schemaPath, 'utf8'))
-  } catch (err) {
-    throw refuse('register-invalid', `runtime capability policy schema ${schemaPath} is unreadable or unparseable under the runtime-policy rule: ${err.message}`)
-  }
-
-  let value
-  if (register === null) {
-    try {
-      value = JSON.parse(readFileSync(path, 'utf8'))
-    } catch (err) {
-      throw refuse('register-invalid', `runtime capability register ${path} is unreadable or unparseable under the runtime-policy rule: ${err.message}`)
-    }
-  } else {
-    try {
-      value = cloneJson(register)
-    } catch (err) {
-      throw refuse('register-invalid', `injected runtime capability register for ${path} is unparseable under the runtime-policy rule: ${err.message}`)
-    }
-  }
-
-  const errors = validateCapabilities(schema, value)
-  if (errors.length) {
-    throw refuse('register-invalid', `runtime capability register ${path} failed schema validation under the runtime-policy rule: ${errors.slice(0, 3).join('; ')}`)
-  }
-  const duplicateMcp = (list, where) => {
-    const seen = new Set()
-    for (const server of list || []) {
-      if (seen.has(server?.name)) {
-        throw refuse('register-invalid', `runtime capability register ${path} declares MCP server name ${JSON.stringify(server.name)} twice under ${where} — a duplicate name makes the grant ambiguous under the runtime-policy rule`)
-      }
-      seen.add(server?.name)
-    }
-  }
-  const validateMcp = (list, where) => {
-    for (const server of list || []) {
-      const hasCommand = server?.command !== null
-      const hasUrl = server?.url !== null
-      if (hasCommand === hasUrl) {
-        throw refuse('register-invalid', `runtime capability register ${path} declares MCP server ${JSON.stringify(server?.name)} under ${where} with exactly one of command or url required — both present or both absent are forbidden under the runtime-policy rule`)
-      }
-    }
-  }
-  for (const [role, spec] of Object.entries(value?.roles || {})) {
-    duplicateMcp(spec?.mcp_servers, `roles.${role}`)
-    validateMcp(spec?.mcp_servers, `roles.${role}`)
-    for (const [agent, overlay] of Object.entries(spec?.by_agent || {})) {
-      duplicateMcp(overlay?.mcp_servers, `roles.${role}.by_agent.${agent}`)
-      validateMcp(overlay?.mcp_servers, `roles.${role}.by_agent.${agent}`)
-    }
-  }
-  const duplicateAgentValues = (list, path, label) => {
-    const seen = new Set()
-    for (const value of list || []) {
-      if (seen.has(value)) throw refuse('register-invalid', `runtime capability register ${path} declares coding agent ${label} ${JSON.stringify(value)} twice — duplicate values make the inventory ambiguous under the runtime-policy rule`)
-      seen.add(value)
-    }
-  }
-  for (const [agent, entry] of Object.entries(value?.coding_agents || {})) {
-    const base = `coding_agents.${agent}`
-    duplicateAgentValues(entry.providers, `${base}.providers`, 'provider')
-    duplicateAgentValues(entry.transports, `${base}.transports`, 'transport'); if (entry.default_transport !== undefined && !entry.transports.includes(entry.default_transport)) throw refuse('register-invalid', `${base}.default_transport must be one of the integration's declared transports`)
-    duplicateAgentValues(entry.refuses, `${base}.refuses`, 'refusal')
-    const expectedAdapter = `crew/adapters/adapter-${agent}.mjs`
-    if (entry.adapter !== expectedAdapter) {
-      throw refuse('register-invalid', `runtime capability register ${path} expects coding agent ${agent} adapter ${JSON.stringify(expectedAdapter)}, found ${JSON.stringify(entry.adapter)}, at ${base}.adapter — adapter key and path must agree under the runtime-policy rule`)
-    }
-  }
-  return deepFreeze(value)
-}
+// Grant paths resolve against the runtime checkout, not the target checkout.
+export const REGISTER = deepFreeze({ roles: {
+  lead: { agents: [], mcp_servers: [] },
+  planner: { agents: [], mcp_servers: [], by_agent: { pi: {
+    agents: [{ name: 'scout', def: 'crew/pi/agents/scout.json' }],
+    mcp_servers: [{ name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }],
+  } } },
+  builder: { agents: [], mcp_servers: [] },
+  reviewer: { agents: [], mcp_servers: [] },
+  'tech-lead': { agents: [], mcp_servers: [] },
+} })
 
 export function resolvedGrantPath(root, relativePath) {
   return resolvePath(join(resolvePath(root), relativePath))
@@ -287,7 +124,7 @@ function registeredAgents(register, role, agent) {
 // becomes its checkout extension, fff becomes the register's MCP server, and subagent brings
 // the registered agent definitions it needs. Resolution and refusals are grantsFor's own; a declared
 // asset that is missing refuses instead of leaving a weaker seat.
-export function armGrants({ role, agent, extensions = [] }, { register = loadCapabilities(), root = REGISTER_ROOT, exists = existsSync, readFile = readFileSync } = {}) {
+export function armGrants({ role, agent, extensions = [] }, { register = REGISTER, root = REGISTER_ROOT, exists = existsSync, readFile = readFileSync } = {}) {
   const paths = []
   const mcp_servers = []
   for (const name of extensions) {

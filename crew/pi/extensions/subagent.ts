@@ -189,7 +189,7 @@ export const FINDINGS_ERROR_CODES = Object.freeze([
   'finding-evidence-invalid', 'finding-confidence-invalid', 'gaps-invalid',
 ])
 
-// Same spirit as validateCapabilities (crew/acp/grants.mjs): returns codes,
+// Returns codes,
 // never throws. DELIBERATELY payload-free and index-free, and deduped by the
 // caller: a payload with 50k unknown keys, or an unknown key whose NAME is 50KB,
 // must not be able to grow the model-visible refusal by one byte. Interpolating
@@ -621,7 +621,7 @@ export function createAgentTool(deps: any = {}) {
       }
       const allowlist = parseAgentAllowlist(env[AGENTS_ENV])
       if (!allowlist.length) {
-        return refuseEarly(`refused: no spawnable agents are granted to this seat; the allowlist comes from the crew capability register (crew/capabilities.json), transported as ${AGENTS_ENV}`)
+        return refuseEarly(`refused: no spawnable agents are granted to this seat; the allowlist comes from the crew capability register (crew/acp/grants.mjs), transported as ${AGENTS_ENV}`)
       }
       // Register-derived, and clamped per name: the only non-literal string any
       // pre-spawn refusal carries.

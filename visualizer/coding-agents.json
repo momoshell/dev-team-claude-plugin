@@ -1,0 +1,37 @@
+{
+  "coding_agents": {
+    "pi": {
+      "providers": ["openai", "anthropic", "meta"],
+      "transports": ["acp"],
+      "adapter": "crew/adapters/adapter-pi.mjs",
+      "refuses": [],
+      "display_name": "Pi",
+      "binary": "pi",
+      "install_hint": "Install Pi and ensure the pi binary is on PATH.",
+      "availability": "executable",
+      "availability_reason": "executable"
+    },
+    "claude": {
+      "providers": ["anthropic"],
+      "transports": ["acp"],
+      "adapter": "crew/adapters/adapter-claude.mjs",
+      "refuses": ["extensions", "local_provider"],
+      "display_name": "Claude Code",
+      "binary": "claude",
+      "install_hint": "Install Claude Code and ensure the claude binary is on PATH.",
+      "availability": "executable",
+      "availability_reason": "executable"
+    },
+    "muse": {
+      "providers": ["meta"],
+      "transports": ["acp"],
+      "adapter": "crew/adapters/adapter-muse.mjs",
+      "refuses": ["local_provider"],
+      "display_name": "Muse Code",
+      "binary": "muse",
+      "install_hint": "Install Muse Code and ensure the muse binary is on PATH.",
+      "availability": "executable",
+      "availability_reason": "executable"
+    }
+  }
+}

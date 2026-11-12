@@ -1,15 +1,6 @@
 import { readFileSync as fsReadFileSync, readdirSync as fsReaddirSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 
-const DEFAULT_REASONS = Object.freeze({
-  register: 'capability register is unavailable',
-  skills: 'skill inventory is unavailable',
-})
-
-function record(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
 function textValue(value) {
   if (typeof value === 'string') return value
   if (Buffer.isBuffer(value)) return value.toString('utf8')
@@ -54,30 +45,8 @@ function safeEntries(readdir, path) {
   }
 }
 
-function refusal(code, message) {
-  return { code, message }
-}
-
 function validName(value) {
   return typeof value === 'string' && /^[a-z0-9][a-z0-9-]*$/.test(value)
-}
-
-function parseJson(read, path, label) {
-  const source = safeRead(read, path, label)
-  if (!source.text) return { value: null, text: null, refusals: [refusal('read-unavailable', source.reason || `${label} is unavailable`)] }
-  try {
-    const value = JSON.parse(source.text)
-    if (!record(value)) return { value: null, text: source.text, refusals: [refusal('json-shape', `${label} must contain a JSON object`)] }
-    return { value, text: source.text, refusals: [] }
-  } catch (error) {
-    return { value: null, text: source.text, refusals: [refusal('json-malformed', `${label} is malformed JSON: ${error?.message || String(error)}`)] }
-  }
-}
-
-function readRegister(read, checkout) {
-  const path = join(checkout, 'crew', 'capabilities.json')
-  const parsed = parseJson(read, path, path)
-  return { ...parsed, path }
 }
 
 function readFrontmatter(text) {
@@ -134,15 +103,13 @@ export function createAgentsSource({ checkout = process.cwd(), pluginRoot = chec
   const readdir = readdirSync
   return {
     read() {
-      const register = readRegister(read, resourcesRoot)
-      const registerReasons = [...(register.refusals || []).map((item) => item.message)]
       const skillResult = listSkills({ read, readdir, checkout: resourcesRoot })
-      const reasons = [...registerReasons, ...skillResult.reasons]
+      const reasons = skillResult.reasons
       return {
         schema: 2,
         degraded: reasons.length > 0,
         reasons: [...new Set(reasons.filter(nonBlank))],
-        error: register.value ? null : (registerReasons[0] || DEFAULT_REASONS.register),
+        error: null,
         skills: skillResult.skills,
       }
     },

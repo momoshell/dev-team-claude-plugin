@@ -18,6 +18,25 @@ const STAGES = ['plan', 'fetch', 'rebase', 'build', 'proof', 'review-paths', 'su
 const SUCCESS = ['seat:planner', 'fetch', 'rebase', 'seat:builder', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'suite', 'seat:reviewer', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase', 'publish']
 const MUTATION = { check: 'A1', file: 'lib.mjs', find: 'old', replace: 'new' }
 
+test('a check row journals a bounded output tail with byte counts and the stage-end row does not repeat the output (#2304)', async () => {
+  for (const [stdout, stderr, stdoutBytes, stderrBytes] of [
+    ['x'.repeat(100_000) + 'END', 'e', 100003, 1], ['éEND', '🌍', 5, 4],
+  ]) {
+    const f = fakes({ suite: { ...green(), stdout, stderr } })
+    await f.go()
+    const result = f.rows.find((row) => row.event === 'check' && row.check === 'suite').result
+    assert.equal(result.stdout, stdout.slice(-4096))
+    assert.equal(result.stderr, stderr.slice(-4096))
+    assert.equal(result.stdoutBytes, stdoutBytes)
+    assert.equal(result.stderrBytes, stderrBytes)
+    const outcome = f.rows.find((row) => row.event === 'stage-end' && row.stage === 'suite').outcome
+    assert.equal(Object.hasOwn(outcome, 'stdout'), false)
+    assert.equal(Object.hasOwn(outcome, 'stderr'), false)
+    assert.equal(outcome.status, 'green')
+    assert.equal(outcome.code, 0)
+  }
+})
+
 // MUTATION: skip the return read after a failed turn.
 test('a valid return written before a turn error is accepted with the error on its envelope row, read once and never reissued (b1490)', async () => {
   const f = fakes({ spec: { tier: 'judge' } })

@@ -3,7 +3,7 @@
 // archive root ordered by the first journal row's time. Nothing here writes, spawns, or trusts a path the lane's own files name.
 import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
-import { supersededReturn } from './lean-journal-order.mjs'
+import { stateless, supersededReturn } from './lean-journal-order.mjs'
 import { deadRun, probeAlive } from '../../crew/run-pid.mjs'
 
 const LEAN_SPEC_FILE = 'lean.json'
@@ -240,14 +240,13 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive } =
         phases.push({ id: phases.length + 1, name: stage, status: nonEmpty(row.status) ? row.status : 'unknown', checks: [], started_at: null, ended_at: null })
       }
     }
-    // A stop inside a stage is followed by that stage's (and any enclosing stage's) stage-end row, so the
-    // lane's state is its last row that is not a stage-end. An archived lane is never running.
-    let last = rows.findLast((row, index) => row.event !== 'stage-end' && !supersededReturn(rows, row, index)) ?? rows.at(-1)
+    // Ignore stage ends, advisor rows and in-flight checks after a stop when choosing the state.
+    let last = rows.findLast((row, index) => !stateless(rows, row, index) && !supersededReturn(rows, row, index)) ?? rows.at(-1)
     // `crew finish --accept` appends a `pr` row then a `finish-decision` row: a pr row after the last
     // finish-ready, followed only by those, is the lane's state.
     const ready = rows.findLastIndex((row) => row.event === 'finish-ready')
     if (last?.event === 'finish-decision') {
-      const tail = rows.findLast((row) => row.event !== 'stage-end' && row.event !== 'finish-decision')
+      const tail = rows.findLast((row, index) => !stateless(rows, row, index) && row.event !== 'finish-decision')
       // A returned finish can start or stop before its parent records the decision.
       if ((tail?.event === 'pr' && isObject(tail.pr) && tail.index > ready)
         || (last.choice === 'return' && ready >= 0 && tail?.index > ready)) last = tail

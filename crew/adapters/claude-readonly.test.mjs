@@ -1,8 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import { basename } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { readOnlyHookDecision } from './claude-readonly.mjs'
+import { CLAUDE_SEAT_SETTINGS } from './adapter-claude.mjs'
 
 const hookPath = new URL('./claude-readonly.mjs', import.meta.url).pathname
 const payload = (command) => ({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } })
@@ -26,8 +28,14 @@ test('malformed input fails closed', () => {
     assert.equal(readOnlyHookDecision(bad, on).hookSpecificOutput.permissionDecision, 'deny', JSON.stringify(bad))
 })
 
+test('S2-14: the claude seat settings file is named for what it holds', () => {
+  assert.equal(basename(CLAUDE_SEAT_SETTINGS), 'claude-seat.settings.json')
+  assert.ok(existsSync(CLAUDE_SEAT_SETTINGS))
+  assert.equal(existsSync(new URL('./claude-usage.settings.json', import.meta.url)), false)
+})
+
 test('the settings hook runs the script through the launch env', () => {
-  const settings = JSON.parse(readFileSync(new URL('./claude-usage.settings.json', import.meta.url), 'utf8'))
+  const settings = JSON.parse(readFileSync(CLAUDE_SEAT_SETTINGS, 'utf8'))
   const hook = settings.hooks.PreToolUse.filter((e) => e.matcher === 'Bash').flatMap((e) => e.hooks).find((h) => h.command.includes('CREW_READ_ONLY_HOOK'))
   const run = (flag, command) => spawnSync('/bin/sh', ['-c', hook.command], {
     input: JSON.stringify(payload(command)), encoding: 'utf8',

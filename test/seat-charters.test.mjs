@@ -145,6 +145,12 @@ test('planner and builder charters tell a named test to list the added files it 
   }
 })
 
+test('S1-10: planner and builder charters keep code out of support', () => {
+  for (const path of ['crew/agents/planner.md', 'crew/agents/builder.md']) {
+    assert.ok(body(path).includes('`support` is for fixtures and goldens, never code.'), path)
+  }
+})
+
 // MUTATION: remove dev-team attribution from the examples heading (PS4).
 test('PS4 code-less attributes all worked examples', () => {
   const skill = read('skills/code-less/SKILL.md')

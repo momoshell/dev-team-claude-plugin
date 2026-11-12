@@ -13,7 +13,7 @@ in `crew/checks.mjs` (`rebase-conflict` and its `regenerate` detail).
 ## Steps
 
 1. Read the source: `gh issue view <N>`, or the operator's words. For an issue, put the ask in the issue body;
-   `crew start` reads only the body. If the operator makes a decision after the issue was filed, append it to
+   `crew start` reads the title and body, refuses an empty title, and writes the title into the run brief as `Issue title:`. If the operator makes a decision after the issue was filed, append it to
    the issue body, quoting the operator. Put proposals, premises and measured facts in an issue the operator
    can read and edit. A session-filed issue opens with the operator words that asked for it. For an operator
    request, quote the operator's words verbatim,

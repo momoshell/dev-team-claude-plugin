@@ -409,10 +409,10 @@ export function startServer(options = {}) {
           if (read.error) return json(res, 200, { schema, events: [], cursor: after, degraded: true, absent: read.error })
           const matching = read.rows.filter((row) => (!filters.type || row.event === filters.type) && (!filters.role || row.role === filters.role)).map((row) => {
             const timestamp = Number.isFinite(row.at) && !Number.isNaN(new Date(row.at).getTime()) ? new Date(row.at).toISOString() : null
-            return { ...row, id: row.index + 1, adw_id: adwId, type: row.event ?? null, timestamp, timestamp_reason: timestamp ? null : 'lean journal row carries no timestamp' }
+            return { ...row, cursor: row.index + 1, adw_id: adwId, type: row.event ?? null, timestamp, timestamp_reason: timestamp ? null : 'lean journal row carries no timestamp' }
           })
-          const events = matching.filter((event) => event.id > after).slice(0, limit)
-          return json(res, 200, { schema, events, cursor: events.length ? events.at(-1).id : after, degraded: false, absent: null })
+          const events = matching.filter((event) => event.cursor > after).slice(0, limit)
+          return json(res, 200, { schema, events, cursor: events.length ? events.at(-1).cursor : after, degraded: false, absent: null })
         }
         // The ledger event source is gone: a non-lean lane answers null-with-reason, never a measured zero.
         return json(res, 200, { schema, events: [], cursor: after, degraded: true, absent: 'ledger event source removed: only lean lanes (adw_id lean:<id>) have events' })

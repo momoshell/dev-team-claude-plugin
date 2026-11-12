@@ -9,22 +9,20 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLeanSource } from '../visualizer/server/lean-source.mjs'
-import { deadRun, probeAlive } from './run-pid.mjs'
+import { probeAlive } from './run-pid.mjs'
 
 const shown = (value) => (typeof value === 'string' && value !== '' ? value : 'not recorded')
 
 export function laneRows({ root, archiveRoot, all = false, alive = probeAlive } = {}) {
-  const source = createLeanSource({ crewRoot: root, archiveRoot })
+  const source = createLeanSource({ crewRoot: root, archiveRoot, alive })
   return source.listRuns()
     .filter((run) => all || !run.archived)
     .map((run) => {
-      const found = run.journal_error === null ? source.resolveLane(run.task_slug) : null
-      const died = found && !run.archived && deadRun({ rows: source.readJournalRows(found).rows, taskDir: join(found.dir, 'task'), alive })
       return {
         lane: run.task_slug,
-        status: died ? 'stopped' : run.status,
+        status: run.status,
         latest_stage: run.latest_stage,
-        reason: died ? 'run-died' : run.reason,
+        reason: run.reason,
         pr: run.pr?.url ?? null,
         archived: run.archived,
         // null when the journal itself could not be read: its rows were never counted.

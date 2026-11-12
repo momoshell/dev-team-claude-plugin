@@ -24,7 +24,7 @@ Number the criteria, one per line, as `WHEN <trigger> THE <code unit> SHALL <obs
 
 ## Properties
 
-List properties only for changed behaviour. Each states what must hold, lists the criteria it validates, and names one test by file and title. Write `None.` as a plain line when there are none.
+List properties only for changed behaviour. A characterization or test-hardening test passes on the old source by design: list it under Tasks as a suite regression lock the suite runs, and do not name it in Properties or `tests`. Each property states what must hold, lists the criteria it validates, and names one test by file and title. Write `None.` as a plain line when there are none.
 
 ## Not machine-checked
 

@@ -7,7 +7,6 @@ import { homedir, networkInterfaces } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createJournalSource } from './journal-source.mjs'
 import { createLeanSource } from '../../crew/lean-source.mjs'
-import { createAgentsSource } from './agents-source.mjs'
 import { proposeAgentEdit } from './agents-edit.mjs'
 import { AGENT_ROLES } from '../../crew/protocols.mjs'
 import { createAgentLibrary } from './agent-library.mjs'
@@ -72,7 +71,6 @@ export const ROUTE_PARAMS = Object.freeze({
   '/api/skill-library': [],
   '/api/skill-library/save': [],
   '/api/skill-rules': [],
-  '/api/agents': [],
   '/api/agents/propose': [],
   '/api/health': [],
 })
@@ -336,7 +334,6 @@ export function startServer(options = {}) {
   const env = config.env ?? process.env
   const lean = config.lean || createLeanSource({ crewRoot: config.crewRoot, archiveRoot: config.leanArchiveRoot })
   const journal = config.journal || createJournalSource({ crewRoot: config.crewRoot, lean })
-  const agents = config.agents || config.agentsSource || createAgentsSource({ checkout: config.checkout, pluginRoot: PROJECT_ROOT, crewRoot: config.crewRoot })
   const agentLibrary = createAgentLibrary({ codingAgentsPath:config.codingAgentsPath ?? join(PROJECT_ROOT,'visualizer/coding-agents.json'), checkout:config.checkout, home:config.home ?? homedir(), env, writable:writeMode.writable && pluginWriteTargetMode({target:join(config.checkout,'agents'),home:config.home ?? homedir()}).writable })
   const skillRoot = config.skillRoot ?? config.pluginRoot ?? PROJECT_ROOT
   const skillLibrary = createSkillLibrary({root:skillRoot,writable:writeMode.writable && pluginWriteTargetMode({target:join(skillRoot,'skills'),home:config.home ?? homedir()}).writable})
@@ -490,11 +487,6 @@ export function startServer(options = {}) {
         const {status,...result}=agentLibrary.save(input)
         return json(res,status || 200,{schema,...result})
       }
-      if (url.pathname === '/api/agents') {
-        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
-        const result = typeof agents.read === 'function' ? await agents.read() : { degraded: true, error: 'agents source is unavailable', reasons: ['agents source is unavailable'], schema: 2, skills: [] }
-        return json(res, 200, { ...result, schema })
-      }
       if (url.pathname === '/api/agents/propose') {
         if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
         const refusal = writeGuard(req)
@@ -536,7 +528,7 @@ export function startServer(options = {}) {
     const address = server.address()
     process.stdout.write(`${JSON.stringify({ listening: true, port: address.port, crew_root: config.crewRoot, readonly: false, writes: SERVER_WRITES })}\n`)
   })
-  return { server, agents }
+  return { server }
 }
 
 const SERVER_WRITES = ['project agent definition files when Save agent is explicitly requested', 'harness execution preferences when Save harness settings is explicitly requested', 'skill definitions and selection rules when explicitly saved']

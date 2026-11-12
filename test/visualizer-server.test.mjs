@@ -1,7 +1,7 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { cpSync, mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, realpathSync, statSync, symlinkSync, utimesSync } from 'node:fs'
+import { cpSync, mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, realpathSync, statSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, posix, resolve } from 'node:path'
 import { request } from 'node:http'
@@ -11,8 +11,7 @@ import { spawn, spawn as spawnProcess, spawnSync } from 'node:child_process'
 import { parseCliArgs, pluginWriteMode, pluginWriteTargetMode, sameOrigin, hostGuard, ROUTE_PARAMS, ServerUsageError, startServer as startVisualizerServer, writeGuard } from '../visualizer/server/server.mjs'
 import { createJournalSource } from '../visualizer/server/journal-source.mjs'
 import * as webApi from '../visualizer/web/src/lib/api.js'
-import { createAgentsSource } from '../visualizer/server/agents-source.mjs'
-import { ROOT, rawRequest, scratchDir, treeDigest } from './helpers.mjs'
+import { ROOT, rawRequest, scratchDir } from './helpers.mjs'
 const children = new Set()
 after(() => { for (const child of children) { try { child.kill('SIGKILL') } catch {} } })
 async function json(base, path, options) {
@@ -126,27 +125,6 @@ async function stopInProcess(server) {
     await new Promise((resolve) => target.close(resolve))
   }
 }
-function agentsFixture(prefix = 'visualizer-agents-') {
-  const dir = scratchDir(prefix)
-  const checkout = join(dir, 'checkout'), crewRoot = join(dir, 'crew-root')
-  mkdirSync(join(checkout, 'crew', 'agents'), { recursive: true })
-  mkdirSync(join(checkout, 'skills'), { recursive: true })
-  const skillNames = ['backend-node', 'crew-dispatch', 'crew-onboard', 'crew-recovery', 'devops', 'frontend-svelte', 'pr-review', 'qa-test-writing', 'ui-design']
-  for (const name of skillNames) { mkdirSync(join(checkout, 'skills', name), { recursive: true }); writeFileSync(join(checkout, 'skills', name, 'SKILL.md'), `---\nname: ${name}\ndescription: Fixture description for ${name}.\n---\n\n# ${name}\n`) }
-  for (const role of ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']) writeFileSync(join(checkout, 'crew', 'agents', `${role}.md`), `# ${role}\nFixture charter for ${role}.\n`)
-  const lane = join(crewRoot, 'dt-agents-fixture', 'fixture-task'), task = join(lane, 'task')
-  mkdirSync(join(task, 'headless', 'builder'), { recursive: true })
-  mkdirSync(join(task, 'headless-rpc', 'builder'), { recursive: true })
-  mkdirSync(join(task, 'headless-json', 'planner'), { recursive: true })
-  const oldCommand = join(task, 'headless', 'builder', 'cmd.json')
-  const newCommand = join(task, 'headless-rpc', 'builder', 'cmd.json')
-  writeFileSync(oldCommand, JSON.stringify({ args: ['pi', '--skill', 'skills/old-skill/SKILL.md'] }))
-  writeFileSync(newCommand, JSON.stringify({ args: ['pi', '--skill', 'skills/frontend-svelte/SKILL.md'] }))
-  utimesSync(oldCommand, new Date(1000), new Date(1000)); utimesSync(newCommand, new Date(2000), new Date(2000))
-  writeFileSync(join(task, 'headless-json', 'planner', 'cmd.json'), JSON.stringify({ command: 'pi --skill skills/ui-design/SKILL.md' }))
-  return { dir, checkout, crewRoot, lane, task, skillNames }
-}
-
 function rawStatus(response) {
   return Number((response.text.match(/^HTTP\/1\.1 (\d{3})/) || [])[1] || 0)
 }
@@ -291,62 +269,6 @@ test('state-writing routes refuse foreign JSON origins before writing state', as
   }
 })
 
-test('B1 agents page proposal endpoints are diff-only', async () => {
-  const fixture = agentsFixture('visualizer-agents-proposals-')
-  const source = createAgentsSource({ checkout: fixture.checkout, crewRoot: fixture.crewRoot })
-  const checkoutBefore = treeDigest(fixture.checkout), crewBefore = treeDigest(fixture.crewRoot)
-  let server
-  try {
-    server = await startInProcess({}, { checkout: fixture.checkout, crewRoot: fixture.crewRoot, agents: source, ledgerDb: join(fixture.dir, 'ledger.db'), triageDb: join(fixture.dir, 'triage.db') })
-    const view = await json(server.base, '/api/agents')
-    assert.equal(view.status, 200)
-    assert.equal(view.json.skills.length, 9)
-    assert.equal(treeDigest(fixture.checkout), checkoutBefore)
-    assert.equal(treeDigest(fixture.crewRoot), crewBefore)
-  } finally {
-    if (server) await stopInProcess(server)
-  }
-})
-
-test('S3-12 /api/agents emits skills without the delivery matrix or role evidence', async () => {
-  const fixture = agentsFixture('visualizer-agents-shape-')
-  const source = createAgentsSource({ checkout: fixture.checkout, crewRoot: fixture.crewRoot })
-  let server
-  try {
-    server = await startInProcess({}, { agents: source })
-    const response = await json(server.base, '/api/agents')
-    assert.equal(response.status, 200)
-    const keys = ['degraded', 'error', 'reasons', 'schema', 'skills']
-    const direct = source.read()
-    assert.deepEqual(Object.keys(direct).sort(), keys)
-    assert.equal(direct.schema, 2)
-    assert.deepEqual(Object.keys(response.json).sort(), keys)
-    assert.equal(response.json.schema, 2)
-  } finally {
-    await stopInProcess(server)
-    rmSync(fixture.dir, { recursive: true, force: true })
-  }
-})
-
-test('skills-page:A1', async () => {
-  const fixture = agentsFixture('visualizer-skills-inventory-')
-  const source = createAgentsSource({ checkout: fixture.checkout, crewRoot: fixture.crewRoot })
-  let server
-  try {
-    server = await startInProcess({}, { checkout: fixture.checkout, crewRoot: fixture.crewRoot, agents: source, ledgerDb: join(fixture.dir, 'ledger.db'), triageDb: join(fixture.dir, 'triage.db') })
-    const response = await json(server.base, '/api/agents')
-    assert.equal(response.status, 200)
-    const expected = fixture.skillNames.map((name) => ({
-      name,
-      description: `Fixture description for ${name}.`,
-      content: readFileSync(join(fixture.checkout, 'skills', name, 'SKILL.md'), 'utf8'),
-    }))
-    assert.deepEqual(response.json.skills.map(({ name, description, content }) => ({ name, description, content })), expected)
-  } finally {
-    if (server) await stopInProcess(server)
-  }
-})
-
 test('the visualizer CLI announces a port through a symlinked repository path', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'visualizer-symlink-'))
   const link = join(dir, 'repo-link')
@@ -477,47 +399,6 @@ test('static responses refuse symlinks that leave web/dist', async () => {
 })
 
 const TEST_GITHUB_API_URL = process.env.TEST_GITHUB_API_URL || 'fixture-invalid://github'
-test('V1 agents resources come from the plugin root for a foreign checkout', async () => {
-  const root = scratchDir('visualizer-foreign-agents-')
-  let server
-  try {
-    assert.equal(spawnSync('git', ['init', root], { encoding: 'utf8' }).status, 0)
-    server = await startInProcess({ close() {} }, { checkout: root, ledgerDb: join(root, 'ledger.db'), triageDb: join(root, 'triage.db'), crewRoot: join(root, 'runtime') })
-    const agents = await json(server.base, '/api/agents')
-    // Mutation: omit pluginRoot from the agents-source construction.
-    assert.ok(agents.json.skills.some((skill) => skill.path === 'skills/code-less/SKILL.md'))
-    assert.equal(agents.json.reasons.some((reason) => reason.includes(root)), false)
-  } finally {
-    if (server) await stopInProcess(server)
-  }
-})
-
-test('agents source does not degrade when the plugin has no crew/capabilities.json', () => {
-  const { dir, checkout, crewRoot } = agentsFixture()
-  try {
-    rmSync(join(checkout, 'crew', 'capabilities.json'), { force: true })
-    const result = createAgentsSource({ checkout, pluginRoot: checkout, crewRoot }).read()
-    assert.equal(result.error, null)
-    assert.equal(result.degraded, false)
-  } finally { rmSync(dir, { recursive: true, force: true }) }
-})
-
-test('agents source separates plugin reads from target proposals compatibly', () => {
-  const target = agentsFixture('visualizer-agents-target-root-')
-  const plugin = agentsFixture('visualizer-agents-plugin-root-')
-  try {
-    mkdirSync(join(plugin.checkout, 'skills', 'plugin-only-skill'), { recursive: true })
-    writeFileSync(join(plugin.checkout, 'skills', 'plugin-only-skill', 'SKILL.md'), '---\nname: plugin-only-skill\ndescription: Plugin-only skill.\n---\n\nPLUGIN-ONLY skill body\n')
-    const source = createAgentsSource({ checkout: target.checkout, pluginRoot: plugin.checkout, crewRoot: target.crewRoot })
-    const read = source.read()
-    assert.ok(read.skills.some((skill) => skill.path === 'skills/plugin-only-skill/SKILL.md' && skill.content.includes('PLUGIN-ONLY skill body')))
-    assert.equal(existsSync(join(target.checkout, 'skills', 'plugin-only-skill')), false)
-  } finally {
-    rmSync(target.dir, { recursive: true, force: true })
-    rmSync(plugin.dir, { recursive: true, force: true })
-  }
-})
-
 test('RO1 symlinked plugins dir', () => {
   const dir = realpathSync(scratchDir('visualizer-plugin-symlink-'))
   try {
@@ -862,7 +743,18 @@ test('LH4 write host guard refuses local interface literals', () => {
 })
 
 // ---- b1410: the visualizer no longer reads the ledger or any old-path module ----
-const DROPPED_ROUTES = ['/api/returns', '/api/roster', '/api/roster/pick', '/api/roster/propose', '/api/roster/agent/propose', '/api/roster/ladder', '/api/roster/ladder/stage', '/api/roster/ladder/compose', '/api/roster/ladder/apply',
+test('GET /api/agents is no longer served while /api/agents/propose stays', async () => {
+  const root = scratchDir('visualizer-no-agents-')
+  let started
+  try {
+    assert.equal(Object.hasOwn(ROUTE_PARAMS, '/api/agents'), false)
+    assert.equal(Object.hasOwn(ROUTE_PARAMS, '/api/agents/propose'), true)
+    started = await startInProcess({}, { crewRoot: root })
+    assert.equal((await json(started.base, '/api/agents')).status, 404)
+  } finally { if (started) await stopInProcess(started); rmSync(root, { recursive: true, force: true }) }
+})
+
+const DROPPED_ROUTES = ['/api/agents', '/api/returns', '/api/roster', '/api/roster/pick', '/api/roster/propose', '/api/roster/agent/propose', '/api/roster/ladder', '/api/roster/ladder/stage', '/api/roster/ladder/compose', '/api/roster/ladder/apply',
   '/api/workflows', '/api/workflows/propose', '/api/workflows/editor', '/api/workflows/save', '/api/workflows/library', '/api/workflows/preview', '/api/prepared-tasks', '/api/assurances', '/api/assurances/preview', '/api/assurances/propose',
   '/api/model-catalog', '/api/model-catalog/key', '/api/skills/propose', '/api/prompts/propose', '/api/prompt-library', '/api/prompt-library/preview', '/api/prompt-library/save', '/api/cell-health', '/api/run-set', '/api/intake', '/api/intake/brake', '/api/seat-teardowns', '/api/cell-attribution', '/api/triage']
 
@@ -878,7 +770,7 @@ function leanLane(crewRoot, id, rows = [{ event: 'run-start', at: Date.now() }, 
 test('route tombstones: every removed server.mjs route is unregistered and has no handler', async () => {
   for (const route of DROPPED_ROUTES) assert.equal(Object.hasOwn(ROUTE_PARAMS, route), false, `${route} must not be in ROUTE_PARAMS`)
   for (const name of ['model-catalog.mjs', 'openrouter-catalog.mjs', 'model-directory.mjs', 'local-env.mjs']) assert.equal(existsSync(join(ROOT, 'visualizer/server', name)), false, name)
-  for (const route of ['/api/sessions', '/api/events', '/api/journal', '/api/seat-sessions', '/api/agents', '/api/agents/propose', '/api/agent-library', '/api/skill-library', '/api/health', '/api/plugin-write-mode']) assert.ok(Object.hasOwn(ROUTE_PARAMS, route), `${route} stays`)
+  for (const route of ['/api/sessions', '/api/events', '/api/journal', '/api/seat-sessions', '/api/agents/propose', '/api/agent-library', '/api/skill-library', '/api/health', '/api/plugin-write-mode']) assert.ok(Object.hasOwn(ROUTE_PARAMS, route), `${route} stays`)
   const crewRoot = scratchDir('visualizer-dropped-routes-')
   let started
   try {

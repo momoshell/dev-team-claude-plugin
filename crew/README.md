@@ -25,9 +25,12 @@ the brief, the task directory, the lane journal and every seat's session file.
 
 `crew closeout <lane> --discard` archives a stopped lane with no PR or a PR
 GitHub reports CLOSED, clearing it from the default visualizer list. It also
-archives a lane ended with `crew finish <lane> --abandon`. It refuses OPEN or
-MERGED PRs (use plain closeout after merge or discard after close), other finish
-records (use `crew finish`), runs not proven stopped, and dirty worktrees. It
+archives a lane ended with `crew finish <lane> --abandon` or accepted before its
+PR closed. A lane without a journal can be discarded if its run is not live. It
+refuses OPEN or MERGED PRs (use plain closeout after merge or discard after close),
+other finish records, runs not proven stopped, dirty worktrees, and tips on neither
+a remote-tracking ref nor the base. An absent worktree is skipped on retry; its
+branch is not checked. It
 removes the worktree without force before deleting only the local branch and
 archiving the journal; the remote branch and visualizer are unchanged. Closeout
 and discard stop proven seat groups and report unproven ones (`reapLaneSeats` in

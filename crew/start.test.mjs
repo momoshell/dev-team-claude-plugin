@@ -61,6 +61,13 @@ test('crew start refuses a bad override file before any worktree, naming the fil
   }
 })
 
+test('an existing lane directory or worktree refusal names crew closeout and --discard', async () => {
+  for (const path of ['/home/.crew/dt-b1/b1', '/repo/dt-b1']) {
+    const { deps } = fakes({ exists: (p) => p === path })
+    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), /crew closeout b1 or crew closeout b1 --discard/)
+  }
+})
+
 test('an existing crew lane directory is refused before any worktree is made', async () => {
   const { deps, calls } = fakes({ exists: (path) => path === '/home/.crew/dt-b1/b1' })
   await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), /\/home\/\.crew\/dt-b1\/b1/)

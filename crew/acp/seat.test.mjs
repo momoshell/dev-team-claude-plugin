@@ -383,7 +383,7 @@ test('a muse readgate seat refuses search and whole-file shell reads at the perm
     })
     await use('pi-turn', { agent: 'muse', model: 'meta/muse-spark-1.3', cwd: root, taskDir: root, definition: { writes: 'repo', extensions: ['readgate'] }, deps: { env: { CREW_FFF: '1' } }, permissions: [{ kind: 'read', rawInput: { path: 'missing' } }, { kind: 'execute', rawInput: { command: 'cat missing' } }, { kind: 'read', rawInput: { path: 'large' } }, { kind: 'execute', rawInput: { command: 'grep x large' } }] }, (run) => {
       assert.equal(run.error, undefined)
-      assert.deepEqual(run.replies.map((reply) => reply?.optionId), ['deny', 'yes', 'yes', 'yes'])
+      assert.deepEqual(run.replies.map((reply) => reply?.optionId), ['yes', 'yes', 'yes', 'yes'])
       const prompt = run.sent.find((frame) => frame.method === 'session/prompt').params.prompt[0].text
       assert.match(prompt, /ranged read/)
       assert.doesNotMatch(prompt, /mcp__fff__/)
@@ -402,6 +402,16 @@ test('a muse seat that writes task-dir launches with writes enabled and settles 
     assert.equal(checks, 2)
     assert.deepEqual(run.leftover, [])
   })
+})
+
+test('a muse readgate seat allows a read whose gate inspection fails and journals the failure', async () => {
+  const root = scratchDir('muse-readgate-failure-')
+  try {
+    await use('pi-turn', { agent: 'muse', model: 'meta/muse-spark-1.3', cwd: root, taskDir: root, definition: { writes: 'repo', extensions: ['readgate'] }, deps: { exists: () => true }, permissions: [{ kind: 'read', rawInput: { path: 'missing' } }] }, (run) => {
+      assert.equal(run.replies[0]?.optionId, 'yes')
+      assert.ok(readFileSync(join(root, 'journal.jsonl'), 'utf8').split('\n').filter(Boolean).map(JSON.parse).some((row) => row.read_gate_failure))
+    })
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
 test('a muse task-dir seat is refused on an unreadable worktree, settles on an unchanged dirty one, and fails when its turn changes the worktree or leaves it unreadable', async () => {
@@ -867,6 +877,19 @@ test('repo seats write the worktree and the lane task directory, nothing else', 
   })
 })
 
+test("a task-dir or repo seat never writes the lane journal or another seat's return, and its own return stays writable", async () => {
+  await withPermissionTree(async (tree) => {
+    writeFileSync(join(tree.task, 'journal.jsonl'), '')
+    symlinkSync(join(tree.task, 'journal.jsonl'), join(tree.work, 'journal-alias'))
+    const denied = [join(tree.task, 'journal.jsonl'), relative(tree.work, join(tree.task, 'journal.jsonl')), join(tree.task, 'JOURNAL.jsonl'), join(tree.work, 'journal-alias'), ...['reviewer-1.json', 'builder-2.json', 'tech-lead-1.json'].map((name) => join(tree.task, name))]
+    const allowed = ['planner-1.json', 'plan.md', 'new/artifact.json', 'reviewer-notes.md'].map((name) => join(tree.task, name))
+    for (const [name, key] of [['pi-turn', 'path'], ['claude-turn', 'file_path']]) for (const writes of ['task-dir', 'repo']) for (const kind of ['edit', 'write', 'delete']) {
+      const { verdicts } = await decide(tree, writes, [...denied, ...allowed].map((path) => ({ ...edit(path, key), kind })), { name })
+      assert.deepEqual(verdicts, [...denied.map(() => 'reject'), ...allowed.map(() => 'allow')], `${name}/${writes}/${kind}`)
+    }
+  })
+})
+
 test('a task-dir or repo seat never edits, writes or deletes a lean session record, and the rest of the task directory stays writable', async () => {
   const root = realpathSync(scratchDir('acp-seat-lean-'))
   try {
@@ -1313,8 +1336,8 @@ test('an answer that settles between an empty poll and the exit marker is return
       })
     }
     await deadline({ agent, wait_s: 1, settleOnExit: true, exitPollAdvance: 5000 }, (run) => {
-      assert.equal(run.error?.reason, 'acp-seat-deadline', agent)
-      assert.equal(run.result, undefined, agent)
+      assert.equal(run.error, undefined, agent)
+      assert.deepEqual(run.result, { stopReason: 'end_turn', usage: null, refusal: null }, agent)
     })
     const eio = Object.assign(new Error('EIO'), { code: 'EIO' })
     await deadline({ agent, wait_s: 60, exitAt: 0, pollError: eio }, (run) => assert.equal(run.error, eio, agent))
@@ -1325,14 +1348,30 @@ test('an answer that settles between an empty poll and the exit marker is return
   }
 })
 
-test('an answer at or after the deadline, even one that arrives inside the poll, is never returned', async () => {
-  for (const [answerAt, pollAdvance] of [[2000, 2000], [2000, 0], [5000, 0]]) {
+test('a finished turn a pre-deadline poll returns on the deadline tick is kept, for pi and claude', async () => {
+  for (const agent of ['pi', 'claude']) {
+    await deadline({ agent, wait_s: 2, answerAt: 2000, pollAdvance: 2000 }, (run) => {
+      assert.equal(run.error, undefined)
+      assert.deepEqual(run.result, { stopReason: 'end_turn', usage: null, refusal: null })
+      assert.deepEqual(run.at('cancel'), [])
+      assert.deepEqual(run.at('cancel-session'), [])
+    })
+    await deadline({ agent, wait_s: 1, pollAdvance: 1001, settleOnExit: true }, (run) => {
+      assert.equal(run.error?.reason, 'acp-seat-deadline')
+      assert.equal(run.result, undefined)
+      assert.equal(run.at('poll').length, 1)
+    })
+  }
+})
+
+test('an answer that settles only at or after the deadline is never returned', async () => {
+  for (const [answerAt, pollAdvance] of [[2000, 0], [5000, 0]]) {
     await deadline({ wait_s: 2, answerAt, pollAdvance }, (run) => {
       assert.equal(run.error?.reason, 'acp-seat-deadline', `${answerAt}/${pollAdvance}`)
       assert.equal(run.result, undefined)
       assert.equal(run.at('cancel').length, 1)
       assert.equal(run.at('cancel')[0][1], 41)
-      assert.equal(run.at('cancel-session').length, pollAdvance > 0 ? 1 : 0, 'a settled late turn falls back to the session cancel')
+      assert.equal(run.at('cancel-session').length, 0)
     })
   }
 })
@@ -1750,7 +1789,7 @@ async function museAdvisorConsult(kind, inspect, fixtureName = 'pi-turn', extra 
     await use(fixtureName, { agent: 'muse', model: 'meta/muse-spark-1.3', cwd, taskDir, permissionsOnlyFirst: true, delayPrompt: true, ...more, onPrompt,
       definition: { role: 'builder', wait_s: 1, advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' } },
       permissions: [{ toolCallId: 'fire', _update: updates }],
-      deps: { now: () => clock, sleep: (ms) => { clock += ms }, wait: async (ms) => { clock += ms; await new Promise(setImmediate) }, advisorDeps: { spawn: () => advisorChild(kind === 'timeout'), consultTimeoutMs: kind === 'timeout' ? 10 : 5000, childKillGraceMs: 10 } },
+      deps: { now: () => clock, sleep: (ms) => { clock += ms }, wait: async (ms) => { clock += ms; await new Promise(setImmediate) }, advisorDeps: { spawn: () => advisorChild(kind === 'timeout' || kind === 'stall'), consultTimeoutMs: kind === 'timeout' ? 10 : 3000, childKillGraceMs: 10 } },
     }, (run) => inspect(run, readFileSync(join(taskDir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse), taskDir))
   } finally { rmSync(root, { recursive: true, force: true }) }
 }
@@ -1807,6 +1846,13 @@ test('a muse turn refused by its provider is returned unchanged with no follow-u
     assert.equal(run.result.refusal?.errorKind, 'authentication_failed')
     assert.equal(run.sent.filter((frame) => frame.method === 'session/prompt').length, 1)
   }, 'claude-refusal-auth')
+})
+
+test('a muse advisor settle that outlasts the deadline after end_turn returns the turn, not acp-seat-deadline', async () => {
+  await museAdvisorConsult('stall', (run) => {
+    assert.equal(run.error, undefined)
+    assert.equal(run.result.stopReason, 'end_turn')
+  })
 })
 
 test('a muse builder advisor consult that times out lets the seat return and journals the failure', async () => {

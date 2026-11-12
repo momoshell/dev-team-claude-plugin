@@ -257,6 +257,33 @@ test('LV3 journal route reads task/journal.jsonl and refuses identity mismatches
   })
 })
 
+test('S6-2 a lane raised to judge serves its tech-lead sessions and reads at the raised tier with the added seat', async () => {
+  await withServer(async ({ crewRoot, get }) => {
+    const cell = { agent: 'claude', model: 'anthropic/claude-opus-5', effort: 'high' }
+    for (const [name, seats] of [['raised1', { ...members, lead: { agent: null, model: null }, 'tech-lead': cell }], ['raised2', undefined], ['plain', undefined]]) {
+      const rows = name === 'plain' ? [] : [{ event: 'tier-raised', lane: name, stage: 'plan', from: 'build', to: 'judge', reason: 'protected-path', paths: ['crew/loop.mjs'], seats, at: 1 }]
+      const dir = lane(crewRoot, name, rows)
+      put(join(dir, 'task', 'lean', 'tech-lead', `${name}.tech-lead.1.jsonl`), 'recorded\n')
+    }
+    for (const name of ['raised1', 'raised2']) {
+      const result = await get(`/api/seat-sessions?${q(name, { role: 'tech-lead' })}`)
+      assert.equal(result.status, 200)
+      assert.equal(result.body.sessions[0].raw, 'recorded\n')
+    }
+    assert.equal((await get(`/api/seat-sessions?${q('plain', { role: 'tech-lead' })}`)).status, 400)
+    const runs = (await get('/api/sessions')).body.runs
+    for (const [name, agent, model] of [['raised1', cell.agent, cell.model], ['raised2', null, null]]) {
+      const run = runs.find((r) => r.task_slug === name)
+      assert.equal(run.tier, 'judge')
+      assert.deepEqual(run.seats.find((s) => s.role === 'tech-lead'), { role: 'tech-lead', agent, model, transport: 'lean-acp' })
+      assert.ok(!run.seats.some((s) => s.role === 'lead'))
+    }
+    const plain = runs.find((r) => r.task_slug === 'plain')
+    assert.equal(plain.tier, 'build')
+    assert.ok(!plain.seats.some((s) => s.role === 'tech-lead'))
+  })
+})
+
 test('LV4 seat sessions are served by role in numeric turn order, confined to the lane', async () => {
   await withServer(async ({ crewRoot, get }) => {
     const dir = lane(crewRoot, 's', [{ event: 'stage-start', stage: 'plan' }])

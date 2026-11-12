@@ -7,6 +7,28 @@
 export const ISSUE_SOURCE = /^issue ([1-9]\d*)$/
 export const BRIEF_FIELDS = Object.freeze(['source', 'closes', 'mechanical', 'shape', 'out_of_scope', 'generated', 'regenerate'])
 export const TIERS = Object.freeze(['mechanical', 'build', 'judge'])
+
+// Shared by lane readers; keep this module import-free at the visualizer boundary.
+export function deriveMembers({ members, rows, leanRoles, tier }) {
+  const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+  const roleName = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/
+  const derived = { ...members }
+  const raises = rows.filter((row) => isObject(row) && row.event === 'tier-raised')
+  let highest = TIERS.indexOf(tier)
+  for (const row of raises) {
+    highest = Math.max(highest, TIERS.indexOf(row.to))
+    if (!isObject(row.seats)) continue
+    for (const [role, cell] of Object.entries(row.seats)) {
+      if (roleName.test(role) && isObject(cell) && (cell.agent != null || cell.model != null) && !Object.hasOwn(derived, role)) {
+        derived[role] = { agent: cell.agent ?? null, model: cell.model ?? null, transport: 'lean-acp' }
+      }
+    }
+  }
+  if (raises.length) for (const role of [...leanRoles].sort()) {
+    if (roleName.test(role) && !Object.hasOwn(derived, role)) derived[role] = { agent: null, model: null, transport: 'lean-acp' }
+  }
+  return { members: derived, tier: highest < 0 ? tier : TIERS[highest] }
+}
 export const RUN_FIELDS = Object.freeze(['agent', 'model', 'effort', 'advisor', 'tiers'])
 export const SHAPES = Object.freeze(['standard', 'finish'])
 export const AGENT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])

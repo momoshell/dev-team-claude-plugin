@@ -447,6 +447,7 @@ test('proof imports only builtins and its pinned check runner and lane-core leaf
   assert.ok(checks.length > 0)
   assert.deepEqual(checks.filter((name) => !name.startsWith('node:')), ['./lane-core.mjs'])
   const laneCore = imports('./lane-core.mjs')
-  assert.ok(laneCore.length > 0 && laneCore.every((name) => name.startsWith('node:')))
+  assert.deepEqual(laneCore.filter((name) => !name.startsWith('node:')), ['./protocols.mjs'])
+  assert.deepEqual(imports('./protocols.mjs'), [])
   assert.deepEqual(imports('./proof-reporter.mjs'), [])
 })

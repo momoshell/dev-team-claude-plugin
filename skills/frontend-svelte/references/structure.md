@@ -7,7 +7,6 @@
 - `visualizer/web/src/lib/api.js` wraps requests and exposes endpoints.
 - `visualizer/web/src/lib/route.js` parses and formats hash routes.
 - `visualizer/web/src/lib/fleet.js` shapes run status and task-list data.
-- `visualizer/web/src/lib/agents.js` shapes agent data.
 - `visualizer/web/src/lib/timeline.js` lays out the intervals rendered by LeanWaterfall.
 - `visualizer/web/src/lib/live.js` supplies the refresh loop and journal pulse.
 

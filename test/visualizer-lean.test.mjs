@@ -4,7 +4,7 @@ import { appendFileSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFile
 import { dirname, join } from 'node:path'
 import { startServer } from '../visualizer/server/server.mjs'
 import { createLeanSource } from '../visualizer/server/lean-source.mjs'
-import { taskBoard, leanStatus } from '../visualizer/web/src/lib/fleet.js'
+import { taskBoard, leanStatus, tokenCell } from '../visualizer/web/src/lib/fleet.js'
 import { leanCheckStatus } from '../visualizer/web/src/lib/lean.js'
 import { scratchDir } from './helpers.mjs'
 
@@ -35,6 +35,27 @@ async function withServer(work, overrides = {}) {
     rmSync(sandbox, { recursive: true, force: true })
   }
 }
+test('lean lane tokens are the seat-turn usage sum, null with the unmeasured reason, with the turn count', () => {
+  const root = scratchDir('lean-tokens-'), crewRoot = join(root, 'crew'), archiveRoot = join(root, 'archive')
+  const builder = { event: 'seat-turn', role: 'builder', usage: { inputTokens: 32823, outputTokens: 3792, cachedReadTokens: 374528, cachedWriteTokens: 0, totalTokens: 411143 } }
+  const lead = { event: 'seat-turn', role: 'lead', usage: { inputTokens: 6, outputTokens: 1674, cachedReadTokens: 25986, cachedWriteTokens: 10022, totalTokens: 37688 } }
+  try {
+    for (const [name, rows, value, text, turns] of [
+      ['measured', [builder, lead], 448831, null, '2 of 2 turns carried usage'],
+      ['missing', [{ event: 'seat-turn', usage: null, unmeasured: { usage: 'not-reported' } }, lead], null, 'not-reported', '1 of 2 turns carried usage'],
+      ['empty', [], null, 'no seat-turn rows recorded', null],
+      ['malformed', [{ event: 'seat-turn', usage: { ...builder.usage, inputTokens: -1 } }], null, 'usage-malformed', '0 of 1 turns carried usage'],
+    ]) {
+      lane(crewRoot, name, rows)
+      const run = createLeanSource({ crewRoot, archiveRoot }).listRuns().find((r) => r.goal === name)
+      const cell = tokenCell(run)
+      assert.equal(cell.value, value); if (text) assert.equal(cell.text, text); assert.equal(cell.turns, turns)
+      if (value !== null) { assert.deepEqual(run.metrics, { billed_input_tokens: 32829, billed_output_tokens: 5466, billed_cache_read_tokens: 400514, billed_cache_write_tokens: 10022 }); assert.equal('tokens' in run.pending, false) }
+      else assert.ok(Object.values(run.metrics).every((v) => v === null))
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 const q = (name, extra = {}) => `repo_slug=dt-${name}&task_slug=${name}&adw_id=lean%3A${name}` + Object.entries(extra).map(([k, v]) => `&${k}=${encodeURIComponent(v)}`).join('')
 
 test('an archived lane with no terminal row reads stopped, never running, in listRuns and the board', () => {

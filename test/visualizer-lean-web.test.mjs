@@ -10,6 +10,30 @@ import { leanStatus } from '../visualizer/web/src/lib/fleet.js'
 const src = (path) => readFileSync(join(ROOT, 'visualizer/web/src', path), 'utf8')
 const open = { source: 'lean', adw_id: 'lean:x', goal: 'x', status: 'running', running: true, latest_stage: 'build', pending: { last_heartbeat_at: 'none recorded' } }
 
+test("journal lines detail every loop event, show a verdict's observation and name advisor rows", () => {
+  const rows = [
+    { event: 'envelope', role: 'builder', parsed: { status: 'insufficient' }, defects: ['missing gap'] },
+    { event: 'envelope', role: 'builder', error: { message: 'seat failed' } },
+    { event: 'seat-turn', role: 'builder', model: 'model', seconds: 2, tool_calls: 3, stop_reason: 'end_turn', status: 'done', usage: { totalTokens: 42 } },
+    { event: 'builder-continue', id: 'a', progressTurns: 1 }, { event: 'lead-bound-refund', id: 'b', progressTurns: 2 },
+    { event: 'tier-raised', from: 'build', to: 'judge', reason: 'risk' }, { event: 'roster', tier: 'build', seats: { builder: {} } },
+    { event: 'commit', head: 'abc' }, { event: 'finish-ready', status: 'ready', head: 'abc' }, { event: 'finish-decision', choice: 'return' },
+    { event: 'memory-empty', role: 'builder', reason: 'empty' }, { event: 'verdict', status: 'stopped', observation: { question: 'Ship it?' } },
+    { at: 1, advisor_consult: {}, role: 'builder' }, { event: 'stage-start' }, { event: 'run-start' },
+  ]
+  const lines = leanView({}, { rows }).lines
+  assert.ok(lines.slice(0, 13).every((line) => line.detail))
+  assert.match(lines[0].detail, /missing gap/); assert.match(lines[1].detail, /seat failed/); assert.match(lines[11].detail, /Ship it\?/)
+  assert.equal(lines[12].event, 'advisor_consult'); assert.match(lines[12].detail, /builder/)
+  assert.equal(lines[13].detail, ''); assert.equal(lines[14].detail, '')
+})
+
+test('the task cell drops the lean id fragment, the usage cell shows turn coverage and the detail page names no event inspector', () => {
+  const task = src('lib/TaskList.svelte')
+  assert.doesNotMatch(task, /slice\(0, 8\)/); assert.ok(task.includes('tokens.turns'))
+  assert.ok(!src('lib/LeanRunDetail.svelte').includes('event inspector'))
+})
+
 test('lean status and activity never claim liveness or merge', () => {
   assert.equal(leanStatus(open).key, 'running'); assert.match(leanStatus(open).word, /no terminal record/)
   const stopped = leanStatus({ status: 'stopped', reason: 'runner-threw' })
@@ -58,7 +82,7 @@ test('lean presentation distinguishes accepted failing baselines, open stages an
   assert.equal(leanStageStatus('green').tone,'ok');assert.equal(leanStageStatus('red').tone,'fail')
   assert.equal(leanStageStatus('running').label,'No stage-end record');assert.equal(leanStageStatus(undefined).label,'Outcome not recorded')
   assert.match(leanOutcome({status:'running'}).next,/does not establish/);assert.match(leanOutcome({status:'done',pr:{number:1}}).next,/Merge status is not recorded/)
-  assert.match(leanOutcome({status:'stopped'}).next,/before deciding/);assert.equal(leanOutcome({status:'failed'}).tone,'fail')
+  assert.match(leanOutcome({status:'stopped'}).next,/before deciding/)
   assert.equal(leanPullRequestUrl({url:'javascript:alert(1)'}),null);assert.equal(leanPullRequestUrl({url:'https://user:secret@github.com/o/r/pull/1'}),null);assert.equal(leanPullRequestUrl({url:'https://github.com/o/r/pull/1'}),'https://github.com/o/r/pull/1')
   assert.equal(leanCheckStatus({result:{code:0}}).label,'Exit code 0 recorded');assert.equal(leanCheckStatus({result:{accepted:false}}).tone,'fail')
 })

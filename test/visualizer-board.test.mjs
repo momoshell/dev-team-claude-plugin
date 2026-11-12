@@ -5,16 +5,26 @@ import { join } from 'node:path'
 import { ROOT } from './helpers.mjs'
 import * as fleet from '../visualizer/web/src/lib/fleet.js'
 import { leanOutcome } from '../visualizer/web/src/lib/lean.js'
+import { layoutTimeline } from '../visualizer/web/src/lib/timeline.js'
 import { parseHash } from '../visualizer/web/src/lib/route.js'
 
 const src = (path) => readFileSync(join(ROOT, 'visualizer/web/src', path), 'utf8')
 const lane = (id, status, extra = {}) => ({ source: 'lean', adw_id: `lean:${id}`, goal: id, status, running: false, archived: false, tier: 'build', shape: 'standard', latest_stage: 'plan', started_at: '2026-01-01', ...extra })
 
+test('board: unwritten lane statuses, the timeline constants and the task_profile filter are gone', () => {
+  assert.equal(fleet.leanStatus({ status: 'escalated' }).key, 'unknown'); assert.equal(fleet.needsAttention('escalated'), false)
+  assert.deepEqual(fleet.attentionBreakdown([]).segments.map((s) => s.key), ['ready', 'returned', 'aborted', 'abandoned'])
+  for (const status of ['failed', 'error', 'blocked', 'escalated']) assert.equal(leanOutcome({ status }).headline, 'Outcome not recorded')
+  const timeline = layoutTimeline({ phases: [] })
+  for (const key of ['request', 'queued', 'marks', 'lanes']) assert.equal(key in timeline, false)
+  assert.ok(!fleet.configurationFilterView([{ adw_id: 'p', task_profile: 'implementation' }]).dimensions.some((d) => d.key === 'task_profile'))
+})
+
 test('board: operator-facing lean statuses reach Needs attention with their own keys', () => {
   // MUTATION: drop the abandoned key from the attention map.
   for (const [status, key, tone, attention, word] of [
     ['ready-for-operator', 'ready', 'serious', true, 'ready for operator'], ['returned', 'returned', 'serious', true, 'returned · no new run'],
-    ['escalated', 'escalated', 'serious', true, 'escalated'], ['stopped', 'aborted', 'aborted', true, 'stopped'], ['abandoned', 'abandoned', 'serious', true, 'abandoned'],
+    ['stopped', 'aborted', 'aborted', true, 'stopped'], ['abandoned', 'abandoned', 'serious', true, 'abandoned'],
   ]) {
     const result = fleet.leanStatus(lane(status, status))
     assert.deepEqual([result.key, result.tone, fleet.needsAttention(result.key), result.word], [key, tone, attention, word])
@@ -63,11 +73,11 @@ test('board: search matches the fields a lean lane carries', () => {
 
 test('board: attention segments name every attention key and sum to the total', () => {
   // MUTATION: drop the ready label.
-  const keys = ['ready', 'returned', 'escalated', 'aborted', 'abandoned']
+  const keys = ['ready', 'returned', 'aborted', 'abandoned']
   const result = fleet.attentionBreakdown(keys.map((key) => ({ status: { key } })))
-  assert.deepEqual(result.segments, keys.map((key, i) => ({ key, label: ['ready for operator', 'returned', 'escalated', 'stopped', 'abandoned'][i], count: 1 })))
+  assert.deepEqual(result.segments, keys.map((key, i) => ({ key, label: ['ready for operator', 'returned', 'stopped', 'abandoned'][i], count: 1 })))
   assert.equal(result.segments.reduce((sum, segment) => sum + segment.count, 0), result.total)
-  assert.equal(result.total, 5)
+  assert.equal(result.total, 4)
 })
 
 test('board: the detail outcome agrees with the board for finish-stage statuses', () => {

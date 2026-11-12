@@ -492,7 +492,7 @@ export function startServer(options = {}) {
       }
       if (url.pathname === '/api/agents') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
-        const result = typeof agents.read === 'function' ? await agents.read() : { degraded: true, reasons: ['agents source is unavailable'], error: 'agents source is unavailable', skills: [], matrix: [], role_evidence: {} }
+        const result = typeof agents.read === 'function' ? await agents.read() : { degraded: true, error: 'agents source is unavailable', reasons: ['agents source is unavailable'], schema: 2, skills: [] }
         return json(res, 200, { ...result, schema })
       }
       if (url.pathname === '/api/agents/propose') {

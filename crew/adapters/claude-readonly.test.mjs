@@ -16,6 +16,13 @@ test('allowed commands and disabled seats produce no decision', () => {
   assert.equal(readOnlyHookDecision({ tool_name: 'Read', tool_input: {} }, on), undefined)
 })
 
+test('a recorded chained read with a cd, a quoted backslash and a stderr redirect passes the hook', () => {
+  assert.equal(readOnlyHookDecision(payload(String.raw`cd crew && grep -n "a\|b" loop.mjs 2>/dev/null`), on), undefined)
+  const out = readOnlyHookDecision(payload('cd crew && rm loop.mjs 2>/dev/null'), on).hookSpecificOutput
+  assert.equal(out.permissionDecision, 'deny')
+  assert.ok(out.permissionDecisionReason.includes('rm loop.mjs'))
+})
+
 test('a refused command is denied with the first offending segment', () => {
   const out = readOnlyHookDecision(payload('git status && git reset --hard && rm -rf x'), on).hookSpecificOutput
   assert.equal(out.permissionDecision, 'deny')

@@ -17,13 +17,14 @@ function segmentReadOnly(argv) {
   }
   if (['grep', 'rg'].includes(argv[0]))
     return !argv.some((arg) => arg.startsWith('--pre') || arg.startsWith('--hostname-bin'))
+  if (argv[0] === 'cd') return argv.length === 2
   if (['cat', 'head', 'tail', 'wc', 'ls'].includes(argv[0])) return true
   if (argv[0] === 'sed') return argv.length >= 3 && argv.length <= 4 && argv[1] === '-n' && /^\d+(,\d+)?p$/.test(argv[2])
   return false
 }
 
-// Segments joined by `&&`, `||`, `;` or `|` are read-only when every segment is. Segments are
-// checked in source order, so the reason names the first one that is not.
+// Segments joined by `&&`, `||`, `;` or `|` are checked in source order. A one-argument cd,
+// literal quoted backslashes and the exact stderr redirects 2>/dev/null and 2>&1 are allowed.
 export function readOnlyCommandResult(command) {
   if (typeof command !== 'string' || command.length === 0) return { allowed: false, reason: 'Not read-only: no command given.' }
   const refuse = (segment, why) => ({ allowed: false, reason: `Not read-only: ${JSON.stringify(segment)} (${why}). Rerun only the read-only parts.` })
@@ -59,7 +60,8 @@ export function readOnlyCommandResult(command) {
   }
   for (let index = 0; index < command.length; index++) {
     const char = command[index]
-    if (char === '\\' || char === '$' || char === '`') return refuse(rawSegment(index, quote), 'shell expansion or escape')
+    if (char === '$' || char === '`' || (char === '\\' && (!quote || (quote === '"' && (index + 1 === command.length || '"\\$`\n\r'.includes(command[index + 1]))))))
+      return refuse(rawSegment(index, quote), 'shell expansion or escape')
     if (char === '\n' || char === '\r') return refuse(rawSegment(index, quote), 'newline')
     if (quote) {
       if (char === quote) quote = null
@@ -81,6 +83,14 @@ export function readOnlyCommandResult(command) {
       index += width - 1
       segStart = index + 1
       continue
+    }
+    if (!started && char === '2') {
+      const redirect = ['2>/dev/null', '2>&1'].find((value) => command.startsWith(value, index))
+      const next = redirect && command[index + redirect.length]
+      if (redirect && (next === undefined || /^[\t\v\f ;|&]$/.test(next))) {
+        index += redirect.length - 1
+        continue
+      }
     }
     if ('&><(){}'.includes(char)) return refuse(rawSegment(index, quote), 'background, redirection or grouping')
     if (/^[\t\v\f ]$/.test(char)) {

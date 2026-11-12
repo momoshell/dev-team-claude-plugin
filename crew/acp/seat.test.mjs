@@ -485,7 +485,7 @@ test('a muse permission naming only its toolCallId is decided on the earlier too
     { toolCallId: 'unseen' },
   ]
   for (const [agent, writes, expected] of [
-    ['muse', 'none', ['yes', 'deny', 'deny', 'deny', 'deny', 'deny']],
+    ['muse', 'none', ['yes', 'yes', 'deny', 'deny', 'deny', 'deny']],
     ['muse', 'repo', ['yes', 'yes', 'yes', 'deny', 'yes', 'deny']],
     ['pi', 'none', ['deny', 'deny', 'deny', 'deny', 'deny', 'deny']],
   ]) await use('pi-turn', { agent, model: agent === 'muse' ? 'meta/muse-spark-1.3' : 'openai/model', definition: { writes }, permissions }, (run) => {

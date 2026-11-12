@@ -59,6 +59,17 @@ const run = (f, extra = {}) => {
 const refusal = (f) => { try { run(f).go() } catch (e) { return e } return null }
 const cleanup = (f) => rmSync(f.base, { recursive: true, force: true })
 
+test('finish skips scalar journal rows and refuses malformed rows (#2324)', () => {
+  for (const [text, malformed] of [['3\n', false], ['{torn\n', true]]) {
+    const f = fixture()
+    try {
+      appendFileSync(join(f.taskDir, 'journal.jsonl'), text)
+      if (malformed) assert.throws(run(f).go, { reason: 'finish-unreadable', message: 'the lane journal has a malformed row' })
+      else assert.doesNotThrow(run(f).go)
+    } finally { cleanup(f) }
+  }
+})
+
 test('review rounds count one per reviewer turn, not one per repaired return (S3-5)', async () => {
   const review = [0, 1, 2].map((n) => ({ event: 'envelope', role: 'reviewer', id: 'lane9.reviewer.5', defects: n < 2 ? ['bad'] : [] }))
   review.push({ event: 'verdict', status: 'reviewed' })

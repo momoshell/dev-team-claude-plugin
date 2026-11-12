@@ -15,7 +15,7 @@ import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLeanSource } from '../visualizer/server/lean-source.mjs'
 import { stateless } from '../visualizer/server/lean-journal-order.mjs'
-import { LANE, isObject, within } from './lane-core.mjs'
+import { LANE, isObject, parseJournalRows, within } from './lane-core.mjs'
 import { reapLaneSeats } from './seat-reap.mjs'
 import { parsePrUrl } from './record-pr.mjs'
 import { deadRun, parsePidRecord, probeAlive } from './run-pid.mjs'
@@ -28,15 +28,7 @@ const isDir = (path) => { try { return statSync(path).isDirectory() } catch { re
 const defaultRun = (cmd, args, options = {}) => spawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024, ...options })
 
 function journalRows(text) {
-  const rows = []
-  for (const line of text.split('\n')) {
-    if (!line.trim()) continue
-    let row
-    try { row = JSON.parse(line) } catch { refuse('task journal has a malformed row') }
-    if (!isObject(row)) refuse('task journal has a non-object row')
-    rows.push(row)
-  }
-  return rows
+  return parseJournalRows(text, (kind) => refuse(kind === 'malformed' ? 'task journal has a malformed row' : 'task journal has a non-object row'))
 }
 
 function lastPr(rows, lane, taskDir, alive) {

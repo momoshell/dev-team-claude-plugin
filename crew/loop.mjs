@@ -437,11 +437,11 @@ export async function runLoop(spec, deps = {}) {
           } catch { /* journal measurements must not affect the turn */ }
           if (!isFinish && tier === 'mechanical' && role === 'builder' && checked.envelope?.status === 'done' && checked.envelope.details && !Object.hasOwn(checked.envelope.details, 'subject')) checked.defects.push('details.subject is required on a mechanical lane for the commit and PR')
           if (role === 'planner' && checked.envelope && checked.defects.length === 0 && Object.hasOwn(checked.envelope.details, 'plan_path')) checked.defects.push(...await artifactDefects(checked.envelope.details))
-          return { failure, parsed, raw, parseError, recording, checked, turnError, routed, providerKind, method }
+          return { failure, parsed, raw, parseError, recording, checked, turnError, routed, providerKind, method, turnBefore, turnAfter }
         }
         const observe = (a) => emit('envelope', { role, id, returnPath, parsed: a.parsed, defects: a.checked.defects, error: a.failure?.error ?? null, turnError: a.turnError })
-        const before = role === 'builder' ? await fingerprint() : null
         const attempts = [await attempt(request)]
+        const firstBefore = attempts[0].turnBefore
         let latest = attempts[0], rerun = false, repairs = 0, asked = request
         for (;;) {
           const acceptable = !latest.failure && latest.checked.defects.length === 0 && latest.checked.envelope?.id === id
@@ -476,10 +476,7 @@ export async function runLoop(spec, deps = {}) {
         if (!failure && !valid) failure = { reason: 'envelope-refused', defects: checked.defects }
         if (failure) return hold ? { held: { ...failure, envelope: null } } : { halt: await stop(role === 'lead' && failure.reason !== 'authentication_failed' ? 'lead-refused' : failure.reason, { role, id, ...failure }) }
         last[role] = checked.envelope
-        if (role === 'builder') {
-          const after = await fingerprint()
-          progressed = before !== null && after !== null && before !== after
-        }
+        progressed = role === 'builder' && firstBefore !== null && latest.turnAfter !== null && firstBefore !== latest.turnAfter
         if (hold && checked.envelope.status !== 'done') return { held: { reason: checked.envelope.status, envelope: checked.envelope } }
         // ADR-055 §12: a questionless escalation returns to the same seat, including the lead.
         if (role === 'lead') {

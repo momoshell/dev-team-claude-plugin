@@ -29,7 +29,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { FINISH_REVIEW_ROUNDS, composeLanePrBody, openPullRequest, runSuite, withoutIssueTokens } from './checks.mjs'
-import { LANE, isObject } from './lane-core.mjs'
+import { LANE, isObject, parseJournalRows } from './lane-core.mjs'
 import { TIERS, validateEnvelope } from './protocols.mjs'
 import { deadRun, parsePidRecord, pidRecord, probeAlive, selfStartedAt, writeRunPid } from './run-pid.mjs'
 import { OnboardRefusal, requireOnboarded } from './onboard.mjs'
@@ -87,9 +87,9 @@ function loadLane(d, lane, crewRoot) {
   try { journalText = d.readFileSync(join(taskDir, 'journal.jsonl'), 'utf8') } catch (error) {
     throw new FinishRefusal('finish-unreadable', `cannot read the lane journal: ${error?.code ?? error?.message}`)
   }
-  const rows = journalText.split('\n').filter((line) => line.trim() !== '').map((line) => {
-    try { return JSON.parse(line) } catch { throw new FinishRefusal('finish-unreadable', 'the lane journal has a malformed row') }
-  }).filter(isObject)
+  const rows = parseJournalRows(journalText, (kind) => {
+    if (kind === 'malformed') throw new FinishRefusal('finish-unreadable', 'the lane journal has a malformed row')
+  })
   const recordedTier = spec.tier
   // ADR-055 §7: a recorded raise survives a finish run.
   for (const row of rows) if (row.event === 'tier-raised' && TIERS.includes(row.to) && TIERS.indexOf(row.to) > TIERS.indexOf(spec.tier)) spec.tier = row.to

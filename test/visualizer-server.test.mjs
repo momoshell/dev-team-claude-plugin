@@ -131,24 +131,6 @@ function agentsFixture(prefix = 'visualizer-agents-') {
   const checkout = join(dir, 'checkout'), crewRoot = join(dir, 'crew-root')
   mkdirSync(join(checkout, 'crew', 'agents'), { recursive: true })
   mkdirSync(join(checkout, 'skills'), { recursive: true })
-  const capabilities = {
-    schema_version: 1,
-    updated_at: '2026-09-15',
-    coding_agents: {
-      pi: {
-        providers: ['openai'], transports: ['pane', 'headless-rpc'], adapter: 'crew/adapters/adapter-pi.mjs', refuses: ['mcp_servers'],
-        display_name: 'Pi', binary: 'pi', install_hint: 'Install Pi.', availability: 'discovered-unavailable', availability_reason: 'version-spawn-failed',
-      },
-      claude: {
-        providers: ['anthropic'], transports: ['pane', 'headless-json'], adapter: 'crew/adapters/adapter-claude.mjs', refuses: ['skills'],
-        display_name: 'Claude Code', binary: 'claude', install_hint: 'Install Claude Code.', availability: 'executable', availability_reason: 'executable',
-      },
-    },
-    roles: Object.fromEntries(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'].map((role) => [role, { tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [], mcp_servers: [] }])),
-    local_providers: {},
-  }
-  const capabilitiesPath = join(checkout, 'crew', 'capabilities.json')
-  writeFileSync(capabilitiesPath, JSON.stringify(capabilities, null, 2) + '\n')
   const skillNames = ['backend-node', 'crew-dispatch', 'crew-onboard', 'crew-recovery', 'devops', 'frontend-svelte', 'pr-review', 'qa-test-writing', 'ui-design']
   for (const name of skillNames) { mkdirSync(join(checkout, 'skills', name), { recursive: true }); writeFileSync(join(checkout, 'skills', name, 'SKILL.md'), `---\nname: ${name}\ndescription: Fixture description for ${name}.\n---\n\n# ${name}\n`) }
   for (const role of ['lead', 'planner', 'builder', 'reviewer', 'tech-lead']) writeFileSync(join(checkout, 'crew', 'agents', `${role}.md`), `# ${role}\nFixture charter for ${role}.\n`)
@@ -162,7 +144,7 @@ function agentsFixture(prefix = 'visualizer-agents-') {
   writeFileSync(newCommand, JSON.stringify({ args: ['pi', '--skill', 'skills/frontend-svelte/SKILL.md'] }))
   utimesSync(oldCommand, new Date(1000), new Date(1000)); utimesSync(newCommand, new Date(2000), new Date(2000))
   writeFileSync(join(task, 'headless-json', 'planner', 'cmd.json'), JSON.stringify({ command: 'pi --skill skills/ui-design/SKILL.md' }))
-  return { dir, checkout, crewRoot, capabilitiesPath, lane, task, skillNames }
+  return { dir, checkout, crewRoot, lane, task, skillNames }
 }
 
 function rawStatus(response) {
@@ -510,13 +492,20 @@ test('V1 agents resources come from the plugin root for a foreign checkout', asy
   }
 })
 
+test('agents source does not degrade when the plugin has no crew/capabilities.json', () => {
+  const { dir, checkout, crewRoot } = agentsFixture()
+  try {
+    rmSync(join(checkout, 'crew', 'capabilities.json'), { force: true })
+    const result = createAgentsSource({ checkout, pluginRoot: checkout, crewRoot }).read()
+    assert.equal(result.error, null)
+    assert.equal(result.degraded, false)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('agents source separates plugin reads from target proposals compatibly', () => {
   const target = agentsFixture('visualizer-agents-target-root-')
   const plugin = agentsFixture('visualizer-agents-plugin-root-')
   try {
-    const pluginCapabilities = JSON.parse(readFileSync(join(plugin.checkout, 'crew', 'capabilities.json'), 'utf8'))
-    pluginCapabilities.roles.builder.skills = ['plugin-only-skill']
-    writeFileSync(join(plugin.checkout, 'crew', 'capabilities.json'), `${JSON.stringify(pluginCapabilities, null, 2)}\n`)
     mkdirSync(join(plugin.checkout, 'skills', 'plugin-only-skill'), { recursive: true })
     writeFileSync(join(plugin.checkout, 'skills', 'plugin-only-skill', 'SKILL.md'), '---\nname: plugin-only-skill\ndescription: Plugin-only skill.\n---\n\nPLUGIN-ONLY skill body\n')
     const source = createAgentsSource({ checkout: target.checkout, pluginRoot: plugin.checkout, crewRoot: target.crewRoot })

@@ -337,7 +337,7 @@ export function startServer(options = {}) {
   const lean = config.lean || createLeanSource({ crewRoot: config.crewRoot, archiveRoot: config.leanArchiveRoot })
   const journal = config.journal || createJournalSource({ crewRoot: config.crewRoot, lean })
   const agents = config.agents || config.agentsSource || createAgentsSource({ checkout: config.checkout, pluginRoot: PROJECT_ROOT, crewRoot: config.crewRoot })
-  const agentLibrary = createAgentLibrary({ capabilitiesPath:config.capabilitiesPath ?? join(PROJECT_ROOT,'crew/capabilities.json'), checkout:config.checkout, home:config.home ?? homedir(), env, writable:writeMode.writable && pluginWriteTargetMode({target:join(config.checkout,'agents'),home:config.home ?? homedir()}).writable })
+  const agentLibrary = createAgentLibrary({ codingAgentsPath:config.codingAgentsPath ?? join(PROJECT_ROOT,'visualizer/coding-agents.json'), checkout:config.checkout, home:config.home ?? homedir(), env, writable:writeMode.writable && pluginWriteTargetMode({target:join(config.checkout,'agents'),home:config.home ?? homedir()}).writable })
   const skillRoot = config.skillRoot ?? config.pluginRoot ?? PROJECT_ROOT
   const skillLibrary = createSkillLibrary({root:skillRoot,writable:writeMode.writable && pluginWriteTargetMode({target:join(skillRoot,'skills'),home:config.home ?? homedir()}).writable})
   const server = createServer(async (req, res) => {
@@ -466,7 +466,7 @@ export function startServer(options = {}) {
         const refusal=writeGuard(req)
         if(refusal) return json(res,refusal.status,{schema,error:refusal.error})
         if(!writeMode.writable) return json(res,409,pluginWriteRefusal)
-        if(!pluginWriteTargetMode({target:config.capabilitiesPath ?? join(PROJECT_ROOT,'crew/capabilities.json'),home:config.home ?? homedir()}).writable) return json(res,409,pluginWriteRefusal)
+        if(!pluginWriteTargetMode({target:config.codingAgentsPath ?? join(PROJECT_ROOT,'visualizer/coding-agents.json'),home:config.home ?? homedir()}).writable) return json(res,409,pluginWriteRefusal)
         let input
         try { input=await body(req) } catch(err) { return json(res,400,{schema,error:err.message}) }
         if(!input || typeof input!=='object' || Array.isArray(input)) return json(res,400,{schema,error:'request body must be an object'})

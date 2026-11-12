@@ -8,11 +8,7 @@ import {join} from 'node:path'
 import {createAgentLibrary} from '../visualizer/server/agent-library.mjs'
 import {startServer} from '../visualizer/server/server.mjs'
 function capabilityRegister() {
- const grant=(extra={})=>({tools:[],extensions:[],agents:[],skills:[],advisor:false,requires:[],mcp_servers:[],...extra})
  return {
-  schema_version:1,updated_at:'2026-08-17',
-  roles:{lead:grant(),planner:grant({requires:['subagents']}),builder:grant(),reviewer:grant(),'tech-lead':grant()},
-  local_providers:{},
   coding_agents:{
    pi:{providers:['openai','anthropic','llama-swap'],transports:['acp'],adapter:'crew/adapters/adapter-pi.mjs',refuses:['mcp_servers'],display_name:'Pi',binary:'pi',install_hint:'Install Pi and ensure the pi binary is on PATH.',availability:'executable',availability_reason:'executable'},
    claude:{providers:['anthropic'],transports:['acp'],adapter:'crew/adapters/adapter-claude.mjs',refuses:['extensions','skills','local_provider'],display_name:'Claude Code',binary:'claude',install_hint:'Install Claude Code and ensure the claude binary is on PATH.',availability:'executable',availability_reason:'executable'},
@@ -21,8 +17,8 @@ function capabilityRegister() {
 }
 function fixture(t) {
  const root=realpathSync(scratchDir('harness-settings-'));t.after(()=>rmSync(root,{recursive:true,force:true}))
- mkdirSync(join(root,'crew'));mkdirSync(join(root,'home'))
- const path=join(root,'crew/capabilities.json'), value=capabilityRegister()
+ mkdirSync(join(root,'visualizer'));mkdirSync(join(root,'home'))
+ const path=join(root,'visualizer/coding-agents.json'), value=capabilityRegister()
  writeFileSync(path,JSON.stringify(value,null,2)+'\n')
  return {root,path,value,library:createAgentLibrary({checkout:root,home:join(root,'home'),env:{PATH:''}})}
 }
@@ -73,7 +69,7 @@ test('read-only and linked capability files cannot be configured',t=>{
 })
 test('harness HTTP saves only closed preference fields and refuses foreign origins',async t=>{
  const {root,path,library}=fixture(t)
- const {server}=startServer({port:0,host:'127.0.0.1',checkout:root,capabilitiesPath:path,home:join(root,'home'),env:{PATH:''},feed:{}})
+ const {server}=startServer({port:0,host:'127.0.0.1',checkout:root,codingAgentsPath:path,home:join(root,'home'),env:{PATH:''},feed:{}})
  await new Promise((resolve,reject)=>{server.once('listening',resolve);server.once('error',reject)})
  t.after(()=>new Promise(resolve=>{server.closeAllConnections();server.close(resolve)}))
  const base=`http://127.0.0.1:${server.address().port}`, input={name:'claude',default_transport:'acp',expected_revision:library.read().config_revision}
@@ -90,7 +86,7 @@ test('installed-plugin HTTP mode cannot change harness defaults even with a vali
  const {root,path,library}=fixture(t),pluginRoot=join(root,'home/.claude/plugins/cache/example/1')
  mkdirSync(pluginRoot,{recursive:true})
  const before=readFileSync(path,'utf8')
- const {server}=startServer({port:0,host:'127.0.0.1',checkout:root,capabilitiesPath:path,pluginRoot,home:join(root,'home'),env:{PATH:''},feed:{}})
+ const {server}=startServer({port:0,host:'127.0.0.1',checkout:root,codingAgentsPath:path,pluginRoot,home:join(root,'home'),env:{PATH:''},feed:{}})
  await new Promise((resolve,reject)=>{server.once('listening',resolve);server.once('error',reject)})
  t.after(()=>new Promise(resolve=>{server.closeAllConnections();server.close(resolve)}))
  const base=`http://127.0.0.1:${server.address().port}`

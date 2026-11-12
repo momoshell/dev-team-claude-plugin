@@ -1,5 +1,5 @@
 import { after } from 'node:test'
-import { scratchDir } from './helpers.mjs'
+import { ROOT, scratchDir } from './helpers.mjs'
 import {test} from 'node:test'
 import assert from 'node:assert/strict'
 import {mkdirSync,writeFileSync,readFileSync,existsSync,rmSync,symlinkSync,realpathSync} from 'node:fs'
@@ -86,9 +86,33 @@ test('linked library directory is refused, and HTTP installed-copy mode prevents
  assert.equal(response.status,409);assert.equal(existsSync(join(root,'elsewhere/reviewer.md')),false)
 })
 
+test('the visualizer owns the shipped coding_agents declarations in visualizer/coding-agents.json',()=>{
+ const path=join(ROOT,'visualizer/coding-agents.json')
+ assert.equal(existsSync(path),true)
+ const {coding_agents}=JSON.parse(readFileSync(path,'utf8'))
+ assert.deepEqual(coding_agents,{
+  pi:{providers:['openai','anthropic','meta'],transports:['acp'],adapter:'crew/adapters/adapter-pi.mjs',refuses:[],display_name:'Pi',binary:'pi',install_hint:'Install Pi and ensure the pi binary is on PATH.',availability:'executable',availability_reason:'executable'},
+  claude:{providers:['anthropic'],transports:['acp'],adapter:'crew/adapters/adapter-claude.mjs',refuses:['extensions','local_provider'],display_name:'Claude Code',binary:'claude',install_hint:'Install Claude Code and ensure the claude binary is on PATH.',availability:'executable',availability_reason:'executable'},
+  muse:{providers:['meta'],transports:['acp'],adapter:'crew/adapters/adapter-muse.mjs',refuses:['local_provider'],display_name:'Muse Code',binary:'muse',install_hint:'Install Muse Code and ensure the muse binary is on PATH.',availability:'executable',availability_reason:'executable'},
+ })
+ for(const entry of Object.values(coding_agents)) assert.ok(existsSync(join(ROOT,entry.adapter)))
+ const muse=coding_agents.muse
+ const imports=[...readFileSync(join(ROOT,muse.adapter),'utf8').matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)].map(match=>match[1])
+ assert.ok(imports.length>0);assert.ok(imports.every(specifier=>specifier.startsWith('node:')))
+ assert.equal(muse.binary,'muse');assert.deepEqual(muse.refuses,['local_provider']);assert.deepEqual(muse.transports,['acp'])
+})
+
+test('harness evidence reads visualizer/coding-agents.json, not crew/capabilities.json',t=>{
+ const {root,library}=fixture(t);mkdirSync(join(root,'visualizer'))
+ writeFileSync(join(root,'visualizer/coding-agents.json'),JSON.stringify({coding_agents:{claude:{providers:['anthropic'],transports:['acp'],adapter:'crew/adapters/adapter-claude.mjs',refuses:['extensions']}}}))
+ const view=library.read(),claude=view.harnesses.find(row=>row.binary==='claude')
+ assert.equal(claude.registered,true);assert.deepEqual(claude.providers,['anthropic'])
+ assert.equal(view.notes.some(note=>note.includes('Harness capabilities could not be read')),false)
+})
+
 test('harness evidence exposes supported providers and modes without claiming authentication',t=>{
- const {root,library}=fixture(t);mkdirSync(join(root,'crew'))
- writeFileSync(join(root,'crew/capabilities.json'),JSON.stringify({coding_agents:{claude:{providers:['anthropic'],transports:['pane','headless-json'],adapter:'crew/adapters/adapter-claude.mjs',refuses:['extensions','local_provider']}}}))
+ const {root,library}=fixture(t);mkdirSync(join(root,'visualizer'))
+ writeFileSync(join(root,'visualizer/coding-agents.json'),JSON.stringify({coding_agents:{claude:{providers:['anthropic'],transports:['pane','headless-json'],adapter:'crew/adapters/adapter-claude.mjs',refuses:['extensions','local_provider']}}}))
  const rows=library.read().harnesses,claude=rows.find(h=>h.binary==='claude'),codex=rows.find(h=>h.binary==='codex')
  assert.equal(claude.available,false);assert.equal(claude.registered,true)
  assert.deepEqual(claude.providers,['anthropic']);assert.deepEqual(claude.transports,['pane','headless-json']);assert.deepEqual(claude.unsupported,['extensions','local_provider'])

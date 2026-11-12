@@ -13,7 +13,7 @@ import { runAcpSeat } from './seat.mjs'
 import { parseAgent } from '../protocols.mjs'
 import * as claude from '../adapters/adapter-claude.mjs'
 import * as muse from '../adapters/adapter-muse.mjs'
-import { loadCapabilities } from './grants.mjs'
+import { REGISTER } from './grants.mjs'
 import { loadAcceptedContext } from '../pi/extensions/skeletonread.ts'
 import { loadContext as advisorContext } from '../pi/extensions/advisor.ts'
 
@@ -339,7 +339,7 @@ test('a muse seat that writes task-dir, names a non-meta model or declares an un
 })
 
 test('a muse seat granted fff launches with the fff MCP server and CREW_FFF, and one without has neither', async () => {
-  const register = loadCapabilities()
+  const register = REGISTER
   const server = Object.values(register.roles).flatMap((role) => [role, ...Object.values(role.by_agent ?? {})]).flatMap((role) => role.mcp_servers ?? []).find((entry) => entry.name === 'fff')
   for (const granted of [true, false]) await use('pi-turn', { agent: 'muse', model: 'meta/muse-spark-1.3', grant: true, definition: { extensions: granted ? ['fff'] : [], writes: 'none' }, deps: { exists: () => true } }, (run) => {
     assert.equal(run.error, undefined)
@@ -350,7 +350,6 @@ test('a muse seat granted fff launches with the fff MCP server and CREW_FFF, and
     assert.ok(sessionNew(run).params.additionalDirectories.includes(run.museSkills[0].dir))
     assert.equal(run.result.museSkillsRoot, run.museSkills[0].dir)
   })
-  assert.deepEqual(register.coding_agents.muse.refuses, ['local_provider'])
   for (const bad of [{ name: 'other', command: { bin: BIN, args: [] }, url: null }, { name: 'fff', command: null, url: 'https://example.com' }, { name: 'fff', type: 'http', command: { bin: BIN, args: [] }, url: null }]) {
     assert.throws(() => muse.acpLaunch({ bin: BIN, grants: { mcp_servers: [bad] } }), (error) => error.reason === 'grant-unsupported')
   }
@@ -1707,7 +1706,7 @@ test('a muse seat granted subagent launches crew-extras agent with the registere
       })
     }
   } finally { rmSync(binDir, { recursive: true, force: true }) }
-  const register = structuredClone(loadCapabilities())
+  const register = structuredClone(REGISTER)
   for (const role of Object.values(register.roles)) for (const group of [role, ...Object.values(role.by_agent ?? {})]) group.agents = []
   await use('pi-turn', { agent: 'muse', model: 'meta/muse-spark-1.3', definition: { role: 'builder', extensions: ['subagent'] }, deps: { register } }, (run) => {
     assert.equal(run.error?.reason, 'unknown-grant')

@@ -6,10 +6,10 @@ import { AGENT_FILE_LIMIT, composeAgentFile, parseAgentFile, validateAgentFile }
 
 const digest = (text) => createHash('sha256').update(text).digest('hex')
 const safeName = (name) => typeof name === 'string' && /^[a-z][a-z0-9._-]{0,79}$/.test(name)
-const TRANSPORTS = ['acp'] // crew/capabilities.schema.json transports enum
+const TRANSPORTS = ['acp'] // The visualizer's supported transport list.
 const problem = (error, status=400) => ({ ok:false, error, status })
 
-export function createAgentLibrary({ checkout=process.cwd(), home=homedir(), env=process.env, writable=true, capabilitiesPath=join(checkout,'crew/capabilities.json') } = {}) {
+export function createAgentLibrary({ checkout=process.cwd(), home=homedir(), env=process.env, writable=true, codingAgentsPath=join(checkout,'visualizer/coding-agents.json') } = {}) {
   const root = resolve(checkout), library = join(root, 'agents')
   function locations() {
     const roots = [
@@ -64,7 +64,7 @@ export function createAgentLibrary({ checkout=process.cwd(), home=homedir(), env
     }
     let register=null, configRevision=null
     try {
-      const configText=readFileSync(capabilitiesPath,'utf8'), value=JSON.parse(configText); configRevision=digest(configText)
+      const configText=readFileSync(codingAgentsPath,'utf8'), value=JSON.parse(configText); configRevision=digest(configText)
       if(!value.coding_agents || typeof value.coding_agents!=='object' || Array.isArray(value.coding_agents)) throw new Error('missing coding_agents object')
       register=value.coding_agents
     } catch { notes.push('Harness capabilities could not be read. Provider and execution support are unavailable.') }
@@ -117,7 +117,7 @@ export function createAgentLibrary({ checkout=process.cwd(), home=homedir(), env
     if(!safeName(name) || (default_transport!==null && typeof default_transport!=='string') || !/^[a-f0-9]{64}$/.test(expected_revision || '')) return problem('Choose a registered harness, a supported mode and the current revision.')
     let temporary
     try {
-      const target=resolve(capabilitiesPath)
+      const target=resolve(codingAgentsPath)
       if(lstatSync(target).isSymbolicLink() || realpathSync(target)!==target || !lstatSync(target).isFile()) return problem('Harness settings must be a regular file in the source checkout.',409)
       const before=readFileSync(target,'utf8')
       if(digest(before)!==expected_revision) return problem('Harness settings changed. Reload the page before saving your choice.',409)

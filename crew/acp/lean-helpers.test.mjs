@@ -1,11 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
-import { isAbsolute, join, resolve as resolvePath } from 'node:path'
+import { join, resolve as resolvePath } from 'node:path'
 import {
   CAPABILITY_REFUSALS, PI_AGENT_DIR_ENV, REGISTER_ROOT, armGrants,
-  grantsFor, loadCapabilities, pathExists, pathMessage, refuse,
-  resolvedGrantPath, validateCapabilities,
+  grantsFor, pathExists, pathMessage, refuse,
+  resolvedGrantPath,
 } from './grants.mjs'
 import { SUBAGENT_EXTENSION } from '../adapters/adapter-pi.mjs'
 import { parseAgent } from '../protocols.mjs'
@@ -23,55 +23,29 @@ test('refuse stamps a closed reason and rejects an unknown one', () => {
   assert.throws(() => refuse('not-a-capability-reason', 'bad'), /unknown capability refusal reason/)
 })
 
-test('the shipped register declares muse as an acp coding agent whose adapter exists and refuses every grant it cannot carry', () => {
-  const muse = loadCapabilities().coding_agents.muse
-  assert.ok(muse)
-  assert.deepEqual(muse.providers, ['meta'])
-  assert.deepEqual(muse.transports, ['acp'])
-  assert.equal(muse.adapter, 'crew/adapters/adapter-muse.mjs')
-  assert.ok(existsSync(join(REGISTER_ROOT, muse.adapter)))
-  const imports = [...readFileSync(join(REGISTER_ROOT, muse.adapter), 'utf8').matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)].map((match) => match[1])
-  assert.ok(imports.length > 0)
-  assert.ok(imports.every((specifier) => specifier.startsWith('node:')))
-  assert.equal(muse.binary, 'muse')
-  assert.deepEqual(muse.refuses, ['local_provider'])
-})
-
-test('loadCapabilities reads the shipped register and refuses an invalid injected one', () => {
-  const register = loadCapabilities()
-  assert.deepEqual(Object.keys(register.roles), ['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
-  assert.equal(Object.isFrozen(register), true)
-  assert.equal(isAbsolute(REGISTER_ROOT), true)
-  assert.throws(() => loadCapabilities({ register: { roles: 'nope' } }), (err) => err.reason === 'register-invalid')
-  assert.throws(() => loadCapabilities({ path: '/nonexistent/register.json' }), (err) => err.reason === 'register-invalid')
-})
-
-// MUTATION: put "pane" back in the transports enum and the injected register loads.
-test('the shipped register declares only the acp transport and the schema refuses a retired one', () => {
-  const shipped = loadCapabilities()
-  const source = JSON.parse(readFileSync(join(REGISTER_ROOT, 'crew/capabilities.json'), 'utf8'))
-  const schema = JSON.parse(readFileSync(join(REGISTER_ROOT, 'crew/capabilities.schema.json'), 'utf8'))
-  assert.deepEqual(schema.$defs.codingagent.properties.default_transport.enum, ['acp'])
-  for (const agent of ['pi', 'claude']) {
-    assert.deepEqual(shipped.coding_agents[agent].transports, ['acp'])
-    for (const transport of ['pane', 'headless-json', 'headless-rpc']) {
-      for (const field of ['transports', 'default_transport']) {
-        const register = structuredClone(source)
-        register.coding_agents[agent][field] = field === 'transports' ? [transport] : transport
-        assert.throws(() => loadCapabilities({ register }), (error) => error.reason === 'register-invalid')
-      }
+test('the grants register is a frozen runtime constant with no schema walker, schema or register file', () => {
+  assert.equal('loadCapabilities' in grants, false)
+  assert.equal('validateCapabilities' in grants, false)
+  for (const path of ['crew/capabilities.json', 'crew/capabilities.schema.json']) assert.equal(existsSync(join(REGISTER_ROOT, path)), false)
+  assert.equal(Object.isFrozen(grants.REGISTER), true)
+  assert.deepEqual(Object.keys(grants.REGISTER), ['roles'])
+  assert.deepEqual(grants.REGISTER.roles, {
+    lead: { agents: [], mcp_servers: [] },
+    planner: { agents: [], mcp_servers: [], by_agent: { pi: {
+      agents: [{ name: 'scout', def: 'crew/pi/agents/scout.json' }],
+      mcp_servers: [{ name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }],
+    } } },
+    builder: { agents: [], mcp_servers: [] },
+    reviewer: { agents: [], mcp_servers: [] },
+    'tech-lead': { agents: [], mcp_servers: [] },
+  })
+  const frozen = (value) => {
+    if (value && typeof value === 'object') {
+      assert.equal(Object.isFrozen(value), true)
+      for (const child of Object.values(value)) frozen(child)
     }
   }
-})
-
-test('validateCapabilities reports type, required and enum errors', () => {
-  const schema = { type: 'object', required: ['a'], properties: { a: { type: 'integer' }, b: { enum: ['x'] } }, additionalProperties: false }
-  assert.deepEqual(validateCapabilities(schema, { a: 1, b: 'x' }), [])
-  const errors = validateCapabilities(schema, { b: 'y', c: 1 })
-  assert.equal(errors.length, 3)
-  assert.match(errors.join('\n'), /missing required property "a"/)
-  assert.match(errors.join('\n'), /not in enum/)
-  assert.match(errors.join('\n'), /additional property "c"/)
+  frozen(grants.REGISTER)
 })
 
 test('path helpers resolve, probe and phrase refusals', () => {
@@ -84,31 +58,8 @@ test('path helpers resolve, probe and phrase refusals', () => {
   assert.equal(err.message, 'seat builder extension grant expected a path, found missing, at /p [extension-missing]')
 })
 
-// MUTATION: restore local_providers in the schema.
-test('the register declares no local provider or narrator and the schema refuses both', () => {
-  const source = JSON.parse(readFileSync(join(REGISTER_ROOT, 'crew/capabilities.json'), 'utf8'))
-  const shipped = loadCapabilities()
-  for (const key of ['local_providers', 'narrator']) assert.equal(Object.hasOwn(shipped, key), false)
-  assert.equal(shipped.coding_agents.pi.providers.includes('llama-swap'), false)
-  for (const [key, value] of [['local_providers', {}], ['narrator', { settings: 'x', pi_provider: 'p', base_url: 'http://x' }]]) {
-    const register = structuredClone(source)
-    register[key] = value
-    assert.throws(() => loadCapabilities({ register }), { reason: 'register-invalid' })
-  }
-})
-
-// MUTATION: restore vendor_extensions in the grant schema.
-test('loadCapabilities refuses every vendor extension declaration on a role or an overlay', () => {
-  const source = JSON.parse(readFileSync(join(REGISTER_ROOT, 'crew/capabilities.json'), 'utf8'))
-  const grant = { package: 'vendor', tools: ['t'] }
-  for (const [overlay, duplicate] of [[false, false], [false, true], [true, false], [true, true]]) {
-    const register = structuredClone(source)
-    const target = overlay ? ((register.roles.builder.by_agent ??= {}).pi ??= {}) : register.roles.builder
-    target.vendor_extensions = duplicate ? [grant, grant] : [grant]
-    assert.throws(() => loadCapabilities({ register }), { reason: 'register-invalid' })
-  }
-  const schema = JSON.parse(readFileSync(join(REGISTER_ROOT, 'crew/capabilities.schema.json'), 'utf8'))
-  assert.equal(schema.$defs.vendorgrant, undefined)
+test('the register declares no local provider or narrator', () => {
+  for (const key of ['local_providers', 'narrator']) assert.equal(Object.hasOwn(grants.REGISTER, key), false)
 })
 
 // MUTATION: restore vendorRoots.
@@ -203,7 +154,7 @@ test('armGrants returns only extensions, agents and mcp_servers', () => {
 
 // MUTATION: restore lead's pi fff overlay.
 test('the shipped register keeps one fff copy, on the planner pi overlay with scout, and no unread role fields', () => {
-  const roles = loadCapabilities().roles
+  const roles = grants.REGISTER.roles
   const locations = []
   for (const [name, spec] of Object.entries(roles)) {
     for (const key of Object.keys(spec)) assert.ok(['agents', 'mcp_servers', 'by_agent'].includes(key), `${name}.${key}`)
@@ -215,17 +166,6 @@ test('the shipped register keeps one fff copy, on the planner pi overlay with sc
   }
   assert.deepEqual(locations, ['roles.planner.by_agent.pi'])
   assert.deepEqual(roles.planner.by_agent.pi.agents, [{ name: 'scout', def: 'crew/pi/agents/scout.json' }])
-})
-
-// MUTATION: restore tools in the role schema.
-test('the register schema refuses the deleted role and overlay fields', () => {
-  const source = JSON.parse(readFileSync(join(REGISTER_ROOT, 'crew/capabilities.json'), 'utf8'))
-  for (const [overlay, field, value] of [[false, 'tools', []], [false, 'requires', []], [false, 'advisor', false], [false, 'extensions', []], [false, 'skills', []], [true, 'extensions', []], [true, 'skills', []]]) {
-    const register = structuredClone(source)
-    const target = overlay ? register.roles.planner.by_agent.pi : register.roles.builder
-    target[field] = value
-    assert.throws(() => loadCapabilities({ register }), { reason: 'register-invalid' }, field)
-  }
 })
 
 test('exportEntries scans exports with lines, spans and signatures', () => {
@@ -282,7 +222,7 @@ test('a seat whose role defines its own agent gets that definition, not an earli
 
 // MUTATION: read spec.extensions without a default.
 test('grantsFor on a shipped role with no extensions field grants no extensions', () => {
-  const register = loadCapabilities()
+  const register = grants.REGISTER
   assert.equal(Object.hasOwn(register.roles.builder, 'extensions'), false)
   assert.deepEqual(grantsFor(register, 'builder', { exists: () => true }).extensions, [])
 })

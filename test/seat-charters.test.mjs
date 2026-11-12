@@ -116,6 +116,18 @@ test('CH7: builder and test-economy let a plan-named new test file override the 
   }
 })
 
+// MUTATION: drop the regression-lock sentence from a charter.
+test('CH8: planner, builder and lead charters keep suite regression locks out of the old-source proof', () => {
+  for (const [path, phrases] of [
+    ['crew/agents/planner.md', ['passes on the old source by design', 'suite regression lock']],
+    ['crew/agents/builder.md', ['suite regression lock', 'not held to the old-source red rule', 'hand mutation']],
+    ['crew/agents/lead.md', ['Never make a test red on the old source through a file the build adds']],
+  ]) {
+    const charter = body(path)
+    for (const phrase of phrases) has(charter, phrase)
+  }
+})
+
 // MUTATION: remove dev-team attribution from the examples heading (PS4).
 test('PS4 code-less attributes all worked examples', () => {
   const skill = read('skills/code-less/SKILL.md')

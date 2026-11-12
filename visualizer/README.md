@@ -15,7 +15,7 @@ server cannot read is `null` with a reason, never a guess or a zero.
 Registered routes: `/api/sessions`, `/api/events`, `/api/journal`,
 `/api/seat-sessions`, `/api/plugin-write-mode`, `/api/agent-library`,
 `/api/agent-library/save`, `/api/harness-settings`, `/api/skill-library`,
-`/api/skill-library/save`, `/api/skill-rules`, `/api/agents`,
+`/api/skill-library/save`, `/api/skill-rules`,
 `/api/agents/propose` and `/api/health`.
 
 Read routes have no authentication. When bound to a non-loopback host such as

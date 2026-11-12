@@ -40,10 +40,18 @@ function readJson(path, laneDir) {
   if (!within(laneDir, path)) return null
   try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return null }
 }
-export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive } = {}) {
+export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, now = Date.now } = {}) {
+  if (!nonEmpty(crewRoot)) throw new TypeError('crewRoot must be a non-empty path')
   const root = resolve(crewRoot)
   const archive = resolve(archiveRoot ?? join(dirname(root), '.crew-journal-archive'))
-  const cache = new Map()
+  const cache = new Map(), probes = new Map()
+  function memoAlive(pid, startedAt) {
+    const key = `${pid}:${startedAt}`, previous = probes.get(key), at = now()
+    if (previous && (previous.value === false || at - previous.at < 60000)) return previous.value
+    const value = alive(pid, startedAt)
+    probes.set(key, { value, at })
+    return value
+  }
   function cacheEntry(path, laneDir) {
     try {
       if (!within(laneDir, path)) return null
@@ -58,12 +66,12 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive } =
   }
 
   // Live lanes and their sibling archives come first, followed by the newest closeout archive.
-  function candidates(lane) {
+  function candidates(lane, archiveNames) {
     const out = []
     for (const base of [root, archive]) {
       const prefix = `dt-${lane}.archive-`
       // First-row times survive later journal appends; suffixes break ties and order unknown times.
-      const outer = base === archive ? dirs(base).filter((name) => name === `dt-${lane}` || (name.startsWith(prefix) && /^[1-9]\d*$/.test(name.slice(prefix.length))))
+      const outer = base === archive ? archiveNames.filter((name) => name === `dt-${lane}` || (name.startsWith(prefix) && /^[1-9]\d*$/.test(name.slice(prefix.length))))
         .map((name) => {
           const laneDir = join(base, name, lane), path = join(laneDir, 'task', LEAN_JOURNAL_FILE)
           let at = null
@@ -92,9 +100,10 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive } =
     return out
   }
 
-  function resolveLane(lane) {
+  function resolveLane(lane) { return resolveIn(lane, dirs(archive)) }
+  function resolveIn(lane, archiveNames) {
     if (typeof lane !== 'string' || !LANE.test(lane)) return null
-    for (const candidate of candidates(lane)) {
+    for (const candidate of candidates(lane, archiveNames)) {
       if (!isDir(candidate.dir) || !within(candidate.base, candidate.dir)) continue
       const spec = readJson(join(candidate.dir, 'task', LEAN_SPEC_FILE), candidate.dir)
       if (!isObject(spec) || spec.id !== lane) continue
@@ -118,11 +127,12 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive } =
 
   function lanes() {
     const names = new Set()
-    for (const base of [root, archive]) for (const name of laneNames(base)) {
+    const archiveNames = laneNames(archive)
+    for (const base of [root, archive]) for (const name of base === archive ? archiveNames : laneNames(base)) {
       const lane = (base === archive ? name.replace(/\.archive-[1-9]\d*$/, '') : name).slice(3)
       if (name.startsWith('dt-') && LANE.test(lane)) names.add(lane)
     }
-    return [...names].sort().map(resolveLane).filter(Boolean)
+    return [...names].sort().map((lane) => resolveIn(lane, archiveNames)).filter(Boolean)
   }
 
   // Resolve a request's identity: all three of repo_slug, task_slug and adw_id must name the same lane.
@@ -282,7 +292,7 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive } =
       status = 'running'; running = true
     }
     if (found.archived && running) { status = 'stopped'; reason = 'archived-without-terminal-row'; running = false }
-    if (!found.archived && !error && deadRun({ rows, taskDir: join(found.dir, 'task'), alive, readFileSync: (path, encoding) => {
+    if (!found.archived && !error && deadRun({ rows, taskDir: join(found.dir, 'task'), alive: memoAlive, readFileSync: (path, encoding) => {
       if (!within(found.dir, path)) throw new Error('run pid resolves outside the lane')
       return readFileSync(path, encoding)
     } })) { status = 'stopped'; reason = 'run-died'; running = false }
@@ -334,9 +344,10 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive } =
     }
     return lanes().map((found) => {
       const entry = found.archived ? cacheEntry(join(found.dir, 'task', LEAN_JOURNAL_FILE), found.dir) : null
-      if (entry?.summary) return entry.summary
+      const fingerprint = entry ? JSON.stringify([found.members, found.spec, dirs(join(found.dir, 'task', LEAN_SESSIONS_DIR))]) : null
+      if (entry?.summary && entry.fingerprint === fingerprint) return entry.summary
       const summary = summarize(found)
-      if (entry) entry.summary = summary
+      if (entry) { entry.summary = summary; entry.fingerprint = fingerprint }
       return summary
     }).filter((run) => !filters.mode && (!filters.status || filters.status === run.status) && inWindow(run))
   }

@@ -6,11 +6,13 @@ import { leanStatus } from './fleet.js'
 function journalLines(rows = []) {
   return (Array.isArray(rows) ? rows : []).map((row) => {
     const stage = row.stage ?? '—'
-    const advisor = !row.event ? Object.keys(row).find((key) => key.startsWith('advisor_')) : null
-    const event = row.event ?? advisor ?? 'unknown'
+    const named = !row.event ? Object.keys(row).find((key) => key.startsWith('advisor_') || key === 'scout_nudge' || key === 'subagent_usage') : null
+    const event = row.event ?? named ?? 'unknown'
     const parts = (...values) => values.filter((value) => value != null && value !== '').map((value) => typeof value === 'string' ? value : JSON.stringify(value)).join(' · ')
     let detail = ''
-    if (advisor) detail = row.role ?? ''
+    if (named === 'scout_nudge') detail = parts(row.role, row.scout_nudge?.reads != null ? `${row.scout_nudge.reads} reads` : null, row.scout_nudge?.directories != null ? `${row.scout_nudge.directories} directories` : null)
+    else if (named === 'subagent_usage') detail = parts(row.role, row.subagent_usage?.agent, row.subagent_usage?.outcome)
+    else if (named) detail = row.role ?? ''
     else if (event === 'envelope') detail = parts(row.role, row.parsed?.status, ...(Array.isArray(row.defects) ? row.defects : []), row.error?.message ?? row.error) || 'envelope details not recorded'
     else if (event === 'seat-turn') detail = parts(row.role, row.model, row.seconds != null ? `${row.seconds}s` : null, row.tool_calls != null ? `${row.tool_calls} tool calls` : null, row.stop_reason, row.status, row.usage?.totalTokens != null ? `${row.usage.totalTokens} tokens` : row.unmeasured?.usage ?? 'usage not recorded')
     else if (event === 'builder-continue' || event === 'lead-bound-refund') detail = parts(row.id, row.progressTurns != null ? `${row.progressTurns} progress turns` : null) || 'progress not recorded'
@@ -21,7 +23,16 @@ function journalLines(rows = []) {
     else if (event === 'finish-decision') detail = parts(row.choice) || 'choice not recorded'
     else if (event === 'memory-empty') detail = parts(row.role, row.reason) || 'memory reason not recorded'
     else if (row.event === 'check') detail = `${row.check ?? 'check'}: ${leanCheckStatus(row).label}`
-    else if (row.event === 'stage-end') detail = row.outcome?.status ?? (row.outcome?.code != null ? `exit ${row.outcome.code}` : 'outcome not recorded')
+    else if (row.event === 'stage-end') {
+      const outcome = row.outcome
+      if (typeof outcome?.status === 'string' && outcome.status.trim()) detail = outcome.status
+      else if (typeof outcome?.code === 'number') detail = `exit ${outcome.code}`
+      else if (outcome?.halt) detail = parts(outcome.halt.status || 'stopped', outcome.halt.reason)
+      else if (outcome?.held) detail = parts('held', outcome.held.reason)
+      else if (outcome?.envelope) detail = typeof outcome.envelope.status === 'string' && outcome.envelope.status.trim() ? parts(outcome.envelope.role, outcome.envelope.status) : 'envelope records no status'
+      else if (outcome?.threw) detail = parts('threw', outcome.threw.message)
+      else detail = outcome == null ? 'outcome not recorded' : 'outcome records no status'
+    }
     else if (row.event === 'verdict') detail = parts(row.status, row.verdict, row.reason, row.observation) || 'verdict fields not recorded'
     else if (row.event === 'pr') {
       detail = row.pr?.url ?? (row.pr?.number != null ? `#${row.pr.number}` : 'pull request not recorded')
@@ -50,6 +61,11 @@ export function leanStageStatus(value) {
   if (['ok','pass','passed','done','completed','success','reviewed'].includes(value)) return { label: displayName(value), tone:'ok' }
   if (['failed','fail','error'].includes(value)) return { label:displayName(value),tone:'fail' }
   if (['stopped','blocked','escalated','changes-needed'].includes(value)) return {label:displayName(value),tone:'attention'}
+  if (value==='escalate') return {label:'Escalated',tone:'attention'}
+  if (value==='held') return {label:'Held',tone:'attention'}
+  if (value==='insufficient') return {label:'Insufficient',tone:'attention'}
+  if (value==='unmeasured') return {label:'Unmeasured',tone:'quiet'}
+  if (value==='unknown') return {label:'Outcome unknown',tone:'quiet'}
   if (value==='running') return {label:'No stage-end record',tone:'quiet'}
   if (value==='skipped') return {label:'Skipped',tone:'quiet'}
   return {label:value ? displayName(value) : 'Outcome not recorded',tone:'quiet'}

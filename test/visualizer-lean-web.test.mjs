@@ -3,12 +3,37 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ROOT } from './helpers.mjs'
-import { leanView } from '../visualizer/web/src/lib/lean.js'
+import { leanView, leanStageStatus } from '../visualizer/web/src/lib/lean.js'
 import { sessionsFeedState } from '../visualizer/web/src/lib/activity.js'
 import { leanStatus } from '../visualizer/web/src/lib/fleet.js'
 
 const src = (path) => readFileSync(join(ROOT, 'visualizer/web/src', path), 'utf8')
 const open = { source: 'lean', adw_id: 'lean:x', goal: 'x', status: 'running', running: true, latest_stage: 'build', pending: { last_heartbeat_at: 'none recorded' } }
+
+test('leanStageStatus gives every phase status the server sends a tone and a label', () => {
+  for (const [status, label, tone] of [['escalate', 'Escalated', 'attention'], ['held', 'Held', 'attention'], ['insufficient', 'Insufficient', 'attention'], ['unmeasured', 'Unmeasured', 'quiet'], ['unknown', 'Outcome unknown', 'quiet'], ['running', 'No stage-end record', 'quiet'], ['done', 'Stage ended', 'ok'], ['failed', 'failed', 'fail'], ['stopped', 'stopped', 'attention']]) assert.deepEqual(leanStageStatus(status), { label, tone })
+})
+
+test('the stage list shows a recorded phase reason', () => {
+  assert.match(src('lib/LeanRunDetail.svelte'), /phase\.reason/)
+})
+
+test('a stage-end line states its envelope, halt, held or threw outcome', () => {
+  const cases = [
+    [{ envelope: { role: 'planner', status: 'done' } }, 'planner · done'],
+    [{ halt: { status: 'stopped', reason: 'lead-escalated' } }, 'stopped · lead-escalated'],
+    [{ held: { reason: 'insufficient', envelope: { status: 'insufficient' } } }, 'held · insufficient'],
+    [{ threw: { message: 'failure' } }, 'threw · failure'],
+    [{ envelope: {} }, 'envelope records no status'], [{}, 'outcome records no status'], [null, 'outcome not recorded'],
+    [{ status: 'done', code: 1 }, 'done'], [{ code: 1, halt: {} }, 'exit 1'],
+  ]
+  assert.deepEqual(leanView({}, { rows: cases.map(([outcome]) => ({ event: 'stage-end', outcome })) }).lines.map(line => line.detail), cases.map(([, expected]) => expected))
+})
+
+test('scout_nudge and subagent_usage rows are named with their role', () => {
+  const rows = [{ role: 'reviewer', scout_nudge: { reads: 8, directories: 7 } }, { role: 'reviewer', subagent_usage: { agent: 'scout', outcome: 'ok' } }]
+  assert.deepEqual(leanView({}, { rows }).lines.map(({ event, detail }) => [event, detail]), [['scout_nudge', 'reviewer · 8 reads · 7 directories'], ['subagent_usage', 'reviewer · scout · ok']])
+})
 
 test("journal lines detail every loop event, show a verdict's observation and name advisor rows", () => {
   const rows = [

@@ -286,7 +286,7 @@ const DETAIL_KEYS = Object.freeze({
 // Fields a role may carry beyond its required ones. A planner states the context the builder's arms read.
 const OPTIONAL_DETAIL_KEYS = Object.freeze({
   planner: ['files_in_scope', 'validation_lane', 'judge', 'question'],
-  builder: ['tests', 'notes', 'question', 'subject'],
+  builder: ['tests', 'notes', 'question', 'subject', 'gap'],
   reviewer: ['question', 'closed', 'findings_omitted'],
   'tech-lead': ['question', 'closed', 'findings_omitted'],
   lead: ['question', 'target'],
@@ -311,6 +311,7 @@ const DETAIL_RULES = {
   decision: [(v) => LEAD_DECISIONS.includes(v), `is one of ${LEAD_DECISIONS.join(', ')}`],
   tests: [(v) => Array.isArray(v) && v.every((t) => plain(t) && Object.keys(t).length === 2 && nonempty(t.file) && nonempty(t.title)), 'is a list of {file, title} with nonempty strings'],
   notes: [nonempty, 'is a nonempty string'],
+  gap: [nonempty, 'is a nonempty string'],
   question: [nonempty, 'is a nonempty string'],
   target: [(v) => ['builder', 'planner'].includes(v), 'is one of builder, planner'],
   requirements: [(v) => Array.isArray(v) && v.length > 0 && v.every((r) => plain(r) && Object.keys(r).length === 3 && nonempty(r.requirement) && REQUIREMENT_STATUSES.includes(r.status) && nonempty(r.evidence)), 'is a nonempty list of {requirement, status, evidence}'],

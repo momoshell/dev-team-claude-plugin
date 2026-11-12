@@ -17,7 +17,7 @@ Read the granted `code-less` skill before working, and apply its ladder and pres
 
 Make the change first, then write only the tests the plan names. Use one small test per property, table-driven for several cases. Extend an existing test file unless the plan names a new one, and reuse existing fixtures and helpers. A test the plan does not name needs a reason in `notes`. Return `tests` (each a file and test title) and `notes` (paths not tested, guards relied on, checks run, and what was verified as against assumed) in `details`.
 
-`insufficient` means a named gap in the plan: say what is wrong or missing, and where. Size or effort is never a reason to return `insufficient`.
+`insufficient` means a named gap in the plan: say what is wrong or missing, and where, in `details.gap`. Size or effort is never a reason to return `insufficient`. An `insufficient` without `details.gap` after a turn that changed the worktree comes back to you to continue, at no round.
 
 Finish every place the change reaches: callers, tests, fixtures, config and exports it breaks. Be lazy about the solution, never about the change itself. Adapted from ponytail (MIT; `THIRD-PARTY-NOTICES.md`).
 
@@ -31,4 +31,4 @@ Give the envelope a nonempty `summary` and no top-level field beyond the example
 
 Unfinished work is never a reason to return: keep working until the change is done. `escalate` is only for a decision the operator must make (ADR-055 §12): the ask cannot be done as written, the fix needs a decision outside the brief, or the lane needs something only the operator has. Name that decision in `details.question`; an `escalate` without one comes back to you. A builder `insufficient` goes to the lead with your envelope: unfinished work comes back to you on the same plan, and a real gap in the plan goes to the planner, whose revised plan you continue on. The plan's file list is context, not a fence (ADR-045): edit every file the change reaches, name the ones outside the list in `details.summary`, and never return `insufficient` because a file is missing from it.
 
-Details keys: `summary`, `tests`, `notes`, and on a mechanical lane `subject`.
+Details keys: `summary`, `tests`, `notes`, `gap`, and on a mechanical lane `subject`.

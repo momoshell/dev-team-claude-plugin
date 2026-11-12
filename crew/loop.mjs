@@ -17,7 +17,7 @@ import { resolveAgents } from './agents.mjs'
 import {
   CHECK_REASONS, FINISH_REVIEW_ROUNDS, commitChanges, openPullRequest, parseStatus, rebaseBranch, runSuite, validGenerated, validTimeout,
 } from './checks.mjs'
-import { HEX_OID, describeError as describe, GIT_STATUS_ARGS } from './lane-core.mjs'
+import { HEX_OID, describeError as describe, GIT_STATUS_ARGS, gitRepoState } from './lane-core.mjs'
 import { proveTests } from './proof.mjs'
 import { TIERS, AGENT_ROLES, runOverrideDefects, validateEnvelope } from './protocols.mjs'
 import { proveRequiredSkills } from './skills-proof.mjs'
@@ -25,6 +25,7 @@ import { proveRequiredSkills } from './skills-proof.mjs'
 export const DEFAULT_ROUNDS = 2
 const MAX_ENVELOPE_REPAIRS = 1
 const MAX_RECHECKS = 3
+const MAX_PROGRESS_TURNS = 6
 const PROOF_UNMEASURED = '- proof: unmeasured'
 export const LOOP_REASONS = Object.freeze([
   ...CHECK_REASONS, 'unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'authentication_failed', 'lead-escalated', 'lead-unavailable',
@@ -193,10 +194,11 @@ export async function runLoop(spec, deps = {}) {
     resolveAgents, mkdir, readFile, stat, realpath, writeFile, proveTests, runSuite, commitChanges, rebaseBranch, openPullRequest,
     run: runSuite,
     now: Date.now,
+    repoState: gitRepoState,
     journal: async (row) => appendFile(join(spec.taskDir, 'journal.jsonl'), `${JSON.stringify(row)}\n`),
     ...deps,
   }
-  const seams = ['runSeat', 'resolveAgents', 'mkdir', 'readFile', 'stat', 'realpath', 'writeFile', 'journal', 'proveTests', 'runSuite', 'commitChanges', 'rebaseBranch', 'openPullRequest', 'run', 'now']
+  const seams = ['runSeat', 'resolveAgents', 'mkdir', 'readFile', 'stat', 'realpath', 'writeFile', 'journal', 'proveTests', 'runSuite', 'commitChanges', 'rebaseBranch', 'openPullRequest', 'run', 'now', 'repoState']
   if (!seams.every((name) => typeof d[name] === 'function')) return early('invalid-input')
   let resolved
   try { resolved = d.resolveAgents(spec.tier, undefined, spec.roster?.snapshot ?? spec.roster?.overrides) } catch { return early('seat-unmeasured') }
@@ -207,6 +209,7 @@ export async function runLoop(spec, deps = {}) {
   if (!Object.values(seats).every(bounded)) return early('invalid-input')
 
   const { cwd } = spec
+  const fingerprint = async () => { try { const s = await d.repoState(cwd); return typeof s === 'string' ? s : null } catch { return null } }
   const { journal } = d
   const rounds = { planner: 0, builder: 0, reviewer: 0, 'tech-lead': 0, lead: 0 }
   const phases = ['build', 'review', 'recheck']
@@ -218,6 +221,7 @@ export async function runLoop(spec, deps = {}) {
   const last = {}
   const context = new AsyncLocalStorage()
   let turn = isFinish ? fin.turnOffset : 0
+  let progressTurns = 0
   let tier = spec.tier
   let testsRequired = isFinish || tier !== 'mechanical'
   let rebasedHead = null
@@ -347,7 +351,7 @@ export async function runLoop(spec, deps = {}) {
     if (role === 'reviewer') enterPhase('review')
     let given = feedback
     for (;;) {
-      let held
+      let held, progressed = false
       if (!free && rounds[role] >= (seats[role].rounds ?? DEFAULT_ROUNDS)) {
         held = { reason: 'round-bound', envelope: null }
       } else {
@@ -385,6 +389,7 @@ export async function runLoop(spec, deps = {}) {
           return { failure, parsed, raw, parseError, recording, checked, turnError, routed, providerKind, method }
         }
         const observe = (a) => emit('envelope', { role, id, returnPath, parsed: a.parsed, defects: a.checked.defects, error: a.failure?.error ?? null, turnError: a.turnError })
+        const before = role === 'builder' ? await fingerprint() : null
         const attempts = [await attempt(request)]
         let latest = attempts[0], rerun = false, repairs = 0, asked = request
         for (;;) {
@@ -420,6 +425,10 @@ export async function runLoop(spec, deps = {}) {
         if (!failure && !valid) failure = { reason: 'envelope-refused', defects: checked.defects }
         if (failure) return hold ? { held: { ...failure, envelope: null } } : { halt: await stop(role === 'lead' && failure.reason !== 'authentication_failed' ? 'lead-refused' : failure.reason, { role, id, ...failure }) }
         last[role] = checked.envelope
+        if (role === 'builder') {
+          const after = await fingerprint()
+          progressed = before !== null && after !== null && before !== after
+        }
         if (hold && checked.envelope.status !== 'done') return { held: { reason: checked.envelope.status, envelope: checked.envelope } }
         // ADR-055 §12: a questionless escalation returns to the same seat, including the lead.
         if (role === 'lead') {
@@ -438,6 +447,15 @@ export async function runLoop(spec, deps = {}) {
         held = { reason: checked.envelope.status, envelope: checked.envelope }
       }
       if (hold) return { held }
+      // ADR-055 §12 (#2279): progress without a named gap continues without spending a round.
+      if (role === 'builder' && held.envelope?.status === 'insufficient' && !held.envelope.details.gap && progressed
+        && !singleTurn && (isFinish || tier !== 'mechanical') && progressTurns < MAX_PROGRESS_TURNS) {
+        progressTurns += 1
+        await emit('builder-continue', { id: held.envelope.id, progressTurns })
+        feedback = [{ id: 'builder-continue', summary: 'Your insufficient names no plan gap in details.gap and your turn changed the worktree: continue the same plan until its tasks are done, or return insufficient naming the gap in details.gap.' }, ...given]
+        free = true
+        continue
+      }
       // ADR-055 §12: a finish escalation with a question reaches the operator; mechanical repair returns still route to the lead or restart.
       if (singleTurn && !(role === 'builder' && !isFinish && tier === 'mechanical' && held.envelope && ['insufficient', 'escalate'].includes(held.envelope.status))) {
         if (held.envelope?.status === 'escalate' && text(held.envelope.details?.question)) return { halt: await stop('seat-escalated', { role, reason: 'escalate', envelope: held.envelope, question: held.envelope.details.question }) }
@@ -473,7 +491,7 @@ export async function runLoop(spec, deps = {}) {
           continue
         }
       }
-      const decided = await consultLead(role, held, given)
+      const decided = await consultLead(role, held, given, progressed)
       if (decided.halt) return decided
       if (decided.decision === 'accept') return { envelope: held.envelope }
       if (!isFinish && role === 'builder' && decided.target === 'planner') {
@@ -497,7 +515,7 @@ export async function runLoop(spec, deps = {}) {
     }
   }
   // accept releases only a schema-valid envelope the seat itself returned, except a builder insufficient that needs routing.
-  const consultLead = async (role, held, feedback) => {
+  const consultLead = async (role, held, feedback, progressed) => {
     if (!seats.lead) return { halt: await stop('lead-unavailable', { role, ...held }) }
     for (;;) {
       const lastConsult = rounds.lead + 1 >= (seats.lead.rounds ?? DEFAULT_ROUNDS)
@@ -515,6 +533,11 @@ export async function runLoop(spec, deps = {}) {
         continue
       }
       if (decision === 'accept' && !held.envelope) return { decision: 'bounce', target: role, summary: asked.envelope.summary }
+      if (decision === 'bounce' && target === 'builder' && role === 'builder' && progressed && progressTurns < MAX_PROGRESS_TURNS) {
+        rounds.lead = Math.max(0, rounds.lead - 1)
+        progressTurns += 1
+        await emit('lead-bound-refund', { id: held.envelope?.id, progressTurns })
+      }
       return { decision, target, summary: asked.envelope.summary }
     }
   }

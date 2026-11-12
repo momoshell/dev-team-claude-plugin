@@ -577,6 +577,62 @@ test('a builder insufficient on build and judge goes to the lead with its envelo
   }
 })
 
+test('a builder insufficient that names no gap and changed the worktree continues on the same plan without a lead turn or a round (#2279)', async () => {
+  for (const mode of ['changed', 'gap', 'unchanged', 'unmeasured', 'throws']) {
+    let builds = 0, state = 0
+    const f = fakes({ bounds: { builder: 1 }, deps: { repoState: () => {
+      if (mode === 'throws') throw new Error('unmeasured')
+      return mode === 'unmeasured' ? null : mode === 'unchanged' ? 'same' : String(state++)
+    } }, edit: (v) => {
+      if (v.role === 'builder' && ++builds === 1) return { ...v, status: 'insufficient', details: { ...v.details, ...(mode === 'gap' ? { gap: 'Missing criterion' } : {}) } }
+      return v
+    } })
+    const result = await f.go()
+    const builders = f.requests.filter((r) => r.role === 'builder')
+    if (mode === 'changed') {
+      assert.equal(result.status, 'done')
+      assert.equal(builders.length, 2)
+      assert.equal(builders[1].planPath, builders[0].planPath)
+      assert.equal(builders[1].feedback[0].id, 'builder-continue')
+      assert.equal(f.requests.filter((r) => r.role === 'lead').length, 0)
+      assert.equal(f.rows.filter((r) => r.event === 'builder-continue').length, 1)
+    } else {
+      assert.equal(result.reason, 'lead-escalated', mode)
+      const lead = f.requests.find((r) => r.role === 'lead')
+      assert.equal(lead.feedback[0].held.status, 'insufficient', mode)
+      if (mode === 'gap') assert.equal(lead.feedback[0].held.details.gap, 'Missing criterion')
+    }
+  }
+})
+
+test('builder continuations are capped per lane, then a no-gap insufficient goes to the lead (#2279)', async () => {
+  let builds = 0, state = 0
+  const f = fakes({ bounds: { builder: 1 }, deps: { repoState: () => String(state++) }, edit: (v) => {
+    if (v.role === 'builder') return { ...v, status: 'insufficient', details: { ...v.details, summary: `partial ${++builds}` } }
+    return v
+  } })
+  assert.equal((await f.go()).reason, 'lead-escalated')
+  assert.deepEqual(f.requests.map((r) => r.role), ['planner', ...Array(7).fill('builder'), 'lead'])
+  assert.deepEqual(f.rows.filter((r) => r.event === 'builder-continue').map((r) => r.progressTurns), [1, 2, 3, 4, 5, 6])
+})
+
+test('a lead bounce to a builder whose turn changed the worktree does not spend the lead bound (#2279)', async () => {
+  for (const changed of [true, false]) {
+    let builds = 0, state = 0
+    const f = fakes({ bounds: { lead: 1 }, lead: 'bounce', deps: { repoState: () => changed ? String(state++) : 'same' }, edit: (v) => {
+      if (v.role === 'builder' && ++builds <= 3) return { ...v, status: 'escalate', details: { ...v.details, question: `Question ${builds}?` } }
+      return v
+    } })
+    const result = await f.go()
+    assert.equal(result.status, changed ? 'done' : 'stopped')
+    if (!changed) assert.equal(result.reason, 'lead-escalated')
+    assert.equal(f.requests.filter((r) => r.role === 'lead').length, changed ? 3 : 1)
+    assert.equal(f.rows.filter((r) => r.event === 'lead-bound-refund').length, changed ? 3 : 0)
+    assert.equal(builds, changed ? 4 : 2)
+    if (changed) assert.ok(f.seen.publish)
+  }
+})
+
 // MUTATION: restore round-bound at the spent-lead stop.
 test("the lead's last consult is marked last, and a spent lead bound stops for the operator with a question, never round-bound", async () => {
   const later = fakes({ review: 10, bounds: { builder: 1, reviewer: 10 }, lead: 'bounce', edit: (v) => {

@@ -5,7 +5,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { ARMS, CHECKOUT, CORPUS_DIR, createOutDir, parseCli, validateArms, writeDiff } from './replay-common.mjs'
+import { ARMS, CHECKOUT, CORPUS_DIR, addedLines, createOutDir, parseCli, validateArms, writeDiff } from './replay-common.mjs'
 import { openMemory, renderSection } from '../crew/memory.mjs'
 import { parseAgent } from '../crew/protocols.mjs'
 import { runBuilder } from './replay-builder.mjs'
@@ -797,4 +797,26 @@ test('writeDiff captures staged edits, staged additions and unstaged edits, and 
   const patch = readFileSync(file, 'utf8')
   for (const needle of ['a-staged', 'staged-new', 'b-unstaged', 'untracked']) assert(patch.includes(needle), needle)
   assert.throws(() => writeDiff(scratch, join(scratch, 'never.patch')), /git .* failed/)
+})
+
+test('the builder replay CLI has no build-first mode', () => {
+  const run = spawnSync(process.execPath, [join(CHECKOUT, 'bench/replay-builder.mjs'), '--build-first'], { encoding: 'utf8' })
+  assert.equal(run.status, 2)
+  assert.match(run.stderr, /unknown argument --build-first/)
+})
+
+// MUTATION: count test additions as source additions.
+test('added lines distinguish source, tests and binary', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'added-'))
+  const git = (...args) => { const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr) }
+  try {
+    git('init', '-q'); git('-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '--allow-empty', '-qm', 'base')
+    mkdirSync(join(dir, 'test'))
+    writeFileSync(join(dir, 'source.mjs'), 'one\ntwo\n')
+    writeFileSync(join(dir, 'test', 'x.test.mjs'), 'one\n')
+    writeFileSync(join(dir, 'binary'), Buffer.from([0, 1]))
+    // MUTATION: truncate the filename at its first tab when parsing numstat.
+    writeFileSync(join(dir, 'prefix\tcase.test.mjs'), 'one\ntwo\nthree\n')
+    assert.deepEqual(addedLines(dir), { source: 2, test: 4, binary: 1 })
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })

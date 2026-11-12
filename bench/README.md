@@ -19,7 +19,7 @@ yours, outside the repo. What past runs decided is under "Results so far" below.
   unavailable, `plannerPromptMissing` in the manifest gives the reason; planner replay refuses
   before creating a worktree, while builder replay remains available. An absent prompt also refuses.
 - `replay-builder.mjs`, `replay-planner.mjs`, `replay-common.mjs`, `blind-review.mjs`.
-- `replay.test.mjs`, `replay-build-first.test.mjs`, `blind-review.test.mjs` — `node --test bench/*.test.mjs`; no models or network.
+- `replay.test.mjs`, `blind-review.test.mjs` — `node --test bench/*.test.mjs`; no models or network.
 
 ## Cell and arms
 
@@ -83,16 +83,9 @@ Makes a detached worktree at the lane's base under `<out>/tree`, gives the seat 
 and planner return, runs the first builder prompt and the touched `*.test.mjs` files. It writes
 `result.json`, `diff.patch` (including added files) and `session.jsonl`, then removes the worktree.
 
-`--charter <file>` replaces the builder charter. `--build-first` requires `--charter` and withholds
-the gate and its planner fields. It supports `node --test` only. The recorded plan may still quote
-old mutation anchors.
-
-`result.json.variant` is `gate` or `build-first`. Both record `added.source`, `added.test` and
-`added.binary`. Build-first records `bound.of`, `bound.proven` and a row per acceptance id with
-base, build and mutant states. Its own mutant leg remains a bench measurement. A proven row needs
-the same test name and source location in all three phases. Null states name why they are unproven.
-A failed test needs a test-file stack frame to count as a body failure; some asynchronous body
-failures therefore remain unproven.
+`--charter <file>` replaces the builder charter. `result.json` records `added.source`, `added.test`
+and `added.binary`. The build-first mode that replayed ADR-053 was removed (#2323); its measurement
+is recorded in [ADR-055](../docs/adr/adr-055-planner-defines-the-work.md).
 
 `error` is null for a clean run, otherwise it names failed stages. `targeted` records touched test
 results; `usage`, `wallS`, `armRows` and `advisor` describe the seat; `changed` and `diff` size the

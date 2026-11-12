@@ -212,7 +212,7 @@ export async function runReplay({ kind, options, deps, body }) {
 
 export function removeDir(dir) { rmSync(dir, { recursive: true, force: true }) }
 
-export function parseCli(argv, { allowMemory = false, allowCharter = false, allowBuildFirst = false } = {}) {
+export function parseCli(argv, { allowMemory = false, allowCharter = false } = {}) {
   const opts = { arms: null }
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]
@@ -221,7 +221,6 @@ export function parseCli(argv, { allowMemory = false, allowCharter = false, allo
     else if (flag === '--cell') opts.cell = value()
     else if (flag === '--arms') { const raw = value(); opts.arms = raw === '' ? [] : raw.split(',') }
     else if (flag === '--out') opts.out = value()
-    else if (flag === '--build-first' && allowBuildFirst) opts.buildFirst = true
     else if (flag === '--memory' && allowMemory) {
       if (!argv[i + 1] || argv[i + 1].startsWith('--')) throw new Error('--memory needs a value')
       opts.memory = value()
@@ -234,7 +233,7 @@ export function parseCli(argv, { allowMemory = false, allowCharter = false, allo
   }
   for (const key of ['lane', 'cell', 'out']) if (!opts[key]) throw new Error(`--${key} is required`)
   if (opts.arms === null) throw new Error('--arms is required (use --arms "" for none)')
-  return { lane: opts.lane, cellFile: opts.cell, arms: opts.arms, out: opts.out, ...(opts.memory !== undefined ? { memory: opts.memory } : {}), ...(opts.charter !== undefined ? { charter: opts.charter } : {}), ...(opts.buildFirst ? { buildFirst: true } : {}) }
+  return { lane: opts.lane, cellFile: opts.cell, arms: opts.arms, out: opts.out, ...(opts.memory !== undefined ? { memory: opts.memory } : {}), ...(opts.charter !== undefined ? { charter: opts.charter } : {}) }
 }
 
 export function readCellFile(file) {
@@ -243,7 +242,7 @@ export function readCellFile(file) {
 
 // Default run preparation: a detached worktree at the lane's base under out/tree, a task dir
 // under out/task, the rewritten first prompt, and (builder only) the recorded plan and gate.
-export function prepareLane({ role, lane, outDir, onCleanup, charterBody, buildFirst = false, deps = {} }) {
+export function prepareLane({ role, lane, outDir, onCleanup, charterBody, deps = {} }) {
   const { dir, manifest } = loadCorpus(lane, deps.corpusDir)
   if (role === 'planner') {
     if (typeof manifest.plannerPromptMissing === 'string' && manifest.plannerPromptMissing.trim()) throw new Error(`missing first planner prompt: ${manifest.plannerPromptMissing}`)
@@ -263,7 +262,7 @@ export function prepareLane({ role, lane, outDir, onCleanup, charterBody, buildF
   writeJournalStart(task, deps.sleepMs ?? sleepMs)
   let planDetails = null
   if (role === 'builder') {
-    for (const name of ['plan.md', ...(buildFirst ? [] : ['gate.mjs']), 'planner-1.json', 'lean.json']) writeFileSync(join(task, name), rewrite(readFileSync(join(dir, name), 'utf8')))
+    for (const name of ['plan.md', 'gate.mjs', 'planner-1.json', 'lean.json']) writeFileSync(join(task, name), rewrite(readFileSync(join(dir, name), 'utf8')))
     const file = join(task, 'planner-1.json')
     const ret = JSON.parse(readFileSync(file, 'utf8'))
     ret.details ??= {}
@@ -271,16 +270,10 @@ export function prepareLane({ role, lane, outDir, onCleanup, charterBody, buildF
       ret.details.files_in_scope ??= SCOPE_BACKFILL[lane]
       ret.details.validation_lane ??= `node --test ${SCOPE_BACKFILL[lane].filter((f) => f.endsWith('.test.mjs')).join(' ')}`
     }
-    if (buildFirst) {
-      delete ret.details.gate_cmd
-      delete ret.details.gate_path
-      delete ret.details.mutations
-    }
     writeFileSync(file, JSON.stringify(ret, null, 2))
     planDetails = ret.details
   }
-  let prompt = rewrite(recordedPrompt ?? readFileSync(join(dir, `${role}-prompt.txt`), 'utf8'))
-  if (role === 'builder' && buildFirst) prompt = prompt.replace(/^Gate (path|command):.*\n?/gm, '')
+  const prompt = rewrite(recordedPrompt ?? readFileSync(join(dir, `${role}-prompt.txt`), 'utf8'))
   const returnName = prompt.match(new RegExp(`${role}-\\d+\\.json`))?.[0]
   if (!returnName) throw new Error(`the ${role} prompt for ${lane} names no return file`)
   return { prompt, briefText: readFileSync(join(dir, 'brief.md'), 'utf8'), cwd: tree, taskDir: task, returnName, plan: planDetails }

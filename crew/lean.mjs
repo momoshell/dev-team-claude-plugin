@@ -168,7 +168,7 @@ export async function runLean(spec, deps = {}) {
   const runSeat = async (request, { emit }) => {
     const { definition, source, charters, memory } = definitionFor(request, request.tier ?? spec.tier, d, spec.roster?.snapshot ?? spec.roster?.overrides)
     const { role, id } = request
-    let recording = { definition, recorded: null, cwd: spec.cwd }
+    let recording = { definition }
     try {
     let sectionText = ''
     if (!request.repair) {
@@ -194,8 +194,8 @@ export async function runLean(spec, deps = {}) {
       // 'wx': a turn id is issued once, so an existing recording is never appended to or reused.
       const header = `${JSON.stringify({ type: 'prompt', text: prompt })}\n`
       d.writeFileSync(sessionFile, header, { flag: 'wx' })
-      // runAcpSeat swallows a failed append; the first one is kept and fails the turn afterwards. Every
-      // relayed line is also kept in memory: the skill proof reads that copy, which the seat cannot rewrite.
+      // runAcpSeat swallows a failed append; the first one is kept and fails the turn afterwards.
+      // The relayed copy serves the muse integrity check and the tool-call count.
       let recordError = null
       const relayed = []
       const guardedAppend = (...args) => {
@@ -223,7 +223,7 @@ export async function runLean(spec, deps = {}) {
         }
         turnError = error
       }
-      // Skill proof trusts only the relayed copy, and only while the session file still matches it.
+      // Compare the file with the relayed copy for the muse integrity check.
       const recorded = relayed.join('')
       let intact = false
       try { intact = d.readFileSync(sessionFile, 'utf8') === header + recorded } catch { /* unreadable is not intact */ }
@@ -234,7 +234,7 @@ export async function runLean(spec, deps = {}) {
           if (update?.sessionUpdate === 'tool_call' && typeof update.toolCallId === 'string') toolIds.add(update.toolCallId)
         } catch { /* skip malformed session lines */ }
       }
-      recording = { definition, recorded: !failed && intact ? recorded : null, cwd: spec.cwd, museSkillsRoot: turn?.museSkillsRoot, stopReason: turn?.stopReason ?? null, usage: turn?.usage ?? null, ...(typeof turn?.usage_reason === 'string' ? { usage_reason: turn.usage_reason } : {}), toolCalls: recordError ? null : toolIds.size }
+      recording = { definition, stopReason: turn?.stopReason ?? null, usage: turn?.usage ?? null, ...(typeof turn?.usage_reason === 'string' ? { usage_reason: turn.usage_reason } : {}), toolCalls: recordError ? null : toolIds.size }
       if (checkRecords) {
         const after = fingerprint()
         if (typeof after !== 'string') throw violation('acp-seat-record-unmeasured')
@@ -257,7 +257,7 @@ export async function runLean(spec, deps = {}) {
         // The refused attempt's envelope was never earned: the replacement must write its own or leave none.
         if (request.returnPath) d.rmSync(request.returnPath, { force: true })
         attempts += 1
-        recording = { definition, recorded: null, cwd: spec.cwd }
+        recording = { definition }
         continue
       }
       return recording

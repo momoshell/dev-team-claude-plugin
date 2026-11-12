@@ -555,7 +555,7 @@ export async function runLoop(spec, deps = {}) {
       const lastConsult = rounds.lead + 1 >= (seats.lead.rounds ?? DEFAULT_ROUNDS)
       const asked = await stage('lead', () => seatTurn('lead', [{ role, reason: held.reason, envelope: held.envelope ?? last[role] ?? null, held: held.envelope ?? null, feedback, last: lastConsult, targets: isFinish ? ['builder'] : ['builder', 'planner'] }]))
       if (asked.halt) return asked
-      const { decision, target, question } = asked.envelope.details
+      const { decision, target, question, instructions } = asked.envelope.details
       if (decision === 'escalate') return { halt: await stop('lead-escalated', { role, ...held, question }) }
       if (decision === 'accept' && !isFinish && tier !== 'mechanical' && role === 'builder' && held.reason === 'insufficient') {
         feedback = [{ id: 'accept-insufficient', summary: 'Route the builder insufficient to builder or planner, or escalate with a question.' }, ...feedback]
@@ -566,13 +566,14 @@ export async function runLoop(spec, deps = {}) {
         feedback = [{ id: 'finish-no-planner', summary: 'A finish run has no planner: bounce to builder with instructions it can apply, or escalate naming the plan gap in details.question.' }, ...feedback]
         continue
       }
-      if (decision === 'accept' && !held.envelope) return { decision: 'bounce', target: role, summary: asked.envelope.summary }
+      // ADR-055 §7: pass the lead's instruction to the bounced seat, falling back to its summary.
+      if (decision === 'accept' && !held.envelope) return { decision: 'bounce', target: role, summary: instructions ?? asked.envelope.summary }
       if (decision === 'bounce' && target === 'builder' && role === 'builder' && progressed && progressTurns < MAX_PROGRESS_TURNS) {
         rounds.lead = Math.max(0, rounds.lead - 1)
         progressTurns += 1
         await emit('lead-bound-refund', { id: held.envelope?.id, progressTurns })
       }
-      return { decision, target, summary: asked.envelope.summary }
+      return { decision, target, summary: instructions ?? asked.envelope.summary }
     }
   }
   const replan = async (envelope, lead) => {

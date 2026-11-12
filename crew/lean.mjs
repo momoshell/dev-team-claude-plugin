@@ -63,7 +63,7 @@ function exampleEnvelope(role, id, tier) {
     },
     reviewer: review,
     'tech-lead': review,
-    lead: { decision: 'bounce', target: 'builder' },
+    lead: { decision: 'bounce', target: 'builder', instructions: '<what the bounced seat must do>' },
   }[role]
   return { role, id, status: 'done', summary: '<one line>', details }
 }

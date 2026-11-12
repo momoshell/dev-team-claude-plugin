@@ -381,6 +381,17 @@ test('P2 accepts every role and status, returning the input untouched', () => {
   for (const verdict of REVIEW_VERDICTS) for (const role of ['reviewer', 'tech-lead']) assert.deepEqual(validateEnvelope(role, review(verdict === 'changes-needed' ? [finding({ severity: 'must-fix', trigger: 'input' })] : [], verdict, role)).defects, [])
 })
 
+test('lead details accept a nonempty instructions field for the bounced seat', () => {
+  for (const target of ['builder', 'planner']) {
+    const value = envelope('lead', { details: { decision: 'bounce', target, instructions: 'fix R1' } })
+    assert.deepEqual(validateEnvelope('lead', value).defects, [])
+    for (const instructions of ['', 3]) {
+      value.details.instructions = instructions
+      assert.deepEqual(validateEnvelope('lead', value).defects, ['details.instructions is a nonempty string'])
+    }
+  }
+})
+
 test('P2 planner details require tests, a list of {file, title}, except on an archived return', () => {
   const value = envelope('planner')
   delete value.details.tests

@@ -259,6 +259,7 @@ Code holds the rule:
   envelope. The lead routes it to `builder` (unfinished work, same plan), `planner` (a real gap) or `escalate`
   (a §12 case only). A mechanical lane keeps the §7 restart. Lanes b1493, b1502 and b1504 stopped `round-bound`
   after builder `insufficient` returns.
+- Amended 2026-11-12, operator decision (#2279): a builder `insufficient` without `details.gap` after a worktree change continues on the same plan without a lead consult or builder round. A named gap, unchanged or unmeasured worktree, or spent progress cap routes to the lead; held turns, single turns and non-finish mechanical lanes do not continue this way. A lead bounce to the builder after a changed builder turn refunds the lead round. Continuations and refunds share a per-lane cap of 6, after which consults spend the bound. In the replay, 1 of 15 terra returns named no gap. Reusing the live builder session is out of scope.
 - Amended 2026-11-03 (b1500, b1509): lead consults have separate full bounds for build, review and moved-head
   recheck. On standard build and judge lanes, the first reviewer turn forced only by a moved-head rebase spends no
   round; on judge the tech-lead turn is free too. Finish recheck reviews still spend a round under the finish review cap.

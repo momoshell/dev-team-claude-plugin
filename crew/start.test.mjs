@@ -1571,10 +1571,11 @@ test('a build-lane planner bounce after builder edits replans through a real mus
             binaries: { muse: process.execPath }, deps: { ...input.deps, clientFactory: () => client } })
         }
         const turn = await answered(input)
-        if (role === 'lead') {
+        if (role === 'lead' || role === 'builder') {
           const path = /^Return path: (.+)$/m.exec(input.prompt)[1]
           const value = JSON.parse(readFileSync(path, 'utf8'))
-          value.details = { decision: 'bounce', target: 'planner' }
+          if (role === 'lead') value.details = { decision: 'bounce', target: 'planner' }
+          else if (value.status === 'insufficient') value.details.gap = 'The plan needs revision'
           writeFileSync(path, JSON.stringify(value))
         }
         return turn

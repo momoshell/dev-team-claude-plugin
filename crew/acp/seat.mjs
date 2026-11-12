@@ -1,7 +1,6 @@
 import {
-  accessSync, appendFileSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
+  accessSync, appendFileSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs'
-import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { basename, delimiter, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
@@ -10,7 +9,7 @@ import { ACP_POLL_MS, ACP_UPDATE_KINDS, acpClient } from '../acp-client.mjs'
 import { permissionHandler, readOnlyCommand } from '../acp-permission.mjs'
 import { armGrants, PI_AGENT_DIR_ENV, refuse } from './grants.mjs'
 import { AGENT_ROLES, validateEnvelope } from '../protocols.mjs'
-import { GIT_STATUS_ARGS } from '../lane-core.mjs'
+import { gitRepoState } from '../lane-core.mjs'
 import * as claudeAdapter from '../adapters/adapter-claude.mjs'
 import * as piAdapter from '../adapters/adapter-pi.mjs'
 import * as museAdapter from '../adapters/adapter-muse.mjs'
@@ -35,39 +34,6 @@ const READ_ONLY_HOOK = fileURLToPath(new URL('../adapters/claude-readonly.mjs', 
 const SKILLS_ROOT = fileURLToPath(new URL('../../skills', import.meta.url))
 // A plain string replaces claude-agent-acp's claude_code preset; the role prompt arrives in the turn itself.
 const LEAN_CLAUDE_SYSTEM_PROMPT = 'You are a coding agent. Work in the current directory with the tools you have. Prefer short command output: use quiet or dot reporters and tail long logs. Be concise.'
-
-// Limits: ignored files, outside writes (including the main repo's .git), restored edits,
-// index-only changes and writes after unproven teardown escape detection; directories are status-only.
-function gitRepoState(cwd) {
-  try {
-    const result = spawnSync('git', [...GIT_STATUS_ARGS], { cwd, encoding: 'utf8', timeout: 10000, maxBuffer: 64 * 1024 * 1024 })
-    if (result.status !== 0 || typeof result.stdout !== 'string') return null
-    if (result.stdout === '') return ''
-    const root = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8', timeout: 10000, maxBuffer: 64 * 1024 * 1024 })
-    if (root.status !== 0 || typeof root.stdout !== 'string' || !root.stdout.endsWith('\n')) return null
-    const fields = result.stdout.split('\0')
-    const entries = []
-    for (let i = 0; i < fields.length; i++) {
-      let entry = fields[i]
-      if (!entry) continue
-      const path = join(root.stdout.slice(0, -1), entry.slice(3))
-      if (entry[0] === 'R' || entry[0] === 'C') entry += ` <- ${fields[++i]}`
-      let digest
-      try {
-        const stat = lstatSync(path)
-        if (stat.isFile()) digest = `sha256:${createHash('sha256').update(readFileSync(path)).digest('hex')}`
-        else if (stat.isSymbolicLink()) digest = `link:${readlinkSync(path)}`
-        else if (stat.isDirectory()) digest = 'dir'
-        else return null
-      } catch (error) {
-        if (error?.code !== 'ENOENT') return null
-        digest = 'missing'
-      }
-      entries.push(`${entry} ${digest}\0`)
-    }
-    return entries.join('')
-  } catch { return null }
-}
 
 function resolveBinary(label, explicit, name, env) {
   const executable = (path) => { try { accessSync(path, fsConstants.X_OK); return statSync(path).isFile() } catch { return false } }

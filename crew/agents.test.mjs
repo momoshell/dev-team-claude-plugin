@@ -157,7 +157,7 @@ test('lean charter declarations match the P2 schemas and loop ownership', () => 
       .map((defect) => /^details\.([a-z_]+) is required$/.exec(defect)?.[1]).filter(Boolean)
     assert.ok(detailKeys.length > 0, role)
     if (role === 'builder') {
-      const optional = { tests: [], notes: 'probe', subject: 'fix(crew): probe' }
+      const optional = { tests: [], notes: 'probe', subject: 'fix(crew): probe', gap: 'probe' }
       assert.deepEqual(validateEnvelope(role, { role, id: 'probe', status: 'done', summary: 'probe', details: { summary: 'probe', ...optional } }).defects, [])
       detailKeys.push(...Object.keys(optional))
     }

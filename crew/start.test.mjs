@@ -1029,7 +1029,7 @@ test('a lean seat turn journals its agent, model, effort, distinct tool calls, s
     const role = input.definition.role
     const id = /^Envelope id: (.+)$/m.exec(input.prompt)[1]
     const path = /^Return path: (.+)$/m.exec(input.prompt)[1]
-    for (const [sessionUpdate, toolCallId] of [['tool_call', 'a'], ['tool_call', 'b'], ['tool_call_update', 'a'], ['tool_call', 'a']]) {
+    for (const [sessionUpdate, toolCallId] of [['tool_call', 'a'], ['tool_call', 'b'], ['tool_call_update', 'a'], ['tool_call', 'a'], ['tool_call_update', 'c']]) {
       input.deps.appendFileSync(input.sessionFile, `${JSON.stringify({ sessionId: 's', update: { sessionUpdate, toolCallId, title: 'read', kind: 'read', status: 'in_progress', rawInput: { path: 'file' } } })}\n`, 'utf8')
     }
     input.deps.appendFileSync(input.sessionFile, 'not json\n', 'utf8')
@@ -2110,6 +2110,9 @@ test('a recording append that fails is recorded even when the seat swallowed it'
   const result = await f.go()
   assert.equal(result.status, 'done')
   assert.equal(rows.find((row) => row.event === 'envelope' && row.role === 'planner').turnError.code, EPERM.code)
+  const planner = rows.find((row) => row.event === 'seat-turn' && row.role === 'planner')
+  assert.equal(planner.tool_calls, null)
+  assert.equal(planner.unmeasured.tool_calls, 'turn-failed')
   assert.equal(f.requests.filter((r) => r.definition.role === 'planner').length, 1)
   assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
 })

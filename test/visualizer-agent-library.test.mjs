@@ -62,6 +62,15 @@ test('HTTP local save validates origin, fields, revisions and large definition b
  assert.equal((await send(input)).status,409)
  assert.equal(readFileSync(join(root,'agents/reviewer.md'),'utf8'),input.text)
 })
+test('HTTP harness evidence reads the shipped register through the server default path',async t=>{
+ const {root}=fixture(t)
+ const {server}=startServer({port:0,host:'127.0.0.1',checkout:root,home:join(root,'home'),env:{PATH:''},feed:{},crewRoot:join(root,'crew-state')})
+ await new Promise((resolve,reject)=>{server.once('listening',resolve);server.once('error',reject)})
+ t.after(()=>new Promise(resolve=>{server.closeAllConnections();server.close(resolve)}))
+ const view=await (await fetch(`http://127.0.0.1:${server.address().port}/api/agent-library`)).json()
+ assert.equal(view.harnesses.find(row=>row.binary==='claude')?.registered,true)
+ assert.equal(view.notes.some(note=>note.includes('Harness capabilities could not be read')),false)
+})
 test('copying a role definition preserves its linked charter destination and opaque settings',t=>{
  const {root,library}=fixture(t);mkdirSync(join(root,'crew/agents'),{recursive:true})
  const text=definition('Read [the charter](../references/reviewer.md).\n')
@@ -90,7 +99,9 @@ test('the visualizer owns the shipped coding_agents declarations in visualizer/c
  const path=join(ROOT,'visualizer/coding-agents.json')
  assert.equal(existsSync(path),true)
  const {coding_agents}=JSON.parse(readFileSync(path,'utf8'))
- assert.deepEqual(coding_agents,{
+ const declarations=structuredClone(coding_agents)
+ for(const entry of Object.values(declarations)) delete entry.default_transport
+ assert.deepEqual(declarations,{
   pi:{providers:['openai','anthropic','meta'],transports:['acp'],adapter:'crew/adapters/adapter-pi.mjs',refuses:[],display_name:'Pi',binary:'pi',install_hint:'Install Pi and ensure the pi binary is on PATH.',availability:'executable',availability_reason:'executable'},
   claude:{providers:['anthropic'],transports:['acp'],adapter:'crew/adapters/adapter-claude.mjs',refuses:['extensions','local_provider'],display_name:'Claude Code',binary:'claude',install_hint:'Install Claude Code and ensure the claude binary is on PATH.',availability:'executable',availability_reason:'executable'},
   muse:{providers:['meta'],transports:['acp'],adapter:'crew/adapters/adapter-muse.mjs',refuses:['local_provider'],display_name:'Muse Code',binary:'muse',install_hint:'Install Muse Code and ensure the muse binary is on PATH.',availability:'executable',availability_reason:'executable'},

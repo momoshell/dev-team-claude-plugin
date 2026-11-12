@@ -367,7 +367,17 @@ export async function runLoop(spec, deps = {}) {
           let failure = null
           let parsed = null, parseError = null
           let recording = null, turnError = null, routed = false, providerKind = null, method = null
-          try { recording = await d.runSeat(asked, { emit }) } catch (error) {
+          // P4 measures each attempt separately; ADR-055 §12 (#2279) keeps its own progress comparison.
+          const turnBefore = role === 'builder' ? await fingerprint() : null
+          let started, ended
+          try { started = d.now() } catch {}
+          let turnAfter = null
+          try {
+            try { recording = await d.runSeat(asked, { emit }) } finally {
+              try { ended = d.now() } catch {}
+              turnAfter = role === 'builder' ? await fingerprint() : null
+            }
+          } catch (error) {
             turnError = describe(error)
             providerKind = error?.providerKind
             method = error?.method
@@ -384,6 +394,28 @@ export async function runLoop(spec, deps = {}) {
             try { parsed = JSON.parse(raw) } catch (error) { parseError = error.message; failure = { reason: 'envelope-refused', error: describe(error) } }
           }
           const checked = failure ? { envelope: null, defects: [] } : validateEnvelope(role, parsed, { prior: (role === 'reviewer' ? priorFindings : role === 'tech-lead' ? secondFindings : []).filter((finding) => finding?.severity === 'must-fix').map((finding) => finding.id) })
+          try {
+            const unmeasured = {}, row = { role, id: asked.id }
+            const measure = (field, value, valid, reason) => {
+              row[field] = valid ? value : null
+              if (!valid) unmeasured[field] = reason
+            }
+            const reason = turnError ? 'turn-failed' : 'not-reported'
+            for (const field of ['agent', 'model', 'effort']) {
+              const value = recording?.definition?.[field]
+              measure(field, value, typeof value === 'string', reason)
+            }
+            const calls = recording?.toolCalls, stopReason = recording?.stopReason, usage = recording?.usage
+            measure('tool_calls', calls, Number.isSafeInteger(calls) && calls >= 0, reason)
+            measure('stop_reason', stopReason, typeof stopReason === 'string', reason)
+            measure('usage', usage, usage !== null && typeof usage === 'object' && (Object.getPrototypeOf(usage) === Object.prototype || Object.getPrototypeOf(usage) === null), turnError ? reason : recording?.usage_reason === 'usage-unavailable' ? 'usage-unavailable' : reason)
+            const seconds = (ended - started) / 1000
+            measure('seconds', seconds, typeof started === 'number' && typeof ended === 'number' && Number.isFinite(seconds), 'clock-unmeasured')
+            const status = parsed?.status
+            measure('status', status, ['done', 'insufficient', 'escalate'].includes(status), 'no-return')
+            measure('worktree_changed', turnBefore !== turnAfter, role === 'builder' && turnBefore !== null && turnAfter !== null, role === 'builder' ? 'worktree-unmeasured' : 'not-repo-seat')
+            await emit('seat-turn', { ...row, unmeasured })
+          } catch { /* journal measurements must not affect the turn */ }
           if (!isFinish && tier === 'mechanical' && role === 'builder' && checked.envelope?.status === 'done' && checked.envelope.details && !Object.hasOwn(checked.envelope.details, 'subject')) checked.defects.push('details.subject is required on a mechanical lane for the commit and PR')
           if (role === 'planner' && checked.envelope && checked.defects.length === 0) checked.defects.push(...await artifactDefects(checked.envelope.details))
           return { failure, parsed, raw, parseError, recording, checked, turnError, routed, providerKind, method }

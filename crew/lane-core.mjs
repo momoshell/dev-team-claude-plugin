@@ -3,8 +3,6 @@ import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { lstatSync, readFileSync, readlinkSync, realpathSync } from 'node:fs'
 import { join, sep } from 'node:path'
-import { deriveMembers } from './protocols.mjs'
-export { deriveMembers }
 
 export const LANE = /^[a-z0-9][a-z0-9-]{0,62}$/
 export const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -19,6 +17,7 @@ export function parseJournalRows(text, refuse) {
   }
   return rows
 }
+
 export function within(root, path) {
   try {
     const base = realpathSync(root), real = realpathSync(path)

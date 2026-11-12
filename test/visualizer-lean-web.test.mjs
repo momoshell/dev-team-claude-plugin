@@ -15,6 +15,7 @@ test("journal lines detail every loop event, show a verdict's observation and na
     { event: 'envelope', role: 'builder', parsed: { status: 'insufficient' }, defects: ['missing gap'] },
     { event: 'envelope', role: 'builder', error: { message: 'seat failed' } },
     { event: 'seat-turn', role: 'builder', model: 'model', seconds: 2, tool_calls: 3, stop_reason: 'end_turn', status: 'done', usage: { totalTokens: 42 } },
+    { event: 'seat-turn', role: 'builder', usage: null, unmeasured: { usage: 'not-reported' } },
     { event: 'builder-continue', id: 'a', progressTurns: 1 }, { event: 'lead-bound-refund', id: 'b', progressTurns: 2 },
     { event: 'tier-raised', from: 'build', to: 'judge', reason: 'risk' }, { event: 'roster', tier: 'build', seats: { builder: {} } },
     { event: 'commit', head: 'abc' }, { event: 'finish-ready', status: 'ready', head: 'abc' }, { event: 'finish-decision', choice: 'return' },
@@ -22,10 +23,12 @@ test("journal lines detail every loop event, show a verdict's observation and na
     { at: 1, advisor_consult: {}, role: 'builder' }, { event: 'stage-start' }, { event: 'run-start' },
   ]
   const lines = leanView({}, { rows }).lines
-  assert.ok(lines.slice(0, 13).every((line) => line.detail))
-  assert.match(lines[0].detail, /missing gap/); assert.match(lines[1].detail, /seat failed/); assert.match(lines[11].detail, /Ship it\?/)
-  assert.equal(lines[12].event, 'advisor_consult'); assert.match(lines[12].detail, /builder/)
-  assert.equal(lines[13].detail, ''); assert.equal(lines[14].detail, '')
+  assert.ok(lines.slice(0, 14).every((line) => line.detail))
+  for (const detail of [/model/, /2s/, /3 tool calls/, /end_turn/, /done/, /42 tokens/]) assert.match(lines[2].detail, detail)
+  assert.match(lines[3].detail, /not-reported/)
+  assert.match(lines[0].detail, /missing gap/); assert.match(lines[1].detail, /seat failed/); assert.match(lines[12].detail, /Ship it\?/)
+  assert.equal(lines[13].event, 'advisor_consult'); assert.match(lines[13].detail, /builder/)
+  assert.equal(lines[14].detail, ''); assert.equal(lines[15].detail, '')
 })
 
 test('the task cell drops the lean id fragment, the usage cell shows turn coverage and the detail page names no event inspector', () => {

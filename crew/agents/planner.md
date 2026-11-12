@@ -34,6 +34,8 @@ List criteria that have no machine check, with reasons. Write `None.` as a plain
 
 Write an ordered checklist of the minimal implementation changes and their callers, at most two levels deep. Each task cites its criteria and the test that proves it, or `not machine-checked` when its criteria have no test. The loop reads `tests`, never `plan.md`, to decide whether a test is required. A builder `insufficient` reaches you as feedback; revise the plan, `files_in_scope` and `tests` to close the gap it names. When a revision answers a builder finding that a criterion cannot be met, narrow or drop that criterion rather than add mechanism to keep it.
 
+A `lead-bounce` item in your feedback is the lead's instruction for this turn.
+
 For a `done` envelope, write `summary` as a one-line, present-tense statement of what the PR achieves for its user or system, for example `Lets closeout re-archive a previously archived lane.` Do not report the planning step, a revision, or a plan-file path.
 
 Give the envelope a nonempty `summary` and no top-level field beyond the example's.

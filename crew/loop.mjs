@@ -230,6 +230,7 @@ export async function runLoop(spec, deps = {}) {
   let subject = isFinish ? fin.subject : null
   let planSummary = isFinish ? fin.planSummary : null
   const failures = []
+  const rulings = []
   const repeatsFailure = (failure) => {
     if (failures.some((previous) => isDeepStrictEqual(previous, failure))) return true
     failures.push(failure)
@@ -349,7 +350,7 @@ export async function runLoop(spec, deps = {}) {
   // Non-done returns route under ADR-055 §12; an exhausted bound goes to the lead, unless singleTurn or the lead's own bound stops it.
   const seatTurn = async (role, feedback = [], { singleTurn = false, free = false, hold = false, reserveReview = null, deltaReview = null } = {}) => {
     if (role === 'reviewer') enterPhase('review')
-    let given = feedback, rulings = []
+    let given = feedback
     for (;;) {
       let held, progressed = false
       if (!free && rounds[role] >= (seats[role].rounds ?? DEFAULT_ROUNDS)) {
@@ -361,7 +362,7 @@ export async function runLoop(spec, deps = {}) {
         if (role === 'lead') feedback = feedback.map((item) => Object.hasOwn(item, 'last') ? { ...item, last: rounds.lead >= (seats.lead.rounds ?? DEFAULT_ROUNDS) } : item)
         const id = `${spec.id}.${role}.${turn}`
         const returnPath = join(spec.taskDir, `${role}-${turn}.json`)
-        const request = { role, tier, seat: seats[role], id, returnPath, brief: spec.brief, planPath, feedback, ...(['builder', 'reviewer', 'tech-lead'].includes(role) ? { filesInScope: filesInScope === null ? null : [...filesInScope] } : {}), ...(['reviewer', 'tech-lead'].includes(role) ? { changedPaths, builderReport } : {}), ...(reserveReview ? { reserveReview } : {}), ...(deltaReview ? { deltaReview } : {}) }
+        const request = { role, tier, seat: seats[role], id, returnPath, brief: spec.brief, planPath, feedback: role === 'builder' ? [...feedback, ...rulings] : feedback, ...(['builder', 'reviewer', 'tech-lead'].includes(role) ? { filesInScope: filesInScope === null ? null : [...filesInScope] } : {}), ...(['reviewer', 'tech-lead'].includes(role) ? { changedPaths, builderReport } : {}), ...(reserveReview ? { reserveReview } : {}), ...(deltaReview ? { deltaReview } : {}) }
         // One attempt: run the seat, then read the issued path back, parse it and validate it in full.
         const attempt = async (asked) => {
           let failure = null
@@ -484,7 +485,7 @@ export async function runLoop(spec, deps = {}) {
         && !singleTurn && (isFinish || tier !== 'mechanical') && progressTurns < MAX_PROGRESS_TURNS) {
         progressTurns += 1
         await emit('builder-continue', { id: held.envelope.id, progressTurns })
-        feedback = [{ id: 'builder-continue', summary: 'Your insufficient names no plan gap in details.gap and your turn changed the worktree: continue the same plan until its tasks are done, or return insufficient naming the gap in details.gap.' }, ...rulings, ...given]
+        feedback = [{ id: 'builder-continue', summary: 'Your insufficient names no plan gap in details.gap and your turn changed the worktree: continue the same plan until its tasks are done, or return insufficient naming the gap in details.gap.' }, ...given]
         free = true
         continue
       }
@@ -510,14 +511,14 @@ export async function runLoop(spec, deps = {}) {
         const failure = { role, status, details }
         if (repeatsFailure(failure)) return { halt: await stop('no-progress', failure) }
         if (status === 'escalate' && !text(details.question)) {
-          feedback = [{ id: 'escalate-no-question', summary: 'Name the decision needed from the operator in details.question.' }, ...rulings, ...given]
+          feedback = [{ id: 'escalate-no-question', summary: 'Name the decision needed from the operator in details.question.' }, ...given]
           continue
         }
         // ADR-055 §12, amended 2026-11-03: only mechanical insufficiency restarts directly.
         if (!isFinish && role === 'builder' && status === 'insufficient' && tier === 'mechanical') {
           const revised = await restart('build', 'builder-insufficient', { envelope: held.envelope })
           if (revised.halt) return revised
-          singleTurn = false; given = []; rulings = []
+          singleTurn = false; given = []
           feedback = []
           seats[role] = { ...seats[role], rounds: Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }
           continue
@@ -534,13 +535,12 @@ export async function runLoop(spec, deps = {}) {
           ? await restart('build', 'lead-bounce-planner', { envelope: held.envelope ?? last.builder ?? null, lead: decided.summary })
           : await replan(held.envelope ?? last.builder ?? null, decided.summary)
         if (revised.halt) return revised
-        if (mechanical) { singleTurn = false; given = []; rulings = [] }
-        feedback = mechanical ? [] : [{ id: 'plan-revised', plan_path: planPath }, ...rulings, ...given]
+        if (mechanical) { singleTurn = false; given = [] }
+        feedback = mechanical ? [] : [{ id: 'plan-revised', summary: 'The planner revised the plan at plan_path: continue on the revised plan.', plan_path: planPath }, ...given]
       } else if (role === 'builder') {
-        const ruling = { id: 'lead-bounce', summary: decided.summary }
-        feedback = [ruling, ...rulings, ...given]
-        rulings.push(ruling)
-      }
+        rulings.unshift({ id: 'lead-bounce', summary: decided.summary })
+        feedback = given
+      } else feedback = [{ id: 'lead-bounce', summary: decided.summary }, ...given]
       // bounce: exactly one more turn for this role, beyond its bound only if the bound is spent; the counter keeps its history
       seats[role] = { ...seats[role], rounds: Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }
       if (!isFinish && role === 'builder') for (const reviewer of ['reviewer', 'tech-lead']) {
@@ -593,7 +593,8 @@ export async function runLoop(spec, deps = {}) {
     if (raised) return { halt: raised }
     rounds.builder = 0
     repaired = false
-    const planned = await stage('plan', () => seatTurn('planner', [{ id: 'mechanical-restart', reason, ...detail }]))
+    rulings.length = 0
+    const planned = await stage('plan', () => seatTurn('planner', [{ id: 'mechanical-restart', summary: 'The mechanical build was discarded; plan the restarted lane.', reason, ...detail }]))
     if (planned.halt) return planned
     const halt = await acceptPlan(planned.envelope)
     return halt ? { halt } : {}
@@ -700,7 +701,7 @@ export async function runLoop(spec, deps = {}) {
     let suiteLine = '- Suite: unmeasured.'
     let builderSummary = '', proofRows = null, suiteResult = null
     const finishReviews = []
-    let feedback = isFinish ? [{ id: 'finish-stop', reason: fin.stop.reason, observation: fin.stop.observation }, ...(fin.guidance !== undefined ? [{ id: 'finish-return', guidance: fin.guidance }] : []), ...fin.findings] : []
+    let feedback = isFinish ? [{ id: 'finish-stop', summary: 'The previous lane stopped with the given reason and observation.', reason: fin.stop.reason, observation: fin.stop.observation }, ...(fin.guidance !== undefined ? [{ id: 'finish-return', summary: 'The operator supplied guidance for this finish run.', guidance: fin.guidance }] : []), ...fin.findings] : []
     let repairing = false, recheck = false, rechecks = 0
     let committed, rebased, measurements, laneBody, reviewStatus, checkedTree, publishedFiles
     const readTree = () => stage('checked-tree', () => callCheck('checked-tree', d.run, { cwd, command: 'git', args: ['write-tree'] }, { command: true }))
@@ -731,7 +732,7 @@ export async function runLoop(spec, deps = {}) {
           if (!namedTests.length && !isFinish && testsRequired) {
             const failure = { role: 'builder', failure: 'proof-no-tests' }
             if (repeatsFailure(failure)) return stop('no-progress', failure)
-            feedback = [{ id: 'proof-no-tests', severity: 'must-fix', summary: 'Name at least one test in details.tests ({file, title}); the loop proves each red on the old source and green on the build.' }]
+            feedback = [{ id: 'proof-no-tests', severity: 'must-fix', summary: 'Name at least one test in details.tests ({file, title}); the loop proves each red on the old source and green on the build.' }, ...feedback.filter((item) => item?.id !== 'proof-no-tests' && item?.id !== 'proof-unproven')]
             continue
           }
         }
@@ -746,7 +747,7 @@ export async function runLoop(spec, deps = {}) {
             const tests = rows.filter((row) => !row?.proven).map(({ file, title, base, build, reason }) => ({ file, title, base, build, reason }))
             const failure = { role: 'builder', failure: 'proof-unproven', tests }
             if (repeatsFailure(failure)) return stop('no-progress', failure)
-            feedback = [{ id: 'proof-unproven', severity: 'must-fix', summary: 'Named tests must be red on the old source and green on the build.', tests }]
+            feedback = [{ id: 'proof-unproven', severity: 'must-fix', summary: 'Named tests must be red on the old source and green on the build.', tests }, ...feedback.filter((item) => item?.id !== 'proof-no-tests' && item?.id !== 'proof-unproven')]
             continue
           }
           if (!proofOK) return stop(proof.reason ?? 'runner-threw', proof)

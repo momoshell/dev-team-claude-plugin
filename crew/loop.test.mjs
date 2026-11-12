@@ -605,7 +605,7 @@ test('a builder insufficient on build and judge goes to the lead with its envelo
         assert.deepEqual(builders[1].feedback[0], { id: 'lead-bounce', summary: 'fixture' })
       } else {
         assert.deepEqual(planners[1].feedback[0], { id: 'plan-gap', role: 'builder', envelope: held.envelope, lead: 'fixture' })
-        assert.deepEqual(builders[1].feedback[0], { id: 'plan-revised', plan_path: builders[1].planPath })
+        assert.deepEqual(builders[1].feedback[0], { id: 'plan-revised', summary: 'The planner revised the plan at plan_path: continue on the revised plan.', plan_path: builders[1].planPath })
         if (tier === 'judge') {
           assert.deepEqual(builders[1].filesInScope, ['crew/loop.mjs'])
           assert.equal(builders[1].tier, 'judge')
@@ -816,6 +816,68 @@ test('the same failure with the same evidence twice stops the lane no-progress a
   } })
   assert.equal((await revised.go()).status, 'done')
   assert.deepEqual(revised.requests.map((r) => r.role), ['planner', 'builder', 'lead', 'planner', 'builder', 'lead', 'planner', 'builder', 'reviewer'])
+})
+
+test('lead rulings reach builder turns after a proof failure and after a review bounce (#2296)', async () => {
+  for (const mode of ['proof', 'review']) {
+    let builds = 0
+    const f = fakes({ lead: 'bounce', review: mode === 'review' ? 1 : 0, bounds: { builder: 3 }, edit: (v) => {
+      if (v.role === 'builder' && ++builds === 1) return { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } }
+      if (v.role === 'builder' && builds === 2 && mode === 'proof') v.details.tests = []
+      if (v.role === 'lead') v.summary = 'ruling 1'
+      return v
+    } })
+    assert.equal((await f.go()).status, 'done', mode)
+    const feedback = f.requests.filter((r) => r.role === 'builder')[2].feedback
+    assert.deepEqual(feedback.map((item) => item.id), [mode === 'proof' ? 'proof-no-tests' : 'R1', 'lead-bounce'], mode)
+    assert.equal(feedback[1].summary, 'ruling 1')
+  }
+})
+
+test('a lead bounce delivers its instructions as lead-bounce feedback to a held planner, reviewer or tech-lead (#2296)', async () => {
+  for (const role of ['planner', 'reviewer', 'tech-lead']) {
+    let turns = 0
+    const f = fakes({ spec: { tier: role === 'tech-lead' ? 'judge' : 'build' }, lead: 'bounce', edit: (v) => {
+      if (v.role === role && ++turns === 1) return { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } }
+      if (v.role === 'lead') v.details.instructions = 'apply this instruction'
+      return v
+    } })
+    assert.equal((await f.go()).status, 'done', role)
+    assert.deepEqual(f.requests.filter((r) => r.role === role)[1].feedback[0], { id: 'lead-bounce', summary: 'apply this instruction' }, role)
+  }
+})
+
+test('a proof failure keeps the open review findings behind the proof item (#2296)', async () => {
+  for (const mode of ['proof-no-tests', 'proof-unproven', 'both']) {
+    let builds = 0, proofs = 0
+    const f = fakes({ review: 1, bounds: { builder: 4 }, proof: () => ++proofs === 2 && mode !== 'proof-no-tests'
+      ? { status: 'red', reason: 'proof-unproven', rows: [{ file: 'lib.test.mjs', title: 'works', proven: false }] }
+      : { status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }] }, edit: (v) => {
+      if (v.role === 'builder' && ++builds === 2 && mode !== 'proof-unproven') v.details.tests = []
+      return v
+    } })
+    assert.equal((await f.go()).status, 'done', mode)
+    const turns = f.requests.filter((r) => r.role === 'builder')
+    assert.deepEqual(turns[2].feedback.map((item) => item.id), [mode === 'proof-unproven' ? mode : 'proof-no-tests', 'R1'], mode)
+    if (mode === 'both') assert.deepEqual(turns[3].feedback.map((item) => item.id), ['proof-unproven', 'R1'])
+  }
+})
+
+test('plan-revised, mechanical-restart, finish-stop and finish-return feedback carry a summary (#2296)', async () => {
+  for (const mode of ['plan-revised', 'mechanical-restart', 'finish']) {
+    let builds = 0
+    const f = fakes({ spec: mode === 'finish' ? finishSpec({ guidance: 'Fix it' }) : { tier: mode === 'mechanical-restart' ? 'mechanical' : 'build' }, lead: 'bounce', target: 'planner', edit: (v) => {
+      if (mode !== 'finish' && v.role === 'builder' && ++builds === 1) return { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } }
+      return v
+    } })
+    assert.equal((await f.go()).status, 'done', mode)
+    const ids = mode === 'finish' ? ['finish-stop', 'finish-return'] : [mode]
+    for (const id of ids) {
+      const item = f.requests.flatMap((r) => r.feedback).find((entry) => entry.id === id)
+      assert.equal(typeof item?.summary, 'string', id)
+      assert.match(item.summary, /^[^\r\n]*\S[^\r\n]*$/, id)
+    }
+  }
 })
 
 const count = (f, role) => f.requests.filter((r) => r.role === role).length
@@ -2293,7 +2355,7 @@ test('a finish lead bounce to the planner is asked again with no planner to rout
 test('the finish builder first hears the stop reason with its observation, then the open findings; seat ids start past the stopped lane', async () => {
   const f = fakes({ spec: finishSpec(), unseated: ['planner'] })
   await f.go()
-  assert.deepEqual(f.requests[0].feedback, [{ id: 'finish-stop', reason: STOP.reason, observation: STOP.observation }, finding])
+  assert.deepEqual(f.requests[0].feedback, [{ id: 'finish-stop', summary: 'The previous lane stopped with the given reason and observation.', reason: STOP.reason, observation: STOP.observation }, finding])
   assert.equal(f.requests[0].planPath, '/virtual/task/plan.md')
   assert.equal(f.requests[0].id, 'lane.builder.4')
   assert.equal(f.requests[0].role, 'builder')
@@ -2337,7 +2399,7 @@ test('a green finish run writes a fused report and a finish-ready row with the m
 
   const g = fakes({ spec: finishSpec({ guidance: 'Fix it first', priorReviewRounds: 2 }), unseated: ['planner'], review: 2, bounds: { builder: 3 } })
   assert.deepEqual(await g.go(), stopped('round-bound'))
-  assert.deepEqual(g.requests[0].feedback.slice(0, 2), [{ id: 'finish-stop', reason: STOP.reason, observation: STOP.observation }, { id: 'finish-return', guidance: 'Fix it first' }])
+  assert.deepEqual(g.requests[0].feedback.slice(0, 2), [{ id: 'finish-stop', summary: 'The previous lane stopped with the given reason and observation.', reason: STOP.reason, observation: STOP.observation }, { id: 'finish-return', summary: 'The operator supplied guidance for this finish run.', guidance: 'Fix it first' }])
   assert.equal(count(g, 'reviewer'), 1)
   for (const bad of [{ guidance: 5 }, { priorReviewRounds: -1 }, { priorReviewRounds: 1.5 }]) {
     assert.deepEqual(await fakes({ spec: finishSpec(bad), unseated: ['planner'] }).go(), stopped('invalid-input'))

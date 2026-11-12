@@ -1,4 +1,4 @@
-import { assuranceMeta, executionMeta, taskProfileMeta } from './workflow-semantics.js'
+import { assuranceMeta, executionMeta } from './workflow-semantics.js'
 
 const TOKEN_FIELDS = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
 
@@ -19,7 +19,6 @@ function absenceMark(reason) {
 }
 
 const CONFIGURATION_DIMENSIONS = Object.freeze([
-  { key: 'task_profile', label: 'Profile', meta: taskProfileMeta },
   { key: 'execution_shape', label: 'Execution', meta: executionMeta },
   { key: 'assurance', label: 'Assurance', meta: assuranceMeta },
 ])
@@ -82,7 +81,7 @@ const STATUS = Object.freeze({
   done: { key: 'success', tone: 'ok' }, stopped: { key: 'aborted', tone: 'aborted' },
   'ready-for-operator': { key: 'ready', tone: 'serious', word: 'ready for operator' },
   returned: { key: 'returned', tone: 'serious', word: 'returned · no new run' },
-  escalated: { key: 'escalated', tone: 'serious' }, abandoned: { key: 'abandoned', tone: 'serious' },
+  abandoned: { key: 'abandoned', tone: 'serious' },
 })
 
 // A lean "running" is an open journal, not a measured live process.
@@ -114,7 +113,7 @@ export function shipStatus(run = {}) {
 }
 
 const ATTENTION_SEGMENT_LABELS = Object.freeze({
-  ready: 'ready for operator', returned: 'returned', escalated: 'escalated', aborted: 'stopped', abandoned: 'abandoned',
+  ready: 'ready for operator', returned: 'returned', aborted: 'stopped', abandoned: 'abandoned',
 })
 const ATTENTION_KEYS = Object.keys(ATTENTION_SEGMENT_LABELS)
 export function needsAttention(key) { return ATTENTION_KEYS.includes(key) }
@@ -148,12 +147,13 @@ export function taskBoard(runs = [], { state = 'all', query = '', showArchived =
 
 export function tokenCell(run = {}) {
   const metrics = run?.metrics ?? run ?? {}
+  const turns = run?.usage_turns ? `${run.usage_turns.measured} of ${run.usage_turns.total} turns carried usage` : null
   let total = null
   for (const field of TOKEN_FIELDS) {
     const value = metrics?.[field]
     if (typeof value === 'number' && Number.isFinite(value)) total = (total ?? 0) + value
   }
-  if (total == null) return absenceMark(run?.pending?.billed_input_tokens ?? run?.pending?.tokens ?? 'not measured')
+  if (total == null) return { ...absenceMark(run?.pending?.billed_input_tokens ?? run?.pending?.tokens ?? 'not measured'), turns }
   const input = finiteNumber(metrics?.billed_input_tokens)
   const output = finiteNumber(metrics?.billed_output_tokens)
   const cacheWrite = finiteNumber(metrics?.billed_cache_write_tokens)
@@ -163,6 +163,7 @@ export function tokenCell(run = {}) {
   const cacheRate = promptTotal > 0 ? cacheRead / promptTotal * 100 : null
   return {
     ...measuredCell(total, textNumber(total)),
+    turns,
     input,
     output,
     cacheWrite,

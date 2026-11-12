@@ -1,12 +1,20 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
 import { configurationDimensionCell, configurationFilterView, needsAttention, taskBoard, tokenCell } from '../visualizer/web/src/lib/fleet.js'
-import { assuranceMeta, executionMeta, taskProfileMeta } from '../visualizer/web/src/lib/workflow-semantics.js'
+import { assuranceMeta, executionMeta } from '../visualizer/web/src/lib/workflow-semantics.js'
 import { ROOT } from './helpers.mjs'
 import { transportLabel } from '../visualizer/web/src/lib/agent-settings.js'
+
+test('the Skills page has no Delivery history tab and its modules are deleted', () => {
+  const lib = join(ROOT, 'visualizer/web/src/lib')
+  const page = readFileSync(join(lib, 'SkillsPage.svelte'), 'utf8')
+  assert.ok(!page.includes('Delivery history')); assert.ok(!page.includes('SkillDelivery'))
+  for (const file of ['SkillDelivery.svelte', 'agents.js']) assert.equal(existsSync(join(lib, file)), false)
+  assert.ok(!readFileSync(join(lib, 'api.js'), 'utf8').includes('getAgents'))
+})
 
 test('D9 the agent editor carries no model picker and agent-settings exports no model helpers', async () => {
   const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/AgentsPage.svelte'), 'utf8')
@@ -34,7 +42,7 @@ test('LB1 a lean row\'s tier and shape fill the board\'s assurance and execution
 })
 
 test('TK1 tokenCell keeps a lean row\'s closed tokens reason', () => {
-  const reason = 'lean seat recordings are not counted'
+  const reason = 'not-reported'
   const cell = tokenCell({ source: 'lean', pending: { tokens: reason } })
   assert.equal(cell.text, reason); assert.equal(cell.title, reason)
 })
@@ -44,15 +52,13 @@ test('workflow semantics separate profile, execution and assurance without infer
   assert.equal(assuranceMeta('judge').label, 'Rigorous')
   assert.equal(assuranceMeta('standard').alias, 'build')
   assert.equal(executionMeta('scout').label, 'Scout')
-  assert.equal(taskProfileMeta(null).label, 'Not recorded')
-  assert.match(taskProfileMeta(null).summary, /does not infer/)
 })
 
 function configurationFixture() {
   const historical = { adw_id: 'historical', tier: 'build', variant: 'full', task_profile: null, execution_shape: null, assurance: null }
   const measured = { adw_id: 'measured', task_profile: 'implementation', execution_shape: 'full', assurance: 'standard' }
   const other = { adw_id: 'other', task_profile: 'audit', execution_shape: 'scout', assurance: 'rigorous' }
-  const colliding = { adw_id: 'colliding', task_profile: 'Not recorded', execution_shape: 'directed', assurance: 'quick' }
+  const colliding = { adw_id: 'colliding', task_profile: 'Not recorded', execution_shape: 'Not recorded', assurance: 'quick' }
   return { historical, measured, other, colliding, rows: [historical, measured, other, colliding] }
 }
 
@@ -64,24 +70,23 @@ test('A1 hides configuration filters when all dimensions are absent', () => {
 test('B1 exposes measured configuration dimensions and options', () => {
   const { rows } = configurationFixture()
   const view = configurationFilterView(rows)
-  assert.deepEqual(view.dimensions.map((dimension) => dimension.key), ['task_profile', 'execution_shape', 'assurance'])
+  assert.deepEqual(view.dimensions.map((dimension) => dimension.key), ['execution_shape', 'assurance'])
   assert.ok(view.dimensions.every((dimension) => dimension.options.length > 0))
   assert.ok(view.dimensions.every((dimension) => dimension.options.every((option) => option.value !== null)))
 })
 
 test('C1 marks missing configuration without inferring legacy fields', () => {
   const { historical } = configurationFixture()
-  const marks = ['task_profile', 'execution_shape', 'assurance'].map((dimension) => configurationDimensionCell(historical, dimension))
+  const marks = ['execution_shape', 'assurance'].map((dimension) => configurationDimensionCell(historical, dimension))
   assert.ok(marks.every((mark) => mark.value === null && mark.text === 'Not recorded' && mark.dashed === true))
   assert.notEqual(marks[0].text, historical.tier)
   assert.notEqual(marks[1].text, historical.variant)
-  assert.notEqual(marks[2].text, 'Standard')
 })
 
 test('D1 distinguishes missing configuration from a matching literal value', () => {
   const { historical, colliding } = configurationFixture()
-  const absent = configurationDimensionCell(historical, 'task_profile')
-  const real = configurationDimensionCell(colliding, 'task_profile')
+  const absent = configurationDimensionCell(historical, 'execution_shape')
+  const real = configurationDimensionCell(colliding, 'execution_shape')
   assert.equal(absent.value, null)
   assert.equal(absent.dashed, true)
   assert.equal(real.value, 'Not recorded')
@@ -91,7 +96,7 @@ test('D1 distinguishes missing configuration from a matching literal value', () 
 
 test('E1 preserves unrecorded rows while filtering measured configuration', () => {
   const { historical, measured, other } = configurationFixture()
-  const view = configurationFilterView([historical, measured, other], { task_profile: 'implementation' })
+  const view = configurationFilterView([historical, measured, other], { execution_shape: 'full' })
   assert.deepEqual(view.rows.map((row) => row.adw_id), ['historical', 'measured'])
   assert.equal(view.excluded.count, 1)
   assert.equal(view.excluded.line, '1 measured row excluded by configuration filters · not-recorded rows remain visible')
@@ -101,8 +106,7 @@ test('F1 lists only measured configuration options', () => {
   const { measured, colliding } = configurationFixture()
   const view = configurationFilterView([measured, colliding])
   const options = (key) => view.dimensions.find((dimension) => dimension.key === key).options.map((option) => option.value)
-  assert.deepEqual(options('task_profile'), ['Not recorded', 'implementation'])
-  assert.deepEqual(options('execution_shape'), ['directed', 'full'])
+  assert.deepEqual(options('execution_shape'), ['Not recorded', 'full'])
   assert.deepEqual(options('assurance'), ['quick', 'standard'])
   assert.doesNotMatch(JSON.stringify(view), /audit|scout|rigorous/)
 })
@@ -112,7 +116,8 @@ test('G1 task list uses configuration cells filters and exclusion text', () => {
   assert.match(source, /import \{[^}]*configurationDimensionCell[^}]*configurationFilterView[^}]*\} from '\.\/fleet\.js'/)
   assert.match(source, /let baseRows = \$derived\(/)
   assert.match(source, /configurationFilterView\(baseRows,/)
-  for (const dimension of ['task_profile', 'execution_shape', 'assurance']) assert.match(source, new RegExp(`configurationDimensionCell\\(run, '${dimension}'\\)`))
+  for (const dimension of ['execution_shape', 'assurance']) assert.match(source, new RegExp(`configurationDimensionCell\\(run, '${dimension}'\\)`))
+  assert.doesNotMatch(source, /task_profile/)
   assert.match(source, /configurationView\.excluded\.line/)
   assert.doesNotMatch(source, /runConfiguration|run\.tier|run\.variant|configuration\.legacy_(?:tier|variant)/)
 })
@@ -177,7 +182,7 @@ test('F1 agents page uses only Tier-2 colour aliases', () => {
   assert.equal(declarations.some((value) => /--(?:ink|paper|spot|serious|status-\w+-raw|role-\w+-(?:dark|light))/.test(value)), false)
   assert.ok(source.includes('background:var(--panel); border:1px solid var(--line);'))
   for (const token of ['Create agent', 'Use a copy', 'Save agent']) assert.ok(source.includes(token), token)
-  for (const tab of ['Project library', 'Available on system']) assert.ok(source.includes(tab), tab); assert.doesNotMatch(source, /Skill delivery|skills-panel/); const skillsPage = readFileSync(join(ROOT, 'visualizer/web/src/lib/SkillDelivery.svelte'), 'utf8'); assert.match(skillsPage, /Skill delivery/); assert.match(skillsPage, /<th>Skill<\/th><th>Last recorded delivery<\/th>/); assert.match(skillsPage, /cell\?\.last_seat_delivery === true/)
+  for (const tab of ['Project library', 'Available on system']) assert.ok(source.includes(tab), tab); assert.doesNotMatch(source, /Skill delivery|skills-panel/)
 })
 
 test('fleet cells preserve honest absence and discriminate status evidence', () => {

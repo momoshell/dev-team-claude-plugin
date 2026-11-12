@@ -7,7 +7,6 @@
   import { getSkillLibrary, saveSkillFile } from './api.js'
   import { parseSkillFile, composeSkillFile, validateSkillFile, SKILL_FILE_LIMIT } from './skill-files.js'
   import SkillRules from './SkillRules.svelte'
-  import SkillDelivery from './SkillDelivery.svelte'
   import './skills.css'
   let payload=$state({definitions:[],notes:[],writable:false,map:null}), loading=$state(true), error=$state(''), notice=$state('')
   let expanded=$state([])
@@ -51,7 +50,7 @@
 <section class="skills-workspace" aria-label="Skills library and configuration">
   {#if !editor}
     <nav class="skill-tabs" aria-label="Skills views">
-      {#each [['library','Skill library'],['rules','Selection rules'],['delivery','Delivery history']] as [key,label]}
+      {#each [['library','Skill library'],['rules','Selection rules']] as [key,label]}
         <button type="button" aria-pressed={view===key} onclick={()=>view=key}>{label}</button>
       {/each}
     </nav>
@@ -91,6 +90,5 @@
       <p class="hint library-location">Files are saved in <code>{payload.directory || 'the project skills directory'}</code>. Downloads include SKILL.md only.</p>
     </div>
     <div hidden={view!=='rules'}><SkillRules {payload} onreload={load} /></div>
-    {#if view==='delivery'}<SkillDelivery />{/if}
   {/if}
 </section>

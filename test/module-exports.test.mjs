@@ -6,7 +6,6 @@ import { pathToFileURL } from 'node:url'
 import { ROOT } from './helpers.mjs'
 
 const PRIVATE_BINDINGS = Object.freeze([
-  ['visualizer/server/agents-source.mjs', ['DELIVERY_STORES']],
   ['visualizer/server/server.mjs', ['parsePort', 'portFromEnv']],
   ['visualizer/server/lean-source.mjs', ['leanIdentity', 'isLeanIdentity', 'isLeanSlug']],
   ['bin/crew.mjs', ['homeProcesses', 'changedPaths', 'main']],

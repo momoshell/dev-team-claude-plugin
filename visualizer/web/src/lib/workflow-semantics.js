@@ -48,9 +48,3 @@ export function executionMeta(value) {
   if (key) return { key, label: humanize(key), summary: 'Recorded execution shape.' }
   return { key: null, label: 'Not recorded', summary: 'This run has no recorded execution shape. It may predate configuration recording; the UI never infers one from phase names.' }
 }
-
-export function taskProfileMeta(value) {
-  const key = typeof value === 'string' && value.trim() ? value.trim() : null
-  if (key) return { key, label: humanize(key), summary: 'Recorded task intent.' }
-  return { key: null, label: 'Not recorded', summary: 'This run has no recorded task profile. It may predate configuration recording; this UI does not infer one.' }
-}

@@ -1,20 +1,33 @@
 // Pure presentation for lean lanes (ADR-052). Stage boundaries and checks carry timestamps;
-// heartbeat and usage are not recorded. Unrecorded values remain absent with their reason.
+// unrecorded values remain absent with their reason.
 import { leanStatus } from './fleet.js'
 
 // Journal rows → recorded-order lines. No time is read or invented.
 function journalLines(rows = []) {
   return (Array.isArray(rows) ? rows : []).map((row) => {
     const stage = row.stage ?? '—'
+    const advisor = !row.event ? Object.keys(row).find((key) => key.startsWith('advisor_')) : null
+    const event = row.event ?? advisor ?? 'unknown'
+    const parts = (...values) => values.filter((value) => value != null && value !== '').map((value) => typeof value === 'string' ? value : JSON.stringify(value)).join(' · ')
     let detail = ''
-    if (row.event === 'check') detail = `${row.check ?? 'check'}: ${leanCheckStatus(row).label}`
+    if (advisor) detail = row.role ?? ''
+    else if (event === 'envelope') detail = parts(row.role, row.parsed?.status, ...(Array.isArray(row.defects) ? row.defects : []), row.error?.message ?? row.error) || 'envelope details not recorded'
+    else if (event === 'seat-turn') detail = parts(row.role, row.model, row.seconds != null ? `${row.seconds}s` : null, row.tool_calls != null ? `${row.tool_calls} tool calls` : null, row.stop_reason, row.status, row.usage?.totalTokens != null ? `${row.usage.totalTokens} tokens` : row.unmeasured?.usage ?? 'usage not recorded')
+    else if (event === 'builder-continue' || event === 'lead-bound-refund') detail = parts(row.id, row.progressTurns != null ? `${row.progressTurns} progress turns` : null) || 'progress not recorded'
+    else if (event === 'tier-raised') detail = parts(row.from, row.to, row.reason) || 'tier change not recorded'
+    else if (event === 'roster') detail = parts(row.tier, ...Object.keys(row.seats ?? {})) || 'roster not recorded'
+    else if (event === 'commit') detail = parts(row.head) || 'head not recorded'
+    else if (event === 'finish-ready') detail = parts(row.status, row.head) || 'finish details not recorded'
+    else if (event === 'finish-decision') detail = parts(row.choice) || 'choice not recorded'
+    else if (event === 'memory-empty') detail = parts(row.role, row.reason) || 'memory reason not recorded'
+    else if (row.event === 'check') detail = `${row.check ?? 'check'}: ${leanCheckStatus(row).label}`
     else if (row.event === 'stage-end') detail = row.outcome?.status ?? (row.outcome?.code != null ? `exit ${row.outcome.code}` : 'outcome not recorded')
-    else if (row.event === 'verdict') detail = [row.status, row.verdict, row.reason].filter((part) => typeof part === 'string' && part).join(' · ') || 'verdict fields not recorded'
+    else if (row.event === 'verdict') detail = parts(row.status, row.verdict, row.reason, row.observation) || 'verdict fields not recorded'
     else if (row.event === 'pr') {
       detail = row.pr?.url ?? (row.pr?.number != null ? `#${row.pr.number}` : 'pull request not recorded')
       if (row.actor === 'operator') detail += ' · recorded by operator · hand-finished'
     }
-    return { index: row.index, event: row.event ?? 'unknown', stage, detail }
+    return { index: row.index, event, stage, detail }
   })
 }
 
@@ -47,8 +60,6 @@ export function leanOutcome(run = {}) {
   if (run.status==='abandoned') return {headline:'Task abandoned by an operator',next:'Inspect the recorded decision; the lane stays in Needs attention until it is archived.',tone:'attention',icon:'alert'}
   if (run.status==='done') return {headline:run.hand_finished?'Task finished by an operator':'Task finished',next:run.pr?'Review the recorded pull request and its checks. Merge status is not recorded here.':'Inspect the recorded stages and outputs before accepting the result.',tone:'ok',icon:'check'}
   if (run.status==='stopped') return {headline:'Task stopped',next:'Inspect the recorded reason and latest checks before deciding how to continue.',tone:'attention',icon:'pause'}
-  if (['failed','error'].includes(run.status)) return {headline:'Task failed',next:'Inspect the failed stage and its evidence before retrying.',tone:'fail',icon:'alert'}
-  if (['blocked','escalated'].includes(run.status)) return {headline:'Task needs attention',next:'Review the recorded reason and stage evidence to decide the next action.',tone:'attention',icon:'alert'}
   if (run.status==='running' || run.status==='reviewed') return {headline:run.status==='reviewed'?'Review recorded; task still open':'No terminal outcome recorded',next:'Inspect the last recorded stage. This journal does not establish whether agents are still active.',tone:'quiet',icon:'info'}
   return {headline:'Outcome not recorded',next:'Refresh the journal or inspect the recorded sessions for more evidence.',tone:'quiet',icon:'info'}
 }

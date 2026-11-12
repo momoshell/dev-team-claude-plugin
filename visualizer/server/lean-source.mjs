@@ -165,7 +165,7 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
 
   const pendingReasons = {
     duration_ms: 'lean journal rows after run-start carry no timestamps', ended_at: 'lean journal rows after run-start carry no timestamps',
-    last_heartbeat_at: 'lean lanes record no heartbeat', tokens: 'lean seat recordings are not counted', cost: 'lean lanes record no cost',
+    last_heartbeat_at: 'lean lanes record no heartbeat', cost: 'lean lanes record no cost',
     mode: 'lean lanes record no mode',
   }
 
@@ -247,7 +247,16 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
     let ended_at = null, duration_ms = null
     if (!running && lastAt !== null) ended_at = lastAt
     if (started_at !== null && ended_at !== null) duration_ms = Date.parse(ended_at) - Date.parse(started_at)
+    const turns = rows.filter((row) => row.event === 'seat-turn')
+    const fields = { inputTokens: 'billed_input_tokens', outputTokens: 'billed_output_tokens', cachedReadTokens: 'billed_cache_read_tokens', cachedWriteTokens: 'billed_cache_write_tokens' }
+    const validUsage = (row) => Object.keys(fields).every((field) => Number.isFinite(row.usage?.[field]) && row.usage[field] >= 0)
+    const measured = turns.filter(validUsage).length
+    const missing = turns.find((row) => !validUsage(row))
+    const metrics = Object.fromEntries(Object.entries(fields).map(([source, target]) => [target, turns.length && !missing ? turns.reduce((sum, row) => sum + row.usage[source], 0) : null]))
+    const usage_turns = turns.length ? { measured, total: turns.length } : null
     const pending = { ...pendingReasons }
+    if (!turns.length) pending.tokens = 'no seat-turn rows recorded'
+    else if (missing) pending.tokens = nonEmpty(missing.unmeasured?.usage) ? missing.unmeasured.usage : 'usage-malformed'
     if (ended_at !== null) delete pending.ended_at
     if (duration_ms !== null) delete pending.duration_ms
     if (started_at === null) pending.started_at = 'the lane journal records no valid run-start time'
@@ -261,7 +270,7 @@ export function createLeanSource({ crewRoot, archiveRoot } = {}) {
       archived: found.archived, journal_rows: rows.length, journal_skipped_malformed: skipped_malformed, journal_error: error ?? null,
       tier: nonEmpty(found.spec.tier) ? found.spec.tier : null, shape: nonEmpty(found.spec.shape) ? found.spec.shape : null,
       mode: null, started_at, ended_at, duration_ms, last_heartbeat_at: null,
-      pending,
+      pending, metrics, usage_turns,
       ship: { state: 'unmeasured', reason: pr ? 'pull request recorded; merge state is not recorded in the lane' : 'lean lanes record no ship state', stale: false },
     }
   }

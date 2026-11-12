@@ -23,7 +23,7 @@ export function formatLeanDuration(ms) {
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${(ms % 60000) / 1000}s`
 }
 
-export function layoutTimeline(run = {}, events = [], { now = Date.now() } = {}) {
+export function layoutTimeline(run = {}) {
   const phases = Array.isArray(run.phases) ? run.phases : []
   const complete = [], unrecorded = [], open = []
   for (const phase of phases) {
@@ -43,5 +43,5 @@ export function layoutTimeline(run = {}, events = [], { now = Date.now() } = {})
     ...phase, phase_id: phase.id ?? null, duration_ms: end - start,
     x: span ? (start - origin) / span : 0, width: Math.max(MIN_WIDTH, span ? (end - start) / span : 0),
   }))
-  return { request: null, origin_at: origin == null ? null : new Date(origin).toISOString(), span_ms: span, blocks, queued: [], unrecorded, open, marks: [], lanes: [] }
+  return { origin_at: origin == null ? null : new Date(origin).toISOString(), span_ms: span, blocks, unrecorded, open }
 }

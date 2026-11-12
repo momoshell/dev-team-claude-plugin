@@ -72,14 +72,14 @@ test('WF1 mounts the waterfall and lays out recorded intervals', () => {
   const run = { source: 'lean', started_at: base - 50000, ended_at: base + 100000, phases: [phase(1, 0, 10000), phase(2, 20000, 40000), phase(3, 25000, 30000)] }
   const original = structuredClone(run), result = layoutTimeline(run)
   assert.deepEqual(result.blocks.map(({ x, width, duration_ms }) => [x, width, duration_ms]), [[0, .25, 10000], [.5, .5, 20000], [.625, .125, 5000]])
-  assert.equal(result.span_ms, 40000); assert.equal(result.request, null); assert.deepEqual(run, original)
+  assert.equal(result.span_ms, 40000); assert.deepEqual(run, original)
 })
 
 test('WF2 marks incomplete or invalid intervals as unrecorded', () => {
   // MUTATION: disabling recordedOnly must expose fabricated timing or queued phases.
   const phases = [phase(1, 0, 10000), phase(2, null, 90000), phase(3, 2000, null), { ...phase(4, 0, 1000), started_at: 'invalid' }, phase(5, 5000, 4000)]
   const run = { source: 'lean', phases }, result = layoutTimeline(run, [], { now: base + 100000 })
-  assert.deepEqual(result.queued, []); assert.deepEqual(result.blocks.map(p => p.id), [1])
+  assert.deepEqual(result.blocks.map(p => p.id), [1])
   assert.equal(result.unrecorded.length, 4)
   for (const p of result.unrecorded) { assert.equal(p.x, null); assert.equal(p.width, null); assert.equal(p.duration_ms, null); assert.ok(p.reason) }
   assert.match(result.unrecorded[0].reason, /start/i); assert.match(result.unrecorded[1].reason, /end/i); assert.match(result.unrecorded[3].reason, /interval/i)
@@ -93,7 +93,6 @@ test('a run without a source tag lays out as recorded intervals only', () => {
   const phases = [phase(1, 0, 10000), phase(2, null, null)]
   const result = layoutTimeline({ phases })
   assert.deepEqual(result, layoutTimeline({ source: 'lean', phases }))
-  assert.deepEqual(result.queued, [])
 })
 
 test('WF3 assigns recorded envelope roles to matching phases', () => {

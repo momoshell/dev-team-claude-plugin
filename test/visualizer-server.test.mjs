@@ -12,7 +12,6 @@ import { parseCliArgs, pluginWriteMode, pluginWriteTargetMode, sameOrigin, hostG
 import { createJournalSource } from '../visualizer/server/journal-source.mjs'
 import * as webApi from '../visualizer/web/src/lib/api.js'
 import { createAgentsSource } from '../visualizer/server/agents-source.mjs'
-import { normalizeSkillsPage } from '../visualizer/web/src/lib/agents.js'
 import { ROOT, rawRequest, scratchDir, treeDigest } from './helpers.mjs'
 const children = new Set()
 after(() => { for (const child of children) { try { child.kill('SIGKILL') } catch {} } })
@@ -320,8 +319,6 @@ test('B1 agents page proposal endpoints are diff-only', async () => {
     const view = await json(server.base, '/api/agents')
     assert.equal(view.status, 200)
     assert.equal(view.json.skills.length, 9)
-    assert.equal(view.json.matrix.length, 5)
-    assert.equal(view.json.matrix.find((row) => row.role === 'builder').cells['frontend-svelte'].last_seat_delivery, true)
     assert.equal(treeDigest(fixture.checkout), checkoutBefore)
     assert.equal(treeDigest(fixture.crewRoot), crewBefore)
   } finally {
@@ -329,7 +326,7 @@ test('B1 agents page proposal endpoints are diff-only', async () => {
   }
 })
 
-test('S3-12 /api/agents emits the fields the web reads once, under schema 2', async () => {
+test('S3-12 /api/agents emits skills without the delivery matrix or role evidence', async () => {
   const fixture = agentsFixture('visualizer-agents-shape-')
   const source = createAgentsSource({ checkout: fixture.checkout, crewRoot: fixture.crewRoot })
   let server
@@ -337,15 +334,12 @@ test('S3-12 /api/agents emits the fields the web reads once, under schema 2', as
     server = await startInProcess({}, { agents: source })
     const response = await json(server.base, '/api/agents')
     assert.equal(response.status, 200)
-    const keys = ['degraded', 'error', 'matrix', 'reasons', 'role_evidence', 'schema', 'skills']
+    const keys = ['degraded', 'error', 'reasons', 'schema', 'skills']
     const direct = source.read()
     assert.deepEqual(Object.keys(direct).sort(), keys)
     assert.equal(direct.schema, 2)
     assert.deepEqual(Object.keys(response.json).sort(), keys)
     assert.equal(response.json.schema, 2)
-    assert.deepEqual(response.json.matrix.map((row) => row.role), ['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
-    for (const row of response.json.matrix) assert.deepEqual(Object.keys(row).sort(), ['cells', 'role'])
-    assert.equal(normalizeSkillsPage(response.json).matrix.find((row) => row.role === 'builder').cells['frontend-svelte'].last_seat_delivery, true)
   } finally {
     await stopInProcess(server)
     rmSync(fixture.dir, { recursive: true, force: true })
@@ -366,27 +360,8 @@ test('skills-page:A1', async () => {
       content: readFileSync(join(fixture.checkout, 'skills', name, 'SKILL.md'), 'utf8'),
     }))
     assert.deepEqual(response.json.skills.map(({ name, description, content }) => ({ name, description, content })), expected)
-    const page = normalizeSkillsPage(response.json)
-    assert.deepEqual(page.rows.map(({ name, description, content }) => ({ name, description, content })), expected)
   } finally {
     if (server) await stopInProcess(server)
-  }
-})
-
-test('skills-page:B1', () => {
-  const fixture = agentsFixture('visualizer-skills-holders-')
-  const capabilities = JSON.parse(readFileSync(fixture.capabilitiesPath, 'utf8'))
-  delete capabilities.roles
-  writeFileSync(fixture.capabilitiesPath, `${JSON.stringify(capabilities, null, 2)}\n`)
-  const source = createAgentsSource({ checkout: fixture.checkout, crewRoot: fixture.crewRoot })
-  const page = normalizeSkillsPage(source.read())
-  assert.equal(page.rows.length, fixture.skillNames.length)
-  for (const row of page.rows) {
-    assert.equal(row.holders.measured, false)
-    assert.equal(row.holders.value, null)
-    assert.equal(typeof row.holders.reason, 'string')
-    assert.ok(row.holders.reason.length > 0)
-    assert.notDeepEqual(row.holders.value, [])
   }
 })
 
@@ -535,18 +510,6 @@ test('V1 agents resources come from the plugin root for a foreign checkout', asy
   }
 })
 
-// MUTATION: restore the boot-journal or compiled-role reads and a role with a readable command reads as degraded.
-test('a readable seat command is the whole delivery evidence: no boot-journal or compiled-role read and no stale diagnostic', () => {
-  const fixture = agentsFixture('visualizer-agents-delivery-')
-  try {
-    const read = createAgentsSource({ checkout: fixture.checkout, crewRoot: fixture.crewRoot }).read()
-    const builder = read.role_evidence.builder
-    assert.equal(builder.measured, true)
-    assert.deepEqual(Object.keys(builder).sort(), ['measured', 'mtime_ms', 'reason', 'skills', 'source_path'])
-    assert.equal(read.reasons.some((reason) => reason.startsWith('builder:')), false)
-  } finally { rmSync(fixture.dir, { recursive: true, force: true }) }
-})
-
 test('agents source separates plugin reads from target proposals compatibly', () => {
   const target = agentsFixture('visualizer-agents-target-root-')
   const plugin = agentsFixture('visualizer-agents-plugin-root-')
@@ -559,7 +522,6 @@ test('agents source separates plugin reads from target proposals compatibly', ()
     const source = createAgentsSource({ checkout: target.checkout, pluginRoot: plugin.checkout, crewRoot: target.crewRoot })
     const read = source.read()
     assert.ok(read.skills.some((skill) => skill.path === 'skills/plugin-only-skill/SKILL.md' && skill.content.includes('PLUGIN-ONLY skill body')))
-    assert.equal(read.matrix.find((row) => row.role === 'builder').cells['plugin-only-skill'].register_grant, true)
     assert.equal(existsSync(join(target.checkout, 'skills', 'plugin-only-skill')), false)
   } finally {
     rmSync(target.dir, { recursive: true, force: true })

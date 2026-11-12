@@ -7,7 +7,6 @@
   let query = $state('')
   let state = $state('all')
   let assurance = $state('all')
-  let taskProfile = $state('all')
   let executionShape = $state('all')
   let showArchived = $state(false)
   let page = $state(1)
@@ -29,23 +28,20 @@
 
   let board = $derived(taskBoard(runs, { state, query, showArchived }))
   let baseRows = $derived(board.rows)
-  let configurationView = $derived(configurationFilterView(baseRows, { task_profile: taskProfile, execution_shape: executionShape, assurance }))
-  let taskProfileDimension = $derived(configurationView.dimensions.find((dimension) => dimension.key === 'task_profile'))
+  let configurationView = $derived(configurationFilterView(baseRows, { execution_shape: executionShape, assurance }))
   let executionDimension = $derived(configurationView.dimensions.find((dimension) => dimension.key === 'execution_shape'))
   let assuranceDimension = $derived(configurationView.dimensions.find((dimension) => dimension.key === 'assurance'))
-  let profileOptions = $derived([{ value:'all', label:'All profiles' }, ...(taskProfileDimension?.options ?? [])])
   let executionOptions = $derived([{ value:'all', label:'All execution' }, ...(executionDimension?.options ?? [])])
   let assuranceOptions = $derived([{ value:'all', label:'All assurance' }, ...(assuranceDimension?.options ?? [])])
   let filtered = $derived(configurationView.rows)
   let paged = $derived(filtered.slice((page - 1) * pageSize, page * pageSize))
 
-  $effect(() => { void `${query}|${state}|${assurance}|${taskProfile}|${executionShape}|${showArchived}`; page = 1 })
+  $effect(() => { void `${query}|${state}|${assurance}|${executionShape}|${showArchived}`; page = 1 })
   $effect(() => {
     if (!focus?.revision || !['all', 'open', 'finished', 'attention'].includes(focus.state)) return
     state = focus.state
     query = ''
     assurance = 'all'
-    taskProfile = 'all'
     executionShape = 'all'
     showArchived = false
     page = 1
@@ -62,7 +58,6 @@
   </div>
   <div class="toolbar">
     <label class="search"><span class="search-mark" aria-hidden="true"></span><input bind:value={query} placeholder="Search tasks, repositories, or run IDs" aria-label="Search tasks" /></label>
-    {#if taskProfileDimension}<label class="select-label"><span>Profile</span><Dropdown bind:value={taskProfile} options={profileOptions} ariaLabel="Task profile" width="9rem" variant="compact" /></label>{/if}
     {#if executionDimension}<label class="select-label"><span>Execution</span><Dropdown bind:value={executionShape} options={executionOptions} ariaLabel="Execution shape" width="9rem" variant="compact" /></label>{/if}
     {#if assuranceDimension}<label class="select-label"><span>Assurance</span><Dropdown bind:value={assurance} options={assuranceOptions} ariaLabel="Task assurance" width="10.5rem" variant="compact" /></label>{/if}
     <label class="archive"><input type="checkbox" bind:checked={showArchived} /><span>Show archived</span></label>
@@ -79,17 +74,16 @@
           {@const ship = shipStatus(run)}
           {@const duration = durationCell(run)}
           {@const tokens = tokenCell(run)}
-          {@const profileCell = configurationDimensionCell(run, 'task_profile')}
           {@const executionCell = configurationDimensionCell(run, 'execution_shape')}
           {@const assuranceCell = configurationDimensionCell(run, 'assurance')}
           <tr class:running={run.running === true}>
-            <td class="task-cell"><button type="button" class="task-link" onclick={(event) => { event.stopPropagation(); onopen(run) }}><strong>{run.goal || 'Untitled run'}</strong><span>{run.repo_slug || 'repository unavailable'} · <code>{String(run.adw_id || '').slice(0, 8)}</code></span></button></td>
-            <td><span class={`status ${status.tone}`}><span class="status-dot" aria-hidden="true"></span>{status.word}</span>{#if needsAttention(status.key)}<details class="row-reason"><summary>Why review?</summary><p>{status.why || (status.key === 'ready' ? 'The run is ready for an operator decision: accept, return or abandon with crew finish.' : status.key === 'escalated' ? 'This run handed its preserved context to a human. Open the run to inspect the decision.' : 'Open the run to inspect its last recorded outcome and evidence.')}</p></details>{/if}</td>
+            <td class="task-cell"><button type="button" class="task-link" onclick={(event) => { event.stopPropagation(); onopen(run) }}><strong>{run.goal || 'Untitled run'}</strong><span>{run.repo_slug || 'repository unavailable'}</span></button></td>
+            <td><span class={`status ${status.tone}`}><span class="status-dot" aria-hidden="true"></span>{status.word}</span>{#if needsAttention(status.key)}<details class="row-reason"><summary>Why review?</summary><p>{status.why || (status.key === 'ready' ? 'The run is ready for an operator decision: accept, return or abandon with crew finish.' : 'Open the run to inspect its last recorded outcome and evidence.')}</p></details>{/if}</td>
             <td title={ship.reason}><span class={`status ${ship.tone}`}><span class="status-dot" aria-hidden="true"></span>{ship.word}</span></td>
-            <td class="run-setup"><div><strong class:missing={assuranceCell.dashed} class:dashed={assuranceCell.dashed}>{assuranceCell.text}</strong></div><small title={`${assuranceCell.summary ?? ''} ${profileCell.summary ?? ''} ${executionCell.summary ?? ''}`}><span class:dashed={profileCell.dashed}>{profileCell.text}</span> · <span class:dashed={executionCell.dashed}>{executionCell.text}</span></small></td>
+            <td class="run-setup"><div><strong class:missing={assuranceCell.dashed} class:dashed={assuranceCell.dashed}>{assuranceCell.text}</strong></div><small title={`${assuranceCell.summary ?? ''} ${executionCell.summary ?? ''}`}><span class:dashed={executionCell.dashed}>{executionCell.text}</span></small></td>
             <td class="execution"><strong>{run.phases?.length ? phaseName(run.phases.at(-1)) : 'Not started'}</strong><small>{run.phases?.length || 0} recorded phases</small></td>
             <td class="time"><strong>{duration.dashed ? (run.running ? status.word : '—') : duration.text}</strong><small>{formatDate(run.started_at)}</small></td>
-            <td class="usage"><strong>{tokens.dashed ? '—' : shortNumber(tokens.value)}</strong><small title={tokens.dashed ? tokens.title : (tokens.cacheRate == null ? tokens.cachePending : 'Cache reads ÷ input, cache writes, and cache reads')}>{tokens.dashed ? 'Not measured' : tokens.cacheRate == null ? 'Cache hit not measured' : cacheRate(tokens.cacheRate)}</small></td>
+            <td class="usage"><strong>{tokens.dashed ? '—' : shortNumber(tokens.value)}</strong><small title={tokens.dashed ? tokens.title : (tokens.cacheRate == null ? tokens.cachePending : 'Cache reads ÷ input, cache writes, and cache reads')}>{tokens.dashed ? tokens.text : tokens.cacheRate == null ? 'Cache hit not measured' : cacheRate(tokens.cacheRate)}</small>{#if tokens.turns}<small>{tokens.turns}</small>{/if}</td>
             <td><button class="open" type="button" aria-label={`Open ${run.goal || 'task'}`} onclick={(event) => { event.stopPropagation(); onopen(run) }}>→</button></td>
           </tr>
         {:else}

@@ -22,7 +22,7 @@ a `consider` naming the defense you think fails.
   as already closed on disk.
 - **Task-dir drift — `plan.md` or an earlier review disagreeing with the built
   code.** Say it in your review's prose if it misleads the crew; it is not a
-  finding against the build. Defense: the task dir is `~/.crew/<repo>/<task>/task`,
+  finding against the build. Defense: the task dir is `~/.crew/dt-<lane>/<lane>/task`,
   outside the checkout, so the loop never commits it.
 - **A failure reachable only through a caller that does not exist** — a
   `Symbol` or `Proxy` argument, a hand-injected dependency, an exotic value no
@@ -37,6 +37,7 @@ a `consider` naming the defense you think fails.
   Defense: name the first fault's own consequence. Where it already leaves that
   subsystem's state unwritable, no handler could have recovered, so the missing
   handling changes nothing; the lead refuted this in run `205-regrant`.
-- **A remedy that cannot be built in this slice** — the fix needs a file
-  outside the plan's `files_in_scope`, or a mechanism the plan or an ADR
-  defers. Write it as a `consider` naming the deferred work. Defense: the remedy is out of this slice, not invisible — you read the complete diff, so say what is wrong and name the deferred work. Under ADR-045 an out-of-context write is recorded and the lane proceeds, so a repair that needs a file outside `files_in_scope` CAN now be built; raise it as a `consider` only when the plan or an ADR defers the mechanism itself (runs `83-headless-io` → #125, `46-tier-boot` → #193).
+- **A remedy needing a mechanism the plan or an ADR defers.** Write it as a
+  `consider` naming the deferred work. Defense: the remedy is deferred, not
+  invisible; read the complete diff, say what is wrong and name the deferred
+  work (runs `83-headless-io` → #125, `46-tier-boot` → #193).

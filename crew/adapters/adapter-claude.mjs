@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 const require = createRequire(import.meta.url)
 let sharedFffSearchProgram
 
-export const CLAUDE_SEAT_SETTINGS = fileURLToPath(new URL('./claude-usage.settings.json', import.meta.url))
+export const CLAUDE_SEAT_SETTINGS = fileURLToPath(new URL('./claude-seat.settings.json', import.meta.url))
 
 const NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills: [], advisor: false, mcp_servers: [] })
 const FFF_MCP_NAME = 'fff'

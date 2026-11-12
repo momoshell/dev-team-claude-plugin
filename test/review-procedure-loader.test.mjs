@@ -96,6 +96,22 @@ test('no review-skill document calls the shipped panel parked', () => {
   assert.deepEqual(offenders, [])
 })
 
+test('S5-7: the procedure tells a /review session which steps apply', () => {
+  const text = readFileSync(join(ROOT, '.agents/skills/review-procedure/SKILL.md'), 'utf8')
+  const section = text.split('## In a `/review` session')[1]?.split('\n## ')[0]
+  assert.ok(section)
+  for (const phrase of ['Builder report', 'step 2', 'step 5', 'conversation']) assert.ok(section.includes(phrase), phrase)
+})
+
+test('S5-8: do-not-flag names the lane task dir and lists only deferred remedies', () => {
+  const finish = readFileSync(join(ROOT, 'crew/finish.mjs'), 'utf8')
+  const text = readFileSync(GUIDELINES, 'utf8')
+  assert.ok(finish.includes("join(crewRoot, `dt-${lane}`, lane, 'task')"))
+  assert.ok(text.includes('`~/.crew/dt-<lane>/<lane>/task`'))
+  assert.ok(!text.includes('~/.crew/<repo>/<task>/task'))
+  assert.doesNotMatch(text, /can now be built|cannot be built in this slice/i)
+})
+
 test('BB3 review guidelines contain no brittle module line citations', () => {
   const text = readFileSync(GUIDELINES, 'utf8')
   const found = text.match(/[A-Za-z0-9_./-]+\.mjs:\d+/g) ?? []

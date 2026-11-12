@@ -40,6 +40,13 @@ restates it.
    contract-drift axis (`skills/pr-review/references/falsification.md`).
 5. Return the P2 reviewer envelope defined in `crew/agents/reviewer.md`.
 
+## In a `/review` session
+
+A `/review` session has no Plan path, no `## Builder report` and no envelope.
+Skip step 2. In step 1, read the change instead of a plan; in step 4, judge
+against the change's stated intent when there is no plan. Report findings in
+the conversation instead of step 5.
+
 ## Verifying on a seat
 
 - pi: `pi --print --skill .agents/skills/review-procedure -- 'list your available skills'`

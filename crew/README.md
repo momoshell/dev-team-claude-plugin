@@ -113,6 +113,8 @@ A seat loads its `requires` skills before its first write, or its envelope is
 refused (`crew/skills-proof.mjs`). Scope is context, not enforcement
 (ADR-045): a lane may write any file.
 
+A seat's `wait_s` in `crew/acp/seat.mjs` starts after ACP setup; setup has its own budget, `ACP_SETUP_TIMEOUT_MS` plus `ACP_FIFO_WAIT_MS` in `crew/acp-client.mjs`, as a fixed cost on top of `wait_s`.
+
 ## Checks
 
 `crew/proof.mjs` and `crew/checks.mjs` own what code verifies:

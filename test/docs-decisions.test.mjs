@@ -119,12 +119,56 @@ test('lane-brief points at the code owners and restates no code-owned list', () 
   for (const owner of ['parseBrief', 'crew/protocols.mjs', 'PROTECTED', 'crew/loop.mjs', 'regenerate', 'crew/checks.mjs']) assert.ok(skill.includes(owner), owner)
   for (const literal of ['crew/finish.mjs', 'crew/lean.mjs', 'crew/proof.mjs', 'hooks/', '.github/workflows/', 'undeclared-path', 'regenerate-failed', 'conflict-markers', '--check']) assert.ok(!skill.includes(literal), literal)
   assert.match(skill, /operator makes a decision after the issue was filed[\s\S]*append it to\s+the issue body, quoting the operator/)
-  assert.match(skill, /reads only the body/)
   assert.match(skill, /Put proposals, premises and measured facts in an issue the operator\s+can read and edit\. A session-filed issue opens with the operator words that asked for it\./)
   assert.match(skill, /operator's words verbatim,\s+one whole message per quoted block/)
   assert.match(skill, /askProvenance.*crew\/brief-provenance\.mjs/)
   assert.doesNotMatch(onboardSkill, /crew start <brief> --check|--check`\s+checks only the checkout/)
   assert.doesNotMatch(read('docs/adr/README.md'), /start --check/)
+})
+
+test('S3-12: lane-brief says crew start reads the issue title', () => {
+  const start = read('crew/start.mjs')
+  const skill = read('skills/lane-brief/SKILL.md')
+  assert.ok(start.includes('Issue title: '))
+  assert.ok(start.includes('has an empty title'))
+  assert.ok(skill.includes('`Issue title:`'))
+  assert.match(skill, /empty title/)
+  assert.doesNotMatch(skill, /reads only the body/)
+})
+
+test('S5-9: frontend-svelte testing names the skill map and requires no mutation', () => {
+  const text = read('skills/frontend-svelte/references/testing.md')
+  assert.ok(!text.includes('qa-test-writing'))
+  assert.doesNotMatch(text, /record a mutation/)
+  assert.ok(text.includes('`skills/skill-map.json`'))
+})
+
+test('S5-11: the ADR register notes the registered gate hooks and the live skill map', () => {
+  const hooks = JSON.parse(read('hooks/hooks.json')).hooks
+  assert.ok(hooks.SessionStart)
+  assert.ok(hooks.PreToolUse)
+  const lines = read('docs/adr/README.md').split('\n')
+  const entry = lines.find(line => line.startsWith('- **ADR-050'))
+  const row = lines.find(line => line.startsWith('| 059 |'))
+  for (const name of ['hooks/hooks.json', 'skills/skill-map.json']) assert.ok(entry.includes(name))
+  assert.ok(row.includes('hooks/hooks.json'))
+  assert.ok(row.includes('proposed'))
+})
+
+test('S5-10: the runtime-boundaries note names PROTECTED instead of listing it', () => {
+  assert.ok(read('crew/loop.mjs').includes('const PROTECTED = ['))
+  const note = read('.claude/dev-team/memory/runtime-boundaries.md')
+  assert.ok(note.includes('`PROTECTED`'))
+  assert.ok(note.includes('crew/loop.mjs'))
+  for (const path of ['crew/checks.mjs', 'crew/acp/grants.mjs', 'hooks/', 'docs/adr/']) assert.ok(!note.includes(path), path)
+})
+
+test('S2-12: crew/README counts ACP setup as a fixed cost before wait_s', () => {
+  const client = read('crew/acp-client.mjs')
+  for (const name of ['ACP_SETUP_TIMEOUT_MS', 'ACP_FIFO_WAIT_MS']) assert.ok(client.includes(`const ${name} =`))
+  const paragraph = crewReadme.split(/\n\s*\n/).map(text => text.replace(/\s+/g, ' ')).find(text => text.includes('fixed cost'))
+  assert.ok(paragraph)
+  for (const name of ['`wait_s`', '`ACP_SETUP_TIMEOUT_MS`', '`ACP_FIFO_WAIT_MS`', '`crew/acp-client.mjs`']) assert.ok(paragraph.includes(name), name)
 })
 
 // MUTATION: remove the tech-lead from the seat description.

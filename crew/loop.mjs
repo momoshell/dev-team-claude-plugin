@@ -609,8 +609,8 @@ export async function runLoop(spec, deps = {}) {
   const replan = async (envelope, lead) => {
     const planned = await stage('replan', () => seatTurn('planner', [{ id: 'plan-gap', role: 'builder', envelope, ...(lead ? { lead } : {}) }]))
     if (planned.halt) return planned
+    if (rulings.length) { rulings.length = 0; await emit('lead-rulings', { rulings: [] }) }
     const halt = await acceptPlan(planned.envelope)
-    if (!halt && rulings.length) { rulings.length = 0; await emit('lead-rulings', { rulings: [] }) }
     return halt ? { halt } : {}
   }
 

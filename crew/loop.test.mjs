@@ -740,6 +740,20 @@ test('a lead bounce to the planner drops the lead rulings about the replaced pla
   assert.deepEqual(f.rows.filter((r) => r.event === 'lead-rulings').at(-1).rulings, [])
 })
 
+test('a replan whose tier raise stops leaves no lead rulings for finish (#2347)', async () => {
+  let builds = 0, leads = 0, plans = 0
+  const f = fakes({ lead: 'bounce', throwJudge: true, deps: { repoState: () => 'same' }, edit: (v) => {
+    if (v.role === 'builder' && ++builds <= 2) return { ...v, status: 'insufficient', details: { ...v.details, gap: `gap ${builds}` } }
+    if (v.role === 'lead') { v.summary = `ruling ${++leads}`; v.details.target = leads === 1 ? 'builder' : 'planner' }
+    if (v.role === 'planner' && ++plans === 2) v.details.judge = 'needs review'
+    return v
+  } })
+  const result = await f.go()
+  assert.equal(result.reason, 'seat-unmeasured')
+  assert.equal(plans, 2)
+  assert.deepEqual(f.rows.filter((r) => r.event === 'lead-rulings').at(-1).rulings, [])
+})
+
 test('a builder-continue turn keeps the lead rulings made earlier in the stage (#2291)', async () => {
   let builds = 0, state = 0
   const f = fakes({ lead: 'bounce', deps: { repoState: () => String(state++) }, edit: (v) => {

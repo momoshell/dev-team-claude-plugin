@@ -349,7 +349,7 @@ export async function runLoop(spec, deps = {}) {
   // Non-done returns route under ADR-055 §12; an exhausted bound goes to the lead, unless singleTurn or the lead's own bound stops it.
   const seatTurn = async (role, feedback = [], { singleTurn = false, free = false, hold = false, reserveReview = null, deltaReview = null } = {}) => {
     if (role === 'reviewer') enterPhase('review')
-    let given = feedback
+    let given = feedback, rulings = []
     for (;;) {
       let held, progressed = false
       if (!free && rounds[role] >= (seats[role].rounds ?? DEFAULT_ROUNDS)) {
@@ -484,7 +484,7 @@ export async function runLoop(spec, deps = {}) {
         && !singleTurn && (isFinish || tier !== 'mechanical') && progressTurns < MAX_PROGRESS_TURNS) {
         progressTurns += 1
         await emit('builder-continue', { id: held.envelope.id, progressTurns })
-        feedback = [{ id: 'builder-continue', summary: 'Your insufficient names no plan gap in details.gap and your turn changed the worktree: continue the same plan until its tasks are done, or return insufficient naming the gap in details.gap.' }, ...given]
+        feedback = [{ id: 'builder-continue', summary: 'Your insufficient names no plan gap in details.gap and your turn changed the worktree: continue the same plan until its tasks are done, or return insufficient naming the gap in details.gap.' }, ...rulings, ...given]
         free = true
         continue
       }
@@ -510,14 +510,14 @@ export async function runLoop(spec, deps = {}) {
         const failure = { role, status, details }
         if (repeatsFailure(failure)) return { halt: await stop('no-progress', failure) }
         if (status === 'escalate' && !text(details.question)) {
-          feedback = [{ id: 'escalate-no-question', summary: 'Name the decision needed from the operator in details.question.' }, ...given]
+          feedback = [{ id: 'escalate-no-question', summary: 'Name the decision needed from the operator in details.question.' }, ...rulings, ...given]
           continue
         }
         // ADR-055 §12, amended 2026-11-03: only mechanical insufficiency restarts directly.
         if (!isFinish && role === 'builder' && status === 'insufficient' && tier === 'mechanical') {
           const revised = await restart('build', 'builder-insufficient', { envelope: held.envelope })
           if (revised.halt) return revised
-          singleTurn = false; given = []
+          singleTurn = false; given = []; rulings = []
           feedback = []
           seats[role] = { ...seats[role], rounds: Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }
           continue
@@ -534,10 +534,12 @@ export async function runLoop(spec, deps = {}) {
           ? await restart('build', 'lead-bounce-planner', { envelope: held.envelope ?? last.builder ?? null, lead: decided.summary })
           : await replan(held.envelope ?? last.builder ?? null, decided.summary)
         if (revised.halt) return revised
-        if (mechanical) { singleTurn = false; given = [] }
-        feedback = mechanical ? [] : [{ id: 'plan-revised', plan_path: planPath }, ...given]
+        if (mechanical) { singleTurn = false; given = []; rulings = [] }
+        feedback = mechanical ? [] : [{ id: 'plan-revised', plan_path: planPath }, ...rulings, ...given]
       } else if (role === 'builder') {
-        feedback = [{ id: 'lead-bounce', summary: decided.summary }, ...given]
+        const ruling = { id: 'lead-bounce', summary: decided.summary }
+        feedback = [ruling, ...rulings, ...given]
+        rulings.push(ruling)
       }
       // bounce: exactly one more turn for this role, beyond its bound only if the bound is spent; the counter keeps its history
       seats[role] = { ...seats[role], rounds: Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }

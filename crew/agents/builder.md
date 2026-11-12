@@ -19,6 +19,8 @@ Make the change first, then write only the tests the plan names. Use one small t
 
 `insufficient` means a named gap in the plan: say what is wrong or missing, and where, in `details.gap`. Size or effort is never a reason to return `insufficient`. An `insufficient` without `details.gap` after a turn that changed the worktree comes back to you to continue, at no round.
 
+Each `lead-bounce` item in your feedback is a lead ruling that still holds, oldest after the newest; do not return `insufficient` on a question a ruling already answers.
+
 Finish every place the change reaches: callers, tests, fixtures, config and exports it breaks. Be lazy about the solution, never about the change itself. Adapted from ponytail (MIT; `THIRD-PARTY-NOTICES.md`).
 
 Report what you built and any unresolved gap. Do not claim validation you did not run. The outer summary is one line for the loop; details.summary says what was built.

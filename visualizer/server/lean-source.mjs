@@ -31,6 +31,10 @@ function dirs(path) {
 function isDir(path) {
   try { return statSync(path).isDirectory() } catch { return false }
 }
+function leanRolesOf(dir) {
+  const leanDir = join(dir, 'task', LEAN_SESSIONS_DIR)
+  return within(dir, leanDir) ? dirs(leanDir).filter((name) => isDir(join(leanDir, name)) && within(dir, join(leanDir, name))) : []
+}
 // A lane file is read only when it resolves inside the lane: a symlink out of the lane reads as absent.
 function readJson(path, laneDir) {
   if (!within(laneDir, path)) return null
@@ -75,8 +79,10 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive } =
               const entry = cacheEntry(path, laneDir)
               if (entry && Object.hasOwn(entry, 'at')) at = entry.at
               else {
-                const value = JSON.parse(readFileSync(path, 'utf8').split('\n')[0]).at
-                if (Number.isFinite(value)) at = value
+                try {
+                  const value = JSON.parse(readFileSync(path, 'utf8').split('\n')[0]).at
+                  if (Number.isFinite(value)) at = value
+                } catch { /* An unreadable first row has unknown time. */ }
                 if (entry) entry.at = at
               }
             }
@@ -103,11 +109,7 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive } =
       if (!isObject(crew) || !isObject(crew.members)) continue
       const seats = Object.entries(crew.members)
       if (!seats.length || seats.some(([name, member]) => !ROLE.test(name) || !isObject(member))) continue
-      const rows = readJournalRows({ dir: candidate.dir }).rows
-      const leanDir = join(candidate.dir, 'task', LEAN_SESSIONS_DIR)
-      const leanRoles = within(candidate.dir, leanDir) ? dirs(leanDir).filter((name) => isDir(join(leanDir, name)) && within(candidate.dir, join(leanDir, name))) : []
-      const derived = deriveMembers({ members: crew.members, rows, leanRoles, tier: spec.tier })
-      return { lane, dir: candidate.dir, base: candidate.base, archived: candidate.archived, spec, ...derived }
+      return { lane, dir: candidate.dir, base: candidate.base, archived: candidate.archived, spec, members: crew.members }
     }
     return null
   }
@@ -167,7 +169,12 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive } =
 
   // Seat recordings of one role, numeric turn order, confined to the resolved lane.
   function readSeatSessions(found, role) {
-    if (typeof role !== 'string' || !ROLE.test(role) || !Object.hasOwn(found.members, role)) return { status: 400, error: `${JSON.stringify(role)} is not a member of lane ${found.lane}` }
+    if (typeof role !== 'string' || !ROLE.test(role)) return { status: 400, error: `${JSON.stringify(role)} is not a member of lane ${found.lane}` }
+    if (!Object.hasOwn(found.members, role)) {
+      const rows = readJournalRows(found).rows
+      const { members } = deriveMembers({ members: found.members, rows, leanRoles: leanRolesOf(found.dir), tier: found.spec.tier })
+      if (!Object.hasOwn(members, role)) return { status: 400, error: `${JSON.stringify(role)} is not a member of lane ${found.lane}` }
+    }
     const roleDir = join(found.dir, 'task', LEAN_SESSIONS_DIR, role)
     const turn = new RegExp(`^[A-Za-z0-9._-]+\\.${role}\\.([0-9]+)((?:\\.[A-Za-z0-9-]+)*)\\.jsonl$`)
     const files = dirs(roleDir).flatMap((name) => {
@@ -219,6 +226,8 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive } =
 
   function summarize(found) {
     const { rows, skipped_malformed, error } = readJournalRows(found)
+    const leanRoles = rows.some((row) => row.event === 'tier-raised') ? leanRolesOf(found.dir) : []
+    const { members, tier } = deriveMembers({ members: found.members, rows, leanRoles, tier: found.spec.tier })
     const phases = []
     let latest_stage = null, status = 'unknown', reason = null, pr = null, running = false, started_at = null
     let hand_finished = false, pr_actor = null, lastAt = null
@@ -306,7 +315,7 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive } =
     if (duration_ms !== null) delete pending.duration_ms
     else pending.duration_ms = started_at === null ? 'the lane journal records no valid run-start time' : endReason
     if (started_at === null) pending.started_at = 'the lane journal records no valid run-start time'
-    const seats = Object.entries(found.members).map(([role, member]) => ({
+    const seats = Object.entries(members).map(([role, member]) => ({
       role, agent: nonEmpty(member.agent) ? member.agent : null, model: nonEmpty(member.model) ? member.model : null,
       transport: nonEmpty(member.transport) ? member.transport : null,
     }))
@@ -314,7 +323,7 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive } =
       source: 'lean', adw_id: leanIdentity(found.lane), goal: found.lane, repo_slug: `dt-${found.lane}`, task_slug: found.lane,
       latest_stage, status, reason, running, phases, seats, pr, hand_finished, pr_actor,
       archived: found.archived, journal_rows: rows.length, journal_skipped_malformed: skipped_malformed, journal_error: error ?? null,
-      tier: nonEmpty(found.tier) ? found.tier : null, shape: nonEmpty(found.spec.shape) ? found.spec.shape : null,
+      tier: nonEmpty(tier) ? tier : null, shape: nonEmpty(found.spec.shape) ? found.spec.shape : null,
       mode: null, started_at, ended_at, duration_ms, last_heartbeat_at: null,
       pending, metrics, usage_turns,
       ship: { state: 'unmeasured', reason: pr ? 'pull request recorded; merge state is not recorded in the lane' : 'lean lanes record no ship state', stale: false },

@@ -70,9 +70,9 @@ enforced by tests, not just preferred:
 - **Never report a rate without its denominator.**
 - **Instrumentation is never load-bearing.** Writing the lane journal and the
   session files does not normally throw into the caller. One exception: a failed
-  session-file write fails the turn (`crew/lean.mjs`, `guardedAppend`). No reader
-  needs the complete recording since the skill proof was removed (#2323); keeping
-  this exception is an operator decision.
+  session-file write fails the turn (`crew/lean.mjs`, `guardedAppend`). The
+  operator decided on 2026-11-12 to keep it: a turn with no recording cannot be
+  inspected with `crew show`.
 - **A blind spot is stated, not omitted.** Tools here print what they could not
   measure and refuse to call that a clear.
 

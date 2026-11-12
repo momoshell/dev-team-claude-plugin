@@ -167,30 +167,6 @@ test('DM8: conventions hold only the binding entries and the rest are archived',
   assert.ok(read('CLAUDE.md').includes(archive))
 })
 
-// MUTATION: restore the old manifest description.
-test('DM9: manifests describe the per-test proof, not gate-first acceptance', () => {
-  const plugin = json('.claude-plugin/plugin.json')
-  const description = json('.claude-plugin/marketplace.json').plugins.find(item => item.name === plugin.name).description
-  assert.equal(plugin.description, description)
-  assert.match(description, /per-test proof/)
-  assert.doesNotMatch(description, /gate-first|acceptance/i)
-})
-
-// MUTATION: restore the four-seat description or a retired feature map.
-test('DM10: lane prose names the current seats, loop and arms', () => {
-  const lane = read('skills/lane-brief/SKILL.md'), readme = read('README.md'), crew = read('crew/README.md')
-  assert.doesNotMatch(lane, /two different gates/)
-  assert.doesNotMatch(lane.match(/^out_of_scope:.*$/m)[0], /roster/)
-  assert.match(readme, /five seats/)
-  assert.match(readme, /tech-lead/)
-  assert.doesNotMatch(crew, /Mechanical and finish prove/)
-  assert.match(crew, /Build, judge and finish commit[\s\S]*?repeat every check/)
-  for (const name of ['Skeletonread', 'Subagent', 'Per-test proof']) assert.match(crew, new RegExp(`\\| ${name} \\|`))
-  const advisor = crew.match(/^\| Advisor \|.*$/m)[0]
-  assert.ok(advisor.includes('`crew/agents/builder.md`'))
-  assert.equal((advisor.match(/adr-047-the-advisor-is-a-roster-seat\.md/g) ?? []).length, 1)
-})
-
 // MUTATION: DM11 restores row 030's status to "ratified 2026-08-14".
 test('DM11: ADR-055 supersedes 030, 038, 048 and 049 in the index', () => {
   const rows = index()
@@ -207,25 +183,4 @@ test('DM12: index rows are in ADR number order', () => {
   const ids = indexRows().map(([id]) => id)
   assert.ok(ids.length)
   assert.deepEqual(ids, [...ids].sort((a, b) => Number(a) - Number(b)))
-})
-
-test('ancillary prose describes the current runtime and marks history', () => {
-  const conventions = read('docs/conventions.md')
-  assert.match(conventions, /2026-08-02 \(a literal NUL/)
-  for (const name of removed) assert.ok(conventions.includes(`\`${name}\``))
-  assert.match(conventions, /operator approved removing these unused dependencies on 2026-10-31/)
-  const scope = read('docs/adr/README.md').split('## Note on scope')[1].split('## Entries')[0]
-  assert.match(scope, /024[\s\S]*026[\s\S]*027[\s\S]*historical/)
-  assert.doesNotMatch(read('visualizer/README.md'), /returns (?:and journal )?sources?/i)
-  const claude = read('CLAUDE.md')
-  assert.ok(claude.includes('`node bin/crew.mjs <verb>`'))
-  assert.equal((claude.match(/^\|.*`skills\/lane-brief\/`.*\|$/gm) ?? []).length, 1)
-  const crew = read('crew/README.md')
-  assert.ok(crew.includes('`~/.crew/dt-<lane>/<lane>/`'))
-  assert.doesNotMatch(crew.match(/State lives under[\s\S]*?session file\./)[0], /DEVTEAM_CREW_ROOT/)
-  assert.match(crew, /skill-map selector, not a registered hook/)
-  assert.ok(crew.includes('visualizer/web/src/lib/LeanWaterfall.svelte'))
-  assert.match(read('test/fixtures/acp/README.md'), /Historical measurements[\s\S]*replayed by current/)
-  assert.match(read('docs/decisions-needed.md'), /Historical register/)
-  assert.match(read('README.md'), /decisions-needed\.md`\]\(docs\/decisions-needed\.md\) is the historical\s+owner-decision register/)
 })

@@ -309,7 +309,7 @@ const DETAIL_RULES = {
   summary: [nonempty, 'is a nonempty string'],
   verdict: [(v) => REVIEW_VERDICTS.includes(v), `is one of ${REVIEW_VERDICTS.join(', ')}`],
   decision: [(v) => LEAD_DECISIONS.includes(v), `is one of ${LEAD_DECISIONS.join(', ')}`],
-  tests: [(v) => Array.isArray(v) && v.every((t) => plain(t) && Object.keys(t).length === 2 && nonempty(t.file) && nonempty(t.title)), 'is a list of {file, title} with nonempty strings'],
+  tests: [(v) => Array.isArray(v) && v.every((t) => plain(t) && Object.keys(t).every((k) => ['file', 'title', 'support'].includes(k)) && nonempty(t.file) && nonempty(t.title) && (!Object.hasOwn(t, 'support') || (Array.isArray(t.support) && t.support.length > 0 && t.support.every(nonempty)))), 'is a list of {file, title, support?} with nonempty strings and optional nonempty support list'],
   notes: [nonempty, 'is a nonempty string'],
   gap: [nonempty, 'is a nonempty string'],
   question: [nonempty, 'is a nonempty string'],

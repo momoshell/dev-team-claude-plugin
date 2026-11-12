@@ -396,6 +396,20 @@ test('P2 planner details require tests, a list of {file, title}, except on an ar
   assert.ok(validateEnvelope('planner', value, { archived: true }).defects.some((d) => d.includes('details.subject')))
 })
 
+test('P2 a named test may list support files, a nonempty list of nonempty strings', () => {
+  for (const role of ['builder', 'planner']) {
+    const value = envelope(role)
+    for (const entry of [{ file: 'x', title: 'y' }, { file: 'x', title: 'y', support: ['fixture.json'] }]) {
+      value.details.tests = [entry]
+      assert.deepEqual(validateEnvelope(role, value).defects, [])
+    }
+    for (const entry of [{ file: 'x', title: 'y', extra: 1 }, ...[[], 'x', [''], null].map((support) => ({ file: 'x', title: 'y', support }))]) {
+      value.details.tests = [entry]
+      assert.ok(validateEnvelope(role, value).defects.some((d) => d.includes('details.tests')))
+    }
+  }
+})
+
 test('P2 a lead bounce names its target, builder or planner, and any escalate may carry a question', () => {
   for (const target of [undefined, '', 'reviewer', null]) {
     const value = envelope('lead', { details: { decision: 'bounce', ...(target === undefined ? {} : { target }) } })

@@ -11,7 +11,7 @@ import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { LANE, isObject } from './lane-core.mjs'
+import { LANE, isObject, deriveMembers } from './lane-core.mjs'
 import { createLeanSource } from '../visualizer/server/lean-source.mjs'
 const ROLE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/
 class ShowRefusal extends Error {}
@@ -93,12 +93,21 @@ export function showLane({ lane, role, json = false, deps = {} }) {
   let members
   try { members = JSON.parse(crewText).members } catch (error) { throw new ShowRefusal(`lane ${lane}: ${crewPath} is not valid JSON (${error.message})`) }
   if (!isObject(members)) throw new ShowRefusal(`lane ${lane}: ${crewPath} has no members object`)
-  const seats = Object.entries(members)
+  let seats = Object.entries(members)
   if (seats.length === 0) throw new ShowRefusal(`lane ${lane}: ${crewPath} lists no members`)
   for (const [name, member] of seats) {
     if (!ROLE.test(name)) throw new ShowRefusal(`lane ${lane}: ${crewPath} names unsafe member ${JSON.stringify(name)}`)
     if (!isObject(member)) throw new ShowRefusal(`lane ${lane}: member ${name} in ${crewPath} is not an object`)
   }
+  const journal = text(join(crewDir, 'task', 'journal.jsonl')) ?? ''
+  const rows = journal.split('\n').flatMap((line) => {
+    try { const row = JSON.parse(line); return isObject(row) ? [row] : [] } catch { return [] }
+  })
+  const leanRoles = rows.some((row) => row.event === 'tier-raised')
+    ? (attempt(join(crewDir, 'task', 'lean'), (path) => d.readdirSync(path, { withFileTypes: true })) ?? []).filter((entry) => entry.isDirectory()).map((entry) => entry.name)
+    : []
+  members = deriveMembers({ members, rows, leanRoles }).members
+  seats = Object.entries(members)
   if (role !== undefined && !Object.hasOwn(members, role)) throw new ShowRefusal(`lane ${lane} has no role ${role}; it has ${seats.map(([name]) => name).join(', ')}`)
 
   const sessionsOf = (name, transport) => {

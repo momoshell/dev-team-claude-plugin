@@ -40,13 +40,14 @@ test('lane-core helpers are defined once, in crew/lane-core.mjs', () => {
   assert.match(body, /withoutIssueTokens\(body\)/)
 })
 
-test('lane-core.mjs is zero-dependency and exports the shared helpers', async () => {
+test('lane-core.mjs imports only builtins and the protocols leaf and exports the shared helpers', async () => {
   const file = new URL('lane-core.mjs', import.meta.url)
   assert.ok(existsSync(file), 'lane-core.mjs exists')
   const source = readFileSync(file, 'utf8')
   const imports = [...source.matchAll(/^import[\s\S]*?from\s+['"]([^'"]+)['"]/gm)].map((match) => match[1])
   assert.ok(imports.length > 0)
-  assert.ok(imports.every((specifier) => specifier.startsWith('node:')), imports.join(', '))
+  assert.deepEqual(imports.filter((specifier) => !specifier.startsWith('node:')), ['./protocols.mjs'])
+  assert.doesNotMatch(readFileSync(new URL('protocols.mjs', import.meta.url), 'utf8'), /^import\s/m)
   const { LANE, isObject, within, HEX_OID, describeError, GIT_STATUS_ARGS } = await import('./lane-core.mjs')
   for (const [slug, valid] of [['demo', true], ['b1544-lane-helpers', true], ['-x', false], ['Demo', false], ['a'.repeat(64), false]]) assert.equal(LANE.test(slug), valid, slug)
   for (const [value, valid] of [[null, false], [[], false], [{}, true]]) assert.equal(isObject(value), valid)

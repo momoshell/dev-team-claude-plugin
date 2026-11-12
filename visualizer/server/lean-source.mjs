@@ -5,6 +5,7 @@ import { readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import { stateless, supersededReturn } from './lean-journal-order.mjs'
 import { deadRun, probeAlive } from '../../crew/run-pid.mjs'
+import { deriveMembers } from '../../crew/protocols.mjs'
 
 const LEAN_SPEC_FILE = 'lean.json'
 const VERDICT_EVENT = 'verdict'
@@ -102,7 +103,11 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive } =
       if (!isObject(crew) || !isObject(crew.members)) continue
       const seats = Object.entries(crew.members)
       if (!seats.length || seats.some(([name, member]) => !ROLE.test(name) || !isObject(member))) continue
-      return { lane, dir: candidate.dir, base: candidate.base, archived: candidate.archived, spec, members: crew.members }
+      const rows = readJournalRows({ dir: candidate.dir }).rows
+      const leanDir = join(candidate.dir, 'task', LEAN_SESSIONS_DIR)
+      const leanRoles = within(candidate.dir, leanDir) ? dirs(leanDir).filter((name) => isDir(join(leanDir, name)) && within(candidate.dir, join(leanDir, name))) : []
+      const derived = deriveMembers({ members: crew.members, rows, leanRoles, tier: spec.tier })
+      return { lane, dir: candidate.dir, base: candidate.base, archived: candidate.archived, spec, ...derived }
     }
     return null
   }
@@ -309,7 +314,7 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive } =
       source: 'lean', adw_id: leanIdentity(found.lane), goal: found.lane, repo_slug: `dt-${found.lane}`, task_slug: found.lane,
       latest_stage, status, reason, running, phases, seats, pr, hand_finished, pr_actor,
       archived: found.archived, journal_rows: rows.length, journal_skipped_malformed: skipped_malformed, journal_error: error ?? null,
-      tier: nonEmpty(found.spec.tier) ? found.spec.tier : null, shape: nonEmpty(found.spec.shape) ? found.spec.shape : null,
+      tier: nonEmpty(found.tier) ? found.tier : null, shape: nonEmpty(found.spec.shape) ? found.spec.shape : null,
       mode: null, started_at, ended_at, duration_ms, last_heartbeat_at: null,
       pending, metrics, usage_turns,
       ship: { state: 'unmeasured', reason: pr ? 'pull request recorded; merge state is not recorded in the lane' : 'lean lanes record no ship state', stale: false },

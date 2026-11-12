@@ -56,6 +56,33 @@ function fingerprint(root) {
   return JSON.stringify(rows)
 }
 
+test('S6-2 a lane raised to judge lists and renders the tech-lead seat its raise added, from the row seats or its recordings', () => {
+  const { crewRoot } = fixture()
+  const members = { planner: MEMBERS.planner, builder: MEMBERS.builder, reviewer: MEMBERS.reviewer }
+  for (const [name, seats] of [
+    ['raised1', { ...members, lead: { agent: null, model: null, effort: null }, 'tech-lead': { agent: 'claude', model: 'anthropic/claude-opus-5', effort: 'high' } }],
+    ['raised2', undefined],
+  ]) {
+    const dir = lane(crewRoot, name, { members, turns: [['tech-lead', 1, RAW]] })
+    put(join(dir, 'task/journal.jsonl'), `${JSON.stringify({ event: 'tier-raised', lane: name, stage: 'plan', from: 'build', to: 'judge', reason: 'protected-path', paths: ['crew/loop.mjs'], seats, at: 1 })}\n{torn`)
+  }
+  lane(crewRoot, 'plain', { members, turns: [['other', 1, RAW]] })
+  const before = fingerprint(crewRoot)
+  for (const [name, metadata] of [['raised1', 'claude  anthropic/claude-opus-5'], ['raised2', 'unknown  unknown']]) {
+    const out = [], err = []
+    const deps = { crewRoot, stdout: (s) => out.push(s), stderr: (s) => err.push(s) }
+    assert.equal(main([name, 'tech-lead'], deps), 0, err.join(''))
+    assert.match(out.join(''), /ASSISTANT\nhello/)
+    out.length = 0
+    assert.equal(main([name], deps), 0, err.join(''))
+    assert.ok(out.join('').includes(`tech-lead  ${metadata}  lean-acp`))
+    assert.doesNotMatch(out.join(''), /^lead  /m)
+    assert.ok(out.join('').indexOf('reviewer  ') < out.join('').indexOf('tech-lead  '))
+  }
+  assert.doesNotMatch(showLane({ lane: 'plain', deps: { crewRoot } }), /^other  /m)
+  assert.equal(fingerprint(crewRoot), before)
+})
+
 // MUTATION: restore the headless-rpc branch of sessionsOf and the planner's old stream is listed.
 test('a seat recorded on a retired transport lists no session file even when its old stream is on disk', () => {
   const { crewRoot } = fixture()

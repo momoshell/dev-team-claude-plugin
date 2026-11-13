@@ -412,6 +412,16 @@ test('a muse readgate seat allows a read whose gate inspection fails and journal
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+test('a muse readgate seat journals its read-gate failure row with a numeric at', async () => {
+  const root = scratchDir('muse-readgate-failure-')
+  try {
+    await use('pi-turn', { agent: 'muse', model: 'meta/muse-spark-1.3', cwd: root, taskDir: root, definition: { writes: 'repo', extensions: ['readgate'] }, deps: { exists: () => true }, permissions: [{ kind: 'read', rawInput: { path: 'missing' } }] }, () => {
+      const row = readFileSync(join(root, 'journal.jsonl'), 'utf8').split('\n').filter(Boolean).map(JSON.parse).find((entry) => entry.read_gate_failure)
+      assert.ok(Number.isFinite(row?.at))
+    })
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('a muse task-dir seat is refused on an unreadable worktree, settles on an unchanged dirty one, and fails when its turn changes the worktree or leaves it unreadable', async () => {
   for (const [states, reason, launches] of [
     [[' M a.mjs sha256:1\0', ' M a.mjs sha256:1\0'], undefined, 1],

@@ -19,6 +19,23 @@ function lane(root, name, rows, suffix = '') {
   return dir
 }
 
+test('a seat row with an ISO at and one with epoch ms give the same lane end time', () => {
+  const root = scratchDir('lean-seat-time-')
+  try {
+    for (const [name, at] of [['old', new Date(3000).toISOString()], ['new', 3000]]) {
+      lane(root, name, [
+        { event: 'run-start', at: 1000 },
+        { event: 'stage-start', stage: 'build', at: 1100 },
+        { event: 'stage-end', stage: 'build', at: 1900, outcome: { status: 'green' } },
+        { event: 'verdict', status: 'stopped', at: 2000 },
+        { at, advisor_note: {} },
+      ])
+    }
+    const ends = createLeanSource({ crewRoot: root }).listRuns().map((run) => run.ended_at)
+    assert.deepEqual(ends, [new Date(3000).toISOString(), new Date(3000).toISOString()])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('an empty crew root is rejected instead of resolving to the current directory', () => {
   for (const crewRoot of ['', '   ']) assert.throws(() => createLeanSource({ crewRoot }), /crewRoot must be a non-empty path/)
 })

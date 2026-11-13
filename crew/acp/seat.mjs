@@ -315,7 +315,7 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
   const real = deps.realpathSync ?? realpathSync
   const laneTaskDir = nonempty(taskDir) ? resolve(taskDir) : null
   const readgate = grants.readgate ? createReadGate({ cwd: workdir, taskDir: laneTaskDir, env: { ...env, CREW_FFF: grants.mcp_servers.some((server) => server.name === 'fff') ? '1' : '0' }, recordFailure: (row) => {
-    if (laneTaskDir) append(journalPathOf(laneTaskDir), `${JSON.stringify({ at: new Date().toISOString(), ...row })}\n`)
+    if (laneTaskDir) append(journalPathOf(laneTaskDir), `${JSON.stringify({ at: Date.now(), ...row })}\n`)
   } }) : null
   if (contextArms.length) laneContext({ arms: contextArms, role, laneTaskDir, workdir, definition, deps, requirePlan: isMuse && grants.skeletonread })
   const workRoot = canonicalRoot(workdir, real)
@@ -393,7 +393,7 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
         }
       } catch (error) {
         if (toolCall?.kind === 'read') {
-          try { if (laneTaskDir) append(journalPathOf(laneTaskDir), `${JSON.stringify({ at: new Date().toISOString(), read_gate_failure: { reason: String(error), tool: 'read', target: '' } })}\n`) } catch { /* journaling cannot block the read */ }
+          try { if (laneTaskDir) append(journalPathOf(laneTaskDir), `${JSON.stringify({ at: Date.now(), read_gate_failure: { reason: String(error), tool: 'read', target: '' } })}\n`) } catch { /* journaling cannot block the read */ }
           return true
         }
       }

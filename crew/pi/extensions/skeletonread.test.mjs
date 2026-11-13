@@ -179,6 +179,14 @@ test('NE1 leaves out of scope reads unchanged', () => {
   assert.equal(skeleton(f).onToolResult(readEvent('src/target.mjs'), { cwd: f.root }), undefined)
 })
 
+test('a skeleton-read failure row carries a numeric at by default', () => {
+  const f = fixture({ source: 'one\ntwo\nthree\nfour\n', maxLines: '2' }), failures = []
+  skeleton(f, { loadContext: () => { throw new Error('injected failure') }, recordFailure: (row) => failures.push(row) })
+    .onToolResult(readEvent('src/target.mjs'), { cwd: f.root })
+  assert.equal(failures.length, 1)
+  assert.ok(Number.isFinite(failures[0].at))
+})
+
 test('FB1 records context failures and leaves the read unchanged', () => {
   const f = fixture({ source: 'one\ntwo\nthree\nfour\n', maxLines: '2' })
   const failures = []

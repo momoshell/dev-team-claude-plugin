@@ -96,6 +96,7 @@ async function drive(extension, {
   mkTempDir,
   root: sharedRoot,
   writeFile,
+  now = () => '2026-08-20T00:00:00.000Z',
 } = {}) {
   const root = sharedRoot || scratchDir('subagent-suite-')
   const taskDir = join(root, 'task')
@@ -141,7 +142,7 @@ async function drive(extension, {
     argv: ['/abs/node', '/abs/pi-cli.js'],
     execPath: '/abs/node',
     existsSync: () => true,
-    now: () => '2026-08-20T00:00:00.000Z',
+    now,
     randomId: () => 's1',
     setTimeout: (fn, ms) => {
       const timer = { fn, ms, cleared: false, fired: false }
@@ -872,6 +873,16 @@ function readRun(nudge, n, dirs = DIRS) {
     assert.equal(nudge.onToolCall({ toolName: 'read', input: { path: `${dirs[i % dirs.length]}/f${i}.mjs` } }), undefined)
   }
 }
+
+test('subagent spawn and scout-nudge rows carry a numeric at by default', async () => {
+  const run = await driven(mod, { now: null })
+  const spawn = run.journal.map(JSON.parse).find((row) => row.subagent_usage)
+  const { nudge, rows } = nudgeFixture({ now: undefined })
+  readRun(nudge, mod.SCOUT_NUDGE_READ_THRESHOLD)
+  assert.ok(Number.isFinite(spawn?.at))
+  assert.equal(rows().length, 1)
+  assert.ok(Number.isFinite(rows()[0].at))
+})
 
 test('SN3: one nudge after the read threshold across several directories', () => {
   const { nudge, sends, rows } = nudgeFixture()

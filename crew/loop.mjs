@@ -943,9 +943,12 @@ export async function runLoop(spec, deps = {}) {
       const proved = [...provedTests.values()]
       const title = issue && /^\s*(?:>\s*)?issue title:\s*(.+)$/im.exec(spec.brief)?.[1]
       const ask = !issue ? briefAsk(spec.brief) : ''
-      const purpose = oneLine(planSummary).replace(/^(?:the plan|plan)(?:\s+|$)/i, '')
+      const subjectPurpose = tier === 'mechanical' && !planSummary
+      const purpose = subjectPurpose
+        ? oneLine(subject).replace(/^[a-z]+(?:\([^)]*\))?!?:\s*/i, '')
+        : oneLine(planSummary).replace(/^(?:the plan|plan)(?:\s+|$)/i, '')
       return [
-        '## Summary', `Purpose: ${purpose && !/plan\.md|^(?:written|drafted)\b/i.test(purpose) ? purpose[0].toUpperCase() + purpose.slice(1) : 'unmeasured.'}`,
+        '## Summary', `Purpose: ${purpose && (subjectPurpose || !/plan\.md|^(?:written|drafted)\b/i.test(purpose)) ? purpose[0].toUpperCase() + purpose.slice(1) : 'unmeasured.'}`,
         ...(issue ? [`${closing ? 'Closes issue' : 'Issue'} ${issue[1]}${title ? `: ${oneLine(title)}` : ''}`] : ask ? [`Operator request: ${ask}`] : []),
         `How: ${oneLine(builderSummary) || oneLine(subject)}`,
         ...(!issue && !ask ? ['', `Source: ${oneLine(spec.source)}`] : []),

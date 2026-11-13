@@ -549,7 +549,7 @@ export function createAgentTool(deps: any = {}) {
   const appendFile = deps.appendFile || appendFileSync
   const mkTempDir = deps.mkTempDir || (() => mkdtempSync(join(tmpdir(), 'crew-pi-subagent-')))
   const removeDir = deps.removeDir || ((dir: string) => rmSync(dir, { recursive: true, force: true }))
-  const now = deps.now || (() => new Date().toISOString())
+  const now = deps.now || (() => Date.now())
   const randomId = deps.randomId || (() => Math.random().toString(36).slice(2, 10))
   // Injected so the abort escalation is deterministic in a test rather than a
   // two-second wall-clock wait.
@@ -920,7 +920,7 @@ export const SCOUT_NUDGE_MESSAGE_TYPE = 'crew-scout-nudge'
 const SCOUT_NUDGE_TEXT = 'You have made many read-type calls across several directories since your last write or scout call. Consider asking a scout that question instead, then read only what its findings cite.'
 
 export function createScoutNudge(deps: any = {}): any {
-  const { env = process.env, send, appendFile = appendFileSync, now = () => new Date().toISOString() } = deps
+  const { env = process.env, send, appendFile = appendFileSync, now = () => Date.now() } = deps
   let count = 0
   const dirs = new Set<string>()
   let nudged = false

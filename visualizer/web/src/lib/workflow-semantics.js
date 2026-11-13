@@ -4,30 +4,25 @@ const ASSURANCE = Object.freeze({
     alias: 'mechanical',
     label: 'Quick',
     summary: 'Lean oversight for routine, low-risk work.',
-    staffing: 'Planner, builder and reviewer; no lead seat.',
   }),
   standard: Object.freeze({
     key: 'standard',
     alias: 'build',
     label: 'Standard',
     summary: 'Balanced oversight for normal implementation work.',
-    staffing: 'Lead, planner, builder and reviewer.',
   }),
   rigorous: Object.freeze({
     key: 'rigorous',
     alias: 'judge',
     label: 'Rigorous',
     summary: 'Reinforced judgment for sensitive or high-risk work.',
-    staffing: 'Lead, planner, builder, reviewer and tech lead.',
   }),
 })
 const ASSURANCE_ALIAS = Object.freeze(Object.fromEntries(Object.values(ASSURANCE).map((entry) => [entry.alias, entry.key])))
 
 const EXECUTION = Object.freeze({
-  full: Object.freeze({ key: 'full', label: 'Full reviewed', summary: 'Plan, build, validate, review and finish.' }),
-  scout: Object.freeze({ key: 'scout', label: 'Scout', summary: 'Read-only investigation ending in a structured return.' }),
-  repair: Object.freeze({ key: 'repair', label: 'Repair', summary: 'Bounded continuation from a recorded failure.' }),
-  directed: Object.freeze({ key: 'directed', label: 'Directed', summary: 'Build from an orchestrator-authored plan and gate.' }),
+  standard: Object.freeze({ key: 'standard', label: 'Standard', summary: 'Runs a lane using its selected assurance tier.' }),
+  finish: Object.freeze({ key: 'finish', label: 'Finish', summary: 'Continues a stopped lane for an operator decision.' }),
 })
 
 function humanize(value) {
@@ -38,8 +33,8 @@ export function assuranceMeta(value) {
   const key = typeof value === 'string' && value.trim() ? value.trim() : null
   const canonical = key && ASSURANCE[key] ? key : ASSURANCE_ALIAS[key] ?? null
   if (canonical) return { ...ASSURANCE[canonical], recorded: key, source: key === canonical ? 'canonical' : 'legacy_alias' }
-  if (key) return { key, alias: null, recorded: key, source: 'unknown', label: humanize(key), summary: 'Recorded assurance preset.', staffing: 'Staffing details are not described by this visualizer.' }
-  return { key: null, alias: null, recorded: null, source: 'missing', label: 'Not recorded', summary: 'This run records no assurance preset.', staffing: 'It may predate configuration recording or have been booted with explicit roles.' }
+  if (key) return { key, alias: null, recorded: key, source: 'unknown', label: humanize(key), summary: 'Recorded assurance preset.' }
+  return { key: null, alias: null, recorded: null, source: 'missing', label: 'Not recorded', summary: 'This run records no assurance preset.' }
 }
 
 export function executionMeta(value) {

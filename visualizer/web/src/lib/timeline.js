@@ -25,23 +25,30 @@ export function formatLeanDuration(ms) {
 
 export function layoutTimeline(run = {}) {
   const phases = Array.isArray(run.phases) ? run.phases : []
-  const complete = [], unrecorded = [], open = []
+  const intervals = [], unrecorded = []
   for (const phase of phases) {
     const start = time(phase.started_at), end = time(phase.ended_at)
     if (phase.status === 'running' && phase.ended_at == null && start != null) {
-      open.push({ ...phase, x: null, width: null, duration_ms: null })
+      intervals.push({ phase, start, end: null })
       continue
     }
     const reason = start == null ? 'Start time missing or invalid' : end == null ? 'End time missing or invalid' : end < start ? 'Interval ends before it starts' : null
     if (reason) unrecorded.push({ ...phase, x: null, width: null, duration_ms: null, reason })
-    else complete.push({ phase, start, end })
+    else intervals.push({ phase, start, end })
   }
-  const origin = complete.length ? Math.min(...complete.map((entry) => entry.start)) : null
-  const finish = complete.length ? Math.max(...complete.map((entry) => entry.end)) : null
+  const origin = intervals.length ? Math.min(...intervals.map((entry) => entry.start)) : null
+  const finish = intervals.length ? Math.max(...intervals.map((entry) => entry.end ?? entry.start)) : null
   const span = origin == null ? null : finish - origin
-  const blocks = complete.map(({ phase, start, end }) => ({
-    ...phase, phase_id: phase.id ?? null, duration_ms: end - start,
-    x: span ? (start - origin) / span : 0, width: Math.max(MIN_WIDTH, span ? (end - start) / span : 0),
-  }))
-  return { origin_at: origin == null ? null : new Date(origin).toISOString(), span_ms: span, blocks, unrecorded, open }
+  const blocks = intervals.map(({ phase, start, end }) => {
+    const turns = Array.isArray(phase.turns) && phase.role ? phase.turns.filter((turn) => turn.role === phase.role) : []
+    const unmeasured = turns.find((turn) => !(Number.isFinite(turn.seconds) && turn.seconds >= 0))
+    const seat_ms = turns.length && !unmeasured ? turns.reduce((sum, turn) => sum + turn.seconds, 0) * 1000 : null
+    const seat_reason = unmeasured ? (typeof unmeasured.reason === 'string' && unmeasured.reason ? unmeasured.reason : 'seconds-malformed') : null
+    return {
+      ...phase, phase_id: phase.id ?? null, open: end == null, duration_ms: end == null ? null : end - start,
+      seat_ms: end == null ? null : seat_ms, seat_reason: end == null ? null : seat_reason, x: span ? (start - origin) / span : 0,
+      width: end == null ? null : Math.max(MIN_WIDTH, span ? (end - start) / span : 0),
+    }
+  })
+  return { origin_at: origin == null ? null : new Date(origin).toISOString(), span_ms: span, blocks, unrecorded }
 }

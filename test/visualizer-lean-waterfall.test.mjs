@@ -21,19 +21,60 @@ test('WP1 separates open and unrecorded phases without invented durations', () =
   ]
   const run = { source: 'lean', phases: [complete, open, ...bad] }, original = structuredClone(run)
   const result = layoutTimeline(run, [], { now: base + 100000 })
-  assert.deepEqual(result.open, [{ ...open, x: null, width: null, duration_ms: null }])
-  assert.deepEqual(result.blocks.map(p => p.id), [1]); assert.deepEqual(result.unrecorded.map(p => p.id), [3, 4, 5, 6, 7])
-  assert.equal(result.origin_at, iso(0)); assert.equal(result.span_ms, 10000)
+  assert.deepEqual(result.blocks.map(p => p.id), [1, 2]); assert.equal(result.blocks[1].x, 1)
+  assert.deepEqual(result.unrecorded.map(p => p.id), [3, 4, 5, 6, 7])
+  assert.equal(result.origin_at, iso(0)); assert.equal(result.span_ms, 20000)
   assert.deepEqual(result, layoutTimeline(run, [], { now: base + 900000 })); assert.deepEqual(run, original)
   const only = layoutTimeline({ source: 'lean', phases: [open] })
-  assert.equal(only.open.length, 1); assert.deepEqual(only.blocks, []); assert.deepEqual(only.unrecorded, [])
-  assert.equal(only.origin_at, null); assert.equal(only.span_ms, null)
-  assert.deepEqual(layoutTimeline({ source: 'lean', phases: [] }).open, [])
+  assert.equal(only.blocks.length, 1); assert.deepEqual(only.unrecorded, [])
+  assert.equal(only.origin_at, iso(20000)); assert.equal(only.span_ms, 0)
+  assert.deepEqual(layoutTimeline({ source: 'lean', phases: [] }).blocks, [])
   const markup = source('LeanWaterfall.svelte')
-  const rows = markup.match(/\{#each\s+timeline\.open\s+as\s+entry\b[\s\S]*?\{\/each\}/)?.[0]
-  assert.ok(rows); assert.match(rows, /Open — no stage-end record/); assert.match(rows, /entry\.name/); assert.match(rows, /entry\.role/)
-  assert.doesNotMatch(rows, /\brunning\b|\blive\b|in.flight|duration_ms|class="bar"/i)
+  assert.doesNotMatch(markup, /timeline\.open/)
   assert.match(markup, /timeline\.unrecorded as entry/); assert.match(markup, /Not recorded — \{entry.reason\}/)
+})
+
+test('an open stage is drawn from its recorded start with no end or duration', () => {
+  const run = { phases: [{ ...phase(1, 0, 10000), status: 'done' }, { ...phase(2, 5000, null), status: 'running' }] }
+  const result = layoutTimeline(run, [], { now: base + 100000 })
+  const block = result.blocks[1]
+  assert.ok(block, 'open stage must be drawn')
+  assert.deepEqual([block.x, block.open, block.width, block.duration_ms, block.seat_ms], [.5, true, null, null, null])
+  assert.deepEqual(result, layoutTimeline(run, [], { now: base + 900000 }))
+  const markup = source('LeanWaterfall.svelte')
+  assert.match(markup, /class="bar open"[^>]*block\.x \* 100/); assert.match(markup, /Open — no stage-end record/)
+  assert.doesNotMatch(markup, /timeline\.open/)
+})
+
+test('a build stage with a lead turn inside it shows the builder turn seconds apart from the stage span', () => {
+  const root = mkdtempSync(join(tmpdir(), 'lean-turns-'))
+  try {
+    const crewRoot = join(root, 'crew'), archiveRoot = join(root, 'archive'), lane = join(crewRoot, 'dt-demo', 'demo')
+    mkdirSync(join(lane, 'task'), { recursive: true }); mkdirSync(archiveRoot)
+    writeFileSync(join(lane, 'crew.json'), JSON.stringify({ members: { builder: { agent: 'pi' }, lead: { agent: 'pi' } } }))
+    writeFileSync(join(lane, 'task', 'lean.json'), JSON.stringify({ id: 'demo', tier: 'build', shape: 'standard' }))
+    const row = (event, stage, seconds, extra = {}) => ({ event, lane: 'demo', stage, at: base + seconds * 1000, ...extra })
+    const turn = (stage, role, seconds, at) => row('seat-turn', stage, at, { role, id: 'turn', model: 'model', seconds, status: 'done', usage: null, unmeasured: {} })
+    const env = (stage, role, at) => row('envelope', stage, at, { role, id: 'turn', parsed: {}, defects: [], error: null })
+    const rows = [row('stage-start', 'build', 0), turn('build', 'builder', 59, 59), turn('build', 'lead', 7, 59), env('build', 'builder', 59), row('stage-start', 'lead', 59), turn('lead', 'lead', 24, 83), env('lead', 'lead', 83), row('stage-end', 'lead', 83), turn('build', 'builder', 486, 569), env('build', 'builder', 569), row('stage-end', 'build', 569)]
+    writeFileSync(join(lane, 'task', 'journal.jsonl'), rows.map(r => JSON.stringify(r)).join('\n') + '\n')
+    const run = createLeanSource({ crewRoot, archiveRoot }).listRuns()[0]
+    const [build, lead] = layoutTimeline(run).blocks
+    // MUTATION: drop the role filter in layoutTimeline; the lead-roled turn inside build adds 7s.
+    assert.equal(build.seat_ms, 545000); assert.equal(build.seat_reason, null); assert.equal(build.duration_ms, 569000); assert.equal(lead.seat_ms, 24000)
+    for (const seconds of [null, -1, '5']) {
+      const phases = structuredClone(run.phases); phases[0].turns.push({ role: 'builder', seconds })
+      const block = layoutTimeline({ phases }).blocks[0]
+      assert.equal(block.seat_ms, null); assert.equal(block.seat_reason, 'seconds-malformed')
+    }
+    // MUTATION: drop the journal's unmeasured.seconds reason in the reader.
+    writeFileSync(join(lane, 'task', 'journal.jsonl'), [...rows.slice(0, -1), row('seat-turn', 'build', 570, { role: 'builder', id: 'turn', model: 'model', seconds: null, status: 'done', usage: null, unmeasured: { seconds: 'clock-unmeasured' } }), rows.at(-1)].map(r => JSON.stringify(r)).join('\n') + '\n')
+    const unclocked = layoutTimeline(createLeanSource({ crewRoot, archiveRoot }).listRuns()[0]).blocks[0]
+    assert.equal(unclocked.seat_ms, null); assert.equal(unclocked.seat_reason, 'clock-unmeasured'); assert.equal(unclocked.duration_ms, 569000)
+    const markup = source('LeanWaterfall.svelte')
+    assert.match(markup, /block\.role\} turns \{formatLeanDuration\(block\.seat_ms\)/); assert.match(markup, /Stage span \{formatLeanDuration\(block\.duration_ms\)/)
+    assert.match(markup, /\{:else if block\.seat_reason\}<span>\{block\.role\} turn time not measured · \{block\.seat_reason\}/)
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
 test('WP2 scales recorded phases with a minimum visible width', () => {

@@ -660,6 +660,17 @@ test('a configured proofTimeoutMs in project.json reaches the lane spec and an a
   }
 })
 
+test('a configured builderChecks in project.json reaches the lane spec and an absent one writes no key', async () => {
+  const checks = ['cargo clippy -- -D warnings', 'cargo test -p fence']
+  for (const field of [{ builderChecks: checks }, {}]) {
+    const { deps, calls } = fakes({ project: { ...projectFile(), ...field } })
+    await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
+    const spec = JSON.parse(written(calls, '/task/lean.json')[2])
+    assert.equal(Object.hasOwn(spec, 'builderChecks'), Object.hasOwn(field, 'builderChecks'))
+    assert.deepEqual(spec.builderChecks, field.builderChecks)
+  }
+})
+
 test('start refuses when the selected lane base lacks the approved onboarding', async () => {
   for (const [baseProject, reason] of [[null, 'not-onboarded'], ['{', 'onboarding-stale'], [projectFile('cargo test'), 'onboarding-stale'], [projectFile(), null]]) {
     const root = scratchDir('start-base-onboarding-')
@@ -1023,6 +1034,37 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
   const sessionOf = (role, n) => join(spec.taskDir, 'lean', role, `lane.${role}.${n}.jsonl`)
   return { spec, requests, logs, go: () => runLean(spec, options), sessionOf, options }
 }
+// MUTATION: leave the section out of the suite-repair prompt.
+test('with builderChecks set, the build and suite-repair builder prompts hold every entry verbatim and planner and reviewer prompts hold none', async () => {
+  let suites = 0
+  const f = leanFixture({ loopDeps: { runSuite: async () => ++suites === 1 ? { ...GREEN, status: 'red', code: 1, reason: 'exit-nonzero' } : GREEN } })
+  f.spec.builderChecks = ['cargo clippy --all-targets -- -D warnings', 'cargo test -p fence --lib']
+  await f.go()
+  const builders = f.requests.filter((request) => request.definition.role === 'builder')
+  assert.ok(builders.length >= 2)
+  assert.ok(builders[1].prompt.includes('suite-repair'))
+  for (const { prompt } of builders) {
+    assert.ok(prompt.includes('## Project checks'))
+    for (const check of f.spec.builderChecks) assert.ok(prompt.includes(`- ${check}\n`))
+  }
+  for (const role of ['planner', 'reviewer']) {
+    const requests = f.requests.filter((request) => request.definition.role === role)
+    assert.ok(requests.length > 0)
+    for (const { prompt } of requests) {
+      assert.ok(!prompt.includes('## Project checks'))
+      for (const check of f.spec.builderChecks) assert.ok(!prompt.includes(check))
+    }
+  }
+})
+
+// MUTATION: emit the section heading with no entries.
+test('without builderChecks no prompt carries a project checks section', async () => {
+  const f = leanFixture()
+  await f.go()
+  assert.ok(f.requests.length > 0)
+  for (const { prompt } of f.requests) assert.ok(!prompt.includes('## Project checks'))
+})
+
 test('a lean seat turn journals its agent, model, effort, distinct tool calls, stop reason and usage (#2287)', async () => {
   const rows = [], usage = { inputTokens: 10, outputTokens: 5, cachedReadTokens: 2, cachedWriteTokens: 1, totalTokens: 15 }
   const f = leanFixture({ loopDeps: { journal: async (row) => rows.push(row) }, acp: async (input) => {

@@ -133,6 +133,7 @@ function promptFor({ request, spec, source, charters, body, section }) {
     '## Brief',
     brief,
     ...(planPath ? ['', `Plan path: ${planPath}`] : []),
+    ...(role === 'builder' && Array.isArray(spec.builderChecks) && spec.builderChecks.length ? ['', '## Project checks', "Before returning, run each line below in the checkout, as written. They are this project's own fast checks and an exception to the rule against running whole packages. Report each line's command and result in `notes`. The loop does not run them or read their result; the suite stays the gate.", ...spec.builderChecks.map((check) => `- ${check}`)] : []),
     ...(role === 'reviewer' && spec.shape !== 'finish' && !request.deltaReview && !request.reserveReview ? ['', '## Full review', 'No earlier reviewed tree is given: review the whole diff. The round-2 must-fix limit does not apply; any defect in the diff may be a must-fix. Still carry or close each earlier must-fix.'] : []),
     ...(request.deltaReview ? ['', '## Delta review', `A must-fix must be an earlier finding still unresolved or a defect in code changed since tree ${request.deltaReview.baseTree}. Use git diff ${request.deltaReview.baseTree} to inspect the delta. Raise a new problem elsewhere as a should-fix.`] : []),
     ...(['reviewer', 'tech-lead'].includes(role) ? ['', '## Builder report', `Tests: ${JSON.stringify(request.builderReport?.tests ?? [])}`, `Notes: ${JSON.stringify(request.builderReport?.notes ?? null)}`, '', '## Changed paths', ...request.changedPaths.map((path) => `- ${JSON.stringify(path)}`)] : []),

@@ -1,14 +1,16 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
-import { basename } from 'node:path'
+import { basename, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { readOnlyHookDecision } from './claude-readonly.mjs'
 import { CLAUDE_SEAT_SETTINGS } from './adapter-claude.mjs'
 
 const hookPath = new URL('./claude-readonly.mjs', import.meta.url).pathname
-const payload = (command) => ({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } })
-const on = { CREW_READ_ONLY: '1' }
+const root = fileURLToPath(new URL('../..', import.meta.url))
+const payload = (command, cwd = root) => ({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command }, cwd })
+const on = { CREW_READ_ONLY: '1', CREW_READ_ONLY_ROOT: root }
 
 test('allowed commands and disabled seats produce no decision', () => {
   assert.equal(readOnlyHookDecision(payload('git status && git diff'), on), undefined)
@@ -30,6 +32,30 @@ test('a refused command is denied with the first offending segment', () => {
   assert.ok(!out.permissionDecisionReason.includes('rm -rf x'))
 })
 
+test('git is denied unless the payload cwd is the seat root (#2351)', () => {
+  const sub = join(root, 'crew')
+  const decision = (d) => d?.hookSpecificOutput?.permissionDecision
+  const nested = readOnlyHookDecision(payload('git diff HEAD~1 HEAD', sub), on)
+  assert.equal(decision(nested), 'deny')
+  assert.ok(nested.hookSpecificOutput.permissionDecisionReason.includes("git runs only in the seat's root directory"))
+  assert.ok(nested.hookSpecificOutput.permissionDecisionReason.includes('git diff HEAD~1 HEAD'))
+  const missingCwd = payload('git status')
+  delete missingCwd.cwd
+  for (const [value, env] of [
+    [missingCwd, on],
+    [payload('git log -1', join(root, 'no-such-dir-2351')), on],
+    [payload('git status'), { CREW_READ_ONLY: '1' }],
+  ]) assert.equal(decision(readOnlyHookDecision(value, env)), 'deny')
+  for (const [value, env] of [
+    [payload('git status && git diff'), on],
+    [payload('git status', `${root}/crew/..`), on],
+    [payload('cd crew && grep -n x loop.mjs'), on],
+    [payload('cd crew && grep -n x loop.mjs', sub), on],
+    [payload('ls', sub), on],
+    [payload('git diff HEAD~1 HEAD', sub), { CREW_READ_ONLY: '0' }],
+  ]) assert.equal(readOnlyHookDecision(value, env), undefined)
+})
+
 test('malformed input fails closed', () => {
   for (const bad of ['not json', '[]', { tool_name: 'Bash' }, { tool_name: 'Bash', tool_input: { command: 4 } }, { tool_input: {} }])
     assert.equal(readOnlyHookDecision(bad, on).hookSpecificOutput.permissionDecision, 'deny', JSON.stringify(bad))
@@ -46,7 +72,7 @@ test('the settings hook runs the script through the launch env', () => {
   const hook = settings.hooks.PreToolUse.filter((e) => e.matcher === 'Bash').flatMap((e) => e.hooks).find((h) => h.command.includes('CREW_READ_ONLY_HOOK'))
   const run = (flag, command) => spawnSync('/bin/sh', ['-c', hook.command], {
     input: JSON.stringify(payload(command)), encoding: 'utf8',
-    env: { ...process.env, CREW_READ_ONLY: flag, CREW_READ_ONLY_NODE: process.execPath, CREW_READ_ONLY_HOOK: hookPath },
+    env: { ...process.env, CREW_READ_ONLY: flag, CREW_READ_ONLY_ROOT: root, CREW_READ_ONLY_NODE: process.execPath, CREW_READ_ONLY_HOOK: hookPath },
   })
   assert.equal(run('1', 'git status && git push').status, 0)
   assert.ok(JSON.parse(run('1', 'git status && git push').stdout).hookSpecificOutput.permissionDecisionReason.includes('git push'))

@@ -19,13 +19,15 @@ function segmentReadOnly(argv) {
     return !argv.some((arg) => arg.startsWith('--pre') || arg.startsWith('--hostname-bin'))
   if (argv[0] === 'cd') return argv.length === 2
   if (['cat', 'head', 'tail', 'wc', 'ls'].includes(argv[0])) return true
-  if (argv[0] === 'sed') return argv.length >= 3 && argv.length <= 4 && argv[1] === '-n' && /^\d+(,\d+)?p$/.test(argv[2])
+  if (argv[0] === 'sed') return argv.length >= 3 && argv.length <= 4 && argv[1] === '-n' && /^\d+(,\d+)?p$/.test(argv[2]) && (argv.length === 3 || !argv[3].startsWith('-'))
   return false
 }
 
 // Segments joined by `&&`, `||`, `;` or `|` are checked in source order. A one-argument cd,
 // literal quoted backslashes and the exact stderr redirects 2>/dev/null and 2>&1 are allowed.
-export function readOnlyCommandResult(command) {
+// Only git is refused alongside cd: cat, head, tail, wc, ls, sed, grep and rg were checked
+// and do not load configuration or code from their working directory. rg reads ignore files there.
+export function readOnlyCommandResult(command, { gitRefusal } = {}) {
   if (typeof command !== 'string' || command.length === 0) return { allowed: false, reason: 'Not read-only: no command given.' }
   const refuse = (segment, why) => ({ allowed: false, reason: `Not read-only: ${JSON.stringify(segment)} (${why}). Rerun only the read-only parts.` })
   let argv = []
@@ -33,6 +35,7 @@ export function readOnlyCommandResult(command) {
   let started = false
   let quote = null
   let segStart = 0
+  let sawCd = false, gitSegment = null
   const finishToken = () => {
     if (started) argv.push(token)
     token = ''
@@ -56,6 +59,10 @@ export function readOnlyCommandResult(command) {
     if (argv.length === 0) return refuse(raw, 'empty command segment')
     const done = argv
     argv = []
+    sawCd ||= done[0] === 'cd'
+    if (done[0] === 'git') gitSegment = raw
+    if (sawCd && gitSegment !== null) return refuse(raw, `git is not allowed in a command with cd: ${JSON.stringify(gitSegment)} reads the configuration of the directory it runs in`)
+    if (done[0] === 'git' && typeof gitRefusal === 'string' && gitRefusal.length > 0) return refuse(raw, gitRefusal)
     return segmentReadOnly(done) ? null : refuse(raw, 'not on the read-only list')
   }
   for (let index = 0; index < command.length; index++) {

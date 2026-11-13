@@ -447,7 +447,7 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
       env: {
         ...(laneTaskDir ? { CREW_ROLE: role, CREW_TASK_DIR: laneTaskDir } : { CREW_ROLE: role }),
         // Launch-authoritative: an inherited value never decides whether the seat's refusals carry a reason.
-        CREW_READ_ONLY: writes === 'repo' ? '0' : '1', CREW_READ_ONLY_NODE: process.execPath, CREW_READ_ONLY_HOOK: READ_ONLY_HOOK,
+        CREW_READ_ONLY: writes === 'repo' ? '0' : '1', CREW_READ_ONLY_ROOT: workdir, CREW_READ_ONLY_NODE: process.execPath, CREW_READ_ONLY_HOOK: READ_ONLY_HOOK,
       },
     }
     let launch

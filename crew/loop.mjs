@@ -620,13 +620,13 @@ export async function runLoop(spec, deps = {}) {
       const discarded = await stage('discard', () => callCheck('discard', d.run, { cwd, command: 'git', args }, { command: true }))
       if (discarded.status !== 'green') return { halt: await stop(discarded.reason, discarded) }
     }
+    if (rulings.length) { rulings.length = 0; await emit('lead-rulings', { rulings: [] }) }
     const raised = await raise(reason, detail, to)
     if (raised) return { halt: raised }
     rounds.builder = 0
     repaired = false
     provedTests.clear()
     lastProved.clear()
-    if (rulings.length) { rulings.length = 0; await emit('lead-rulings', { rulings: [] }) }
     const planned = await stage('plan', () => seatTurn('planner', [{ id: 'mechanical-restart', summary: 'The mechanical build was discarded; plan the restarted lane.', reason, ...detail }]))
     if (planned.halt) return planned
     const halt = await acceptPlan(planned.envelope)

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Claude PreToolUse hook for read-only seats: a refused Bash command is denied with a reason that
-// names its first non-read-only segment. Allowed commands print nothing, so the ACP gate still decides.
+// names its first non-read-only segment. Git is also refused when the payload cwd is not CREW_READ_ONLY_ROOT.
+// Allowed commands print nothing, so the ACP gate still decides.
 import { readFileSync } from 'node:fs'
 import { basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -23,7 +24,19 @@ export function readOnlyHookDecision(payload, env = process.env) {
   const input = value.tool_input ?? value.toolInput ?? value.input
   if (!input || typeof input !== 'object' || typeof input.command !== 'string') return deny(MALFORMED)
   const result = readOnlyCommandResult(input.command)
-  return result.allowed ? undefined : deny(result.reason)
+  if (!result.allowed) return deny(result.reason)
+  const root = env.CREW_READ_ONLY_ROOT
+  let atRoot = false
+  try {
+    atRoot = typeof value.cwd === 'string' && value.cwd.length > 0 && typeof root === 'string' && root.length > 0
+      && realpathSync(value.cwd) === realpathSync(root)
+  } catch { /* unverifiable paths are not the root */ }
+  if (!atRoot) {
+    const gitRefusal = `git runs only in the seat's root directory${root ? ` ${root}` : ''}; cd there in a call of its own first`
+    const checked = readOnlyCommandResult(input.command, { gitRefusal })
+    if (!checked.allowed) return deny(checked.reason)
+  }
+  return undefined
 }
 
 // A resolution failure must not skip the check: when realpath cannot tell, fall back to the unresolved

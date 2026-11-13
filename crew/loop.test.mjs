@@ -754,6 +754,28 @@ test('a replan whose tier raise stops leaves no lead rulings for finish (#2347)'
   assert.deepEqual(f.rows.filter((r) => r.event === 'lead-rulings').at(-1).rulings, [])
 })
 
+test('a mechanical restart whose tier raise stops leaves no lead rulings for finish (#2351)', async () => {
+  let builds = 0
+  const f = fakes({ spec: { tier: 'mechanical' }, lead: 'bounce', edit: (v) => {
+    if (v.role === 'builder') {
+      builds++
+      if (builds === 1) return { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } }
+      if (builds === 2) return { ...v, status: 'insufficient' }
+    }
+    return v
+  } })
+  const resolve = f.deps.resolveAgents
+  f.deps.resolveAgents = (...args) => {
+    if (args[0] === 'build') throw new Error('build unavailable')
+    return resolve(...args)
+  }
+  const result = await f.go()
+  assert.equal(result.reason, 'seat-unmeasured')
+  const rows = f.rows.filter((r) => r.event === 'lead-rulings')
+  assert.ok(rows.some((r) => r.rulings.length > 0))
+  assert.deepEqual(rows.at(-1).rulings, [])
+})
+
 test('a builder-continue turn keeps the lead rulings made earlier in the stage (#2291)', async () => {
   let builds = 0, state = 0
   const f = fakes({ lead: 'bounce', deps: { repoState: () => String(state++) }, edit: (v) => {

@@ -21,7 +21,8 @@ export class OnboardRefusal extends Error {
 export const projectHash = ({ suite, proof }) => createHash('sha256').update(JSON.stringify([suite, proof.map((e) => e.manifest !== undefined ? [e.match, e.setup ?? null, e.run, e.list ?? null, e.manifest] : e.list === undefined ? [e.match, e.setup ?? null, e.run] : [e.match, e.setup ?? null, e.run, e.list])])).digest('hex')
 // PR 2243 briefly wrote an absent list as null; records onboarded then stay readable.
 const nullListHash = ({ suite, proof }) => createHash('sha256').update(JSON.stringify([suite, proof.map((e) => e.manifest === undefined ? [e.match, e.setup ?? null, e.run, e.list ?? null] : [e.match, e.setup ?? null, e.run, e.list ?? null, e.manifest])])).digest('hex')
-const validProject = (p) => p && typeof p === 'object' && !Array.isArray(p) && typeof p.suite === 'string' && p.suite.trim() && !/["'\\\0]/.test(p.suite) && Array.isArray(p.proof) && p.proof.every(validProofEntry) && (p.suiteTimeoutMs === undefined || validTimeout(p.suiteTimeoutMs)) && (p.proofTimeoutMs === undefined || validTimeout(p.proofTimeoutMs))
+const validBuilderChecks = (v) => Array.isArray(v) && v.every((s) => typeof s === 'string' && s.trim() !== '' && !/[\r\n]/.test(s))
+const validProject = (p) => p && typeof p === 'object' && !Array.isArray(p) && typeof p.suite === 'string' && p.suite.trim() && !/["'\\\0]/.test(p.suite) && Array.isArray(p.proof) && p.proof.every(validProofEntry) && (p.suiteTimeoutMs === undefined || validTimeout(p.suiteTimeoutMs)) && (p.proofTimeoutMs === undefined || validTimeout(p.proofTimeoutMs)) && (p.builderChecks === undefined || validBuilderChecks(p.builderChecks))
 
 export function requireOnboarded(checkout, read = readFileSync) {
   let p
@@ -31,7 +32,7 @@ export function requireOnboarded(checkout, read = readFileSync) {
   if (!p || typeof p !== 'object' || Array.isArray(p)) throw new OnboardRefusal('onboarding-stale')
   if (!Object.hasOwn(p, 'onboarded')) throw new OnboardRefusal('not-onboarded')
   if (!validProject(p) || !p.onboarded || typeof p.onboarded !== 'object' || (p.onboarded.hash !== projectHash(p) && p.onboarded.hash !== nullListHash(p))) throw new OnboardRefusal('onboarding-stale')
-  return { suite: p.suite, proof: p.proof, hash: p.onboarded.hash, suiteTimeoutMs: p.suiteTimeoutMs ?? SUITE_TIMEOUT_DEFAULT_MS, proofTimeoutMs: p.proofTimeoutMs ?? PROOF_TIMEOUT_DEFAULT_MS }
+  return { suite: p.suite, proof: p.proof, hash: p.onboarded.hash, suiteTimeoutMs: p.suiteTimeoutMs ?? SUITE_TIMEOUT_DEFAULT_MS, proofTimeoutMs: p.proofTimeoutMs ?? PROOF_TIMEOUT_DEFAULT_MS, ...(p.builderChecks === undefined ? {} : { builderChecks: p.builderChecks }) }
 }
 
 export async function checkOnboarding({ checkout, draft, timeoutMs = 120_000 }) {
@@ -88,7 +89,7 @@ export async function checkOnboarding({ checkout, draft, timeoutMs = 120_000 }) 
       added = false
     }
     rmSync(tmp, { recursive: true, force: true }); tmp = null
-    const project = { suite: p.suite, proof, ...(p.suiteTimeoutMs === undefined ? {} : { suiteTimeoutMs: p.suiteTimeoutMs }), ...(p.proofTimeoutMs === undefined ? {} : { proofTimeoutMs: p.proofTimeoutMs }) }
+    const project = { suite: p.suite, proof, ...(p.suiteTimeoutMs === undefined ? {} : { suiteTimeoutMs: p.suiteTimeoutMs }), ...(p.proofTimeoutMs === undefined ? {} : { proofTimeoutMs: p.proofTimeoutMs }), ...(p.builderChecks === undefined ? {} : { builderChecks: p.builderChecks }) }
     const dir = join(checkout, '.crew'), target = join(dir, 'project.json')
     const dirStat = lstatSync(dir, { throwIfNoEntry: false })
     const fileStat = dirStat?.isDirectory() ? lstatSync(target, { throwIfNoEntry: false }) : null

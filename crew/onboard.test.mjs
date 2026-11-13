@@ -79,6 +79,37 @@ test('requireOnboarded returns a configured proofTimeoutMs, defaults an absent o
   }
 })
 
+test('requireOnboarded returns a configured builderChecks, omits an absent one, and refuses invalid values as onboarding-stale', () => {
+  const suite = 'npm test', proof = []
+  const hash = createHash('sha256').update(JSON.stringify([suite, proof])).digest('hex')
+  const project = { suite, proof, onboarded: { hash } }
+  const builderChecks = ['cargo clippy -- -D warnings', 'cargo test -p fence']
+  assert.deepEqual(requireOnboarded('/repo', () => JSON.stringify({ ...project, builderChecks })).builderChecks, builderChecks)
+  assert.equal(projectHash({ ...project, builderChecks }), hash)
+  assert.deepEqual(requireOnboarded('/repo', () => JSON.stringify(project)), { suite, proof, hash, suiteTimeoutMs: 1800000, proofTimeoutMs: 120000 })
+  for (const value of ['x', null, {}, [''], ['  '], ['a\nb'], ['a\rb'], [1]]) {
+    assert.throws(() => requireOnboarded('/repo', () => JSON.stringify({ ...project, builderChecks: value })), (error) => error instanceof OnboardRefusal && error.reason === 'onboarding-stale')
+  }
+})
+
+test('checkOnboarding records a valid builderChecks list in project.json and refuses a string, an empty entry or a multi-line entry without writing', async () => {
+  const checks = ['cargo clippy -- -D warnings', 'cargo test -p fence']
+  for (const [field, status] of [[{ builderChecks: checks }, 'green'], [{}, 'green'], [{ builderChecks: 'cargo test' }, 'red'], [{ builderChecks: [''] }, 'red'], [{ builderChecks: ['  '] }, 'red'], [{ builderChecks: ['a\nb'] }, 'red']]) {
+    const repo = scratchDir('onboard-builder-checks-')
+    git(repo, 'init'); writeFileSync(join(repo, 'initial'), 'initial')
+    git(repo, 'add', 'initial'); git(repo, 'commit', '-m', 'initial')
+    const draft = join(repo, 'draft.json'), target = join(repo, '.crew', 'project.json')
+    writeFileSync(draft, JSON.stringify({ suite: 'npm test', proof: [], ...field }))
+    assert.equal((await checkOnboarding({ checkout: repo, draft })).status, status)
+    assert.equal(existsSync(target), status === 'green')
+    if (status === 'green') {
+      const project = JSON.parse(readFileSync(target, 'utf8'))
+      assert.equal(Object.hasOwn(project, 'builderChecks'), Object.hasOwn(field, 'builderChecks'))
+      assert.deepEqual(project.builderChecks, field.builderChecks)
+    }
+  }
+})
+
 test('checkOnboarding records a configured proofTimeoutMs in project.json and refuses an invalid one without writing it', async () => {
   for (const [field, status] of [[{ proofTimeoutMs: 360000 }, 'green'], [{}, 'green'], [{ proofTimeoutMs: 0 }, 'red']]) {
     const repo = scratchDir('onboard-proof-timeout-')

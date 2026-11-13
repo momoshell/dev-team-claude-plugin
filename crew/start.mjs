@@ -192,6 +192,7 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
     id: lane, cwd: worktree, taskDir, tier, shape: fields.shape, brief: run,
     source: fields.source, branch: lane, base, closes: fields.closes === null ? [] : [fields.closes],
     suite: suiteSpec(project.suite, project.suiteTimeoutMs), proofTimeoutMs: project.proofTimeoutMs, onboarded: project.hash,
+    ...(project.builderChecks === undefined ? {} : { builderChecks: project.builderChecks }),
     ...(fields.generated === undefined ? {} : { generated: { paths: fields.generated, ...suiteSpec(fields.regenerate) } }),
     roster,
   }

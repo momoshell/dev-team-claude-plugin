@@ -59,6 +59,9 @@ the fetch fails; it does not probe seats. The probe is implemented in
    Optionally set top-level `proofTimeoutMs` to a safe integer from 1 to
    `2**31-1` ms for every proof run; if absent, it defaults to
    `PROOF_TIMEOUT_DEFAULT_MS` (`crew/proof.mjs`). It is not set per runner entry.
+   Optionally set `builderChecks` to a list of non-empty, one-line commands,
+   such as a lint or one package's tests. The builder runs them before returning
+   and reports each result in `notes`; the loop does not run them or read results.
 3. For each other runner, add `match` (a file glob), optional `setup`, `run`, and
    `calibrate`. The latter holds `file` (a literal relative path matched first
    by this entry), `text` (the throwaway test source), and distinct `pass` and
@@ -97,7 +100,7 @@ the fetch fails; it does not probe seats. The probe is implemented in
    have matching onboarding; proof reads runner entries from the lane's
    old-source worktree. Re-run
    onboarding after changing the suite or proof entries. Changing only
-   `suiteTimeoutMs` or `proofTimeoutMs` in `.crew/project.json` does not require
+   `suiteTimeoutMs`, `proofTimeoutMs` or `builderChecks` in `.crew/project.json` does not require
    re-onboarding.
    Write a brief with
    `skills/lane-brief/SKILL.md`, then run `crew start <brief>` in the checkout.

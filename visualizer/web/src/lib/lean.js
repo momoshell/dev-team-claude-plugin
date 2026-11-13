@@ -62,6 +62,8 @@ export function leanStageStatus(value) {
   if (['failed','fail','error'].includes(value)) return { label:displayName(value),tone:'fail' }
   if (['stopped','blocked','escalated','changes-needed'].includes(value)) return {label:displayName(value),tone:'attention'}
   if (value==='escalate') return {label:'Escalated',tone:'attention'}
+  if (value==='bounce') return {label:'Bounced',tone:'attention'}
+  if (value==='accept') return {label:'Accepted',tone:'ok'}
   if (value==='held') return {label:'Held',tone:'attention'}
   if (value==='insufficient') return {label:'Insufficient',tone:'attention'}
   if (value==='unmeasured') return {label:'Unmeasured',tone:'quiet'}

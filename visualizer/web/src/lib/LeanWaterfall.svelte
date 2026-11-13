@@ -21,10 +21,10 @@
         <li class={`stage-row ${state.tone}`} data-role={entry.role || 'control'}>
           <details>
             <summary>
-              <span class="label"><span class="stage-name"><span class="ordinal">{String(entry.ordinal).padStart(2, '0')}</span><strong>{leanLabel(entry.name)}</strong></span><span class="meta">{entry.role || 'No seat recorded'} · {state.label}{#if entry.reason} · {entry.reason}{/if}<span class="inspect"> · Inspect</span></span></span>
+              <span class="label"><span class="stage-name"><span class="ordinal">{String(entry.ordinal).padStart(2, '0')}</span><strong>{leanLabel(entry.name)}</strong></span><span class="meta">{entry.role || (entry.kind === 'check' ? 'Code check · no seat' : 'Seat role not recorded')} · {state.label}{#if entry.reason} · {entry.reason}{/if}<span class="inspect"> · Inspect</span></span></span>
               <span class="track ordinal-track" aria-hidden="true"><span class="bar" style={`left:${entry.x * 100}%;width:${entry.width * 100}%`}></span></span>
             </summary>
-            <div class="evidence"><p>{entry.role ? `Recorded seat: ${entry.role}.` : 'No seat role recorded for this stage.'} Timing not recorded.</p>{#if entry.checks?.length}<ul>{#each entry.checks as check}<li><strong>{leanLabel(check.check)}</strong> · {leanCheckStatus(check).label}<pre>{JSON.stringify(check.result, null, 2)}</pre></li>{/each}</ul>{:else}<p>No check evidence recorded for this stage.</p>{/if}</div>
+            <div class="evidence"><p>{entry.role ? `Recorded seat: ${entry.role}.` : entry.kind === 'check' ? 'Code check — no seat runs this stage.' : 'No seat role recorded for this stage.'} Timing not recorded.</p>{#if entry.checks?.length}<ul>{#each entry.checks as check}<li><strong>{leanLabel(check.check)}</strong> · {leanCheckStatus(check).label}<pre>{JSON.stringify(check.result, null, 2)}</pre></li>{/each}</ul>{:else}<p>No check evidence recorded for this stage.</p>{/if}</div>
           </details>
         </li>
       {/each}
@@ -37,7 +37,7 @@
       {#each timeline.blocks as block (block.phase_id)}
         {@const state = leanStageStatus(block.status)}
         <li class={`stage-row ${state.tone}`} data-role={block.role || 'control'}>
-          <div class="label"><strong>{block.name || 'Stage not recorded'}</strong><span>{block.role || 'Seat role not recorded'}</span><span>{state.label}{#if block.reason} · {block.reason}{/if}</span><span>{formatLeanDuration(block.duration_ms)}</span></div>
+          <div class="label"><strong>{block.name || 'Stage not recorded'}</strong><span>{block.role || (block.kind === 'check' ? 'Code check · no seat' : 'Seat role not recorded')}</span><span>{state.label}{#if block.reason} · {block.reason}{/if}</span><span>{formatLeanDuration(block.duration_ms)}</span></div>
           <div class="track" aria-hidden="true"><span class="bar" style={`left:${block.x * 100}%;width:${block.width * 100}%`}></span></div>
         </li>
       {/each}
@@ -49,7 +49,7 @@
   {#if timeline.open.length}
     <ul class="absent">
       {#each timeline.open as entry (entry.id)}
-        <li><strong>{entry.name || 'Stage not recorded'}</strong> · {entry.role || 'Seat role not recorded'} · Open — no stage-end record</li>
+        <li><strong>{entry.name || 'Stage not recorded'}</strong> · {entry.role || (entry.kind === 'check' ? 'Code check · no seat' : 'Seat role not recorded')} · Open — no stage-end record</li>
       {/each}
     </ul>
   {/if}
@@ -58,7 +58,7 @@
       <summary>Timing evidence · {timeline.unrecorded.length} unmeasured {timeline.unrecorded.length === 1 ? 'stage' : 'stages'}</summary>
       <ul class="absent">
         {#each timeline.unrecorded as entry (entry.id)}
-          <li><strong>{entry.name || 'Stage not recorded'}</strong> · {entry.role || 'Seat role not recorded'} · Not recorded — {entry.reason}</li>
+          <li><strong>{entry.name || 'Stage not recorded'}</strong> · {entry.role || (entry.kind === 'check' ? 'Code check · no seat' : 'Seat role not recorded')} · Not recorded — {entry.reason}</li>
         {/each}
       </ul>
     </details>

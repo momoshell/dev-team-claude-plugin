@@ -17,6 +17,15 @@ const LANE = /^[a-z0-9][a-z0-9-]{0,62}$/
 const ROLE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/
 const PREFIX = 'lean:'
 const nonEmpty = (value) => typeof value === 'string' && value.trim() !== ''
+// Seat stages follow the stage(...seatTurn(...)) calls in crew/loop.mjs.
+const SEAT_STAGES = { plan: 'planner', replan: 'planner', build: 'builder', 'suite-repair': 'builder', conflict: 'builder', review: 'reviewer', lead: 'lead', 'second-review': 'tech-lead' }
+const BILLED_FIELDS = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
+
+function sideUsage(rows, getUsage) {
+  if (!rows.length) return null
+  const measured = rows.map(getUsage).filter((usage) => BILLED_FIELDS.every((field) => Number.isFinite(usage?.[field]) && usage[field] >= 0))
+  return { measured: measured.length, total: rows.length, billed_tokens: measured.length ? measured.reduce((sum, usage) => sum + BILLED_FIELDS.reduce((n, field) => n + usage[field], 0), 0) : null }
+}
 
 // A row time is an epoch-ms number inside the Date range (past it, toISOString throws); anything else is unknown.
 const rowTime = (value) => (Number.isFinite(value) && !Number.isNaN(new Date(value).getTime()) ? new Date(value).toISOString() : null)
@@ -213,16 +222,22 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
       accepted: result.accepted,
       status: result.status,
       code: result.code,
+      ...(nonEmpty(result.reason) ? { reason: result.reason } : {}),
+      ...(Array.isArray(result.rows) ? { rows: result.rows.filter(isObject).map((row) => ({ file: row.file ?? null, title: row.title ?? null, proven: row.proven ?? null, reason: row.reason ?? null })) } : {}),
       ...(isObject(result.result) ? { result: { status: result.result.status } } : {}),
     }
   }
 
   function stageOutcome(outcome) {
-    if (nonEmpty(outcome?.status)) return { status: outcome.status, reason: null }
+    if (nonEmpty(outcome?.status)) return { status: outcome.status, reason: nonEmpty(outcome.reason) ? outcome.reason : null }
     if (typeof outcome?.code === 'number') return { status: outcome.code !== 0 ? 'failed' : 'done', reason: null }
     if (outcome?.halt) return { status: nonEmpty(outcome.halt.status) ? outcome.halt.status : 'stopped', reason: outcome.halt.reason ?? null }
     if (outcome?.held) return { status: 'held', reason: outcome.held.reason ?? null }
-    if (outcome?.envelope) return nonEmpty(outcome.envelope.status) ? { status: outcome.envelope.status, reason: null } : { status: 'unknown', reason: 'envelope records no status' }
+    if (outcome?.envelope) {
+      const { status, details } = outcome.envelope
+      if (!nonEmpty(status)) return { status: 'unknown', reason: 'envelope records no status' }
+      return { status: status === 'done' ? (nonEmpty(details?.verdict) ? details.verdict : nonEmpty(details?.decision) ? details.decision : status) : status, reason: null }
+    }
     if (outcome?.threw) return { status: 'failed', reason: 'stage threw' }
     return { status: 'unknown', reason: outcome == null ? 'stage-end records no outcome' : 'stage-end outcome records no status' }
   }
@@ -256,6 +271,10 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
       } else if (row.event === VERDICT_EVENT && stage && !phases.some((entry) => entry.name === stage)) {
         phases.push({ id: phases.length + 1, name: stage, status: nonEmpty(row.status) ? row.status : 'unknown', checks: [], started_at: null, ended_at: null })
       }
+    }
+    for (const phase of phases) {
+      if (!nonEmpty(phase.role)) phase.role = Object.hasOwn(SEAT_STAGES, phase.name) ? SEAT_STAGES[phase.name] : null
+      phase.kind = phase.role ? 'seat' : 'check'
     }
     // Ignore stage ends, advisor rows and in-flight checks after a stop when choosing the state.
     let last = rows.findLast((row, index) => !stateless(rows, row, index) && !supersededReturn(rows, row, index)) ?? rows.at(-1)
@@ -329,6 +348,8 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
       tier: nonEmpty(tier) ? tier : null, shape: nonEmpty(found.spec.shape) ? found.spec.shape : null,
       mode: null, started_at, ended_at, duration_ms, last_heartbeat_at: null,
       pending, metrics, usage_turns,
+      usage_subagents: sideUsage(rows.filter((row) => Object.hasOwn(row, 'subagent_usage')), (row) => isObject(row.subagent_usage) ? row.usage : null),
+      usage_advisor: sideUsage(rows.filter((row) => Object.hasOwn(row, 'advisor_usage')), (row) => row.advisor_usage?.usage),
       ship: { state: 'unmeasured', reason: pr ? 'pull request recorded; merge state is not recorded in the lane' : 'lean lanes record no ship state', stale: false },
     }
   }

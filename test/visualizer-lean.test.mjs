@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { startServer } from '../visualizer/server/server.mjs'
 import { createLeanSource } from '../crew/lean-source.mjs'
 import { taskBoard, leanStatus, tokenCell } from '../visualizer/web/src/lib/fleet.js'
-import { leanCheckStatus } from '../visualizer/web/src/lib/lean.js'
+import { leanCheckStatus, leanStageStatus } from '../visualizer/web/src/lib/lean.js'
 import { scratchDir } from './helpers.mjs'
 
 const jsonl = (rows) => rows.map((row) => JSON.stringify(row)).join('\n') + '\n'
@@ -53,6 +53,74 @@ test('lean lane tokens are the seat-turn usage sum, null with the unmeasured rea
       if (value !== null) { assert.deepEqual(run.metrics, { billed_input_tokens: 32829, billed_output_tokens: 5466, billed_cache_read_tokens: 400514, billed_cache_write_tokens: 10022 }); assert.equal('tokens' in run.pending, false) }
       else assert.ok(Object.values(run.metrics).every((v) => v === null))
     }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('a red suite stage keeps its recorded reason and reads as a code check with no seat', () => {
+  const root = scratchDir('lean-suite-'), crewRoot = join(root, 'crew'), archiveRoot = join(root, 'archive')
+  try {
+    lane(crewRoot, 'suite', [{ event: 'stage-start', stage: 'suite' }, { event: 'stage-end', stage: 'suite', outcome: { status: 'red', reason: 'exit-nonzero', code: 1, signal: null, timedOut: false } }])
+    const [phase] = createLeanSource({ crewRoot, archiveRoot }).listRuns()[0].phases
+    assert.deepEqual([phase.status, phase.reason, phase.kind, phase.role], ['red', 'exit-nonzero', 'check', null])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('a seat stage names its seat from the stage name while open and when it ends with no envelope', () => {
+  const root = scratchDir('lean-seats-'), crewRoot = join(root, 'crew'), archiveRoot = join(root, 'archive')
+  try {
+    const cases = [['plan', 'planner'], ['replan', 'planner'], ['build', 'builder'], ['suite-repair', 'builder'], ['conflict', 'builder'], ['review', 'reviewer'], ['lead', 'lead'], ['second-review', 'tech-lead']]
+    lane(crewRoot, 'seats', [...cases.map(([stage]) => ({ event: 'stage-start', stage })), { event: 'stage-end', stage: 'lead', outcome: { halt: { status: 'stopped', reason: 'lead-escalated' } } }, { event: 'envelope', stage: 'plan', role: 'other' }])
+    const phases = createLeanSource({ crewRoot, archiveRoot }).listRuns()[0].phases
+    assert.deepEqual(phases.map(({ role, kind }) => [role, kind]), cases.map(([name, role]) => [name === 'plan' ? 'other' : role, 'seat']))
+    assert.equal(phases.find((phase) => phase.name === 'review').status, 'running')
+    assert.equal(phases.find((phase) => phase.name === 'lead').reason, 'lead-escalated')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('proof check evidence keeps the recorded reason and each test row', () => {
+  const root = scratchDir('lean-proof-'), crewRoot = join(root, 'crew'), archiveRoot = join(root, 'archive')
+  try {
+    const rows = [{ file: 'test/a.test.mjs', title: 'example', base: { state: 'green' }, build: { state: 'green' }, proven: false, reason: 'proof-not-red-on-base' }]
+    lane(crewRoot, 'proof', [{ event: 'stage-start', stage: 'proof' }, { event: 'check', stage: 'proof', check: 'proof', result: { status: 'red', reason: 'proof-unproven', rows } }])
+    const result = createLeanSource({ crewRoot, archiveRoot }).listRuns()[0].phases[0].checks[0].result
+    assert.equal(result.reason, 'proof-unproven')
+    assert.deepEqual(result.rows, [{ file: rows[0].file, title: rows[0].title, proven: false, reason: rows[0].reason }])
+    assert.match(readFileSync(new URL('../visualizer/web/src/lib/LeanRunDetail.svelte', import.meta.url), 'utf8'), /check\.result\.rows/)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('review, second-review and lead stages carry their verdict or decision and never read as a plain pass', () => {
+  const root = scratchDir('lean-verdict-'), crewRoot = join(root, 'crew'), archiveRoot = join(root, 'archive')
+  try {
+    const cases = [['review', 'verdict', 'changes-needed'], ['second-review', 'verdict', 'changes-needed'], ['lead', 'decision', 'bounce'], ['lead', 'decision', 'escalate'], ['review', 'verdict', 'pass'], ['lead', 'decision', 'accept']]
+    lane(crewRoot, 'verdict', cases.flatMap(([stage, key, value]) => [{ event: 'stage-start', stage }, { event: 'stage-end', stage, outcome: { envelope: { status: 'done', details: { [key]: value } } } }]))
+    const phases = createLeanSource({ crewRoot, archiveRoot }).listRuns()[0].phases
+    assert.deepEqual(phases.map((phase) => phase.status), cases.map(([, , value]) => value))
+    for (const phase of phases.slice(0, 4)) { const state = leanStageStatus(phase.status); assert.notEqual(state.tone, 'ok'); assert.notEqual(state.label, 'Stage ended') }
+    for (const phase of phases.slice(4)) assert.equal(leanStageStatus(phase.status).tone, 'ok')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('subagent and advisor usage are summed apart from the seat total with measured of total rows', () => {
+  const root = scratchDir('lean-side-'), crewRoot = join(root, 'crew'), archiveRoot = join(root, 'archive')
+  try {
+    const usage = { billed_input_tokens: 1000, billed_output_tokens: 200, billed_cache_write_tokens: 30, billed_cache_read_tokens: 4 }
+    lane(crewRoot, 'side', [{ event: 'seat-turn', usage: { inputTokens: 1, outputTokens: 2, cachedWriteTokens: 3, cachedReadTokens: 4 } }, { subagent_usage: {}, usage }, { subagent_usage: {}, usage: null }, { advisor_usage: { usage } }])
+    lane(crewRoot, 'old', [{ event: 'stage-start', stage: 'suite' }])
+    lane(crewRoot, 'malformed-side', [{ subagent_usage: {}, usage: { ...usage, billed_input_tokens: -1 } }, { advisor_usage: { usage: null } }, { subagent_usage: null, usage }, { advisor_usage: null }])
+    const runs = createLeanSource({ crewRoot, archiveRoot }).listRuns(), run = runs.find((r) => r.goal === 'side'), old = runs.find((r) => r.goal === 'old')
+    assert.deepEqual(run.usage_subagents, { measured: 1, total: 2, billed_tokens: 1234 })
+    assert.deepEqual(run.usage_advisor, { measured: 1, total: 1, billed_tokens: 1234 })
+    assert.deepEqual(run.metrics, { billed_input_tokens: 1, billed_output_tokens: 2, billed_cache_read_tokens: 4, billed_cache_write_tokens: 3 })
+    assert.equal(tokenCell(run).value, 10)
+    assert.equal(tokenCell(run).subagents, 'Subagents: 1,234 tokens · 1 of 2 rows carried usage')
+    assert.equal(tokenCell(run).advisor, 'Advisor: 1,234 tokens · 1 of 1 rows carried usage')
+    assert.equal(old.usage_subagents, null); assert.equal(old.usage_advisor, null)
+    assert.equal(tokenCell(old).subagents, null); assert.equal(tokenCell(old).advisor, null)
+    assert.equal(old.pending.tokens, 'no seat-turn rows recorded')
+    const malformed = runs.find((r) => r.goal === 'malformed-side')
+    for (const summary of [malformed.usage_subagents, malformed.usage_advisor]) assert.deepEqual(summary, { measured: 0, total: 2, billed_tokens: null })
+    assert.equal(tokenCell(malformed).subagents, 'Subagents: not measured · 0 of 2 rows carried usage')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

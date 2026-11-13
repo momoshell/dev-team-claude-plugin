@@ -148,12 +148,14 @@ export function taskBoard(runs = [], { state = 'all', query = '', showArchived =
 export function tokenCell(run = {}) {
   const metrics = run?.metrics ?? run ?? {}
   const turns = run?.usage_turns ? `${run.usage_turns.measured} of ${run.usage_turns.total} turns carried usage` : null
+  const sideLine = (label, usage) => usage ? `${label}: ${usage.billed_tokens == null ? 'not measured' : `${textNumber(usage.billed_tokens)} tokens`} · ${usage.measured} of ${usage.total} rows carried usage` : null
+  const subagents = sideLine('Subagents', run?.usage_subagents), advisor = sideLine('Advisor', run?.usage_advisor)
   let total = null
   for (const field of TOKEN_FIELDS) {
     const value = metrics?.[field]
     if (typeof value === 'number' && Number.isFinite(value)) total = (total ?? 0) + value
   }
-  if (total == null) return { ...absenceMark(run?.pending?.billed_input_tokens ?? run?.pending?.tokens ?? 'not measured'), turns }
+  if (total == null) return { ...absenceMark(run?.pending?.billed_input_tokens ?? run?.pending?.tokens ?? 'not measured'), turns, subagents, advisor }
   const input = finiteNumber(metrics?.billed_input_tokens)
   const output = finiteNumber(metrics?.billed_output_tokens)
   const cacheWrite = finiteNumber(metrics?.billed_cache_write_tokens)
@@ -163,7 +165,7 @@ export function tokenCell(run = {}) {
   const cacheRate = promptTotal > 0 ? cacheRead / promptTotal * 100 : null
   return {
     ...measuredCell(total, textNumber(total)),
-    turns,
+    turns, subagents, advisor,
     input,
     output,
     cacheWrite,

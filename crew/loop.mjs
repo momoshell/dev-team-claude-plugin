@@ -736,7 +736,7 @@ export async function runLoop(spec, deps = {}) {
     const finishReviews = []
     let feedback = isFinish ? [{ id: 'finish-stop', summary: 'The previous lane stopped with the given reason and observation.', reason: fin.stop.reason, observation: fin.stop.observation }, ...(fin.guidance !== undefined ? [{ id: 'finish-return', summary: 'The operator supplied guidance for this finish run.', guidance: fin.guidance }] : []), ...fin.findings] : []
     let repairing = false, recheck = false, rechecks = 0
-    let committed, rebased, measurements, laneBody, reviewStatus, checkedTree, publishedFiles
+    let committed, rebased, measurements, laneBody, reviewStatus, checkedTree
     const readTree = () => stage('checked-tree', () => callCheck('checked-tree', d.run, { cwd, command: 'git', args: ['write-tree'] }, { command: true }))
     const stageChecked = async () => {
       if (stagePaths.length > 0) {
@@ -935,7 +935,6 @@ export async function runLoop(spec, deps = {}) {
     const status = await readStatus('paths')
     const files = status.status === 'green' && typeof status.stdout === 'string' ? parseChangedPaths(status.stdout) : null
     if (!files) return stop('paths-unmeasured', status)
-    publishedFiles = files
     laneBody = () => {
       const entries = [...openFindings.reviewer.values(), ...(tier === 'judge' && !isFinish ? openFindings['tech-lead'].values() : [])].sort((a, b) => a.order - b.order)
       const open = entries.map(({ finding }) => finding)
@@ -951,7 +950,6 @@ export async function runLoop(spec, deps = {}) {
         `How: ${oneLine(builderSummary) || oneLine(subject)}`,
         ...(!issue && !ask ? ['', `Source: ${oneLine(spec.source)}`] : []),
         ...(isFinish ? ['', `The lane stopped with reason ${oneLine(fin.stop.reason)}. This report covers only this finish run.`, `${finishReviews.length} ${finishReviews.length === 1 ? 'review' : 'reviews'} in this finish run; final verdict: ${oneLine(finishReviews.at(-1)?.verdict) || 'unmeasured'}.`] : []),
-        '', '## Changes', ...publishedFiles.map((file) => `- ${oneLine(file)}`),
         '', '## Verification',
         ...(proved.length ? [...proved.map(({ file, title, base }) => `- ${oneLine(file)}: ${oneLine(title)} ${base?.reason === 'base-package-absent' ? 'had its package absent on the old source (base-package-absent)' : 'was red on the old source'}, green on ${lastProved.has(`${file}\0${title}`) ? 'the build.' : 'an earlier build turn; the last build turn did not name it.'}`), ...(!isFinish && tier === 'mechanical' ? ['Review: none, mechanical lane, not reviewed.'] : [])]
           : !isFinish && tier === 'mechanical' ? ['Proof: mechanical lane, not reviewed.']
@@ -1012,12 +1010,6 @@ export async function runLoop(spec, deps = {}) {
     }
 
     if (rebased.head !== committed.head) {
-      const paths = await stage('published-paths', () => callCheck('published-paths', d.run, { cwd, command: 'git', args: ['diff', '--no-renames', '--name-only', '-z', `${rebased.head}^`, rebased.head] }, { command: true }))
-      const output = paths.status === 'green' && typeof paths.stdout === 'string' ? paths.stdout : null
-      // Reuse the status path validation on the NUL-framed diff names.
-      publishedFiles = output !== null && (output === '' || output.endsWith('\0'))
-        ? parseChangedPaths(output === '' ? '' : `${output.slice(0, -1).split('\0').map((file) => `M  ${file}`).join('\0')}\0`) : null
-      if (publishedFiles === null) return stop('paths-unmeasured', paths)
       if (namedTests.length) {
         const reproven = await stage('proof', () => callCheck('proof', d.proveTests, { cwd, base: `${rebased.head}^`, tests: namedTests, timeoutMs: spec.proofTimeoutMs }))
         if (reproven.status !== 'green' || reproven.reason !== null || !Array.isArray(reproven.rows) || reproven.rows.length !== namedTests.length || !reproven.rows.every((row) => row?.proven === true)) return stop(reproven.reason ?? 'runner-threw', reproven)

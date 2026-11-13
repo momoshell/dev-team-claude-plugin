@@ -268,7 +268,8 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
         if (phase) phase.role = row.role
       } else if (row.event === 'seat-turn' && stage && nonEmpty(row.role)) {
         const phase = phases.findLast((entry) => entry.name === stage)
-        if (phase) (phase.turns ??= []).push({ role: row.role, seconds: Number.isFinite(row.seconds) && row.seconds >= 0 ? row.seconds : null })
+        const seconds = Number.isFinite(row.seconds) && row.seconds >= 0 ? row.seconds : null
+        if (phase) (phase.turns ??= []).push({ role: row.role, seconds, reason: seconds !== null ? null : nonEmpty(row.unmeasured?.seconds) ? row.unmeasured.seconds : 'seconds-malformed' })
       } else if (row.event === 'check' && stage) {
         const phase = phases.findLast((entry) => entry.name === stage)
         const check = { check: row.check ?? null, result: summarizeCheckResult(row.result) }

@@ -37,7 +37,7 @@
       {#each timeline.blocks as block (block.phase_id)}
         {@const state = leanStageStatus(block.status)}
         <li class={`stage-row ${state.tone}`} data-role={block.role || 'control'}>
-          <div class="label"><strong>{block.name || 'Stage not recorded'}</strong><span>{block.role || (block.kind === 'check' ? 'Code check · no seat' : 'Seat role not recorded')}</span><span>{state.label}{#if block.reason} · {block.reason}{/if}</span>{#if block.open}<span>Open — no stage-end record</span>{:else}{#if block.seat_ms != null}<span>{block.role} turns {formatLeanDuration(block.seat_ms)}</span>{/if}<span>Stage span {formatLeanDuration(block.duration_ms)}</span>{/if}</div>
+          <div class="label"><strong>{block.name || 'Stage not recorded'}</strong><span>{block.role || (block.kind === 'check' ? 'Code check · no seat' : 'Seat role not recorded')}</span><span>{state.label}{#if block.reason} · {block.reason}{/if}</span>{#if block.open}<span>Open — no stage-end record</span>{:else}{#if block.seat_ms != null}<span>{block.role} turns {formatLeanDuration(block.seat_ms)}</span>{:else if block.seat_reason}<span>{block.role} turn time not measured · {block.seat_reason}</span>{/if}<span>Stage span {formatLeanDuration(block.duration_ms)}</span>{/if}</div>
           <div class="track" aria-hidden="true">{#if block.open}<span class="bar open" style={`left:${block.x * 100}%`}></span>{:else}<span class="bar" style={`left:${block.x * 100}%;width:${block.width * 100}%`}></span>{/if}</div>
         </li>
       {/each}

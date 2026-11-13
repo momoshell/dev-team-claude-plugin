@@ -41,11 +41,12 @@ export function layoutTimeline(run = {}) {
   const span = origin == null ? null : finish - origin
   const blocks = intervals.map(({ phase, start, end }) => {
     const turns = Array.isArray(phase.turns) && phase.role ? phase.turns.filter((turn) => turn.role === phase.role) : []
-    const seat_ms = turns.length && turns.every((turn) => Number.isFinite(turn.seconds) && turn.seconds >= 0)
-      ? turns.reduce((sum, turn) => sum + turn.seconds, 0) * 1000 : null
+    const unmeasured = turns.find((turn) => !(Number.isFinite(turn.seconds) && turn.seconds >= 0))
+    const seat_ms = turns.length && !unmeasured ? turns.reduce((sum, turn) => sum + turn.seconds, 0) * 1000 : null
+    const seat_reason = unmeasured ? (typeof unmeasured.reason === 'string' && unmeasured.reason ? unmeasured.reason : 'seconds-malformed') : null
     return {
       ...phase, phase_id: phase.id ?? null, open: end == null, duration_ms: end == null ? null : end - start,
-      seat_ms: end == null ? null : seat_ms, x: span ? (start - origin) / span : 0,
+      seat_ms: end == null ? null : seat_ms, seat_reason: end == null ? null : seat_reason, x: span ? (start - origin) / span : 0,
       width: end == null ? null : Math.max(MIN_WIDTH, span ? (end - start) / span : 0),
     }
   })

@@ -56,17 +56,24 @@ test('a build stage with a lead turn inside it shows the builder turn seconds ap
     const row = (event, stage, seconds, extra = {}) => ({ event, lane: 'demo', stage, at: base + seconds * 1000, ...extra })
     const turn = (stage, role, seconds, at) => row('seat-turn', stage, at, { role, id: 'turn', model: 'model', seconds, status: 'done', usage: null, unmeasured: {} })
     const env = (stage, role, at) => row('envelope', stage, at, { role, id: 'turn', parsed: {}, defects: [], error: null })
-    const rows = [row('stage-start', 'build', 0), turn('build', 'builder', 59, 59), env('build', 'builder', 59), row('stage-start', 'lead', 59), turn('lead', 'lead', 24, 83), env('lead', 'lead', 83), row('stage-end', 'lead', 83), turn('build', 'builder', 486, 569), env('build', 'builder', 569), row('stage-end', 'build', 569)]
+    const rows = [row('stage-start', 'build', 0), turn('build', 'builder', 59, 59), turn('build', 'lead', 7, 59), env('build', 'builder', 59), row('stage-start', 'lead', 59), turn('lead', 'lead', 24, 83), env('lead', 'lead', 83), row('stage-end', 'lead', 83), turn('build', 'builder', 486, 569), env('build', 'builder', 569), row('stage-end', 'build', 569)]
     writeFileSync(join(lane, 'task', 'journal.jsonl'), rows.map(r => JSON.stringify(r)).join('\n') + '\n')
     const run = createLeanSource({ crewRoot, archiveRoot }).listRuns()[0]
     const [build, lead] = layoutTimeline(run).blocks
-    assert.equal(build.seat_ms, 545000); assert.equal(build.duration_ms, 569000); assert.equal(lead.seat_ms, 24000)
+    // MUTATION: drop the role filter in layoutTimeline; the lead-roled turn inside build adds 7s.
+    assert.equal(build.seat_ms, 545000); assert.equal(build.seat_reason, null); assert.equal(build.duration_ms, 569000); assert.equal(lead.seat_ms, 24000)
     for (const seconds of [null, -1, '5']) {
       const phases = structuredClone(run.phases); phases[0].turns.push({ role: 'builder', seconds })
-      assert.equal(layoutTimeline({ phases }).blocks[0].seat_ms, null)
+      const block = layoutTimeline({ phases }).blocks[0]
+      assert.equal(block.seat_ms, null); assert.equal(block.seat_reason, 'seconds-malformed')
     }
+    // MUTATION: drop the journal's unmeasured.seconds reason in the reader.
+    writeFileSync(join(lane, 'task', 'journal.jsonl'), [...rows.slice(0, -1), row('seat-turn', 'build', 570, { role: 'builder', id: 'turn', model: 'model', seconds: null, status: 'done', usage: null, unmeasured: { seconds: 'clock-unmeasured' } }), rows.at(-1)].map(r => JSON.stringify(r)).join('\n') + '\n')
+    const unclocked = layoutTimeline(createLeanSource({ crewRoot, archiveRoot }).listRuns()[0]).blocks[0]
+    assert.equal(unclocked.seat_ms, null); assert.equal(unclocked.seat_reason, 'clock-unmeasured'); assert.equal(unclocked.duration_ms, 569000)
     const markup = source('LeanWaterfall.svelte')
     assert.match(markup, /block\.role\} turns \{formatLeanDuration\(block\.seat_ms\)/); assert.match(markup, /Stage span \{formatLeanDuration\(block\.duration_ms\)/)
+    assert.match(markup, /\{:else if block\.seat_reason\}<span>\{block\.role\} turn time not measured · \{block\.seat_reason\}/)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

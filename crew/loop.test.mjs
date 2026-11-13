@@ -523,7 +523,7 @@ test('the tech-lead turn is bounded like any seat, and a lead bounce past the bu
 })
 
 const BODY = ['Source: "issue 12"', '', '## Measurements', '- proof: lib.test.mjs "works": red on the old source, green on the build', '- Suite: green; exit 0.'].join('\n')
-const PR_BODY = ['## Summary', 'Purpose: Fixture', 'Closes issue 12', 'How: built', '', '## Changes', '- lib.mjs', '', '## Verification', '- lib.test.mjs: works was red on the old source, green on the build.', 'Suite passed with exit code 0.'].join('\n')
+const PR_BODY = ['## Summary', 'Purpose: Fixture', 'Closes issue 12', 'How: built', '', '## Verification', '- lib.test.mjs: works was red on the old source, green on the build.', 'Suite passed with exit code 0.'].join('\n')
 test('a planner judge reason raises a build lane to judge before the build (PD4)', async () => {
   for (const mode of ['judge', 'none', 'throw']) {
     const f = fakes({ spec: { acceptance: ['A1'] }, throwJudge: mode === 'throw', edit: (v) => { if (v.role === 'planner') { if (mode !== 'none') v.details.judge = 'needs review' } return v } })
@@ -2798,7 +2798,7 @@ test('a rebase that moves the head reruns proof then the suite on the rebased tr
   const f = moved()
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
   const tail = f.calls.slice(f.calls.lastIndexOf('rebase'))
-  assert.deepEqual(tail, ['rebase', 'published-paths', 'proof', 'suite', 'post-rebase-clean', 'post-rebase-head', 'publish'])
+  assert.deepEqual(tail, ['rebase', 'proof', 'suite', 'post-rebase-clean', 'post-rebase-head', 'publish'])
   assert.equal(f.calls.filter((c) => c === 'proof').length, 2)
   assert.equal(f.calls.filter((c) => c === 'suite').length, 2)
   assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: undefined })
@@ -2806,19 +2806,18 @@ test('a rebase that moves the head reruns proof then the suite on the rebased tr
   assert.ok(f.seen.publish.body.split('\n').includes('- lib.test.mjs: works was red on the old source, green on the build.'))
 })
 
-test('a mechanical publishing rebase lists only surviving committed paths in the PR', async () => {
-  for (const [publishedPaths, reason] of [
-    [{ ...green(), stdout: 'b.mjs\0' }, null],
-    [{ ...green(), status: 'red', reason: 'exit-nonzero', code: 1 }, 'paths-unmeasured'],
-    [{ ...green(), stdout: 'b.mjs' }, 'paths-unmeasured'],
-    [{ ...green(), stdout: '../unsafe\0' }, 'paths-unmeasured'],
+test('a mechanical publishing rebase publishes without a published-paths diff', async () => {
+  for (const publishedPaths of [
+    { ...green(), stdout: 'b.mjs\0' },
+    { ...green(), status: 'red', reason: 'exit-nonzero', code: 1 },
+    { ...green(), stdout: 'b.mjs' },
+    { ...green(), stdout: '../unsafe\0' },
   ]) {
     const f = moved({ reviewPaths: ' M a.mjs\0 M b.mjs\0', paths: 'M  a.mjs\0M  b.mjs\0', publishedPaths })
-    assert.equal((await f.go()).reason, reason)
+    assert.equal((await f.go()).reason, null)
     assert.deepEqual(f.seen.commit.files, ['a.mjs', 'b.mjs'])
-    if (reason) assert.equal(f.seen.publish, undefined)
-    else assert.match(f.seen.publish.body, /## Changes\n- b\.mjs\n\n## Verification/)
-    assert.deepEqual(f.seen['published-paths'].args, ['diff', '--no-renames', '--name-only', '-z', `${MOVED.head}^`, MOVED.head])
+    assert.equal(f.calls.includes('published-paths'), false)
+    assert.doesNotMatch(f.seen.publish.body, /## Changes/)
   }
 })
 
@@ -3225,7 +3224,7 @@ test('the PR body omits lane telemetry even when the clock is unreadable', async
   }
 })
 
-test('the PR body is a readable summary, changes and verification, and the commit body is unchanged', async () => {
+test('the PR body is a readable summary and verification, and the commit body is unchanged', async () => {
   for (const tier of ['build', 'judge']) {
     const f = fakes({ spec: { tier } })
     assert.equal((await f.go()).status, 'done')
@@ -3243,9 +3242,17 @@ test('the PR body is a readable summary, changes and verification, and the commi
     return v
   } })
   assert.equal((await f.go()).status, 'done')
-  assert.match(f.seen.publish.body, /## Changes\n- lib.mjs\n- other.mjs/)
   assert.ok(f.seen.publish.body.includes(`lib.test.mjs: ${title} was red on the old source, green on the build.`))
   assert.ok(f.seen.commit.body.includes(JSON.stringify(title)))
+})
+
+test('the PR body has no Changes section and the commit still names every changed file', async () => {
+  const f = fakes({ paths: 'M  lib.mjs\0M  other.mjs\0' })
+  assert.equal((await f.go()).status, 'done')
+  assert.doesNotMatch(f.seen.publish.body, /## Changes/)
+  assert.ok(!f.seen.publish.body.includes('- other.mjs'))
+  assert.match(f.seen.publish.body, /How: built\n\n## Verification\n/)
+  assert.deepEqual(f.seen.commit.files, ['lib.mjs', 'other.mjs'])
 })
 
 test('the PR body states the purpose from the brief ask before what changed', async () => {

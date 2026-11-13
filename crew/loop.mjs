@@ -296,7 +296,7 @@ export async function runLoop(spec, deps = {}) {
   let priorFindings = isFinish ? fin.findings : []
   let reservePending = false, reserveSpent = false, reserveBase = null
   let secondFindings = []
-  let reviewedTree = null
+  let reviewedTree = null, recheckScope = null
   let findingOrder = 0
   const openFindings = { reviewer: new Map(priorFindings.filter((f) => f.severity === 'should-fix').map((f) => [f.id, { finding: f, order: findingOrder++ }])), 'tech-lead': new Map() }
   const omitted = (role, details) => Number.isSafeInteger(details.findings_omitted) && details.findings_omitted > 0 ? [{ id: 'findings-omitted', role, count: details.findings_omitted, summary: `The ${role} listed ${details.findings.length} findings and omitted ${details.findings_omitted} more; fix the listed ones and check the same code for the omitted ones.` }] : []
@@ -408,7 +408,7 @@ export async function runLoop(spec, deps = {}) {
   // One role's turn: issue, await, read back, validate (an envelope attempt gets one repair turn that
   // costs no round). Returns { envelope } for a done envelope or { halt }.
   // Non-done returns route under ADR-055 §12; an exhausted bound goes to the lead, unless singleTurn or the lead's own bound stops it.
-  const seatTurn = async (role, feedback = [], { singleTurn = false, free = false, hold = false, reserveReview = null, deltaReview = null } = {}) => {
+  const seatTurn = async (role, feedback = [], { singleTurn = false, free = false, hold = false, reserveReview = null, deltaReview = null, recheckReview = null } = {}) => {
     if (role === 'reviewer') enterPhase('review')
     let given = feedback
     for (;;) {
@@ -422,7 +422,7 @@ export async function runLoop(spec, deps = {}) {
         if (role === 'lead') feedback = feedback.map((item) => Object.hasOwn(item, 'last') ? { ...item, last: rounds.lead >= (seats.lead.rounds ?? DEFAULT_ROUNDS) } : item)
         const id = `${spec.id}.${role}.${turn}`
         const returnPath = join(spec.taskDir, `${role}-${turn}.json`)
-        const request = { role, tier, seat: seats[role], id, returnPath, brief: spec.brief, planPath, feedback: role === 'builder' ? [...feedback, ...rulings] : feedback, ...(role === 'builder' ? { testsRequired } : {}), ...(['builder', 'reviewer', 'tech-lead'].includes(role) ? { filesInScope: filesInScope === null ? null : [...filesInScope] } : {}), ...(['reviewer', 'tech-lead'].includes(role) ? { changedPaths, builderReport } : {}), ...(reserveReview ? { reserveReview } : {}), ...(deltaReview ? { deltaReview } : {}) }
+        const request = { role, tier, seat: seats[role], id, returnPath, brief: spec.brief, planPath, feedback: role === 'builder' ? [...feedback, ...rulings] : feedback, ...(role === 'builder' ? { testsRequired } : {}), ...(['builder', 'reviewer', 'tech-lead'].includes(role) ? { filesInScope: filesInScope === null ? null : [...filesInScope] } : {}), ...(['reviewer', 'tech-lead'].includes(role) ? { changedPaths, builderReport } : {}), ...(reserveReview ? { reserveReview } : {}), ...(deltaReview ? { deltaReview } : {}), ...(recheckReview ? { recheckReview } : {}) }
         // One attempt: run the seat, then read the issued path back, parse it and validate it in full.
         const attempt = async (asked) => {
           let failure = null
@@ -770,6 +770,8 @@ export async function runLoop(spec, deps = {}) {
           }
         }
         const rebaseOnly = recheck && !isFinish
+        const recheckReview = rebaseOnly ? recheckScope : null
+        recheckScope = null
         recheck = false
         if (!namedTests.length && !isFinish && !testsRequired) proofLines = [tier === 'mechanical' ? '- proof: none, mechanical lane, not reviewed' : '- proof: none, no criterion is machine-checked']
         if (namedTests.length) {
@@ -814,7 +816,7 @@ export async function runLoop(spec, deps = {}) {
         if (!isFinish) {
           const halt = await stageChecked()
           if (halt) return halt
-          const runReview = () => stage('review', () => seatTurn('reviewer', priorFindings, { free: rebaseOnly, singleTurn: !rebaseOnly && reservePending, ...(!rebaseOnly && reservePending ? { reserveReview: { baseTree: reserveBase } } : !rebaseOnly && reviewedTree ? { deltaReview: { baseTree: reviewedTree } } : {}) }))
+          const runReview = () => stage('review', () => seatTurn('reviewer', priorFindings, { free: rebaseOnly, recheckReview, singleTurn: !rebaseOnly && reservePending, ...(!rebaseOnly && reservePending ? { reserveReview: { baseTree: reserveBase } } : !rebaseOnly && reviewedTree ? { deltaReview: { baseTree: reviewedTree } } : {}) }))
           let suite, reviewed
           if (tier === 'build') {
             const pair = await Promise.allSettled([suiteRun(), runReview()])
@@ -858,7 +860,7 @@ export async function runLoop(spec, deps = {}) {
           suiteResult = { code: suite.code }
           suiteLine = `- Suite: green; exit ${suite.code}.`
           if (tier === 'judge') {
-            const second = await stage('second-review', () => seatTurn('tech-lead', secondFindings, { free: rebaseOnly }))
+            const second = await stage('second-review', () => seatTurn('tech-lead', secondFindings, { free: rebaseOnly, recheckReview }))
             if (second.halt) return second.halt
             secondFindings = second.envelope.details.findings
             rememberFindings('tech-lead', second.envelope.details)
@@ -993,6 +995,15 @@ export async function runLoop(spec, deps = {}) {
         enterPhase('recheck')
         rechecks++
         reviewedTree = null
+        if (!isFinish) {
+          const scope = { reviewed: committed.head, onto: rebased.onto, rebased: rebased.head }
+          recheckScope = Object.values(scope).every((oid) => HEX_OID.test(oid)) ? scope : null
+          if (recheckScope) for (const [from, to] of [[`${scope.reviewed}^`, scope.reviewed], [scope.onto, scope.rebased], [`${scope.reviewed}^`, scope.onto]]) {
+            const diff = await callCheck('recheck-scope-diff', d.run, { cwd, command: 'git', args: ['diff', '--no-ext-diff', '--name-only', from, to] }, { command: true })
+            if (diff.status !== 'green') { recheckScope = null; break }
+          }
+          await emit('recheck-scope', { scope: recheckScope ? 'measured' : 'unmeasured', review: recheckScope ? 'scoped' : 'full', reason: recheckScope ? null : 'scope-unmeasured', ...scope })
+        }
         recheck = true
         continue
       }

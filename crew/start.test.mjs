@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { laneName, main, runBrief, startLane, StartRefusal } from './start.mjs'
 import { main as leanMain, runLean } from './lean.mjs'
 import { runAcpSeat } from './acp/seat.mjs'
+import { readOnlyCommand } from './acp-permission.mjs'
 import { parseAgent, TIERS, validateEnvelope } from './protocols.mjs'
 import { resolveAgents } from './agents.mjs'
 import { PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS } from './acp/provider.mjs'
@@ -1249,6 +1250,28 @@ test('a standard-lane reviewer prompt with no delta or reserve base tree says it
   assert.match(first, /^## Full review$/m)
   assert.match(second, /^## Delta review$/m)
   assert.doesNotMatch(second, /^## Full review$/m)
+})
+
+test('a moved-head recheck prompt scopes the reviewer and the tech-lead to what the rebase changed, with no full review (#2359)', async () => {
+  const R = 'a'.repeat(40), O = 'c'.repeat(40), H = 'd'.repeat(40)
+  const heads = ['b'.repeat(40), H, R]
+  const f = leanFixture({ tier: 'judge', loopDeps: { rebaseBranch: async () => ({ status: 'green', reason: null, head: heads.shift(), onto: O }) } })
+  await f.go()
+  const reviewers = f.requests.filter((r) => r.definition.role === 'reviewer').map((r) => r.prompt)
+  const leads = f.requests.filter((r) => r.definition.role === 'tech-lead').map((r) => r.prompt)
+  assert.equal(reviewers.length, 2)
+  assert.equal(leads.length, 2)
+  assert.match(reviewers[0], /^## Full review$/m)
+  assert.doesNotMatch(reviewers[0], /^## Recheck review$/m)
+  for (const prompt of [reviewers[1], leads[1]]) {
+    assert.match(prompt, /^## Recheck review$/m)
+    assert.doesNotMatch(prompt, /^## Full review$/m)
+    for (const command of [`git diff ${R}^ ${R}`, `git diff ${O} ${H}`, `git diff ${R}^ ${O}`]) {
+      assert.ok(prompt.includes(command))
+      assert.ok(readOnlyCommand(command), command)
+    }
+    assert.ok(prompt.includes("A must-fix is an earlier finding still unresolved, a defect in lane code the rebase or the conflict turn altered, or a defect where the base's new commits meet the lane's change. A new problem elsewhere in the already-reviewed diff is a should-fix."))
+  }
 })
 
 // MUTATION: send a request without the role's definition, effort, prompt or recording and a seat turn loses it.

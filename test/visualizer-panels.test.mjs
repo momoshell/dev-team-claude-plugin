@@ -47,6 +47,17 @@ test('TK1 tokenCell keeps a lean row\'s closed tokens reason', () => {
   assert.equal(cell.text, reason); assert.equal(cell.title, reason)
 })
 
+test('workflow semantics name only real tiers and shapes and no mechanical planner or reviewer', () => {
+  for (const value of ['mechanical', 'build', 'judge', 'unknown', null]) assert.equal('staffing' in assuranceMeta(value), false)
+  const text = readFileSync(join(ROOT, 'visualizer/web/src/lib/workflow-semantics.js'), 'utf8')
+  const quick = text.match(/quick: Object\.freeze\(\{[\s\S]*?\}\)/)[0]
+  assert.doesNotMatch(quick, /planner|reviewer/i)
+  for (const shape of ['standard', 'finish']) assert.notEqual(executionMeta(shape).summary, 'Recorded execution shape.')
+  assert.doesNotMatch(executionMeta('standard').summary, /plan|review/i)
+  assert.doesNotMatch(executionMeta('finish').summary, /pull request|\bpr\b/i)
+  assert.equal(executionMeta('full').summary, 'Recorded execution shape.')
+})
+
 test('workflow semantics separate profile, execution and assurance without inference', () => {
   assert.equal(assuranceMeta('mechanical').label, 'Quick')
   assert.equal(assuranceMeta('judge').label, 'Rigorous')

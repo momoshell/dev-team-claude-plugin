@@ -246,7 +246,7 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
     const { rows, skipped_malformed, error } = readJournalRows(found)
     const leanRoles = rows.some((row) => row.event === 'tier-raised') ? leanRolesOf(found.dir) : []
     const { members, tier } = deriveMembers({ members: found.members, rows, leanRoles, tier: found.spec.tier })
-    const phases = []
+    const phases = [], openPhases = []
     let latest_stage = null, status = 'unknown', reason = null, pr = null, running = false, started_at = null
     let hand_finished = false, pr_actor = null, lastAt = null
     for (const row of rows) {
@@ -255,14 +255,20 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
       else if (at !== null) lastAt = at
       const stage = nonEmpty(row.stage) ? row.stage : null
       if (stage) latest_stage = stage
-      if (row.event === 'stage-start' && stage) phases.push({ id: phases.length + 1, name: stage, status: 'running', checks: [], started_at: at, ended_at: null })
-      else if (row.event === 'stage-end' && stage) {
-        const phase = phases.findLast((entry) => entry.name === stage && entry.status === 'running')
+      if (row.event === 'stage-start' && stage) {
+        const phase = { id: phases.length + 1, name: stage, status: 'running', checks: [], started_at: at, ended_at: null }
+        phases.push(phase); openPhases.push(phase)
+      } else if (row.event === 'stage-end' && stage) {
+        const index = openPhases.findLastIndex((entry) => entry.name === stage)
+        const phase = index < 0 ? phases.findLast((entry) => entry.name === stage && entry.status === 'running') : openPhases.splice(index, 1)[0]
         const outcome = stageOutcome(row.outcome)
         if (phase) { Object.assign(phase, outcome); phase.ended_at = at } else phases.push({ id: phases.length + 1, name: stage, ...outcome, checks: [], started_at: null, ended_at: at })
       } else if (row.event === 'envelope' && stage && nonEmpty(row.role)) {
         const phase = phases.findLast((entry) => entry.name === stage)
         if (phase) phase.role = row.role
+      } else if (row.event === 'seat-turn' && stage && nonEmpty(row.role)) {
+        const phase = phases.findLast((entry) => entry.name === stage)
+        if (phase) (phase.turns ??= []).push({ role: row.role, seconds: Number.isFinite(row.seconds) && row.seconds >= 0 ? row.seconds : null })
       } else if (row.event === 'check' && stage) {
         const phase = phases.findLast((entry) => entry.name === stage)
         const check = { check: row.check ?? null, result: summarizeCheckResult(row.result) }
@@ -276,6 +282,8 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
       if (!nonEmpty(phase.role)) phase.role = Object.hasOwn(SEAT_STAGES, phase.name) ? SEAT_STAGES[phase.name] : null
       phase.kind = phase.role ? 'seat' : 'check'
     }
+    const open_stages = openPhases.map((phase) => phase.name)
+    latest_stage = open_stages.at(-1) ?? latest_stage
     // Ignore stage ends, advisor rows and in-flight checks after a stop when choosing the state.
     let last = rows.findLast((row, index) => !stateless(rows, row, index) && !supersededReturn(rows, row, index)) ?? rows.at(-1)
     // `crew finish --accept` appends a `pr` row then a `finish-decision` row: a pr row after the last
@@ -343,7 +351,7 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
     }))
     return {
       source: 'lean', adw_id: leanIdentity(found.lane), goal: found.lane, repo_slug: `dt-${found.lane}`, task_slug: found.lane,
-      latest_stage, status, reason, running, phases, seats, pr, hand_finished, pr_actor,
+      latest_stage, open_stages, status, reason, running, phases, seats, pr, hand_finished, pr_actor,
       archived: found.archived, journal_rows: rows.length, journal_skipped_malformed: skipped_malformed, journal_error: error ?? null,
       tier: nonEmpty(tier) ? tier : null, shape: nonEmpty(found.spec.shape) ? found.spec.shape : null,
       mode: null, started_at, ended_at, duration_ms, last_heartbeat_at: null,

@@ -42,10 +42,15 @@ function journalLines(rows = []) {
   })
 }
 
+export function leanLatestStage(run = {}) {
+  return run.open_stages?.length ? run.open_stages.join(' · ') : run.latest_stage ?? null
+}
+
 export function leanView(run = {}, journal = null) {
+  const stage = leanLatestStage(run)
   return {
-    lane: run.goal ?? null, status: leanStatus(run), stage: run.latest_stage ?? null,
-    stageReason: run.latest_stage ? null : 'no stage recorded',
+    lane: run.goal ?? null, status: leanStatus(run), stage,
+    stageReason: stage ? null : 'no stage recorded',
     seats: Array.isArray(run.seats) ? run.seats : [],
     lines: journalLines(journal?.rows),
     pr: run.pr ?? null,

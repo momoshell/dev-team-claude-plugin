@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { startServer } from '../visualizer/server/server.mjs'
 import { createLeanSource } from '../crew/lean-source.mjs'
 import { taskBoard, leanStatus, tokenCell } from '../visualizer/web/src/lib/fleet.js'
-import { leanCheckStatus, leanStageStatus } from '../visualizer/web/src/lib/lean.js'
+import { leanCheckStatus, leanStageStatus, leanView } from '../visualizer/web/src/lib/lean.js'
 import { scratchDir } from './helpers.mjs'
 
 const jsonl = (rows) => rows.map((row) => JSON.stringify(row)).join('\n') + '\n'
@@ -35,6 +35,31 @@ async function withServer(work, overrides = {}) {
     rmSync(sandbox, { recursive: true, force: true })
   }
 }
+test('the latest stage names the open review, not the ended suite, in the summary and on both pages', () => {
+  const root = scratchDir('lean-stages-'), crewRoot = join(root, 'crew'), archiveRoot = join(root, 'archive')
+  try {
+    for (const [name, starts] of [['first', ['review', 'suite']], ['second', ['suite', 'review']], ['nested', ['build', 'lead']]]) {
+      const rows = starts.map(stage => ({ event: 'stage-start', stage, at: 1700000000000 }))
+      if (name !== 'nested') rows.push({ event: 'check', stage: 'suite', at: 1700000001000 }, { event: 'stage-end', stage: 'suite', at: 1700000002000 })
+      lane(crewRoot, name, rows)
+    }
+    lane(crewRoot, 'legacy', [{ event: 'check', stage: 'suite', check: 'proof' }, { event: 'stage-end', stage: 'suite', outcome: { status: 'done' } }])
+    const runs = createLeanSource({ crewRoot, archiveRoot }).listRuns()
+    const legacy = runs.find(r => r.goal === 'legacy')
+    assert.deepEqual(legacy.open_stages, [])
+    assert.equal(legacy.phases.length, 1); assert.equal(legacy.phases[0].status, 'done'); assert.equal(legacy.phases[0].checks.length, 1)
+    for (const name of ['first', 'second']) {
+      const run = runs.find(r => r.goal === name)
+      assert.equal(run.latest_stage, 'review'); assert.deepEqual(run.open_stages, ['review']); assert.equal(leanView(run).stage, 'review')
+    }
+    const nested = runs.find(r => r.goal === 'nested')
+    assert.deepEqual(nested.open_stages, ['build', 'lead']); assert.equal(leanView(nested).stage, 'build · lead')
+    const task = readFileSync(new URL('../visualizer/web/src/lib/TaskList.svelte', import.meta.url), 'utf8')
+    const detail = readFileSync(new URL('../visualizer/web/src/lib/LeanRunDetail.svelte', import.meta.url), 'utf8')
+    assert.match(task, /leanLatestStage\(run\)/); assert.doesNotMatch(task, /phases\.at\(-1\)/); assert.match(detail, /leanLabel\(view\.stage\)/)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('lean lane tokens are the seat-turn usage sum, null with the unmeasured reason, with the turn count', () => {
   const root = scratchDir('lean-tokens-'), crewRoot = join(root, 'crew'), archiveRoot = join(root, 'archive')
   const builder = { event: 'seat-turn', role: 'builder', usage: { inputTokens: 32823, outputTokens: 3792, cachedReadTokens: 374528, cachedWriteTokens: 0, totalTokens: 411143 } }

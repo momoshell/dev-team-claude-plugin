@@ -1,5 +1,6 @@
 <script>
   import { configurationDimensionCell, configurationFilterView, durationCell, leanStatus, needsAttention, shipStatus, taskBoard, tokenCell } from './fleet.js'
+  import { leanLabel, leanLatestStage } from './lean.js'
   import Pagination from './Pagination.svelte'
   import Dropdown from './Dropdown.svelte'
 
@@ -13,7 +14,6 @@
   let pageSize = $state(12)
 
   function statusFor(run) { return leanStatus(run) }
-  function phaseName(phase) { return String(phase?.name || 'phase').replaceAll('_', ' ') }
   function formatDate(value) {
     if (!value) return 'date unavailable'
     const parsed = new Date(value)
@@ -67,7 +67,7 @@
   <div class="table-wrap">
     <table>
       <caption>Run history · scroll horizontally for all columns on smaller screens</caption>
-      <thead><tr><th>Task</th><th>Status</th><th>Ship</th><th>Run setup</th><th>Latest phase</th><th>Elapsed</th><th>Usage</th><th><span class="sr-only">Open</span></th></tr></thead>
+      <thead><tr><th>Task</th><th>Status</th><th>Ship</th><th>Run setup</th><th>Latest stage</th><th>Elapsed</th><th>Usage</th><th><span class="sr-only">Open</span></th></tr></thead>
       <tbody>
         {#each paged as run (run.adw_id)}
           {@const status = statusFor(run)}
@@ -81,7 +81,7 @@
             <td><span class={`status ${status.tone}`}><span class="status-dot" aria-hidden="true"></span>{status.word}</span>{#if needsAttention(status.key)}<details class="row-reason"><summary>Why review?</summary><p>{status.why || (status.key === 'ready' ? 'The run is ready for an operator decision: accept, return or abandon with crew finish.' : 'Open the run to inspect its last recorded outcome and evidence.')}</p></details>{/if}</td>
             <td title={ship.reason}><span class={`status ${ship.tone}`}><span class="status-dot" aria-hidden="true"></span>{ship.word}</span></td>
             <td class="run-setup"><div><strong class:missing={assuranceCell.dashed} class:dashed={assuranceCell.dashed}>{assuranceCell.text}</strong></div><small title={`${assuranceCell.summary ?? ''} ${executionCell.summary ?? ''}`}><span class:dashed={executionCell.dashed}>{executionCell.text}</span></small></td>
-            <td class="execution"><strong>{run.phases?.length ? phaseName(run.phases.at(-1)) : 'Not started'}</strong><small>{run.phases?.length || 0} recorded phases</small></td>
+            <td class="execution"><strong>{leanLatestStage(run) ? leanLabel(leanLatestStage(run)) : 'Not started'}</strong><small>{run.phases?.length || 0} recorded phases</small></td>
             <td class="time"><strong>{duration.dashed ? (run.running ? status.word : '—') : duration.text}</strong><small>{formatDate(run.started_at)}</small></td>
             <td class="usage"><strong>{tokens.dashed ? '—' : shortNumber(tokens.value)}</strong><small title={tokens.dashed ? tokens.title : (tokens.cacheRate == null ? tokens.cachePending : 'Cache reads ÷ input, cache writes, and cache reads')}>{tokens.dashed ? tokens.text : tokens.cacheRate == null ? 'Cache hit not measured' : cacheRate(tokens.cacheRate)}</small>{#if tokens.turns}<small>{tokens.turns}</small>{/if}{#if tokens.subagents}<small>{tokens.subagents}</small>{/if}{#if tokens.advisor}<small>{tokens.advisor}</small>{/if}</td>
             <td><button class="open" type="button" aria-label={`Open ${run.goal || 'task'}`} onclick={(event) => { event.stopPropagation(); onopen(run) }}>→</button></td>

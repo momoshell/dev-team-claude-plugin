@@ -23,9 +23,8 @@ description: >-
 - For a hand-opened PR, use `## Summary` with a `Purpose:` line stating what
   the PR achieves, the issue number and title or quoted operator request for why,
   a `How:` line for the implementation, a `Source:` line only when the issue or
-  request line does not name the source, `## Changes` for the changed files,
-  `## Verification` for test and suite results, and `## Open points` for
-  unresolved should-fix findings when present.
+  request line does not name the source, `## Verification` for test and suite
+  results, and `## Open points` for unresolved should-fix findings when present.
   Crew lanes generate this body themselves. Follow `prose-plain` for PR prose.
 - Push the lane branch: `git push -u origin <lane>`.
 - Write the body to a file and open with an absolute path:

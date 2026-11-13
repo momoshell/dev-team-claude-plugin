@@ -915,6 +915,14 @@ test('errors and mixed content are not byte-capped', () => {
   assert.equal(d.gate.onToolResult({ toolName: 'read', toolCallId: 'mixed-content', input, isError: false, content: [{ type: 'text', text: d.text }, { type: 'image', data: 'x' }] }), undefined)
 })
 
+test('the default read-gate recorder journals a numeric at', () => {
+  const f = fixture(), entries = []
+  const gate = mod.createReadGate({ cwd: f.root, env: {}, taskDir: f.taskDir, journalPath: join(f.taskDir, 'journal.jsonl'), appendFile: (_path, text) => entries.push(JSON.parse(text)) })
+  call(gate, 'bash', { command: "cat 'missing.txt'" }, f.root)
+  assert.equal(entries.length, 1)
+  assert.ok(Number.isFinite(entries[0].at))
+})
+
 test('missing cat operand fails open and records failure', () => {
   const f = fixture()
   const entries = []

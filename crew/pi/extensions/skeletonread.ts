@@ -45,7 +45,7 @@ const defaultRead = (path, encoding) => readFileSync(path, encoding)
 const defaultAppend = (path, text) => appendFileSync(path, text)
 const defaultReadDir = (path) => readdirSync(path)
 const defaultStat = (path) => statSync(path)
-const defaultNow = () => new Date().toISOString()
+const defaultNow = () => Date.now()
 
 function bytes(value) {
   return Buffer.byteLength(String(value ?? ''), 'utf8')

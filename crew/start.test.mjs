@@ -1128,7 +1128,7 @@ test('with builderChecks set, the build and suite-repair builder prompts hold ev
   await f.go()
   const builders = f.requests.filter((request) => request.definition.role === 'builder')
   assert.ok(builders.length >= 2)
-  assert.ok(builders[1].prompt.includes('suite-repair'))
+  assert.ok(builders[1].prompt.includes('The full suite is red'))
   for (const { prompt } of builders) {
     assert.ok(prompt.includes('## Project checks'))
     for (const check of f.spec.builderChecks) assert.ok(prompt.includes(`- ${check}\n`))

@@ -27,8 +27,11 @@ function sideUsage(rows, getUsage) {
   return { measured: measured.length, total: rows.length, billed_tokens: measured.length ? measured.reduce((sum, usage) => sum + BILLED_FIELDS.reduce((n, field) => n + usage[field], 0), 0) : null }
 }
 
-// A row time is an epoch-ms number inside the Date range (past it, toISOString throws); anything else is unknown.
-const rowTime = (value) => (Number.isFinite(value) && !Number.isNaN(new Date(value).getTime()) ? new Date(value).toISOString() : null)
+// Accept epoch milliseconds and older ISO journal times; invalid dates are unknown.
+const rowTime = (value) => {
+  const ms = typeof value === 'string' && value.trim() ? Date.parse(value) : value
+  return Number.isFinite(ms) && !Number.isNaN(new Date(ms).getTime()) ? new Date(ms).toISOString() : null
+}
 
 const leanIdentity = (lane) => `${PREFIX}${lane}`
 const isLeanIdentity = (id) => typeof id === 'string' && id.startsWith(PREFIX)

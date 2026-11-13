@@ -361,6 +361,13 @@ const sharedAdvisorCells = Object.freeze([
 
 
 
+test('advisor journal rows carry a numeric at by default', async () => {
+  const journal = sink()
+  await advisor.attachAdvisor(pi(), { env: env(), deps: journal })
+  assert.ok(journal.rows.length > 0)
+  assert.ok(journal.rows.every((row) => Number.isFinite(row.at)))
+})
+
 test('attach is default-off, refuses wrong roles, and journals before handlers', async () => {
   const off = pi(); await advisor.attachAdvisor(off, { env: { CREW_ROLE: 'builder' }, deps: { appendFile: () => { throw new Error('must stay inert') } } })
   assert.equal(off.handlers.length, 0)

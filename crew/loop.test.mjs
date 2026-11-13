@@ -3255,6 +3255,35 @@ test('the PR body has no Changes section and the commit still names every change
   assert.deepEqual(f.seen.commit.files, ['lib.mjs', 'other.mjs'])
 })
 
+test('a mechanical PR body takes its purpose from the recorded subject', async () => {
+  for (const [tier, subject, planSummary, purpose] of [
+    ['mechanical', 'fix(crew): keep archives', 'Plan preserves archives.', 'Keep archives'],
+    ['mechanical', 'fix(docs): correct plan.md links', 'Plan preserves archives.', 'Correct plan.md links'],
+    ['mechanical', 'fix(docs): written guidance', 'Plan preserves archives.', 'Written guidance'],
+    ['build', 'fix(crew): keep archives', 'Plan preserves archives.', 'Preserves archives.'],
+    ['build', 'fix(crew): keep archives', 'Plan written to task/plan.md.', 'unmeasured.'],
+  ]) {
+    const f = fakes({ spec: { tier, source: 'operator request', brief: '## The ask\n> Fix the typo.' }, edit: (v) => {
+      if (v.role === 'builder') v.details.subject = subject
+      if (v.role === 'planner') v.summary = planSummary
+      return v
+    } })
+    assert.equal((await f.go()).status, 'done')
+    assert.ok(f.seen.publish.body.startsWith(`## Summary\nPurpose: ${purpose}\n`))
+  }
+  for (const [subject, planSummary, purpose] of [
+    ['fix(crew): keep archives', undefined, 'Keep archives'],
+    ['fix(docs): written guidance', undefined, 'Written guidance'],
+    ['fix(crew): keep archives', 'Plan preserves archives.', 'Preserves archives.'],
+  ]) {
+    const f = fakes({ spec: { ...finishSpec({ planPath: null, subject, planSummary }), tier: 'mechanical' } })
+    assert.equal((await f.go()).status, 'done')
+    const body = JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body
+    assert.ok(body.startsWith(`## Summary\nPurpose: ${purpose}\n`), body)
+    assert.equal(f.rows.find((r) => r.event === 'finish-ready').body, body)
+  }
+})
+
 test('the PR body states the purpose from the brief ask before what changed', async () => {
   for (const [tier, source, brief, why] of [
     ['build', 'issue 12', '# Task\n## The ask\n> Issue title: Keep archives\n', 'Closes issue 12: Keep archives'],
@@ -3269,7 +3298,7 @@ test('the PR body states the purpose from the brief ask before what changed', as
       return v
     } })
     assert.equal((await f.go()).status, 'done')
-    assert.ok(f.seen.publish.body.startsWith(`## Summary\nPurpose: ${tier === 'mechanical' ? 'unmeasured.' : 'Preserves earlier archives.'}\n${why}\nHow: built\n`), f.seen.publish.body)
+    assert.ok(f.seen.publish.body.startsWith(`## Summary\nPurpose: ${tier === 'mechanical' ? 'Mechanical' : 'Preserves earlier archives.'}\n${why}\nHow: built\n`), f.seen.publish.body)
     assert.doesNotMatch(f.seen.publish.body, /^Source:/m)
     if (tier !== 'mechanical') assert.equal(f.seen.commit.body, BODY.replace('issue 12', source))
   }

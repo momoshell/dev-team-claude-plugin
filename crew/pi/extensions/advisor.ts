@@ -101,7 +101,7 @@ export const JUDGMENT_ERROR_CODES = Object.freeze([
 ])
 
 const DEFAULT_ROLE = 'builder'
-const DEFAULT_NOW = () => new Date().toISOString()
+const DEFAULT_NOW = () => Date.now()
 const DEFAULT_READ = (path, encoding) => readFileSync(path, encoding)
 const DEFAULT_APPEND = (path, text) => appendFileSync(path, text)
 
@@ -661,7 +661,9 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
   }
 
   function nowMs() {
-    const parsed = Date.parse(String(atOf(now)))
+    const value = atOf(now)
+    if (Number.isFinite(value)) return value
+    const parsed = Date.parse(String(value))
     return Number.isFinite(parsed) ? parsed : Date.now()
   }
 

@@ -72,7 +72,7 @@ const defaultSnapshotFile = (path) => {
   }
 }
 const defaultAppend = (path, text) => appendFileSync(path, text)
-const defaultNow = () => new Date().toISOString()
+const defaultNow = () => Date.now()
 
 function countTextLines(raw) {
   const text = Buffer.isBuffer(raw) ? raw.toString('utf8') : String(raw ?? '')

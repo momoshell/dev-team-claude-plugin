@@ -8,16 +8,17 @@
 // The start stands on the brief parser and the agent definitions alone. It refuses before any
 // git call when the brief is not P1 or the definitions do not resolve.
 import { spawn, spawnSync } from 'node:child_process'
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, posix, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { LANE } from './lane-core.mjs'
+import { GIT_STATUS_ARGS, LANE } from './lane-core.mjs'
+import { runSuite } from './checks.mjs'
 import { ISSUE_SOURCE, parseBrief, TIERS } from './protocols.mjs'
 import { resolveAgents, loadRoster, snapshotRoster } from './agents.mjs'
 import { writeRunPid } from './run-pid.mjs'
 import { askProvenance, readOperatorMessages } from './brief-provenance.mjs'
-import { OnboardRefusal, requireOnboarded, SUITE_TIMEOUT_DEFAULT_MS } from './onboard.mjs'
+import { OnboardRefusal, requireOnboarded, SUITE_TIMEOUT_DEFAULT_MS, WORKTREE_SETUP_TIMEOUT_MS } from './onboard.mjs'
 
 const HOME = dirname(dirname(fileURLToPath(import.meta.url)))
 const LEAN = join(HOME, 'crew', 'lean.mjs')
@@ -48,7 +49,7 @@ function logStdout(line) {
 }
 
 const defaultDeps = () => ({
-  readFileSync, existsSync, mkdirSync, writeFileSync, rmSync, openSync, closeSync, resolveAgents, snapshotRoster,
+  readFileSync, existsSync, mkdirSync, writeFileSync, appendFileSync, rmSync, openSync, closeSync, resolveAgents, snapshotRoster, runSuite,
   spawnSync: (file, args, options) => spawnSync(file, args, { encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024, ...options }),
   spawnDetached: (file, args, { cwd, log, env }) => {
     const out = openSync(log, 'a')
@@ -168,6 +169,34 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
   }
   const run = runBrief(text, fields.closes, ask, title)
   if (git(d, checkout, ['worktree', 'add', '-b', lane, worktree, baseCommit]) === null) throw new StartRefusal(`git worktree add -b ${lane} ${worktree} ${base} failed in ${checkout}`)
+
+  let setup
+  if (project.worktreeSetup !== undefined) {
+    try {
+      setup = await d.runSuite({ cwd: worktree, ...suiteSpec(project.worktreeSetup, WORKTREE_SETUP_TIMEOUT_MS) })
+      if (!setup || !['green', 'red', 'unmeasured'].includes(setup.status) || (setup.status !== 'green' && (typeof setup.reason !== 'string' || !setup.reason))) throw new Error('malformed result')
+    } catch { setup = { status: 'unmeasured', reason: 'runner-threw' } }
+    const reason = setup.status === 'green' ? null : setup.reason
+    const taskDir = join(crewDir, 'task')
+    try {
+      d.mkdirSync(taskDir, { recursive: true })
+      d.appendFileSync(join(taskDir, 'journal.jsonl'), `${JSON.stringify({ event: 'worktree-setup', lane, stage: null, status: setup.status, reason, command: project.worktreeSetup, at: new Date(d.now()).toISOString() })}\n`)
+    } catch (error) { logLine(`crew start: worktree setup journal not recorded: ${error.message}`) }
+    logLine(`crew start: worktree setup ${setup.status}${reason === null ? '' : `: ${reason}`}`)
+    let result
+    try { result = d.spawnSync('git', ['-C', worktree, ...GIT_STATUS_ARGS]) } catch {}
+    const prefix = `worktree setup ${setup.status}${setup.status === 'green' ? '' : `: ${setup.reason}`}`
+    const left = `the worktree ${worktree} and branch ${lane} are left for inspection`
+    if (result?.status !== 0 || typeof result.stdout !== 'string' || (result.stdout && !result.stdout.endsWith('\0'))) throw new StartRefusal(`${prefix}; git status could not be read; ${left}`)
+    const fields = result.stdout.split('\0'), paths = []
+    for (let i = 0; i < fields.length && fields[i]; i++) {
+      const entry = fields[i]
+      if (entry.length < 4 || entry[2] !== ' ' || ((entry[0] === 'R' || entry[0] === 'C') && !fields[i + 1])) throw new StartRefusal(`${prefix}; git status could not be read; ${left}`)
+      paths.push(entry.slice(3))
+      if (entry[0] === 'R' || entry[0] === 'C') i++
+    }
+    if (paths.length) throw new StartRefusal(`${prefix}; changed or untracked paths:\n- ${paths.join('\n- ')}; ${left}`)
+  }
 
   // The run reads a snapshot, so editing the draft cannot change a running lane.
   const started = join(d.crewRoot, 'briefs', 'started')

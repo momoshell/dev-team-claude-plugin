@@ -59,6 +59,11 @@ the fetch fails; it does not probe seats. The probe is implemented in
    Optionally set top-level `proofTimeoutMs` to a safe integer from 1 to
    `2**31-1` ms for every proof run; if absent, it defaults to
    `PROOF_TIMEOUT_DEFAULT_MS` (`crew/proof.mjs`). It is not set per runner entry.
+   Optionally set `worktreeSetup` to a non-blank command, split on whitespace
+   without a shell like proof `setup`. `crew start` runs it once in the new
+   worktree before launch, with a 10-minute timeout. Failure or timeout is
+   printed and journaled but does not stop the lane. Changed or untracked paths
+   reported by git cause start to refuse; ignored paths are allowed.
    Optionally set `builderChecks` to a list of non-empty, one-line commands,
    such as a lint or one package's tests. The builder runs them before returning
    and reports each result in `notes`; the loop does not run them or read results.
@@ -99,7 +104,7 @@ the fetch fails; it does not probe seats. The probe is implemented in
    `origin/<base>`, so a local commit is not enough. The checkout and base must
    have matching onboarding; proof reads runner entries from the lane's
    old-source worktree. Re-run
-   onboarding after changing the suite or proof entries. Changing only
+   onboarding after changing the suite, proof entries or `worktreeSetup`. Changing only
    `suiteTimeoutMs`, `proofTimeoutMs` or `builderChecks` in `.crew/project.json` does not require
    re-onboarding.
    Write a brief with

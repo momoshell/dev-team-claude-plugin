@@ -59,6 +59,8 @@ Optional `builderChecks` in `.crew/project.json` is a list of non-empty, one-lin
 
 A brief may choose `mechanical: true` for a change with no behaviour to judge. With no named test, its PR states `proof: none, mechanical lane, not reviewed`; the operator reviews the diff before merging. Protected paths restart it as judge, and builder insufficiency restarts it as build.
 
+Optional `worktreeSetup` in `.crew/project.json` is a non-blank command split on whitespace without a shell, like a proof entry's `setup`. `crew start` runs it once in the new worktree before launching the lane, with a 10-minute timeout. Failure or timeout is printed and recorded in the journal as red or unmeasured but does not stop the lane. If git reports changed or untracked paths after setup, start names them and refuses to launch; ignored paths are allowed. Changing or adding the command requires onboarding again.
+
 The lane name is the brief's file name. `crew start` runs the `standard` shape
 only; `finish` (ADR-051) is the second entry path. `crew finish <lane> --return <file>`
 starts a finish pass on any finishable stop, including an escalation or a

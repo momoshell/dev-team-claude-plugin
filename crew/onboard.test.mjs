@@ -146,6 +146,24 @@ test('checkOnboarding records a configured suiteTimeoutMs in project.json and re
   }
 })
 
+test('checkOnboarding records worktreeSetup, and a changed or added worktreeSetup reads onboarding-stale', async () => {
+  for (const value of ['node seed.mjs', undefined, ' ']) {
+    const repo = scratchDir('onboard-worktree-setup-')
+    git(repo, 'init'); writeFileSync(join(repo, 'initial'), 'initial')
+    git(repo, 'add', 'initial'); git(repo, 'commit', '-m', 'initial')
+    const draft = join(repo, 'draft.json'), target = join(repo, '.crew', 'project.json')
+    writeFileSync(draft, JSON.stringify({ suite: 'npm test', proof: [], ...(value === undefined ? {} : { worktreeSetup: value }) }))
+    assert.equal((await checkOnboarding({ checkout: repo, draft })).status, value === ' ' ? 'red' : 'green')
+    if (value === ' ') { assert.equal(existsSync(target), false); continue }
+    const record = JSON.parse(readFileSync(target, 'utf8'))
+    assert.equal(record.worktreeSetup, value)
+    assert.equal(requireOnboarded(repo).worktreeSetup, value)
+    record.worktreeSetup = 'node other.mjs'
+    writeFileSync(target, JSON.stringify(record))
+    assert.throws(() => requireOnboarded(repo), (error) => error.reason === 'onboarding-stale')
+  }
+})
+
 function seatFixture(overrides = {}, behavior = () => ({})) {
   const repo = scratchDir('onboard-seats-')
   git(repo, 'init'); writeFileSync(join(repo, 'initial'), 'initial')

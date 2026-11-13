@@ -7,6 +7,7 @@ import { syncBuiltinESMExports } from 'node:module'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { laneName, main, runBrief, startLane, StartRefusal } from './start.mjs'
+import { projectHash } from './onboard.mjs'
 import { main as leanMain, runLean } from './lean.mjs'
 import { runAcpSeat } from './acp/seat.mjs'
 import { readOnlyCommand } from './acp-permission.mjs'
@@ -133,6 +134,7 @@ function fakes({ brief = BRIEF, project = projectFile(), overrides = {}, exists 
     existsSync: (path) => exists(path),
     mkdirSync: (path) => { calls.push(['mkdir', path]); write('mkdir', path) },
     writeFileSync: (path, text) => { calls.push(['write', path, text]); write('write', path, text) },
+    appendFileSync: (path, text) => { calls.push(['append', path, text]) },
     spawnSync: (file, args, options) => {
       calls.push(['spawn', file, args, options?.cwd ?? null])
       if (file === 'gh') {
@@ -759,6 +761,73 @@ function originBaseFixture(change) {
   }
   return { root, checkout, briefPath, deps, calls, a, b }
 }
+
+function worktreeSetupFixture(dirty) {
+  const f = originBaseFixture((seed) => {
+    const root = join(seed, '..')
+    const script = join(root, 'setup.mjs')
+    writeFileSync(script, `import { appendFileSync, writeFileSync } from 'node:fs'\nappendFileSync(${JSON.stringify(join(root, 'setup.log'))}, process.cwd() + '\\n')\n${dirty ? "writeFileSync('initial', 'changed'); writeFileSync('seeded.txt', 'seeded')" : "writeFileSync('seeded.bin', 'seeded')"}\n`)
+    writeFileSync(join(seed, 'initial'), 'initial')
+    writeFileSync(join(seed, '.gitignore'), 'seeded.bin\n')
+    writeFileSync(join(seed, 'origin-only'), '')
+    const project = { suite: 'npm test', proof: [], worktreeSetup: `${process.execPath} ${script}` }
+    writeFileSync(join(seed, '.crew', 'project.json'), JSON.stringify({ ...project, onboarded: { hash: projectHash(project) } }))
+  })
+  writeFileSync(join(f.checkout, '.crew', 'project.json'), readFileSync(join(f.root, 'seed', '.crew', 'project.json')))
+  return f
+}
+
+test('crew start runs worktreeSetup once in the new worktree before the run is spawned', async () => {
+  const f = worktreeSetupFixture(false)
+  let sawLog = false
+  f.deps.spawnDetached = () => { sawLog = existsSync(join(f.root, 'setup.log')); return 1 }
+  const lane = await startLane({ briefPath: f.briefPath, checkout: f.checkout, deps: f.deps })
+  assert.equal(existsSync(join(f.root, 'setup.log')), true)
+  assert.deepEqual(readFileSync(join(f.root, 'setup.log'), 'utf8').trim().split('\n'), [fs.realpathSync(lane.worktree)])
+  assert.equal(existsSync(join(lane.worktree, 'seeded.bin')), true)
+  assert.equal(existsSync(join(f.checkout, 'seeded.bin')), false)
+  assert.equal(sawLog, true)
+  const rows = readFileSync(join(f.root, 'crew', 'dt-b1', 'b1', 'task', 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+  assert.equal(rows.length, 1); assert.equal(rows[0].event, 'worktree-setup'); assert.equal(rows[0].status, 'green'); assert.equal(rows[0].reason, null)
+})
+
+test('crew start journals a red or timed-out worktreeSetup with its reason, prints it, and still starts the lane', async () => {
+  for (const [status, reason] of [['red', 'exit-nonzero'], ['unmeasured', 'timeout']]) {
+    const project = { suite: 'npm test', proof: [], worktreeSetup: 'node seed.mjs' }
+    project.onboarded = { hash: projectHash(project) }
+    const { deps, calls } = fakes({ project })
+    deps.runSuite = async (spec) => { calls.push(['setup', spec]); return { status, reason } }
+    await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
+    const setup = calls.filter(([kind]) => kind === 'setup')
+    assert.equal(setup.length, 1); assert.deepEqual(setup[0][1], { cwd: '/repo/dt-b1', command: 'node', args: ['seed.mjs'], timeoutMs: 600000 })
+    const rows = calls.filter(([kind]) => kind === 'append')
+    assert.equal(rows.length, 1); assert.equal(rows[0][1], '/home/.crew/dt-b1/b1/task/journal.jsonl')
+    const row = JSON.parse(rows[0][2]); assert.equal(row.status, status); assert.equal(row.reason, reason)
+    assert.ok(calls.some(([kind, line]) => kind === 'log' && line.includes(`${status}: ${reason}`)))
+    assert.ok(calls.some(([kind]) => kind === 'detached'))
+  }
+})
+
+test('crew start refuses a worktreeSetup that leaves changed or untracked paths, names them and starts no run', async () => {
+  for (const [status, reason] of [['green', null], ['red', 'exit-nonzero'], ['unmeasured', 'timeout']]) {
+    const f = worktreeSetupFixture(true)
+    if (status === 'red') appendFileSyncReal(join(f.root, 'setup.mjs'), '\nprocess.exitCode = 1\n')
+    if (status === 'unmeasured') f.deps.runSuite = async ({ cwd }) => {
+      writeFileSync(join(cwd, 'initial'), 'changed')
+      writeFileSync(join(cwd, 'seeded.txt'), 'seeded')
+      return { status, reason }
+    }
+    await assert.rejects(startLane({ briefPath: f.briefPath, checkout: f.checkout, deps: f.deps }), (error) => error instanceof StartRefusal && error.message.includes('initial') && error.message.includes('seeded.txt'))
+    assert.equal(f.calls.some(([kind]) => kind === 'launch'), false)
+    const task = join(f.root, 'crew', 'dt-b1', 'b1', 'task')
+    assert.equal(existsSync(join(task, 'lean.json')), false)
+    assert.equal(existsSync(join(task, 'journal.jsonl')), true)
+    const rows = readFileSync(join(task, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].status, status)
+    assert.equal(rows[0].reason, reason)
+  }
+})
 
 test('crew start bases the lane on the origin commit when the local default branch is one commit behind', async () => {
   for (const customRefspec of [false, true]) {

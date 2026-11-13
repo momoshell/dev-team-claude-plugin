@@ -808,6 +808,22 @@ test('crew start journals a red or timed-out worktreeSetup with its reason, prin
   }
 })
 
+test('crew start journals the worktree-setup row time as the epoch-ms number from now', async () => {
+  for (const [status, reason] of [['green', null], ['red', 'exit-nonzero'], ['unmeasured', 'timeout']]) {
+    const project = { suite: 'npm test', proof: [], worktreeSetup: 'node seed.mjs' }
+    project.onboarded = { hash: projectHash(project) }
+    const { deps, calls } = fakes({ project })
+    deps.now = () => 1_700_000_000_000
+    deps.runSuite = async () => ({ status, reason })
+    await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
+    const rows = calls.filter(([kind]) => kind === 'append')
+    assert.equal(rows.length, 1)
+    const row = JSON.parse(rows[0][2])
+    assert.equal(row.event, 'worktree-setup')
+    assert.strictEqual(row.at, 1_700_000_000_000)
+  }
+})
+
 test('crew start refuses a worktreeSetup that leaves changed or untracked paths, names them and starts no run', async () => {
   for (const [status, reason] of [['green', null], ['red', 'exit-nonzero'], ['unmeasured', 'timeout']]) {
     const f = worktreeSetupFixture(true)

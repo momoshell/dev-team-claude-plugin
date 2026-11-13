@@ -180,7 +180,7 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
     const taskDir = join(crewDir, 'task')
     try {
       d.mkdirSync(taskDir, { recursive: true })
-      d.appendFileSync(join(taskDir, 'journal.jsonl'), `${JSON.stringify({ event: 'worktree-setup', lane, stage: null, status: setup.status, reason, command: project.worktreeSetup, at: new Date(d.now()).toISOString() })}\n`)
+      d.appendFileSync(join(taskDir, 'journal.jsonl'), `${JSON.stringify({ event: 'worktree-setup', lane, stage: null, status: setup.status, reason, command: project.worktreeSetup, at: d.now() })}\n`)
     } catch (error) { logLine(`crew start: worktree setup journal not recorded: ${error.message}`) }
     logLine(`crew start: worktree setup ${setup.status}${reason === null ? '' : `: ${reason}`}`)
     let result

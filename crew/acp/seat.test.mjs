@@ -485,7 +485,7 @@ test('a muse permission naming only its toolCallId is decided on the earlier too
     { toolCallId: 'unseen' },
   ]
   for (const [agent, writes, expected] of [
-    ['muse', 'none', ['yes', 'yes', 'deny', 'deny', 'deny', 'deny']],
+    ['muse', 'none', ['yes', 'deny', 'deny', 'deny', 'deny', 'deny']],
     ['muse', 'repo', ['yes', 'yes', 'yes', 'deny', 'yes', 'deny']],
     ['pi', 'none', ['deny', 'deny', 'deny', 'deny', 'deny', 'deny']],
   ]) await use('pi-turn', { agent, model: agent === 'muse' ? 'meta/muse-spark-1.3' : 'openai/model', definition: { writes }, permissions }, (run) => {
@@ -848,6 +848,15 @@ test('read-only seat launches carry a launch-authoritative flag, repo seats disa
       assert.equal(env.CREW_READ_ONLY, writes === 'repo' ? '0' : '1', `${name}/${writes}`)
       assert.equal(env.CREW_READ_ONLY_NODE, process.execPath)
       assert.ok(env.CREW_READ_ONLY_HOOK.endsWith('crew/adapters/claude-readonly.mjs'))
+    }
+  })
+})
+
+test('seat launches name their root directory for the read-only git check (#2351)', async () => {
+  await withPermissionTree(async (tree) => {
+    for (const name of ['pi-turn', 'claude-turn']) for (const writes of ['none', 'task-dir', 'repo']) {
+      const { run } = await decide(tree, writes, [{ kind: 'execute', title: 'shell', rawInput: { command: 'git status' } }], { name })
+      assert.equal(run.launches[0][2].env.CREW_READ_ONLY_ROOT, resolve(tree.work), `${name}/${writes}`)
     }
   })
 })

@@ -98,9 +98,9 @@ test('RD1 a backslash inside a quoted argument is allowed only where the shell k
 })
 
 test('RD2 a cd with one directory argument may lead a read-only chain', () => {
-  for (const command of ['cd crew && grep -n x loop.mjs', 'cd "dir name" && ls', 'cd /tmp/w; git status --short'])
+  for (const command of ['cd crew && grep -n x loop.mjs', 'cd "dir name" && ls'])
     assert.equal(readOnlyCommand(command), true, command)
-  for (const command of ['cd x && rm y', 'cd', 'cd a b', 'cd x; git push', 'cd $HOME && ls', 'cd x > f'])
+  for (const command of ['cd /tmp/w; git status --short', 'cd x && rm y', 'cd', 'cd a b', 'cd x; git push', 'cd $HOME && ls', 'cd x > f'])
     assert.equal(readOnlyCommand(command), false, command)
 })
 
@@ -113,6 +113,31 @@ test('RD3 only exact 2>/dev/null and 2>&1 redirects are allowed on a read-only s
     'cat a 2>file', 'cat a 2> /dev/null', 'cat a 2>>/dev/null', 'cat a >/dev/null', 'cat a 1>&2',
     'cat a 2>/dev/nullx', 'cat a2>/dev/null', 'cat a 2>&1 > f', 'cat a 2>&1&', 'rm x 2>/dev/null', '2>/dev/null',
   ]) assert.equal(readOnlyCommand(command), false, command)
+})
+
+test('RD4 a command with a cd segment and a git segment is refused', () => {
+  for (const [command, segment, gitSegment] of [
+    ['cd evil && git diff HEAD~1 HEAD', 'git diff HEAD~1 HEAD', 'git diff HEAD~1 HEAD'],
+    ['cd x && git log -1', 'git log -1', 'git log -1'],
+    ['cd x; git status', 'git status', 'git status'],
+    ['git status && cd x && git grep y', 'cd x', 'git status'],
+    ['cd x | git status', 'git status', 'git status'],
+    ['git status || cd x', 'cd x', 'git status'],
+  ]) {
+    const result = readOnlyCommandResult(command)
+    assert.equal(result.allowed, false, command)
+    assert.ok(result.reason.includes(segment), command)
+    assert.ok(result.reason.includes(gitSegment), command)
+    assert.match(result.reason, /git is not allowed in a command with cd/)
+  }
+  for (const command of ['cd crew && grep -n x loop.mjs', 'cd crew && sed -n 1,4p loop.mjs'])
+    assert.equal(readOnlyCommand(command), true, command)
+})
+
+test('RD5 sed -n refuses a file argument that starts with a dash', () => {
+  for (const command of ["sed -n 1p '-ew x'", "sed -n 1p '--expression=w x'", 'sed -n 1p -e'])
+    assert.equal(readOnlyCommand(command), false, command)
+  assert.equal(readOnlyCommand('sed -n 1,4p file'), true)
 })
 
 test('RV1-1 rejects git grep pager option aliases', () => {

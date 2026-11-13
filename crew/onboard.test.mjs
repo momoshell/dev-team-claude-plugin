@@ -12,6 +12,15 @@ test('projectHash changes when a proof entry gains a list command', () => {
   assert.notEqual(projectHash(project), projectHash({ ...project, proof: [{ ...entry, list: 'node list.mjs' }] }))
 })
 
+test('projectHash changes when a proof entry gains a manifest', () => {
+  const entry = { match: '*.xml', run: 'node run.mjs' }
+  const project = { suite: 'npm test', proof: [entry] }
+  const withManifest = { ...project, proof: [{ ...entry, manifest: 'Cargo.toml' }] }
+  assert.notEqual(projectHash(project), projectHash(withManifest))
+  assert.notEqual(projectHash(withManifest), projectHash({ ...project, proof: [{ ...entry, manifest: 'pkg.json' }] }))
+  assert.throws(() => requireOnboarded('/repo', () => JSON.stringify({ ...withManifest, onboarded: { hash: createHash('sha256').update(JSON.stringify([project.suite, [[entry.match, null, entry.run, null]]])).digest('hex') } })), (error) => error.reason === 'onboarding-stale')
+})
+
 // MUTATION: hash an absent list as null and every project onboarded before list existed reads stale.
 test('projectHash of an entry without list matches the hash recorded before list existed', () => {
   const proof = [{ match: 'crates/**', run: 'sh tools/crew-proof.sh {file} {title} {report}' }, { match: 'ui/**', setup: 'npm ci', run: 'vitest {file}' }]

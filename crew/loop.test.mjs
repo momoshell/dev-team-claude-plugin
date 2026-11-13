@@ -2634,6 +2634,15 @@ test('the PR body says Closes issue N only when the lane closes issue N (S6-11)'
   }
 })
 
+test('a test proven as base-package-absent says so in the commit and PR body, never red on the old source', async () => {
+  const f = fakes({ proof: { status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true, base: { state: null, reason: 'base-package-absent' }, build: { state: 'green', reason: null } }] } })
+  assert.equal((await f.go()).status, 'done')
+  assert.ok(f.seen.commit.body.includes('- proof: lib.test.mjs "works": package absent on the old source (base-package-absent), green on the build'))
+  assert.ok(f.seen.publish.body.includes('- lib.test.mjs: works had its package absent on the old source (base-package-absent), green on the build.'))
+  assert.doesNotMatch(f.seen.commit.body, /works.*red on the old source/)
+  assert.doesNotMatch(f.seen.publish.body, /works.*red on the old source/)
+})
+
 test('a mechanical lane that proved a named test lists that proof in Verification (S6-11)', async () => {
   const f = fakes({ spec: { tier: 'mechanical' }, edit: (v) => { if (v.role === 'builder') v.details.subject = 'fix: mechanical'; return v } })
   assert.equal((await f.go()).status, 'done')

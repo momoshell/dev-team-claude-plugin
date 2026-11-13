@@ -198,6 +198,98 @@ test('a runner that writes no report on the old source is base-does-not-build, n
   assert.equal(truncated.rows[0].base.state, 'red'); assert.deepEqual(truncated.rows[0].build, { state: null, reason: 'no-report' }); assert.equal(truncated.rows[0].proven, false)
 })
 
+function newPackageProof({ manifest = true, present = false } = {}) {
+  const cwd = scratchDir('proof-package-')
+  git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew'))
+  writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: [{ match: '**/*.xml', run: 'node build.mjs {file} {report}', ...(manifest ? { manifest: 'pkg.json' } : {}) }] }))
+  writeFileSync(join(cwd, 'build.mjs'), 'process.exit(1)\n')
+  if (present) { mkdirSync(join(cwd, 'crates/new'), { recursive: true }); writeFileSync(join(cwd, 'crates/new/pkg.json'), '{}') }
+  git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+  mkdirSync(join(cwd, 'crates/new/tests'), { recursive: true })
+  writeFileSync(join(cwd, 'crates/new/pkg.json'), '{}')
+  writeFileSync(join(cwd, 'crates/new/tests/x.xml'), '<testsuite><testcase name="works"/></testsuite>')
+  writeFileSync(join(cwd, 'build.mjs'), "import { copyFileSync } from 'node:fs'; copyFileSync(process.argv[2], process.argv[3])\n")
+  return cwd
+}
+
+test('a test in a package the build adds is proven as base-package-absent when the old-source commit lacks its manifest', async () => {
+  const cwd = newPackageProof()
+  const result = await proveTests({ cwd, tests: [{ file: 'crates/new/tests/x.xml', title: 'works' }] })
+  assert.deepEqual(result.rows[0].base, { state: null, reason: 'base-package-absent' })
+  assert.equal(result.rows[0].proven, true); assert.equal(result.status, 'green')
+  rmSync(join(cwd, 'crates/new/pkg.json'))
+  writeFileSync(join(cwd, 'pkg.json'), '{}')
+  symlinkSync('../../pkg.json', join(cwd, 'crates/new/pkg.json'))
+  const unsafe = await proveTests({ cwd, tests: [{ file: 'crates/new/tests/x.xml', title: 'works' }] })
+  assert.deepEqual(unsafe.rows[0].base, { state: null, reason: 'base-does-not-build' })
+  assert.equal(unsafe.rows[0].proven, false)
+})
+
+test('a new package manifest listed in support still reads base-package-absent', async () => {
+  const cwd = newPackageProof()
+  const result = await proveTests({ cwd, tests: [{ file: 'crates/new/tests/x.xml', title: 'works', support: ['crates/new/pkg.json'] }] })
+  assert.deepEqual(result.rows[0].base, { state: null, reason: 'base-package-absent' })
+  assert.equal(result.rows[0].proven, true); assert.equal(result.status, 'green')
+})
+
+test('a proof entry whose manifest is not a bare file name is invalid-project-config', async () => {
+  for (const manifest of ['../pkg.json', '', '  ', '.', '..', 'x/y', 'x\\\\y', 'x\0y', null, 1, {}]) {
+    const cwd = scratchDir('proof-invalid-manifest-')
+    git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew'))
+    writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: [{ match: '*.xml', run: 'node build.mjs', manifest }] }))
+    git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+    const result = await proveTests({ cwd, tests: [{ file: 'test.xml', title: 'works' }] })
+    assert.equal(result.status, 'unmeasured'); assert.equal(result.reason, 'invalid-project-config')
+  }
+})
+
+test('a differently cased manifest does not prove a broken package absent', async () => {
+  const absent = await proveTests({ cwd: newPackageProof(), tests: [{ file: 'crates/new/tests/x.xml', title: 'works' }] })
+  assert.equal(absent.rows[0].base.reason, 'base-package-absent')
+  const cwd = newPackageProof({ present: true })
+  writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: [{ match: '**/*.xml', run: 'node build.mjs {file} {report}', manifest: 'PKG.json' }] }))
+  git(cwd, 'add', '.crew/project.json'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'case mismatch')
+  const result = await proveTests({ cwd, tests: [{ file: 'crates/new/tests/x.xml', title: 'works' }] })
+  assert.deepEqual(result.rows[0].base, { state: null, reason: 'base-does-not-build' })
+  assert.equal(result.rows[0].reason, 'proof-not-red-on-base'); assert.equal(result.rows[0].proven, false)
+})
+
+test('a missing build manifest does not prove a package absent', async () => {
+  const cwd = newPackageProof()
+  const tests = [{ file: 'crates/new/tests/x.xml', title: 'works' }]
+  const absent = await proveTests({ cwd, tests })
+  assert.equal(absent.rows[0].base.reason, 'base-package-absent')
+  rmSync(join(cwd, 'crates/new/pkg.json'))
+  const result = await proveTests({ cwd, tests })
+  assert.deepEqual(result.rows[0].base, { state: null, reason: 'base-does-not-build' })
+  assert.equal(result.rows[0].reason, 'proof-not-red-on-base'); assert.equal(result.rows[0].proven, false)
+})
+
+test('a package present on the old source that writes no report stays base-does-not-build', async () => {
+  const cwd = newPackageProof({ present: true })
+  const result = await proveTests({ cwd, tests: [{ file: 'crates/new/tests/x.xml', title: 'works' }] })
+  assert.deepEqual(result.rows[0].base, { state: null, reason: 'base-does-not-build' })
+  assert.equal(result.rows[0].reason, 'proof-not-red-on-base'); assert.equal(result.rows[0].proven, false)
+})
+
+test('an entry with no manifest key reads an absent package as base-does-not-build', async () => {
+  const cwd = newPackageProof({ manifest: false })
+  const result = await proveTests({ cwd, tests: [{ file: 'crates/new/tests/x.xml', title: 'works' }] })
+  assert.deepEqual(result.rows[0].base, { state: null, reason: 'base-does-not-build' })
+  assert.equal(result.rows[0].reason, 'proof-not-red-on-base'); assert.equal(result.rows[0].proven, false)
+})
+
+test('an absent package whose build side is red or has no report stays unproven', async () => {
+  const cwd = newPackageProof()
+  for (const [xml, script] of [['<testsuite><testcase name="works"><failure/></testcase></testsuite>', null], [null, 'process.exit(1)\n'], ['<testsuite><testcase name="other"/></testsuite>', "import { copyFileSync } from 'node:fs'; copyFileSync(process.argv[2], process.argv[3])\n"]]) {
+    if (xml !== null) writeFileSync(join(cwd, 'crates/new/tests/x.xml'), xml)
+    if (script !== null) writeFileSync(join(cwd, 'build.mjs'), script)
+    const result = await proveTests({ cwd, tests: [{ file: 'crates/new/tests/x.xml', title: 'works' }] })
+    assert.equal(result.rows[0].base.reason, 'base-package-absent')
+    assert.equal(result.rows[0].proven, false); assert.equal(result.rows[0].reason, 'proof-not-green')
+  }
+})
+
 test('setup runs in the old-source worktree before the runner and a failing setup is unmeasured', async () => {
   const cwd = scratchDir('proof-setup-')
   git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew')); mkdirSync(join(cwd, 'tests'))

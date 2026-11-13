@@ -64,9 +64,12 @@ enforced by tests, not just preferred:
 - **Unknown is never a guess and never a zero.** An unmeasured cell carries
   `null` and one closed reason. A null beats a value nobody measured — the
   visualizer says "heartbeat unavailable" rather than inventing one.
-- **A test proves a change only when it is red on the old source and green on
-  the build.** That is not a kill proof, and a PR never calls it one. A seat may
-  still mutate code by hand to test its own tests; nothing requires it.
+- **A test normally proves a change when it is red on the old source and green on
+  the build.** With a runner's `manifest` key, a new package's own test can prove
+  on a green build alone if its manifest is absent from the old-source commit
+  (`base-package-absent`). It has no red side and may be vacuous. Neither is a
+  kill proof, and a PR never calls it one. A seat may still mutate code by hand
+  to test its own tests; nothing requires it.
 - **Never report a rate without its denominator.**
 - **Instrumentation is never load-bearing.** Writing the lane journal and the
   session files does not normally throw into the caller. One exception: a failed

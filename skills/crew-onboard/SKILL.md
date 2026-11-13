@@ -65,7 +65,11 @@ the fetch fails; it does not probe seats. The probe is implemented in
    `fail` test titles. The source must contain a passing test and a test that
    fails in its own body. The runner must write JUnit XML to `{report}`. Its
    command can use `{file}`, `{title}`, `{report}` and `{stem}` as substitutions.
-   Setup and run commands are whitespace-split without a shell. For example:
+   Optionally set `manifest` to a bare file name such as `Cargo.toml`. If the
+   nearest manifest above a test in the build is absent from the old-source
+   commit, the new package's own test is proven by a green build report alone
+   (`base-package-absent`), without a red side. Setup and run commands are
+   whitespace-split without a shell. For example:
 
    ```json
    {

@@ -18,9 +18,9 @@ export class OnboardRefusal extends Error {
 }
 
 // An entry without `list` hashes as it did before `list` existed, so older onboardings stay valid.
-export const projectHash = ({ suite, proof }) => createHash('sha256').update(JSON.stringify([suite, proof.map((e) => e.list === undefined ? [e.match, e.setup ?? null, e.run] : [e.match, e.setup ?? null, e.run, e.list])])).digest('hex')
+export const projectHash = ({ suite, proof }) => createHash('sha256').update(JSON.stringify([suite, proof.map((e) => e.manifest !== undefined ? [e.match, e.setup ?? null, e.run, e.list ?? null, e.manifest] : e.list === undefined ? [e.match, e.setup ?? null, e.run] : [e.match, e.setup ?? null, e.run, e.list])])).digest('hex')
 // PR 2243 briefly wrote an absent list as null; records onboarded then stay readable.
-const nullListHash = ({ suite, proof }) => createHash('sha256').update(JSON.stringify([suite, proof.map((e) => [e.match, e.setup ?? null, e.run, e.list ?? null])])).digest('hex')
+const nullListHash = ({ suite, proof }) => createHash('sha256').update(JSON.stringify([suite, proof.map((e) => e.manifest === undefined ? [e.match, e.setup ?? null, e.run, e.list ?? null] : [e.match, e.setup ?? null, e.run, e.list ?? null, e.manifest])])).digest('hex')
 const validProject = (p) => p && typeof p === 'object' && !Array.isArray(p) && typeof p.suite === 'string' && p.suite.trim() && !/["'\\\0]/.test(p.suite) && Array.isArray(p.proof) && p.proof.every(validProofEntry) && (p.suiteTimeoutMs === undefined || validTimeout(p.suiteTimeoutMs)) && (p.proofTimeoutMs === undefined || validTimeout(p.proofTimeoutMs))
 
 export function requireOnboarded(checkout, read = readFileSync) {

@@ -154,8 +154,8 @@ test('the tech-lead charter says which reviewer rules do not apply to it', () =>
   const charter = flat(read('crew/agents/tech-lead.md'))
   for (const phrase of [
     'Its round-2 delta limit on new must-fixes is not yours',
-    'only the reviewer receives a base tree',
-    'a new defect anywhere may be a must-fix',
+    'outside a scoped recheck, a new defect anywhere may be a must-fix',
+    'When given a recheck scope, follow its must-fix limit',
     'still carry or close your earlier must-fixes',
     'your frontmatter grants no skills',
     'read `code-less` only when the lane grants it',

@@ -263,6 +263,7 @@ Code holds the rule:
 - Amended 2026-11-03 (b1500, b1509): lead consults have separate full bounds for build, review and moved-head
   recheck. On standard build and judge lanes, the first reviewer turn forced only by a moved-head rebase spends no
   round; on judge the tech-lead turn is free too. Finish recheck reviews still spend a round under the finish review cap.
+- Amended 2026-11-13, operator decision (#2359): build and judge recheck reviews cover unresolved earlier findings, lane code altered by the rebase or conflict turn, and where the base's new commits meet the lane's change. For reviewed commit R, new base O and rebased head H, compare `git diff R^ R` with `git diff O H` to see lane changes; `git diff R^ O` shows base changes. The loop checks that all three comparisons work; if the scope cannot be measured, the review is full and the journal records that fallback.
 - Amended 2026-11-04, operator decision D4: a publishing rebase may trigger at most three moved-head rechecks;
   a fourth move stops as `recheck-bound` before uncommitting or publishing.
 - The lead's last consult is marked last. A spent lead bound stops for the operator as `lead-escalated`, with a

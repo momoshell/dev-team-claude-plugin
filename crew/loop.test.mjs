@@ -194,6 +194,7 @@ function fakes(options = {}) {
       : input.args.includes('reset') || input.args.includes('clean') ? (discardArgs.push(input.args), measured('discard', options.discard ?? green())(input))
       : input.args.includes('add') ? measured('suite-stage', options.stageResult ?? green())(input)
       : input.args.includes('write-tree') ? measured('checked-tree', options.checkedTree ?? { ...green(), stdout: `${'e'.repeat(40)}\n` })(input)
+      : input.args.includes('--no-ext-diff') ? Promise.resolve(green())
       : input.args.includes('diff') ? measured('published-paths', options.publishedPaths ?? { ...green(), stdout: 'lib.mjs\0' })(input)
       : input.args.includes('rev-parse') ? measured('post-rebase-head', () => ({ ...green(), stdout: options.cleanHead ?? `${(options.rebase ?? {}).head ?? 'a'.repeat(40)}\n` }))(input)
       : input.args.includes('status') && spec.shape === 'finish' && !calls.includes('seat:builder') ? measured('base-paths', options.baseStatus ?? { ...green(), stdout: ' M lib.mjs\0' })(input)
@@ -2962,6 +2963,57 @@ test("the lead's bound is per phase: plan routing before the first review never 
   assert.equal((await f.go()).status, 'done')
   assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'builder', 'lead', 'planner', 'builder', 'reviewer', 'lead', 'builder', 'reviewer', 'reviewer', 'lead', 'builder', 'reviewer'])
   assert.deepEqual(f.requests.filter((r) => r.role === 'lead').map((r) => r.feedback[0].last), [true, true, true])
+})
+
+test('a moved-head recheck sends the reviewer and the tech-lead the reviewed commit, the new base and the rebased head as its scope (#2359)', async () => {
+  const A = 'a'.repeat(40), C = 'c'.repeat(40)
+  const f = fakes({ spec: { tier: 'judge' }, rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C }),
+    commit: answers({ status: 'green', reason: null, head: A }, { status: 'green', reason: null, head: C }) })
+  const comparisons = [], run = f.deps.run
+  f.deps.run = (input) => { if (input.args.includes('--no-ext-diff')) comparisons.push(input.args.slice(-2)); return run(input) }
+  assert.equal((await f.go()).status, 'done')
+  assert.deepEqual(comparisons, [[`${A}^`, A], [O, MOVED.head], [`${A}^`, O]])
+  const scope = { reviewed: A, onto: O, rebased: MOVED.head }
+  for (const role of ['reviewer', 'tech-lead']) {
+    const turns = f.requests.filter((r) => r.role === role)
+    assert.equal(turns.length, 2)
+    assert.equal(Object.hasOwn(turns[0], 'recheckReview'), false)
+    assert.deepEqual(turns[1].recheckReview, scope)
+    assert.equal(Object.hasOwn(turns[1], 'deltaReview'), false)
+    assert.equal(Object.hasOwn(turns[1], 'reserveReview'), false)
+  }
+  const rows = f.rows.filter((row) => row.event === 'recheck-scope')
+  assert.equal(rows.length, 1)
+  const { scope: s, review, reason, reviewed, onto, rebased } = rows[0]
+  assert.deepEqual({ scope: s, review, reason, reviewed, onto, rebased }, { scope: 'measured', review: 'scoped', reason: null, ...scope })
+})
+
+test('a moved-head recheck whose reviewed commit is not an object id stays a full review and journals that it did (#2359)', async () => {
+  const A = 'a'.repeat(40), C = 'c'.repeat(40)
+  for (const [reviewed, rebased] of [['unknown', MOVED.head], [A, 'unknown']]) {
+    const f = fakes({ spec: { tier: 'judge' }, rebase: answers({ ...MOVED, head: A }, { ...MOVED, head: rebased, onto: O }, { ...MOVED, head: C }),
+      commit: answers({ status: 'green', reason: null, head: reviewed }, { status: 'green', reason: null, head: C }) })
+    assert.equal((await f.go()).status, 'done')
+    const turn = f.requests.filter((r) => r.role === 'reviewer')[1]
+    assert.equal(Object.hasOwn(turn, 'recheckReview'), false)
+    assert.equal(Object.hasOwn(turn, 'deltaReview'), false)
+    assert.equal(Object.hasOwn(turn, 'reserveReview'), false)
+    const rows = f.rows.filter((row) => row.event === 'recheck-scope')
+    assert.equal(rows.length, 1)
+    const { scope, review, reason, reviewed: r, onto, rebased: h } = rows[0]
+    assert.deepEqual({ scope, review, reason, reviewed: r, onto, rebased: h }, { scope: 'unmeasured', review: 'full', reason: 'scope-unmeasured', reviewed, onto: O, rebased })
+  }
+  for (const failed of [0, 1, 2]) {
+    const f = fakes({ spec: { tier: 'judge' }, rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C }),
+      commit: answers({ status: 'green', reason: null, head: A }, { status: 'green', reason: null, head: C }) })
+    const run = f.deps.run
+    let comparisons = 0
+    f.deps.run = (input) => input.args.includes('--no-ext-diff') && comparisons++ === failed ? redRun() : run(input)
+    assert.equal((await f.go()).status, 'done')
+    assert.equal(Object.hasOwn(f.requests.filter((r) => r.role === 'reviewer')[1], 'recheckReview'), false)
+    const row = f.rows.find((r) => r.event === 'recheck-scope')
+    assert.deepEqual([row.scope, row.review, row.reason], ['unmeasured', 'full', 'scope-unmeasured'])
+  }
 })
 
 // MUTATION: count the rebase-forced re-review against the seat's bound.

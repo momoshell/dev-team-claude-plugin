@@ -129,3 +129,7 @@ The shipped heads supersede section 1:
 - gate-baseline dropped (a dirty-tree baseline measures nothing)
 - suite:cold folds into suite (its head does)
 - decision replaces publish (nothing pushed; the operator decides)
+
+## Amendment 2 (2026-11-14)
+
+The review after the run's one suite-repair turn and a moved-head recheck review do not count against the three-round finish review cap. Both run even when the cap is spent. If either returns `changes-needed` at the cap, the run stops `round-bound` with its findings. The journal marks these reviews `counted: false`; `reviewCount` and `reviewRounds` exclude them, while the finish report and commit body list every review. See issue #2374.

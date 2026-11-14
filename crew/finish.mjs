@@ -8,7 +8,7 @@
 // operator's publish decision is a later step:
 // `--accept [--notes <file>]` publishes the PR the finish run measured (merging stays the operator's),
 // `--return <file>` runs a finish pass on a finishable stop, dead run or ready lane with the file as guidance
-// (later passes count against the three review rounds) and
+// (counted reviews across passes share three rounds) and
 // `--abandon` ends a stopped, dead run or ready lane unpublished. Each appends a `finish-decision` row; a lane takes one decision per stop or ready.
 // Refused, with nothing written: `finish-worktree` (the worktree is gone), `finish-premise` (the lane never reached
 // a build), `finish-running` (a run re-entered or claimed the lane after its stop), `finish-published` and
@@ -328,8 +328,8 @@ function readText(d, file, what) {
 }
 
 const reviewCount = (rows) => Math.max(
-  rows.filter((row) => row.event === 'verdict' && row.status === 'reviewed').length,
-  new Set(rows.flatMap((row, index) => row.event === 'envelope' && row.role === 'reviewer' ? [typeof row.id === 'string' ? row.id : index] : [])).size,
+  rows.filter((row) => row.counted !== false && row.event === 'verdict' && row.status === 'reviewed').length,
+  new Set(rows.flatMap((row, index) => row.counted !== false && row.event === 'envelope' && row.role === 'reviewer' ? [typeof row.id === 'string' ? row.id : index] : [])).size,
 )
 
 // One decision per stop or ready row: the claim is exclusive and taken before any effect, so overlapping decisions cannot both act.

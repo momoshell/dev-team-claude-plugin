@@ -418,6 +418,7 @@ export async function runLoop(spec, deps = {}) {
       } else {
         turn += 1
         if (!free) rounds[role] += 1
+        const uncounted = isFinish && role === 'reviewer' && free
         free = false
         if (role === 'lead') feedback = feedback.map((item) => Object.hasOwn(item, 'last') ? { ...item, last: rounds.lead >= (seats.lead.rounds ?? DEFAULT_ROUNDS) } : item)
         const id = `${spec.id}.${role}.${turn}`
@@ -463,7 +464,7 @@ export async function runLoop(spec, deps = {}) {
           if (role === 'planner' && checked.envelope && checked.defects.length === 0 && Object.hasOwn(checked.envelope.details, 'plan_path')) checked.defects.push(...await artifactDefects(checked.envelope.details))
           return { failure, parsed, raw, parseError, checked, turnError, routed, providerKind, method, turnBefore, turnAfter }
         }
-        const observe = (a) => emit('envelope', { role, id, returnPath, parsed: a.parsed, defects: a.checked.defects, error: a.failure?.error ?? null, turnError: a.turnError })
+        const observe = (a) => emit('envelope', { role, id, returnPath, parsed: a.parsed, defects: a.checked.defects, error: a.failure?.error ?? null, turnError: a.turnError, ...(uncounted ? { counted: false } : {}) })
         const attempts = [await attempt(request)]
         const firstBefore = attempts[0].turnBefore
         let latest = attempts[0], rerun = false, repairs = 0, asked = request
@@ -482,7 +483,7 @@ export async function runLoop(spec, deps = {}) {
         }
         let { failure, parsed, checked } = latest
         const valid = !failure && checked.defects.length === 0 && checked.envelope?.id === id
-        await emit('envelope', { role, id, returnPath, parsed, defects: checked.defects, error: failure?.error ?? null, turnError: latest.turnError })
+        await emit('envelope', { role, id, returnPath, parsed, defects: checked.defects, error: failure?.error ?? null, turnError: latest.turnError, ...(uncounted ? { counted: false } : {}) })
         if (latest.turnError && !valid) failure = { reason: latest.providerKind === 'authentication_failed' && latest.method === 'session/new' ? 'authentication_failed' : 'seat-unmeasured', error: latest.turnError }
         if (!failure && !valid) failure = { reason: 'envelope-refused', defects: checked.defects }
         if (failure) return hold ? { held: { ...failure, envelope: null } } : { halt: await stop(role === 'lead' && failure.reason !== 'authentication_failed' ? 'lead-refused' : failure.reason, { role, id, ...failure }) }
@@ -735,7 +736,7 @@ export async function runLoop(spec, deps = {}) {
     let builderSummary = '', suiteResult = null
     const finishReviews = []
     let feedback = isFinish ? [{ id: 'finish-stop', summary: 'The previous lane stopped with the given reason and observation.', reason: fin.stop.reason, observation: fin.stop.observation }, ...(fin.guidance !== undefined ? [{ id: 'finish-return', summary: 'The operator supplied guidance for this finish run.', guidance: fin.guidance }] : []), ...fin.findings] : []
-    let repairing = false, recheck = false, rechecks = 0
+    let repairing = false, recheck = false, rechecks = 0, uncountedReview = false
     let committed, rebased, measurements, laneBody, reviewStatus, checkedTree
     const readTree = () => stage('checked-tree', () => callCheck('checked-tree', d.run, { cwd, command: 'git', args: ['write-tree'] }, { command: true }))
     const stageChecked = async () => {
@@ -754,6 +755,7 @@ export async function runLoop(spec, deps = {}) {
         if (!recheck) {
           if (reserveSpent && rounds.reviewer >= (seats.reviewer.rounds ?? DEFAULT_ROUNDS)) return stop('round-bound', { role: 'reviewer', reason: 'round-bound', findings: priorFindings, feedback })
           const built = await stage(repairing ? 'suite-repair' : 'build', () => seatTurn('builder', feedback, { singleTurn: repairing && (isFinish || tier === 'mechanical') }))
+          uncountedReview = isFinish && repairing
           repairing = false
           if (built.halt) return built.halt
           if (!isFinish && tier === 'mechanical') subject = built.envelope.details.subject
@@ -768,7 +770,7 @@ export async function runLoop(spec, deps = {}) {
             feedback = [{ id: 'proof-no-tests', severity: 'must-fix', summary: 'Name at least one test in details.tests ({file, title}); the loop proves each red on the old source and green on the build, or green with base-package-absent or base-test-absent.' }, ...feedback.filter((item) => item?.id !== 'proof-no-tests' && item?.id !== 'proof-unproven')]
             continue
           }
-        }
+        } else uncountedReview = isFinish
         const rebaseOnly = recheck && !isFinish
         const recheckReview = rebaseOnly ? recheckScope : null
         recheckScope = null
@@ -873,15 +875,16 @@ export async function runLoop(spec, deps = {}) {
         const halt = await stageChecked()
         if (halt) return halt
 
-        // A finish review is capped outright: its bound ends the run, never a lead bounce into a fourth round.
-        const reviewed = await stage('review', () => seatTurn('reviewer', priorFindings, { singleTurn: isFinish }))
+        // ADR-051 Amendment 2: repair and moved-head reviews run even at the cap.
+        const reviewed = await stage('review', () => seatTurn('reviewer', priorFindings, { singleTurn: isFinish, free: uncountedReview }))
         if (reviewed.halt) return reviewed.halt
         const review = reviewed.envelope
         priorFindings = review.details.findings
         rememberFindings('reviewer', review.details)
         finishReviews.push({ verdict: review.details.verdict, findings: review.details.findings })
-        await emit('verdict', { status: 'reviewed', verdict: review.details.verdict, findings: review.details.findings })
+        await emit('verdict', { status: 'reviewed', verdict: review.details.verdict, findings: review.details.findings, ...(uncountedReview ? { counted: false } : {}) })
         if (review.details.verdict === 'changes-needed') {
+          if (uncountedReview && rounds.reviewer >= (seats.reviewer.rounds ?? DEFAULT_ROUNDS)) return stop('round-bound', { role: 'reviewer', reason: 'round-bound', envelope: review, findings: review.details.findings })
           feedback = [...review.details.findings, ...omitted('reviewer', review.details)]
           continue
         }

@@ -70,7 +70,7 @@ A claim whose run is provably gone is taken over. A committed
 build with no remote branch is uncommitted and finished if HEAD is the commit or
 its journal-recorded one-commit rebase. The latter is reset onto the rebase base;
 the journal records `finish-uncommit`. `--return` refuses with `finish-rounds-spent`
-once the review rounds in `FINISH_REVIEW_ROUNDS` in `crew/checks.mjs` are spent. On `--accept`, issue tokens in the measured
+once the review rounds in `FINISH_REVIEW_ROUNDS` in `crew/checks.mjs` are spent. The review after the one suite-repair turn and a moved-head recheck review do not count against that cap and run even when it is spent. On `--accept`, issue tokens in the measured
 text and notes are rewritten; issue numbers appear only on trailer lines.
 A gated lane can accept a calibrated `.crew/project.json` if its hash matches the calibrated journal-recorded rebase base and its suite and timeouts match the lane's. If the base file cannot be read, accept requires the worktree hash to match the start hash. A hash or calibration mismatch refuses `onboarding-stale`; a suite or timeout mismatch also refuses and names the field. The decision row records the start and finish onboarding hashes, even when equal.
 Every loop is bounded, every envelope is

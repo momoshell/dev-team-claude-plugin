@@ -1,5 +1,5 @@
 // Red on the old source and green on the build shows that a test depends on the change.
-// A new package can instead prove on green alone; neither is a kill proof.
+// A new package or opted-in new test file can instead prove on green alone; neither is a kill proof.
 import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, extname, join, matchesGlob, relative, sep } from 'node:path'
@@ -133,17 +133,23 @@ function safePath(root, file, required) {
   return true
 }
 
-export const validProofEntry = (e) => e && typeof e === 'object' && !Array.isArray(e) && typeof e.match === 'string' && e.match.trim() && typeof e.run === 'string' && e.run.trim() && (!Object.hasOwn(e, 'setup') || (typeof e.setup === 'string' && e.setup.trim())) && (!Object.hasOwn(e, 'list') || (typeof e.list === 'string' && e.list.trim())) && (!Object.hasOwn(e, 'manifest') || (typeof e.manifest === 'string' && e.manifest.trim() && !/[\/\\\0]/.test(e.manifest) && e.manifest !== '.' && e.manifest !== '..'))
+export const validProofEntry = (e) => e && typeof e === 'object' && !Array.isArray(e) && typeof e.match === 'string' && e.match.trim() && typeof e.run === 'string' && e.run.trim() && (!Object.hasOwn(e, 'setup') || (typeof e.setup === 'string' && e.setup.trim())) && (!Object.hasOwn(e, 'list') || (typeof e.list === 'string' && e.list.trim())) && (!Object.hasOwn(e, 'manifest') || (typeof e.manifest === 'string' && e.manifest.trim() && !/[\/\\\0]/.test(e.manifest) && e.manifest !== '.' && e.manifest !== '..')) && (!Object.hasOwn(e, 'newTestFile') || typeof e.newTestFile === 'boolean')
 export const entryCommand = (run, values) => run.trim().split(/\s+/).map((token) => token.replace(/\{(file|title|report|stem)\}/g, (_, key) => values[key]))
+
+async function commitAbsent(cwd, base, path, timeoutMs) {
+  try {
+    if (!safePath(cwd, path, true) || realpathSync.native(join(cwd, path)) !== join(realpathSync.native(cwd), path)) return false
+    const run = await runSuite({ cwd, command: 'git', args: ['--literal-pathspecs', 'ls-tree', '--full-tree', '--name-only', base, '--', path], timeoutMs })
+    return run.status === 'green' && !run.stdout.trim()
+  } catch { return false }
+}
 
 async function packageAbsent(cwd, base, file, manifest, timeoutMs) {
   for (let dir = dirname(file); ; dir = dirname(dir)) {
     const path = dir === '.' ? manifest : `${dir}/${manifest}`
     try {
       if (lstatSync(join(cwd, path), { throwIfNoEntry: false })) {
-        if (!safePath(cwd, path, true) || realpathSync.native(join(cwd, path)) !== join(realpathSync.native(cwd), path)) return false
-        const run = await runSuite({ cwd, command: 'git', args: ['--literal-pathspecs', 'ls-tree', '--full-tree', '--name-only', base, '--', path], timeoutMs })
-        return run.status === 'green' && !run.stdout.trim()
+        return await commitAbsent(cwd, base, path, timeoutMs)
       }
     } catch { return false }
     if (dir === '.') return false
@@ -219,9 +225,10 @@ export async function proveTests(input = {}) {
           const candidates = events?.length ? events.flatMap((e) => e.classname ? [e.name, `${e.classname}.${e.name}`, `${e.classname}::${e.name}`] : [e.name]) : (listing?.status === 'green' ? listing.stdout.split('\n').map((line) => line.trim()).filter(Boolean) : [])
           row[side] = hits?.length ? testState(hits) : events || (xml === undefined && (run.status === 'green' || (run.status === 'red' && listing?.status === 'green'))) ? { state: null, reason: 'title-unmatched', nearest: nearestTitle(candidates, row.title) } : { state: null, reason: side === 'base' ? 'base-does-not-build' : 'no-report' }
           if (side === 'base' && row.base.reason === 'base-does-not-build' && entry.manifest && await packageAbsent(cwd, base, row.file, entry.manifest, timeoutMs)) row.base.reason = 'base-package-absent'
+          if (side === 'base' && row.base.reason === 'base-does-not-build' && entry.newTestFile === true && await commitAbsent(cwd, base, row.file, timeoutMs)) row.base.reason = 'base-test-absent'
         }
         if (row.reason) continue
-        const baseProven = row.base.state === 'red' || row.base.reason === 'base-package-absent'
+        const baseProven = row.base.state === 'red' || row.base.reason === 'base-package-absent' || row.base.reason === 'base-test-absent'
         row.proven = baseProven && row.build.state === 'green'
         row.reason = row.proven ? null : !baseProven ? 'proof-not-red-on-base' : 'proof-not-green'
       }

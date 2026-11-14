@@ -21,6 +21,17 @@ test('projectHash changes when a proof entry gains a manifest', () => {
   assert.throws(() => requireOnboarded('/repo', () => JSON.stringify({ ...withManifest, onboarded: { hash: createHash('sha256').update(JSON.stringify([project.suite, [[entry.match, null, entry.run, null]]])).digest('hex') } })), (error) => error.reason === 'onboarding-stale')
 })
 
+test('projectHash changes when a proof entry gains newTestFile', () => {
+  const entry = { match: '*.xml', run: 'node run.mjs' }
+  const project = { suite: 'npm test', proof: [entry] }
+  const opted = { ...project, proof: [{ ...entry, newTestFile: true }] }
+  const oldHash = projectHash(project)
+  const oldNullListHash = createHash('sha256').update(JSON.stringify([project.suite, [[entry.match, null, entry.run, null]]])).digest('hex')
+  assert.notEqual(projectHash(opted), oldHash)
+  for (const hash of [oldHash, oldNullListHash]) assert.throws(() => requireOnboarded('/repo', () => JSON.stringify({ ...opted, onboarded: { hash } })), (error) => error.reason === 'onboarding-stale')
+  assert.equal(requireOnboarded('/repo', () => JSON.stringify({ ...opted, onboarded: { hash: projectHash(opted) } })).proof[0].newTestFile, true)
+})
+
 // MUTATION: hash an absent list as null and every project onboarded before list existed reads stale.
 test('projectHash of an entry without list matches the hash recorded before list existed', () => {
   const proof = [{ match: 'crates/**', run: 'sh tools/crew-proof.sh {file} {title} {report}' }, { match: 'ui/**', setup: 'npm ci', run: 'vitest {file}' }]

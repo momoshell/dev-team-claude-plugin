@@ -9,8 +9,8 @@ it has to rediscover it.
 `dev-team` — a Claude Code plugin whose subject is a **team runtime**. One brief
 starts a lane (`crew start`): a planner, builder and reviewer, and a lead on
 escalation, and a tech-lead gives judge lanes a second review. They play their seats over ACP. Code only checks the result: each test the
-builder names is red on the old source and green on the build, and the full suite
-is green. Then it commits and opens the PR (ADR-052, ADR-055). A stopped lane is
+builder names is normally red on the old source and green on the build (with the
+green-only exceptions below), and the full suite is green. Then it commits and opens the PR (ADR-052, ADR-055). A stopped lane is
 finished with `crew finish`.
 
 `README.md` is the map. `crew/README.md` is the full model, verbs, seats and
@@ -67,8 +67,10 @@ enforced by tests, not just preferred:
 - **A test normally proves a change when it is red on the old source and green on
   the build.** With a runner's `manifest` key, a new package's own test can prove
   on a green build alone if its manifest is absent from the old-source commit
-  (`base-package-absent`). It has no red side and may be vacuous. Neither is a
-  kill proof, and a PR never calls it one. A seat may still mutate code by hand
+  (`base-package-absent`). With `newTestFile: true`, a test file absent from the
+  old-source commit can prove on a green build report when the old-source run
+  writes no report (`base-test-absent`). Both exceptions have no red side and
+  may be vacuous. None is a kill proof, and a PR never calls it one. A seat may still mutate code by hand
   to test its own tests; nothing requires it.
 - **Never report a rate without its denominator.**
 - **Instrumentation is never load-bearing.** Writing the lane journal and the

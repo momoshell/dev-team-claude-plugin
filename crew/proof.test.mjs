@@ -198,6 +198,74 @@ test('a runner that writes no report on the old source is base-does-not-build, n
   assert.equal(truncated.rows[0].base.state, 'red'); assert.deepEqual(truncated.rows[0].build, { state: null, reason: 'no-report' }); assert.equal(truncated.rows[0].proven, false)
 })
 
+function newTestFileProof({ optIn = true, present = false } = {}) {
+  const cwd = scratchDir('proof-test-file-')
+  git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew')); mkdirSync(join(cwd, 'crates/a/tests'), { recursive: true })
+  writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: [{ match: '**/*.xml', run: 'node build.mjs {file} {report}', manifest: 'pkg.json', ...(optIn ? { newTestFile: true } : {}) }] }))
+  writeFileSync(join(cwd, 'crates/a/pkg.json'), '{}')
+  writeFileSync(join(cwd, 'build.mjs'), 'process.exit(1)\n')
+  if (present) writeFileSync(join(cwd, 'crates/a/tests/m.xml'), '<testsuite/>')
+  git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+  writeFileSync(join(cwd, 'crates/a/tests/m.xml'), '<testsuite><testcase name="works"/></testsuite>')
+  writeFileSync(join(cwd, 'build.mjs'), "import { copyFileSync } from 'node:fs'; copyFileSync(process.argv[2], process.argv[3])\n")
+  return cwd
+}
+
+test('a new test file in an existing package is proven as base-test-absent when its entry opts in with newTestFile', async () => {
+  const result = await proveTests({ cwd: newTestFileProof(), tests: [{ file: 'crates/a/tests/m.xml', title: 'works' }] })
+  assert.deepEqual(result.rows[0].base, { state: null, reason: 'base-test-absent' })
+  assert.deepEqual(result.rows[0].build, { state: 'green', reason: null })
+  assert.equal(result.rows[0].proven, true); assert.equal(result.rows[0].reason, null); assert.equal(result.status, 'green')
+})
+
+test('a base-test-absent row whose build side is red or has no report stays unproven', async () => {
+  const cwd = newTestFileProof()
+  for (const [xml, script, state, reason] of [
+    ['<testsuite><testcase name="works"><failure/></testcase></testsuite>', null, 'red', null],
+    [null, 'process.exit(1)\n', null, 'no-report'],
+    ['<testsuite><testcase name="other"/></testsuite>', "import { copyFileSync } from 'node:fs'; copyFileSync(process.argv[2], process.argv[3])\n", null, 'title-unmatched'],
+  ]) {
+    if (xml !== null) writeFileSync(join(cwd, 'crates/a/tests/m.xml'), xml)
+    if (script !== null) writeFileSync(join(cwd, 'build.mjs'), script)
+    const result = await proveTests({ cwd, tests: [{ file: 'crates/a/tests/m.xml', title: 'works' }] })
+    assert.equal(result.rows[0].base.reason, 'base-test-absent')
+    assert.equal(result.rows[0].build.state, state); assert.equal(result.rows[0].build.reason, reason)
+    assert.equal(result.rows[0].proven, false); assert.equal(result.rows[0].reason, 'proof-not-green')
+  }
+})
+
+test('a proof entry whose newTestFile is not a boolean is invalid-project-config', async () => {
+  for (const newTestFile of ['yes', 1, null, {}]) {
+    const cwd = scratchDir('proof-invalid-test-file-')
+    git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew'))
+    writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: [{ match: '*.xml', run: 'node build.mjs', newTestFile }] }))
+    git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+    const result = await proveTests({ cwd, tests: [{ file: 'test.xml', title: 'works' }] })
+    assert.equal(result.status, 'unmeasured'); assert.equal(result.reason, 'invalid-project-config')
+  }
+})
+
+test('an existing test file that writes no report on the old source stays base-does-not-build with newTestFile', async () => {
+  const result = await proveTests({ cwd: newTestFileProof({ present: true }), tests: [{ file: 'crates/a/tests/m.xml', title: 'works' }] })
+  assert.equal(result.rows[0].base.reason, 'base-does-not-build'); assert.equal(result.rows[0].proven, false)
+})
+
+test('a differently cased test file does not prove an existing file absent', async () => {
+  const cwd = newTestFileProof({ present: true })
+  const file = 'crates/a/tests/M.xml'
+  const result = await proveTests({ cwd, tests: [{ file, title: 'works' }] })
+  if (existsSync(join(cwd, file))) {
+    assert.equal(result.rows[0].base.reason, 'base-does-not-build')
+    assert.equal(result.rows[0].build.state, 'green')
+  } else assert.equal(result.rows[0].reason, 'unsafe-path')
+  assert.notEqual(result.rows[0].base.reason, 'base-test-absent'); assert.equal(result.rows[0].proven, false)
+})
+
+test('an entry without newTestFile reads a new test file as base-does-not-build', async () => {
+  const result = await proveTests({ cwd: newTestFileProof({ optIn: false }), tests: [{ file: 'crates/a/tests/m.xml', title: 'works' }] })
+  assert.equal(result.rows[0].base.reason, 'base-does-not-build'); assert.equal(result.rows[0].proven, false)
+})
+
 function newPackageProof({ manifest = true, present = false } = {}) {
   const cwd = scratchDir('proof-package-')
   git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew'))

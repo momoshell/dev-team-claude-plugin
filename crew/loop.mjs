@@ -765,7 +765,7 @@ export async function runLoop(spec, deps = {}) {
           if (!namedTests.length && !isFinish && testsRequired) {
             const failure = { role: 'builder', failure: 'proof-no-tests' }
             if (repeatsFailure(failure)) return stop('no-progress', failure)
-            feedback = [{ id: 'proof-no-tests', severity: 'must-fix', summary: 'Name at least one test in details.tests ({file, title}); the loop proves each red on the old source and green on the build, or green with base-package-absent.' }, ...feedback.filter((item) => item?.id !== 'proof-no-tests' && item?.id !== 'proof-unproven')]
+            feedback = [{ id: 'proof-no-tests', severity: 'must-fix', summary: 'Name at least one test in details.tests ({file, title}); the loop proves each red on the old source and green on the build, or green with base-package-absent or base-test-absent.' }, ...feedback.filter((item) => item?.id !== 'proof-no-tests' && item?.id !== 'proof-unproven')]
             continue
           }
         }
@@ -782,7 +782,7 @@ export async function runLoop(spec, deps = {}) {
             const tests = rows.filter((row) => !row?.proven).map(({ file, title, base, build, reason }) => ({ file, title, base, build, reason }))
             const failure = { role: 'builder', failure: 'proof-unproven', tests }
             if (repeatsFailure(failure)) return stop('no-progress', failure)
-            feedback = [{ id: 'proof-unproven', severity: 'must-fix', summary: 'Named tests must be green on the build and red on the old source, or have base-package-absent.', tests }, ...feedback.filter((item) => item?.id !== 'proof-no-tests' && item?.id !== 'proof-unproven')]
+            feedback = [{ id: 'proof-unproven', severity: 'must-fix', summary: 'Named tests must be green on the build and red on the old source, or have base-package-absent or base-test-absent.', tests }, ...feedback.filter((item) => item?.id !== 'proof-no-tests' && item?.id !== 'proof-unproven')]
             continue
           }
           if (!proofOK) return stop(proof.reason ?? 'runner-threw', proof)
@@ -791,7 +791,7 @@ export async function runLoop(spec, deps = {}) {
             provedTests.set(key, row)
             lastProved.add(key)
           }
-          proofLines = rows.map(({ file, title, base }) => `- proof: ${file} ${JSON.stringify(oneLine(title))}: ${base?.reason === 'base-package-absent' ? 'package absent on the old source (base-package-absent)' : 'red on the old source'}, green on the build`)
+          proofLines = rows.map(({ file, title, base }) => `- proof: ${file} ${JSON.stringify(oneLine(title))}: ${base?.reason === 'base-package-absent' ? 'package absent on the old source (base-package-absent)' : base?.reason === 'base-test-absent' ? 'test file absent on the old source (base-test-absent)' : 'red on the old source'}, green on the build`)
         }
 
         // The reviewer is told what git reports changed now, remeasured every round; an unreadable status stops the lane.
@@ -954,7 +954,7 @@ export async function runLoop(spec, deps = {}) {
         ...(!issue && !ask ? ['', `Source: ${oneLine(spec.source)}`] : []),
         ...(isFinish ? ['', `The lane stopped with reason ${oneLine(fin.stop.reason)}. This report covers only this finish run.`, `${finishReviews.length} ${finishReviews.length === 1 ? 'review' : 'reviews'} in this finish run; final verdict: ${oneLine(finishReviews.at(-1)?.verdict) || 'unmeasured'}.`] : []),
         '', '## Verification',
-        ...(proved.length ? [...proved.map(({ file, title, base }) => `- ${oneLine(file)}: ${oneLine(title)} ${base?.reason === 'base-package-absent' ? 'had its package absent on the old source (base-package-absent)' : 'was red on the old source'}, green on ${lastProved.has(`${file}\0${title}`) ? 'the build.' : 'an earlier build turn; the last build turn did not name it.'}`), ...(!isFinish && tier === 'mechanical' ? ['Review: none, mechanical lane, not reviewed.'] : [])]
+        ...(proved.length ? [...proved.map(({ file, title, base }) => `- ${oneLine(file)}: ${oneLine(title)} ${base?.reason === 'base-package-absent' ? 'had its package absent on the old source (base-package-absent)' : base?.reason === 'base-test-absent' ? 'had its test file absent on the old source (base-test-absent)' : 'was red on the old source'}, green on ${lastProved.has(`${file}\0${title}`) ? 'the build.' : 'an earlier build turn; the last build turn did not name it.'}`), ...(!isFinish && tier === 'mechanical' ? ['Review: none, mechanical lane, not reviewed.'] : [])]
           : !isFinish && tier === 'mechanical' ? ['Proof: mechanical lane, not reviewed.']
             : !isFinish && !testsRequired ? ['Proof: no criterion is machine-checked.'] : ['Proof: unmeasured.']),
         suiteResult ? `Suite passed with exit code ${suiteResult.code}${Object.hasOwn(suiteResult, 'redCode') ? ` on a re-run after a red exit ${suiteResult.redCode}` : ''}.` : 'Suite: unmeasured.',

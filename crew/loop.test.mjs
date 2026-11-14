@@ -2343,6 +2343,51 @@ test('a finish review that asks for changes after the suite repair goes back to 
   assert.match(report.body, /Suite passed with exit code 0/)
 })
 
+test('a finish run with its review cap spent reviews the suite repair without a round and reaches finish-ready (#2374)', async () => {
+  const f = sequenced([redRun(), redRun(), green()], { spec: finishSpec({ priorReviewRounds: 2 }) })
+  assert.equal((await f.go()).status, 'done')
+  assert.equal(count(f, 'reviewer'), 2)
+  assert.equal(f.rows.find((row) => row.event === 'finish-ready').reviewRounds, 3)
+  assert.deepEqual(f.rows.filter((row) => row.event === 'verdict' && row.status === 'reviewed').map((row) => row.counted), [undefined, false])
+  const id = f.requests.filter((request) => request.role === 'reviewer')[1].id
+  const envelopes = f.rows.filter((row) => row.event === 'envelope' && row.role === 'reviewer' && row.id === id)
+  assert.ok(envelopes.length > 0 && envelopes.every((row) => row.counted === false))
+  assert.equal(JSON.parse(f.writes.get('/virtual/task/finish-report.json')).reviews.length, 2)
+  assert.match(f.seen.commit.body, /Review 2/)
+})
+
+test('a finish run with its review cap spent rechecks a moved head without a round and reaches finish-ready (#2374)', async () => {
+  const A = 'a'.repeat(40), C = 'c'.repeat(40)
+  const f = fakes({ spec: finishSpec({ priorReviewRounds: 2 }), unseated: ['planner'],
+    rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C, onto: O }),
+    commit: answers({ status: 'green', reason: null, head: A, files: ['lib.mjs'] }, { status: 'green', reason: null, head: C, files: ['lib.mjs'] }) })
+  assert.equal((await f.go()).status, 'done')
+  assert.equal(count(f, 'reviewer'), 2)
+  assert.equal(f.rows.find((row) => row.event === 'finish-ready').reviewRounds, 3)
+})
+
+test('an uncounted finish review that asks for changes with the cap spent stops round-bound with its findings and no builder turn (#2374)', async () => {
+  const A = 'a'.repeat(40), C = 'c'.repeat(40)
+  for (const kind of ['repair', 'recheck']) {
+    let reviews = 0
+    const options = { spec: finishSpec({ priorReviewRounds: 2 }), unseated: ['planner'], edit: (v) => {
+      if (v.role === 'reviewer' && ++reviews === 2) v.details = { ...v.details, verdict: 'changes-needed', findings: [finding] }
+      return v
+    } }
+    const f = kind === 'repair' ? sequenced([redRun(), redRun(), green()], options) : fakes({ ...options,
+      rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C, onto: O }),
+      commit: answers({ status: 'green', reason: null, head: A, files: ['lib.mjs'] }, { status: 'green', reason: null, head: C, files: ['lib.mjs'] }) })
+    assert.deepEqual(await f.go(), stopped('round-bound'), kind)
+    const observation = f.rows.findLast((row) => row.status === 'stopped').observation
+    assert.equal(observation.role, 'reviewer', kind)
+    assert.equal(observation.envelope?.details.verdict, 'changes-needed', kind)
+    assert.deepEqual(observation.findings, [finding], kind)
+    assert.equal(count(f, 'builder'), kind === 'repair' ? 2 : 1, kind)
+    assert.equal(count(f, 'lead'), 0, kind)
+    assert.equal(f.requests.at(-1).role, 'reviewer', kind)
+  }
+})
+
 // MUTATION: reject a null plan path or claim a mechanical finish was not reviewed.
 test('a mechanical finish runs on its brief with no plan path, is reviewed, and its report never says not reviewed', async () => {
   const f = fakes({ spec: { ...finishSpec({ planPath: null }), tier: 'mechanical' } })
@@ -2840,18 +2885,12 @@ test('a finish run whose final rebase moves the head puts the build on the new b
     const bases = [], prove = f.deps.proveTests
     f.deps.proveTests = (input) => { bases.push(input.base); return prove(input) }
     const result = await f.go()
-    if (priorReviewRounds) {
-      assert.deepEqual(result, stopped('round-bound'))
-      assert.equal(f.writes.has('/virtual/task/finish-report.json'), false)
-      assert.equal(f.rows.some((row) => row.event === 'finish-ready'), false)
-      continue
-    }
     assert.deepEqual(result, { status: 'done', reason: null, pr: null })
     assert.deepEqual(f.calls.slice(f.calls.indexOf('uncommit')), ['uncommit', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'seat:reviewer', 'suite', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase'])
     assert.deepEqual(f.discardArgs, [['reset', '--soft', C], ['reset', '--soft', O]])
     assert.deepEqual(bases, ['HEAD', 'HEAD'])
     const report = JSON.parse(f.writes.get('/virtual/task/finish-report.json'))
-    assert.deepEqual([report.head, report.reviewRounds, report.reviews.length], [C, 2, 2])
+    assert.deepEqual([report.head, report.reviewRounds, report.reviews.length], [C, priorReviewRounds + 1, 2])
     assert.deepEqual([f.rows.at(-1).event, f.rows.at(-1).head], ['finish-ready', C])
   }
 })

@@ -949,6 +949,30 @@ test('a returned finish pass that escalates carries its spent reviews into the n
   }
 })
 
+test('an uncounted finish review leaves priorReviewRounds of the next --return unchanged (#2374)', async () => {
+  const counted = [{ event: 'envelope', role: 'reviewer', id: 'x.reviewer.1' }, { event: 'verdict', status: 'reviewed' }]
+  const uncounted = [{ event: 'envelope', role: 'reviewer', id: 'x.reviewer.9', counted: false }, { event: 'verdict', status: 'reviewed', counted: false }]
+  const stop = { event: 'verdict', stage: 'review', status: 'stopped', reason: 'seat-escalated' }
+  for (const path of ['ready', 'stop']) for (const marked of [false, true]) {
+    const reviews = [...counted, ...(marked ? uncounted : [])]
+    const r = path === 'ready' ? ready([], { before: reviews, legacy: true }) : null
+    const f = r?.f ?? fixture({ rows: [{ event: 'run-start' }, builderRow, stop, { event: 'finish-decision', choice: 'return' }, ...reviews, stop] })
+    try {
+      if (r) {
+        const rows = r.rowsOf()
+        rows.find((row) => row.event === 'finish-ready').reviewRounds = 1
+        writeFileSync(join(f.taskDir, 'journal.jsonl'), `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
+      }
+      const file = join(f.base, 'guidance'), spawned = []
+      writeFileSync(file, 'continue')
+      const deps = r?.deps ?? { log: () => {}, spawnDetached: () => { spawned.push(true); return 4242 } }
+      await assert.doesNotReject(decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps }))
+      assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.priorReviewRounds, 1, `${path} marked=${marked}`)
+      assert.equal((r?.spawned ?? spawned).length, 1)
+    } finally { cleanup(f) }
+  }
+})
+
 test('an escalated lane with three spent finish reviews is refused finish-rounds-spent', async () => {
   const review = [{ event: 'envelope', role: 'reviewer' }, { event: 'verdict', status: 'reviewed' }]
   const stop = { event: 'verdict', stage: 'review', status: 'stopped', reason: 'seat-escalated' }

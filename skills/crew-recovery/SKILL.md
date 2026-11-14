@@ -49,7 +49,9 @@ When that run is ready, decide once:
 - `crew finish <lane> --accept [--notes <file>]` publishes the PR the run
   measured. Merging stays yours.
 - `crew finish <lane> --return <file>` runs one more finish pass with the file
-  as the builder's guidance; it counts against the three review rounds.
+  as the builder's guidance. Reviews count against the three review rounds,
+  except the review after the one suite-repair turn and a moved-head recheck
+  review; those run even when the cap is spent.
 - `crew finish <lane> --abandon` ends the lane unpublished. It also decides a
   stopped lane, once per stop.
 

@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { scratchDir, trackProcessGroupFile } from '../test/helpers.mjs'
+import { git, scratchDir, trackProcessGroupFile } from '../test/helpers.mjs'
 import { createHash } from 'node:crypto'
 import * as finishModule from './finish.mjs'
 import { FinishRefusal, decideFinish, finishLane, main } from './finish.mjs'
@@ -11,7 +11,8 @@ import { openPullRequest } from './checks.mjs'
 import { LOOP_REASONS } from './loop.mjs'
 import { validateEnvelope } from './protocols.mjs'
 import { recordPr } from './record-pr.mjs'
-import { projectHash } from './onboard.mjs'
+import { projectHash, SUITE_TIMEOUT_DEFAULT_MS } from './onboard.mjs'
+import { PROOF_TIMEOUT_DEFAULT_MS } from './proof.mjs'
 import { laneRows } from './lanes.mjs'
 import { probeAlive } from './run-pid.mjs'
 
@@ -1111,6 +1112,7 @@ function ready(extra = [], { before = [], legacy = false, spec = {} } = {}) {
     { event: 'verdict', stage: 'review', status: 'stopped', reason: STOP.reason, observation: STOP.observation },
     { event: 'commit', stage: 'commit', head: 'a'.repeat(40) },
     ...before,
+    ...(Object.hasOwn(spec, 'onboarded') ? [{ event: 'stage-end', stage: 'rebase', outcome: { status: 'green', head: 'b'.repeat(40), onto: 'c'.repeat(40) } }] : []),
     legacy
       ? { event: 'finish-ready', stage: null, status: 'ready-for-operator', head: 'b'.repeat(40) }
       : { event: 'finish-ready', stage: null, status: 'ready-for-operator', head: 'b'.repeat(40), subject: 'fix(crew): planned lane', body: 'MEASURED BODY', reviewRounds: 2 },
@@ -1143,21 +1145,189 @@ test('--accept refuses a gated lane whose worktree is not onboarded and publishe
   }
 })
 
-// MUTATION: drop the comparison with spec.onboarded and a recalibrated project file publishes a lane started under another onboarding.
-test('--accept refuses a gated lane whose calibrated project file differs from the onboarding it started under, and publishes when they match (ADR-057)', async () => {
+// MUTATION: allow an unreadable rebase base and a recalibrated project file publishes without verification.
+test('--accept refuses a recalibrated project file with an unreadable base and publishes when hashes match (ADR-057)', async () => {
   const project = { suite: 'npm test', proof: [] }
   const hash = projectHash(project)
   for (const [started, reason] of [['a'.repeat(64), 'onboarding-stale'], [hash, null]]) {
-    const r = ready([], { spec: { onboarded: started } })
+    const r = ready([], { spec: { onboarded: started, suite: { command: 'npm', args: ['test'], timeoutMs: SUITE_TIMEOUT_DEFAULT_MS }, proofTimeoutMs: PROOF_TIMEOUT_DEFAULT_MS } })
     try {
       mkdirSync(join(r.f.base, 'worktree', '.crew'), { recursive: true })
-      writeFileSync(join(r.f.base, 'worktree', '.crew', 'project.json'), JSON.stringify({ ...project, onboarded: { hash } }))
+      const text = JSON.stringify({ ...project, onboarded: { hash } })
+      writeFileSync(join(r.f.base, 'worktree', '.crew', 'project.json'), text)
       const before = r.rowsOf()
       assert.equal(await reasonOf(r.decide('accept')), reason)
       assert.equal(r.published.length, reason === null ? 1 : 0)
       if (reason) assert.deepEqual(r.rowsOf(), before)
     } finally { cleanup(r.f) }
   }
+})
+
+test('--accept publishes a lane rebased onto a recalibrated onboarding that is the base\'s file with the lane\'s suite, recording both hashes (#2373)', async () => {
+  const spec = { onboarded: 'a'.repeat(64), suite: { command: 'npm', args: ['test'], timeoutMs: SUITE_TIMEOUT_DEFAULT_MS }, proofTimeoutMs: PROOF_TIMEOUT_DEFAULT_MS }
+  const r = ready([], { spec })
+  try {
+    const project = { suite: 'npm test', proof: [{ match: '*.xml', run: 'node run.mjs' }], builderChecks: ['npm test'], worktreeSetup: 'npm install' }
+    const hash = projectHash(project), text = JSON.stringify({ ...project, onboarded: { hash } })
+    mkdirSync(join(r.f.cwd, '.crew'), { recursive: true })
+    writeFileSync(join(r.f.cwd, '.crew', 'project.json'), text)
+    r.deps.git = (_cwd, args) => args[0] === 'show' && args[1] === `${'c'.repeat(40)}:.crew/project.json` ? { status: 'green', stdout: text } : { status: 'red', stdout: '' }
+    assert.equal(await reasonOf(r.decide('accept')), null)
+    assert.equal(r.published.length, 1)
+    assert.deepEqual(r.rowsOf().at(-1).onboarding, { start: spec.onboarded, finish: hash })
+  } finally { cleanup(r.f) }
+})
+
+test('--accept records the start and finish onboarding hashes on the decision row even when they are equal (#2373)', async () => {
+  const project = { suite: 'npm test', proof: [] }, hash = projectHash(project)
+  const r = ready([], { spec: { onboarded: hash, suite: { command: 'npm', args: ['test'], timeoutMs: SUITE_TIMEOUT_DEFAULT_MS }, proofTimeoutMs: PROOF_TIMEOUT_DEFAULT_MS } })
+  try {
+    mkdirSync(join(r.f.cwd, '.crew'), { recursive: true })
+    const text = JSON.stringify({ ...project, onboarded: { hash } })
+    writeFileSync(join(r.f.cwd, '.crew', 'project.json'), text)
+    r.deps.git = () => ({ status: 'green', stdout: text })
+    assert.equal(await reasonOf(r.decide('accept')), null)
+    assert.deepEqual(r.rowsOf().at(-1).onboarding, { start: hash, finish: hash })
+  } finally { cleanup(r.f) }
+})
+
+test('--accept publishes equal-hash onboarding with a lane-only builderChecks change (#2373)', async () => {
+  const project = { suite: 'npm test', proof: [] }, hash = projectHash(project)
+  const r = ready([], { spec: { onboarded: hash, suite: { command: 'npm', args: ['test'], timeoutMs: SUITE_TIMEOUT_DEFAULT_MS }, proofTimeoutMs: PROOF_TIMEOUT_DEFAULT_MS } })
+  try {
+    mkdirSync(join(r.f.cwd, '.crew'), { recursive: true })
+    const base = JSON.stringify({ ...project, onboarded: { hash } })
+    writeFileSync(join(r.f.cwd, '.crew', 'project.json'), JSON.stringify({ ...project, builderChecks: ['npm test'], onboarded: { hash } }))
+    r.deps.git = () => ({ status: 'green', stdout: base })
+    assert.equal(await reasonOf(r.decide('accept')), null)
+    assert.equal(r.published.length, 1)
+    assert.deepEqual(r.rowsOf().at(-1).onboarding, { start: hash, finish: hash })
+  } finally { cleanup(r.f) }
+})
+
+// MUTATION: skip the base hash check when the worktree matches the start and a lane can restore old onboarding over the base.
+test('--accept refuses a committed restoration of the start onboarding over a recalibrated base (#2373)', async () => {
+  const start = { suite: 'npm test', proof: [] }
+  const base = { ...start, proof: [{ match: '*.xml', run: 'node run.mjs' }] }
+  const hash = projectHash(start)
+  const r = ready([], { spec: { onboarded: hash, suite: { command: 'npm', args: ['test'], timeoutMs: SUITE_TIMEOUT_DEFAULT_MS }, proofTimeoutMs: PROOF_TIMEOUT_DEFAULT_MS } })
+  try {
+    git(r.f.cwd, 'init', '-q')
+    mkdirSync(join(r.f.cwd, '.crew'), { recursive: true })
+    const file = join(r.f.cwd, '.crew', 'project.json')
+    writeFileSync(file, JSON.stringify({ ...base, onboarded: { hash: projectHash(base) } }))
+    git(r.f.cwd, 'add', '.')
+    git(r.f.cwd, 'commit', '-qm', 'recalibrated base')
+    const onto = git(r.f.cwd, 'rev-parse', 'HEAD').trim()
+    writeFileSync(file, JSON.stringify({ ...start, onboarded: { hash } }))
+    git(r.f.cwd, 'add', '.')
+    git(r.f.cwd, 'commit', '-qm', 'restore start onboarding')
+    const head = git(r.f.cwd, 'rev-parse', 'HEAD').trim()
+    const rows = r.rowsOf()
+    Object.assign(rows.findLast((row) => row.stage === 'rebase').outcome, { head, onto })
+    rows.findLast((row) => row.event === 'finish-ready').head = head
+    writeFileSync(join(r.f.taskDir, 'journal.jsonl'), `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
+    r.deps.run = async () => ({ status: 'green', stdout: head })
+    const before = r.rowsOf()
+    assert.equal(await reasonOf(r.decide('accept')), 'onboarding-stale')
+    assert.equal(r.published.length, 0)
+    assert.deepEqual(r.rowsOf(), before)
+  } finally { cleanup(r.f) }
+})
+
+test('--accept refuses a recalibrated onboarding whose suite or timeouts differ from the lane\'s, naming the field (#2373)', async () => {
+  for (const [field, change, equalHash] of [['suite', { suite: 'npm run ci' }, false], ['suiteTimeoutMs', { suiteTimeoutMs: 1 }, false], ['proofTimeoutMs', { proofTimeoutMs: 1 }, false], ['suiteTimeoutMs', { suiteTimeoutMs: 1 }, true], ['proofTimeoutMs', { proofTimeoutMs: 1 }, true]]) {
+    const project = { suite: 'npm test', proof: [], ...change }
+    const hash = projectHash(project), text = JSON.stringify({ ...project, onboarded: { hash } })
+    const r = ready([], { spec: { onboarded: equalHash ? hash : 'a'.repeat(64), suite: { command: 'npm', args: ['test'], timeoutMs: SUITE_TIMEOUT_DEFAULT_MS }, proofTimeoutMs: PROOF_TIMEOUT_DEFAULT_MS } })
+    try {
+      mkdirSync(join(r.f.cwd, '.crew'), { recursive: true })
+      writeFileSync(join(r.f.cwd, '.crew', 'project.json'), text)
+      r.deps.git = (_cwd, args) => args[0] === 'show' && String(args[1]).endsWith(':.crew/project.json') ? { status: 'green', stdout: text } : { status: 'red', stdout: '' }
+      const before = r.rowsOf()
+      const error = await r.decide('accept').catch((e) => e)
+      assert.equal(error.reason, 'onboarding-stale', field)
+      assert.ok(error.message.includes(`differs from the lane's ${field}`), field)
+      assert.equal(r.published.length, 0)
+      assert.deepEqual(r.rowsOf(), before)
+    } finally { cleanup(r.f) }
+  }
+})
+
+test('--accept refuses a recalibrated onboarding the lane\'s own diff changed or whose base file is unreadable (#2373)', async () => {
+  for (const status of ['different', 'uncalibrated', 'red', 'missing-rebase', 'wrong-head']) {
+    const r = ready([], { spec: { onboarded: 'a'.repeat(64), suite: { command: 'npm', args: ['test'], timeoutMs: SUITE_TIMEOUT_DEFAULT_MS }, proofTimeoutMs: PROOF_TIMEOUT_DEFAULT_MS } })
+    try {
+      const project = { suite: 'npm test', proof: [] }, hash = projectHash(project)
+      mkdirSync(join(r.f.cwd, '.crew'), { recursive: true })
+      writeFileSync(join(r.f.cwd, '.crew', 'project.json'), JSON.stringify({ ...project, onboarded: { hash } }))
+      r.deps.git = () => status === 'red' ? { status: 'red', stdout: '' } : { status: 'green', stdout: status === 'different' ? 'different' : status === 'uncalibrated' ? JSON.stringify({ ...project, onboarded: { hash: 'b'.repeat(64) } }) : readFileSync(join(r.f.cwd, '.crew', 'project.json'), 'utf8') }
+      if (status === 'missing-rebase' || status === 'wrong-head') {
+        const rows = r.rowsOf(), index = rows.findLastIndex((row) => row.stage === 'rebase')
+        if (status === 'missing-rebase') rows.splice(index, 1)
+        else rows[index].outcome.head = 'd'.repeat(40)
+        writeFileSync(join(r.f.taskDir, 'journal.jsonl'), `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
+      }
+      const before = r.rowsOf()
+      assert.equal(await reasonOf(r.decide('accept')), 'onboarding-stale', status)
+      assert.equal(r.published.length, 0)
+      assert.deepEqual(r.rowsOf(), before)
+    } finally { cleanup(r.f) }
+  }
+  // An uncalibrated base cannot pass by carrying the worktree's hash.
+  const same = { suite: 'npm test', proof: [] }, sameHash = projectHash(same)
+  const invalid = ready([], { spec: { onboarded: sameHash, suite: { command: 'npm', args: ['test'], timeoutMs: SUITE_TIMEOUT_DEFAULT_MS }, proofTimeoutMs: PROOF_TIMEOUT_DEFAULT_MS } })
+  try {
+    mkdirSync(join(invalid.f.cwd, '.crew'), { recursive: true })
+    writeFileSync(join(invalid.f.cwd, '.crew', 'project.json'), JSON.stringify({ ...same, onboarded: { hash: sameHash } }))
+    invalid.deps.git = () => ({ status: 'green', stdout: JSON.stringify({ ...same, proof: [{ match: '*.xml', run: 'node run.mjs' }], onboarded: { hash: sameHash } }) })
+    const before = invalid.rowsOf()
+    assert.equal(await reasonOf(invalid.decide('accept')), 'onboarding-stale')
+    assert.equal(invalid.published.length, 0)
+    assert.deepEqual(invalid.rowsOf(), before)
+  } finally { cleanup(invalid.f) }
+  // A returned ready pass can leave the onboarding edit in an earlier lane commit.
+  const original = { suite: 'npm test', proof: [] }, changed = { ...original, proof: [{ match: '*.xml', run: 'node run.mjs' }] }
+  const r = ready([], { spec: { onboarded: projectHash(original), suite: { command: 'npm', args: ['test'], timeoutMs: SUITE_TIMEOUT_DEFAULT_MS }, proofTimeoutMs: PROOF_TIMEOUT_DEFAULT_MS } })
+  try {
+    git(r.f.cwd, 'init', '-q')
+    mkdirSync(join(r.f.cwd, '.crew'), { recursive: true })
+    const file = join(r.f.cwd, '.crew', 'project.json')
+    writeFileSync(file, JSON.stringify({ ...original, onboarded: { hash: projectHash(original) } }))
+    git(r.f.cwd, 'add', '.')
+    git(r.f.cwd, 'commit', '-qm', 'base')
+    const onto = git(r.f.cwd, 'rev-parse', 'HEAD').trim()
+    writeFileSync(file, JSON.stringify({ ...changed, onboarded: { hash: projectHash(changed) } }))
+    git(r.f.cwd, 'add', '.')
+    git(r.f.cwd, 'commit', '-qm', 'lane onboarding')
+    writeFileSync(join(r.f.cwd, 'other'), 'second pass')
+    git(r.f.cwd, 'add', '.')
+    git(r.f.cwd, 'commit', '-qm', 'second pass')
+    const head = git(r.f.cwd, 'rev-parse', 'HEAD').trim()
+    const rows = r.rowsOf()
+    Object.assign(rows.findLast((row) => row.stage === 'rebase').outcome, { head, onto })
+    rows.findLast((row) => row.event === 'finish-ready').head = head
+    writeFileSync(join(r.f.taskDir, 'journal.jsonl'), `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
+    r.deps.run = async () => ({ status: 'green', stdout: head })
+    const before = r.rowsOf()
+    assert.equal(await reasonOf(r.decide('accept')), 'onboarding-stale')
+    assert.equal(r.published.length, 0)
+    assert.deepEqual(r.rowsOf(), before)
+  } finally { cleanup(r.f) }
+})
+
+test('--accept refuses a recalibrated worktree onboarding whose hash does not match its content (#2373)', async () => {
+  const r = ready([], { spec: { onboarded: 'a'.repeat(64), suite: { command: 'npm', args: ['test'], timeoutMs: SUITE_TIMEOUT_DEFAULT_MS }, proofTimeoutMs: PROOF_TIMEOUT_DEFAULT_MS } })
+  try {
+    const text = JSON.stringify({ suite: 'npm test', proof: [], onboarded: { hash: 'b'.repeat(64) } })
+    mkdirSync(join(r.f.cwd, '.crew'), { recursive: true })
+    writeFileSync(join(r.f.cwd, '.crew', 'project.json'), text)
+    r.deps.git = () => ({ status: 'green', stdout: text })
+    const before = r.rowsOf()
+    assert.equal(await reasonOf(r.decide('accept')), 'onboarding-stale')
+    assert.equal(r.published.length, 0)
+    assert.deepEqual(r.rowsOf(), before)
+  } finally { cleanup(r.f) }
 })
 
 // MUTATION: publish another title or body than the measured one, or drop the notes heading, and the PR text is not what was measured.

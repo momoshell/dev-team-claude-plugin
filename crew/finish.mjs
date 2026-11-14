@@ -21,7 +21,8 @@
 // Accept is refused as `finish-not-ready` (the last run did not end finish-ready), a decision as `finish-decided` (it already
 // has one), `finish-head-moved` (accept: the checkout is no longer the head the run measured) or `finish-publish`
 // (the PR did not open; nothing is recorded, so it can be retried), or `finish-rounds-spent` (return has no review
-// rounds left).
+// rounds left). Gated accept compares the calibrated worktree and rebase base onboarding hashes when the base is
+// readable, and requires the suite and timeouts to match the lane's; decisions record both onboarding hashes.
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -29,7 +30,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { FINISH_REVIEW_ROUNDS, composeLanePrBody, openPullRequest, runSuite, withoutIssueTokens } from './checks.mjs'
-import { LANE, isObject, parseJournalRows } from './lane-core.mjs'
+import { HEX_OID, LANE, isObject, parseJournalRows } from './lane-core.mjs'
 import { TIERS, validateEnvelope } from './protocols.mjs'
 import { deadRun, parsePidRecord, pidRecord, probeAlive, selfStartedAt, writeRunPid } from './run-pid.mjs'
 import { OnboardRefusal, requireOnboarded } from './onboard.mjs'
@@ -434,21 +435,36 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
     if (priorReviewRounds >= FINISH_REVIEW_ROUNDS) throw new FinishRefusal('finish-rounds-spent', `lane ${lane} has spent its finish review rounds`)
   }
 
+  let project
   if (choice === 'accept' && Object.hasOwn(spec, 'onboarded')) {
     requireWorktree(d, spec)
-    let project
     try { project = requireOnboarded(spec.cwd, d.readFileSync) } catch (error) {
       if (error instanceof OnboardRefusal) throw new FinishRefusal(error.reason, error.message)
       throw error
     }
-    // A calibrated file the lane did not start under is still a different onboarding.
-    if (project.hash !== spec.onboarded) throw new FinishRefusal('onboarding-stale', `lane ${lane} started under onboarding ${spec.onboarded}; the worktree's .crew/project.json is ${project.hash}: run /onboard and start the lane again`)
+    // The rebase records the actual base, even when the lane has multiple commits.
+    const rebase = rows.slice(0, readyAt).findLast((row) => row.event === 'stage-end' && row.stage === 'rebase' && row.outcome?.status === 'green' && row.outcome.head === ready.head)?.outcome
+    const base = typeof rebase?.onto === 'string' && HEX_OID.test(rebase.onto)
+      ? d.git(spec.cwd, ['show', `${rebase.onto}:.crew/project.json`]) : null
+    let baseHash
+    if (base?.status === 'green') {
+      try { baseHash = requireOnboarded(spec.cwd, () => base.stdout).hash } catch (error) {
+        if (!(error instanceof OnboardRefusal)) throw error
+      }
+    }
+    if (base?.status === 'green' ? baseHash !== project.hash : project.hash !== spec.onboarded) throw new FinishRefusal('onboarding-stale', `lane ${lane}'s worktree .crew/project.json does not match a calibrated base onboarding; the lane's own diff may change it: run /onboard and start the lane again`)
+    const fields = [
+      ['suite', JSON.stringify(project.suite.trim().split(/\s+/)), JSON.stringify([spec.suite?.command, ...(spec.suite?.args ?? [])])],
+      ['suiteTimeoutMs', project.suiteTimeoutMs, spec.suite?.timeoutMs],
+      ['proofTimeoutMs', project.proofTimeoutMs, spec.proofTimeoutMs],
+    ]
+    for (const [field, current, started] of fields) if (current !== started) throw new FinishRefusal('onboarding-stale', `lane ${lane} started under onboarding ${spec.onboarded}; the worktree's .crew/project.json ${project.hash} differs from the lane's ${field}: run /onboard and start the lane again`)
   }
   const claim = claimDecision(d, lane, taskDir, readyAt)
   try {
     const notes = typeof file === 'string' ? readText(d, file, choice === 'return' ? 'the guidance file' : 'the notes file') : null
     const journal = join(taskDir, 'journal.jsonl')
-    const decision = () => d.appendFileSync(journal, `${JSON.stringify({ event: 'finish-decision', lane, choice, at: d.now(), ...(choice === 'return' ? { launchedAt: rows.length } : {}), notesSha256: notes === null ? null : createHash('sha256').update(notes).digest('hex') })}\n`)
+    const decision = () => d.appendFileSync(journal, `${JSON.stringify({ event: 'finish-decision', lane, choice, at: d.now(), ...(choice === 'return' ? { launchedAt: rows.length } : {}), notesSha256: notes === null ? null : createHash('sha256').update(notes).digest('hex'), ...(choice === 'accept' && Object.hasOwn(spec, 'onboarded') ? { onboarding: { start: spec.onboarded, finish: project.hash } } : {}) })}\n`)
 
     if (choice === 'abandon') {
       decision()

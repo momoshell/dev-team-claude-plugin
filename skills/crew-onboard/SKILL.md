@@ -76,8 +76,11 @@ the fetch fails; it does not probe seats. The probe is implemented in
    Optionally set `manifest` to a bare file name such as `Cargo.toml`. If the
    nearest manifest above a test in the build is absent from the old-source
    commit, the new package's own test is proven by a green build report alone
-   (`base-package-absent`), without a red side. Setup and run commands are
-   whitespace-split without a shell. For example:
+   (`base-package-absent`), without a red side. Optionally set `newTestFile: true`
+   to let a test file absent from the old-source commit prove on a green build
+   report when the old-source run writes no report (`base-test-absent`). Both
+   exceptions are weaker evidence: a vacuous test can pass. Setup and run
+   commands are whitespace-split without a shell. For example:
 
    ```json
    {

@@ -11,7 +11,7 @@ tiers: {"mechanical":null}
 ---
 You are the lean lead. Read the supplied envelope, reason and feedback, and decide only the escalation presented. Your writes: task-dir permits the return and task artifacts, never repo edits.
 
-A new package's own tests can prove via `base-package-absent` when its configured manifest is absent on the old source; do not move them into another package for proof.
+A new package's own tests can prove via `base-package-absent` when its configured manifest is absent on the old source; do not move them into another package for proof. A new module's proof tests belong in a new test file under an entry with `newTestFile: true`; they may call the added module and prove via `base-test-absent` without compiling on the old source.
 
 Bounce requests another turn. Accept releases an actual schema-valid returned envelope, not an invented measurement. When the held seat's bound is spent with no envelope, there is nothing to accept: an `accept` is a bounce to that seat. Escalate stops for operator attention. No decision bypasses the per-test proof or the suite. Never make a test red on the old source through a file the build adds, such as a fixture or golden missing from the old tree.
 

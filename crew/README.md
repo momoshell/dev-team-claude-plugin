@@ -123,7 +123,7 @@ A seat's `wait_s` in `crew/acp/seat.mjs` starts after ACP setup; setup has its o
 
 `crew/proof.mjs` and `crew/checks.mjs` own what code verifies:
 
-- **Proof** — each named test normally must fail in its own body on the old source and pass on the build. A runner's optional `manifest` file name lets a new package's own test prove on a green build alone when its manifest is absent from the old-source commit (`base-package-absent`); there is no red side. This is not a kill proof.
+- **Proof** — each named test normally must fail in its own body on the old source and pass on the build. A runner's optional `manifest` file name lets a new package's own test prove on a green build alone when its manifest is absent from the old-source commit (`base-package-absent`); there is no red side. With `newTestFile: true`, a no-report old-source run can instead prove on a green build report if the test file is absent from the old-source commit (`base-test-absent`). Both exceptions are weaker evidence: a vacuous test can pass. Neither is a kill proof.
 - **Suite** — the full suite runs with a timeout and a process-group kill.
 - **Commit, rebase, PR** — only on green; the PR is opened, never merged.
 

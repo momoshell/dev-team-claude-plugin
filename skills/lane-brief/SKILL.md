@@ -20,7 +20,10 @@ in `crew/checks.mjs` (`rebase-conflict` and its `regenerate` detail).
    one whole message per quoted block; do not use excerpts or combine messages. When provenance is
    measured, `askProvenance` in `crew/brief-provenance.mjs` checks each block against a typed or queued message.
 2. Fetch origin, then check premises on the base branch (`git grep`, `git show origin/main:<path>`, a quick run).
-   Leave unchecked premises out or mark them unmeasured in the issue.
+   Leave unchecked premises out or mark them unmeasured in the issue. A decision or measured answer on the
+   issue must leave no behaviour undefined: when it adds or changes a setting, state its default and what
+   unset means in each environment the code runs in. The planner and the reviewer otherwise each pick a
+   reading, and the lane escalates.
 3. Write the brief to `~/.crew/briefs/<lane>.md`. Use `<project>-<issue>-<slug>` for the lane name (for example,
    `devteam-1962-lane-names`); see `LANE` in `crew/lane-core.mjs` for the allowed characters. Choose `source`, the issue bound by `closes`, whether the
    work is `mechanical`, and what is `out_of_scope`. Use Context pointers to the files and symbols the planner

@@ -808,6 +808,88 @@ test('a lead bounce to a builder whose turn changed the worktree does not spend 
   }
 })
 
+test('a lead bounce to a builder held at its round bound after a turn that changed the worktree refunds the lead round (#2375)', async () => {
+  let state = 0, reviews = 0
+  const f = fakes({ review: 3, bounds: { builder: 1, reviewer: 10 }, lead: 'bounce', deps: { repoState: () => String(state++) }, edit: (v, request) => {
+    if (v.role === 'reviewer' && v.details.verdict === 'changes-needed') {
+      v.details.findings = [{ ...finding, id: `R${++reviews}` }]
+      v.details.closed = request.feedback.map((item) => ({ id: item.id, evidence: 'fixed' }))
+    }
+    return v
+  } })
+  assert.equal((await f.go()).status, 'done')
+  assert.equal(f.requests.filter((r) => r.role === 'lead').length, 3)
+  assert.equal(f.rows.filter((r) => r.event === 'lead-bound-refund').length, 3)
+})
+
+test('a must-fix carried from the previous lead consult spends the lead bound for a builder held at its round bound (#2375)', async () => {
+  let state = 0
+  const f = fakes({ review: 4, bounds: { builder: 1, reviewer: 10 }, lead: 'bounce', deps: { repoState: () => String(state++) } })
+  assert.equal((await f.go()).reason, 'lead-escalated')
+  assert.equal(f.requests.filter((r) => r.role === 'lead').length, 3)
+  assert.equal(f.rows.filter((r) => r.event === 'lead-bound-refund').length, 1)
+})
+
+test("a round-bound refund needs the builder's most recent turn to have changed the worktree (#2375)", async () => {
+  let state = 0, reviews = 0
+  const f = fakes({ review: 4, bounds: { builder: 1, reviewer: 10 }, lead: 'bounce', deps: { repoState: () => state++ === 0 ? 'before' : 'same' }, edit: (v, request) => {
+    if (v.role === 'reviewer' && v.details.verdict === 'changes-needed') {
+      v.details.findings = [{ ...finding, id: `R${++reviews}` }]
+      v.details.closed = request.feedback.map((item) => ({ id: item.id, evidence: 'fixed' }))
+    }
+    return v
+  } })
+  assert.equal((await f.go()).reason, 'lead-escalated')
+  assert.equal(f.requests.filter((r) => r.role === 'lead').length, 3)
+  assert.equal(f.rows.filter((r) => r.event === 'lead-bound-refund').length, 1)
+})
+
+test('round-bound lead refunds share the per-lane progress cap with builder continuations (#2375)', async () => {
+  let state = 0, reviews = 0, builds = 0
+  const f = fakes({ review: 4, bounds: { builder: 1, reviewer: 10 }, lead: 'bounce', deps: { repoState: () => String(state++) }, edit: (v, request) => {
+    if (v.role === 'builder' && ++builds <= 5) v.status = 'insufficient'
+    if (v.role === 'reviewer' && v.details.verdict === 'changes-needed') {
+      v.details.findings = [{ ...finding, id: `R${++reviews}` }]
+      v.details.closed = request.feedback.map((item) => ({ id: item.id, evidence: 'fixed' }))
+    }
+    return v
+  } })
+  assert.equal((await f.go()).reason, 'lead-escalated')
+  assert.deepEqual(f.rows.filter((r) => r.event === 'builder-continue').map((r) => r.progressTurns), [1, 2, 3, 4, 5])
+  assert.deepEqual(f.rows.filter((r) => r.event === 'lead-bound-refund').map((r) => r.progressTurns), [6])
+  assert.equal(f.requests.filter((r) => r.role === 'lead').length, 3)
+})
+
+test('a builder held at its round bound after an unchanged or unmeasured turn spends the lead bound (#2375)', async () => {
+  for (const mode of ['same', null]) {
+    let reviews = 0
+    const f = fakes({ review: 3, bounds: { builder: 1, reviewer: 10 }, lead: 'bounce', deps: { repoState: () => mode }, edit: (v, request) => {
+      if (v.role === 'reviewer' && v.details.verdict === 'changes-needed') {
+        v.details.findings = [{ ...finding, id: `R${++reviews}` }]
+        v.details.closed = request.feedback.map((item) => ({ id: item.id, evidence: 'fixed' }))
+      }
+      return v
+    } })
+    assert.equal((await f.go()).reason, 'lead-escalated')
+    assert.equal(f.requests.filter((r) => r.role === 'lead').length, 2)
+    assert.equal(f.rows.filter((r) => r.event === 'lead-bound-refund').length, 0)
+  }
+})
+
+test('a lead bounce to the planner for a builder held at its round bound spends the lead bound (#2375)', async () => {
+  let state = 0, reviews = 0
+  const f = fakes({ review: 3, bounds: { builder: 1, reviewer: 10 }, lead: 'bounce', target: 'planner', deps: { repoState: () => String(state++) }, edit: (v, request) => {
+    if (v.role === 'reviewer' && v.details.verdict === 'changes-needed') {
+      v.details.findings = [{ ...finding, id: `R${++reviews}` }]
+      v.details.closed = request.feedback.map((item) => ({ id: item.id, evidence: 'fixed' }))
+    }
+    return v
+  } })
+  await f.go()
+  assert.equal(f.rows.filter((r) => r.event === 'lead-bound-refund').length, 0)
+  assert.equal(f.requests.filter((r) => r.role === 'lead').length, 2)
+})
+
 // MUTATION: restore round-bound at the spent-lead stop.
 test("the lead's last consult is marked last, and a spent lead bound stops for the operator with a question, never round-bound", async () => {
   const later = fakes({ review: 10, bounds: { builder: 1, reviewer: 10 }, lead: 'bounce', edit: (v) => {
@@ -2206,6 +2288,38 @@ const finishSpec = (over = {}) => ({
   shape: 'finish',
   finish: { planPath: '/virtual/task/plan.md', subject: 'fix(crew): planned lane', mutations: [MUTATION], stop: STOP, findings: [finding], turnOffset: 3, ...over },
 })
+test('a finish consult distinguishes imported tech-lead findings from reviewer findings with the same id (#2375)', async () => {
+  for (const role of ['reviewer', 'tech-lead']) {
+    const root = scratchDir(), task = join(root, 'dt-lane', 'lane', 'task')
+    mkdirSync(task, { recursive: true })
+    const planner = { role: 'planner', id: 'lane.planner.1', status: 'done', summary: 'planned', details: { subject: 'fix(crew): planned lane', plan_path: '/virtual/task/plan.md', tests: [{ file: 'lib.test.mjs', title: 'works' }], files_in_scope: ['lib.mjs'] } }
+    const builder = { role: 'builder', id: 'lane.builder.2', status: 'done', summary: 'built', details: { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }] } }
+    const rows = [
+      { event: 'envelope', role: 'planner', id: planner.id, parsed: planner, defects: [], error: null },
+      { event: 'envelope', role: 'builder', id: builder.id, parsed: builder, defects: [], error: null },
+      { event: 'verdict', status: 'reviewed', role, verdict: 'changes-needed', findings: [{ ...finding, id: 'T1' }] },
+      { event: 'verdict', status: 'stopped', stage: 'build', reason: 'round-bound' },
+    ]
+    writeFileSync(join(task, 'lean.json'), JSON.stringify({ ...fakes().spec, cwd: root, taskDir: task, tier: 'judge' }))
+    writeFileSync(join(task, 'planner-1.json'), JSON.stringify(planner))
+    writeFileSync(join(task, 'journal.jsonl'), `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
+    finishLane({ lane: 'lane', root, deps: { log: () => {}, spawnDetached: () => 4242 } })
+    const finish = JSON.parse(readFileSync(join(task, 'finish.json'), 'utf8')).finish
+    let state = 0, builds = 0
+    const f = fakes({ spec: { shape: 'finish', tier: 'judge', finish }, review: 1, lead: 'bounce', deps: { repoState: () => String(state++) }, edit: (v) => {
+      if (v.role === 'builder' && ++builds === 1) return { ...v, status: 'insufficient', details: { ...v.details, gap: 'gap' } }
+      if (v.role === 'reviewer' && v.details.verdict === 'changes-needed') {
+        v.details.findings = [{ ...finding, id: 'T1' }]
+        v.details.closed = []
+      }
+      return v
+    } })
+    assert.equal((await f.go()).status, 'done', role)
+    assert.equal(f.requests.filter((r) => r.role === 'lead').length, 2, role)
+    assert.equal(f.rows.filter((r) => r.event === 'lead-bound-refund').length, role === 'tech-lead' ? 2 : 1, role)
+  }
+})
+
 test('a finish run builder receives the lead rulings from its finish spec (#2341)', async () => {
   const rulings = [{ id: 'lead-bounce', summary: 'ruling 0' }]
   const f = fakes({ spec: finishSpec({ rulings }), unseated: ['planner'] })

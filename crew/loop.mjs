@@ -238,6 +238,7 @@ export async function runLoop(spec, deps = {}) {
   // A finish run re-enters a stopped lane with its accepted plan and open findings.
   if (isFinish && !(fin && typeof fin === 'object' && text(fin.subject) && (fin.planPath === null || text(fin.planPath))
     && Array.isArray(fin.findings) && text(fin.stop?.reason)
+    && (fin.findingsRole === undefined || fin.findingsRole === 'tech-lead')
     && Number.isSafeInteger(fin.turnOffset) && fin.turnOffset >= 0
     && (fin.filesInScope == null || strings(fin.filesInScope))
     && (fin.testsRequired === undefined || typeof fin.testsRequired === 'boolean')
@@ -276,6 +277,7 @@ export async function runLoop(spec, deps = {}) {
   const context = new AsyncLocalStorage()
   let turn = isFinish ? fin.turnOffset : 0
   let progressTurns = 0
+  let builderMark = null, consultMustFix = null
   let tier = spec.tier
   let testsRequired = isFinish ? fin.testsRequired ?? fin.planPath !== null : tier !== 'mechanical'
   let rebasedHead = null
@@ -294,6 +296,7 @@ export async function runLoop(spec, deps = {}) {
   const provedTests = new Map()
   const lastProved = new Set()
   let priorFindings = isFinish ? fin.findings : []
+  const importedTechFindings = new Set(isFinish && fin.findingsRole === 'tech-lead' ? fin.findings : [])
   let reservePending = false, reserveSpent = false, reserveBase = null
   let secondFindings = []
   let reviewedTree = null, recheckScope = null
@@ -415,7 +418,9 @@ export async function runLoop(spec, deps = {}) {
       let held, progressed = false
       if (!free && rounds[role] >= (seats[role].rounds ?? DEFAULT_ROUNDS)) {
         held = { reason: 'round-bound', envelope: null }
+        progressed = role === 'builder' && builderMark?.changed === true && !builderMark.refunded
       } else {
+        if (role === 'builder') builderMark = null
         turn += 1
         if (!free) rounds[role] += 1
         free = false
@@ -488,6 +493,7 @@ export async function runLoop(spec, deps = {}) {
         if (failure) return hold ? { held: { ...failure, envelope: null } } : { halt: await stop(role === 'lead' && failure.reason !== 'authentication_failed' ? 'lead-refused' : failure.reason, { role, id, ...failure }) }
         last[role] = checked.envelope
         progressed = role === 'builder' && firstBefore !== null && latest.turnAfter !== null && firstBefore !== latest.turnAfter
+        if (role === 'builder') builderMark = { changed: progressed, refunded: false }
         if (hold && checked.envelope.status !== 'done') return { held: { reason: checked.envelope.status, envelope: checked.envelope } }
         // ADR-055 §12: a questionless escalation returns to the same seat, including the lead.
         if (role === 'lead') {
@@ -581,6 +587,9 @@ export async function runLoop(spec, deps = {}) {
   // accept releases only a schema-valid envelope the seat itself returned, except a builder insufficient that needs routing.
   const consultLead = async (role, held, feedback, progressed) => {
     if (!seats.lead) return { halt: await stop('lead-unavailable', { role, ...held }) }
+    const mustFix = new Set(feedback.filter((item) => item.severity === 'must-fix').map((item) => `${importedTechFindings.has(item) || secondFindings.includes(item) ? 'tech-lead' : priorFindings.includes(item) ? 'reviewer' : 'loop'}\0${item.id}`))
+    const carried = [...mustFix].some((key) => consultMustFix?.has(key))
+    consultMustFix = mustFix
     for (;;) {
       const lastConsult = rounds.lead + 1 >= (seats.lead.rounds ?? DEFAULT_ROUNDS)
       const asked = await stage('lead', () => seatTurn('lead', [{ role, reason: held.reason, envelope: held.envelope ?? last[role] ?? null, held: held.envelope ?? null, feedback, last: lastConsult, targets: isFinish ? ['builder'] : ['builder', 'planner'] }]))
@@ -598,9 +607,10 @@ export async function runLoop(spec, deps = {}) {
       }
       // ADR-055 §7: pass the lead's instruction to the bounced seat, falling back to its summary.
       if (decision === 'accept' && (!held.envelope || (['planner', 'reviewer', 'tech-lead'].includes(role) && held.envelope.status !== 'done' && validateEnvelope(role, { ...held.envelope, status: 'done' }).defects.length > 0))) return { decision: 'bounce', target: role, summary: instructions ?? asked.envelope.summary }
-      if (decision === 'bounce' && target === 'builder' && role === 'builder' && progressed && progressTurns < MAX_PROGRESS_TURNS) {
+      if (decision === 'bounce' && target === 'builder' && role === 'builder' && progressed && !(held.reason === 'round-bound' && carried) && progressTurns < MAX_PROGRESS_TURNS) {
         rounds.lead = Math.max(0, rounds.lead - 1)
         progressTurns += 1
+        if (builderMark) builderMark.refunded = true
         await emit('lead-bound-refund', { id: held.envelope?.id, progressTurns })
       }
       return { decision, target, summary: instructions ?? asked.envelope.summary }

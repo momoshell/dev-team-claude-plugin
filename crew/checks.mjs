@@ -376,11 +376,11 @@ export async function rebaseBranch(spec = {}, deps = {}) {
     // Every step below uses the resolved commit, never the ref: lanes share origin/<base>, and a fetch by another lane
     // between the resolve and the rebase would move it under this one.
     // An ignored file the base tracks can be overwritten by a rebase, and an abort does not bring it back.
-    const ignored = await git(['ls-files', '-z', '--others', '--ignored', '--exclude-standard'])
+    const ignored = await git(['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--directory'])
     const tracked = await git(['ls-tree', '-r', '-z', '--name-only', onto])
     if (ignored.status !== 'green' || tracked.status !== 'green') return unmeasured('rebase-failed', { detail: 'ignored or base paths could not be listed' })
-    const baseFiles = new Set(tracked.stdout.split('\0').filter(Boolean))
-    const colliding = ignored.stdout.split('\0').filter((path) => path !== '' && baseFiles.has(path))
+    const baseFiles = tracked.stdout.split('\0').filter(Boolean)
+    const colliding = ignored.stdout.split('\0').filter((path) => path !== '' && baseFiles.some((file) => path.endsWith('/') ? file.startsWith(path) : file === path))
     if (colliding.length > 0) return red('dirty-worktree', { detail: 'ignored files the base tracks would be overwritten', paths: colliding })
     const count = generated ? await git(['rev-list', '--count', `${onto}..${before.head}`]) : null
     if (count && (count.status !== 'green' || !/^\d+$/.test(count.stdout.trim()))) return unmeasured('rebase-failed', { detail: 'lane commits could not be counted' })

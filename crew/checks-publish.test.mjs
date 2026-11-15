@@ -884,6 +884,123 @@ test('openPullRequest refuses a lane branch that is its own base before any push
   assert.equal(f.calls.length, 0)
 })
 
+test('rebaseBranch rebases with an ignored cache whose expanded listing exceeds the runner budget', async () => {
+  const cwd = laneRepo({ 'a.txt': 'base\n', 'outside.txt': 'base\n', '.gitignore': 'cache/\n' })
+  writeFileSync(join(cwd, 'a.txt'), 'lane work\n')
+  git(cwd, 'commit', '-qam', 'lane work')
+  git(cwd, 'checkout', '-q', 'main')
+  writeFileSync(join(cwd, 'outside.txt'), 'advanced base\n')
+  git(cwd, 'commit', '-qam', 'advance base')
+  git(cwd, 'checkout', '-q', 'lane')
+  mkdirSync(join(cwd, 'cache/nested'), { recursive: true })
+  const cache = Array.from({ length: 16 }, (_, i) => [`cache/nested/artifact-${i}.bin`, Buffer.from([i, 0, 255])])
+  for (const [path, bytes] of cache) writeFileSync(join(cwd, path), bytes)
+  const budget = 64
+  const listing = ['ls-files', '-z', '--others', '--ignored', '--exclude-standard']
+  assert.ok(Buffer.byteLength(git(cwd, ...listing)) > budget)
+  assert.ok(Buffer.byteLength(git(cwd, ...listing, '--directory')) <= budget)
+  const before = git(cwd, 'rev-parse', 'HEAD').trim()
+  const onto = git(cwd, 'rev-parse', 'main').trim()
+  const run = async (spec) => {
+    const result = await runSuite(spec)
+    return has(spec, '--ignored') && result.status === 'green' && Buffer.byteLength(result.stdout) > budget
+      ? FAKE_UNMEASURED('output-limit') : result
+  }
+  const result = await rebaseBranch({ cwd, base: 'main' }, { run })
+  assert.equal(result.status, 'green', JSON.stringify(result))
+  assert.equal(reasonOf(result), null)
+  assert.equal(result.onto, onto)
+  assert.notEqual(result.head, before)
+  assert.equal(git(cwd, 'rev-parse', 'HEAD').trim(), result.head)
+  assert.equal(git(cwd, 'rev-parse', 'HEAD^').trim(), onto)
+  assert.equal(readFileSync(join(cwd, 'a.txt'), 'utf8'), 'lane work\n')
+  assert.equal(readFileSync(join(cwd, 'outside.txt'), 'utf8'), 'advanced base\n')
+  assert.equal(git(cwd, 'status', '--porcelain'), '')
+  for (const [path, bytes] of cache) assert.deepEqual(readFileSync(join(cwd, path)), bytes)
+})
+
+test('rebaseBranch refuses an ignored directory collision beyond the expanded listing budget', async () => {
+  const cwd = laneRepo({ 'a.txt': 'base\n', '.gitignore': 'cache/\n' })
+  git(cwd, 'checkout', '-q', 'main')
+  mkdirSync(join(cwd, 'cache/nested'), { recursive: true })
+  writeFileSync(join(cwd, 'cache/nested/artifact-0.bin'), 'tracked base bytes\n')
+  git(cwd, 'add', '-f', 'cache/nested/artifact-0.bin')
+  git(cwd, 'commit', '-qm', 'base tracks nested cache file')
+  git(cwd, 'checkout', '-q', 'lane')
+  mkdirSync(join(cwd, 'cache/nested'), { recursive: true })
+  const cache = Array.from({ length: 16 }, (_, i) => [`cache/nested/artifact-${i}.bin`, Buffer.from([i, 0, 255])])
+  for (const [path, bytes] of cache) writeFileSync(join(cwd, path), bytes)
+  const budget = 64
+  const listing = ['ls-files', '-z', '--others', '--ignored', '--exclude-standard']
+  assert.ok(Buffer.byteLength(git(cwd, ...listing)) > budget)
+  assert.ok(Buffer.byteLength(git(cwd, ...listing, '--directory')) <= budget)
+  const before = snapshot(cwd)
+  const calls = []
+  const run = async (spec) => {
+    calls.push(spec)
+    const result = await runSuite(spec)
+    return has(spec, '--ignored') && result.status === 'green' && Buffer.byteLength(result.stdout) > budget
+      ? FAKE_UNMEASURED('output-limit') : result
+  }
+  const result = await rebaseBranch({ cwd, base: 'main' }, { run })
+  assert.equal(result.status, 'red', JSON.stringify(result))
+  assert.equal(reasonOf(result), 'dirty-worktree')
+  assert.deepEqual(result.paths, ['cache/'])
+  assert.ok(!calls.some((spec) => has(spec, 'rebase')))
+  assert.deepEqual(snapshot(cwd), before)
+  for (const [path, bytes] of cache) assert.deepEqual(readFileSync(join(cwd, path)), bytes)
+})
+
+test('rebaseBranch distinguishes ignored directory collisions from sibling prefixes', async () => {
+  for (const [baseDir, status] of [['cache', 'red'], ['cache-other', 'green']]) {
+    const cwd = laneRepo({ 'a.txt': 'base\n', '.gitignore': 'cache/\n' })
+    git(cwd, 'checkout', '-q', 'main')
+    const basePath = `${baseDir}/nested/file.bin`
+    mkdirSync(join(cwd, baseDir, 'nested'), { recursive: true })
+    writeFileSync(join(cwd, basePath), 'base bytes\n')
+    git(cwd, 'add', '-f', basePath)
+    git(cwd, 'commit', '-qm', 'base adds nested file')
+    git(cwd, 'checkout', '-q', 'lane')
+    mkdirSync(join(cwd, 'cache/nested'), { recursive: true })
+    writeFileSync(join(cwd, 'cache/nested/file.bin'), 'local bytes\n')
+    const before = snapshot(cwd)
+    const calls = []
+    const run = through((spec) => { calls.push(spec) })
+    const result = await rebaseBranch({ cwd, base: 'main' }, { run })
+    assert.equal(result.status, status, baseDir)
+    assert.equal(reasonOf(result), status === 'red' ? 'dirty-worktree' : null)
+    if (status === 'red') {
+      assert.ok(result.paths.length > 0 && result.paths.every((path) => path.startsWith('cache/')))
+      assert.ok(!calls.some((spec) => has(spec, 'rebase')))
+      assert.deepEqual(snapshot(cwd), before)
+    } else {
+      assert.equal(result.head, git(cwd, 'rev-parse', 'main').trim())
+      assert.equal(readFileSync(join(cwd, basePath), 'utf8'), 'base bytes\n')
+    }
+    assert.equal(readFileSync(join(cwd, 'cache/nested/file.bin'), 'utf8'), 'local bytes\n')
+  }
+})
+
+test('rebaseBranch leaves ignored or base listing failures unmeasured without rebasing', async () => {
+  const cwd = laneRepo()
+  const before = snapshot(cwd)
+  for (const command of ['ls-files', 'ls-tree']) {
+    for (const failure of [FAKE_BAD, FAKE_UNMEASURED('output-limit')]) {
+      const calls = []
+      const run = through((spec) => {
+        calls.push(spec)
+        if (has(spec, command) && (command === 'ls-tree' || has(spec, '--ignored'))) return failure
+      })
+      const result = await rebaseBranch({ cwd, base: 'main' }, { run })
+      assert.equal(result.status, 'unmeasured', command)
+      assert.equal(reasonOf(result), 'rebase-failed')
+      assert.equal(result.detail, 'ignored or base paths could not be listed')
+      assert.ok(!calls.some((spec) => has(spec, 'rebase')))
+      assert.deepEqual(snapshot(cwd), before)
+    }
+  }
+})
+
 // MUTATION: drop the ignored-path collision check and a conflicting rebase overwrites the ignored file.
 test('rebaseBranch refuses to rebase over an ignored file the base tracks', async () => {
   const cwd = laneRepo({ 'a.txt': 'base\n', '.gitignore': 'build.log\n' })

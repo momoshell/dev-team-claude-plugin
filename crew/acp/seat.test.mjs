@@ -1627,6 +1627,101 @@ const piExtensions = (launch) => launch.args.flatMap((arg, index, args) => arg =
 const piTools = (launch) => launch.args[launch.args.indexOf('--tools') + 1].split(',')
 const FFF_TOOLS = ['mcp__fff__find_files', 'mcp__fff__grep', 'mcp__fff__multi_grep']
 
+test('a claude reviewer granted subagent boots with exactly one read-only Haiku scout', async () => {
+  const { launch } = await armed('claude', 'reviewer', { extensions: ['subagent'] })
+  const options = claudeOptions(launch)
+  const piScout = JSON.parse(readFileSync(join(ROOT, 'crew/pi/agents/scout.json'), 'utf8'))
+  assert.deepEqual(options.agents, { scout: {
+    description: piScout.description, prompt: piScout.prompt, model: 'claude-haiku-5-5',
+    tools: ['Read', 'Grep', 'Glob'], disallowedTools: ['Bash', 'Edit', 'Write', 'NotebookEdit', 'Agent', 'Task', 'mcp__*'],
+  } })
+  for (const key of ['tools', 'allowedTools']) assert.ok(options[key].includes('Agent'))
+  assert.equal(launch.env.CREW_SCOUT, '1')
+  assert.equal(launch.env.CREW_SCOUT_NODE, process.execPath)
+  assert.equal(launch.env.CREW_SCOUT_HOOK, join(ROOT, 'crew/adapters/adapter-claude.mjs'))
+  const bare = (await armed('claude', 'reviewer', {})).launch
+  assert.equal(claudeOptions(bare).agents, undefined)
+  for (const key of ['tools', 'allowedTools']) assert.ok(!claudeOptions(bare)[key].includes('Agent'))
+  assert.equal(bare.env.CREW_SCOUT, '0')
+})
+
+function runScoutHook(taskDir, toolName, toolInput, toolUseId = 'spawn-1') {
+  const settings = JSON.parse(readFileSync(join(ROOT, 'crew/adapters/claude-seat.settings.json'), 'utf8'))
+  const command = settings.hooks.PreToolUse.find((entry) => entry.matcher.includes('Agent'))?.hooks?.[0]?.command ?? 'exit 0'
+  const result = spawnSync('/bin/sh', ['-c', command], {
+    encoding: 'utf8', env: { PATH: process.env.PATH, CREW_SCOUT: '1', CREW_SCOUT_NODE: process.execPath, CREW_SCOUT_HOOK: join(ROOT, 'crew/adapters/adapter-claude.mjs'), CREW_TASK_DIR: taskDir, CREW_ROLE: 'reviewer' },
+    input: JSON.stringify({ session_id: 'session', transcript_path: '/tmp/transcript', cwd: ROOT, hook_event_name: 'PreToolUse', tool_name: toolName, tool_input: toolInput, tool_use_id: toolUseId }),
+  })
+  assert.equal(result.status, 0, result.stderr)
+  return result.stdout.trim() ? JSON.parse(result.stdout).hookSpecificOutput : undefined
+}
+
+test("the claude scout hook spends the lane's shared spawn budget and refuses at 24", () => {
+  const taskDir = scratchDir('claude-scout-budget-')
+  try {
+    const counter = join(taskDir, 'subagent-spawns.json')
+    const input = { description: 'recon', prompt: 'question', subagent_type: 'scout' }
+    writeFileSync(counter, JSON.stringify({ spawns: 24 }))
+    const denied = runScoutHook(taskDir, 'Agent', input)
+    assert.equal(denied?.permissionDecision, 'deny')
+    assert.match(denied.permissionDecisionReason, /budget.*spent/i)
+    assert.ok(denied.permissionDecisionReason.includes(counter))
+    assert.equal(JSON.parse(readFileSync(counter, 'utf8')).spawns, 24)
+    writeFileSync(counter, JSON.stringify({ spawns: 23 }))
+    assert.equal(runScoutHook(taskDir, 'Agent', input), undefined)
+    assert.equal(JSON.parse(readFileSync(counter, 'utf8')).spawns, 24)
+    const rows = readFileSync(join(taskDir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    assert.deepEqual(rows.map((row) => row.subagent_usage.outcome), ['budget-refused', 'ok'])
+    for (const row of rows) {
+      assert.equal(row.subagent_usage.agent, 'scout')
+      assert.equal(row.subagent_usage.model, 'anthropic/claude-haiku-5-5')
+      assert.equal(row.subagent_usage.parent_role, 'reviewer')
+      assert.equal(row.subagent_usage.spawn_id, 'spawn-1')
+      assert.equal(row.role, 'reviewer')
+      assert.equal(row.usage, null)
+      assert.equal(row.usage_reason, row.subagent_usage.outcome === 'ok' ? 'sdk-reports-no-subagent-usage' : 'not-spawned')
+    }
+  } finally { rmSync(taskDir, { recursive: true, force: true }) }
+})
+
+test('a claude scout completion does not treat the last SDK response as total usage', async () => {
+  const taskDir = scratchDir('claude-scout-usage-')
+  try {
+    const input = { description: 'recon', prompt: 'question', subagent_type: 'scout' }
+    for (const id of ['completed', 'background']) assert.equal(runScoutHook(taskDir, 'Agent', input, id), undefined)
+    const usage = { input_tokens: 11, output_tokens: 7, cache_creation_input_tokens: 3, cache_read_input_tokens: 2 }
+    const updates = ['completed', 'background'].map((id) => ({
+      sessionUpdate: 'tool_call_update', toolCallId: id,
+      _meta: { claudeCode: { toolName: 'Agent', toolResponse: { status: id === 'completed' ? 'completed' : 'async_launched', usage } } },
+    }))
+    await use('claude-turn', { taskDir, definition: { role: 'reviewer', extensions: ['subagent'] }, permissions: [{ kind: 'read', rawInput: { path: '/tmp/a' }, _update: updates }] }, (run) => {
+      assert.equal(run.error, undefined)
+      const rows = readFileSync(join(taskDir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+      assert.deepEqual(rows.map((row) => row.subagent_usage?.spawn_id), ['completed', 'background'])
+      for (const row of rows) {
+        assert.equal(row.usage, null)
+        assert.equal(row.usage_reason, 'sdk-reports-no-subagent-usage')
+      }
+    })
+  } finally { rmSync(taskDir, { recursive: true, force: true }) }
+})
+
+test('the claude scout hook refuses another agent type or a model override', () => {
+  const taskDir = scratchDir('claude-scout-refuse-')
+  try {
+    for (const [tool, input] of [
+      ['Agent', { subagent_type: 'general-purpose' }], ['Task', { subagent_type: 'Explore' }],
+      ['Agent', {}], ['Agent', { subagent_type: 'scout', model: 'opus' }],
+      ['Agent', { subagent_type: 'scout', isolation: 'worktree' }], ['Task', { subagent_type: 'scout', isolation: 'remote' }],
+    ]) {
+      const denied = runScoutHook(taskDir, tool, { description: 'recon', prompt: 'question', ...input })
+      assert.equal(denied?.permissionDecision, 'deny')
+      assert.match(denied.permissionDecisionReason, /scout/i)
+      assert.equal(existsSync(join(taskDir, 'subagent-spawns.json')), false)
+    }
+  } finally { rmSync(taskDir, { recursive: true, force: true }) }
+})
+
 test('a claude seat that declares fff launches with the fff server, its tools and CREW_FFF; one that does not has none', async () => {
   const { launch } = (await armed('claude', 'planner', { extensions: ['fff'] }))
   const options = claudeOptions(launch)
@@ -1649,9 +1744,9 @@ test('both agents refuse a retired lab grant before client construction', async 
   }
 })
 
-test('a claude seat refuses the arms it cannot carry before a client: subagent, alone or beside arms it can', async () => {
+test('a claude seat refuses the arms it cannot carry before a client, including beside subagent', async () => {
   const requests = [
-    { extensions: ['subagent'] }, { extensions: ['readgate', 'subagent'] }, { extensions: ['subagent'], advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' } },
+    { extensions: ['readgate', 'subagent'] }, { extensions: ['subagent'], advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' } },
   ]
   for (const arms of requests) {
     const probe = armLaunch('claude', 'builder', arms)

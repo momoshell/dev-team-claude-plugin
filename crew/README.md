@@ -99,7 +99,7 @@ A frontmatter tier override replaces only the fields it names and keeps a raw ov
 | FFF | `crew/adapters/adapter-pi.mjs` | - | - |
 | Advisor | `crew/pi/extensions/advisor.ts`, `crew/agents/builder.md` (advisor model) | [ADR-047](../docs/adr/adr-047-the-advisor-is-a-roster-seat.md) | - |
 | Skeletonread | `crew/pi/extensions/skeletonread.ts` | - | - |
-| Subagent | `crew/pi/extensions/subagent.ts` | - | - |
+| Subagent | `crew/pi/extensions/subagent.ts`; Claude native scout: `crew/adapters/claude-scout.json`, hook in `crew/adapters/adapter-claude.mjs` | - | - |
 | Per-test proof | `crew/proof.mjs` | [ADR-055](../docs/adr/adr-055-planner-defines-the-work.md) | - |
 | Seat skills | `hooks/skill-gate.mjs` (skill-map selector, not a registered hook) | ADR-050 ([decision](../docs/adr/adr-050-seat-skills-are-granted-not-pasted.md)) | [Seat skills](../docs/adr/adr-050-seat-skills-are-granted-not-pasted.md) |
 | Memory | `crew/memory.mjs` | - | - |

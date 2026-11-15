@@ -581,8 +581,51 @@ test("the planner's tests alone decide proof: an empty list reaches the PR with 
   }
 })
 
-test('an escalate without details.question is a bounce to the same seat, and the lead stops lead-escalated only with its question', async () => {
-  for (const role of ['planner', 'builder', 'reviewer', 'lead']) {
+test('non-done decision seats escalate with their question or summary without repair', async () => {
+  for (const role of ['planner', 'reviewer', 'tech-lead', 'lead']) for (const status of ['insufficient', 'escalate']) for (const question of [undefined, '', 'Which rule applies?']) {
+    const f = fakes({ spec: { tier: role === 'tech-lead' ? 'judge' : 'build' }, edit: (v) => {
+      if (role === 'lead' && v.role === 'builder') return { ...v, status: 'escalate', details: { ...v.details, question: 'Ask the lead?' } }
+      if (v.role !== role) return v
+      return { ...v, status, summary: 'Which constraint takes precedence?', details: {
+        ...(role === 'lead' ? { decision: 'escalate', section: 'rules', notes: 'blocked' } : { gap: 'Missing rules' }),
+        ...(role === 'planner' ? { plan_path: '/virtual/task/nonexistent.md', tests: [], files_in_scope: [], validation_lane: '' } : {}),
+        ...(question === undefined ? {} : { question }),
+      } }
+    } })
+    assert.deepEqual(await f.go(), stopped(role === 'lead' ? 'lead-escalated' : 'seat-escalated'), `${role}/${status}/${question}`)
+    assert.equal(count(f, role), 1)
+    assert.equal(f.requests.some((r) => r.repair || r.feedback.some((item) => item.id === 'escalate-no-question')), false)
+    const observation = f.rows.findLast((r) => r.event === 'verdict').observation
+    assert.equal(observation.question, question || 'Which constraint takes precedence?')
+    const returned = role === 'lead' ? observation.lead : observation.envelope
+    assert.equal(returned.status, status)
+    assert.equal(Object.hasOwn(returned.details, role === 'lead' ? 'notes' : 'gap'), false)
+    assert.equal(Object.hasOwn(returned.details, 'question'), Boolean(question))
+  }
+})
+
+test('envelope rows report dropped detail keys on every attempt', async () => {
+  for (const dirty of [false, true]) {
+    const f = fakes({ edit: (v, r) => v.role === 'planner' ? { ...v, id: r.repair ? r.id : 'stale', status: 'escalate', summary: 'Which plan?', details: dirty ? { gap: 'blocked', files_in_scope: [], question: '' } : { question: 'Which plan?' } } : v })
+    const result = await f.go()
+    assert.equal(count(f, 'planner'), 2)
+    const rows = f.rows.filter((r) => r.event === 'envelope' && r.role === 'planner')
+    assert.equal(rows.length, 2)
+    for (const row of rows) {
+      assert.deepEqual(row.dropped, dirty ? ['gap', 'files_in_scope', 'question'] : [])
+      assert.deepEqual(row.parsed.details, dirty ? { gap: 'blocked', files_in_scope: [], question: '' } : { question: 'Which plan?' })
+    }
+    assert.match(rows[0].defects.join(' '), /issued id/)
+    assert.deepEqual(rows[1].defects, [])
+    assert.deepEqual(result, stopped('seat-escalated'))
+    const observation = f.rows.findLast((r) => r.event === 'verdict').observation
+    assert.deepEqual(observation.envelope.details, dirty ? {} : { question: 'Which plan?' })
+    assert.equal(observation.question, 'Which plan?')
+  }
+})
+
+test('a builder escalate or done lead decision without details.question retries the same seat', async () => {
+  for (const role of ['builder', 'lead']) {
     let returned = false
     const f = fakes({ edit: (v) => {
       if (role === 'lead' && v.role === 'builder') return { ...v, status: 'escalate', details: { ...v.details, question: 'Builder question?' } }
@@ -590,7 +633,7 @@ test('an escalate without details.question is a bounce to the same seat, and the
       return v
     } })
     const result = await f.go()
-    const expected = role === 'planner' ? ['planner', 'planner', 'builder', 'reviewer'] : role === 'builder' ? ['planner', 'builder', 'builder', 'reviewer'] : role === 'reviewer' ? ['planner', 'builder', 'reviewer', 'reviewer'] : ['planner', 'builder', 'lead', 'lead']
+    const expected = role === 'builder' ? ['planner', 'builder', 'builder', 'reviewer'] : ['planner', 'builder', 'lead', 'lead']
     assert.deepEqual(f.requests.map((r) => r.role), expected)
     const retry = f.requests.filter((r) => r.role === role)[1]
     assert.equal(retry.feedback[0].id, 'escalate-no-question')
@@ -908,15 +951,15 @@ test("the lead's last consult is marked last, and a spent lead bound stops for t
   assert.ok(!later.rows.some((r) => r.event === 'verdict' && r.reason === 'round-bound'))
 
   const reask = fakes({ bounds: { lead: 1 }, edit: (v) => {
-    if (v.role === 'planner') return { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } }
+    if (v.role === 'builder') return { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } }
     if (v.role === 'lead') return { ...v, details: { decision: 'escalate' } }
     return v
   } })
   assert.deepEqual(await reask.go(), stopped('lead-escalated'))
   assert.equal(reask.requests.find((r) => r.role === 'lead').feedback[0].last, true)
-  // MUTATION: drop held from the lead request and the current planner escalation is labelled an earlier return.
+  // MUTATION: drop held from the lead request and the current builder escalation is labelled an earlier return.
   const reasked = reask.rows.findLast((r) => r.event === 'verdict').observation.question
-  assert.match(reasked, /planner/)
+  assert.match(reasked, /builder/)
   assert.doesNotMatch(reasked, /last return:/)
 })
 
@@ -1002,19 +1045,6 @@ test('lead rulings reach builder turns after a proof failure and after a review 
   }
 })
 
-test('a lead bounce delivers its instructions as lead-bounce feedback to a held planner, reviewer or tech-lead (#2296)', async () => {
-  for (const role of ['planner', 'reviewer', 'tech-lead']) {
-    let turns = 0
-    const f = fakes({ spec: { tier: role === 'tech-lead' ? 'judge' : 'build' }, lead: 'bounce', edit: (v) => {
-      if (v.role === role && ++turns === 1) return { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } }
-      if (v.role === 'lead') v.details.instructions = 'apply this instruction'
-      return v
-    } })
-    assert.equal((await f.go()).status, 'done', role)
-    assert.deepEqual(f.requests.filter((r) => r.role === role)[1].feedback[0], { id: 'lead-bounce', summary: 'apply this instruction' }, role)
-  }
-})
-
 test('a proof failure keeps the open review findings behind the proof item (#2296)', async () => {
   for (const mode of ['proof-no-tests', 'proof-unproven', 'both']) {
     let builds = 0, proofs = 0
@@ -1059,23 +1089,25 @@ test('a planner done without files_in_scope gets a repair turn and the lane cont
   assert.ok(planners[1].repair.defects.includes('details.files_in_scope is required'))
 })
 
-test('a planner escalate with only a question reaches the lead instead of stopping envelope-refused', async () => {
+test('a planner escalate with only a question stops seat-escalated', async () => {
   const f = fakes({ edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate', details: { question: 'Which plan?' } } : v })
-  assert.deepEqual(await f.go(), stopped('lead-escalated'))
+  assert.deepEqual(await f.go(), stopped('seat-escalated'))
   assert.equal(count(f, 'planner'), 1)
-  assert.equal(f.requests.find((r) => r.role === 'lead').feedback[0].envelope.details.question, 'Which plan?')
+  assert.equal(count(f, 'lead'), 0)
+  assert.equal(f.rows.findLast((r) => r.event === 'verdict').observation.question, 'Which plan?')
 })
 
-test('a lead accept of a planner insufficient without done fields bounces the planner', async () => {
+test('a planner insufficient without done fields stops before consulting the lead', async () => {
   const f = fakes({ lead: 'accept', edit: (v) => v.role === 'planner' ? { ...v, status: 'insufficient', details: {} } : v })
-  assert.deepEqual(await f.go(), stopped('no-progress'))
-  assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'lead', 'planner'])
+  assert.deepEqual(await f.go(), stopped('seat-escalated'))
+  assert.deepEqual(f.requests.map((r) => r.role), ['planner'])
 })
 
-test('a lead accept of a reviewer or tech-lead insufficient with empty details bounces that seat (#2320)', async () => {
+test('a reviewer or tech-lead insufficient with empty details stops before consulting the lead (#2320)', async () => {
   for (const [tier, role] of [['build', 'reviewer'], ['judge', 'tech-lead']]) {
     const f = fakes({ spec: { tier }, lead: 'accept', edit: (v) => v.role === role ? { ...v, status: 'insufficient', details: {} } : v })
-    assert.deepEqual(await f.go(), stopped('no-progress'), role)
+    assert.deepEqual(await f.go(), stopped('seat-escalated'), role)
+    assert.equal(count(f, 'lead'), 0)
     assert.equal(f.calls.includes('commit'), false, role)
   }
 })
@@ -1278,7 +1310,7 @@ test('a repaired envelope that is refused again stops the lane with no third tur
     assert.equal(f.calls.includes('proof'), false, name)
   }
   // a refused repair of the lead is a lead refusal
-  const lead = fakes({ edit: (v) => (v.role === 'planner' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v.role === 'lead' ? gaps(v) : v) })
+  const lead = fakes({ edit: (v) => (v.role === 'builder' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v.role === 'lead' ? gaps(v) : v) })
   assert.deepEqual(await lead.go(), stopped('lead-refused'))
   assert.equal(count(lead, 'lead'), 2)
 })
@@ -1431,14 +1463,14 @@ test('a changes-needed on the last reviewer round grants one reserve re-review t
   assert.ok(f.seen.publish)
 })
 
-test('a reserve re-review that still asks for changes stops round-bound with no further build or lead consult', async () => {
+test('a reserve re-review that still asks for changes or returns insufficient stops with no further build or lead consult', async () => {
   for (const mode of ['changes-needed', 'insufficient']) {
     let reviews = 0
     const f = fakes({ review: 10, bounds: { builder: 10, reviewer: 2 }, lead: 'bounce', edit: (v) => {
       if (v.role === 'reviewer' && ++reviews === 3 && mode === 'insufficient') v.status = 'insufficient'
       return v
     } })
-    assert.deepEqual(await f.go(), stopped('round-bound'), mode)
+    assert.deepEqual(await f.go(), stopped(mode === 'insufficient' ? 'seat-escalated' : 'round-bound'), mode)
     assert.equal(count(f, 'reviewer'), 3, mode)
     assert.equal(count(f, 'builder'), 3, mode)
     assert.equal(count(f, 'lead'), 0, mode)
@@ -1529,9 +1561,9 @@ test('a lead bounce grants one retry, repeated bounces are bounded by the lead a
   assert.equal(count(repeated, 'lead'), 2)
   assert.equal(count(repeated, 'builder'), 3)
   assert.equal(repeated.calls.includes('commit'), false)
-  const retried = fakes({ lead: 'bounce', edit: (v, r) => r.role === 'planner' && r.id.endsWith('.1') ? { ...v, status: 'insufficient' } : v })
+  const retried = fakes({ lead: 'bounce', edit: (v) => v.id === 'lane.builder.2' ? { ...v, status: 'insufficient' } : v })
   assert.equal((await retried.go()).status, 'done')
-  assert.equal(count(retried, 'planner'), 2)
+  assert.equal(count(retried, 'builder'), 2)
 })
 
 // MUTATION: grant a whole extra round on every bounce and a seat with turns left outruns its bound unsupervised.
@@ -1543,10 +1575,10 @@ test('a lead bounce on a seat with turns left does not raise its bound, so the n
 
 // MUTATION: let accept pass with no valid envelope and a bound or lead decision stands in for a measurement.
 test('a lead accept releases only a valid non-done envelope and never an exhausted bound', async () => {
-  const escalated = fakes({ lead: 'accept', edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v })
+  const escalated = fakes({ lead: 'accept', edit: (v) => v.id === 'lane.builder.2' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v })
   assert.equal((await escalated.go()).status, 'done')
   assert.equal(count(escalated, 'lead'), 1)
-  assert.deepEqual(escalated.requests.find((r) => r.role === 'lead').feedback.map((x) => [x.role, x.reason, x.envelope.status]), [['planner', 'escalate', 'escalate']])
+  assert.deepEqual(escalated.requests.find((r) => r.role === 'lead').feedback.map((x) => [x.role, x.reason, x.envelope.status]), [['builder', 'escalate', 'escalate']])
   const exhausted = fakes({ lead: 'accept', review: 10, bounds: { builder: 1, reviewer: 10 } })
   assert.deepEqual(await exhausted.go(), stopped('lead-escalated'))
   assert.equal(count(exhausted, 'lead'), 2)
@@ -1559,18 +1591,18 @@ test('a lead accept releases only a valid non-done envelope and never an exhaust
 
 // MUTATION: consult a missing lead anyway, or let a bad lead envelope decide.
 test('an unseated, refusing or insufficient lead stops without recursion', async () => {
-  const none = fakes({ unseated: ['lead'], edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v })
+  const none = fakes({ unseated: ['lead'], edit: (v) => v.role === 'builder' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v })
   assert.deepEqual(await none.go(), stopped('lead-unavailable'))
   assert.equal(count(none, 'lead'), 0)
-  const bad = fakes({ edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v.role === 'lead' ? { ...v, extra: 1 } : v })
+  const bad = fakes({ edit: (v) => v.role === 'builder' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v.role === 'lead' ? { ...v, extra: 1 } : v })
   assert.deepEqual(await bad.go(), stopped('lead-refused'))
   assert.equal(count(bad, 'lead'), 2)
-  const insufficient = fakes({ edit: (v) => v.role === 'planner' || v.role === 'lead' ? { ...v, status: 'insufficient' } : v })
+  const insufficient = fakes({ edit: (v) => v.role === 'builder' || v.role === 'lead' ? { ...v, status: 'insufficient' } : v })
   assert.deepEqual(await insufficient.go(), stopped('lead-escalated'))
   assert.equal(count(insufficient, 'lead'), 1)
-  const undecided = fakes({ edit: (v) => v.role === 'planner' ? { ...v, status: 'insufficient' } : v.role === 'lead' ? { ...v, status: 'insufficient', details: {} } : v })
+  const undecided = fakes({ edit: (v) => v.role === 'builder' ? { ...v, status: 'insufficient' } : v.role === 'lead' ? { ...v, status: 'insufficient', details: {} } : v })
   assert.deepEqual(await undecided.go(), stopped('lead-refused'))
-  const crashed = fakes({ seatThrows: 'lead', edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v })
+  const crashed = fakes({ seatThrows: 'lead', edit: (v) => v.role === 'builder' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v })
   assert.deepEqual(await crashed.go(), stopped('lead-refused'))
 })
 
@@ -1869,9 +1901,9 @@ test('every started stage ends on success and refusal, in order', async () => {
   for (const name of new Set(pairs(refused.rows).map(([, s]) => s))) assert.equal(pairs(refused.rows).filter(([event, s]) => event === 'stage-start' && s === name).length, pairs(refused.rows).filter(([event, s]) => event === 'stage-end' && s === name).length, name)
   const thrown = fakes({ deps: { mkdir: async () => {}, resolveAgents: undefined } })
   assert.deepEqual(await thrown.go(), stopped('invalid-input'))
-  const lead = fakes({ edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v })
-  await lead.go()
-  assert.deepEqual(pairs(lead.rows), [['stage-start', 'plan'], ['stage-start', 'lead'], ['stage-end', 'lead'], ['stage-end', 'plan']])
+  const escalated = fakes({ edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v })
+  await escalated.go()
+  assert.deepEqual(pairs(escalated.rows), [['stage-start', 'plan'], ['stage-end', 'plan']])
   const crashing = fakes({ deps: { readFile: async () => { throw new Error('boom') } } })
   await crashing.go()
   assert.deepEqual(pairs(crashing.rows), [['stage-start', 'plan'], ['stage-end', 'plan']])
@@ -2717,12 +2749,14 @@ test('a finish run that cannot write its report emits no finish-ready, and the s
   assert.equal(std.writes.size, 0)
 })
 
-// MUTATION: refuse a lead decision carried by a non-done status and the held role gets no second turn.
-test('a lead envelope with status insufficient and decision bounce gives the held role one more turn (LF4)', async () => {
-  const f = fakes({ lead: 'bounce', edit: (v, r) => (v.role === 'planner' && r.id.endsWith('.1') ? { ...v, status: 'insufficient' } : v.role === 'lead' ? { ...v, status: 'insufficient' } : v) })
-  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
-  assert.equal(count(f, 'planner'), 2)
-  assert.equal(count(f, 'lead'), 1)
+// MUTATION: refuse a lead decision carried by a non-done status and the held role cannot continue.
+test('a non-done lead bounce or accept keeps its routing (LF4)', async () => {
+  for (const status of ['insufficient', 'escalate']) for (const decision of ['bounce', 'accept']) {
+    const f = fakes({ lead: decision, edit: (v) => (v.id === 'lane.builder.2' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v.role === 'lead' ? { ...v, status } : v) })
+    assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
+    assert.equal(count(f, 'builder'), decision === 'bounce' ? 2 : 1)
+    assert.equal(count(f, 'lead'), 1)
+  }
 })
 
 // MUTATION: drop the seat-escalated branch and the question stops round-bound.
@@ -2740,7 +2774,7 @@ test('a finish review or finish suite-repair escalate with a question stops seat
     }
     const options = { spec: finishSpec(), unseated: ['planner'], edit }
     const f = mode === 'repair' ? sequenced([redRun(), redRun()], options) : fakes(options)
-    assert.deepEqual(await f.go(), stopped(['insufficient', 'questionless'].includes(mode) ? 'round-bound' : 'seat-escalated'), mode)
+    assert.deepEqual(await f.go(), stopped('seat-escalated'), mode)
     assert.equal(count(f, 'lead'), 0)
     if (!['insufficient', 'questionless'].includes(mode)) {
       const observation = f.rows.findLast((r) => r.status === 'stopped').observation

@@ -468,10 +468,10 @@ export async function runLoop(spec, deps = {}) {
             await emit('seat-turn', seatTurnRow({ role, id: asked.id, recording, turnError, parsed, started, ended, turnBefore, turnAfter }))
           } catch { /* journal measurements must not affect the turn */ }
           if (!isFinish && tier === 'mechanical' && role === 'builder' && checked.envelope?.status === 'done' && checked.envelope.details && !Object.hasOwn(checked.envelope.details, 'subject')) checked.defects.push('details.subject is required on a mechanical lane for the commit and PR')
-          if (role === 'planner' && checked.envelope && checked.defects.length === 0 && Object.hasOwn(checked.envelope.details, 'plan_path')) checked.defects.push(...await artifactDefects(checked.envelope.details))
+          if (role === 'planner' && checked.envelope?.status === 'done' && checked.defects.length === 0 && Object.hasOwn(checked.envelope.details, 'plan_path')) checked.defects.push(...await artifactDefects(checked.envelope.details))
           return { failure, parsed, raw, parseError, checked, turnError, routed, providerKind, method, turnBefore, turnAfter }
         }
-        const observe = (a) => emit('envelope', { role, id, returnPath, parsed: a.parsed, defects: a.checked.defects, error: a.failure?.error ?? null, turnError: a.turnError, ...(uncounted ? { counted: false } : {}) })
+        const observe = (a) => emit('envelope', { role, id, returnPath, parsed: a.parsed, dropped: a.checked.dropped ?? [], defects: a.checked.defects, error: a.failure?.error ?? null, turnError: a.turnError, ...(uncounted ? { counted: false } : {}) })
         const attempts = [await attempt(request)]
         const firstBefore = attempts[0].turnBefore
         let latest = attempts[0], rerun = false, repairs = 0, asked = request
@@ -490,7 +490,7 @@ export async function runLoop(spec, deps = {}) {
         }
         let { failure, parsed, checked } = latest
         const valid = !failure && checked.defects.length === 0 && checked.envelope?.id === id
-        await emit('envelope', { role, id, returnPath, parsed, defects: checked.defects, error: failure?.error ?? null, turnError: latest.turnError, ...(uncounted ? { counted: false } : {}) })
+        await emit('envelope', { role, id, returnPath, parsed, dropped: checked.dropped ?? [], defects: checked.defects, error: failure?.error ?? null, turnError: latest.turnError, ...(uncounted ? { counted: false } : {}) })
         if (latest.turnError && !valid) failure = { reason: latest.providerKind === 'authentication_failed' && latest.method === 'session/new' ? 'authentication_failed' : 'seat-unmeasured', error: latest.turnError }
         if (!failure && !valid) failure = { reason: 'envelope-refused', defects: checked.defects }
         if (failure) return hold ? { held: { ...failure, envelope: null } } : { halt: await stop(role === 'lead' && failure.reason !== 'authentication_failed' ? 'lead-refused' : failure.reason, { role, id, ...failure }) }
@@ -498,9 +498,11 @@ export async function runLoop(spec, deps = {}) {
         progressed = role === 'builder' && firstBefore !== null && latest.turnAfter !== null && firstBefore !== latest.turnAfter
         if (role === 'builder') builderMark = { changed: progressed, refunded: false }
         if (hold && checked.envelope.status !== 'done') return { held: { reason: checked.envelope.status, envelope: checked.envelope } }
-        // ADR-055 §12: a questionless escalation returns to the same seat, including the lead.
+        // Decision seats may stop with their summary as the operator question.
+        if (['planner', 'reviewer', 'tech-lead'].includes(role) && checked.envelope.status !== 'done') return { halt: await stop('seat-escalated', { role, reason: checked.envelope.status, envelope: checked.envelope, question: checked.envelope.details.question ?? checked.envelope.summary }) }
+        // ADR-055 §12: done lead escalations still retry when questionless.
         if (role === 'lead') {
-          const questionless = checked.envelope.details.decision === 'escalate' && !text(checked.envelope.details.question)
+          const questionless = checked.envelope.status === 'done' && checked.envelope.details.decision === 'escalate' && !text(checked.envelope.details.question)
           if (checked.envelope.status !== 'done' || questionless) {
             const failure = { role, status: checked.envelope.status, details: checked.envelope.details }
             if (repeatsFailure(failure)) return { halt: await stop('no-progress', failure) }
@@ -598,7 +600,7 @@ export async function runLoop(spec, deps = {}) {
       const asked = await stage('lead', () => seatTurn('lead', [{ role, reason: held.reason, envelope: held.envelope ?? last[role] ?? null, held: held.envelope ?? null, feedback, last: lastConsult, targets: isFinish ? ['builder'] : ['builder', 'planner'] }]))
       if (asked.halt) return asked
       const { decision, target, question, instructions } = asked.envelope.details
-      if (decision === 'escalate') return { halt: await stop('lead-escalated', { role, ...held, question }) }
+      if (decision === 'escalate') return { halt: await stop('lead-escalated', { role, ...held, lead: asked.envelope, question: question ?? asked.envelope.summary }) }
       if (decision === 'accept' && !isFinish && tier !== 'mechanical' && role === 'builder' && held.reason === 'insufficient') {
         feedback = [{ id: 'accept-insufficient', summary: 'Route the builder insufficient to builder or planner, or escalate with a question.' }, ...feedback]
         continue

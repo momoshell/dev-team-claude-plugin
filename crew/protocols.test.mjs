@@ -355,19 +355,44 @@ const finding = (overrides = {}) => ({ id: 'RV1-1', severity: 'should-fix', loca
 const review = (findings, verdict = 'changes-needed', role = 'reviewer') => envelope(role, { details: { ...structuredClone(DETAILS[role]), verdict, findings } })
 const refusedFor = (role, value, needle) => validateEnvelope(role, value).defects.filter((d) => d.includes(needle))
 
-test('P2 a planner, reviewer or tech-lead insufficient or escalate needs only a summary and, for escalate, a question', () => {
-  for (const role of ['planner', 'reviewer', 'tech-lead']) for (const status of ['insufficient', 'escalate']) {
-    const details = status === 'escalate' ? { question: 'Which way?' } : {}
+test('P2 non-done decision seats sanitize placeholder and extra details', () => {
+  const cases = [
+    ['planner', { gap: 'Missing rules', files_in_scope: [], validation_lane: '', tests: [] }, { subject: DETAILS.planner.subject, plan_path: '/task/missing.md' }],
+    ['planner', { subject: 'unrelated subject', judge: 'two\nlines' }, { tests: [{ file: 'lib.test.mjs', title: 'works' }], files_in_scope: ['lib.mjs'], validation_lane: 'node --test' }],
+    ['reviewer', { decision: 'accept', verdict: 'maybe', findings: [finding({ severity: 'invalid' })], requirements: {}, coverage: {} }, { findings_omitted: 0 }],
+    ['tech-lead', { findings: [finding({ disposition: 'auto-fix' })], closed: [{}], failure_modes: [] }, { verdict: 'changes-needed' }],
+    ['lead', { section: 'rules', notes: 'blocked', target: 'reviewer', instructions: '' }, { decision: 'escalate' }],
+    ['lead', { target: '' }, { decision: 'bounce' }],
+    ...['reviewer', 'tech-lead'].map((role) => [role, {}, { verdict: 'pass', findings: [finding({ severity: 'must-fix', trigger: 'input' })], requirements: [{ requirement: 'build', status: 'unmet', evidence: 'blocked' }], coverage: { read: ['lib.mjs'], complete: false } }]),
+  ]
+  for (const [role, discarded, kept] of cases) for (const status of ['insufficient', 'escalate']) for (const archived of [false, true]) {
+    const details = { ...discarded, ...kept, question: 'Which rule applies?', ...(archived && role === 'planner' ? { acceptance: 'legacy criterion' } : {}) }
     const value = envelope(role, { status, details })
-    const options = { prior: ['R1'] }
-    assert.deepEqual(validateEnvelope(role, value, options).defects, [], `${role}/${status}`)
-    const key = role === 'planner' ? 'tests' : 'verdict'
-    value.details[key] = role === 'planner' ? {} : 'maybe'
-    assert.ok(validateEnvelope(role, value, options).defects.some((d) => d.startsWith(`details.${key} `)))
-    if (role !== 'planner') {
-      value.details.findings = []
-      assert.ok(validateEnvelope(role, value, options).defects.includes('details must carry or close prior finding R1'))
+    const snapshot = structuredClone(value)
+    const result = validateEnvelope(role, value, { archived, prior: ['R1'] })
+    assert.deepEqual(result.defects, [], `${role}/${status}`)
+    assert.deepEqual(result.envelope.details, { ...kept, question: details.question, ...(archived && role === 'planner' ? { acceptance: details.acceptance } : {}) })
+    assert.deepEqual([...result.dropped].sort(), Object.keys(discarded).sort())
+    assert.deepEqual(value, snapshot)
+  }
+})
+
+test('P2 non-done decision seats discard invalid questions but require lead decisions', () => {
+  for (const role of ['planner', 'reviewer', 'tech-lead', 'lead']) for (const status of ['insufficient', 'escalate']) {
+    for (const question of ['', undefined, null, 1, [], {}, ' ', 'Which way?']) {
+      const value = envelope(role, { status, details: { ...(role === 'lead' ? { decision: 'escalate' } : {}), ...(question === undefined ? {} : { question }) } })
+      const result = validateEnvelope(role, value)
+      assert.deepEqual(result.defects, [])
+      const valid = typeof question === 'string' && question !== ''
+      assert.deepEqual(result.dropped, question === undefined || valid ? [] : ['question'])
+      assert.equal(result.envelope.details.question, valid ? question : undefined)
     }
+  }
+  for (const status of ['insufficient', 'escalate']) for (const decision of [undefined, '', null, 'maybe']) {
+    const result = validateEnvelope('lead', envelope('lead', { status, details: { ...(decision === undefined ? {} : { decision }), notes: 'blocked' } }))
+    assert.deepEqual(result.dropped, ['notes'])
+    assert.equal(result.defects.length, 1)
+    assert.match(result.defects[0], /^details\.decision /)
   }
 })
 
@@ -390,14 +415,16 @@ test('P2 vocabularies are closed and frozen', () => {
   for (const list of [ENVELOPE_FIELDS, ENVELOPE_STATUSES, REVIEW_VERDICTS, LEAD_DECISIONS, FINDING_SEVERITIES, FINDING_DISPOSITIONS]) assert.ok(Object.isFrozen(list))
 })
 
-// MUTATION: return a copy or null on success and the loop acts on a value it never validated.
-test('P2 accepts every role and status, returning the input untouched', () => {
+test('P2 accepts every role and status without mutating the input, keeping strict returns identical', () => {
   for (const role of AGENT_ROLES) for (const status of ENVELOPE_STATUSES) {
     const value = envelope(role, { status })
     const snapshot = structuredClone(value)
     const result = validateEnvelope(role, value)
     assert.deepEqual(result.defects, [], `${role}/${status}`)
-    assert.equal(result.envelope, value)
+    if (role === 'builder' || status === 'done') {
+      assert.equal(result.envelope, value)
+      assert.ok(refusedFor(role, { ...value, details: { ...value.details, extra: 'blocked', question: '' } }, 'details.').length)
+    }
     assert.deepEqual(value, snapshot)
   }
   for (const decision of LEAD_DECISIONS) assert.deepEqual(validateEnvelope('lead', envelope('lead', { details: { decision, ...(decision === 'bounce' ? { target: 'builder' } : {}) } })).defects, [])
@@ -451,7 +478,7 @@ test('P2 a lead bounce names its target, builder or planner, and any escalate ma
   }
   for (const target of ['builder', 'planner']) assert.deepEqual(validateEnvelope('lead', envelope('lead', { details: { decision: 'bounce', target } })).defects, [])
   for (const role of AGENT_ROLES) {
-    const value = envelope(role, { status: 'escalate' })
+    const value = envelope(role, { status: role === 'builder' ? 'escalate' : 'done' })
     value.details.question = 'Which decision?'
     assert.deepEqual(validateEnvelope(role, value).defects, [])
     for (const question of ['', null, 1]) { value.details.question = question; assert.ok(validateEnvelope(role, value).defects.some((d) => d.includes('details.question'))) }
@@ -551,13 +578,17 @@ test('P2 refuses unknown top-level fields, including a parsed __proto__', () => 
 
 // MUTATION: throw or return null for a bad root and one malformed envelope halts the loop.
 test('P2 malformed roots and common fields are refused without throwing', () => {
-  for (const input of [null, [], 'json', 7, undefined]) assert.deepEqual(validateEnvelope('builder', input), { envelope: null, defects: ['envelope is a JSON object'] })
-  for (const key of ENVELOPE_FIELDS) {
-    const value = envelope('builder'); delete value[key]
-    assert.ok(refusedFor('builder', value, `missing field ${key}`).length, key)
+  for (const role of AGENT_ROLES) for (const status of ENVELOPE_STATUSES) {
+    for (const input of [null, [], 'json', 7, undefined]) assert.deepEqual(validateEnvelope(role, input), { envelope: null, defects: ['envelope is a JSON object'] })
+    for (const key of ENVELOPE_FIELDS) {
+      const value = envelope(role, { status }); delete value[key]
+      assert.ok(refusedFor(role, value, `missing field ${key}`).length, key)
+    }
+    for (const key of ['id', 'summary']) for (const bad of ['', null, 5, []]) assert.ok(refusedFor(role, envelope(role, { status, [key]: bad }), key).length, key)
+    for (const details of [null, [], 'details', 5]) assert.ok(refusedFor(role, envelope(role, { status, details }), 'details is an object').length, role)
+    assert.ok(refusedFor(role, envelope(role, { status, extra: true }), 'unknown field extra').length)
+    assert.ok(refusedFor(role, envelope(role, { status, role: 'scout' }), 'role').length)
   }
-  for (const key of ['id', 'summary']) for (const bad of ['', null, 5, []]) assert.ok(refusedFor('builder', envelope('builder', { [key]: bad }), key).length, key)
-  for (const details of [null, [], 'details', 5]) for (const role of AGENT_ROLES) assert.ok(refusedFor(role, envelope(role, { details }), 'details is an object').length, role)
   const several = validateEnvelope('builder', envelope('builder', { id: '', summary: '', status: 'blocked' }))
   assert.ok(several.defects.length >= 3)
 })

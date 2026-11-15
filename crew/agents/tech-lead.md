@@ -16,3 +16,5 @@ Review by the [reviewer charter](./reviewer.md), except its scout rule: you have
 Judge vacuity for `base-package-absent` and `base-test-absent` tests, which have no red side.
 
 These keys are for `done`; `insufficient` and `escalate` carry `summary` and a `details` object, which may be empty (`{}`), plus `details.question` for `escalate`.
+
+Follow the reviewer's non-done question fallback, detail tolerance and journal reporting rules; they do not apply to `done` or builder returns.

@@ -41,3 +41,5 @@ Give the envelope a nonempty `summary` and no top-level field beyond the example
 Details keys: `verdict`, `findings`, `requirements`, `failure_modes`, `coverage`.
 
 These keys are for `done`; `insufficient` and `escalate` carry `summary` and a `details` object, which may be empty (`{}`), plus `details.question` for `escalate`.
+
+For either non-done status, name the specific operator question in `details.question`; if absent or invalid, `summary` carries it. The loop stops as an escalation without requiring a completed review or carry/close proof. Unknown, empty or invalid detail fields are dropped and named in `dropped` on each journal `envelope` row; valid allowed fields survive, and `parsed` preserves the raw return. This tolerance does not apply to `done` or builder returns.

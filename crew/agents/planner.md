@@ -47,6 +47,8 @@ Details keys: `subject`, `plan_path`, `tests`, `files_in_scope`.
 
 These keys are for `done`; `insufficient` and `escalate` carry `summary` and a `details` object, which may be empty (`{}`), plus `details.question` for `escalate`.
 
+For either non-done status, name the specific operator question in `details.question`; if absent or invalid, `summary` carries it. The loop stops as an escalation without requiring a plan artifact. Unknown, empty or invalid detail fields are dropped and named in `dropped` on each journal `envelope` row; valid allowed fields survive, and `parsed` preserves the raw return. This tolerance does not apply to `done` or builder returns.
+
 The `subject` is the conventional-commit subject for this change, at most 72 characters, written `type(scope): summary` with an optional scope and optional `!` after it. The type is one of `chore`, `ci`, `crew`, `docs`, `feat`, `fix`, `merge`, `perf`, `refactor`, `revert`, `spike`, `test`, `wip`, `workflow`. It names both the commit and the PR. Do not write a PR body: the loop generates it from the measured results.
 
 `plan_path` is a bare file path without a line-range suffix; cite plan lines as `file:start-end` in the plan text.

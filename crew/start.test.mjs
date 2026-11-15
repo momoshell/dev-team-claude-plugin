@@ -2136,17 +2136,17 @@ test('an authentication failure, even with a parseable reset, stops the lane wit
 
 // MUTATION: skip the lead turn's definition and a consulted lead runs with no charter or P2 example.
 test('a consulted lead gets its own definition and decision shape', async () => {
-  const f = leanFixture({ answers: { 'planner.1': 'insufficient' } })
+  const f = leanFixture({ answers: { 'builder.2': 'insufficient' } })
   const result = await f.go()
   assert.equal(result.status, 'done')
   const roles = f.requests.map((r) => r.definition.role)
-  assert.deepEqual(roles.slice(0, 3), ['planner', 'lead', 'planner'])
-  const lead = f.requests[1]
+  assert.deepEqual(roles.slice(0, 4), ['planner', 'builder', 'lead', 'builder'])
+  const lead = f.requests[2]
   assert.equal(lead.definition.model, `${resolveAgents('build').seats.lead.provider}/${resolveAgents('build').seats.lead.id}`)
   assert.match(lead.prompt, /"decision"/)
   assert.match(lead.prompt, /insufficient/)
   assert.ok(lead.prompt.includes(`Task directory: ${f.spec.taskDir}`))
-  assert.equal(lead.sessionFile, f.sessionOf('lead', 2))
+  assert.equal(lead.sessionFile, f.sessionOf('lead', 3))
 })
 
 // MUTATION: resume the refused session or repeat the assignment and a repair is not a fresh, repair-only turn.
@@ -2187,7 +2187,7 @@ test('a schema-refused builder envelope gets one fresh repair-only turn at the s
 
 // MUTATION: restore an old role-charter link or first-generation field in a body and a dispatched prompt carries it.
 test('lean prompts contain only the lean contract', async () => {
-  const f = leanFixture({ answers: { 'planner.1': 'insufficient' } })
+  const f = leanFixture({ answers: { 'builder.2': 'insufficient' } })
   f.spec.brief = 'Implement the supplied task.'
   assert.equal((await f.go()).status, 'done')
   assert.deepEqual([...new Set(f.requests.map((r) => r.definition.role))].sort(), ['builder', 'lead', 'planner', 'reviewer'])

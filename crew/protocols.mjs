@@ -357,7 +357,7 @@ const FINDING_RULES = {
   end_line: [(v) => Number.isSafeInteger(v) && v > 0, 'is a positive safe integer'],
 }
 
-// Returns { envelope, defects }. An empty defects list is an envelope the loop can act on;
+// Returns { envelope, defects, dropped? }. An empty defects list is an envelope the loop can act on;
 // a refused object root is still returned, a non-object root is null.
 export function validateEnvelope(role, envelope, { archived = false, prior = [] } = {}) {
   if (!plain(envelope)) return { envelope: null, defects: ['envelope is a JSON object'] }
@@ -372,19 +372,24 @@ export function validateEnvelope(role, envelope, { archived = false, prior = [] 
   if (!ENVELOPE_STATUSES.includes(envelope.status)) defects.push(`status is one of ${ENVELOPE_STATUSES.join(', ')}`)
   if (!nonempty(envelope.summary)) defects.push('summary is a nonempty string')
   const required = AGENT_ROLES.includes(role) ? DETAIL_KEYS[role] : null
+  const tolerant = ['planner', 'reviewer', 'tech-lead', 'lead'].includes(role) && ['insufficient', 'escalate'].includes(envelope.status)
+  const dropped = []
+  if (tolerant && plain(envelope.details)) envelope = { ...envelope, details: { ...envelope.details } }
   const details = envelope.details
   if (required && Object.hasOwn(envelope, 'details')) {
     if (!plain(details)) defects.push(`details is an object with ${required.join(', ')}`)
     else {
       const optional = OPTIONAL_DETAIL_KEYS[role] ?? []
       for (const key of Object.keys(details)) {
-        if (optional.includes(key)) {
-          if (!DETAIL_RULES[key][0](details[key])) defects.push(`details.${key} ${DETAIL_RULES[key][1]}`)
-        }
-        else if (!required.includes(key) && !(archived && (LEGACY_DETAIL_KEYS[role] ?? []).includes(key))) defects.push(`details.${key} is not a field of ${role} details`)
+        const unknown = !optional.includes(key) && !required.includes(key) && !(archived && (LEGACY_DETAIL_KEYS[role] ?? []).includes(key))
+        const v = details[key]
+        const empty = v === '' || (Array.isArray(v) && v.length === 0) || (plain(v) && Object.keys(v).length === 0)
+        if (tolerant && !(role === 'lead' && key === 'decision') && (unknown || empty)) { delete details[key]; dropped.push(key) }
+        else if (unknown) defects.push(`details.${key} is not a field of ${role} details`)
       }
-      for (const key of required) {
-        if (!Object.hasOwn(details, key)) { if (!(['planner', 'reviewer', 'tech-lead'].includes(role) && ['insufficient', 'escalate'].includes(envelope.status)) && (!archived || !(ARCHIVED_OPTIONAL[role] ?? []).includes(key))) defects.push(`details.${key} is required`); continue }
+      for (const key of [...required, ...optional.filter((key) => Object.hasOwn(details, key))]) {
+        if (!Object.hasOwn(details, key)) { if ((!tolerant || key === 'decision') && (!archived || !(ARCHIVED_OPTIONAL[role] ?? []).includes(key))) defects.push(`details.${key} is required`); continue }
+        const start = defects.length
         const v = details[key]
         if (Object.hasOwn(DETAIL_RULES, key)) { if (!DETAIL_RULES[key][0](v)) defects.push(`details.${key} ${DETAIL_RULES[key][1]}`) }
         else if (key === 'findings' && !Array.isArray(v)) defects.push('details.findings is a list of findings')
@@ -408,10 +413,15 @@ export function validateEnvelope(role, envelope, { archived = false, prior = [] 
             if (finding.disposition === 'auto-fix' && !hasPatch) defects.push(`${path}.patch is required for disposition auto-fix`)
             if (hasPatch && finding.disposition !== 'auto-fix') defects.push(`${path}.patch is only allowed with disposition auto-fix`)
           })
-          if (details.verdict === 'pass' && v.some((finding) => plain(finding) && finding.severity === 'must-fix')) defects.push('details.verdict is pass but the findings include a must-fix')
+          if (!tolerant && details.verdict === 'pass' && v.some((finding) => plain(finding) && finding.severity === 'must-fix')) defects.push('details.verdict is pass but the findings include a must-fix')
+        }
+        if (tolerant && !(role === 'lead' && key === 'decision') && defects.length > start) {
+          defects.splice(start)
+          delete details[key]
+          dropped.push(key)
         }
       }
-      if (['reviewer', 'tech-lead'].includes(role)) {
+      if (!tolerant && ['reviewer', 'tech-lead'].includes(role)) {
         if (!archived && envelope.status === 'done' && details.verdict === 'changes-needed' && Array.isArray(details.findings) && !details.findings.some((f) => plain(f) && f.severity === 'must-fix')) defects.push('details.verdict is changes-needed but no finding is must-fix')
         if (details.verdict === 'pass' && Array.isArray(details.requirements) && details.requirements.some((r) => r?.status === 'unmet')) defects.push('details.verdict is pass but a requirement is unmet')
         if (details.verdict === 'pass' && Object.hasOwn(details, 'coverage') && details.coverage?.complete !== true) defects.push('details.verdict is pass but coverage is incomplete')
@@ -419,8 +429,8 @@ export function validateEnvelope(role, envelope, { archived = false, prior = [] 
           if (typeof id === 'string' && FINDING_ID.test(id) && !(Array.isArray(details.findings) && details.findings.some((f) => f?.id === id)) && !(Array.isArray(details.closed) && details.closed.some((c) => c?.id === id))) defects.push(`details must carry or close prior finding ${id}`)
         }
       }
-      if (role === 'lead' && details.decision === 'bounce' && !Object.hasOwn(details, 'target')) defects.push('details.target is required for a bounce: builder or planner')
+      if (!tolerant && role === 'lead' && details.decision === 'bounce' && !Object.hasOwn(details, 'target')) defects.push('details.target is required for a bounce: builder or planner')
     }
   }
-  return { envelope, defects }
+  return { envelope, defects, ...(tolerant ? { dropped } : {}) }
 }

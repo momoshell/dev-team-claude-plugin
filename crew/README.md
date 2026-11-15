@@ -65,6 +65,7 @@ The lane name is the brief's file name. `crew start` runs the `standard` shape
 only; `finish` (ADR-051) is the second entry path. `crew finish <lane> --return <file>`
 starts a finish pass on any finishable stop, including an escalation or a
 provably dead run, or another pass on a ready lane, with the file as guidance.
+A `--return` pass whose branch equals its base after the rebase still runs the build; only the commit stage stops `nothing-to-commit`.
 Bare `crew finish <lane>` reports without writing.
 A claim whose run is provably gone is taken over. A committed
 build with no remote branch is uncommitted and finished if HEAD is the commit or

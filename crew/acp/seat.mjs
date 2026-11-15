@@ -7,6 +7,7 @@ import { basename, delimiter, dirname, isAbsolute, join, parse, relative, resolv
 import { fileURLToPath } from 'node:url'
 import { ACP_POLL_MS, ACP_UPDATE_KINDS, acpClient } from '../acp-client.mjs'
 import { permissionHandler, readOnlyCommand } from '../acp-permission.mjs'
+import { SIGNAL_REFUSAL, signalCommandResult } from '../acp-signal.mjs'
 import { armGrants, PI_AGENT_DIR_ENV, refuse } from './grants.mjs'
 import { AGENT_ROLES, validateEnvelope } from '../protocols.mjs'
 import { gitRepoState } from '../lane-core.mjs'
@@ -378,6 +379,7 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
     })
   }
 
+  let seatPid = null
   // The effective definition's writes are the only authority; anything the rules do not name is refused.
   function seatPermission(toolCall) {
     if (readgate && (toolCall?.kind === 'execute' || toolCall?.kind === 'read')) {
@@ -400,7 +402,11 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
     }
     if (toolCall?.kind === 'execute') {
       if (!nonempty(toolCall.rawInput?.command)) return false
-      return writes === 'repo' || readOnlyCommand(toolCall?.rawInput?.command)
+      if (writes !== 'repo') return readOnlyCommand(toolCall?.rawInput?.command)
+      const result = signalCommandResult(toolCall.rawInput.command, { root: seatPid, processTable: deps.processTable, refuseNested: true })
+      // ACP rejection has no reason field; Muse receives it in the next prompt.
+      if (isMuse && !result.allowed) advisorNotes.push(result.reason)
+      return result.allowed
     }
     if (!['edit', 'write', 'delete'].includes(toolCall?.kind)) return false
     if (writes === 'none') return false
@@ -481,14 +487,14 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
       sinks: Object.fromEntries(sinkKinds.map((kind) => [kind, recordUpdate])),
       deps: { seatCommandRoot: runtime, ...deps.clientDeps },
     })
-    client.start()
+    seatPid = client.start()?.pid ?? null
     started = true
     client.initialize()
     client.newSession(launch.sessionParams)
     if (launch.mode) client.setMode(launch.mode)
     const deadline = now() + waitS * 1000
     // ACP's selected rejection carries only an option ID, so give the redirects before the turn.
-    const guidance = readgate ? `\n\nReadgate is active: whole-file reads and cat/head/tail of large files are refused; use a ranged read instead.${grants.mcp_servers.some((server) => server.name === 'fff') ? ' Direct grep/rg/find/fd searches are refused; use mcp__fff__grep or mcp__fff__find_files instead.' : ''}` : ''
+    const guidance = (readgate ? `\n\nReadgate is active: whole-file reads and cat/head/tail of large files are refused; use a ranged read instead.${grants.mcp_servers.some((server) => server.name === 'fff') ? ' Direct grep/rg/find/fd searches are refused; use mcp__fff__grep or mcp__fff__find_files instead.' : ''}` : '') + (isMuse && writes === 'repo' ? `\n\nSignal gate: rejected process signalling means ${SIGNAL_REFUSAL}` : '')
     const extras = [grants.skeletonread && 'mcp__crew-extras__retrieve', grants.skeletonread && 'mcp__crew-extras__skeleton', grants.subagent && 'mcp__crew-extras__agent'].filter(Boolean)
     const extraGuidance = (extras.length ? `\n\nGranted tools: ${extras.join(', ')}.` : '') + (grants.skeletonread ? ' A whole read of a large in-scope source file is refused; call mcp__crew-extras__skeleton with its path for the indexed signatures and plan citations, then mcp__crew-extras__retrieve for a range or symbol.' : '') + (isClaude && grants.agents.length ? '\n\nThe Agent tool spawns only subagent_type: "scout"; other types are refused.' : '')
     // Muse writes without asking, so a return the advisor blocked is already on disk, however it was written. A

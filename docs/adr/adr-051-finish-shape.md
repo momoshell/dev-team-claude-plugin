@@ -137,3 +137,25 @@ The review after the run's one suite-repair turn and a moved-head recheck review
 ## Amendment 3 (2026-11-15)
 
 The guidance file given to `--return` stays in force for the whole pass. Every builder turn and lead consult of that pass carries the `finish-return` item. It outranks the plan and lead rulings where they differ. Reviewer and conflict turns do not receive it. A new `--return` replaces the previous guidance. See issue #2384.
+
+## Amendment 4: pre-build planning resume (#2392)
+
+`crew finish <lane> --return <file>` takes a notes file. For a stopped planning
+attempt before any build, it resumes in the existing lane, branch and worktree,
+without discarding seeded files, prior returns or sessions. This supersedes the
+pre-build refusal in section 4 and the no-planner rule in section 2 only for this entry.
+Baseline-only stops still refuse.
+
+If the current planner done return is schema-valid and journal-accepted and only
+the lead decision is unresolved, resume at the lead. Otherwise rerun the planner
+with the previous return or refusal evidence, never an older accepted plan in its
+place. Planner and lead receive labelled operator guidance beside the unchanged
+brief, with the previous planner evidence and the stopped lead's question. Lead
+bounces may revise the plan during this entry. Another escalation stops for an
+answer; a new return replaces the guidance.
+
+After accepting a plan, use its subject, scope and proof requirement in the finish
+build/check path. Keep the original run-start anchor and issue fresh turn IDs.
+The run still ends at `finish-ready`; only the operator's `--accept` publishes.
+Post-build finish passes still cannot reopen planning. A post-build plan gap needs
+abandon, discard and restart from the brief.

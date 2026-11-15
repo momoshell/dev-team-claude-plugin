@@ -1802,6 +1802,95 @@ test('a committed, unpublished build at HEAD on the lane branch is uncommitted a
   }
 })
 
+test('return resumes pre-build planning stops in the same lane (#2392)', async () => {
+  for (const kind of ['explicit', 'closed', 'missing', 'refused', 'planner-escalation', 'lead-escalation']) {
+    const parsed = kind === 'planner-escalation' || kind === 'lead-escalation'
+      ? { role: 'planner', id: PLANNER.id, status: 'escalate', summary: 'Need an answer', details: { question: 'Keep the baseline?' } } : null
+    const observation = { role: 'planner', envelope: parsed, question: 'Keep the baseline?' }
+    const rows = [
+      { event: 'run-start', at: 123 }, { event: 'stage-start', stage: 'plan' },
+      ...Array.from({ length: 3 }, () => ({ event: 'envelope', role: 'planner', id: PLANNER.id, parsed, defects: parsed ? [] : ['invalid return'], error: null })),
+      ...(kind === 'lead-escalation' ? [{ event: 'stage-start', stage: 'lead' }, { event: 'stage-end', stage: 'lead' }] : []),
+      { event: 'stage-end', stage: 'plan' },
+      { event: 'verdict', status: 'stopped', stage: kind === 'explicit' ? 'plan' : null, reason: kind === 'lead-escalation' ? 'lead-escalated' : 'envelope-refused', observation },
+    ]
+    const f = fixture({ rows, planRecorded: false, builder: false })
+    try {
+      const plannerPath = join(f.taskDir, 'planner-1.json'), sessionDir = join(f.taskDir, 'lean', 'lead')
+      if (kind === 'missing') rmSync(plannerPath)
+      else writeFileSync(plannerPath, parsed ? JSON.stringify(parsed) : '{refused')
+      mkdirSync(sessionDir, { recursive: true })
+      const session = join(sessionDir, 'lane9.lead.70.repair.retry-1.jsonl')
+      writeFileSync(session, 'previous session')
+      const seed = join(f.cwd, 'seed.txt'), file = join(f.base, 'notes.md')
+      writeFileSync(seed, 'seeded target')
+      const lean = readFileSync(join(f.taskDir, 'lean.json'), 'utf8')
+      const oldPlanner = existsSync(plannerPath) ? readFileSync(plannerPath, 'utf8') : null
+      let launches = 0
+      const deps = { log: () => {}, spawnDetached: () => { launches++; return 4242 }, git: () => { throw new Error('planning launch must not reset the checkout') } }
+      for (const notes of ['Keep the baseline.', 'Use the replacement answer.']) {
+        writeFileSync(file, notes)
+        let started
+        await assert.doesNotReject(async () => { started = await decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps }) }, kind)
+        const spec = JSON.parse(readFileSync(started.specPath, 'utf8'))
+        assert.deepEqual([started.lane, started.worktree, spec.branch, spec.shape], ['lane9', f.cwd, 'lane9', 'finish'], kind)
+        assert.equal(spec.finish.planning.entry, 'planner', kind)
+        assert.equal(spec.finish.guidance, notes)
+        assert.deepEqual(spec.finish.planning.observation, observation)
+        assert.equal(spec.finish.planning.planner.returnPath, launches === 1 ? plannerPath : join(f.taskDir, 'planner-91.json'))
+        assert.deepEqual(spec.finish.planning.planner.parsed, launches === 1 ? parsed : null)
+        assert.ok(spec.finish.planning.planner.defects.length || parsed)
+        assert.equal(spec.finish.turnOffset, launches === 1 ? 70 : 91)
+        if (launches === 1) {
+          appendFileSync(join(f.taskDir, 'journal.jsonl'), [
+            { event: 'stage-start', stage: 'plan' }, { event: 'seat-turn', role: 'planner', id: 'lane9.planner.91' },
+            { event: 'stage-end', stage: 'plan' }, { event: 'verdict', stage: null, status: 'stopped', reason: 'envelope-refused', observation },
+          ].map((row) => JSON.stringify(row) + '\n').join(''))
+        }
+      }
+      assert.equal(launches, 2)
+      assert.equal(readFileSync(join(f.taskDir, 'lean.json'), 'utf8'), lean)
+      assert.equal(readFileSync(seed, 'utf8'), 'seeded target')
+      assert.equal(readFileSync(session, 'utf8'), 'previous session')
+      assert.equal(existsSync(plannerPath) ? readFileSync(plannerPath, 'utf8') : null, oldPlanner)
+      assert.deepEqual(JSON.parse(readFileSync(join(f.taskDir, 'journal.jsonl'), 'utf8').split('\n')[0]), rows[0])
+    } finally { cleanup(f) }
+  }
+})
+
+test('planning return resumes the lead only with an accepted current plan (#2392)', async () => {
+  for (const kind of ['accepted', 'refused', 'unrecorded', 'missing', 'invalid', 'escalated', 'older-attempt', 'newer-session']) {
+    const current = { ...PLANNER, id: 'lane9.planner.2' }
+    if (kind === 'escalated') { current.status = 'escalate'; current.details = { question: 'Keep the baseline?' } }
+    const row = { event: 'envelope', role: 'planner', id: current.id, parsed: current, defects: kind === 'refused' ? ['refused'] : [], error: null }
+    const rows = [
+      { event: 'run-start', at: 123 },
+      { event: 'envelope', role: 'planner', id: PLANNER.id, parsed: PLANNER, defects: [], error: null },
+      ...(kind === 'older-attempt' ? [row] : []),
+      { event: 'stage-start', stage: 'plan' },
+      ...(['unrecorded', 'older-attempt'].includes(kind) ? [] : [row]),
+      { event: 'stage-start', stage: 'lead' }, { event: 'stage-end', stage: 'lead' }, { event: 'stage-end', stage: 'plan' },
+      { event: 'verdict', stage: null, status: 'stopped', reason: 'lead-escalated', observation: { question: 'Approve the plan?' } },
+    ]
+    const f = fixture({ rows, planRecorded: false, builder: false })
+    try {
+      if (kind !== 'missing') writeFileSync(join(f.taskDir, 'planner-2.json'), kind === 'invalid' ? '{invalid' : JSON.stringify(current))
+      if (kind === 'newer-session') {
+        const dir = join(f.taskDir, 'lean', 'planner')
+        mkdirSync(dir, { recursive: true })
+        writeFileSync(join(dir, 'lane9.planner.80.jsonl'), 'unrecorded attempt')
+      }
+      const file = join(f.base, 'notes')
+      writeFileSync(file, 'Approved.')
+      await assert.doesNotReject(decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps: { log: () => {}, spawnDetached: () => 4242 } }), kind)
+      const fin = JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish
+      assert.equal(fin.planning.entry, kind === 'accepted' ? 'lead' : 'planner', kind)
+      assert.deepEqual(fin.planning.plan, kind === 'accepted' ? current : null, kind)
+      assert.equal(fin.subject, kind === 'accepted' ? current.details.subject : null, kind)
+    } finally { cleanup(f) }
+  }
+})
+
 test('main parses the decision flags and returns 2 for any other shape', async () => {
   for (const argv of [['lane9', '--accept', '--notes'], ['lane9', '--return'], ['lane9', '--abandon', 'x'], ['lane9', '--bogus'], ['lane9', '--notes', 'f'], ['--accept']]) {
     assert.equal(await main(argv, {}), 2, argv.join(' '))

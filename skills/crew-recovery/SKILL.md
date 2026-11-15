@@ -29,10 +29,18 @@ Read first, decide second, remove last.
 
 `crew finish <lane>` reports the stop or ready state without changing the lane.
 `crew finish <lane> --return <file>` starts a finish pass on any finishable stop,
-including an escalation or a provably dead run, with the file as builder guidance.
-Use `--return` when the existing plan still fits the build. A finish pass keeps
-the plan and recorded roster; it cannot return work to the planner (ADR-051).
-If the stop's lead names a plan gap or asks to reopen planning, end the lane with
+including an escalation or a provably dead run. `<file>` is a notes file, not inline text.
+Before any build, a planning stop resumes in the same lane, worktree and branch,
+keeping seeded files and prior returns and sessions. If the current planner done
+return was accepted and only the lead is unresolved, the lead sees the answer
+first. Otherwise the planner reruns with the previous evidence. Both receive
+labelled operator guidance and the stopped lead's question; a lead bounce can
+revise the plan. A new `--return` replaces the guidance. Once planning succeeds,
+the lane runs the finish checks below and stops ready for your decision, without
+publishing (ADR-051's pre-build exception). Baseline-only stops still refuse.
+After a build, use `--return` when the existing plan still fits. That finish pass
+keeps the plan and recorded roster; it cannot return work to the planner.
+If a post-build stop's lead names a plan gap or asks to reopen planning, end the lane with
 `crew finish <lane> --abandon` and `crew closeout <lane> --discard`, then start
 it again from its brief so the planner writes a new plan.
 On an escalation, the file answers the operator question. The pass re-enters the

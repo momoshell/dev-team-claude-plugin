@@ -235,8 +235,12 @@ export async function runLoop(spec, deps = {}) {
     && (!Object.hasOwn(spec, 'roster') || rosterSound(spec.roster))
   if (!sound) return early('invalid-input')
   const fin = spec.finish
-  // A finish run re-enters a stopped lane with its accepted plan and open findings.
-  if (isFinish && !(fin && typeof fin === 'object' && text(fin.subject) && (fin.planPath === null || text(fin.planPath))
+  const planning = isFinish ? fin?.planning : null
+  if (planning != null && !(plainObject(planning) && ['planner', 'lead'].includes(planning.entry)
+    && plainObject(planning.planner) && typeof fin.guidance === 'string'
+    && (planning.entry !== 'lead' || (validateEnvelope('planner', planning.plan, { archived: true }).defects.length === 0 && planning.plan?.status === 'done')))) return early('invalid-input')
+  // Only a pre-build planning resume may enter without a subject or plan.
+  if (isFinish && !(fin && typeof fin === 'object' && (planning || text(fin.subject)) && (fin.planPath === null || text(fin.planPath))
     && Array.isArray(fin.findings) && text(fin.stop?.reason)
     && (fin.findingsRole === undefined || fin.findingsRole === 'tech-lead')
     && Number.isSafeInteger(fin.turnOffset) && fin.turnOffset >= 0
@@ -258,7 +262,7 @@ export async function runLoop(spec, deps = {}) {
   let resolved
   try { resolved = d.resolveAgents(spec.tier, undefined, spec.roster?.snapshot ?? spec.roster?.overrides) } catch { return early('seat-unmeasured') }
   const seats = { ...resolved?.seats }
-  const requiredRoles = (tier) => isFinish ? FINISH_ROLES : tier === 'mechanical' ? ['builder'] : tier === 'judge' ? [...REQUIRED_ROLES, 'tech-lead'] : REQUIRED_ROLES
+  const requiredRoles = (tier) => isFinish ? (planning ? REQUIRED_ROLES : FINISH_ROLES) : tier === 'mechanical' ? ['builder'] : tier === 'judge' ? [...REQUIRED_ROLES, 'tech-lead'] : REQUIRED_ROLES
   if (!requiredRoles(spec.tier).every((role) => seats[role] && typeof seats[role] === 'object')) return early('seat-unmeasured')
   const bounded = (cell) => cell.rounds === undefined || (Number.isSafeInteger(cell.rounds) && cell.rounds > 0)
   if (!Object.values(seats).every(bounded)) return early('invalid-input')
@@ -276,6 +280,7 @@ export async function runLoop(spec, deps = {}) {
   const last = {}
   const context = new AsyncLocalStorage()
   let turn = isFinish ? fin.turnOffset : 0
+  let planningEntry = Boolean(planning)
   let progressTurns = 0
   let builderMark = null, consultMustFix = null
   let tier = spec.tier
@@ -289,6 +294,7 @@ export async function runLoop(spec, deps = {}) {
   const rulings = isFinish && Array.isArray(fin.rulings) ? fin.rulings.map((r) => ({ id: 'lead-bounce', summary: r.summary })) : []
   const guidanceItem = isFinish && typeof fin?.guidance === 'string' ? { id: 'finish-return', summary: 'The operator supplied guidance for this finish run. It stands for the whole finish run and outranks the plan and a lead ruling where they differ.', guidance: fin.guidance } : null
   const withGuidance = (items) => guidanceItem ? [guidanceItem, ...items.filter((item) => item?.id !== 'finish-return')] : items
+  const planningHistory = planning ? { id: 'planning-resume', summary: 'Resume the stopped planning attempt in this lane. The operator guidance answers the previous stop; the brief is unchanged. Previous planner evidence and the stopped lead question follow.', planner: planning.planner, observation: planning.observation } : null
   const repeatsFailure = (failure) => {
     if (failures.some((previous) => isDeepStrictEqual(previous, failure))) return true
     failures.push(failure)
@@ -388,7 +394,7 @@ export async function runLoop(spec, deps = {}) {
     planPath = resolve(spec.taskDir, details.plan_path)
     filesInScope = details.files_in_scope ?? null
     subject = details.subject
-    testsRequired = details.tests.length > 0
+    testsRequired = !Array.isArray(details.tests) || details.tests.length > 0
     if (details.judge) {
       const halt = await raise('planner-judge', { judge: details.judge })
       if (halt) return halt
@@ -415,6 +421,7 @@ export async function runLoop(spec, deps = {}) {
   // Non-done returns route under ADR-055 §12; an exhausted bound goes to the lead, unless singleTurn or the lead's own bound stops it.
   const seatTurn = async (role, feedback = [], { singleTurn = false, free = false, hold = false, reserveReview = null, deltaReview = null, recheckReview = null } = {}) => {
     if (role === 'reviewer') enterPhase('review')
+    if (planningEntry && ['planner', 'lead'].includes(role)) feedback = [...feedback, guidanceItem, planningHistory]
     let given = feedback
     for (;;) {
       let held, progressed = false
@@ -597,7 +604,7 @@ export async function runLoop(spec, deps = {}) {
     consultMustFix = mustFix
     for (;;) {
       const lastConsult = rounds.lead + 1 >= (seats.lead.rounds ?? DEFAULT_ROUNDS)
-      const asked = await stage('lead', () => seatTurn('lead', [{ role, reason: held.reason, envelope: held.envelope ?? last[role] ?? null, held: held.envelope ?? null, feedback, last: lastConsult, targets: isFinish ? ['builder'] : ['builder', 'planner'] }]))
+      const asked = await stage('lead', () => seatTurn('lead', [{ role, reason: held.reason, envelope: held.envelope ?? last[role] ?? null, held: held.envelope ?? null, feedback, last: lastConsult, targets: isFinish && !planningEntry ? ['builder'] : ['builder', 'planner'] }]))
       if (asked.halt) return asked
       const { decision, target, question, instructions } = asked.envelope.details
       if (decision === 'escalate') return { halt: await stop('lead-escalated', { role, ...held, lead: asked.envelope, question: question ?? asked.envelope.summary }) }
@@ -683,12 +690,22 @@ export async function runLoop(spec, deps = {}) {
       await emit('roster', { tier, seats: rosterCells(seats), files: spec.roster?.files ?? [] })
     }
 
-    const planned = isFinish || tier === 'mechanical' ? null : await stage('plan', () => seatTurn('planner'))
+    let planned = null
+    if (planning) {
+      if (planning.entry === 'lead') {
+        const decision = await consultLead('planner', { reason: fin.stop.reason, envelope: planning.plan }, [], false)
+        if (decision.halt) return decision.halt
+        planned = decision.decision === 'accept' ? { envelope: planning.plan }
+          : await stage('plan', () => seatTurn('planner', [{ id: 'lead-bounce', summary: decision.summary }]))
+      } else planned = await stage('plan', () => seatTurn('planner'))
+    } else if (!isFinish && tier !== 'mechanical') planned = await stage('plan', () => seatTurn('planner'))
     if (planned?.halt) return planned.halt
     if (planned) {
       const halt = await acceptPlan(planned.envelope)
       if (halt) return halt
-    } else if (isFinish) {
+      planningEntry = false
+    }
+    if (isFinish) {
       // A --return pass counts the reviews the finish run already spent: it never grants new rounds.
       seats.reviewer = { ...seats.reviewer, rounds: FINISH_REVIEW_ROUNDS - (fin.priorReviewRounds ?? 0) }
       const scopePaths = protectedPaths(filesInScope)
@@ -776,7 +793,7 @@ export async function runLoop(spec, deps = {}) {
           namedTests = Array.isArray(built.envelope.details.tests) ? built.envelope.details.tests : []
           lastProved.clear()
           builderReport = { tests: namedTests, notes: built.envelope.details.notes ?? null }
-          if (!namedTests.length && !isFinish && testsRequired) {
+          if (!namedTests.length && (!isFinish || planning) && testsRequired) {
             const failure = { role: 'builder', failure: 'proof-no-tests' }
             if (repeatsFailure(failure)) return stop('no-progress', failure)
             feedback = [{ id: 'proof-no-tests', severity: 'must-fix', summary: 'Name at least one test in details.tests ({file, title}); the loop proves each red on the old source and green on the build, or green with base-package-absent or base-test-absent.' }, ...feedback.filter((item) => item?.id !== 'proof-no-tests' && item?.id !== 'proof-unproven')]
@@ -787,7 +804,7 @@ export async function runLoop(spec, deps = {}) {
         const recheckReview = rebaseOnly ? recheckScope : null
         recheckScope = null
         recheck = false
-        if (!namedTests.length && !isFinish && !testsRequired) proofLines = [tier === 'mechanical' ? '- proof: none, mechanical lane, not reviewed' : '- proof: none, no criterion is machine-checked']
+        if (!namedTests.length && (!isFinish || planning) && !testsRequired) proofLines = [tier === 'mechanical' ? '- proof: none, mechanical lane, not reviewed' : '- proof: none, no criterion is machine-checked']
         if (namedTests.length) {
           const proof = await stage('proof', () => callCheck('proof', d.proveTests, { cwd, base: 'HEAD', tests: namedTests, timeoutMs: spec.proofTimeoutMs }))
           const rows = Array.isArray(proof.rows) ? proof.rows : []
@@ -971,7 +988,7 @@ export async function runLoop(spec, deps = {}) {
         '', '## Verification',
         ...(proved.length ? [...proved.map(({ file, title, base }) => `- ${oneLine(file)}: ${oneLine(title)} ${base?.reason === 'base-package-absent' ? 'had its package absent on the old source (base-package-absent)' : base?.reason === 'base-test-absent' ? 'had its test file absent on the old source (base-test-absent)' : 'was red on the old source'}, green on ${lastProved.has(`${file}\0${title}`) ? 'the build.' : 'an earlier build turn; the last build turn did not name it.'}`), ...(!isFinish && tier === 'mechanical' ? ['Review: none, mechanical lane, not reviewed.'] : [])]
           : !isFinish && tier === 'mechanical' ? ['Proof: mechanical lane, not reviewed.']
-            : !isFinish && !testsRequired ? ['Proof: no criterion is machine-checked.'] : ['Proof: unmeasured.']),
+            : (!isFinish || planning) && !testsRequired ? ['Proof: no criterion is machine-checked.'] : ['Proof: unmeasured.']),
         suiteResult ? `Suite passed with exit code ${suiteResult.code}${Object.hasOwn(suiteResult, 'redCode') ? ` on a re-run after a red exit ${suiteResult.redCode}` : ''}.` : 'Suite: unmeasured.',
         ...(open.length ? ['', '## Open points', ...open.map((f) => `- ${oneLine(f.summary)} (${oneLine(f.location)})`)] : []),
       ].join('\n')

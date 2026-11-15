@@ -1627,6 +1627,33 @@ const piExtensions = (launch) => launch.args.flatMap((arg, index, args) => arg =
 const piTools = (launch) => launch.args[launch.args.indexOf('--tools') + 1].split(',')
 const FFF_TOOLS = ['mcp__fff__find_files', 'mcp__fff__grep', 'mcp__fff__multi_grep']
 
+test('the committed planner grants a pi scout on every seated tier', async () => {
+  const { fields, defects } = parseAgent(readFileSync(join(ROOT, 'crew/agents/planner.md'), 'utf8'))
+  assert.deepEqual(defects, [])
+  for (const tier of ['mechanical', 'build', 'judge']) {
+    assert.notEqual(fields.tiers?.[tier], null, tier)
+    const definition = { ...fields, ...fields.tiers?.[tier], agent: 'pi', model: 'openai/gpt-6-astra' }
+    const { launch } = await armed('pi', 'planner', definition)
+    assert.deepEqual(piExtensions(launch), [join(ROOT, 'crew/pi/extensions/subagent.ts')], tier)
+    assert.deepEqual(JSON.parse(launch.env.CREW_PI_AGENTS ?? '[]'), [{ name: 'scout', def: join(ROOT, 'crew/pi/agents/scout.json') }], tier)
+    assert.ok(piTools(launch).includes('agent'), tier)
+  }
+})
+
+test('the committed Claude planner boots with its native Haiku scout', async () => {
+  const { fields, defects } = parseAgent(readFileSync(join(ROOT, 'crew/agents/planner.md'), 'utf8'))
+  assert.deepEqual(defects, [])
+  const { launch } = await armed('claude', 'planner', { ...fields, ...fields.tiers?.build })
+  const options = claudeOptions(launch)
+  const piScout = JSON.parse(readFileSync(join(ROOT, 'crew/pi/agents/scout.json'), 'utf8'))
+  assert.deepEqual(options.agents, { scout: {
+    description: piScout.description, prompt: piScout.prompt, model: 'claude-haiku-5-5',
+    tools: ['Read', 'Grep', 'Glob'], disallowedTools: ['Bash', 'Edit', 'Write', 'NotebookEdit', 'Agent', 'Task', 'mcp__*'],
+  } })
+  for (const key of ['tools', 'allowedTools']) assert.ok(options[key].includes('Agent'))
+  assert.equal(launch.env.CREW_SCOUT, '1')
+})
+
 test('a claude reviewer granted subagent boots with exactly one read-only Haiku scout', async () => {
   const { launch } = await armed('claude', 'reviewer', { extensions: ['subagent'] })
   const options = claudeOptions(launch)

@@ -238,7 +238,7 @@ test('every tier resolves to exactly the roster cells, null roles unseated', () 
 
 // The seats' arm grants are part of the roster: a definition that drops one runs a silently weaker seat.
 test('each committed definition declares exactly its arm grants', () => {
-  const expected = { lead: undefined, planner: undefined, builder: ['fff', 'readgate', 'skeletonread'], reviewer: ['subagent'], 'tech-lead': undefined }
+  const expected = { lead: undefined, planner: ['subagent'], builder: ['fff', 'readgate', 'skeletonread'], reviewer: ['subagent'], 'tech-lead': undefined }
   for (const role of AGENT_ROLES) {
     const { fields } = parseAgent(readFileSync(join(AGENTS_DIR, `${role}.md`), 'utf8'))
     assert.deepEqual(fields.extensions, expected[role], role)

@@ -741,11 +741,11 @@ test('toolResultPatch flags a refusal and only a refusal', () => {
   assert.equal(mod.toolResultPatch(null), undefined)
 })
 
-test('the committed scout definition runs the child on gpt-6.1-terra at medium', () => {
+test('the committed scout definition runs the child on gpt-6-luna at medium', () => {
   const loaded = mod.loadAgentDefinition({ name: 'scout', def: join(ROOT, 'crew/pi/agents/scout.json') })
   assert.equal(loaded.error, undefined)
   const args = mod.childArgs({ def: loaded.definition, task: 'probe', promptFile: '/tmp/probe', model: loaded.definition.model, thinking: loaded.definition.thinking })
-  assert.equal(args[args.indexOf('--model') + 1], 'openai-codex/gpt-6.1-terra')
+  assert.equal(args[args.indexOf('--model') + 1], 'openai-codex/gpt-6-luna')
   assert.equal(args[args.indexOf('--thinking') + 1], 'medium')
 })
 

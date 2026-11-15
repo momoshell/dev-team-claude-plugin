@@ -9,7 +9,7 @@ export function readProcessTable() {
   return result.stdout
 }
 
-const signalName = (word) => ['kill', 'pkill', 'killall'].includes(basename(word))
+const SIGNAL_WORD = /(^|[^\w-])(kill|pkill|killall)(?=$|[^\w-])/
 // Commands that run their arguments as a command; a signalling word there is refused, since its target is not parsed here.
 const runners = new Set(['eval', 'trap', 'alias', 'find', 'watch', 'parallel', 'flock', 'doas', 'su', 'runuser', 'chroot', 'stdbuf', 'ionice', 'taskset', 'caffeinate', 'script', 'unshare', 'nsenter'])
 const wrappers = new Set(['xargs', 'sudo', 'env', 'command', 'builtin', 'exec', 'nohup', 'timeout', 'nice', 'time', 'setsid'])
@@ -22,7 +22,7 @@ export function signalCommandResult(command, { root, processTable = readProcessT
   command = command.replace(/\\\n/g, '')
   // Quotes and backslashes can split a command word ('ki''ll'), and an expansion can supply one ("$k"),
   // so only a command with neither a signalling word after unquoting nor an expansion skips the parse.
-  if (!/(^|[^\w-])(kill|pkill|killall)(?=$|[^\w-])/.test(command.replace(/['"\\]/g, '')) && !/[$`*?[]/.test(command)) return allow
+  if (!SIGNAL_WORD.test(command.replace(/['"\\]/g, '')) && !/[$`*?[]/.test(command)) return allow
   let rows
   function owned(pid) {
     const seen = new Set()
@@ -68,8 +68,7 @@ export function signalCommandResult(command, { root, processTable = readProcessT
     if (/[$`*?[]/.test(words[0])) return false
     const name = basename(words[0])
     if ((wrappers.has(name) || runners.has(name)) && words.slice(1).some((word) => /[$`]/.test(word))) return false
-    if (refuseNested && runners.has(name) && words.slice(1).some((word) => /(^|[^\w-])(kill|pkill|killall)(?=$|[^\w-])/.test(word))) return false
-    if (wrappers.has(name) && words.slice(1).some((word) => signalName(word) || /(^|[^\w-])(kill|pkill|killall)(?=$|[^\w-])/.test(word))) return false
+    if ((wrappers.has(name) || (refuseNested && runners.has(name))) && words.slice(1).some((word) => SIGNAL_WORD.test(word))) return false
     if (['sh', 'bash', 'zsh'].includes(name)) {
       const index = words.findIndex((word, i) => i > 0 && /^-[^-]*c/.test(word))
       if (index >= 0 && words[index + 1] !== undefined && !parse(words[index + 1])) return false

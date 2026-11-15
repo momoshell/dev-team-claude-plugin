@@ -72,7 +72,9 @@ return with an unresolved lead decision resumes at the lead; otherwise the plann
 reruns with the previous evidence. Planner and lead receive labelled operator guidance
 and the stopped lead's question. A lead bounce can revise the plan. An accepted plan
 then enters the finish build/check path, ending at `finish-ready`, not publication;
-use `--accept` to publish. Baseline-only stops still refuse. Post-build finish passes
+use `--accept` to publish. A judge lane resumed by `--return` from a plan stop gets
+reviewer review but no tech-lead second review. To get that second review, abandon
+and restart the lane. Baseline-only stops still refuse. Post-build finish passes
 cannot reopen planning: abandon, close out with `--discard` and restart from the brief
 when the build needs a new plan (ADR-051).
 A `--return` pass whose branch equals its base after the rebase still runs the build; only the commit stage stops `nothing-to-commit`.

@@ -157,5 +157,7 @@ answer; a new return replaces the guidance.
 After accepting a plan, use its subject, scope and proof requirement in the finish
 build/check path. Keep the original run-start anchor and issue fresh turn IDs.
 The run still ends at `finish-ready`; only the operator's `--accept` publishes.
+A judge lane resumed by `--return` from a plan stop gets reviewer review but no
+tech-lead second review. To get that second review, abandon and restart the lane.
 Post-build finish passes still cannot reopen planning. A post-build plan gap needs
 abandon, discard and restart from the brief.

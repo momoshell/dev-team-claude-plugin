@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { git, scratchDir, trackProcessGroupFile } from '../test/helpers.mjs'
 import { createHash } from 'node:crypto'
@@ -844,6 +844,87 @@ test('bare crew finish reports a stopped lane without spawning or writing anythi
       assert.equal(readFileSync(join(f.cwd, 'change'), 'utf8'), 'keep')
       assert.deepEqual(spawned, [])
       assert.equal(git.some(([, args]) => args[0] === 'reset'), false)
+    } finally { cleanup(f) }
+  }
+})
+
+test('bare crew finish reports resumable pre-build plan stops without side effects (#2395)', async () => {
+  for (const kind of ['explicit', 'closed', 'missing', 'refused', 'planner-escalation', 'lead-escalation']) {
+    const parsed = kind.endsWith('escalation')
+      ? { role: 'planner', id: PLANNER.id, status: 'escalate', summary: 'Need an answer', details: { question: 'Keep the baseline?' } } : null
+    const reason = kind === 'lead-escalation' ? 'lead-escalated' : kind === 'planner-escalation' ? 'seat-escalated' : 'envelope-refused'
+    const rows = [
+      { event: 'run-start' }, { event: 'stage-start', stage: 'plan' },
+      ...(kind === 'missing' ? [{ event: 'seat-turn', role: 'planner', id: PLANNER.id }]
+        : [{ event: 'envelope', role: 'planner', id: PLANNER.id, parsed, defects: parsed ? [] : ['invalid return'], error: null }]),
+      ...(kind === 'lead-escalation' ? [{ event: 'stage-start', stage: 'lead' }, { event: 'stage-end', stage: 'lead' }] : []),
+      { event: 'stage-end', stage: 'plan' },
+      { event: 'verdict', stage: kind === 'explicit' ? 'plan' : null, status: 'stopped', reason },
+    ]
+    const f = fixture({ rows, builder: false, planRecorded: false })
+    try {
+      const plannerPath = join(f.taskDir, 'planner-1.json')
+      if (kind === 'missing') rmSync(plannerPath)
+      else writeFileSync(plannerPath, parsed ? JSON.stringify(parsed) : '{refused')
+      writeFileSync(join(f.cwd, 'change'), 'keep')
+      const before = Object.fromEntries(readdirSync(f.taskDir).map((name) => [name, readFileSync(join(f.taskDir, name), 'utf8')]))
+      const logs = [], errors = []
+      const unexpected = () => { assert.fail('report must not write, spawn or call git') }
+      const stderr = process.stderr.write
+      process.stderr.write = (chunk) => { errors.push(String(chunk)); return true }
+      let code
+      try {
+        code = await main(['lane9'], {
+          crewRoot: f.root, alive: () => true, log: (line) => logs.push(line),
+          spawnDetached: unexpected, spawnSync: unexpected, git: unexpected,
+          writeFileSync: unexpected, appendFileSync: unexpected, mkdirSync: unexpected, rmSync: unexpected,
+        })
+      } finally { process.stderr.write = stderr }
+      assert.equal(code, 0, kind)
+      assert.deepEqual(logs, [`crew finish: lane=lane9 stop=${reason}`], kind)
+      assert.deepEqual(errors, [], kind)
+      assert.deepEqual(Object.fromEntries(readdirSync(f.taskDir).map((name) => [name, readFileSync(join(f.taskDir, name), 'utf8')])), before, kind)
+      assert.deepEqual(readdirSync(f.cwd), ['change'], kind)
+      assert.equal(readFileSync(join(f.cwd, 'change'), 'utf8'), 'keep', kind)
+    } finally { cleanup(f) }
+  }
+})
+
+test('bare report and return retain pre-build refusal guards (#2395)', async () => {
+  for (const kind of ['baseline-explicit', 'baseline-closed', 'builder-row', 'builder-file', 'builder-session']) {
+    const stage = kind.startsWith('baseline') ? 'baseline' : 'plan'
+    const rows = [
+      { event: 'run-start' }, { event: 'stage-start', stage },
+      ...(kind === 'builder-row' ? [builderRow] : []),
+      { event: 'stage-end', stage },
+      { event: 'verdict', stage: kind === 'baseline-explicit' ? stage : null, status: 'stopped', reason: 'envelope-refused' },
+    ]
+    const f = fixture({ rows, builder: false, planRecorded: false })
+    try {
+      if (kind === 'builder-file') writeFileSync(join(f.taskDir, 'builder-2.json'), JSON.stringify(BUILDER))
+      if (kind === 'builder-session') {
+        const dir = join(f.taskDir, 'lean', 'builder')
+        mkdirSync(dir, { recursive: true })
+        writeFileSync(join(dir, 'lane9.builder.2.jsonl'), 'previous session')
+      }
+      const file = join(f.base, 'notes')
+      writeFileSync(file, 'Continue.')
+      const before = Object.fromEntries(readdirSync(f.taskDir, { recursive: true }).filter((name) => statSync(join(f.taskDir, name)).isFile()).map((name) => [name, readFileSync(join(f.taskDir, name), 'utf8')]))
+      const errors = [], logs = []
+      const unexpected = () => { assert.fail('refusal must not launch or call git') }
+      const deps = { crewRoot: f.root, alive: () => true, log: (line) => logs.push(line), spawnDetached: unexpected, git: unexpected }
+      const stderr = process.stderr.write
+      process.stderr.write = (chunk) => { errors.push(String(chunk)); return true }
+      try {
+        for (const argv of [['lane9'], ['lane9', '--return', file]]) {
+          assert.equal(await main(argv, deps), 1, `${kind}: ${argv.join(' ')}`)
+          assert.deepEqual(Object.fromEntries(readdirSync(f.taskDir, { recursive: true }).filter((name) => statSync(join(f.taskDir, name)).isFile()).map((name) => [name, readFileSync(join(f.taskDir, name), 'utf8')])), before, kind)
+        }
+      } finally { process.stderr.write = stderr }
+      assert.equal(errors.length, 2, kind)
+      assert.match(errors[0], /finish-premise/, kind)
+      assert.equal(errors[1], errors[0], kind)
+      assert.deepEqual(logs, [], kind)
     } finally { cleanup(f) }
   }
 })

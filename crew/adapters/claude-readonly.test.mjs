@@ -67,6 +67,22 @@ test('S2-14: the claude seat settings file is named for what it holds', () => {
   assert.equal(existsSync(new URL('./claude-usage.settings.json', import.meta.url)), false)
 })
 
+test('a repo seat hook denies pkill and a foreign pid with the ownership reason (#2379)', () => {
+  const env = { CREW_READ_ONLY: '0', CREW_SEAT_PID: String(process.pid) }
+  const reason = 'this process is not yours; another lane or the operator owns it. Stop only processes your own commands started.'
+  for (const command of ['pkill -f nextest', 'kill 1']) {
+    const out = readOnlyHookDecision(payload(command), env)?.hookSpecificOutput
+    assert.equal(out?.permissionDecision, 'deny')
+    assert.equal(out?.permissionDecisionReason, reason)
+  }
+  assert.equal(readOnlyHookDecision(payload('git push'), env), undefined)
+  const settings = JSON.parse(readFileSync(CLAUDE_SEAT_SETTINGS, 'utf8'))
+  const hook = settings.hooks.PreToolUse.filter((e) => e.matcher === 'Bash').flatMap((e) => e.hooks).find((h) => h.command.includes('CREW_READ_ONLY_HOOK'))
+  const run = spawnSync('/bin/sh', ['-c', hook.command], { input: JSON.stringify(payload('pkill -f nextest')), encoding: 'utf8', env: { ...process.env, ...env, CREW_READ_ONLY_NODE: process.execPath, CREW_READ_ONLY_HOOK: hookPath } })
+  assert.equal(run.status, 0)
+  assert.equal(JSON.parse(run.stdout).hookSpecificOutput.permissionDecisionReason, reason)
+})
+
 test('the settings hook runs the script through the launch env', () => {
   const settings = JSON.parse(readFileSync(CLAUDE_SEAT_SETTINGS, 'utf8'))
   const hook = settings.hooks.PreToolUse.filter((e) => e.matcher === 'Bash').flatMap((e) => e.hooks).find((h) => h.command.includes('CREW_READ_ONLY_HOOK'))

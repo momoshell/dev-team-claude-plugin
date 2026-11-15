@@ -724,6 +724,20 @@ test('a read-only Pi seat blocks a refused command with a reason naming its firs
   } finally { h.close() }
 })
 
+test('a repo-writing Pi seat blocks a signal to a process it did not start with the reason, before any ACP request (#2379)', async () => {
+  const h = await withSession({ env: { CREW_READ_ONLY: '0', CREW_SEAT_PID: String(process.pid) } })
+  try {
+    for (const command of ['pkill -f nextest', 'kill 1']) {
+      const result = await Promise.race([
+        h.emit('tool_call', bashCall(command, command)),
+        h.wait((f) => f.method === 'session/request_permission', 'permission request', 100).then(() => 'requested', () => 'timed out'),
+      ])
+      assert.deepEqual(result, { block: true, reason: 'this process is not yours; another lane or the operator owns it. Stop only processes your own commands started.' })
+      assert.equal(h.permissionRequests().length, 0)
+    }
+  } finally { h.close() }
+})
+
 test('a repo-writing Pi seat keeps the generic ACP gate for refused commands', async () => {
   const h = await withSession({ env: { CREW_READ_ONLY: '0' } })
   try {

@@ -139,7 +139,7 @@ export function acpClient({ launch, dir, cwd, role = 'builder', sinks = {}, onPe
     if (!reservation.ok) throw acpRefuse(reservation.reason === 'unresolvable' ? 'acp-unresolvable-reservation' : 'acp-session-busy', `acp seat ${role} is busy`)
     handle = reservation.handle
     const args = launch?.args || []
-    const shell = `trap ':' TERM INT; rm -f ${shq(paths.exit)}; mkfifo ${shq(paths.fifo)} 2>/dev/null; printf '%s' $$ >${shq(`${paths.pgid}.tmp`)}; mv ${shq(`${paths.pgid}.tmp`)} ${shq(paths.pgid)}; ${shq(launch?.bin)} ${args.map(shq).join(' ')} <${shq(paths.fifo)} >>${shq(paths.stream)} 2>>${shq(paths.stderr)}; printf '%s' $? >${shq(`${paths.exit}.tmp`)}; mv ${shq(`${paths.exit}.tmp`)} ${shq(paths.exit)}`
+    const shell = `trap ':' TERM INT; rm -f ${shq(paths.exit)}; mkfifo ${shq(paths.fifo)} 2>/dev/null; printf '%s' $$ >${shq(`${paths.pgid}.tmp`)}; mv ${shq(`${paths.pgid}.tmp`)} ${shq(paths.pgid)}; CREW_SEAT_PID=$$; export CREW_SEAT_PID; ${shq(launch?.bin)} ${args.map(shq).join(' ')} <${shq(paths.fifo)} >>${shq(paths.stream)} 2>>${shq(paths.stderr)}; printf '%s' $? >${shq(`${paths.exit}.tmp`)}; mv ${shq(`${paths.exit}.tmp`)} ${shq(paths.exit)}`
     store.advance(handle, PHASES.SPAWNING)
     try {
       child = spawn('/bin/sh', ['-c', shell], { detached: true, stdio: 'ignore', cwd, env: piSeatSpawnEnv(process.env, launch?.env || {}) })

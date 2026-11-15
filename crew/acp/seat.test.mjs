@@ -980,6 +980,97 @@ test('shell: repo seats run commands, others only the read-only allowlist', asyn
   })
 })
 
+test('a repo seat may signal only processes its own agent started (#2379)', async () => {
+  await withPermissionTree(async (tree) => {
+    const commands = [`cd ${tree.work} && kill 96587 96625`, 'kill 96587', 'kill 96625', 'kill 950 951', 'kill -0 950', 'kill 0', 'kill %1', 'kill $!', 'kill -l', 'kill -9 -901']
+    const processTable = () => '901 1 901\n902 901 901\n950 902 950\n951 950 950\n96587 1 96587\n96625 96587 96587\n'
+    assert.deepEqual((await decide(tree, 'repo', commands.map(shell), { deps: { processTable } })).verdicts, ['reject', 'reject', 'reject', ...Array(7).fill('allow')])
+  })
+})
+
+test('a repo seat checks signals in shell control flow and groups (#2379)', async () => {
+  await withPermissionTree(async (tree) => {
+    const commands = ['if true; then kill 96587; fi', '(kill 96587)', '{ kill 96587; }']
+    const processTable = () => '901 1 901\n96587 1 96587\n'
+    assert.deepEqual((await decide(tree, 'repo', commands.map(shell), { deps: { processTable } })).verdicts, commands.map(() => 'reject'))
+  })
+})
+
+test('a repo seat checks expansions in unquoted but not quoted heredocs (#2379)', async () => {
+  await withPermissionTree(async (tree) => {
+    const commands = ['cat <<EOF\n$(kill 96587)\nEOF', "cat <<'EOF'\n$(kill 96587)\nEOF"]
+    const processTable = () => '901 1 901\n96587 1 96587\n'
+    assert.deepEqual((await decide(tree, 'repo', commands.map(shell), { deps: { processTable } })).verdicts, ['reject', 'allow'])
+  })
+})
+
+test('a repo seat permits redirected signals only to owned processes (#2379)', async () => {
+  await withPermissionTree(async (tree) => {
+    const commands = ['kill 950 2>/dev/null', 'kill 950 >/dev/null', 'kill 96587 2>/dev/null']
+    const processTable = () => '901 1 901\n950 901 950\n96587 1 96587\n'
+    assert.deepEqual((await decide(tree, 'repo', commands.map(shell), { deps: { processTable } })).verdicts, ['allow', 'allow', 'reject'])
+  })
+})
+
+test('a Muse repo seat receives the reason for a refused signal (#2379)', async () => {
+  await withPermissionTree(async (tree) => {
+    const processTable = () => '901 1 901\n96587 1 96587\n'
+    const muse = await decide(tree, 'repo', [shell('kill 96587')], { agent: 'muse', model: 'meta/test', permissionsOnlyFirst: true, deps: { processTable } })
+    const prompts = muse.run.sent.filter((frame) => frame.method === 'session/prompt')
+    assert.equal(prompts[1]?.params.prompt[0].text, 'this process is not yours; another lane or the operator owns it. Stop only processes your own commands started.')
+    assert.deepEqual(muse.verdicts, ['reject'])
+  })
+})
+
+test('a repo seat refuses pkill, killall and kill fed by xargs or substitution (#2379)', async () => {
+  await withPermissionTree(async (tree) => {
+    const commands = ['pkill -f nextest', 'killall cargo', "ps ax | grep nextest | awk '{print $1}' | xargs kill", 'kill $(pgrep -f nextest)', 'kill $PID']
+    assert.deepEqual((await decide(tree, 'repo', commands.map(shell))).verdicts, Array(commands.length).fill('reject'))
+  })
+})
+
+test('a repo seat refuses pids fed to a nested shell by xargs (#2379)', async () => {
+  await withPermissionTree(async (tree) => {
+    const processTable = () => '901 1 901\n96587 1 96587\n'
+    const command = `printf '%s\\n' 96587 | xargs sh -c 'kill "$@"' sh`
+    assert.deepEqual((await decide(tree, 'repo', [shell(command)], { deps: { processTable } })).verdicts, ['reject'])
+  })
+})
+
+test('a repo seat consumes the kill -n signal number before checking targets (#2379)', async () => {
+  await withPermissionTree(async (tree) => {
+    const processTable = () => '901 1 901\n950 901 950\n96587 1 96587\n'
+    const commands = ['kill -n 9 950', 'kill -n 9 96587']
+    assert.deepEqual((await decide(tree, 'repo', commands.map(shell), { deps: { processTable } })).verdicts, ['allow', 'reject'])
+  })
+})
+
+test('a repo seat ignores shell comments after a kill target (#2379)', async () => {
+  await withPermissionTree(async (tree) => {
+    const processTable = () => '901 1 901\n950 901 950\n96587 1 96587\n'
+    const commands = ['kill 950 # stop our child', 'kill 96587 # foreign', 'kill 950 "#literal"', 'kill 950 \\#literal']
+    assert.deepEqual((await decide(tree, 'repo', commands.map(shell), { deps: { processTable } })).verdicts, ['allow', 'reject', 'reject', 'reject'])
+  })
+})
+
+test('a repo seat refuses signalling words in command positions it cannot check, not in plain arguments (#2379)', async () => {
+  await withPermissionTree(async (tree) => {
+    const processTable = () => '901 1 901\n950 901 950\n96587 1 96587\n'
+    const refused = ["sh -c 'kill 96587'", "eval 'kill 950'", "env sh -c 'kill 950'", "nohup sh -c 'pkill cargo'", "timeout 1 sh -c 'killall cargo'", 'find . -exec kill 950 ;', "xargs sh -c 'kill 950'", "'ki''ll' -0 96587", 'k\\ill -0 96587', 'k=kill; "$k" -0 96587', 'env "$k" -0 96587', 'sh -c "$cmd"', "trap 'kill 96587' EXIT", '/bin/k?ll 96587', '/bin/k[i]ll 96587', 'ki\\\nll 96587', "alias k='kill -0'\nk 96587"]
+    const allowed = ["sh -c 'kill 950'", 'grep kill file', 'git log --grep "kill"', 'grep -rn pkill crew', 'ls *.mjs', 'rm -f dist/*.js']
+    const commands = [...refused, ...allowed]
+    assert.deepEqual((await decide(tree, 'repo', commands.map(shell), { deps: { processTable } })).verdicts, [...refused.map(() => 'reject'), ...allowed.map(() => 'allow')])
+  })
+})
+
+test('a repo seat refuses a pid signal when ps fails or cannot read the pid (#2379)', async () => {
+  await withPermissionTree(async (tree) => {
+    for (const processTable of [() => { throw Error('ps failed') }, () => '', () => '901 1 901\n']) {
+      assert.deepEqual((await decide(tree, 'repo', [shell('kill 950')], { deps: { processTable } })).verdicts, ['reject'])
+    }
+  })
+})
+
 test('anything the rules do not name is rejected even for a repo seat', async () => {
   await withPermissionTree(async (tree) => {
     const target = join(tree.work, 'existing')

@@ -30,6 +30,7 @@
 import net from 'node:net'
 import { unlinkSync } from 'node:fs'
 import { readOnlyCommandResult } from '../../acp-permission.mjs'
+import { SIGNAL_REFUSAL, signalCommandResult } from '../../acp-signal.mjs'
 import { ACP_PROTOCOL_VERSION, ACP_STOP_REASONS, ACP_UPDATE_KINDS } from '../../acp-client.mjs'
 
 const GATED_TOOLS_ENV = 'CREW_ACP_GATED_TOOLS'
@@ -110,6 +111,7 @@ export default function acpServerExtension(pi: any) {
   const permissionTimeoutMs = permissionTimeoutFrom(process.env[PERMISSION_TIMEOUT_ENV])
   // Fixed at launch: only a read-only seat has its refused commands explained.
   const readOnlySeat = process.env.CREW_READ_ONLY === '1'
+  const seatPid = Number(process.env.CREW_SEAT_PID)
 
   let ctx: any = null
   let server: any = null
@@ -287,6 +289,9 @@ export default function acpServerExtension(pi: any) {
     if (readOnlySeat && toolKindFor(event.toolName) === 'execute') {
       const verdict = readOnlyCommandResult(event.input?.command)
       if (!verdict.allowed) return { block: true, reason: verdict.reason }
+    }
+    if (!readOnlySeat && toolKindFor(event.toolName) === 'execute' && !signalCommandResult(event.input?.command, { root: seatPid, refuseNested: true }).allowed) {
+      return { block: true, reason: SIGNAL_REFUSAL }
     }
     permissionSeq += 1
     const id = permissionSeq

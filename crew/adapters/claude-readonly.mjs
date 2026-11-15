@@ -7,11 +7,20 @@ import { basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { realpathSync } from 'node:fs'
 import { readOnlyCommandResult } from '../acp-permission.mjs'
+import { SIGNAL_REFUSAL, signalCommandResult } from '../acp-signal.mjs'
 
 const deny = (reason) => ({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } })
 const MALFORMED = 'Refusing Bash: unable to verify the command is read-only.'
 
-export function readOnlyHookDecision(payload, env = process.env) {
+export function readOnlyHookDecision(payload, env = process.env, deps = {}) {
+  if (env?.CREW_READ_ONLY === '0') {
+    let value = payload
+    if (typeof value === 'string') { try { value = JSON.parse(value) } catch { return undefined } }
+    const input = value?.tool_input ?? value?.toolInput ?? value?.input
+    if ((value?.tool_name ?? value?.toolName) === 'Bash' && typeof input?.command === 'string'
+      && !signalCommandResult(input.command, { root: Number(env.CREW_SEAT_PID), processTable: deps.processTable, refuseNested: true }).allowed) return deny(SIGNAL_REFUSAL)
+    return undefined
+  }
   if (env?.CREW_READ_ONLY !== '1') return undefined
   let value = payload
   if (typeof value === 'string') {

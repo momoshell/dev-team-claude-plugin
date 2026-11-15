@@ -160,7 +160,7 @@ Everything durable is a file; session chat is never the record.
 - `proof.mjs` — per-test proof.
 - `checks.mjs` — suite, commit, rebase, PR.
 - `agents.mjs`, `protocols.mjs` — agent definitions, tiers, and the closed protocols.
-- `acp/`, `acp-client.mjs`, `acp-permission.mjs` — the ACP seat transport, grants and permission handling.
+- `acp/`, `acp-client.mjs`, `acp-permission.mjs`, `acp-signal.mjs` — the ACP seat transport, grants and permission handling.
 - `show.mjs`, `lanes.mjs`, `finish.mjs`, `record-pr.mjs`, `closeout.mjs` — the other verbs.
 - `reclaim.mjs` — token-fenced locks and the per-seat reservation markers the ACP client takes (`reserve`, `advance`, `clear`, `probeEvidence`).
 - `adapters/adapter-*.mjs` — per-agent launch shapes for `claude`, `pi` and `muse`.
@@ -175,6 +175,14 @@ Seats run unattended, so the enforced tool boundary is each seat's grants, not
 a prompt. Only the builder is granted repo writes; other seats write their
 envelope and task-dir artifacts. Worktree isolation separates lanes, not seats
 within a lane. The loop opens a PR after a green suite and never merges.
+
+A repo seat may signal only processes descended from its own agent. The gate
+checks ancestry with `ps` at call time and refuses when `ps` cannot tell. It
+reads shell command text only: `node -e`, `python -c` and other interpreters,
+a script file the seat writes and then runs, and aliases or functions defined
+in an earlier call can still signal any process. It guards against a seat
+stopping another lane's process by mistake; it does not contain a seat that
+means to.
 
 ## Environment
 

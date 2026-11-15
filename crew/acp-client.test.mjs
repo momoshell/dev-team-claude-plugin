@@ -13,6 +13,19 @@ import {
 } from './acp-client.mjs'
 import { seatCommandPath } from './acp/wire.mjs'
 
+test('the seat wrapper exports its own pid to the agent as CREW_SEAT_PID (#2379)', async () => {
+  const root = scratchDir('acp-wrapper-pid-')
+  const output = join(root, 'pid')
+  const client = acpClient({ launch: { bin: '/bin/sh', args: ['-c', `printf %s "$CREW_SEAT_PID" > "$1"`, 'agent', output] }, dir: join(root, 'acp'), cwd: root, role: 'builder', deps: { seatCommandRoot: root } })
+  const paths = acpSeatPaths(join(root, 'acp'), 'builder', root)
+  try {
+    const started = client.start()
+    for (let i = 0; i < 200 && (!existsSync(output) || !readFileSync(output, 'utf8')); i++) await new Promise((resolve) => setTimeout(resolve, 10))
+    assert.equal(readFileSync(output, 'utf8'), String(started.pid))
+    assert.equal(readFileSync(output, 'utf8'), readFileSync(paths.pgid, 'utf8'))
+  } finally { client.close(); rmSync(root, { recursive: true, force: true }) }
+})
+
 // MUTATION: re-add reprove.
 test('acpClient exposes no prompt, resumeSession or reprove', () => {
   const root = scratchDir('acp-client-surface-')

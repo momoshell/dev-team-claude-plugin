@@ -2613,6 +2613,55 @@ test('the finish builder first hears the stop reason with its observation, then 
   assert.equal(f.requests[0].role, 'builder')
 })
 
+test('a finish pass with guidance keeps finish-return once in the builder turn after a review bounce and never sends it to the reviewer (#2384)', async () => {
+  const guidance = 'Do not name the new-file test as a proof test.'
+  const f = fakes({ spec: finishSpec({ guidance }), unseated: ['planner'], review: 1, bounds: { builder: 3 } })
+  assert.equal((await f.go()).status, 'done')
+  const feedback = builderTurns(f)[1].feedback
+  assert.deepEqual(feedback.filter((item) => item.id === 'finish-return'), [{ id: 'finish-return', summary: 'The operator supplied guidance for this finish run. It stands for the whole finish run and outranks the plan and a lead ruling where they differ.', guidance }])
+  assert.equal(feedback.some((item) => item.id === 'finish-stop'), false)
+  assert.ok(f.requests.filter((r) => r.role === 'reviewer').every((r) => r.feedback.every((item) => item.id !== 'finish-return')))
+})
+
+test('a finish lead consult for a builder held at its round bound sees finish-return and a lead-escalated question leaves the guidance out (#2384)', async () => {
+  const guidance = 'Do not name the new-file test as a proof test.'
+  const f = fakes({ spec: finishSpec({ guidance }), unseated: ['planner'], review: 1, bounds: { builder: 1, lead: 1 }, lead: 'bounce', target: 'planner' })
+  assert.deepEqual(await f.go(), stopped('lead-escalated'))
+  const feedback = f.requests.find((r) => r.role === 'lead').feedback[0].feedback
+  assert.deepEqual(feedback.filter((item) => item.id === 'finish-return').map((item) => item.guidance), [guidance])
+  const question = f.rows.findLast((r) => r.reason === 'lead-escalated').observation.question
+  assert.match(question, /Fix the defect/)
+  assert.doesNotMatch(question, /outranks|operator supplied guidance/i)
+  assert.equal(question.includes(guidance), false)
+})
+
+test('a finish pass with guidance whose suite is red twice gives the suite-repair builder turn finish-return once (#2384)', async () => {
+  const guidance = 'Do not name the new-file test as a proof test.'
+  const f = sequenced([redRun(), redRun(), green()], { spec: finishSpec({ guidance }), unseated: ['planner'] })
+  assert.equal((await f.go()).status, 'done')
+  const feedback = builderTurns(f)[1].feedback
+  assert.equal(feedback.filter((item) => item.id === 'suite-repair').length, 1)
+  assert.deepEqual(feedback.filter((item) => item.id === 'finish-return').map((item) => item.guidance), [guidance])
+})
+
+test('a finish conflict turn and a non-finish lane never carry finish-return (#2384)', async () => {
+  const guidance = 'Do not name the new-file test as a proof test.'
+  const conflict = { status: 'red', reason: 'rebase-conflict', conflicts: ['lib.mjs'] }
+  const f = fakes({ spec: finishSpec({ guidance }), unseated: ['planner'], rebase: answers(conflict, { ...MOVED, onto: O }, { ...MOVED, head: 'a'.repeat(40) }) })
+  assert.equal((await f.go()).status, 'done')
+  const turns = builderTurns(f)
+  assert.equal(turns[0].feedback.length, 1)
+  assert.equal(turns[0].feedback[0].id, 'rebase-conflict')
+  assert.equal(turns[1].feedback.filter((item) => item.id === 'finish-return').length, 1)
+  for (const options of [{ review: 1, bounds: { builder: 3 } }, { review: 1, bounds: { builder: 1 }, lead: 'bounce' }]) {
+    const standard = fakes(options)
+    assert.equal((await standard.go()).status, 'done')
+    for (const request of standard.requests) {
+      assert.ok(request.feedback.every((item) => item.id !== 'finish-return' && (item.feedback ?? []).every((nested) => nested.id !== 'finish-return')))
+    }
+  }
+})
+
 // MUTATION: leave the reviewer at two rounds and the third finish review bounds out.
 test('a finish run gives the reviewer three rounds and refuses an unsound finish spec', async () => {
   const f = fakes({ spec: finishSpec(), unseated: ['planner'], review: 2, bounds: { builder: 3 } })
@@ -2651,7 +2700,7 @@ test('a green finish run writes a fused report and a finish-ready row with the m
 
   const g = fakes({ spec: finishSpec({ guidance: 'Fix it first', priorReviewRounds: 2 }), unseated: ['planner'], review: 2, bounds: { builder: 3 } })
   assert.deepEqual(await g.go(), stopped('round-bound'))
-  assert.deepEqual(g.requests[0].feedback.slice(0, 2), [{ id: 'finish-stop', summary: 'The previous lane stopped with the given reason and observation.', reason: STOP.reason, observation: STOP.observation }, { id: 'finish-return', summary: 'The operator supplied guidance for this finish run.', guidance: 'Fix it first' }])
+  assert.deepEqual(g.requests[0].feedback.slice(0, 2), [{ id: 'finish-stop', summary: 'The previous lane stopped with the given reason and observation.', reason: STOP.reason, observation: STOP.observation }, { id: 'finish-return', summary: 'The operator supplied guidance for this finish run. It stands for the whole finish run and outranks the plan and a lead ruling where they differ.', guidance: 'Fix it first' }])
   assert.equal(count(g, 'reviewer'), 1)
   for (const bad of [{ guidance: 5 }, { priorReviewRounds: -1 }, { priorReviewRounds: 1.5 }]) {
     assert.deepEqual(await fakes({ spec: finishSpec(bad), unseated: ['planner'] }).go(), stopped('invalid-input'))

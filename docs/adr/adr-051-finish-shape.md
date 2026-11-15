@@ -133,3 +133,7 @@ The shipped heads supersede section 1:
 ## Amendment 2 (2026-11-14)
 
 The review after the run's one suite-repair turn and a moved-head recheck review do not count against the three-round finish review cap. Both run even when the cap is spent. If either returns `changes-needed` at the cap, the run stops `round-bound` with its findings. The journal marks these reviews `counted: false`; `reviewCount` and `reviewRounds` exclude them, while the finish report and commit body list every review. See issue #2374.
+
+## Amendment 3 (2026-11-15)
+
+The guidance file given to `--return` stays in force for the whole pass. Every builder turn and lead consult of that pass carries the `finish-return` item. It outranks the plan and lead rulings where they differ. Reviewer and conflict turns do not receive it. A new `--return` replaces the previous guidance. See issue #2384.

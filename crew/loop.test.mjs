@@ -2330,6 +2330,115 @@ test('a finish run builder receives the lead rulings from its finish spec (#2341
   }
 })
 
+test('planning resume carries operator guidance through planner and lead to finish-ready (#2392)', async () => {
+  for (const [guidance, testsRequired] of [['Keep the seeded baseline.', true], ['Use the replacement answer.', false]]) {
+    const history = { returnPath: '/virtual/task/planner-1.json', parsed: null, defects: ['invalid return'], error: null }
+    const observation = { question: 'Keep the seeded baseline?' }
+    let planners = 0, builds = 0
+    const f = fakes({ spec: finishSpec({ subject: null, planPath: null, findings: [], turnOffset: 70, guidance,
+      planning: { entry: 'planner', plan: null, planner: history, observation } }), bounds: { planner: 1 }, lead: 'bounce', target: 'planner',
+      edit: (v, r) => {
+        if (r.role === 'lead') v.details.instructions = 'Revise the checklist using the answer.'
+        if (r.role === 'builder' && (++builds === 1 || !testsRequired)) v.details.tests = []
+        if (r.role === 'planner') {
+          planners++
+          if (planners === 1) return { ...v, status: 'escalate', details: { question: 'Can I revise the checklist?' } }
+          v.details.subject = 'fix(crew): resumed plan'
+          v.details.files_in_scope = ['seed.txt', 'lib.mjs']
+          if (!testsRequired) v.details.tests = []
+          if (!r.repair) v.details.plan_path += ':1-2'
+        }
+        return v
+      } })
+    const anchor = { event: 'run-start', at: 123, run_id: 'lane' }
+    f.rows.push(anchor)
+    f.writes.set('/virtual/checkout/seed.txt', 'seeded target')
+    assert.equal((await f.go()).status, 'done')
+    assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'lead', 'planner', 'planner', 'builder', ...(testsRequired ? ['builder'] : []), 'reviewer'])
+    if (testsRequired) assert.equal(builderTurns(f)[1].feedback[0].id, 'proof-no-tests')
+    assert.equal(f.calls.includes('proof'), testsRequired)
+    if (!testsRequired) {
+      assert.match(f.seen.commit.body, /proof: none, no criterion is machine-checked/)
+      assert.match(f.rows.at(-1).body, /Proof: no criterion is machine-checked\./)
+    }
+    for (const r of f.requests.filter((r) => ['planner', 'lead'].includes(r.role))) {
+      assert.equal(r.brief, f.spec.brief)
+      assert.equal(r.feedback.find((item) => item.id === 'finish-return').guidance, guidance)
+      assert.deepEqual(r.feedback.find((item) => item.id === 'planning-resume').planner, history)
+      assert.deepEqual(r.feedback.find((item) => item.id === 'planning-resume').observation, observation)
+    }
+    assert.ok(f.requests[2].feedback.some((item) => item.id === 'lead-bounce' && item.summary === 'Revise the checklist using the answer.'))
+    assert.ok(f.requests[3].repair)
+    const builder = f.requests.find((r) => r.role === 'builder')
+    assert.equal(builder.planPath, '/virtual/task/plan.md')
+    assert.deepEqual(builder.filesInScope, ['seed.txt', 'lib.mjs'])
+    assert.equal(builder.testsRequired, testsRequired)
+    assert.equal(f.seen.commit.subject, 'fix(crew): resumed plan')
+    assert.equal(f.requests[0].id, 'lane.planner.71')
+    assert.ok(f.requests.every((r) => Number(r.id.split('.').at(-1)) > 70))
+    assert.deepEqual(f.rows.filter((r) => r.event === 'run-start'), [anchor])
+    assert.equal(f.writes.get('/virtual/checkout/seed.txt'), 'seeded target')
+    assert.ok(!f.discardArgs.some((args) => args.includes('--hard') || args.includes('clean')))
+    assert.equal(f.calls.includes('publish'), false)
+    assert.equal(f.rows.at(-1).event, 'finish-ready')
+    assert.equal(f.rows.at(-1).subject, 'fix(crew): resumed plan')
+  }
+})
+
+test('accepted planning resume starts at the lead and honors its decision (#2392)', async () => {
+  const plan = { role: 'planner', id: 'lane.planner.1', status: 'done', summary: 'Held plan', details: {
+    subject: 'fix(crew): held plan', plan_path: '/virtual/task/plan.md', tests: [], files_in_scope: ['held.mjs'],
+  } }
+  for (const [decision, archived] of [['accept', false], ['accept', true], ['bounce', false], ['escalate', false]]) {
+    const held = structuredClone(plan)
+    if (archived) delete held.details.tests
+    const guidance = 'The baseline is approved.'
+    const testsRequired = decision !== 'accept' || archived
+    let builds = 0
+    const f = fakes({ spec: finishSpec({ subject: null, planPath: null, findings: [], turnOffset: 80, guidance,
+      planning: { entry: 'lead', plan: held, planner: { returnPath: '/virtual/task/planner-1.json', parsed: held, defects: [], error: null }, observation: { question: 'Approve the baseline?' } } }),
+      lead: decision, target: 'planner', edit: (v) => {
+        if (v.role === 'builder' && (++builds === 1 || !testsRequired)) v.details.tests = []
+        if (v.role === 'lead') {
+          if (decision === 'bounce') v.details.instructions = 'Revise the plan with the approved baseline.'
+          if (decision === 'escalate') v.details.question = 'Which new checklist should I use?'
+        }
+        return v
+      } })
+    const result = await f.go()
+    assert.deepEqual(f.requests.map((r) => r.role), ['lead', ...(decision === 'escalate' ? [] : [...(decision === 'bounce' ? ['planner'] : []), 'builder', ...(testsRequired ? ['builder'] : []), 'reviewer'])], decision)
+    assert.equal(f.requests[0].id, 'lane.lead.81')
+    assert.deepEqual(f.requests[0].feedback[0].envelope, held)
+    for (const r of f.requests.filter((r) => ['lead', 'planner'].includes(r.role))) {
+      assert.equal(r.feedback.find((item) => item.id === 'finish-return').guidance, guidance)
+      assert.equal(r.feedback.find((item) => item.id === 'planning-resume').observation.question, 'Approve the baseline?')
+    }
+    if (decision === 'escalate') {
+      assert.equal(result.reason, 'lead-escalated')
+      assert.equal(f.rows.at(-1).observation.question, 'Which new checklist should I use?')
+      assert.equal(f.rows.some((r) => r.event === 'finish-ready'), false)
+      assert.equal(f.calls.includes('fetch'), false)
+    } else {
+      assert.equal(result.status, 'done')
+      const builder = f.requests.find((r) => r.role === 'builder')
+      assert.equal(builder.planPath, plan.details.plan_path)
+      assert.deepEqual(builder.filesInScope, decision === 'accept' ? ['held.mjs'] : ['lib.mjs'])
+      assert.equal(builder.testsRequired, testsRequired)
+      if (testsRequired) assert.equal(builderTurns(f)[1].feedback[0].id, 'proof-no-tests')
+      assert.equal(f.calls.includes('proof'), testsRequired)
+      if (!testsRequired) {
+        assert.match(f.seen.commit.body, /proof: none, no criterion is machine-checked/)
+        assert.match(f.rows.at(-1).body, /Proof: no criterion is machine-checked\./)
+      }
+      assert.equal(f.seen.commit.subject, decision === 'accept' ? plan.details.subject : 'fix(crew): planned lane')
+      assert.equal(f.rows.at(-1).event, 'finish-ready')
+      if (decision === 'bounce') assert.ok(f.requests[1].feedback.some((item) => item.id === 'lead-bounce' && item.summary === 'Revise the plan with the approved baseline.'))
+    }
+    assert.equal(f.calls.includes('publish'), false)
+    assert.ok(!f.discardArgs.some((args) => args.includes('--hard') || args.includes('clean')))
+  }
+})
+
 const FINISH_SUCCESS = ['base-paths', 'fetch', 'base-commit', 'rebase', 'base-restore', 'seat:builder', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'seat:reviewer', 'suite', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase']
 
 test('a changes-needed with only should-fix findings gets one repair turn and a repaired pass publishes without a builder bounce', async () => {

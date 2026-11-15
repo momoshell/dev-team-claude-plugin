@@ -4,8 +4,8 @@
 // builder triage -> proof -> review -> suite -> commit -> rebase. A base or publishing conflict gets one builder
 // conflict turn; an unresolved or spent turn stops rebase-conflict. A failed base turn leaves the build uncommitted.
 // A mechanical lane is finished on its brief. Only the checked tree is committed; a rebase
-// that moves the head repeats proof, review and suite. It never re-plans, re-runs the baseline or publishes; the
-// operator's publish decision is a later step:
+// that moves the head repeats proof, review and suite. Post-build passes never re-plan; a pre-build planning
+// stop can resume its planner or lead first. Neither entry re-runs the baseline or publishes; the operator decides:
 // `--accept [--notes <file>]` publishes the PR the finish run measured (merging stays the operator's),
 // `--return <file>` runs a finish pass on a finishable stop, dead run or ready lane with the file as guidance
 // (counted reviews across passes share three rounds) and
@@ -31,7 +31,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { FINISH_REVIEW_ROUNDS, composeLanePrBody, openPullRequest, runSuite, withoutIssueTokens } from './checks.mjs'
 import { HEX_OID, LANE, isObject, parseJournalRows } from './lane-core.mjs'
-import { TIERS, validateEnvelope } from './protocols.mjs'
+import { AGENT_ROLES, TIERS, validateEnvelope } from './protocols.mjs'
 import { deadRun, parsePidRecord, pidRecord, probeAlive, selfStartedAt, writeRunPid } from './run-pid.mjs'
 import { OnboardRefusal, requireOnboarded } from './onboard.mjs'
 import { reapLaneSeats } from './seat-reap.mjs'
@@ -140,7 +140,7 @@ function planFor(d, lane, taskDir, recordedTier, rows) {
 }
 
 // The finish spec for a stop: the stop, the findings still open at that point of the journal, and the turn offset.
-function finishFor(rows, stopped, before, plan) {
+function finishFor(d, taskDir, rows, stopped, before, plan) {
   const { subject, plan_path: planPath } = plan
   const reviewed = rows.slice(0, before).findLast((row) => row.event === 'verdict' && row.status === 'reviewed')
   const rulings = rows.slice(0, before).findLast((row) => row.event === 'lead-rulings')?.rulings
@@ -150,7 +150,7 @@ function finishFor(rows, stopped, before, plan) {
     findings: reviewed?.verdict === 'changes-needed' && Array.isArray(reviewed.findings) ? reviewed.findings : [],
     ...(reviewed?.role === 'tech-lead' ? { findingsRole: 'tech-lead' } : {}),
     ...(Array.isArray(rulings) && rulings.length ? { rulings } : {}),
-    turnOffset: rows.filter((row) => row.event === 'envelope').length,
+    turnOffset: issuedTurns(d, taskDir, rows).turnOffset,
   }
 }
 
@@ -216,15 +216,65 @@ const onLaneBranch = (d, spec) => {
   return branch?.status === 'green' && typeof spec.branch === 'string' && String(branch.stdout ?? '').trim() === spec.branch
 }
 
-function stoppedLane(d, lane, taskDir, rows) {
+// Repairs repeat envelope rows; issued IDs and files also survive a missing journal write.
+// Every later finish pass must stay above the planning resume's IDs too.
+function issuedTurns(d, taskDir, rows) {
+  let turnOffset = rows.filter((row) => row.event === 'envelope').length, plannerTurn = 0
+  const issued = (value) => {
+    const match = /\.(planner|builder|reviewer|tech-lead|lead)\.(\d+)(?:\.|$)/.exec(String(value))
+      ?? /^(planner|builder|reviewer|tech-lead|lead)-(\d+)\.json$/.exec(String(value))
+    const n = Number(match?.[2])
+    if (!Number.isSafeInteger(n) || n < 1) return
+    turnOffset = Math.max(turnOffset, n)
+    if (match[1] === 'planner') plannerTurn = Math.max(plannerTurn, n)
+  }
+  for (const row of rows) issued(row.id ?? row.parsed?.id)
+  for (const name of d.readdirSync(taskDir)) issued(name)
+  for (const role of AGENT_ROLES) {
+    const dir = join(taskDir, 'lean', role)
+    if (d.existsSync(dir)) for (const name of d.readdirSync(dir)) issued(name)
+  }
+  return { turnOffset, plannerTurn }
+}
+
+// Only a planning attempt with no build evidence can reopen planning.
+function planningReturn(d, taskDir, rows, stopped, stopAt) {
+  const before = rows.slice(0, stopAt)
+  if (before.some((row) => row.role === 'builder' || (row.event === 'stage-start' && ['build', 'conflict', 'review', 'suite', 'commit'].includes(row.stage)))) return null
+  if (d.readdirSync(taskDir).some((name) => /^builder-\d+\.json$/.test(name))
+    || (d.existsSync(join(taskDir, 'lean', 'builder')) && d.readdirSync(join(taskDir, 'lean', 'builder')).length)) return null
+  const planAt = before.findLastIndex((row) => row.event === 'stage-start' && ['plan', 'replan'].includes(row.stage))
+  if (planAt < 0 && stopped.stage !== 'plan') return null
+  const lastStage = before.findLast((row) => row.event === 'stage-start')?.stage
+  if (!['plan', 'replan', 'lead'].includes(stopped.stage ?? lastStage)) return null
+  const { turnOffset, plannerTurn } = issuedTurns(d, taskDir, rows)
+  const recorded = before.findLast((row) => row.event === 'envelope' && row.role === 'planner' && String(row.id).endsWith(`.planner.${plannerTurn}`))
+  const returnPath = plannerTurn ? join(taskDir, `planner-${plannerTurn}.json`) : null
+  let parsed = null, error = null
+  if (returnPath) try { parsed = JSON.parse(d.readFileSync(returnPath, 'utf8')) } catch (e) { error = e?.code ?? e?.message }
+  const checked = validateEnvelope('planner', parsed, { archived: true })
+  const accepted = recorded && before.lastIndexOf(recorded) >= planAt && !recorded.error && Array.isArray(recorded.defects) && recorded.defects.length === 0
+    && recorded.parsed?.status === 'done' && parsed?.id === recorded.id && checked.defects.length === 0 && parsed.status === 'done'
+    && JSON.stringify(recorded.parsed) === JSON.stringify(parsed)
+  const leadStop = stopped.reason === 'lead-escalated' || stopped.stage === 'lead' || lastStage === 'lead'
+  return {
+    planning: { entry: accepted && leadStop ? 'lead' : 'planner', plan: accepted ? parsed : null,
+      planner: { returnPath, parsed, defects: recorded?.defects ?? checked.defects, error: error ?? recorded?.error ?? null },
+      observation: stopped.observation ?? null },
+    turnOffset,
+  }
+}
+
+function stoppedLane(d, lane, taskDir, rows, allowPlanning = false) {
   const died = deadRun({ rows, taskDir, readFileSync: d.readFileSync, alive: d.alive })
   const stopped = died ? { event: 'verdict', status: 'stopped', stage: null, reason: 'run-died', observation: died } : rows.findLast((row) => row.event === 'verdict' && row.status === 'stopped')
   if (!stopped) throw new FinishRefusal('finish-premise', `lane ${lane} has not stopped`)
   // A stop the loop writes after a stage closed carries stage null, so the stage it stopped in is the last one started.
   const stopAt = died ? rows.length : rows.lastIndexOf(stopped)
   const stoppedIn = rows.slice(0, stopAt).findLast((row) => row.event === 'stage-start')?.stage ?? stopped.stage
-  if ([stopped.stage, stoppedIn].some((stage) => stage === 'plan' || stage === 'baseline')) throw new FinishRefusal('finish-premise', `lane ${lane} stopped in the ${stoppedIn} stage, before any build`)
-  return { stopped, stopAt, died }
+  const planning = allowPlanning ? planningReturn(d, taskDir, rows, stopped, stopAt) : null
+  if (!planning && [stopped.stage, stoppedIn].some((stage) => stage === 'plan' || stage === 'baseline')) throw new FinishRefusal('finish-premise', `lane ${lane} stopped in the ${stoppedIn} stage, before any build`)
+  return { stopped, stopAt, died, planning }
 }
 
 // Legacy decisions have no launch boundary and retain their chronological meaning.
@@ -263,7 +313,7 @@ export function finishLane({ lane, root, deps = {}, guidance, priorReviewRounds 
   const { taskDir, spec, rows, recordedTier } = loadLane(d, lane, crewRoot)
   if (expected && (JSON.stringify(rows) !== JSON.stringify(expected.rows) || JSON.stringify(spec) !== JSON.stringify(expected.spec) || recordedTier !== expected.recordedTier)) throw new FinishRefusal('finish-running', `lane ${lane} changed while claiming its decision`)
   requireWorktree(d, spec)
-  const { stopped, stopAt, died } = stoppedLane(d, lane, taskDir, rows)
+  const { stopped, stopAt, died, planning } = stoppedLane(d, lane, taskDir, rows, guidance !== undefined)
   if (expected?.died && died?.pid !== expected.died.pid) throw new FinishRefusal('finish-running', `lane ${lane}'s run is no longer proven dead`)
   // A row after the stop means a run has re-entered the lane since: a second finish would race it.
   if (rows.slice(stopAt + 1).some((row) => row.event === 'stage-start' || row.event === 'finish-ready')) throw new FinishRefusal('finish-running', `lane ${lane} has run again since it stopped`)
@@ -290,9 +340,11 @@ export function finishLane({ lane, root, deps = {}, guidance, priorReviewRounds 
     if (remote?.status !== 'green' || String(remote.stdout ?? '').trim() !== '') throw new FinishRefusal('finish-committed', `lane ${lane}'s remote branch exists or could not be checked`)
   }
 
-  if (!rows.some((row) => row.event === 'envelope' && row.role === 'builder' && Array.isArray(row.defects) && row.defects.length === 0 && !row.error && (guidance === undefined ? ['done', 'insufficient'] : ['done', 'insufficient', 'escalate']).includes(row.parsed?.status) && row.parsed.id === row.id && (guidance === undefined || validateEnvelope('builder', row.parsed, { archived: true }).defects.length === 0))) throw new FinishRefusal('finish-no-build', `lane ${lane} has no schema-valid builder envelope in its journal`)
+  if (!planning && !rows.some((row) => row.event === 'envelope' && row.role === 'builder' && Array.isArray(row.defects) && row.defects.length === 0 && !row.error && (guidance === undefined ? ['done', 'insufficient'] : ['done', 'insufficient', 'escalate']).includes(row.parsed?.status) && row.parsed.id === row.id && (guidance === undefined || validateEnvelope('builder', row.parsed, { archived: true }).defects.length === 0))) throw new FinishRefusal('finish-no-build', `lane ${lane} has no schema-valid builder envelope in its journal`)
 
-  const finish = finishFor(rows, stopped, stopAt, planFor(d, lane, taskDir, recordedTier, rows))
+  const plan = planning ? planning.planning.plan : null
+  const finish = finishFor(d, taskDir, rows, stopped, stopAt, planning ? (plan ? { ...plan.details, planSummary: plan.summary } : { subject: null, plan_path: null }) : planFor(d, lane, taskDir, recordedTier, rows))
+  if (planning) Object.assign(finish, planning)
   if (guidance !== undefined) Object.assign(finish, { guidance, priorReviewRounds })
   if (died) finish.recoveredStopAt = Math.min(recoveredStopAt ?? stopAt, stopAt)
   else if (recoveredStopAt !== undefined) finish.recoveredStopAt = recoveredStopAt
@@ -496,7 +548,7 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
     // return: the same finish spec the first pass had, plus the guidance, with the review rounds already spent.
     const plan = planFor(d, lane, taskDir, recordedTier, rows)
     const finish = {
-      ...finishFor(rows, stopped, readyAt, plan),
+      ...finishFor(d, taskDir, rows, stopped, readyAt, plan),
       ...(recoveredStopAt === undefined ? {} : { recoveredStopAt }),
       guidance: notes,
       priorReviewRounds,

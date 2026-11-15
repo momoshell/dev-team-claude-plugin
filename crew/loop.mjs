@@ -287,6 +287,8 @@ export async function runLoop(spec, deps = {}) {
   let planSummary = isFinish ? fin.planSummary : null
   const failures = []
   const rulings = isFinish && Array.isArray(fin.rulings) ? fin.rulings.map((r) => ({ id: 'lead-bounce', summary: r.summary })) : []
+  const guidanceItem = isFinish && typeof fin?.guidance === 'string' ? { id: 'finish-return', summary: 'The operator supplied guidance for this finish run. It stands for the whole finish run and outranks the plan and a lead ruling where they differ.', guidance: fin.guidance } : null
+  const withGuidance = (items) => guidanceItem ? [guidanceItem, ...items.filter((item) => item?.id !== 'finish-return')] : items
   const repeatsFailure = (failure) => {
     if (failures.some((previous) => isDeepStrictEqual(previous, failure))) return true
     failures.push(failure)
@@ -532,7 +534,7 @@ export async function runLoop(spec, deps = {}) {
         // The question names the blocker in front of the lead now: the held return, else the open feedback; an
         // earlier return and an earlier lead decision are labelled as earlier, never as this blocker's.
         const { role, reason, envelope, held: current = null, feedback: open = [] } = given[0]
-        const findings = (Array.isArray(open) ? open : []).map((item) => item?.summary).filter(text)
+        const findings = (Array.isArray(open) ? open : []).filter((item) => item?.id !== 'finish-return').map((item) => item?.summary).filter(text)
         const blocker = current?.summary || findings.join('; ') || (envelope?.summary ? `last return: ${envelope.summary}` : 'no envelope')
         const lead = last.lead ?? null
         const earlier = lead?.details?.decision ? ` Earlier lead decision: ${[lead.details.decision, lead.details.target, lead.summary].filter(Boolean).join(' ')}.` : ''
@@ -743,7 +745,7 @@ export async function runLoop(spec, deps = {}) {
     let suiteLine = '- Suite: unmeasured.'
     let builderSummary = '', suiteResult = null
     const finishReviews = []
-    let feedback = isFinish ? [{ id: 'finish-stop', summary: 'The previous lane stopped with the given reason and observation.', reason: fin.stop.reason, observation: fin.stop.observation }, ...(fin.guidance !== undefined ? [{ id: 'finish-return', summary: 'The operator supplied guidance for this finish run.', guidance: fin.guidance }] : []), ...fin.findings] : []
+    let feedback = isFinish ? [{ id: 'finish-stop', summary: 'The previous lane stopped with the given reason and observation.', reason: fin.stop.reason, observation: fin.stop.observation }, ...(guidanceItem ? [guidanceItem] : []), ...fin.findings] : []
     let repairing = false, recheck = false, rechecks = 0, uncountedReview = false
     let committed, rebased, measurements, laneBody, reviewStatus, checkedTree
     const readTree = () => stage('checked-tree', () => callCheck('checked-tree', d.run, { cwd, command: 'git', args: ['write-tree'] }, { command: true }))
@@ -893,7 +895,7 @@ export async function runLoop(spec, deps = {}) {
         await emit('verdict', { status: 'reviewed', verdict: review.details.verdict, findings: review.details.findings, ...(uncountedReview ? { counted: false } : {}) })
         if (review.details.verdict === 'changes-needed') {
           if (uncountedReview && rounds.reviewer >= (seats.reviewer.rounds ?? DEFAULT_ROUNDS)) return stop('round-bound', { role: 'reviewer', reason: 'round-bound', envelope: review, findings: review.details.findings })
-          feedback = [...review.details.findings, ...omitted('reviewer', review.details)]
+          feedback = withGuidance([...review.details.findings, ...omitted('reviewer', review.details)])
           continue
         }
         break
@@ -916,7 +918,7 @@ export async function runLoop(spec, deps = {}) {
           if (repaired) return stop(suite.reason, rerun)
           // Give the builder one repair turn, then repeat this lane's checks.
           const failures = suiteFailures(mechanical ? [suite] : [suite, rerun])
-          feedback = [{
+          feedback = withGuidance([{
             id: 'suite-repair',
             severity: 'must-fix',
             summary: `The full suite is red ${mechanical ? 'after your change' : 'on two runs after your change'}. Fix the failing tests. This is your only repair turn.`,
@@ -924,7 +926,7 @@ export async function runLoop(spec, deps = {}) {
             failingTests: failures.tests,
             failingFiles: failures.files,
             ...(failures.tail.length ? { outputTail: failures.tail } : {}),
-          }]
+          }])
           for (const role of isFinish || tier === 'mechanical' ? ['builder'] : ['builder', 'reviewer']) seats[role] = { ...seats[role], rounds: isFinish ? (seats[role].rounds ?? DEFAULT_ROUNDS) + 1 : Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }
           repairing = true
           repaired = true

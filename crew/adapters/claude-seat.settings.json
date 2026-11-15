@@ -2,6 +2,6 @@
   "disableBundledSkills": true,
   "skillOverrides": { "design": "off", "doctor": "off", "plugin-authoring": "off" },
   "hooks": {
-    "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "if [ \"$CREW_FFF\" != \"1\" ]; then exit 0; fi; exec \"$CREW_FFF_NODE\" \"$CREW_FFF_HOOK\"" }] }, { "matcher": "Bash", "hooks": [{ "type": "command", "command": "if [ \"$CREW_READ_ONLY\" != \"1\" ]; then exit 0; fi; exec \"$CREW_READ_ONLY_NODE\" \"$CREW_READ_ONLY_HOOK\"" }] }]
+    "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "if [ \"$CREW_FFF\" != \"1\" ]; then exit 0; fi; exec \"$CREW_FFF_NODE\" \"$CREW_FFF_HOOK\"" }] }, { "matcher": "Bash", "hooks": [{ "type": "command", "command": "if [ \"$CREW_READ_ONLY\" != \"1\" ]; then exit 0; fi; exec \"$CREW_READ_ONLY_NODE\" \"$CREW_READ_ONLY_HOOK\"" }] }, { "matcher": "Agent|Task", "hooks": [{ "type": "command", "command": "if [ \"$CREW_SCOUT\" != \"1\" ]; then exit 0; fi; exec \"$CREW_SCOUT_NODE\" \"$CREW_SCOUT_HOOK\"" }] }]
   }
 }

@@ -1,7 +1,9 @@
-import { readFileSync as fsReadFileSync, realpathSync, existsSync, cpSync, mkdirSync, statSync, writeFileSync, rmSync } from 'node:fs'
+import { readFileSync as fsReadFileSync, realpathSync, existsSync, cpSync, mkdirSync, statSync, writeFileSync, appendFileSync, rmSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { isAbsolute, join, basename, dirname } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
+import { journalPathOf } from '../pi/context-layout.mjs'
 
 const require = createRequire(import.meta.url)
 let sharedFffSearchProgram
@@ -11,6 +13,7 @@ export const CLAUDE_SEAT_SETTINGS = fileURLToPath(new URL('./claude-seat.setting
 const NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills: [], advisor: false, mcp_servers: [] })
 const FFF_MCP_NAME = 'fff'
 export const FFF_HOOK_PATH = fileURLToPath(import.meta.url)
+const SCOUT_DEFINITION = fileURLToPath(new URL('./claude-scout.json', import.meta.url))
 
 function hasFffGrant(grants = NO_GRANTS) {
   return Array.isArray(grants?.mcp_servers) && grants.mcp_servers.some((server) => (
@@ -85,6 +88,45 @@ export function fffHookDecision(payload, options = {}) {
   return hookDeny(`Refusing ${program}: use ${replacement} instead.`)
 }
 
+export function scoutHookDecision(payload, { env = process.env, readFile = fsReadFileSync, writeFile = writeFileSync, appendFile = appendFileSync } = {}) {
+  if (env.CREW_SCOUT !== '1') return undefined
+  let value = hookInput(payload)
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value) } catch { value = undefined }
+  }
+  const malformed = !value || typeof value !== 'object' || Array.isArray(value)
+  if (!malformed && !['Agent', 'Task'].includes(value.tool_name ?? value.toolName)) return undefined
+  const input = value?.tool_input ?? value?.toolInput
+  let reason
+  let outcome = 'refused'
+  if (malformed || !input || typeof input !== 'object' || Array.isArray(input) || input.subagent_type !== 'scout') {
+    reason = 'Refusing agent: scout is the only permitted subagent type.'
+  } else if (typeof input.model === 'string' && input.model.trim()) {
+    reason = 'Refusing scout: its model is fixed by its definition.'
+  } else if (typeof input.isolation === 'string' && input.isolation.trim()) {
+    reason = 'Refusing scout: isolation is not permitted.'
+  } else {
+    try {
+      const { reserveSpawn, SPAWN_BUDGET_OUTCOME } = require('../pi/extensions/subagent.ts')
+      const reservation = reserveSpawn({ taskDir: env.CREW_TASK_DIR, env, readFile, writeFile })
+      reason = reservation.error
+      outcome = reason ? SPAWN_BUDGET_OUTCOME : 'ok'
+    } catch {
+      reason = 'Refusing scout: unable to reserve the spawn budget.'
+    }
+  }
+  try {
+    if (env.CREW_TASK_DIR) {
+      const { model } = JSON.parse(fsReadFileSync(SCOUT_DEFINITION, 'utf8'))
+      appendFile(journalPathOf(env.CREW_TASK_DIR), `${JSON.stringify({
+        at: Date.now(), subagent_usage: { spawn_id: value?.tool_use_id ?? randomUUID(), parent_role: env.CREW_ROLE, agent: 'scout', model, outcome },
+        role: env.CREW_ROLE, usage: null, usage_reason: outcome === 'ok' ? 'sdk-reports-no-subagent-usage' : 'not-spawned',
+      })}\n`)
+    }
+  } catch { /* journaling cannot change the decision */ }
+  return reason ? hookDeny(reason) : undefined
+}
+
 function invokedDirectly() {
   try {
     if (!process.argv[1]) return false
@@ -101,7 +143,9 @@ function runHook() {
   if (typeof raw === 'string') {
     try { payload = raw.trim() ? JSON.parse(raw) : undefined } catch { payload = undefined }
   }
-  const decision = fffHookDecision(payload)
+  const decision = !payload || ['Agent', 'Task'].includes(payload.tool_name ?? payload.toolName)
+    ? (scoutHookDecision(payload) ?? fffHookDecision(payload))
+    : fffHookDecision(payload)
   if (decision !== undefined) process.stdout.write(`${JSON.stringify(decision)}\n`)
 }
 
@@ -256,6 +300,16 @@ function assertSkillsMaterialised({ taskDir, role, grants } = {}) {
   }
 }
 
+function claudeAgents(grants) {
+  if (!grants?.agents?.length) return undefined
+  const native = JSON.parse(fsReadFileSync(SCOUT_DEFINITION, 'utf8'))
+  return Object.fromEntries(grants.agents.map(({ name, def }) => {
+    if (name !== native.name) throw Object.assign(new Error(`adapter-claude has no native definition for ${JSON.stringify(name)} [grant-unsupported]`), { reason: 'grant-unsupported' })
+    const { description, prompt } = JSON.parse(fsReadFileSync(def, 'utf8'))
+    return [name, { description, prompt, tools: native.tools, disallowedTools: native.disallowedTools, model: native.model.split('/').at(-1) }]
+  }))
+}
+
 export function acpLaunch(spec = {}) {
   const { bin, claudeBin, cwd, model, tools, deny, effort, promptFile, role, taskDir, grants = NO_GRANTS, env = {} } = spec
   assertSupportedGrants(grants)
@@ -266,6 +320,7 @@ export function acpLaunch(spec = {}) {
   if (!claudeBin || !isAbsolute(claudeBin)) {
     throw new Error(`adapter-claude.acpLaunch: claudeBin must be an ABSOLUTE frozen worker path, got ${JSON.stringify(claudeBin)}`)
   }
+  const agents = claudeAgents(grants)
   const hasSkills = (grants?.skills?.length ?? 0) > 0
   const hasMcpServers = (grants?.mcp_servers?.length ?? 0) > 0
   const mcpServers = {}
@@ -279,6 +334,7 @@ export function acpLaunch(spec = {}) {
   const acpAllowedTools = [...new Set([
     ...allowedTools(tools, grants).split(',').filter(Boolean),
     ...(hasFffGrant(grants) ? ['mcp__fff__find_files', 'mcp__fff__grep', 'mcp__fff__multi_grep'] : []),
+    ...(agents ? ['Agent'] : []),
   ])]
   const acpTools = hasSkills ? [...acpAllowedTools.filter((tool) => tool !== 'Skill'), 'Skill'] : acpAllowedTools
   const plugins = [
@@ -287,7 +343,7 @@ export function acpLaunch(spec = {}) {
   return {
     bin,
     args: [],
-    env: { ...env, CLAUDE_CODE_EXECUTABLE: claudeBin, CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', ...fffEnvironment(grants) },
+    env: { ...env, CLAUDE_CODE_EXECUTABLE: claudeBin, CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', ...fffEnvironment(grants), CREW_SCOUT: agents ? '1' : '0', ...(agents ? { CREW_SCOUT_NODE: process.execPath, CREW_SCOUT_HOOK: FFF_HOOK_PATH } : {}) },
     mode: 'acceptEdits',
     sessionParams: {
       cwd,
@@ -296,6 +352,7 @@ export function acpLaunch(spec = {}) {
         model,
         settingSources: ['project'], settings: CLAUDE_SEAT_SETTINGS,
         ...(hasMcpServers ? { mcpServers } : {}),
+        ...(agents ? { agents } : {}),
         strictMcpConfig: true,
         allowedTools: acpTools,
         tools: acpTools,

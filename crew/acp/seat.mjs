@@ -490,7 +490,7 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
     // ACP's selected rejection carries only an option ID, so give the redirects before the turn.
     const guidance = readgate ? `\n\nReadgate is active: whole-file reads and cat/head/tail of large files are refused; use a ranged read instead.${grants.mcp_servers.some((server) => server.name === 'fff') ? ' Direct grep/rg/find/fd searches are refused; use mcp__fff__grep or mcp__fff__find_files instead.' : ''}` : ''
     const extras = [grants.skeletonread && 'mcp__crew-extras__retrieve', grants.skeletonread && 'mcp__crew-extras__skeleton', grants.subagent && 'mcp__crew-extras__agent'].filter(Boolean)
-    const extraGuidance = (extras.length ? `\n\nGranted tools: ${extras.join(', ')}.` : '') + (grants.skeletonread ? ' A whole read of a large in-scope source file is refused; call mcp__crew-extras__skeleton with its path for the indexed signatures and plan citations, then mcp__crew-extras__retrieve for a range or symbol.' : '')
+    const extraGuidance = (extras.length ? `\n\nGranted tools: ${extras.join(', ')}.` : '') + (grants.skeletonread ? ' A whole read of a large in-scope source file is refused; call mcp__crew-extras__skeleton with its path for the indexed signatures and plan citations, then mcp__crew-extras__retrieve for a range or symbol.' : '') + (isClaude && grants.agents.length ? '\n\nThe Agent tool spawns only subagent_type: "scout"; other types are refused.' : '')
     // Muse writes without asking, so a return the advisor blocked is already on disk, however it was written. A
     // blocked turn records the returns this run wrote; after the follow-up turn, any still byte-identical is removed.
     const returnName = new RegExp('^' + role + '-\\d+\\.json$')

@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process'
 import { basename } from 'node:path'
 
-export const SIGNAL_REFUSAL = 'this process is not yours; another lane or the operator owns it. Stop only processes your own commands started.'
+export const SIGNAL_REFUSAL = 'refused: this command may signal a process your own commands did not start, or the gate could not check who started it. Stop only processes your own commands started, by a pid you can read.'
 
 export function readProcessTable() {
   const result = spawnSync('ps', ['-A', '-o', 'pid=,ppid=,pgid='], { encoding: 'utf8', timeout: 1000 })

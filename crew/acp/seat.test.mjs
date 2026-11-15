@@ -1017,7 +1017,7 @@ test('a Muse repo seat receives the reason for a refused signal (#2379)', async 
     const processTable = () => '901 1 901\n96587 1 96587\n'
     const muse = await decide(tree, 'repo', [shell('kill 96587')], { agent: 'muse', model: 'meta/test', permissionsOnlyFirst: true, deps: { processTable } })
     const prompts = muse.run.sent.filter((frame) => frame.method === 'session/prompt')
-    assert.equal(prompts[1]?.params.prompt[0].text, 'this process is not yours; another lane or the operator owns it. Stop only processes your own commands started.')
+    assert.equal(prompts[1]?.params.prompt[0].text, 'refused: this command may signal a process your own commands did not start, or the gate could not check who started it. Stop only processes your own commands started, by a pid you can read.')
     assert.deepEqual(muse.verdicts, ['reject'])
   })
 })

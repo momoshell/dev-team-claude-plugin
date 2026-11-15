@@ -69,7 +69,7 @@ test('S2-14: the claude seat settings file is named for what it holds', () => {
 
 test('a repo seat hook denies pkill and a foreign pid with the ownership reason (#2379)', () => {
   const env = { CREW_READ_ONLY: '0', CREW_SEAT_PID: String(process.pid) }
-  const reason = 'this process is not yours; another lane or the operator owns it. Stop only processes your own commands started.'
+  const reason = 'refused: this command may signal a process your own commands did not start, or the gate could not check who started it. Stop only processes your own commands started, by a pid you can read.'
   for (const command of ['pkill -f nextest', 'kill 1']) {
     const out = readOnlyHookDecision(payload(command), env)?.hookSpecificOutput
     assert.equal(out?.permissionDecision, 'deny')

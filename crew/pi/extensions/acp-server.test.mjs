@@ -732,7 +732,7 @@ test('a repo-writing Pi seat blocks a signal to a process it did not start with 
         h.emit('tool_call', bashCall(command, command)),
         h.wait((f) => f.method === 'session/request_permission', 'permission request', 100).then(() => 'requested', () => 'timed out'),
       ])
-      assert.deepEqual(result, { block: true, reason: 'this process is not yours; another lane or the operator owns it. Stop only processes your own commands started.' })
+      assert.deepEqual(result, { block: true, reason: 'refused: this command may signal a process your own commands did not start, or the gate could not check who started it. Stop only processes your own commands started, by a pid you can read.' })
       assert.equal(h.permissionRequests().length, 0)
     }
   } finally { h.close() }

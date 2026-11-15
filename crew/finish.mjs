@@ -296,7 +296,7 @@ function reportLane({ lane, root, deps = {} }) {
     d.log(`crew finish: lane=${lane} stop=finish-ready`)
     return
   }
-  const { stopped, stopAt } = stoppedLane(d, lane, taskDir, rows)
+  const { stopped, stopAt } = stoppedLane(d, lane, taskDir, rows, true)
   if (rows.slice(stopAt + 1).some((row) => row.event === 'stage-start' || row.event === 'finish-ready')) throw new FinishRefusal('finish-running', `lane ${lane} has run again since it stopped`)
   d.log(`crew finish: lane=${lane} stop=${stopped.reason}`)
 }

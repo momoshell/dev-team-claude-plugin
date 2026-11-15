@@ -2364,17 +2364,18 @@ test('a finish run builder receives the lead rulings from its finish spec (#2341
 
 test('planning resume carries operator guidance through planner and lead to finish-ready (#2392)', async () => {
   for (const [guidance, testsRequired] of [['Keep the seeded baseline.', true], ['Use the replacement answer.', false]]) {
-    const history = { returnPath: '/virtual/task/planner-1.json', parsed: null, defects: ['invalid return'], error: null }
+    const plan = { role: 'planner', id: 'lane.planner.1', status: 'done', summary: 'Held plan', details: {
+      subject: 'fix(crew): held plan', plan_path: '/virtual/task/plan.md', tests: [], files_in_scope: ['seed.txt'],
+    } }
+    const history = { returnPath: '/virtual/task/planner-1.json', parsed: plan, defects: [], error: null }
     const observation = { question: 'Keep the seeded baseline?' }
-    let planners = 0, builds = 0
+    let builds = 0
     const f = fakes({ spec: finishSpec({ subject: null, planPath: null, findings: [], turnOffset: 70, guidance,
-      planning: { entry: 'planner', plan: null, planner: history, observation } }), bounds: { planner: 1 }, lead: 'bounce', target: 'planner',
+      planning: { entry: 'lead', plan, planner: history, observation } }), bounds: { planner: 1 }, lead: 'bounce', target: 'planner',
       edit: (v, r) => {
         if (r.role === 'lead') v.details.instructions = 'Revise the checklist using the answer.'
         if (r.role === 'builder' && (++builds === 1 || !testsRequired)) v.details.tests = []
         if (r.role === 'planner') {
-          planners++
-          if (planners === 1) return { ...v, status: 'escalate', details: { question: 'Can I revise the checklist?' } }
           v.details.subject = 'fix(crew): resumed plan'
           v.details.files_in_scope = ['seed.txt', 'lib.mjs']
           if (!testsRequired) v.details.tests = []
@@ -2386,7 +2387,7 @@ test('planning resume carries operator guidance through planner and lead to fini
     f.rows.push(anchor)
     f.writes.set('/virtual/checkout/seed.txt', 'seeded target')
     assert.equal((await f.go()).status, 'done')
-    assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'lead', 'planner', 'planner', 'builder', ...(testsRequired ? ['builder'] : []), 'reviewer'])
+    assert.deepEqual(f.requests.map((r) => r.role), ['lead', 'planner', 'planner', 'builder', ...(testsRequired ? ['builder'] : []), 'reviewer'])
     if (testsRequired) assert.equal(builderTurns(f)[1].feedback[0].id, 'proof-no-tests')
     assert.equal(f.calls.includes('proof'), testsRequired)
     if (!testsRequired) {
@@ -2399,14 +2400,14 @@ test('planning resume carries operator guidance through planner and lead to fini
       assert.deepEqual(r.feedback.find((item) => item.id === 'planning-resume').planner, history)
       assert.deepEqual(r.feedback.find((item) => item.id === 'planning-resume').observation, observation)
     }
-    assert.ok(f.requests[2].feedback.some((item) => item.id === 'lead-bounce' && item.summary === 'Revise the checklist using the answer.'))
-    assert.ok(f.requests[3].repair)
+    assert.ok(f.requests[1].feedback.some((item) => item.id === 'lead-bounce' && item.summary === 'Revise the checklist using the answer.'))
+    assert.ok(f.requests[2].repair)
     const builder = f.requests.find((r) => r.role === 'builder')
     assert.equal(builder.planPath, '/virtual/task/plan.md')
     assert.deepEqual(builder.filesInScope, ['seed.txt', 'lib.mjs'])
     assert.equal(builder.testsRequired, testsRequired)
     assert.equal(f.seen.commit.subject, 'fix(crew): resumed plan')
-    assert.equal(f.requests[0].id, 'lane.planner.71')
+    assert.equal(f.requests[0].id, 'lane.lead.71')
     assert.ok(f.requests.every((r) => Number(r.id.split('.').at(-1)) > 70))
     assert.deepEqual(f.rows.filter((r) => r.event === 'run-start'), [anchor])
     assert.equal(f.writes.get('/virtual/checkout/seed.txt'), 'seeded target')

@@ -37,7 +37,9 @@ first. Otherwise the planner reruns with the previous evidence. Both receive
 labelled operator guidance and the stopped lead's question; a lead bounce can
 revise the plan. A new `--return` replaces the guidance. Once planning succeeds,
 the lane runs the finish checks below and stops ready for your decision, without
-publishing (ADR-051's pre-build exception). Baseline-only stops still refuse.
+publishing (ADR-051's pre-build exception). A judge lane resumed by `--return`
+from a plan stop gets reviewer review but no tech-lead second review. To get that
+second review, abandon and restart the lane. Baseline-only stops still refuse.
 After a build, use `--return` when the existing plan still fits. That finish pass
 keeps the plan and recorded roster; it cannot return work to the planner.
 If a post-build stop's lead names a plan gap or asks to reopen planning, end the lane with

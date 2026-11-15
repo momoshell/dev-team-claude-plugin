@@ -2425,13 +2425,29 @@ test("a finish run brings the uncommitted build onto the current base before the
   }
 })
 
+// MUTATION: restore the nothing-to-commit stop for --return.
+test('a finish --return pass whose branch equals its base after the rebase re-enters build with the return notes (#2380)', async () => {
+  for (const stdout of ['', ' M lib.mjs\0']) {
+    const f = fakes({ spec: finishSpec({ guidance: 'Fix it first' }), unseated: ['planner'], baseStatus: { ...green(), stdout }, rebase: answers(
+      { status: 'green', reason: null, head: 'c'.repeat(40), onto: 'c'.repeat(40) },
+      { status: 'green', reason: null, head: 'a'.repeat(40), onto: 'c'.repeat(40) },
+    ) })
+    assert.equal((await f.go()).status, 'done')
+    assert.ok(f.calls.includes('seat:builder'))
+    const builder = builderTurns(f)[0]
+    assert.equal(builder.planPath, '/virtual/task/plan.md')
+    assert.ok(builder.feedback.some((item) => item.id === 'finish-stop' && item.reason === STOP.reason))
+    assert.ok(builder.feedback.some((item) => item.id === 'finish-return' && item.guidance === 'Fix it first'))
+    assert.equal(f.rows.some((row) => row.status === 'stopped' && row.reason === 'nothing-to-commit'), false)
+    if (stdout) assert.deepEqual(f.discardArgs[0], ['reset', '--soft', 'c'.repeat(40)])
+  }
+})
+
 // MUTATION: drop base-restore on a failed rebase and the build remains committed.
 test('a finish run whose base rebase conflicts stops, names the conflicting paths and leaves the build uncommitted', async () => {
   for (const [rebase, reason, restore] of [
     [{ status: 'red', reason: 'rebase-conflict', conflicts: ['lib.mjs'] }, 'rebase-conflict', true],
     [{ status: 'unmeasured', reason: 'cleanup-unproven' }, 'cleanup-unproven', false],
-    // A dropped snapshot leaves the branch on the base: no reset to the snapshot's old parent.
-    [{ status: 'green', reason: null, head: 'c'.repeat(40), onto: 'c'.repeat(40) }, 'nothing-to-commit', false],
     [{ status: 'green', reason: null, head: 'a'.repeat(40), onto: 'invalid' }, 'runner-threw', true],
   ]) {
     const f = fakes({ spec: finishSpec(), rebase })

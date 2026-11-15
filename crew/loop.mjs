@@ -715,17 +715,15 @@ export async function runLoop(spec, deps = {}) {
       }
       const rebased = await resolveConflict(await rebaseOnBase())
       const baseFailure = rebased.status !== 'green' ? rebased.reason
-        : typeof rebased.onto !== 'string' || !HEX_OID.test(rebased.onto) || !text(rebased.head) ? 'runner-threw'
-        : rebased.head === rebased.onto ? 'nothing-to-commit' : null
+        : typeof rebased.onto !== 'string' || !HEX_OID.test(rebased.onto) || !text(rebased.head) ? 'runner-threw' : null
       if (baseFailure) {
-        // A dropped snapshot (its patch already upstream) leaves the branch on the base with a clean tree: resetting to
-        // its old parent would rewind the lane off the base and stage the upstream change as local.
-        if (wip && baseFailure !== 'cleanup-unproven' && baseFailure !== 'nothing-to-commit') {
+        if (wip && baseFailure !== 'cleanup-unproven') {
           const restored = await stage('base-restore', () => callCheck('base-restore', d.run, { cwd, command: 'git', args: ['reset', '--soft', `${wip.head}^`] }, { command: true }))
           if (restored.status !== 'green') return stop(restored.reason, restored)
         }
         return stop(baseFailure, rebased)
       }
+      // A dropped snapshot leaves the branch on the base; the pass continues to build and this reset is a no-op.
       if (wip) {
         const restored = await stage('base-restore', () => callCheck('base-restore', d.run, { cwd, command: 'git', args: ['reset', '--soft', rebased.onto] }, { command: true }))
         if (restored.status !== 'green') return stop(restored.reason, restored)

@@ -1861,6 +1861,83 @@ test('an unmeasured suite is never re-run and never turned green by a re-run', a
   }
 })
 
+test('ref-lock fetch failures retry with backoff at entry and after commit (#2400)', async () => {
+  for (const finish of [false, true]) for (const phrase of ['cannot lock ref', 'unable to update local ref']) for (const failures of [1, 2]) {
+    const failed = Array.from({ length: failures }, (_, i) => ({ ...redRun(128), stderr: `${phrase}: attempt ${i + 1}\n${'x'.repeat(5000)}` }))
+    const results = [...failed, green(), ...failed, green()]
+    const next = answers(...results), inputs = [], waits = []
+    const f = fakes({ spec: finish ? finishSpec() : {}, fetch: (input) => { inputs.push(input); return next() },
+      deps: { sleep: async (ms) => { waits.push(ms); f.calls.push(`sleep:${ms}`) } } })
+    assert.equal((await f.go()).status, 'done')
+    assert.deepEqual(inputs, results.map(() => ({ cwd: '/virtual/checkout', command: 'git', args: ['fetch', 'origin'] })))
+    const backoff = failures === 1 ? [1000] : [1000, 2000]
+    assert.deepEqual(waits, [...backoff, ...backoff])
+    const attempts = [...backoff.flatMap((ms) => ['fetch', `sleep:${ms}`]), 'fetch']
+    assert.deepEqual(f.calls.filter((c) => ['fetch', 'rebase', 'commit', 'publish'].includes(c) || c.startsWith('sleep:')),
+      [...attempts, 'rebase', 'commit', ...attempts, 'rebase', ...(finish ? [] : ['publish'])])
+    assert.deepEqual(f.rows.filter((r) => r.event === 'check' && r.check === 'fetch').map((r) => r.result),
+      results.map((r) => ({ ...r, stderr: r.stderr.slice(-4096), stdoutBytes: 0, stderrBytes: Buffer.byteLength(r.stderr) })))
+    assert.deepEqual(f.rows.filter((r) => r.stage === 'fetch' && r.event !== 'check').map((r) => r.event),
+      ['stage-start', 'stage-end', 'stage-start', 'stage-end'])
+  }
+})
+
+test('three ref-lock fetch failures stop with the last attempt (#2400)', async () => {
+  for (const finish of [false, true]) for (const afterCommit of [false, true]) {
+    const failures = [1, 2, 3].map((n) => ({ ...redRun(128), stderr: `cannot lock ref: attempt ${n}` }))
+    const results = [...(afterCommit ? [green()] : []), ...failures]
+    const waits = [], next = answers(...results)
+    const f = fakes({ spec: finish ? finishSpec() : {}, fetch: next,
+      deps: { sleep: async (ms) => { waits.push(ms); f.calls.push(`sleep:${ms}`) } } })
+    assert.deepEqual(await f.go(), stopped('exit-nonzero'))
+    assert.deepEqual(waits, [1000, 2000])
+    const start = afterCommit ? f.calls.indexOf('commit') + 1 : f.calls.indexOf('fetch')
+    assert.deepEqual(f.calls.slice(start), ['fetch', 'sleep:1000', 'fetch', 'sleep:2000', 'fetch'])
+    assert.deepEqual(f.rows.filter((r) => r.event === 'check' && r.check === 'fetch').map((r) => r.result),
+      results.map((r) => ({ ...r, stdoutBytes: 0, stderrBytes: Buffer.byteLength(r.stderr) })))
+    assert.deepEqual(f.rows.find((r) => r.event === 'verdict' && r.status === 'stopped').observation, failures[2])
+  }
+})
+
+test('a non-retryable fetch result ends a ref-lock retry sequence (#2400)', async () => {
+  for (const terminal of [{ ...redRun(128), stderr: 'fatal: authentication failed' }, { ...timeoutRun(), stderr: 'cannot lock ref' }]) {
+    const first = { ...redRun(128), stderr: 'unable to update local ref' }
+    const waits = [], next = answers(first, terminal, green())
+    const f = fakes({ fetch: next, deps: { sleep: async (ms) => { waits.push(ms); f.calls.push(`sleep:${ms}`) } } })
+    assert.deepEqual(await f.go(), stopped(terminal.reason))
+    assert.deepEqual(waits, [1000])
+    assert.deepEqual(f.calls.slice(f.calls.indexOf('fetch')), ['fetch', 'sleep:1000', 'fetch'])
+    assert.deepEqual(f.rows.filter((r) => r.event === 'check' && r.check === 'fetch').map((r) => r.result),
+      [first, terminal].map((r) => ({ ...r, stdoutBytes: 0, stderrBytes: Buffer.byteLength(r.stderr) })))
+    assert.deepEqual(f.rows.find((r) => r.event === 'verdict').observation, terminal)
+  }
+})
+
+test('a first non-retryable fetch failure stops without retrying (#2400)', async () => {
+  const missingStderr = { ...redRun(128) }; delete missingStderr.stderr
+  for (const [result, reason] of [
+    [{ ...redRun(128), stderr: 'fatal: authentication failed' }, 'exit-nonzero'],
+    [{ ...redRun(128), stdout: 'cannot lock ref' }, 'exit-nonzero'],
+    [missingStderr, 'exit-nonzero'],
+    [{ ...timeoutRun(), stderr: 'unable to update local ref' }, 'timeout'],
+    [new Error('runner failed'), 'runner-threw'],
+    [{ ...green(), code: 128, stderr: 'cannot lock ref' }, 'runner-threw'],
+    [green(), null],
+  ]) {
+    const waits = []
+    const f = fakes({ fetch: () => { if (result instanceof Error) throw result; return result }, deps: { sleep: async (ms) => { waits.push(ms) } } })
+    const outcome = await f.go()
+    if (reason) {
+      assert.deepEqual(outcome, stopped(reason))
+      assert.deepEqual(f.calls.slice(f.calls.indexOf('fetch')), ['fetch'])
+    } else assert.equal(outcome.status, 'done')
+    assert.deepEqual(waits, [])
+    const expected = reason ? 1 : 2
+    assert.equal(f.calls.filter((c) => c === 'fetch').length, expected)
+    assert.equal(f.rows.filter((r) => r.event === 'check' && r.check === 'fetch').length, expected)
+  }
+})
+
 // MUTATION: continue past a failed publication effect and a later effect runs on an unproven state.
 test('a failed commit, fetch, rebase or publish stops every later effect and returns one enum reason', async () => {
   const bad = (reason) => ({ status: 'red', reason })

@@ -253,11 +253,12 @@ export async function runLoop(spec, deps = {}) {
     resolveAgents, mkdir, readFile, stat, realpath, writeFile, proveTests, runSuite, commitChanges, rebaseBranch, openPullRequest,
     run: runSuite,
     now: Date.now,
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     repoState: gitRepoState,
     journal: async (row) => appendFile(join(spec.taskDir, 'journal.jsonl'), `${JSON.stringify(row)}\n`),
     ...deps,
   }
-  const seams = ['runSeat', 'resolveAgents', 'mkdir', 'readFile', 'stat', 'realpath', 'writeFile', 'journal', 'proveTests', 'runSuite', 'commitChanges', 'rebaseBranch', 'openPullRequest', 'run', 'now', 'repoState']
+  const seams = ['runSeat', 'resolveAgents', 'mkdir', 'readFile', 'stat', 'realpath', 'writeFile', 'journal', 'proveTests', 'runSuite', 'commitChanges', 'rebaseBranch', 'openPullRequest', 'run', 'now', 'sleep', 'repoState']
   if (!seams.every((name) => typeof d[name] === 'function')) return early('invalid-input')
   let resolved
   try { resolved = d.resolveAgents(spec.tier, undefined, spec.roster?.snapshot ?? spec.roster?.overrides) } catch { return early('seat-unmeasured') }
@@ -655,7 +656,14 @@ export async function runLoop(spec, deps = {}) {
     return halt ? { halt } : {}
   }
 
-  const fetchOrigin = () => stage('fetch', () => callCheck('fetch', d.run, { cwd, command: 'git', args: ['fetch', 'origin'] }, { command: true }))
+  const fetchOrigin = () => stage('fetch', async () => {
+    for (let attempt = 1; ; attempt++) {
+      const result = await callCheck('fetch', d.run, { cwd, command: 'git', args: ['fetch', 'origin'] }, { command: true })
+      if (attempt === 3 || result.status !== 'red' || result.reason !== 'exit-nonzero'
+        || typeof result.stderr !== 'string' || !/cannot lock ref|unable to update local ref/.test(result.stderr)) return result
+      await d.sleep(attempt * 1000)
+    }
+  })
   const rebaseOnBase = () => stage('rebase', () => callCheck('rebase', d.rebaseBranch, { cwd, base: spec.base, ...(spec.generated ? { generated: spec.generated } : {}) }))
   let conflictTurn = true
   const resolveConflict = async (rebased) => {

@@ -744,12 +744,13 @@ export async function runLoop(spec, deps = {}) {
         }
         return stop(baseFailure, rebased)
       }
-      // A dropped snapshot leaves the branch on the base; the pass continues to build and this reset is a no-op.
-      if (wip) {
-        const restored = await stage('base-restore', () => callCheck('base-restore', d.run, { cwd, command: 'git', args: ['reset', '--soft', rebased.onto] }, { command: true }))
+      // Clean committed returns also need the build uncommitted so proof's HEAD is the base.
+      // Record uncommit so finishLane can resume a pass that stops before its next commit.
+      if (wip || rebased.head !== rebased.onto) {
+        const restored = await stage('uncommit', () => callCheck('uncommit', d.run, { cwd, command: 'git', args: ['reset', '--soft', rebased.onto] }, { command: true }))
         if (restored.status !== 'green') return stop(restored.reason, restored)
       }
-      rebasedHead = wip ? rebased.onto : rebased.head
+      rebasedHead = rebased.onto
     }
 
     if (!isFinish && rebasedHead === null) {

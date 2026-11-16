@@ -4,10 +4,10 @@ import { execFileSync } from 'node:child_process'
 import { cpSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
-import { git as repoGit, scratchDir } from '../test/helpers.mjs'
+import { git as repoGit, gitResult, scratchDir } from '../test/helpers.mjs'
 import { CHECK_REASONS } from './checks.mjs'
 import { proveTests } from './proof.mjs'
-import { FinishRefusal, finishLane } from './finish.mjs'
+import { decideFinish, FinishRefusal, finishLane } from './finish.mjs'
 import { DEFAULT_ROUNDS, LOOP_REASONS, runLoop } from './loop.mjs'
 import { resolveAgents } from './agents.mjs'
 
@@ -2545,7 +2545,7 @@ test('a finish run drops added-then-deleted index entries before its base snapsh
   for (const [stdout, files] of [[' M lib.mjs\0AD scratch.mjs\0', ['lib.mjs']], ['AD scratch.mjs\0', null]]) {
     const f = fakes({ spec: finishSpec(), baseStatus: { ...green(), stdout } })
     assert.equal((await f.go()).status, 'done')
-    assert.deepEqual(f.calls.slice(1, f.calls.indexOf('seat:builder')), ['base-paths', 'fetch', 'base-unstage', ...(files ? ['base-commit'] : []), 'rebase', ...(files ? ['base-restore'] : [])])
+    assert.deepEqual(f.calls.slice(1, f.calls.indexOf('seat:builder')), ['base-paths', 'fetch', 'base-unstage', ...(files ? ['base-commit'] : []), 'rebase', 'base-restore'])
     assert.deepEqual(f.seen['base-unstage'].args, ['--literal-pathspecs', 'rm', '--cached', '--quiet', '--ignore-unmatch', '--', 'scratch.mjs'])
     if (files) assert.deepEqual(f.seen['base-commit'].files, files)
   }
@@ -2557,11 +2557,9 @@ test("a finish run brings the uncommitted build onto the current base before the
     const f = fakes({ spec: finishSpec(), baseStatus: { ...green(), stdout: dirty ? ' M lib.mjs\0' : '' } })
     assert.equal((await f.go()).status, 'done')
     const before = f.calls.slice(1, f.calls.indexOf('seat:builder'))
-    assert.deepEqual(before, ['base-paths', 'fetch', ...(dirty ? ['base-commit'] : []), 'rebase', ...(dirty ? ['base-restore'] : [])])
-    if (dirty) {
-      assert.deepEqual(f.seen['base-commit'].files, ['lib.mjs'])
-      assert.deepEqual(f.discardArgs[0], ['reset', '--soft', 'c'.repeat(40)])
-    }
+    assert.deepEqual(before, ['base-paths', 'fetch', ...(dirty ? ['base-commit'] : []), 'rebase', 'base-restore'])
+    if (dirty) assert.deepEqual(f.seen['base-commit'].files, ['lib.mjs'])
+    assert.deepEqual(f.discardArgs[0], ['reset', '--soft', 'c'.repeat(40)])
     assert.equal(f.rows.filter((row) => row.event === 'commit').length, 1)
     assert.equal(f.seen.proof.base, 'HEAD')
   }
@@ -2584,6 +2582,134 @@ test('a finish --return pass whose branch equals its base after the rebase re-en
     if (stdout) assert.deepEqual(f.discardArgs[0], ['reset', '--soft', 'c'.repeat(40)])
   }
 })
+
+test('a clean committed finish-ready return proves its new-file test against the base and ends with one commit (#2399)', async () => {
+  await committedReadyReturn(false)
+})
+
+test('a committed finish-ready return after conflict resolution proves against the rebase base and ends with one commit (#2399)', async () => {
+  await committedReadyReturn(true)
+})
+
+test('a committed finish-ready return stopped after uncommit can be returned again (#2399)', async () => {
+  await committedReadyReturn(false, true)
+})
+
+async function committedReadyReturn(conflict, stop = false) {
+  const root = scratchDir('finish-return-'), cwd = join(root, 'checkout'), remote = join(root, 'origin.git')
+  const taskDir = join(root, 'dt-lane', 'lane', 'task')
+  mkdirSync(cwd); mkdirSync(taskDir, { recursive: true })
+  const g = (...args) => repoGit(cwd, ...args)
+  g('init', '-q', '-b', 'main')
+  g('config', 'user.name', 'Crew Test'); g('config', 'user.email', 'crew@example.invalid')
+  repoGit(root, 'init', '--bare', '-q', remote)
+  g('remote', 'add', 'origin', remote)
+  writeFileSync(join(cwd, 'lib.mjs'), "export const value = 'old'\n")
+  g('add', '.'); g('commit', '-qm', 'base'); g('push', '-q', 'origin', 'main')
+  g('checkout', '-qb', 'lane')
+  const named = { file: 'new.test.mjs', title: 'the returned build works' }
+  writeFileSync(join(cwd, 'lib.mjs'), "export const value = 'new'\n")
+  writeFileSync(join(cwd, 'build.txt'), 'original build\n')
+  writeFileSync(join(cwd, named.file), `import { test } from 'node:test'\nimport assert from 'node:assert/strict'\nimport { value } from './lib.mjs'\ntest('${named.title}', () => assert.equal(value, 'new'))\n`)
+  g('add', '.'); g('commit', '-qm', 'committed build')
+  const head = g('rev-parse', 'HEAD').trim()
+  if (conflict) {
+    g('checkout', '-q', 'main')
+    writeFileSync(join(cwd, 'lib.mjs'), "export const value = 'upstream'\n")
+    g('add', '.'); g('commit', '-qm', 'advance base'); g('push', '-q', 'origin', 'main')
+    g('checkout', '-q', 'lane')
+  }
+  const onto = g('rev-parse', 'refs/remotes/origin/main').trim()
+  const planPath = join(taskDir, 'plan.md')
+  const planner = { role: 'planner', id: 'lane.planner.1', status: 'done', summary: 'planned', details: {
+    subject: 'fix(crew): returned build', plan_path: planPath, tests: [named], files_in_scope: ['lib.mjs', 'build.txt', named.file, 'return.txt'],
+  } }
+  const spec = { ...fakes().spec, cwd, taskDir, suite: { command: process.execPath, args: ['--test', named.file] } }
+  const history = [
+    { event: 'run-start', run_id: 'lane' },
+    { event: 'envelope', role: 'planner', id: planner.id, parsed: planner, defects: [], error: null },
+    { event: 'envelope', role: 'builder', id: 'lane.builder.2', parsed: { role: 'builder', id: 'lane.builder.2', status: 'done', summary: 'built', details: { summary: 'built', tests: [named] } }, defects: [], error: null },
+    { event: 'verdict', stage: 'review', status: 'stopped', ...STOP },
+    { event: 'commit', stage: 'commit', head },
+    { event: 'finish-ready', status: 'ready-for-operator', head, subject: planner.details.subject, body: 'measured', reviewRounds: 1 },
+  ]
+  writeFileSync(planPath, 'Return the committed build.\n')
+  writeFileSync(join(taskDir, 'planner-1.json'), JSON.stringify(planner))
+  writeFileSync(join(taskDir, 'lean.json'), JSON.stringify(spec))
+  const journal = join(taskDir, 'journal.jsonl')
+  writeFileSync(journal, history.map((row) => JSON.stringify(row)).join('\n') + '\n')
+  const guidance = join(root, 'guidance.txt')
+  writeFileSync(guidance, 'Add the return edit and keep the original build.')
+  assert.equal(g('status', '--porcelain'), '')
+  let spawned = 0
+  const launched = await decideFinish({ lane: 'lane', root, choice: 'return', file: guidance, deps: {
+    spawnDetached: () => { spawned++; return 4242 }, log: () => {},
+  } })
+  assert.equal(spawned, 1)
+  const finish = JSON.parse(readFileSync(launched.specPath, 'utf8'))
+  const seats = fakes({ edit: (value) => {
+    if (value.role === 'builder') {
+      value.details.tests = [named]
+      if (stop) {
+        value.status = 'escalate'
+        value.details.question = 'Which return edit should be kept?'
+      }
+    }
+    return value
+  } })
+  const triageHeads = [], resolutions = []
+  const result = await runLoop(finish, {
+    resolveAgents: seats.deps.resolveAgents,
+    runSeat: async (request) => {
+      if (request.role === 'builder') {
+        if (request.feedback.some((item) => item.id === 'rebase-conflict')) {
+          resolutions.push(gitResult(cwd, 'rebase', 'origin/main').status)
+          writeFileSync(join(cwd, 'lib.mjs'), "export const value = 'new'\nexport const resolved = true\n")
+          g('add', 'lib.mjs'); g('-c', 'core.editor=true', 'rebase', '--continue')
+        } else {
+          triageHeads.push(g('rev-parse', 'HEAD').trim())
+          writeFileSync(join(cwd, 'return.txt'), 'return edit\n')
+        }
+      }
+      await seats.deps.runSeat(request)
+      writeFileSync(request.returnPath, await seats.deps.readFile(request.returnPath))
+    },
+  })
+  const rows = readFileSync(journal, 'utf8').trim().split('\n').map((row) => JSON.parse(row)).slice(history.length)
+  if (stop) {
+    assert.equal(result.reason, 'lead-escalated')
+    assert.equal(g('rev-parse', 'HEAD').trim(), onto)
+    assert.equal(readFileSync(join(cwd, 'build.txt'), 'utf8'), 'original build\n')
+    assert.equal(readFileSync(join(cwd, 'return.txt'), 'utf8'), 'return edit\n')
+    writeFileSync(guidance, 'Keep both edits and resume.')
+    await decideFinish({ lane: 'lane', root, choice: 'return', file: guidance, deps: {
+      spawnDetached: () => { spawned++; return 4243 }, log: () => {},
+    } })
+    assert.equal(spawned, 2)
+    assert.equal(JSON.parse(readFileSync(launched.specPath, 'utf8')).finish.guidance, 'Keep both edits and resume.')
+    return
+  }
+  const proof = rows.find((row) => row.event === 'check' && row.check === 'proof')?.result
+  assert.deepEqual(proof?.rows.map((row) => [row.base.state, row.build.state, row.proven]), [['red', 'green', true]])
+  assert.deepEqual(result, { status: 'done', reason: null, pr: null })
+  const rebases = rows.filter((row) => row.event === 'stage-end' && row.stage === 'rebase')
+  assert.deepEqual(rebases.map((row) => row.outcome.status), conflict ? ['red', 'green', 'green'] : ['green', 'green'])
+  if (conflict) assert.equal(rebases[0].outcome.reason, 'rebase-conflict')
+  const initial = rebases.find((row) => row.outcome.status === 'green')
+  assert.equal(initial.outcome.onto, onto)
+  assert.deepEqual(triageHeads, [initial.outcome.onto])
+  assert.deepEqual(resolutions, conflict ? [1] : [])
+  assert.equal(rows.filter((row) => row.event === 'stage-end' && row.stage === 'conflict').length, conflict ? 1 : 0)
+  assert.ok(rows.indexOf(initial) < rows.findIndex((row) => row.event === 'stage-start' && row.stage === 'build'))
+  assert.equal(readFileSync(join(cwd, 'lib.mjs'), 'utf8'), "export const value = 'new'\n" + (conflict ? 'export const resolved = true\n' : ''))
+  assert.equal(readFileSync(join(cwd, 'build.txt'), 'utf8'), 'original build\n')
+  assert.equal(readFileSync(join(cwd, 'return.txt'), 'utf8'), 'return edit\n')
+  assert.ok(g('ls-tree', '--name-only', 'HEAD').split('\n').includes(named.file))
+  assert.equal(g('status', '--porcelain'), '')
+  assert.equal(rows.at(-1).event, 'finish-ready')
+  assert.equal(rows.at(-1).head, g('rev-parse', 'HEAD').trim())
+  assert.equal(g('rev-list', '--count', `${initial.outcome.onto}..HEAD`).trim(), '1')
+}
 
 // MUTATION: drop base-restore on a failed rebase and the build remains committed.
 test('a finish run whose base rebase conflicts stops, names the conflicting paths and leaves the build uncommitted', async () => {

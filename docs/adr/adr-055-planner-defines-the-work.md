@@ -1,6 +1,6 @@
 # ADR-055 — The planner defines the work, code checks red and green, the reviewer judges
 
-**Status:** builder (§3) and planner (§2) parts ratified 2026-11-03 by operator decision on `~/.crew/reviews/adr-055-readout-2026-11-03.md`; §1, §7, §8 and §12 ratified 2026-11-04 by operator decision D14 in `~/.crew/reviews/codebase-2026-11-04.md`; §6 pre-check base refresh (#2403) and concurrent judge reviews (#2425) ratified 2026-11-16 by operator decision; §6 round budgets stay proposed until about 10 lanes run on b1514's round budgets · **Owner:** operator ·
+**Status:** builder (§3) and planner (§2) parts ratified 2026-11-03 by operator decision on `~/.crew/reviews/adr-055-readout-2026-11-03.md`; §1, §7, §8 and §12 ratified 2026-11-04 by operator decision D14 in `~/.crew/reviews/codebase-2026-11-04.md`; §6 pre-check base refresh (#2403), first-round-only refresh (#2433) and concurrent judge reviews (#2425) ratified 2026-11-16 by operator decision; §6 round budgets stay proposed until about 10 lanes run on b1514's round budgets · **Owner:** operator ·
 **Relates to:** ADR-052 (P1 brief, P3 acceptance gate, §6 the loop), ADR-053 (rejected here), ADR-054 (amended
 here), ADR-038 (superseded here), ADR-030 (superseded here), ADR-051 (finish shape), ADR-048 and ADR-049 (superseded
 here)
@@ -163,6 +163,24 @@ not. The journal records old/new base and full-review intent. This grants no rou
 a spent or unresolved turn stops `rebase-conflict`. Failed moves restore uncommitted work only when cleanup
 is proven. The post-suite publishing rebase and its three-recheck bound stay unchanged, covering base movement
 while checks run. This decision does not ratify the proposed round budgets below.
+
+Amended 2026-11-16, operator decision (#2433): narrow #2403's pre-check refresh to
+**the first check round of each run**. A start run or finish pass fetches and
+measures the base once at its first check opportunity, after the required-test-name
+gate, whether or not that measurement moves the base. Later check rounds do not
+fetch, measure or move it before proof, suite or review. Proof retries, review
+findings, suite repairs, replanning, tier restarts and builder repairs after a
+publishing recheck do not reopen this allowance. Builder and conflict turns are
+not themselves check rounds. The rule covers build, judge, mechanical and finish;
+a new finish pass starts a new invocation with its own first-round refresh.
+
+The first-round move still leaves the build uncommitted; its next review stays
+full and counted. The shared single builder conflict turn is unchanged. Later
+checks use the held base at `HEAD`, not necessarily the latest remote tip.
+Publishing still commits and rebases after checks pass; a moved head gets the
+existing suite and uncounted recheck review within `MAX_RECHECKS`. Mechanical
+publishing rechecks still run on the committed rebased head. This amendment does
+not change publishing rechecks or ratify the proposed round budgets.
 
 ### 7. Choosing the loop
 

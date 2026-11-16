@@ -26,11 +26,14 @@ workspace-wide checks. They do not replace the suite gate.
 
 ## Read the lane change from Git
 
-On the first lane or finish suite invocation, the change is uncommitted over the
-base commit at `HEAD`. Pre-check base moves and build, judge and finish
-publishing-rebase rechecks soft-reset to the new base before checks too. No lane
-commits sit above that base at suite time. The loop stages measured lane paths,
-but the script must account for staged, unstaged and nonignored untracked paths.
+On lane or finish suite invocations, the change is uncommitted over the held
+base commit at `HEAD`, not necessarily the latest remote tip. Only the first
+check round of a start run or finish pass refreshes the base. Later repairs keep
+that base until publishing; a new finish pass gets a new first-round refresh.
+First-round pre-check base moves and build, judge and finish publishing-rebase
+rechecks soft-reset to the new base before checks too. No lane commits sit above
+that base at suite time. The loop stages measured lane paths, but the script
+must account for staged, unstaged and nonignored untracked paths.
 
 There is one exception: a mechanical publishing-rebase recheck runs on the clean,
 committed rebased head. A clean tree must run everything. That fallback also

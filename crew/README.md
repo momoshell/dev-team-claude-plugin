@@ -196,7 +196,9 @@ Everything durable is a file; session chat is never the record.
   output-file writes. Unknown timing is `seconds: null` with
   `secondsReason: 'clock-unmeasured'`. Non-green checks save captured output as
   JSON `{stdout, stderr}` in the task directory; the row's `outputFile` names it
-  relative to that directory. Decode both strings to read the full capture,
+  relative to that directory. A stream the runner did not return is `null`, and a
+  runner that returned neither (it threw, for one) writes no file: `outputFile: null`
+  with `outputError.code: 'output-uncaptured'`. Decode both strings to read the full capture,
   including lines before the journal's unchanged 4096-character tails and byte
   counts. Capture is still bounded by the runner's existing 64 MiB output limit
   per subprocess. Green checks create no output artifact. A failed write does

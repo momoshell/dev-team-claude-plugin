@@ -427,7 +427,10 @@ export async function runLoop(spec, deps = {}) {
       if (metadata.seconds === null) metadata.secondsReason = 'clock-unmeasured'
       if (result?.status !== 'green') {
         try {
-          const output = JSON.stringify({ stdout: typeof result?.stdout === 'string' ? result.stdout : '', stderr: typeof result?.stderr === 'string' ? result.stderr : '' })
+          // A runner that threw or returned no streams captured nothing: an empty file would claim two empty streams.
+          const streams = { stdout: typeof result?.stdout === 'string' ? result.stdout : null, stderr: typeof result?.stderr === 'string' ? result.stderr : null }
+          if (streams.stdout === null && streams.stderr === null) throw Object.assign(new Error('the runner returned no output streams'), { code: 'output-uncaptured' })
+          const output = JSON.stringify(streams)
           for (;;) {
             const file = `check-${name}-${++outputNumber}.json`
             try { await d.writeFile(join(spec.taskDir, file), output, { flag: 'wx' }) } catch (error) {

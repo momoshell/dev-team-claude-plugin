@@ -89,6 +89,22 @@ test('non-green proof checks name their full captured output artifact (#2410)', 
   }
 })
 
+test('a runner that returns no streams records unavailable output, not empty streams (#2410)', async () => {
+  for (const next of [new Error('crashed'), { status: 'unmeasured', reason: 'timeout' }, { status: 'unmeasured', reason: 'timeout', stderr: 'late' }]) {
+    const f = sequenced([next])
+    const before = [...f.writes.keys()]
+    assert.equal((await f.go()).status, 'stopped')
+    const row = f.rows.find((r) => r.event === 'check' && r.check === 'suite')
+    if (typeof next.stderr === 'string') {
+      assert.deepEqual(JSON.parse(f.writes.get(join('/virtual/task', row.outputFile))), { stdout: null, stderr: 'late' })
+      continue
+    }
+    assert.equal(row.outputFile, null)
+    assert.deepEqual(row.outputError, { code: 'output-uncaptured', message: 'the runner returned no output streams' })
+    assert.deepEqual([...f.writes.keys()].filter((path) => path.includes('check-suite-') && !before.includes(path)), [])
+  }
+})
+
 test('failed output writes are reported without changing suite or proof routing (#2410)', async () => {
   for (const check of ['suite', 'proof']) for (const status of ['red', 'unmeasured']) for (const failure of ['sync', 'reject']) {
     const make = () => {

@@ -1,12 +1,16 @@
-// Build: plan -> rebase -> build -> proof -> (suite || review) -> PR.
-// Judge: plan -> rebase -> build -> proof -> suite -> review -> second review -> PR.
-// Finish: rebase -> builder triage -> proof -> review -> suite -> commit -> rebase. A base conflict gets one
-// builder conflict turn; an unresolved or spent turn stops with the build uncommitted. A mechanical finish uses its brief and publishes nothing.
-// A publishing rebase conflict also gets one builder conflict turn per run; an unresolved or spent turn stops rebase-conflict.
-// Mechanical: rebase -> build -> proof -> suite -> PR. A fix turn repeats checks; build, judge and mechanical
+// Build: plan -> rebase -> build -> refresh base -> proof -> (suite || review) -> PR.
+// Judge: plan -> rebase -> build -> refresh base -> proof -> suite -> review -> second review -> PR.
+// Finish: rebase -> builder triage -> refresh base -> proof -> review -> suite -> commit -> rebase.
+// Every accepted build/repair fetches before checks. A moved base snapshots, rebases and uncommits the build;
+// its next review is full and counted, not a publishing recheck, and spends none of MAX_RECHECKS.
+// Initial finish, pre-check and publishing conflicts share one builder conflict turn per run.
+// An unresolved or spent turn stops rebase-conflict, restoring uncommitted work only when cleanup is proven.
+// A mechanical finish uses its brief and publishes nothing.
+// Mechanical: rebase -> build -> refresh base -> proof -> suite -> PR. A fix turn repeats checks; build, judge and mechanical
 // never automatically rerun a red suite (ADR-054 §1). Finish also repairs the first red immediately, then stops on another red.
 // A finish suite that is neither green nor red stops without a repair.
-// Every shape commits only the checked tree; a moved head repeats checks at most three times, stopping if Git dropped the change as upstream.
+// Only the checked tree is committed. The post-suite publishing rebase still repeats checks at most three times.
+// Git dropping the change as upstream stops nothing-to-commit at either move.
 // Import-only: every effect (seat turn, filesystem, check, git, journal) crosses an injected seam.
 // A seat's return is never trusted from the callback: the envelope is read back from the path
 // the loop issued, parsed and validated as P2, and must carry the id the loop issued.
@@ -287,7 +291,7 @@ export async function runLoop(spec, deps = {}) {
   let builderMark = null, consultMustFix = null
   let tier = spec.tier
   let testsRequired = isFinish ? fin.testsRequired ?? fin.planPath !== null : tier !== 'mechanical'
-  let rebasedHead = null
+  let rebasedHead = null, currentBase = null
   let repaired = false
   let planPath = isFinish ? fin.planPath : null
   let subject = isFinish ? fin.subject : null
@@ -680,7 +684,7 @@ export async function runLoop(spec, deps = {}) {
     let outcome = turn.held
     if (turn.envelope?.status === 'done') {
       outcome = await rebaseOnBase()
-      if (outcome.status === 'green' && text(outcome.head)) return outcome
+      if ((outcome.status === 'green' && text(outcome.head)) || outcome.reason === 'cleanup-unproven') return outcome
     }
     await stage('conflict-undo', () => callCheck('conflict-undo', d.run, { cwd, command: 'git', args: ['rebase', '--abort'] }, { command: true }))
     for (const args of [['reset', '--hard', before], ['clean', '-f', '-d']]) {
@@ -688,6 +692,41 @@ export async function runLoop(spec, deps = {}) {
       if (undone.status !== 'green') return undone
     }
     return { ...rebased, ...(outcome?.reason === 'authentication_failed' ? { reason: 'authentication_failed' } : {}), turn: outcome }
+  }
+  // Snapshot only measured lane paths; both finish bootstrap and pre-check moves use the rebase safety policy.
+  const moveBuild = async (status, precheck = false) => {
+    const files = status.status === 'green' && typeof status.stdout === 'string' ? parseChangedPaths(status.stdout) : null
+    if (files === null) return { halt: await stop('paths-unmeasured', status) }
+    // Added-then-deleted entries are not part of the build and would leave the snapshot dirty.
+    const dropped = worktreeRecords(status.stdout).filter((record) => record.startsWith('AD ')).map((record) => record.slice(3))
+    if (dropped.length) {
+      const unstaged = await stage('base-unstage', () => callCheck('base-unstage', d.run, { cwd, command: 'git', args: ['--literal-pathspecs', 'rm', '--cached', '--quiet', '--ignore-unmatch', '--', ...dropped] }, { command: true }))
+      if (unstaged.status !== 'green') return { halt: await stop(unstaged.reason, unstaged) }
+    }
+    const kept = files.filter((path) => !dropped.includes(path))
+    let wip
+    if (kept.length) {
+      wip = await stage('base-commit', () => callCheck('base-commit', d.commitChanges, { cwd, files: kept, subject: precheck ? 'wip: crew pre-check base' : 'wip: crew finish base' }))
+      if (wip.status !== 'green' || !text(wip.head)) return { halt: await stop(wip.reason ?? 'runner-threw', wip) }
+    }
+    const rebased = await resolveConflict(await rebaseOnBase())
+    const baseFailure = rebased.status !== 'green' ? rebased.reason
+      : typeof rebased.onto !== 'string' || !HEX_OID.test(rebased.onto) || typeof rebased.head !== 'string' || !HEX_OID.test(rebased.head) ? 'runner-threw' : null
+    if (baseFailure) {
+      if (wip && baseFailure !== 'cleanup-unproven') {
+        const name = precheck ? 'uncommit' : 'base-restore'
+        const restored = await stage(name, () => callCheck(name, d.run, { cwd, command: 'git', args: ['reset', '--soft', `${wip.head}^`] }, { command: true }))
+        if (restored.status !== 'green') return { halt: await stop(restored.reason, restored) }
+      }
+      return { halt: await stop(baseFailure, rebased) }
+    }
+    if (precheck && rebased.head === rebased.onto) return { halt: await stop('nothing-to-commit', rebased) }
+    // Record uncommit so finishLane can resume a pass stopped before its next commit.
+    if (wip || rebased.head !== rebased.onto) {
+      const restored = await stage('uncommit', () => callCheck('uncommit', d.run, { cwd, command: 'git', args: ['reset', '--soft', rebased.onto] }, { command: true }))
+      if (restored.status !== 'green') return { halt: await stop(restored.reason, restored) }
+    }
+    return { rebased }
   }
   const suiteRun = () => stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs }, { command: true }))
   const result = await (async () => {
@@ -731,36 +770,9 @@ export async function runLoop(spec, deps = {}) {
       if (files === null) return stop('paths-unmeasured', status)
       const fetched = await fetchOrigin()
       if (fetched.status !== 'green') return stop(fetched.reason, fetched)
-      // An added-then-deleted entry is no part of the build (the work tree deleted it) and no commit can hold it, so it
-      // leaves the index before the snapshot; left there, the rebase refuses the checkout as dirty.
-      const dropped = worktreeRecords(status.stdout).filter((record) => record.startsWith('AD ')).map((record) => record.slice(3))
-      if (dropped.length) {
-        const unstaged = await stage('base-unstage', () => callCheck('base-unstage', d.run, { cwd, command: 'git', args: ['--literal-pathspecs', 'rm', '--cached', '--quiet', '--ignore-unmatch', '--', ...dropped] }, { command: true }))
-        if (unstaged.status !== 'green') return stop(unstaged.reason, unstaged)
-      }
-      const kept = files.filter((path) => !dropped.includes(path))
-      let wip
-      if (kept.length) {
-        wip = await stage('base-commit', () => callCheck('base-commit', d.commitChanges, { cwd, files: kept, subject: 'wip: crew finish base' }))
-        if (wip.status !== 'green' || !text(wip.head)) return stop(wip.reason ?? 'runner-threw', wip)
-      }
-      const rebased = await resolveConflict(await rebaseOnBase())
-      const baseFailure = rebased.status !== 'green' ? rebased.reason
-        : typeof rebased.onto !== 'string' || !HEX_OID.test(rebased.onto) || !text(rebased.head) ? 'runner-threw' : null
-      if (baseFailure) {
-        if (wip && baseFailure !== 'cleanup-unproven') {
-          const restored = await stage('base-restore', () => callCheck('base-restore', d.run, { cwd, command: 'git', args: ['reset', '--soft', `${wip.head}^`] }, { command: true }))
-          if (restored.status !== 'green') return stop(restored.reason, restored)
-        }
-        return stop(baseFailure, rebased)
-      }
-      // Clean committed returns also need the build uncommitted so proof's HEAD is the base.
-      // Record uncommit so finishLane can resume a pass that stops before its next commit.
-      if (wip || rebased.head !== rebased.onto) {
-        const restored = await stage('uncommit', () => callCheck('uncommit', d.run, { cwd, command: 'git', args: ['reset', '--soft', rebased.onto] }, { command: true }))
-        if (restored.status !== 'green') return stop(restored.reason, restored)
-      }
-      rebasedHead = rebased.onto
+      const moved = await moveBuild(status)
+      if (moved.halt) return moved.halt
+      rebasedHead = currentBase = moved.rebased.onto
     }
 
     if (!isFinish && rebasedHead === null) {
@@ -769,6 +781,7 @@ export async function runLoop(spec, deps = {}) {
       const rebased = await rebaseOnBase()
       if (rebased.status !== 'green' || !text(rebased.head)) return stop(rebased.reason ?? 'runner-threw', rebased)
       rebasedHead = rebased.head
+      currentBase = rebased.onto
     }
 
     let proofLines = [PROOF_UNMEASURED]
@@ -809,6 +822,20 @@ export async function runLoop(spec, deps = {}) {
             if (repeatsFailure(failure)) return stop('no-progress', failure)
             feedback = [{ id: 'proof-no-tests', severity: 'must-fix', summary: 'Name at least one test in details.tests ({file, title}); the loop proves each red on the old source and green on the build, or green with base-package-absent or base-test-absent.' }, ...feedback.filter((item) => item?.id !== 'proof-no-tests' && item?.id !== 'proof-unproven')]
             continue
+          }
+          const fetched = await fetchOrigin()
+          if (fetched.status !== 'green') return stop(fetched.reason, fetched)
+          const measured = await stage('check-base', () => callCheck('check-base', d.run, { cwd, command: 'git', args: ['rev-parse', `refs/remotes/origin/${spec.base}`] }, { command: true }))
+          if (measured.status !== 'green') return stop(measured.reason, measured)
+          const freshBase = typeof measured.stdout === 'string' ? measured.stdout.trim() : ''
+          if (!HEX_OID.test(freshBase) || typeof currentBase !== 'string' || !HEX_OID.test(currentBase)) return stop('runner-threw', measured)
+          if (freshBase !== currentBase) {
+            const moved = await moveBuild(await readStatus('base-paths'), true)
+            if (moved.halt) return moved.halt
+            await emit('pre-check-base-move', { from: currentBase, onto: moved.rebased.onto, review: !isFinish && tier === 'mechanical' ? 'none' : 'full', counted: isFinish || tier !== 'mechanical' })
+            rebasedHead = currentBase = moved.rebased.onto
+            reviewedTree = reserveBase = recheckScope = null
+            uncountedReview = false
           }
         } else uncountedReview = isFinish
         const rebaseOnly = recheck && !isFinish
@@ -858,7 +885,7 @@ export async function runLoop(spec, deps = {}) {
         if (!isFinish) {
           const halt = await stageChecked()
           if (halt) return halt
-          const runReview = () => stage('review', () => seatTurn('reviewer', priorFindings, { free: rebaseOnly, recheckReview, singleTurn: !rebaseOnly && reservePending, ...(!rebaseOnly && reservePending ? { reserveReview: { baseTree: reserveBase } } : !rebaseOnly && reviewedTree ? { deltaReview: { baseTree: reviewedTree } } : {}) }))
+          const runReview = () => stage('review', () => seatTurn('reviewer', priorFindings, { free: rebaseOnly, recheckReview, singleTurn: !rebaseOnly && reservePending, ...(!rebaseOnly && reservePending && reserveBase ? { reserveReview: { baseTree: reserveBase } } : !rebaseOnly && reviewedTree ? { deltaReview: { baseTree: reviewedTree } } : {}) }))
           let suite, reviewed
           if (tier === 'build') {
             const pair = await Promise.allSettled([suiteRun(), runReview()])
@@ -1027,6 +1054,7 @@ export async function runLoop(spec, deps = {}) {
         if (rechecks >= MAX_RECHECKS) return stop('recheck-bound', { rechecks, head: rebased.head, onto: rebased.onto, committed: committed.head })
         const uncommitted = await stage('uncommit', () => callCheck('uncommit', d.run, { cwd, command: 'git', args: ['reset', '--soft', rebased.onto] }, { command: true }))
         if (uncommitted.status !== 'green') return stop(uncommitted.reason, uncommitted)
+        currentBase = rebased.onto
         enterPhase('recheck')
         rechecks++
         reviewedTree = null

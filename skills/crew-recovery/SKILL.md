@@ -47,12 +47,18 @@ If a post-build stop's lead names a plan gap or asks to reopen planning, end the
 it again from its brief so the planner writes a new plan.
 On an escalation, the file answers the operator question. The pass re-enters the
 lane in its own worktree and rebases onto the current base,
-then runs builder triage, proof of the builder's named
-tests, review, suite, commit and rebase. A base conflict gets one builder conflict
-turn; an unresolved or spent turn stops with the build uncommitted. A mechanical lane is finished on its brief; one
+then runs builder triage, refreshes the base, proves the builder's named
+tests, reviews, runs the suite, commits and rebases. After every accepted build or repair,
+the loop fetches before checks. A moved base temporarily snapshots the measured lane paths,
+rebases through the ignored/generated-file rules and soft-resets onto the fresh base,
+leaving the build uncommitted. Proof measures old source there. The next review is full
+and counted, with earlier findings retained; the journal records the move and full scope.
+This spends no publishing recheck and grants no rounds. Initial finish, pre-check and
+publishing conflicts share one builder conflict turn. An unresolved or spent turn stops
+`rebase-conflict`; failed moves restore uncommitted work only when cleanup is proven. A mechanical lane is finished on its brief; one
 whose diff reaches a protected path stops `raise-needs-plan`, and you restart it
 from its brief as a build lane.
-Only the checked tree is committed; a rebase that moves the head repeats proof,
+Only the checked tree is committed; the post-suite rebase still repeats proof,
 review and suite on the new base. It publishes nothing (`crew/finish.mjs`).
 The first red suite gives the builder its one repair turn immediately, even for
 a flaky failure. There is no unchanged-tree retry. The repair repeats proof,
@@ -64,8 +70,9 @@ When that run is ready, decide once:
   measured. Merging stays yours.
 - `crew finish <lane> --return <file>` runs one more finish pass with the file
   as the builder's guidance. Reviews count against the three review rounds,
-  except the review after the one suite-repair turn and a moved-head recheck
-  review; those run even when the cap is spent.
+  except the suite-repair review when its pre-check base is unchanged, and a
+  post-suite moved-head recheck review; those run even when the cap is spent.
+  A pre-check move makes a repair review full and counted, so a spent cap stops it.
 - `crew finish <lane> --abandon` ends the lane unpublished. It also decides a
   stopped lane, once per stop.
 

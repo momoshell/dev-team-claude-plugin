@@ -46,12 +46,16 @@ and discard stop proven seat groups and report unproven ones (`reapLaneSeats` in
 body has the quoted operator ask and bare Context pointers, or bare Context pointers alone for an issue; `crew start` quotes the issue body as the ask). `crew/loop.mjs` runs it:
 
 ```
-build:      plan -> rebase -> build -> per-test proof -> (full suite || review) -> PR
-judge:      plan -> rebase -> build -> per-test proof -> full suite -> review -> second review -> PR
-mechanical: rebase -> build -> per-test proof -> full suite -> PR
+build:      plan -> rebase -> build -> refresh base -> per-test proof -> (full suite || review) -> PR
+judge:      plan -> rebase -> build -> refresh base -> per-test proof -> full suite -> review -> second review -> PR
+mechanical: rebase -> build -> refresh base -> per-test proof -> full suite -> PR
 ```
 
-A fix turn carries the red results back to the builder, then repeats proof, the suite and the tier's reviews. Build and judge do not automatically rerun a red suite on an unchanged tree. Before publishing, each lane commits and rebases. A publishing or finish base rebase conflict gets one builder conflict turn per run; an unresolved or spent turn stops `rebase-conflict`. Build, judge and finish commit only the tree their suite and reviews checked. If the head changes, they put the change on the new base tip and repeat every check, including reviews. On build and judge lanes, the recheck review covers unresolved earlier findings, lane code altered by the rebase or conflict turn, and where the base's new commits meet the lane's change. The loop checks that the three commit comparisons work; if it cannot measure the scope, the recheck is a full review and the journal says so. If Git drops the commit as already upstream, they stop. Mechanical re-proves and re-tests a moved head.
+A fix turn carries the red results back to the builder, then repeats proof, the suite and the tier's reviews. Build and judge do not automatically rerun a red suite on an unchanged tree.
+
+After every accepted builder or repair turn, including finish runs, the loop fetches before checks. An unchanged base adds only fetch and base measurement. If the base moved, the loop temporarily commits the measured lane paths, rebases through the existing ignored/generated-file rules, then soft-resets onto the new base, leaving the build uncommitted. Proof's old source is that fresh base. The next review is full and counted, including reserve and finish repair reviews; earlier findings remain, but delta/reserve/recheck scopes do not. The `pre-check-base-move` journal row records old/new base and review intent. This move grants no rounds and spends none of `MAX_RECHECKS`. A dropped change stops `nothing-to-commit` before checks; a terminal fetch failure stops before snapshotting, with the existing ref-lock retries.
+
+Before publishing, each lane still commits and rebases. Initial finish, pre-check and publishing rebases share one builder conflict turn per run; an unresolved or spent turn stops `rebase-conflict`. Failed moves restore uncommitted work only when cleanup is proven. Build, judge and finish commit only the tree their suite and reviews checked. If the head changes, they put the change on the new base tip and repeat every check, including reviews. On build and judge lanes, the recheck review covers unresolved earlier findings, lane code altered by the rebase or conflict turn, and where the base's new commits meet the lane's change. The loop checks that the three commit comparisons work; if it cannot measure the scope, the recheck is a full review and the journal says so. If Git drops the commit as already upstream, they stop. Mechanical re-proves and re-tests a moved head.
 
 Optional `builderChecks` in `.crew/project.json` is a list of non-empty, one-line commands. Its lines appear verbatim in a `## Project checks` section of build, suite-repair and finish builder prompts. Builders run them and report each result in `notes`. The loop never runs them or reads their results; no journal row or PR line reports them, and the suite stays the gate. Editing the list does not require re-onboarding.
 
@@ -77,14 +81,14 @@ reviewer review but no tech-lead second review. To get that second review, aband
 and restart the lane. Baseline-only stops still refuse. Post-build finish passes
 cannot reopen planning: abandon, close out with `--discard` and restart from the brief
 when the build needs a new plan (ADR-051).
-A `--return` pass whose branch equals its base after the rebase still runs the build; only the commit stage stops `nothing-to-commit`.
+A `--return` pass whose branch equals its base after the initial rebase still runs the build; a later pre-check move that drops the change, or the commit stage, can stop `nothing-to-commit`.
 In a finish pass, the first red suite gives the builder its one repair turn immediately, even for a flaky failure. There is no unchanged-tree retry. The repair repeats proof, review and the suite. A red suite after repair, or a suite that is neither green nor red, stops the lane.
 Bare `crew finish <lane>` reports without writing.
 A claim whose run is provably gone is taken over. A committed
 build with no remote branch is uncommitted and finished if HEAD is the commit or
 its journal-recorded one-commit rebase. The latter is reset onto the rebase base;
 the journal records `finish-uncommit`. `--return` refuses with `finish-rounds-spent`
-once the review rounds in `FINISH_REVIEW_ROUNDS` in `crew/checks.mjs` are spent. The review after the one suite-repair turn and a moved-head recheck review do not count against that cap and run even when it is spent. On `--accept`, issue tokens in the measured
+once the review rounds in `FINISH_REVIEW_ROUNDS` in `crew/checks.mjs` are spent. The review after the one suite-repair turn is free only if its pre-check fetch finds the base unchanged. A pre-check move makes it full and counted, so a spent cap stops it. A post-suite moved-head recheck review remains free and runs even when the cap is spent. On `--accept`, issue tokens in the measured
 text and notes are rewritten; issue numbers appear only on trailer lines.
 A gated lane can accept a calibrated `.crew/project.json` if its hash matches the calibrated journal-recorded rebase base and its suite and timeouts match the lane's. If the base file cannot be read, accept requires the worktree hash to match the start hash. A hash or calibration mismatch refuses `onboarding-stale`; a suite or timeout mismatch also refuses and names the field. The decision row records the start and finish onboarding hashes, even when equal.
 Every loop is bounded, every envelope is

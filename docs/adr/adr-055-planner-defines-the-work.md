@@ -127,12 +127,27 @@ A second-pass scorer that grades and drops findings is deferred until it is meas
 ADR-054's three loops stand, with section 4 above as their proof:
 
 ```
-mechanical:  brief -> rebase -> build -> prove -> suite -> PR
-build:       brief -> plan -> rebase -> build -> prove -> (suite || review) -> PR
-judge:       brief -> plan -> rebase -> build -> prove -> suite -> review -> second review -> PR
+mechanical:  brief -> rebase -> build -> refresh base -> prove -> suite -> PR
+build:       brief -> plan -> rebase -> build -> refresh base -> prove -> (suite || review) -> PR
+judge:       brief -> plan -> rebase -> build -> refresh base -> prove -> suite -> review -> second review -> PR
 ```
 
 The judge loop's second review is the tech-lead's. It drops ADR-038's mutation on the changed surface.
+
+Amended 2026-11-16, operator decision (#2403): **every suite run** refreshes the base after the accepted
+builder or suite-repair turn and before proof, review or suite, in build, judge, mechanical and finish runs.
+An unchanged base adds only fetch and base measurement. A moved base temporarily commits the measured lane
+paths, rebases through the existing ignored/generated-file policy, then soft-resets onto the new base so the
+build remains uncommitted and proof measures old source at that base. If Git drops the change as upstream,
+the lane stops `nothing-to-commit`. Fetch failures retain the ref-lock retry policy and stop on terminal failure.
+
+After a pre-check move, the next review is full and counted against normal review rounds, including a reserve
+review or finish suite-repair review. Earlier findings remain; delta, reserve and publishing-recheck scopes do
+not. The journal records old/new base and full-review intent. This grants no rounds and spends none of
+`MAX_RECHECKS`. Initial finish, pre-check and publishing conflicts share the run's one builder conflict turn;
+a spent or unresolved turn stops `rebase-conflict`. Failed moves restore uncommitted work only when cleanup
+is proven. The post-suite publishing rebase and its three-recheck bound stay unchanged, covering base movement
+while checks run. This decision does not ratify the proposed round budgets below.
 
 ### 7. Choosing the loop
 

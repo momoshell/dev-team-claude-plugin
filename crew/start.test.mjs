@@ -1119,7 +1119,7 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
   }
   mkdirSync(spec.cwd, { recursive: true })
   const requests = [], logs = [], reviews = answers.reviews ?? ['pass']
-  let review = 0, reads = 0, rebasedHead = null, committed = false
+  let review = 0, reads = 0, rebasedHead = null, committed = false, baseOid = 'c'.repeat(40)
   const envelope = (role, id) => {
     const n = Number(id.split('.').at(-1))
     const own = answers[`${role}.${n}`]
@@ -1153,11 +1153,11 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
       proveTests: async () => ({ status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }] }),
       runSuite: async () => GREEN,
       commitChanges: async () => ({ status: 'green', reason: null, head: 'a'.repeat(40) }),
-      rebaseBranch: async () => ({ status: 'green', reason: null, head: (committed ? 'a' : 'b').repeat(40) }),
+      rebaseBranch: async () => ({ status: 'green', reason: null, head: (committed ? 'a' : 'b').repeat(40), onto: baseOid }),
       openPullRequest: async () => ({ status: 'green', reason: null, pr: { number: 7, url: 'https://example.test/7' } }),
       // After the rebase the tree is the rebased head and clean; before it, status reads the scripted paths.
       run: async (input) => input.args.includes('write-tree') ? { ...GREEN, stdout: `${'e'.repeat(40)}\n` }
-        : input.args.includes('rev-parse') ? { ...GREEN, stdout: `${rebasedHead}\n` }
+        : input.args.includes('rev-parse') ? { ...GREEN, stdout: `${input.args.at(-1) === `refs/remotes/origin/${spec.base}` ? baseOid : rebasedHead}\n` }
         : input.args.includes('status') ? { ...GREEN, stdout: rebasedHead ? '' : [status].flat()[Math.min(reads++, [status].flat().length - 1)] } : GREEN,
       ...loopDeps,
     },
@@ -1166,7 +1166,7 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
   const commit = options.loopDeps.commitChanges
   options.loopDeps.commitChanges = async (input) => { const result = await commit(input); if (result.status === 'green') committed = true; return result }
   const rebase = options.loopDeps.rebaseBranch
-  options.loopDeps.rebaseBranch = async (input) => { const result = await rebase(input); if (committed && result.status === 'green') rebasedHead = result.head; return result }
+  options.loopDeps.rebaseBranch = async (input) => { const result = await rebase(input); if (result.status === 'green') { baseOid = result.onto; if (committed) rebasedHead = result.head } return result }
   const sessionOf = (role, n) => join(spec.taskDir, 'lean', role, `lane.${role}.${n}.jsonl`)
   return { spec, requests, logs, go: () => runLean(spec, options), sessionOf, options }
 }
@@ -1256,7 +1256,7 @@ test('a Muse seat refused at session/new for being logged out stops as authentic
     let rebases = 0
     const f = leanFixture({ tier: target === 'conflict' ? 'mechanical' : 'build', answers: target === 'lead' ? { 'builder.2': 'insufficient' } : {}, loopDeps: {
       journal: async (row) => rows.push(row),
-      ...(target === 'conflict' ? { rebaseBranch: async () => ++rebases === 1 ? { status: 'green', reason: null, head: 'b'.repeat(40) } : { status: 'red', reason: 'rebase-conflict', conflicts: ['file'] } } : {}),
+      ...(target === 'conflict' ? { rebaseBranch: async () => ++rebases === 1 ? { status: 'green', reason: null, head: 'b'.repeat(40), onto: 'c'.repeat(40) } : { status: 'red', reason: 'rebase-conflict', conflicts: ['file'] } } : {}),
     } })
     if (target === 'conflict') {
       const run = f.options.loopDeps.run
@@ -2428,7 +2428,7 @@ test('a turn that throws or rejects stops with a terminal row', async () => {
 })
 
 test('the terminal row repeats a stopped loop result and a throwing log is not swallowed', async () => {
-  const f = leanFixture({ loopDeps: { run: async ({ args }) => { if (args.includes('status')) throw EPERM; return GREEN } } })
+  const f = leanFixture({ loopDeps: { run: async ({ args }) => { if (args.includes('status')) throw EPERM; return { ...GREEN, stdout: args.includes('rev-parse') ? 'c'.repeat(40) : '' } } } })
   const result = await f.go()
   assert.deepEqual(result, { status: 'stopped', reason: 'paths-unmeasured', pr: null })
   assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
@@ -2455,7 +2455,7 @@ test('the bridge entry reads one spec file; a malformed or unreadable spec is on
   assert.equal(await leanMain([specPath], good.options), 0)
   assert.equal(existsSync(good.sessionOf('planner', 1)), true)
   const stoppedRows = []
-  const failing = leanFixture({ loopDeps: { run: async ({ args }) => { if (args.includes('status')) throw EPERM; return GREEN } } })
+  const failing = leanFixture({ loopDeps: { run: async ({ args }) => { if (args.includes('status')) throw EPERM; return { ...GREEN, stdout: args.includes('rev-parse') ? 'c'.repeat(40) : '' } } } })
   const failingPath = join(dir, 'failing.json')
   writeFileSync(failingPath, JSON.stringify(failing.spec))
   assert.equal(await leanMain([failingPath], { ...failing.options, log: (line) => stoppedRows.push(line) }), 1)

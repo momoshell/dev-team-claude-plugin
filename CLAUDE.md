@@ -10,7 +10,7 @@ it has to rediscover it.
 starts a lane (`crew start`): a planner, builder and reviewer, and a lead on
 escalation, and a tech-lead gives judge lanes a second review. They play their seats over ACP. Code only checks the result: each test the
 builder names is normally red on the old source and green on the build (with the
-green-only exceptions below), and the full suite is green. Then it commits and opens the PR (ADR-052, ADR-055). A stopped lane is
+green-only exceptions below), and the project suite is green. Then it commits and opens the PR (ADR-052, ADR-055). A stopped lane is
 finished with `crew finish`.
 
 `README.md` is the map. `crew/README.md` is the full model, verbs, seats and

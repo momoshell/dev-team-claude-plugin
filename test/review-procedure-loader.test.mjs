@@ -151,11 +151,15 @@ test('RP4: do-not-flag is labelled the /review procedure only', () => {
   assert.equal(reviewer.includes('review-do-not-flag'), false)
 })
 
-// MUTATION: RP2 restores "The loop runs the proof and suite, in parallel with this review on a build lane."
-test('RP2: step 2 orders the proof before review and runs only the suite beside it on build', () => {
+// MUTATION: RP2 restores the old exclusive-suite scheduling or runs proof beside review.
+test('RP2: step 2 states proof and review scheduling on build, judge and finish lanes', () => {
   const text = readFileSync(join(ROOT, '.agents/skills/review-procedure/SKILL.md'), 'utf8')
   const step = text.split('\n2. ')[1].split('\n3. ')[0].replace(/\s+/g, ' ')
   assert.doesNotMatch(step, /proof and (the )?suite, in parallel/i)
   assert.match(step, /proved[^.]*before this review/i)
-  assert.match(step, /Only the suite runs beside this review, and only on a build lane/)
+  for (const sentence of [
+    'On a build lane, the suite runs beside this review.',
+    'On a judge lane, the tech-lead review runs beside it after the suite has passed.',
+    'On a finish lane, nothing runs beside this review; the suite runs afterward.',
+  ]) assert.ok(step.includes(sentence), sentence)
 })

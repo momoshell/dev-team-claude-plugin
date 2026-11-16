@@ -1645,18 +1645,31 @@ function sequenced(sequence, options = {}) {
 }
 const EFFECTS = ['paths', 'commit', 'fetch', 'rebase', 'publish']
 
-// MUTATION: never re-run a red suite and a flaky first red stops the lane.
-test('a finish lane runs a red suite once more and a green re-run reaches the commit with both runs in its measurements', async () => {
-  const f = sequenced([redRun(7), green(), redRun(9)], { spec: { ...finishSpec(), suite: { command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 1800000 } } })
-  const { inputs } = f
+// MUTATION: retry a finish red on the unchanged tree instead of dispatching its repair.
+test('a finish first red repairs immediately with one run of diagnostics and ordinary green measurements', async () => {
+  const f = sequenced([{ ...redRun(7), stdout: SPEC_OUT, stderr: TAP_OUT }, green()], { spec: { ...finishSpec(), suite: { command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 1800000 } } })
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: null })
-  assert.equal(inputs.length, 2)
-  assert.deepEqual(inputs[1], inputs[0])
-  assert.deepEqual(inputs[0], { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 1800000 })
-  assert.deepEqual(f.calls.filter((c) => ['suite', ...EFFECTS].includes(c)), ['fetch', 'rebase', 'suite', 'suite', ...EFFECTS.filter((c) => c !== 'publish')])
-  assert.match(f.seen.commit.body, /Suite: green; exit 0 \(re-run after red; exit 7\)/)
-  assert.ok(JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body.includes('## Verification'))
+  assert.equal(builderTurns(f).length, 2)
+  assert.deepEqual(f.calls.slice(f.calls.indexOf('suite'), f.calls.lastIndexOf('suite') + 1), ['suite', 'seat:builder', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'seat:reviewer', 'suite'])
+  const feedback = builderTurns(f)[1].feedback.find((item) => item.id === 'suite-repair')
+  assert.equal(feedback.summary, 'The full suite is red after your change. Fix the failing tests. This is your only repair turn.')
+  assert.equal(feedback.checkout, f.spec.cwd)
+  assert.deepEqual(feedback.failingTests, ['anchor spans remain current', 'exhibit census remains current'])
+  assert.deepEqual(feedback.failingFiles, ['skills/qa-test-writing/exhibits.test.mjs:42:1', '/virtual/checkout/skills/ux/exhibits.test.mjs:73:1'])
+  assert.deepEqual(feedback.outputTail, [`${SPEC_OUT}\n${TAP_OUT}`])
+  assert.ok(feedback.outputTail[0].length <= 2000)
+  assert.equal(f.inputs.length, 2)
+  assert.deepEqual(f.inputs[1], f.inputs[0])
+  assert.deepEqual(f.inputs[0], { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 1800000 })
+  assert.equal(f.calls.filter((c) => c === 'proof').length, 2)
+  assert.equal(count(f, 'reviewer'), 2)
   assert.deepEqual(f.rows.filter((r) => r.event === 'check' && r.check === 'suite').map((r) => r.result.status), ['red', 'green'])
+  assert.match(f.seen.commit.body, /- Suite: green; exit 0\.\n?$/)
+  const report = JSON.parse(f.writes.get('/virtual/task/finish-report.json'))
+  assert.ok(report.measurements.includes('- Suite: green; exit 0.'))
+  assert.match(report.body, /Suite passed with exit code 0\./)
+  assert.doesNotMatch(f.seen.commit.body + JSON.stringify(report), /redCode|re-run after red|re-run after a red/)
+  assert.equal(f.calls.includes('publish'), false)
 })
 
 const SPEC_OUT = ['ℹ failing tests:', 'test at skills/qa-test-writing/exhibits.test.mjs:42:1', '✖ anchor spans remain current (2ms)', '  AssertionError: stale'].join('\n')
@@ -1789,57 +1802,44 @@ test('suite repair keeps the accepted scope', async () => {
   for (const r of f.requests.filter((r) => ['builder', 'reviewer'].includes(r.role))) assert.deepEqual(r.filesInScope, scope)
 })
 
-// MUTATION: drop the feedback at the repair call, or skip the repair turn, and a double red stops without a builder.
-test('a suite red on both runs gives the builder one repair turn whose feedback names the failing tests and files', async () => {
-  const f = sequenced([redOut(SPEC_OUT), redOut(TAP_OUT), green()], { spec: finishSpec() })
-  assert.deepEqual((await f.go()).status, 'done')
-  assert.equal(builderTurns(f).length, 2)
-  assert.equal(builderTurns(f)[0].feedback[0].id, 'finish-stop')
-  const feedback = JSON.stringify(builderTurns(f)[1].feedback)
-  for (const needle of ['skills/qa-test-writing/exhibits.test.mjs', 'skills/ux/exhibits.test.mjs', 'anchor spans remain current', 'exhibit census remains current']) assert.ok(feedback.includes(needle), needle)
-  assert.equal(feedback.includes('anchor-pin.mjs'), false, 'the repair hint names no deleted tool')
-  // parsed names never drop the diagnostics: both runs' output tails ride along
-  assert.deepEqual(builderTurns(f)[1].feedback[0].outputTail, [SPEC_OUT, TAP_OUT])
-  const empty = sequenced([redRun(1), redRun(1), green()], { spec: finishSpec() })
+test('a finish suite repair tolerates empty diagnostics and spent builder and review rounds', async () => {
+  const empty = sequenced([redRun(1), green()], { spec: finishSpec() })
   assert.equal((await empty.go()).status, 'done')
   assert.equal(builderTurns(empty).length, 2)
   // the repair turn and its review are granted even when review fixes spent both rounds, and need no lead
-  const spent = sequenced([redOut(SPEC_OUT), redOut(TAP_OUT), green()], { spec: finishSpec(), review: 1, bounds: { builder: 2, reviewer: 2 } })
+  const spent = sequenced([redOut(SPEC_OUT), green()], { spec: finishSpec(), review: 1, bounds: { builder: 2, reviewer: 2 } })
   assert.equal((await spent.go()).status, 'done')
   assert.equal(builderTurns(spent).length, 3)
   assert.equal(count(spent, 'lead'), 0)
 })
 
-// MUTATION: skip the fresh proof, review or suite after the repair and an unproven green is published.
-test('after a suite repair the proof, review and suite run again, then the lane commits and opens its PR with every measurement', async () => {
-  const f = sequenced([redRun(1), redRun(2), green()], { spec: finishSpec() })
-  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: null })
-  const at = f.calls.lastIndexOf('seat:builder')
-  assert.deepEqual(f.calls.slice(at), ['seat:builder', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'seat:reviewer', 'suite', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase'])
-  assert.equal(f.inputs.length, 3)
-  assert.deepEqual(f.inputs[2], f.inputs[0])
-  assert.match(f.seen.commit.body, /Suite: green; exit 0/)
-  assert.ok(JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body.includes('## Verification'))
-
-})
-
-// MUTATION: accept a red repaired suite, retry it, or let a non-done repair bounce into more builders.
-test('a suite still red after the repair turn stops with no second repair turn and no publication', async () => {
-  // the repaired suite gets the same single re-run as any red suite, and two more reds stop the lane
-  const f = sequenced([redRun(1), redRun(2), redRun(3), redRun(4), green()], { spec: finishSpec() })
+// MUTATION: retry a repaired red or let it reach commit and publication.
+test('a finish red after repair stops without an unchanged-tree retry', async () => {
+  const after = { ...redRun(2), stderr: TAP_OUT }
+  const f = sequenced([redOut(SPEC_OUT), after, green()], { spec: finishSpec() })
   assert.deepEqual(await f.go(), stopped('exit-nonzero'))
   assert.equal(builderTurns(f).length, 2)
-  assert.equal(f.inputs.length, 4)
+  assert.equal(f.inputs.length, 2)
+  assert.deepEqual(f.calls.slice(f.calls.indexOf('suite')), ['suite', 'seat:builder', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'seat:reviewer', 'suite'])
+  assert.equal(f.calls.filter((c) => c === 'proof').length, 2)
+  assert.equal(count(f, 'reviewer'), 2)
+  assert.deepEqual(f.rows.findLast((r) => r.status === 'stopped').observation, after)
+  assert.deepEqual(f.rows.filter((r) => r.event === 'check' && r.check === 'suite').map((r) => r.result.status), ['red', 'red'])
   for (const effect of EFFECTS) assert.equal(f.calls.slice(f.calls.indexOf('seat:builder')).includes(effect), false, effect)
+  assert.equal(f.writes.has('/virtual/task/finish-report.json'), false)
+})
+
+// MUTATION: let an unmeasured check or non-done repair bounce into more builders.
+test('an unmeasured post-repair suite or non-done finish repair stops without publication', async () => {
   for (const post of [timeoutRun(), new Error('crashed'), { ...green(), code: 4 }]) {
-    const r = sequenced([redRun(), redRun(), post, green()], { spec: finishSpec() })
+    const r = sequenced([redRun(), post, green()], { spec: finishSpec() })
     assert.equal((await r.go()).status, 'stopped')
     assert.equal(builderTurns(r).length, 2)
-    assert.equal(r.inputs.length, 3)
+    assert.equal(r.inputs.length, 2)
     for (const effect of EFFECTS) assert.equal(r.calls.slice(r.calls.indexOf('seat:builder')).includes(effect), false, effect)
   }
   for (const status of ['insufficient', 'escalate']) {
-    const r = sequenced([redRun(), redRun(), green()], { spec: finishSpec(), lead: 'bounce', edit: (v, req) => req.role === 'builder' && req.feedback.some((item) => item.id === 'suite-repair') ? { ...v, status } : v })
+    const r = sequenced([redRun(), green()], { spec: finishSpec(), lead: 'bounce', edit: (v, req) => req.role === 'builder' && req.feedback.some((item) => item.id === 'suite-repair') ? { ...v, status } : v })
     assert.equal((await r.go()).status, 'stopped')
     assert.equal(builderTurns(r).length, 2)
     assert.equal(count(r, 'lead'), 0)
@@ -1847,17 +1847,17 @@ test('a suite still red after the repair turn stops with no second repair turn a
   }
 })
 
-// MUTATION: let a re-run turn an unmeasured result into green, or re-run an unmeasured first result.
-test('an unmeasured suite is never re-run and never turned green by a re-run', async () => {
+// MUTATION: retry an unmeasured suite before or after repair.
+test('an unmeasured suite before or after repair is never retried', async () => {
   const unknowns = [[timeoutRun(), 'timeout'], [new Error('crashed'), 'runner-threw'], [{ ...green(), code: 4 }, 'runner-threw'], [{ status: 'green' }, 'runner-threw']]
   for (const [unknown, reason] of unknowns) {
     const initial = sequenced([unknown, green()], { spec: finishSpec() })
     assert.deepEqual(await initial.go(), stopped(reason))
     assert.equal(initial.inputs.length, 1)
-    const rerun = sequenced([redRun(), unknown, green()], { spec: finishSpec() })
-    assert.deepEqual(await rerun.go(), stopped(reason))
-    assert.equal(rerun.inputs.length, 2)
-    for (const f of [initial, rerun]) for (const effect of EFFECTS) assert.equal(f.calls.slice(f.calls.indexOf('seat:builder')).includes(effect), false, effect)
+    const repaired = sequenced([redRun(), unknown, green()], { spec: finishSpec() })
+    assert.deepEqual(await repaired.go(), stopped(reason))
+    assert.equal(repaired.inputs.length, 2)
+    for (const f of [initial, repaired]) for (const effect of EFFECTS) assert.equal(f.calls.slice(f.calls.indexOf('seat:builder')).includes(effect), false, effect)
   }
 })
 
@@ -2605,7 +2605,7 @@ test('a finish run whose base rebase conflicts stops, names the conflicting path
 
 // MUTATION: restore the repaired review stop or the old builder grant.
 test('a finish review that asks for changes after the suite repair goes back to the builder, and the repaired tree is proven, reviewed and suite-run before ready', async () => {
-  const f = sequenced([redRun(), redRun(), green()], { spec: finishSpec(), edit: (v, req) => req.role === 'reviewer' && count(f, 'builder') === 2 ? { ...v, details: { ...v.details, verdict: 'changes-needed', findings: [finding] } } : v })
+  const f = sequenced([redRun(), green()], { spec: finishSpec(), edit: (v, req) => req.role === 'reviewer' && count(f, 'builder') === 2 ? { ...v, details: { ...v.details, verdict: 'changes-needed', findings: [finding] } } : v })
   assert.equal((await f.go()).status, 'done')
   assert.deepEqual(builderTurns(f)[2].feedback, [finding])
   assert.equal(count(f, 'lead'), 0)
@@ -2616,7 +2616,7 @@ test('a finish review that asks for changes after the suite repair goes back to 
 })
 
 test('a finish run with its review cap spent reviews the suite repair without a round and reaches finish-ready (#2374)', async () => {
-  const f = sequenced([redRun(), redRun(), green()], { spec: finishSpec({ priorReviewRounds: 2 }) })
+  const f = sequenced([redRun(), green()], { spec: finishSpec({ priorReviewRounds: 2 }) })
   assert.equal((await f.go()).status, 'done')
   assert.equal(count(f, 'reviewer'), 2)
   assert.equal(f.rows.find((row) => row.event === 'finish-ready').reviewRounds, 3)
@@ -2646,7 +2646,7 @@ test('an uncounted finish review that asks for changes with the cap spent stops 
       if (v.role === 'reviewer' && ++reviews === 2) v.details = { ...v.details, verdict: 'changes-needed', findings: [finding] }
       return v
     } }
-    const f = kind === 'repair' ? sequenced([redRun(), redRun(), green()], options) : fakes({ ...options,
+    const f = kind === 'repair' ? sequenced([redRun(), green()], options) : fakes({ ...options,
       rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C, onto: O }),
       commit: answers({ status: 'green', reason: null, head: A, files: ['lib.mjs'] }, { status: 'green', reason: null, head: C, files: ['lib.mjs'] }) })
     assert.deepEqual(await f.go(), stopped('round-bound'), kind)
@@ -2777,9 +2777,9 @@ test('a finish lead consult for a builder held at its round bound sees finish-re
   assert.equal(question.includes(guidance), false)
 })
 
-test('a finish pass with guidance whose suite is red twice gives the suite-repair builder turn finish-return once (#2384)', async () => {
+test('a finish pass with guidance whose first suite is red gives the suite-repair builder turn finish-return once (#2384)', async () => {
   const guidance = 'Do not name the new-file test as a proof test.'
-  const f = sequenced([redRun(), redRun(), green()], { spec: finishSpec({ guidance }), unseated: ['planner'] })
+  const f = sequenced([redRun(), green()], { spec: finishSpec({ guidance }), unseated: ['planner'] })
   assert.equal((await f.go()).status, 'done')
   const feedback = builderTurns(f)[1].feedback
   assert.equal(feedback.filter((item) => item.id === 'suite-repair').length, 1)
@@ -2883,7 +2883,7 @@ test('a finish review or finish suite-repair escalate with a question stops seat
       return v
     }
     const options = { spec: finishSpec(), unseated: ['planner'], edit }
-    const f = mode === 'repair' ? sequenced([redRun(), redRun()], options) : fakes(options)
+    const f = mode === 'repair' ? sequenced([redRun()], options) : fakes(options)
     assert.deepEqual(await f.go(), stopped('seat-escalated'), mode)
     assert.equal(count(f, 'lead'), 0)
     if (!['insufficient', 'questionless'].includes(mode)) {
@@ -3750,24 +3750,24 @@ test('should-fix findings reach the PR as plain open points with no seat name or
 })
 
 test('the PR body states proof and suite honestly when no test is named, the lane is mechanical, or proof is unmeasured', async () => {
-  for (const mode of ['none', 'mechanical', 'mechanical-named', 'unmeasured', 'rerun']) {
-    const finish = ['unmeasured', 'rerun'].includes(mode)
+  for (const mode of ['none', 'mechanical', 'mechanical-named', 'unmeasured', 'repair']) {
+    const finish = ['unmeasured', 'repair'].includes(mode)
     const mechanical = mode.startsWith('mechanical')
     const options = { spec: finish ? finishSpec() : mechanical ? { tier: 'mechanical' } : {}, edit: (v) => {
       if (v.role === 'planner' && mode === 'none') v.details.tests = []
       if (v.role === 'builder') {
         if (mechanical) v.details.subject = 'fix: mechanical'
-        if (['none', 'mechanical', 'unmeasured', 'rerun'].includes(mode)) v.details.tests = []
+        if (['none', 'mechanical', 'unmeasured', 'repair'].includes(mode)) v.details.tests = []
       }
       return v
     } }
-    const f = mode === 'rerun' ? sequenced([redRun(7), green()], options) : fakes(options)
+    const f = mode === 'repair' ? sequenced([redRun(7), green()], options) : fakes(options)
     assert.equal((await f.go()).status, 'done', mode)
     const body = finish ? JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body : f.seen.publish.body
     assert.match(body, mode === 'none' ? /Proof: no criterion is machine-checked/ : mode === 'mechanical-named' ? /Review: none, mechanical lane, not reviewed/ : mechanical ? /Proof: mechanical lane, not reviewed/ : /Proof: unmeasured/)
     if (mode === 'mechanical-named') assert.match(body, /lib\.test\.mjs: works was red on the old source, green on the build/)
     else assert.doesNotMatch(body, /red on the old source|green on the build/)
-    assert.match(body, mode === 'rerun' ? /Suite passed with exit code 0 on a re-run after a red exit 7/ : /Suite passed with exit code 0/)
+    assert.match(body, /Suite passed with exit code 0\./)
   }
 })
 

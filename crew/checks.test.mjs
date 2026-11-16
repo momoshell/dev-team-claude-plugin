@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { scratchDir } from '../test/helpers.mjs'
 import { CHECK_REASONS, runSuite } from './checks.mjs'
 import * as checks from './checks.mjs'
+import { sampledBudget } from './host-sleep.mjs'
 
 const GATE_TIMEOUT_MS = 10_000
 const SHORT_TIMEOUT_MS = 2_500
@@ -28,6 +29,88 @@ test('the reason vocabulary is a frozen list of unique tokens', () => {
   assert.equal(new Set(CHECK_REASONS).size, CHECK_REASONS.length)
   assert.equal(CHECK_REASONS.length, 20)
   for (const token of ['invalid-project-config', 'setup-failed', 'nothing-to-commit', 'commit-failed', 'rebase-conflict', 'rebase-failed', 'dirty-worktree', 'push-unmeasured', 'pr-unmeasured', 'invalid-remote-data']) assert.ok(CHECK_REASONS.includes(token), token)
+})
+
+test('sampledBudget freezes its final sample at stop', () => {
+  for (const [elapsed, left, fields] of [[100, 900, {}], [6025, 975, { sleep_credited_s: 6 }]]) {
+    let clock = 0, failed = false, nowReads = 0, sampleReads = 0, scheduled = 0
+    const budget = sampledBudget(1000, {
+      now: () => { nowReads++; if (failed) throw new Error('late clock failure'); return clock },
+      sampleNow: () => { sampleReads++; if (failed) throw new Error('late sample failure'); return clock },
+      setTimeout: () => { scheduled++ },
+    })
+    clock = elapsed
+    const before = [nowReads, sampleReads]
+    budget.stop()
+    assert.deepEqual([nowReads, sampleReads], before.map((count) => count + 1))
+    const stoppedReads = [nowReads, sampleReads]
+    for (const fail of [false, true]) {
+      clock += 3_600_000
+      failed = fail
+      budget.stop()
+      assert.equal(budget.remaining(), left)
+      assert.deepEqual(budget.fields(), fields)
+      budget.watch(() => assert.fail('a stopped budget cannot expire again'))
+      assert.deepEqual([nowReads, sampleReads], stoppedReads)
+      assert.equal(scheduled, 0)
+    }
+  }
+})
+
+test('cancelling a budget watch leaves its deadline running', () => {
+  let clock = 0, tick, expired = 0
+  const timer = {}, cleared = []
+  const budget = sampledBudget(1000, {
+    now: () => clock,
+    setTimeout: (fn) => { tick = fn; return timer },
+    clearTimeout: (handle) => cleared.push(handle),
+  })
+  const cancel = budget.watch(() => expired++)
+  cancel()
+  assert.deepEqual(cleared, [timer])
+  clock = 100
+  assert.equal(budget.remaining(), 900)
+  budget.watch(() => expired++)
+  clock = 1000
+  tick()
+  assert.equal(expired, 1)
+  assert.equal(budget.remaining(), 0)
+  budget.stop()
+})
+
+test('a budget with failed sampling keeps its deadline and unavailable credit at stop', () => {
+  for (const failure of ['backwards', 'throwing', 'missing']) {
+    let clock = 0
+    const budget = sampledBudget(1000, {
+      now: () => clock,
+      sampleNow: failure === 'missing' ? null : () => {
+        if (clock && failure === 'throwing') throw new Error('no clock')
+        return clock ? -1 : 0
+      },
+    })
+    clock = 100
+    assert.equal(budget.remaining(), 900)
+    clock = 1000
+    budget.stop()
+    assert.equal(budget.remaining(), 0)
+    assert.deepEqual(budget.fields(), { sleep_credited_s: null, sleep_credit_reason: 'clock-unavailable' })
+  }
+})
+
+test('runSuite excludes cleanup gaps from sleep credit', async () => {
+  let clock = 0, probes = 0
+  const result = await node(scratchDir('checks-cleanup-sleep-'), '', {}, {
+    now: () => clock,
+    probeKill: (pid, signal) => {
+      if (probes++ === 0) clock += 3_600_000
+      return process.kill(pid, signal)
+    },
+  })
+  assert.ok(probes > 0)
+  assert.equal(result.status, 'green')
+  assert.equal(result.sleep_credited_s, undefined)
+  assert.equal(result.cleanup, 'proven')
+  assert.ok(groupGone(result.pgid))
 })
 
 test('runSuite credits a suspended gap before enforcing its timeout', async () => {

@@ -115,7 +115,6 @@ export function runSuite({ cwd, command, args = [], timeoutMs = DEFAULT_TIMEOUT_
     const stop = async (force) => {
       if (stopping) return
       stopping = true
-      budget.remaining()
       budget.stop()
       if (!force && groupState(probe, pgid) === 'dead') return settle('proven')
       settle(await reapGroup(child, probe, () => closed) ? 'proven' : 'unproven')

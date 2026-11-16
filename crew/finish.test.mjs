@@ -1,5 +1,6 @@
 import { test } from 'node:test'
-import { spawnSync } from 'node:child_process'
+import childProcess, { spawnSync } from 'node:child_process'
+import { syncBuiltinESMExports } from 'node:module'
 import assert from 'node:assert/strict'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -119,6 +120,39 @@ test('every row finish writes carries the clock it was given (S6-9)', async () =
       assert.ok(written.every((row) => row.at === at), mode)
     } finally { cleanup(f) }
   }
+})
+
+test('crew finish never launches real caffeinate in a test worker', () => {
+  const f = fixture(), calls = []
+  const originalSpawn = childProcess.spawn, platform = Object.getOwnPropertyDescriptor(process, 'platform')
+  try {
+    assert.notEqual(process.env.NODE_TEST_CONTEXT, undefined)
+    Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' })
+    childProcess.spawn = (...args) => { calls.push(args); return { on() {}, unref() {} } }
+    syncBuiltinESMExports()
+    const result = finishLane({ lane: 'lane9', root: f.root, deps: { spawnDetached: () => 4242, log() {} } })
+    assert.equal(result.pid, 4242)
+    assert.deepEqual(calls, [])
+  } finally {
+    Object.defineProperty(process, 'platform', platform)
+    childProcess.spawn = originalSpawn
+    syncBuiltinESMExports()
+    cleanup(f)
+  }
+})
+
+test('crew finish return binds an idle sleep assertion to the detached run pid', async () => {
+  const f = fixture(), calls = []
+  try {
+    const file = join(f.base, 'guidance')
+    writeFileSync(file, 'continue')
+    const result = await decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps: {
+      platform: 'darwin', log() {}, spawnDetached: () => 4242,
+      spawn: (...args) => { calls.push(args); return { on() {}, unref() {} } },
+    } })
+    assert.equal(result.pid, 4242)
+    assert.deepEqual(calls, [['caffeinate', ['-i', '-w', '4242'], { detached: true, stdio: 'ignore' }]])
+  } finally { cleanup(f) }
 })
 
 test('crew finish binds an idle sleep assertion to the detached run pid', () => {

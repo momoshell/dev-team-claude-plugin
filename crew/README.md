@@ -57,7 +57,7 @@ On judge lanes, every review round starts the reviewer and tech-lead independent
 
 A fix turn carries the red results back to the builder, then repeats proof, the suite and any needed reviews. In build, judge and finish runs, each review role reuses its own latest verdict and findings if it passed the same tree id earlier in that run. Reuse journals `review-reused` with the role, tree and `pass` verdict, without seating the role or spending a review round or reserve review. A changed tree, a pre-check base move or a latest verdict of `changes-needed` still requires review. Proof and the suite repeat as before. Build and judge do not automatically rerun a red suite on an unchanged tree.
 
-After every accepted builder or repair turn, including finish runs, the loop fetches before checks. An unchanged base adds only fetch and base measurement. If the base moved, the loop temporarily commits the measured lane paths, rebases through the existing ignored/generated-file rules, then soft-resets onto the new base, leaving the build uncommitted. Proof's old source is that fresh base. The next review is full and counted, including reserve and finish repair reviews; earlier findings remain, but delta/reserve/recheck scopes do not. The `pre-check-base-move` journal row records old/new base and review intent. This move grants no rounds and spends none of `MAX_RECHECKS`. A dropped change stops `nothing-to-commit` before checks; a terminal fetch failure stops before snapshotting, with the existing ref-lock retries.
+Only the first check round of each start run or finish pass fetches and measures the base before proof, the suite and review. An unchanged base adds only fetch and base measurement, and still consumes that run's refresh. Later proof retries, review fixes and suite repairs neither fetch nor move the base before checks, including repairs after a publishing recheck; they hold the base already checked out until publishing. A new finish pass gets its own first-round refresh. If the base moved, the loop temporarily commits the measured lane paths, rebases through the existing ignored/generated-file rules, then soft-resets onto the new base, leaving the build uncommitted. Proof's old source is that fresh base. The next review stays full and counted; earlier findings remain, but delta/reserve/recheck scopes do not. The `pre-check-base-move` journal row records old/new base and review intent. This move grants no rounds and spends none of `MAX_RECHECKS`. A dropped change stops `nothing-to-commit` before checks; a terminal fetch failure stops before snapshotting, with the existing ref-lock retries.
 
 Before publishing, each lane still commits and rebases. Initial finish, pre-check and publishing rebases share one builder conflict turn per run; an unresolved or spent turn stops `rebase-conflict`. Failed moves restore uncommitted work only when cleanup is proven. Build, judge and finish commit only the tree their suite and reviews checked. If the head changes, they put the change on the new base tip and repeat the checks, reusing each role's latest pass only if the tree id is unchanged. On build and judge lanes, the recheck review covers unresolved earlier findings, lane code altered by the rebase or conflict turn, and where the base's new commits meet the lane's change. The loop checks that the three commit comparisons work; if it cannot measure the scope, the recheck is a full review and the journal says so. If Git drops the commit as already upstream, they stop. Mechanical re-proves and re-tests a moved head.
 
@@ -92,7 +92,7 @@ A claim whose run is provably gone is taken over. A committed
 build with no remote branch is uncommitted and finished if HEAD is the commit or
 its journal-recorded one-commit rebase. The latter is reset onto the rebase base;
 the journal records `finish-uncommit`. `--return` refuses with `finish-rounds-spent`
-once the review rounds in `FINISH_REVIEW_ROUNDS` in `crew/checks.mjs` are spent. When not eligible for reuse, the review after the one suite-repair turn is free only if its pre-check fetch finds the base unchanged. A pre-check move makes it full and counted, so a spent cap stops it. A post-suite moved-head recheck review remains free and runs even when the cap is spent. On `--accept`, issue tokens in the measured
+once the review rounds in `FINISH_REVIEW_ROUNDS` in `crew/checks.mjs` are spent. When not eligible for reuse, the review after the one suite-repair turn is free; the repair does not fetch or move the base before checks. A first-round pre-check move still requires a full, counted review, so a spent cap stops it. A post-suite moved-head recheck review remains free and runs even when the cap is spent. On `--accept`, issue tokens in the measured
 text and notes are rewritten; issue numbers appear only on trailer lines.
 A gated lane can accept a calibrated `.crew/project.json` if its hash matches the calibrated journal-recorded rebase base and its suite and timeouts match the lane's. If the base file cannot be read, accept requires the worktree hash to match the start hash. A hash or calibration mismatch refuses `onboarding-stale`; a suite or timeout mismatch also refuses and names the field. The decision row records the start and finish onboarding hashes, even when equal.
 Every loop is bounded, every envelope is
@@ -164,8 +164,11 @@ After an `acp-seat-deadline` cut, the one rerun receives the original prompt plu
 
 ### Suite Git state
 
-On the first lane or finish suite invocation, the lane change is uncommitted
-above the base commit at `HEAD`. The same holds after pre-check base moves and
+On lane or finish suite invocations, the lane change is uncommitted
+over the held base commit at `HEAD`, not necessarily the latest remote tip.
+Only the first check round refreshes the base; later repairs keep it until
+publishing. A new finish pass refreshes on its first check round again.
+The same uncommitted state holds after first-round pre-check base moves and
 build, judge or finish publishing-rebase rechecks: the loop soft-resets to the
 new base before checks. There are no lane commits above `HEAD` at those checks.
 The loop stages measured lane paths before the suite, but a project script

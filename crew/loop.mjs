@@ -1,7 +1,8 @@
 // Build: plan -> rebase -> build -> refresh base -> proof -> (suite || review) -> PR.
 // Judge: plan -> rebase -> build -> refresh base -> proof -> suite -> (review || second review) -> PR.
 // Finish: rebase -> builder triage -> refresh base -> proof -> review -> suite -> commit -> rebase.
-// Every accepted build/repair fetches before checks. A moved base snapshots, rebases and uncommits the build;
+// Only the first check round fetches the base; later repairs hold it until publishing.
+// A moved base snapshots, rebases and uncommits the build;
 // its next review is full and counted, not a publishing recheck, and spends none of MAX_RECHECKS.
 // Initial finish, pre-check and publishing conflicts share one builder conflict turn per run.
 // An unresolved or spent turn stops rebase-conflict, restoring uncommitted work only when cleanup is proven.
@@ -838,6 +839,7 @@ export async function runLoop(spec, deps = {}) {
     let builderSummary = ''
     const finishReviews = []
     let feedback = isFinish ? [{ id: 'finish-stop', summary: 'The previous lane stopped with the given reason and observation.', reason: fin.stop.reason, observation: fin.stop.observation }, ...(guidanceItem ? [guidanceItem] : []), ...fin.findings] : []
+    let firstCheck = true
     let repairing = false, recheck = false, rechecks = 0, uncountedReview = false
     let committed, rebased, measurements, laneBody, reviewStatus, checkedTree
     const readTree = () => stage('checked-tree', () => callCheck('checked-tree', d.run, { cwd, command: 'git', args: ['write-tree'] }, { command: true }))
@@ -883,21 +885,24 @@ export async function runLoop(spec, deps = {}) {
             feedback = [{ id: 'proof-no-tests', severity: 'must-fix', summary: 'Name at least one test in details.tests ({file, title}); the loop proves each red on the old source and green on the build, or green with base-package-absent or base-test-absent.' }, ...feedback.filter((item) => item?.id !== 'proof-no-tests' && item?.id !== 'proof-unproven')]
             continue
           }
-          const fetched = await fetchOrigin()
-          if (fetched.status !== 'green') return stop(fetched.reason, fetched)
-          const measured = await stage('check-base', () => callCheck('check-base', d.run, { cwd, command: 'git', args: ['rev-parse', `refs/remotes/origin/${spec.base}`] }, { command: true }))
-          if (measured.status !== 'green') return stop(measured.reason, measured)
-          const freshBase = typeof measured.stdout === 'string' ? measured.stdout.trim() : ''
-          if (!HEX_OID.test(freshBase) || typeof currentBase !== 'string' || !HEX_OID.test(currentBase)) return stop('runner-threw', measured)
-          if (freshBase !== currentBase) {
-            const moved = await moveBuild(await readStatus('base-paths'), true)
-            if (moved.halt) return moved.halt
-            await emit('pre-check-base-move', { from: currentBase, onto: moved.rebased.onto, review: !isFinish && tier === 'mechanical' ? 'none' : 'full', counted: isFinish || tier !== 'mechanical' })
-            rebasedHead = currentBase = moved.rebased.onto
-            reviewedTree = reserveBase = recheckScope = null
-            // A moved base needs a full counted review even when the lane's tree id is unchanged, so no earlier pass is reused.
-            for (const role of Object.keys(latestReviews)) delete latestReviews[role]
-            uncountedReview = false
+          if (firstCheck) {
+            firstCheck = false
+            const fetched = await fetchOrigin()
+            if (fetched.status !== 'green') return stop(fetched.reason, fetched)
+            const measured = await stage('check-base', () => callCheck('check-base', d.run, { cwd, command: 'git', args: ['rev-parse', `refs/remotes/origin/${spec.base}`] }, { command: true }))
+            if (measured.status !== 'green') return stop(measured.reason, measured)
+            const freshBase = typeof measured.stdout === 'string' ? measured.stdout.trim() : ''
+            if (!HEX_OID.test(freshBase) || typeof currentBase !== 'string' || !HEX_OID.test(currentBase)) return stop('runner-threw', measured)
+            if (freshBase !== currentBase) {
+              const moved = await moveBuild(await readStatus('base-paths'), true)
+              if (moved.halt) return moved.halt
+              await emit('pre-check-base-move', { from: currentBase, onto: moved.rebased.onto, review: !isFinish && tier === 'mechanical' ? 'none' : 'full', counted: isFinish || tier !== 'mechanical' })
+              rebasedHead = currentBase = moved.rebased.onto
+              reviewedTree = reserveBase = recheckScope = null
+              // A moved base needs a full counted review even when the lane's tree id is unchanged, so no earlier pass is reused.
+              for (const role of Object.keys(latestReviews)) delete latestReviews[role]
+              uncountedReview = false
+            }
           }
         } else uncountedReview = isFinish
         const rebaseOnly = recheck && !isFinish

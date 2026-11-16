@@ -412,10 +412,38 @@ export async function runLoop(spec, deps = {}) {
     return paths.length ? await raise('protected-path', { paths }) : null
   }
   // Runs one check seam; a throw or a result that contradicts its own status is unmeasured, never trusted.
+  let outputNumber = 0
   const callCheck = async (name, fn, input, { command = false } = {}) => {
-    let result
-    try { result = await fn(input) } catch (error) { result = { status: 'unmeasured', reason: 'runner-threw', error: describe(error) } }
-    await emit('check', { check: name, result: journaled(result) })
+    const retained = name === 'suite' || name === 'proof'
+    let result, started, ended
+    if (retained) try { started = d.now() } catch {}
+    try { result = await fn(input) } catch (error) { result = { status: 'unmeasured', reason: 'runner-threw', error: describe(error) } } finally {
+      if (retained) try { ended = d.now() } catch {}
+    }
+    const metadata = {}
+    if (retained) {
+      const elapsed = Number.isFinite(started) && Number.isFinite(ended) ? ended - started : NaN
+      metadata.seconds = Number.isFinite(elapsed) && elapsed >= 0 ? elapsed / 1000 : null
+      if (metadata.seconds === null) metadata.secondsReason = 'clock-unmeasured'
+      if (result?.status !== 'green') {
+        try {
+          const output = JSON.stringify({ stdout: typeof result?.stdout === 'string' ? result.stdout : '', stderr: typeof result?.stderr === 'string' ? result.stderr : '' })
+          for (;;) {
+            const file = `check-${name}-${++outputNumber}.json`
+            try { await d.writeFile(join(spec.taskDir, file), output, { flag: 'wx' }) } catch (error) {
+              if (error?.code === 'EEXIST') continue
+              throw error
+            }
+            metadata.outputFile = file
+            break
+          }
+        } catch (error) {
+          metadata.outputFile = null
+          try { metadata.outputError = describe(error) } catch { metadata.outputError = { code: null, message: 'unprintable error' } }
+        }
+      }
+    }
+    await emit('check', { check: name, result: journaled(result), ...metadata })
     const sound = result !== null && typeof result === 'object' && !Array.isArray(result)
       && (result.reason === null || CHECK_REASONS.includes(result.reason))
       && ['green', 'red', 'unmeasured'].includes(result.status) && (result.status === 'green') === (result.reason === null)
@@ -870,7 +898,7 @@ export async function runLoop(spec, deps = {}) {
             feedback = [{ id: 'proof-unproven', severity: 'must-fix', summary: 'Named tests must be green on the build and red on the old source, or have base-package-absent or base-test-absent.', tests }, ...feedback.filter((item) => item?.id !== 'proof-no-tests' && item?.id !== 'proof-unproven')]
             continue
           }
-          if (!proofOK) return stop(proof.reason ?? 'runner-threw', proof)
+          if (!proofOK) return stop(proof.reason ?? 'runner-threw', journaled(proof))
           for (const row of rows) {
             const key = `${row.file}\0${row.title}`
             provedTests.set(key, row)
@@ -1096,7 +1124,7 @@ export async function runLoop(spec, deps = {}) {
     if (rebased.head !== committed.head) {
       if (namedTests.length) {
         const reproven = await stage('proof', () => callCheck('proof', d.proveTests, { cwd, base: `${rebased.head}^`, tests: namedTests, timeoutMs: spec.proofTimeoutMs }))
-        if (reproven.status !== 'green' || reproven.reason !== null || !Array.isArray(reproven.rows) || reproven.rows.length !== namedTests.length || !reproven.rows.every((row) => row?.proven === true)) return stop(reproven.reason ?? 'runner-threw', reproven)
+        if (reproven.status !== 'green' || reproven.reason !== null || !Array.isArray(reproven.rows) || reproven.rows.length !== namedTests.length || !reproven.rows.every((row) => row?.proven === true)) return stop(reproven.reason ?? 'runner-threw', journaled(reproven))
         lastProved.clear()
         for (const row of reproven.rows) {
           const key = `${row.file}\0${row.title}`

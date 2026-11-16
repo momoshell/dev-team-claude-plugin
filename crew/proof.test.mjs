@@ -48,6 +48,52 @@ test('proveTests preserves suspension credit across runner and cleanup results',
   }
 })
 
+test('failed proofs retain captured output from Node runners, configured runners and setup (#2410)', async () => {
+  for (const mode of ['node', 'configured', 'runner-failure', 'setup-failure']) {
+    const cwd = scratchDir('proof-output-')
+    git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew'))
+    writeFileSync(join(cwd, 'side'), 'base')
+    writeFileSync(join(cwd, 'setup.mjs'), "console.log('setup stdout ' + process.argv[2]); console.error('setup stderr ' + process.argv[2]); if (process.argv[2] === 'bad') process.exit(1)\n")
+    writeFileSync(join(cwd, 'runner.mjs'), `import { readFileSync, writeFileSync } from 'node:fs'
+const side = readFileSync('side', 'utf8')
+console.log('runner stdout ' + side); console.error('runner stderr ' + side)
+if (${mode === 'runner-failure'} && side === 'build') process.exit(1)
+writeFileSync(process.argv[2], '<testsuite><testcase name="works"/></testsuite>')
+`)
+    writeFileSync(join(cwd, 'list.mjs'), "console.log('list stdout'); console.error('list stderr'); process.exit(1)\n")
+    const entries = mode === 'setup-failure'
+      ? [{ match: 'a.xml', setup: 'node setup.mjs good', run: 'node runner.mjs {report}' }, { match: 'b.xml', setup: 'node setup.mjs bad', run: 'node runner.mjs {report}' }]
+      : mode === 'node' ? [] : [{ match: '*.xml', setup: 'node setup.mjs good', run: 'node runner.mjs {report}', list: 'node list.mjs' }]
+    writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: entries }))
+    git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+    writeFileSync(join(cwd, 'side'), 'build')
+    const files = mode === 'node' ? ['output.test.mjs'] : mode === 'setup-failure' ? ['a.xml', 'b.xml'] : ['a.xml']
+    for (const file of files) writeFileSync(join(cwd, file), mode === 'node'
+      ? "import test from 'node:test'\nimport { readFileSync } from 'node:fs'\ntest('works', () => {})\ntest('node ' + readFileSync('side', 'utf8'), () => {})\n" : '')
+    const result = await proveTests({ cwd, base: 'HEAD', tests: files.map((file) => ({ file, title: 'works' })) })
+    assert.equal(typeof result.stdout, 'string', mode)
+    assert.equal(typeof result.stderr, 'string', mode)
+    assert.equal(result.status, mode === 'setup-failure' ? 'unmeasured' : 'red')
+    if (mode === 'node') {
+      assert.ok(result.stdout.includes('node base'))
+      assert.ok(result.stdout.indexOf('node build') > result.stdout.indexOf('node base'))
+    } else {
+      for (const [stream, output] of [['stdout', result.stdout], ['stderr', result.stderr]]) {
+        assert.ok(output.includes(`setup ${stream} good`))
+        if (mode === 'setup-failure') {
+          assert.ok(output.indexOf(`setup ${stream} bad`) > output.indexOf(`setup ${stream} good`))
+          assert.equal(result.reason, 'setup-failed')
+        } else {
+          assert.ok(output.indexOf(`runner ${stream} base`) > output.indexOf(`setup ${stream} good`))
+          assert.ok(output.indexOf(`runner ${stream} build`) > output.indexOf(`runner ${stream} base`))
+          if (mode === 'runner-failure') assert.ok(output.indexOf(`list ${stream}`) > output.indexOf(`runner ${stream} build`))
+        }
+      }
+    }
+    assert.equal(git(cwd, 'worktree', 'list').trim().split('\n').length, 1)
+  }
+})
+
 test('a configured runner proves a TypeScript test from its JUnit report', async () => {
   const cwd = scratchDir('proof-junit-')
   git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew')); mkdirSync(join(cwd, 'lib'))
@@ -588,7 +634,7 @@ test('a throw inside proveTests is unmeasured runner-threw with the rows it had'
   const tests = [{ file: 'x.test.mjs', title: 'x' }]
   try {
     process.env.TMPDIR = join(tmp, 'absent')
-    assert.deepEqual(await proveTests({ cwd, tests }), { status: 'unmeasured', reason: 'runner-threw', rows: [{ ...tests[0], base: { state: null, reason: 'not-run' }, build: { state: null, reason: 'not-run' }, proven: false, reason: null }] })
+    assert.deepEqual(await proveTests({ cwd, tests }), { status: 'unmeasured', reason: 'runner-threw', rows: [{ ...tests[0], base: { state: null, reason: 'not-run' }, build: { state: null, reason: 'not-run' }, proven: false, reason: null }], stdout: '', stderr: '' })
   } finally { if (prior === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = prior }
 })
 

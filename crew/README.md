@@ -192,6 +192,17 @@ Everything durable is a file; session chat is never the record.
   measurement omit `usage_partial`; unknown is not zero. Snapshots do not carry
   into another prompt or attempt. `crew show` and visualizer token totals still
   read only `usage`, never `usage_partial`.
+  Suite and proof `check` rows record elapsed `seconds` around the runner, excluding
+  output-file writes. Unknown timing is `seconds: null` with
+  `secondsReason: 'clock-unmeasured'`. Non-green checks save captured output as
+  JSON `{stdout, stderr}` in the task directory; the row's `outputFile` names it
+  relative to that directory. Decode both strings to read the full capture,
+  including lines before the journal's unchanged 4096-character tails and byte
+  counts. Capture is still bounded by the runner's existing 64 MiB output limit
+  per subprocess. Green checks create no output artifact. A failed write does
+  not stop the lane: `outputFile: null` and `outputError: {code, message}` mean
+  unavailable output, not empty streams. Closeout archives these files with the
+  task directory; resolve `outputFile` beside the archived `journal.jsonl` too.
 
 ## Files
 

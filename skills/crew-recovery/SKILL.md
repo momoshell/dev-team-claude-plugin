@@ -24,6 +24,18 @@ Read first, decide second, remove last.
   prints the recorded JSONL untouched (`crew/show.mjs`). Read-only.
 - The lane journal is `~/.crew/dt-<lane>/<lane>/task/journal.jsonl`: one JSON row per
   event. The last rows say why the lane stopped. Never edit it by hand.
+- For a red or unmeasured suite or proof, find its `check` row (`check: 'suite'`
+  or `check: 'proof'`). Resolve `outputFile` against the directory containing
+  `journal.jsonl`, then JSON-decode the file's `stdout` and `stderr` strings.
+  They include captured lines before the journal's 4096-character tails; capture
+  remains bounded by the runner's 64 MiB output limit per subprocess. Green checks
+  write no output artifact, including a green proof with an expected red base run.
+  `outputFile: null` with `outputError: {code, message}` means the write failed,
+  not that the streams were empty; the lane continues with the same check result.
+  The row's `seconds` measures the runner, not the output write. Null seconds with
+  `secondsReason: 'clock-unmeasured'` means unknown timing, not a zero-length run.
+  After closeout, use the archived journal and resolve the filename beside it in
+  the archived task directory; closeout keeps the output files with the journal.
 
 A `seat-unmeasured` stop means the seat failed to produce a usable turn after
 its existing single rerun. Inspect both sessions and their `seat-turn` rows

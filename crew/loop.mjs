@@ -444,7 +444,7 @@ export async function runLoop(spec, deps = {}) {
         const attempt = async (asked) => {
           let failure = null
           let parsed = null, parseError = null
-          let recording = null, turnError = null, routed = false, providerKind = null, method = null
+          let recording = null, turnError = null, turnReason = null, routed = false, providerKind = null, method = null
           // P4 measures each attempt separately; ADR-055 §12 (#2279) keeps its own progress comparison.
           const turnBefore = role === 'builder' ? await fingerprint() : null
           let started, ended
@@ -457,6 +457,7 @@ export async function runLoop(spec, deps = {}) {
             }
           } catch (error) {
             turnError = describe(error)
+            turnReason = error?.reason
             providerKind = error?.providerKind
             method = error?.method
             recording = error?.recording ?? null
@@ -478,7 +479,7 @@ export async function runLoop(spec, deps = {}) {
           } catch { /* journal measurements must not affect the turn */ }
           if (!isFinish && tier === 'mechanical' && role === 'builder' && checked.envelope?.status === 'done' && checked.envelope.details && !Object.hasOwn(checked.envelope.details, 'subject')) checked.defects.push('details.subject is required on a mechanical lane for the commit and PR')
           if (role === 'planner' && checked.envelope?.status === 'done' && checked.defects.length === 0 && Object.hasOwn(checked.envelope.details, 'plan_path')) checked.defects.push(...await artifactDefects(checked.envelope.details))
-          return { failure, parsed, raw, parseError, checked, turnError, routed, providerKind, method, turnBefore, turnAfter }
+          return { failure, parsed, raw, parseError, checked, turnError, turnReason, routed, providerKind, method, turnBefore, turnAfter }
         }
         const observe = (a) => emit('envelope', { role, id, returnPath, parsed: a.parsed, dropped: a.checked.dropped ?? [], defects: a.checked.defects, error: a.failure?.error ?? null, turnError: a.turnError, ...(uncounted ? { counted: false } : {}) })
         const attempts = [await attempt(request)]
@@ -489,7 +490,7 @@ export async function runLoop(spec, deps = {}) {
           if (latest.turnError && !acceptable && !latest.routed && !rerun) {
             await observe(latest)
             rerun = true
-            asked = { ...asked, rerun: { error: latest.turnError } }
+            asked = { ...asked, rerun: { error: latest.turnError, reason: latest.turnReason } }
           } else if (!latest.turnError && repairs < MAX_ENVELOPE_REPAIRS && ((!latest.failure && latest.checked.defects.length > 0) || (latest.parseError && latest.raw.trimStart().startsWith('{')))) {
             await observe(latest)
             repairs += 1

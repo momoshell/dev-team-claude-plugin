@@ -29,7 +29,7 @@ export function deriveMembers({ members, rows, leanRoles, tier }) {
   }
   return { members: derived, tier: highest < 0 ? tier : TIERS[highest] }
 }
-export const RUN_FIELDS = Object.freeze(['agent', 'model', 'effort', 'advisor', 'tiers'])
+export const RUN_FIELDS = Object.freeze(['agent', 'model', 'effort', 'advisor', 'wait_s', 'tiers'])
 export const SHAPES = Object.freeze(['standard', 'finish'])
 export const AGENT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
 const ID = /^[A-Za-z][A-Za-z0-9._-]*$/
@@ -243,7 +243,7 @@ export function runOverrideDefects(role, entry) {
       if (!TIERS.includes(tier)) out.push(`${path} is not a tier`)
       if (value === null) continue
       if (!plain(value)) { out.push(`${path} is an object or null`); continue }
-      for (const key of Object.keys(value)) if (!RUN_FIELDS.slice(0, 4).includes(key)) out.push(`${path}.${key} is not a run field`)
+      for (const key of Object.keys(value)) if (key === 'tiers' || !RUN_FIELDS.includes(key)) out.push(`${path}.${key} is not a run field`)
       out.push(...validateAgentFields(value, `${path}.`))
     }
   }

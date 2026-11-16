@@ -118,7 +118,7 @@ function nearestTitle(candidates, title) {
 export async function testEvents({ cwd, files, timeoutMs }, deps = {}) {
   const run = await (deps.runSuite ?? runSuite)({ cwd, command: process.execPath, args: ['--test', `--test-reporter=${new URL('./proof-reporter.mjs', import.meta.url).href}`, '--test-reporter-destination=stdout', ...files], timeoutMs })
   const events = run.stdout.split('\n').flatMap((line) => { try { return [JSON.parse(line)] } catch { return [] } })
-  return { status: run.status, reason: run.reason, events, ...addSleepCredit({}, run) }
+  return { status: run.status, reason: run.reason, events, stdout: run.stdout, stderr: run.stderr, ...addSleepCredit({}, run) }
 }
 
 // Refuse symlinked parents as well as the final path, including in the checkout.
@@ -161,9 +161,16 @@ export const PROOF_TIMEOUT_DEFAULT_MS = 120_000
 
 export async function proveTests(input = {}, deps = {}) {
   const credit = {}
+  // Null until a runner returns that stream: a runner that threw captured nothing, which is not an empty stream.
+  let stdout = null, stderr = null
+  const capture = (result) => {
+    if (typeof result?.stdout === 'string') stdout = (stdout ?? '') + result.stdout
+    if (typeof result?.stderr === 'string') stderr = (stderr ?? '') + result.stderr
+    return result
+  }
   const runCommand = async (spec) => {
     try {
-      const run = await (deps.runSuite ?? runSuite)(spec)
+      const run = capture(await (deps.runSuite ?? runSuite)(spec))
       addSleepCredit(credit, run)
       return run
     } catch (error) {
@@ -171,7 +178,7 @@ export async function proveTests(input = {}, deps = {}) {
       throw error
     }
   }
-  const unmeasured = (reason, rows = []) => ({ status: 'unmeasured', reason, rows })
+  const unmeasured = (reason, rows = []) => ({ status: 'unmeasured', reason, rows, stdout, stderr })
   let tmp, added = null, result, rows = []
   try {
     const { cwd, base = 'HEAD', tests, timeoutMs = PROOF_TIMEOUT_DEFAULT_MS } = input ?? {}
@@ -281,5 +288,5 @@ export async function proveTests(input = {}, deps = {}) {
     }
     if (tmp && !kept) try { rmSync(tmp, { recursive: true, force: true }) } catch { result = unmeasured('cleanup-unproven', rows) }
   }
-  return { ...result, ...credit }
+  return { ...(result.status === 'green' ? result : { ...result, stdout, stderr }), ...credit }
 }

@@ -37,6 +37,129 @@ test('a check row journals a bounded output tail with byte counts and the stage-
   }
 })
 
+test('non-green suite checks preserve full output in distinct task artifacts (#2410)', async () => {
+  const taskDir = scratchDir('loop-output-'), saved = new Map()
+  for (const reason of ['exit-nonzero', 'timeout', 'output-limit']) {
+    const failed = [1, 2].map((n) => ({ ...green(), status: reason === 'exit-nonzero' ? 'red' : 'unmeasured', reason, code: 1,
+      stdout: `first stdout ${reason} ${n}\n${'é'.repeat(5000)}`, stderr: `first stderr ${reason} ${n}\n${'e'.repeat(5000)}` }))
+    const f = sequenced([...failed, green()], { spec: { taskDir }, bounds: { builder: 3 }, deps: { writeFile: async (...args) => writeFileSync(...args) } })
+    await f.go()
+    const checks = f.rows.filter((r) => r.event === 'check' && r.check === 'suite' && r.result.status !== 'green')
+    assert.equal(checks.length, reason === 'exit-nonzero' ? 2 : 1)
+    for (const [i, row] of checks.entries()) {
+      assert.equal(typeof row.outputFile, 'string')
+      assert.equal(saved.has(row.outputFile), false)
+      const content = readFileSync(join(taskDir, row.outputFile), 'utf8')
+      assert.deepEqual(JSON.parse(content), { stdout: failed[i].stdout, stderr: failed[i].stderr })
+      assert.equal(row.result.stdout, failed[i].stdout.slice(-4096))
+      assert.equal(row.result.stdoutBytes, Buffer.byteLength(failed[i].stdout))
+      saved.set(row.outputFile, content)
+    }
+    for (const [file, content] of saved) assert.equal(readFileSync(join(taskDir, file), 'utf8'), content)
+  }
+  assert.equal(readdirSync(taskDir).length, saved.size)
+})
+
+test('non-green proof checks name their full captured output artifact (#2410)', async () => {
+  const taskDir = scratchDir('loop-proof-output-')
+  for (const mode of ['repair', 'rebase', 'unmeasured']) {
+    const failed = { status: mode === 'unmeasured' ? 'unmeasured' : 'red', reason: mode === 'unmeasured' ? 'timeout' : 'proof-unproven', rows: [],
+      stdout: `proof first stdout ${mode}\n${'x'.repeat(5000)}`, stderr: `proof first stderr ${mode}\n${'e'.repeat(5000)}` }
+    const proven = { status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }] }
+    const options = { spec: { taskDir, ...(mode === 'rebase' ? { tier: 'mechanical' } : {}) }, proof: mode === 'repair' ? answers(failed, failed, proven) : mode === 'rebase' ? answers(proven, failed) : failed,
+      deps: { writeFile: async (...args) => writeFileSync(...args) } }
+    const f = mode === 'rebase' ? moved(options) : fakes(options)
+    await f.go()
+    const checks = f.rows.filter((r) => r.event === 'check' && r.check === 'proof' && r.result.status !== 'green')
+    assert.equal(checks.length, mode === 'repair' ? 2 : 1)
+    for (const row of checks) {
+      assert.equal(typeof row.outputFile, 'string')
+      assert.deepEqual(JSON.parse(readFileSync(join(taskDir, row.outputFile), 'utf8')), { stdout: failed.stdout, stderr: failed.stderr })
+    }
+    assert.equal(new Set(checks.map((r) => r.outputFile)).size, checks.length)
+    if (mode !== 'repair') {
+      const stopped = f.rows.findLast((r) => r.event === 'verdict' && r.status === 'stopped')
+      assert.equal(stopped.reason, failed.reason)
+      assert.deepEqual(stopped.observation, checks.at(-1).result)
+      for (const stream of ['stdout', 'stderr']) {
+        assert.equal(stopped.observation[stream], failed[stream].slice(-4096))
+        assert.equal(stopped.observation[`${stream}Bytes`], Buffer.byteLength(failed[stream]))
+      }
+    }
+  }
+})
+
+test('a runner that returns no streams records unavailable output, not empty streams (#2410)', async () => {
+  for (const next of [new Error('crashed'), { status: 'unmeasured', reason: 'timeout' }, { status: 'unmeasured', reason: 'timeout', stderr: 'late' }]) {
+    const f = sequenced([next])
+    const before = [...f.writes.keys()]
+    assert.equal((await f.go()).status, 'stopped')
+    const row = f.rows.find((r) => r.event === 'check' && r.check === 'suite')
+    if (typeof next.stderr === 'string') {
+      assert.deepEqual(JSON.parse(f.writes.get(join('/virtual/task', row.outputFile))), { stdout: null, stderr: 'late' })
+      continue
+    }
+    assert.equal(row.outputFile, null)
+    assert.deepEqual(row.outputError, { code: 'output-uncaptured', message: 'the runner returned no output streams' })
+    assert.deepEqual([...f.writes.keys()].filter((path) => path.includes('check-suite-') && !before.includes(path)), [])
+  }
+})
+
+test('failed output writes are reported without changing suite or proof routing (#2410)', async () => {
+  for (const check of ['suite', 'proof']) for (const status of ['red', 'unmeasured']) for (const failure of ['sync', 'reject']) {
+    const make = () => {
+      const failed = { ...green(), status, reason: status === 'unmeasured' ? 'timeout' : check === 'suite' ? 'exit-nonzero' : 'proof-unproven', code: 1, rows: [], stdout: 'diagnostic' }
+      return check === 'suite' ? sequenced([failed, green()]) : fakes({ proof: answers(failed, { status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }] }) })
+    }
+    const baseline = make(), f = make(), write = f.deps.writeFile
+    f.deps.writeFile = (path, ...args) => {
+      if (!path.includes(`check-${check}-`)) return write(path, ...args)
+      const error = Object.assign(new Error('output denied'), { code: 'EACCES' })
+      if (failure === 'sync') throw error
+      return Promise.reject(error)
+    }
+    assert.deepEqual(await f.go(), await baseline.go())
+    assert.deepEqual(f.calls, baseline.calls)
+    assert.deepEqual(f.requests, baseline.requests)
+    const row = f.rows.find((r) => r.event === 'check' && r.check === check)
+    assert.equal(row.outputFile, null)
+    assert.deepEqual(row.outputError, { code: 'EACCES', message: 'output denied' })
+    assert.deepEqual(row.result, baseline.rows.find((r) => r.event === 'check' && r.check === check).result)
+  }
+})
+
+test('suite and proof check rows measure elapsed seconds without failing on bad clocks (#2410)', async () => {
+  for (const check of ['suite', 'proof']) for (const status of ['green', 'red', 'unmeasured', 'throw']) for (const clock of ['good', 'throw', 'nan', 'infinite', 'backwards']) {
+    let time = 10_000
+    const result = { ...green(), status, reason: status === 'green' ? null : status === 'red' ? check === 'suite' ? 'exit-nonzero' : 'proof-unproven' : 'timeout', rows: [] }
+    const f = fakes({ [check]: result, ...(status === 'throw' ? { throwCheck: check } : {}), deps: { now: () => {
+      if (clock === 'throw') throw new Error('bad clock')
+      return clock === 'nan' ? NaN : clock === 'infinite' ? Infinity : time
+    } } })
+    const key = check === 'suite' ? 'runSuite' : 'proveTests', run = f.deps[key], write = f.deps.writeFile
+    f.deps[key] = async (input) => { try { return await run(input) } finally { time += clock === 'backwards' ? -2500 : 2500 } }
+    f.deps.writeFile = async (...args) => { time += 50_000; return write(...args) }
+    await f.go()
+    const row = f.rows.find((r) => r.event === 'check' && r.check === check)
+    assert.ok(row, `${check} ${status} ${clock}`)
+    assert.equal(row.seconds, clock === 'good' ? 2.5 : null)
+    if (clock === 'good') assert.equal(Object.hasOwn(row, 'secondsReason'), false)
+    else assert.equal(row.secondsReason, 'clock-unmeasured')
+    assert.equal(row.result.status, status === 'throw' ? 'unmeasured' : status)
+  }
+})
+
+test('green suite and proof checks write no output artifacts and other check types stay uninstrumented (#2410)', async () => {
+  const f = fakes({ proof: { status: 'green', reason: null, stdout: 'expected red base output', stderr: 'base diagnostic', rows: [{ file: 'lib.test.mjs', title: 'works', proven: true, base: { state: 'red', reason: null } }] } })
+  assert.equal((await f.go()).status, 'done')
+  assert.equal(f.writes.size, 0)
+  for (const row of f.rows.filter((r) => r.event === 'check')) {
+    assert.equal(Object.hasOwn(row, 'outputFile'), false)
+    assert.equal(Object.hasOwn(row, 'outputError'), false)
+    if (!['suite', 'proof'].includes(row.check)) assert.equal(Object.hasOwn(row, 'seconds'), false)
+  }
+})
+
 // MUTATION: skip the return read after a failed turn.
 test('a valid return written before a turn error is accepted with the error on its envelope row, read once and never reissued (b1490)', async () => {
   const f = fakes({ spec: { tier: 'judge' } })
@@ -141,7 +264,7 @@ function fakes(options = {}) {
   }
   const envelope = (request) => ({
     role: request.role, id: request.id, status: 'done', summary: 'fixture',
-    details: request.role === 'planner' ? { subject: 'fix(crew): planned lane', plan_path: '/virtual/task/plan.md', tests: [{ file: 'lib.test.mjs', title: 'works' }], files_in_scope: ['lib.mjs'] }
+    details: request.role === 'planner' ? { subject: 'fix(crew): planned lane', plan_path: join(spec.taskDir, 'plan.md'), tests: [{ file: 'lib.test.mjs', title: 'works' }], files_in_scope: ['lib.mjs'] }
       : request.role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
       : request.role === 'lead' ? { decision: options.lead ?? 'escalate', ...((options.lead ?? 'escalate') === 'escalate' ? { question: 'Which way should the lane go?' } : options.lead === 'bounce' ? { target: options.target ?? 'builder' } : {}) }
       : (() => {
@@ -162,11 +285,11 @@ function fakes(options = {}) {
     mkdir: async (path, opts) => { calls.push('mkdir'); seen.mkdir = [path, opts] },
     readFile: async (path) => {
       if (options.readError) throw Object.assign(new Error('denied'), { code: options.readError })
-      return path === '/virtual/task/plan.md' ? options.plan ?? '' : returns.get(path) ?? ''
+      return path === join(spec.taskDir, 'plan.md') ? options.plan ?? '' : returns.get(path) ?? ''
     },
     // the planner's two artifacts exist as virtual regular files inside the virtual task dir
     stat: async (path) => {
-      if (path !== '/virtual/task/plan.md') throw Object.assign(new Error(`no ${path}`), { code: 'ENOENT' })
+      if (path !== join(spec.taskDir, 'plan.md')) throw Object.assign(new Error(`no ${path}`), { code: 'ENOENT' })
       return { isFile: () => true }
     },
     realpath: async (path) => path,
@@ -3797,7 +3920,7 @@ test('a red suite after a rebase that moved the head stops with its reason and p
   assert.equal(f.calls.includes('publish'), false)
   const g = moved({ spec: finishSpec(), unseated: ['planner'], suite: answers(green(), red) })
   assert.deepEqual(await g.go(), stopped('exit-nonzero'))
-  assert.equal(g.writes.size, 0)
+  assert.equal(g.writes.has('/virtual/task/finish-report.json'), false)
   assert.equal(g.rows.some((r) => r.event === 'finish-ready'), false)
 })
 
@@ -4043,7 +4166,7 @@ test('every journaled row carries one read of the injected clock, and a throwing
   await f.go()
   assert.ok(f.rows.length > 8)
   assert.ok(f.rows.every((row, i) => i === 0 || row.at > f.rows[i - 1].at))
-  assert.equal(ticks, f.rows.length + 2 * f.rows.filter((row) => row.event === 'seat-turn').length)
+  assert.equal(ticks, f.rows.length + 2 * f.rows.filter((row) => row.event === 'seat-turn' || (row.event === 'check' && ['suite', 'proof'].includes(row.check))).length)
   assert.equal(f.rows.filter((r) => r.event === 'run-start').length, 1)
   const plain = fakes()
   await plain.go()

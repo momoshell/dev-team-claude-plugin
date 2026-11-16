@@ -260,7 +260,9 @@ test('discard refuses a branch tip on neither a remote ref nor the base and prin
 })
 
 test('a lane stopped in plan with no pull request is discarded: worktree and branch removed, lane archived, no gh call', () => {
-  const w = world({ rows: STOPPED })
+  const outputFile = 'check-suite-1.json', output = { stdout: 'first failed line\n', stderr: 'diagnostic\n' }
+  const w = world({ rows: [...STOPPED, { event: 'check', check: 'suite', outputFile }] })
+  writeFileSync(join(w.leaf, 'task', outputFile), JSON.stringify(output))
   try {
     const r = close(w, { argv: [LANE, '--discard'], renameSync: (from, to) => {
       assert.ok(!existsSync(w.worktree))
@@ -272,7 +274,11 @@ test('a lane stopped in plan with no pull request is discarded: worktree and bra
     assert.ok(!existsSync(w.worktree))
     assert.ok(!branchExists(w))
     assert.ok(!existsSync(w.laneDir))
-    assert.equal(readFileSync(join(w.archiveRoot, `dt-${LANE}`, LANE, 'task', 'journal.jsonl'), 'utf8'), w.journalText)
+    const archivedTask = join(w.archiveRoot, `dt-${LANE}`, LANE, 'task')
+    const journal = readFileSync(join(archivedTask, 'journal.jsonl'), 'utf8')
+    assert.equal(journal, w.journalText)
+    const row = journal.trim().split('\n').map(JSON.parse).find((r) => r.event === 'check')
+    assert.deepEqual(JSON.parse(readFileSync(join(archivedTask, row.outputFile), 'utf8')), output)
     assert.deepEqual(r.calls.filter((c) => c[0] === 'git' && (c.includes('remove') || c.includes('-D'))).map((c) => c.slice(3, 5).join(' ')), ['worktree remove', 'branch -D'])
     assert.ok(!r.calls.some((c) => c[0] === 'gh'))
   } finally { w.done() }

@@ -32,9 +32,16 @@ export function laneName(briefPath) {
   return lane
 }
 
-export function runBrief(text, closes, ask = null, title = null) {
+const quoteBody = (body) => body.trimEnd().split(/\r?\n/).map((line) => line.trim() ? `> ${line}` : '>').join('\n')
+
+export function runBrief(text, closes, ask = null, title = null, references = []) {
+  if (references.length) {
+    const section = `## Referenced issues\n\nThese are context, not asks; only closes binds an issue.\n\n${references.map(({ number, title, body }) => `### issue ${number}: ${title}\n\n${quoteBody(body.trim() ? body : 'empty body')}`).join('\n\n')}\n\n`
+    // Insert into the valid P1 draft before quoting the source body, whose headings are not boundaries.
+    text = text.replace(/^ {0,3}## Context[ \t]*\r?\n[\s\S]*?(?=^ {0,3}#{1,2}\s+|(?![\s\S]))/m, (context) => `${context.trimEnd()}\n\n${section}`)
+  }
   if (ask !== null) {
-    const quote = ask.trimEnd().split(/\r?\n/).map((line) => line.trim() ? `> ${line}` : '>').join('\n')
+    const quote = quoteBody(ask)
     text = text.replace(/^([^\S\r\n]*---[^\S\r\n]*\r?\n[\s\S]*?\r?\n[^\S\r\n]*---[^\S\r\n]*\r?\n)/, (front) => `${front}${title === null ? '' : `Issue title: ${title.replace(/\s+/g, ' ').trim()}\n`}## The ask\n\n${quote}\n\n`)
   }
   return `# Task\n${closes ? `<!-- crew:bound-issue #${closes} -->\n` : ''}\n${text}`
@@ -83,7 +90,7 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
   const logLine = (line) => { try { d.log(line) } catch { /* Instrumentation must not affect the start. */ } }
   const lane = laneName(briefPath)
   const text = d.readFileSync(briefPath, 'utf8')
-  const { fields, ask: quotedAsk, paths, defects } = parseBrief(text)
+  const { fields, ask: quotedAsk, paths, issues, defects } = parseBrief(text)
   if (defects.length) throw new StartRefusal(`brief ${briefPath} is not a P1 brief:\n- ${defects.join('\n- ')}`)
   if (fields.shape === 'finish') throw new StartRefusal('shape finish starts from an escalated lane, not a new brief; crew start runs standard only')
   if (quotedAsk.length) {
@@ -157,18 +164,21 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
     throw error
   }
   let ask = null, title = null
-  const issue = ISSUE_SOURCE.exec(fields.source)
-  if (issue) {
-    const result = d.spawnSync('gh', ['issue', 'view', issue[1], '--json', 'body', '--jq', '.body'], { cwd: checkout })
-    if (result.status !== 0) throw new StartRefusal(`cannot read the body of issue ${issue[1]}: ${result.error?.message || String(result.stderr ?? '').trim() || `gh exited with status ${result.status}`}`)
-    if (!/[\p{L}\p{N}]/u.test(String(result.stdout ?? ''))) throw new StartRefusal(`issue ${issue[1]} has an empty body: no letter or digit`)
-    ask = String(result.stdout)
-    const titleResult = d.spawnSync('gh', ['issue', 'view', issue[1], '--json', 'title', '--jq', '.title'], { cwd: checkout })
-    if (titleResult.status !== 0) throw new StartRefusal(`cannot read the title of issue ${issue[1]}: ${titleResult.error?.message || String(titleResult.stderr ?? '').trim() || `gh exited with status ${titleResult.status}`}`)
-    title = String(titleResult.stdout ?? '').replace(/\s+/g, ' ').trim()
-    if (!title) throw new StartRefusal(`issue ${issue[1]} has an empty title`)
+  const source = ISSUE_SOURCE.exec(fields.source)?.[1]
+  const references = []
+  for (const number of [...(source ? [source] : []), ...issues.filter((number) => number !== source)]) {
+    const result = d.spawnSync('gh', ['issue', 'view', number, '--json', 'body', '--jq', '.body'], { cwd: checkout })
+    if (result.status !== 0) throw new StartRefusal(`cannot read the body of issue ${number}: ${result.error?.message || String(result.stderr ?? '').trim() || `gh exited with status ${result.status}`}`)
+    const body = String(result.stdout ?? '')
+    if (number === source && !/[\p{L}\p{N}]/u.test(body)) throw new StartRefusal(`issue ${number} has an empty body: no letter or digit`)
+    const titleResult = d.spawnSync('gh', ['issue', 'view', number, '--json', 'title', '--jq', '.title'], { cwd: checkout })
+    if (titleResult.status !== 0) throw new StartRefusal(`cannot read the title of issue ${number}: ${titleResult.error?.message || String(titleResult.stderr ?? '').trim() || `gh exited with status ${titleResult.status}`}`)
+    const issueTitle = String(titleResult.stdout ?? '').replace(/\s+/g, ' ').trim()
+    if (!issueTitle) throw new StartRefusal(`issue ${number} has an empty title`)
+    if (number === source) { ask = body; title = issueTitle }
+    else references.push({ number, title: issueTitle, body })
   }
-  const run = runBrief(text, fields.closes, ask, title)
+  const run = runBrief(text, fields.closes, ask, title, references)
   if (git(d, checkout, ['worktree', 'add', '-b', lane, worktree, baseCommit]) === null) throw new StartRefusal(`git worktree add -b ${lane} ${worktree} ${base} failed in ${checkout}`)
 
   let setup

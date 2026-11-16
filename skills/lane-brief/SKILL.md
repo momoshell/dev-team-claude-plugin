@@ -32,6 +32,8 @@ in `crew/checks.mjs` (`rebase-conflict` and its `regenerate` detail).
 4. Start with `crew start ~/.crew/briefs/<lane>.md`. Fix any refusal and retry. In this repo, the checkout's
    copy is `node crew/start.mjs <brief>`. Close the lane after its PR merges using `crew-recovery`.
 
+Use bare `issue N` pointers in `## Context` for related issues. For issue and operator-request briefs alike, `crew start` fetches each distinct reference other than the source and adds its title and whole quoted body under `## Referenced issues` immediately after Context. Do not write that generated section yourself. References are context, not asks; only `closes` binds an issue. Start refuses and names any reference it cannot read before creating the worktree. Empty or whitespace-only bodies appear as `empty body` with the title. `PR N` pointers are not fetched.
+
 ## Format
 
 ```markdown

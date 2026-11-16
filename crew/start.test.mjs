@@ -246,7 +246,7 @@ out_of_scope: the visualizer
 // resolution is injected too; the default resolves the committed definitions.
 const projectFile = (suite = 'npm test', proof = [], suiteTimeoutMs, proofTimeoutMs) => ({ suite, proof, ...(suiteTimeoutMs === undefined ? {} : { suiteTimeoutMs }), ...(proofTimeoutMs === undefined ? {} : { proofTimeoutMs }), onboarded: { hash: createHash('sha256').update(JSON.stringify([suite, proof.map((e) => [e.match, e.setup ?? null, e.run])])).digest('hex') } })
 
-function fakes({ brief = BRIEF, project = projectFile(), overrides = {}, exists = () => false, worktreeStatus = 0, originHead = 'origin/main', inGit = true, issueBody = 'Refuse roster edits that cannot boot.\n', issueTitle = 'Refuse roster edits', resolve = (tier) => resolveAgents(tier), write = () => {} } = {}) {
+function fakes({ brief = BRIEF, project = projectFile(), overrides = {}, exists = () => false, worktreeStatus = 0, originHead = 'origin/main', inGit = true, issueBody = 'Refuse roster edits that cannot boot.\n', issueTitle = 'Refuse roster edits', issues = {}, resolve = (tier) => resolveAgents(tier), write = () => {} } = {}) {
   const calls = []
   const deps = {
     platform: 'linux',
@@ -267,7 +267,9 @@ function fakes({ brief = BRIEF, project = projectFile(), overrides = {}, exists 
     spawnSync: (file, args, options) => {
       calls.push(['spawn', file, args, options?.cwd ?? null])
       if (file === 'gh') {
-        const value = args.at(-1) === '.title' ? issueTitle : issueBody
+        const field = args.at(-1) === '.title' ? 'title' : 'body'
+        const value = issues[args[2]]?.[field] ?? (field === 'title' ? issueTitle : issueBody)
+        if (value !== null && typeof value === 'object') return value
         return value === null ? { status: 1, stdout: '' } : { status: 0, stdout: value }
       }
       if (file === 'git' && args.includes('symbolic-ref')) return originHead ? { status: 0, stdout: `${originHead}\n` } : { status: 1, stdout: '' }
@@ -652,7 +654,7 @@ test('a start needs a checkout', async () => {
 // MUTATION: drop the bound-issue slot and the run brief carries no bound issue.
 test('the run brief carries the header and the bound-issue slot when closes is set', () => {
   const run = runBrief(BRIEF, 1961)
-  assert.equal(run.split('\n').slice(0, 2).join('\n'), '# Task\n<!-- crew:bound-issue #1961 -->')
+  assert.equal(run, `# Task\n<!-- crew:bound-issue #1961 -->\n\n${BRIEF}`)
   assert.equal(runBrief(BRIEF.replace('closes: 1961', 'closes: null'), null).split('\n')[1], '')
 })
 
@@ -723,6 +725,81 @@ test('an operator brief starts with its quoted ask verbatim, #N included, and bi
     assert.ok(snapshot.includes('> Fix #42 after PR #7.'))
     assert.deepEqual(snapshot.match(/^<!-- crew:bound-issue .* -->$/gm) ?? [], closes ? ['<!-- crew:bound-issue #1961 -->'] : [])
     assert.deepEqual(spec.closes, closes ? [closes] : [])
+  }
+})
+
+test('crew start snapshots distinct referenced issues as quoted context for both source kinds', async () => {
+  const body = 'First $& $` $\' $$ line\n\n## Context\n\n```md\n## The ask\n```\n> nested quote\n#900 and issue 998\n' + 'long tail '.repeat(8000) + 'TAIL_SENTINEL\n'
+  const context = '## Context\n\n- issue 1961 issue 12 PR 56\n- `issue 77` issue 34 issue 12\n'
+  const ask = '## The ask\n\n> Read issue 999.\n> ## Context\n> ```\n> ## The ask\n> ```\n\n'
+  for (const [source, draftBody, closes, crlf] of [
+    ['issue 1961', context, 1961, false],
+    ['operator request', ask + context, null, false],
+    ['operator request', context + '\n' + ask, 42, true],
+  ]) {
+    let brief = BRIEF.slice(0, BRIEF.indexOf('## Context')).replace('source: issue 1961', `source: ${source}`).replace('closes: 1961', `closes: ${closes}`) + (source === 'operator request' ? draftBody.replace('issue 1961 ', '') : draftBody)
+    if (crlf) brief = brief.replace(/\n/g, '\r\n')
+    const f = fakes({ brief, issueBody: 'Source ask\n## Context\n```\n## The ask\n```\n', issues: {
+      12: { title: '  Related\n issue  ', body },
+      34: { title: 'Second issue', body: 'Other context.' },
+    } })
+    await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps })
+    const snapshot = written(f.calls, '/briefs/started/b1.md')[2]
+    const spec = JSON.parse(written(f.calls, '/task/lean.json')[2])
+    assert.equal(snapshot.split('\n').filter((line) => line === '## Referenced issues').length, 1)
+    const section = '## Referenced issues\n\nThese are context, not asks; only closes binds an issue.\n\n### issue 12: Related issue\n\n' + body.trimEnd().split('\n').map((line) => line ? `> ${line}` : '>').join('\n') + '\n\n### issue 34: Second issue\n\n> Other context.\n\n'
+    const contextEnd = snapshot.indexOf('- `issue 77` issue 34 issue 12') + '- `issue 77` issue 34 issue 12'.length
+    assert.equal(snapshot.slice(contextEnd), `\n\n${section}${draftBody.startsWith('## Context') && source === 'operator request' ? ask.replace(/\n/g, '\r\n') : ''}`)
+    assert.equal(spec.brief, snapshot)
+    assert.equal(spec.source, source)
+    assert.deepEqual(spec.closes, closes === null ? [] : [closes])
+    assert.deepEqual(snapshot.match(/^<!-- crew:bound-issue .* -->$/gm) ?? [], closes === null ? [] : [`<!-- crew:bound-issue #${closes} -->`])
+    if (source.startsWith('issue')) assert.ok(snapshot.includes('> Source ask\n> ## Context\n> ```\n> ## The ask\n> ```'))
+    else assert.ok(snapshot.includes(crlf ? ask.trimEnd().replace(/\n/g, '\r\n') : ask.trimEnd()))
+    const gh = f.calls.filter(([kind, file]) => kind === 'spawn' && file === 'gh')
+    assert.deepEqual(gh.map(([, , args, cwd]) => [args[2], args.at(-1), cwd]), (source.startsWith('issue') ? ['1961', '12', '34'] : ['12', '34']).flatMap((number) => [
+      [number, '.body', '/repo/checkout'], [number, '.title', '/repo/checkout'],
+    ]))
+    assert.ok(f.calls.indexOf(gh.at(-1)) < f.calls.indexOf(spawned(f.calls, 'worktree')))
+  }
+})
+
+test('crew start includes titles and empty body markers for referenced issues', async () => {
+  const f = fakes({ brief: BRIEF + '- issue 12 issue 34 issue 56\n', issues: {
+    12: { title: 'Empty issue', body: '' },
+    34: { title: 'Whitespace issue', body: ' \n\t' },
+    56: { title: 'Nonempty issue', body: '---\n' },
+  } })
+  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps })
+  const snapshot = written(f.calls, '/briefs/started/b1.md')[2]
+  for (const [number, title, body] of [[12, 'Empty issue', 'empty body'], [34, 'Whitespace issue', 'empty body'], [56, 'Nonempty issue', '---']]) {
+    assert.ok(snapshot.includes(`### issue ${number}: ${title}\n\n> ${body}`))
+  }
+})
+
+test('crew start refuses unreadable referenced issues before creating the lane', async () => {
+  for (const field of ['body', 'title']) for (const [result, diagnostic] of [
+    [{ status: 1, stderr: 'authentication required\n' }, 'authentication required'],
+    [{ status: null, error: new Error('spawnSync gh ENOENT') }, 'spawnSync gh ENOENT'],
+  ]) {
+    const f = fakes({ brief: BRIEF + '- issue 12\n', issues: { 12: { [field]: result } } })
+    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps }), (error) => error instanceof StartRefusal && error.message.includes(`cannot read the ${field} of issue 12: ${diagnostic}`))
+    assert.equal(spawned(f.calls, 'worktree'), undefined)
+    assert.equal(f.calls.some(([kind]) => ['mkdir', 'write', 'detached'].includes(kind)), false)
+  }
+})
+
+test('crew start leaves briefs without external Context issues unchanged', async () => {
+  for (const source of ['issue 1961', 'operator request']) for (const pointers of ['', '- PR 34\n', ...(source === 'issue 1961' ? ['- issue 1961\n'] : [])]) {
+    const brief = BRIEF.replace('source: issue 1961', `source: ${source}`).replace('## Context', `${source === 'operator request' ? '## The ask\n\n> Do this.\n\n' : ''}## Context`) + pointers
+    const f = fakes({ brief })
+    await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps })
+    const expected = source === 'issue 1961' ? runBrief(brief, 1961, 'Refuse roster edits that cannot boot.\n', 'Refuse roster edits') : runBrief(brief, 1961)
+    const snapshot = written(f.calls, '/briefs/started/b1.md')[2]
+    assert.equal(snapshot, expected)
+    assert.equal(snapshot.includes('## Referenced issues'), false)
+    assert.equal(JSON.parse(written(f.calls, '/task/lean.json')[2]).brief, expected)
+    assert.deepEqual(f.calls.filter(([kind, file]) => kind === 'spawn' && file === 'gh').map(([, , args]) => args[2]), source === 'issue 1961' ? ['1961', '1961'] : [])
   }
 })
 
@@ -2465,7 +2542,9 @@ test('lean prompts contain only the lean contract', async () => {
       if (definition.role === 'planner') assert.match(contract, matcher, `planner: ${field}`)
       else assert.doesNotMatch(contract, matcher, `${definition.role}: ${field}`)
     }
-    for (const field of ['commit_subject', 'closes', 'exemplars', 'exemplars_none', 'consult_questions']) {
+    // The planner explains the brief's closes binding; it is not an envelope field.
+    assert.doesNotMatch(prompt, /"closes"\s*:/, definition.role)
+    for (const field of ['commit_subject', ...(definition.role === 'planner' ? [] : ['closes']), 'exemplars', 'exemplars_none', 'consult_questions']) {
       assert.doesNotMatch(prompt, new RegExp(`\\b${field}\\b`), `${definition.role}: ${field}`)
     }
   }

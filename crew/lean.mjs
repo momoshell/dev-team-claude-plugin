@@ -225,7 +225,7 @@ export async function runLean(spec, deps = {}) {
         })
         if (recordError) throw recordError
         // The runtime writes the one turn row of every turn, accepted or not.
-        guardedAppend(sessionFile, `${JSON.stringify({ type: 'turn', stopReason: turn?.stopReason ?? null, usage: turn?.usage ?? null, refusal: turn?.refusal ?? null, ...(typeof turn?.usage_reason === 'string' ? { usage_reason: turn.usage_reason } : {}) })}\n`, 'utf8')
+        guardedAppend(sessionFile, `${JSON.stringify({ type: 'turn', stopReason: turn?.stopReason ?? null, usage: turn?.usage ?? null, refusal: turn?.refusal ?? null, ...(!turn?.usage && turn?.usage_partial ? { usage_partial: turn.usage_partial } : {}), ...(typeof turn?.usage_reason === 'string' ? { usage_reason: turn.usage_reason } : {}) })}\n`, 'utf8')
       } catch (error) {
         failed = true
         if (error?.method === 'session/new' && acpProviderFailureKind(error.errorKind, error.errorMessage) === 'authentication_failed') {
@@ -245,7 +245,7 @@ export async function runLean(spec, deps = {}) {
           if (update?.sessionUpdate === 'tool_call' && typeof update.toolCallId === 'string') toolIds.add(update.toolCallId)
         } catch { /* skip malformed session lines */ }
       }
-      recording = { definition, stopReason: turn?.stopReason ?? null, usage: turn?.usage ?? null, ...(typeof turn?.usage_reason === 'string' ? { usage_reason: turn.usage_reason } : {}), toolCalls: recordError ? null : toolIds.size }
+      recording = { definition, stopReason: turn?.stopReason ?? null, usage: turn?.usage ?? null, ...(!turn?.usage && (turnError?.usage_partial ?? turn?.usage_partial) ? { usage_partial: turnError?.usage_partial ?? turn.usage_partial } : {}), ...(typeof turn?.usage_reason === 'string' ? { usage_reason: turn.usage_reason } : {}), toolCalls: recordError ? null : toolIds.size }
       if (checkRecords) {
         const after = fingerprint()
         if (typeof after !== 'string') throw violation('acp-seat-record-unmeasured')

@@ -1232,6 +1232,47 @@ test('a lean seat turn journals its agent, model, effort, distinct tool calls, s
   assert.equal(reviewer.unmeasured.usage, 'usage-unavailable')
 })
 
+test('lean journals partial usage from interrupted and refused seats separately from usage', async () => {
+  for (const usage_partial of [
+    { kind: 'tokens', inputTokens: 13, outputTokens: 7, cachedReadTokens: 2, cachedWriteTokens: 5, totalTokens: 27 },
+    { kind: 'context', used: 25474, cost: { amount: 0.114063, currency: 'USD' } },
+  ]) {
+    for (const mode of ['acp-seat-deadline', 'acp-seat-closed', 'refusal']) {
+      const rows = []
+      let attempts = 0
+      const f = leanFixture({ loopDeps: { journal: async (row) => rows.push(row) }, acp: async () => {
+        if (attempts++ > 0) throw new Error('next attempt has no measurements')
+        if (mode !== 'refusal') throw Object.assign(new Error(mode), { reason: mode, usage_partial })
+        return { stopReason: null, usage: null, usage_partial, refusal: { code: 1, message: 'refused', errorKind: null } }
+      } })
+      await f.go()
+      const turns = rows.filter((row) => row.event === 'seat-turn')
+      assert.ok(turns.length >= 2, mode)
+      assert.deepEqual(turns[0].usage_partial, usage_partial, mode)
+      assert.equal(turns[0].usage, null, mode)
+      assert.equal(turns[0].unmeasured.usage, 'turn-failed', mode)
+      for (const turn of turns.slice(1)) assert.equal(Object.hasOwn(turn, 'usage_partial'), false, mode)
+      if (mode === 'refusal') {
+        const recorded = readFileSync(f.requests[0].sessionFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line)).find((row) => row.type === 'turn')
+        assert.deepEqual(recorded.usage_partial, usage_partial)
+        assert.equal(recorded.usage, null)
+      }
+    }
+  }
+})
+
+test('lean journal final usage suppresses partial figures', async () => {
+  const rows = [], usage = { inputTokens: 3 }
+  const f = leanFixture({ loopDeps: { journal: async (row) => rows.push(row) }, acp: async () => ({ stopReason: 'end_turn', usage, usage_partial: { kind: 'tokens', inputTokens: 2 }, refusal: null }) })
+  await f.go()
+  const turns = rows.filter((row) => row.event === 'seat-turn')
+  assert.ok(turns.length > 0)
+  for (const row of turns) {
+    assert.deepEqual(row.usage, usage)
+    assert.equal(Object.hasOwn(row, 'usage_partial'), false)
+  }
+})
+
 test('a Muse seat refused at session/new for being logged out stops as authentication_failed with no rerun', async () => {
   const message = 'log in to Muse before opening a session'
   for (const [errorKind, errorMessage, frozen] of [[null, message, false], ['authentication_failed', 'denied', true], ['oauth_org_not_allowed', 'denied', false], ['verification_required', 'denied', false]]) {

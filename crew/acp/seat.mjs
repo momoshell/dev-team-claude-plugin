@@ -342,9 +342,18 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
   const advised = new Map()
   const seenAdvice = new Set()
   const completed = new Set()
+  let promptActive = false, usagePartial = null
   const recordUpdate = (payload) => {
     try {
       const update = payload.update
+      if (promptActive && update?.sessionUpdate === 'usage_update') {
+        const tokens = Object.fromEntries(['inputTokens', 'outputTokens', 'cachedReadTokens', 'cachedWriteTokens', 'totalTokens'].filter((key) => Number.isFinite(update.usage?.[key])).map((key) => [key, update.usage[key]]))
+        if (Object.keys(tokens).length) usagePartial = { kind: 'tokens', ...tokens }
+        else if (Number.isFinite(update.used)) {
+          const cost = update.cost
+          usagePartial = { kind: 'context', used: update.used, ...(Number.isFinite(cost?.amount) && typeof cost.currency === 'string' ? { cost: { amount: cost.amount, currency: cost.currency } } : {}) }
+        }
+      }
       if (isMuse && ['tool_call', 'tool_call_update'].includes(update?.sessionUpdate) && nonempty(update.toolCallId)) {
         const fields = Object.fromEntries(['kind', 'rawInput', 'title'].filter((key) => update[key] !== undefined).map((key) => [key, update[key]]))
         const call = { ...toolCalls.get(update.toolCallId), ...fields }
@@ -514,6 +523,8 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
     }
     const priorReturns = returnHashes()
     let blockedReturns = null
+    promptActive = true
+    usagePartial = null
     let promptId = client.beginPrompt([{ type: 'text', text: prompt + guidance + extraGuidance }])
     const finishTurn = async (turn) => {
       if (blockedReturns) {
@@ -542,9 +553,11 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
         }
       }
       if (advisorNotes.length && !terminal) {
+        usagePartial = null
         promptId = client.beginPrompt([{ type: 'text', text: advisorNotes.splice(0).join('\n\n') }])
         return null
       }
+      if (!turn.usage && (turn.refusal != null || !['end_turn', 'max_tokens', 'max_turn_requests'].includes(turn.stopReason)) && usagePartial) turn = { ...turn, usage_partial: usagePartial }
       return isMuse ? { ...turn, usage: null, usage_reason: 'usage-unavailable' } : turn
     }
     while (now() < deadline) {
@@ -577,7 +590,14 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
     // A turn that settled too late is no longer pending, so the session-wide cancel stands in for the prompt's.
     try { client.cancelPrompt(promptId) || client.cancel() } catch { /* the deadline stands */ }
     throw Object.assign(new Error(`${role} produced no answer within ${waitS}s (acp-seat-deadline)`), { reason: 'acp-seat-deadline' })
+  } catch (error) {
+    if (usagePartial) {
+      if (!error || typeof error !== 'object' || !Object.isExtensible(error)) error = Object.assign(new Error(String(error?.message ?? error)), error)
+      error.usage_partial = usagePartial
+    }
+    throw error
   } finally {
+    promptActive = false
     try { closed = client?.close() ?? null } catch { /* teardown never overwrites the turn */ }
     // An unproven teardown keeps the runtime: it holds the evidence the next owner reclaims by.
     if ((!started && !client?.spawned) || closed?.outcome === 'proven') { try { rmSync(runtime, { recursive: true, force: true }) } catch { /* best effort */ } }

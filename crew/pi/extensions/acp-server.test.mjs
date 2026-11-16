@@ -142,6 +142,48 @@ test('P2 answers a prompt once after settlement with usage', async () => {
   } finally { h.close() }
 })
 
+test('pi publishes cumulative usage after each assistant message before settlement', async () => {
+  const h = await withSession()
+  try {
+    h.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'work' }] } })
+    await h.flush()
+    const updates = () => h.frames.filter((f) => f.params?.update?.sessionUpdate === 'usage_update').map((f) => f.params.update.usage)
+    const first = { role: 'assistant', usage: { input: 10, output: 5, cacheRead: 2, cacheWrite: 1, totalTokens: 18 } }
+    h.emit('message_end', { message: first })
+    await h.flush()
+    assert.deepEqual(updates(), [{ inputTokens: 10, outputTokens: 5, cachedReadTokens: 2, cachedWriteTokens: 1, totalTokens: 18 }])
+    h.emit('message_end', { message: { role: 'toolResult', usage: { input: 999 } } })
+    h.emit('message_end', { message: { role: 'assistant' } })
+    h.emit('agent_end', { messages: [first] })
+    h.emit('message_end', { message: { role: 'assistant', usage: { input: 3, output: 2, cacheRead: 0, cacheWrite: 4 } } })
+    await h.flush()
+    assert.deepEqual(updates(), [
+      { inputTokens: 10, outputTokens: 5, cachedReadTokens: 2, cachedWriteTokens: 1, totalTokens: 18 },
+      { inputTokens: 13, outputTokens: 7, cachedReadTokens: 2, cachedWriteTokens: 5, totalTokens: 18 },
+    ])
+    assert.equal(h.frames.some((f) => f.id === 5), false)
+  } finally { h.close() }
+})
+
+test('running pi accounting resets per prompt without changing final agent_end usage', async () => {
+  const h = await withSession()
+  try {
+    h.emit('message_end', { message: { role: 'assistant', usage: { input: 999 } } })
+    for (const id of [5, 6]) {
+      h.send({ jsonrpc: '2.0', id, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'work' }] } })
+      await h.flush()
+      const message = { role: 'assistant', usage: { input: 2 } }
+      h.emit('message_end', { message })
+      h.emit('agent_end', { messages: [message] })
+      h.emit('agent_before_settle', { outcome: 'completed' })
+      h.emit('agent_settled')
+      const done = await h.wait((f) => f.id === id, 'settled response')
+      assert.deepEqual(done.result.usage, { inputTokens: 2 })
+    }
+    assert.deepEqual(h.frames.filter((f) => f.params?.update?.sessionUpdate === 'usage_update').map((f) => f.params.update.usage), [{ inputTokens: 2 }, { inputTokens: 2 }])
+  } finally { h.close() }
+})
+
 test('P3 aborts a cancelled prompt and answers once after settlement', async () => {
   const h = await withSession()
   try {

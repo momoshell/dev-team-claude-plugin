@@ -208,7 +208,7 @@ export default function acpServerExtension(pi: any) {
       const blocks = Array.isArray(params.prompt) ? params.prompt : []
       const text = blocks.filter((block: any) => block?.type === 'text' && typeof block.text === 'string').map((block: any) => ({ type: 'text', text: block.text }))
       if (!text.length) return fail(id, INVALID_PARAMS, 'session/prompt carried no text block')
-      prompt = { id, messages: [], outcome: null, lastStopReason: null, lastErrorMessage: undefined }
+      prompt = { id, messages: [], runningUsage: {}, outcome: null, lastStopReason: null, lastErrorMessage: undefined }
       pi.sendUserMessage(text)
       return undefined
     }
@@ -323,6 +323,14 @@ export default function acpServerExtension(pi: any) {
     if (!prompt || typeof step?.delta !== 'string') return
     if (step.type === 'text_delta') update('agent_message_chunk', { content: { type: 'text', text: step.delta } })
     else if (step.type === 'thinking_delta') update('agent_thought_chunk', { content: { type: 'text', text: step.delta } })
+  })
+  pi.on('message_end', (event: any, handlerCtx: any) => {
+    remember(handlerCtx)
+    if (!prompt) return
+    const usage = usageFrom([event?.message])
+    if (!usage) return
+    for (const field of Object.keys(usage)) prompt.runningUsage[field] = (prompt.runningUsage[field] ?? 0) + usage[field]
+    update('usage_update', { usage: prompt.runningUsage })
   })
   pi.on('tool_execution_start', (event: any, handlerCtx: any) => {
     remember(handlerCtx)

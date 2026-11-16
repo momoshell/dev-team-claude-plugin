@@ -2,8 +2,9 @@
 //
 // A finish pass re-enters the lane in its own worktree: rebase onto the current base ->
 // builder triage -> refresh base -> proof -> review -> suite -> commit -> rebase.
-// Every build/repair fetches before checks; a moved base snapshots, rebases and uncommits the build.
-// Its review is full and counted, including after suite repair, without spending a publishing recheck.
+// Only the first check round of each invocation fetches before checks; a moved base snapshots, rebases and uncommits the build.
+// That move requires a full, counted review without spending a publishing recheck.
+// A needed review after finish suite repair is uncounted.
 // Initial, pre-check and publishing conflicts share one builder conflict turn; an unresolved or spent turn stops
 // rebase-conflict. A failed move restores uncommitted work only when cleanup is proven.
 // A mechanical lane is finished on its brief. Only the checked tree is committed; the post-suite rebase

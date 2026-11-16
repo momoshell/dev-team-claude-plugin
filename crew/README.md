@@ -46,9 +46,9 @@ and discard stop proven seat groups and report unproven ones (`reapLaneSeats` in
 body has the quoted operator ask and bare Context pointers, or bare Context pointers alone for an issue; `crew start` quotes the issue body as the ask). `crew/loop.mjs` runs it:
 
 ```
-build:      plan -> rebase -> build -> refresh base -> per-test proof -> (full suite || review) -> PR
-judge:      plan -> rebase -> build -> refresh base -> per-test proof -> full suite -> review -> second review -> PR
-mechanical: rebase -> build -> refresh base -> per-test proof -> full suite -> PR
+build:      plan -> rebase -> build -> refresh base -> per-test proof -> (project suite || review) -> PR
+judge:      plan -> rebase -> build -> refresh base -> per-test proof -> project suite -> review -> second review -> PR
+mechanical: rebase -> build -> refresh base -> per-test proof -> project suite -> PR
 ```
 
 Authors write bare `issue N` pointers in `## Context`, not a `## Referenced issues` section. For both issue and operator-request briefs, `crew start` fetches each distinct Context issue other than the source and puts its title and whole quoted body in that section immediately after Context. Referenced issues are context, not asks; only `closes` binds an issue. An unreadable reference refuses start before worktree creation and names the issue. An empty or whitespace-only body appears as `empty body` with its title. `PR N` pointers are not fetched. Finish passes use the same enriched run brief.
@@ -157,8 +157,26 @@ After an `acp-seat-deadline` cut, the one rerun receives the original prompt plu
 `crew/proof.mjs` and `crew/checks.mjs` own what code verifies:
 
 - **Proof** — each named test normally must fail in its own body on the old source and pass on the build. A runner's optional `manifest` file name lets a new package's own test prove on a green build alone when its manifest is absent from the old-source commit (`base-package-absent`); there is no red side. With `newTestFile: true`, a no-report old-source run can instead prove on a green build report if the test file is absent from the old-source commit (`base-test-absent`). Both exceptions are weaker evidence: a vacuous test can pass. Neither is a kill proof.
-- **Suite** — the full suite runs with a timeout and a process-group kill.
+- **Suite** — the project-defined command runs with a timeout and a process-group kill. Commit measurements and PR or finish verification name the command; green does not imply full coverage.
 - **Commit, rebase, PR** — only on green; the PR is opened, never merged.
+
+### Suite Git state
+
+On the first lane or finish suite invocation, the lane change is uncommitted
+above the base commit at `HEAD`. The same holds after pre-check base moves and
+build, judge or finish publishing-rebase rechecks: the loop soft-resets to the
+new base before checks. There are no lane commits above `HEAD` at those checks.
+The loop stages measured lane paths before the suite, but a project script
+should discover staged and unstaged tracked changes against `HEAD` plus
+nonignored untracked paths, using NUL-delimited Git output.
+
+Exception: a mechanical lane's publishing-rebase recheck runs on the committed
+rebased head, without a soft reset. A clean tree must therefore select the full
+suite, as it must during onboarding or a hand run with no lane change. Do not
+infer a base from a branch comparison or expect a base environment variable.
+The project script owns affected-package selection, not the plugin. See the
+[onboarding guide](../skills/crew-onboard/references/affected-suite.md) for
+selection rules, full-run fallbacks and approval trials.
 
 ## Contracts
 

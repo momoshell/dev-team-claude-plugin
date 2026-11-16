@@ -203,6 +203,17 @@ test('a ## Context pointer outside the checkout or a link is refused, and code-s
   assert.deepEqual(parseBrief('---\n').paths, [])
 })
 
+test('parseBrief returns distinct bare Context issue pointers', () => {
+  const context = '## Context\n\n- issue 12 PR 34 issue 56 `issue 78`\n- `crew/protocols.mjs` issue 12 issue 90\n'
+  const ask = '## The ask\n\n> Read issue 99.\n> ## Context\n> ```\n> issue 100\n> ```\n\n'
+  for (const body of [ask + context, context + '\n' + ask]) {
+    const parsed = parseBrief(brief({ source: 'operator request' }, body))
+    assert.deepEqual(parsed.defects, [])
+    assert.deepEqual(parsed.issues, ['12', '56', '90'])
+  }
+  for (const text of ['', '---\n']) assert.deepEqual(parseBrief(text).issues, [])
+})
+
 // P5, the agent definition.
 const BASE = { name: 'planner', description: 'Plan one lane.', role: 'planner', agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' }
 const agent = (fields = {}, body = 'Read [the notes](../notes/planner.md).\n') => {

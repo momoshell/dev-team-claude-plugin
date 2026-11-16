@@ -85,12 +85,12 @@ function sections(body, { includeFences = false } = {}) {
   return { parts: out, repeated, askQuotes }
 }
 
-// Returns { fields, body, ask, paths, defects }. An empty defects list is a brief code can start.
+// Returns { fields, body, ask, paths, issues, defects }. An empty defects list is a brief code can start.
 export function parseBrief(text) {
   const lines = String(text ?? '').replace(/\r\n/g, '\n').split('\n')
-  if (lines[0]?.trim() !== '---') return { fields: null, body: null, ask: [], paths: [], defects: ['the brief does not open with a --- frontmatter block'] }
+  if (lines[0]?.trim() !== '---') return { fields: null, body: null, ask: [], paths: [], issues: [], defects: ['the brief does not open with a --- frontmatter block'] }
   const end = lines.findIndex((line, index) => index > 0 && line.trim() === '---')
-  if (end < 0) return { fields: null, body: null, ask: [], paths: [], defects: ['the frontmatter block is never closed with ---'] }
+  if (end < 0) return { fields: null, body: null, ask: [], paths: [], issues: [], defects: ['the frontmatter block is never closed with ---'] }
   const fields = {}
   const defects = []
   for (const line of lines.slice(1, end)) {
@@ -145,10 +145,12 @@ export function parseBrief(text) {
   const context = parts.get('## Context') ?? []
   let hasItem = false
   const paths = new Set()
+  const issues = new Set()
   for (const line of context) {
     if (!line.trim()) continue
     if (/^ {0,3}[-*] +/.test(line)) hasItem = true
     if (!/^ {0,3}[-*] +(?:`[^`]+`|(?:issue|PR) [1-9]\d*)(?:[ \t]+(?:`[^`]+`|(?:issue|PR) [1-9]\d*))*[ \t]*$/.test(line)) defects.push(`## Context holds only bare pointers: each item is one or more code spans, issue N or PR N, with no other text: ${line}`)
+    for (const match of line.replace(/`[^`]+`/g, '').matchAll(/\bissue ([1-9]\d*)\b/g)) issues.add(match[1])
     const spans = [...line.matchAll(/`([^`]+)`/g)].map((match) => match[1])
     for (const [index, span] of spans.entries()) {
       if (/^(?:[\/~]|[A-Za-z][A-Za-z0-9+.-]*:)/.test(span) || span.split('/').includes('..')) defects.push(`## Context points only inside the checkout (ADR-056 Amendment 1): ${span}`)
@@ -168,7 +170,7 @@ export function parseBrief(text) {
     previous = i
   }
   const quotedAsk = blocks.filter(({ text }) => /[\p{L}\p{N}]/u.test(text))
-  return { fields, body, ask: quotedAsk, paths: [...paths], defects }
+  return { fields, body, ask: quotedAsk, paths: [...paths], issues: [...issues], defects }
 }
 
 const nonempty = (v) => typeof v === 'string' && v !== ''

@@ -100,7 +100,7 @@ and extensions, and the body is the charter. Tiers are
 or unseats it. `crew/agents.mjs` resolves a tier and `crew/protocols.mjs` holds
 the brief, envelope and agent-definition validators. ADR-055 §7 raises lanes to judge for the planner's reason or protected paths; it never lowers them.
 
-Local roster files layer project `<checkout>/.crew/agents.json` over personal `~/.crew/agents.json` over the committed defaults. They may change only `agent`, `model`, `effort`, `advisor` and `tiers`; the charter and other fields stay with the plugin. Start validates the layers and records the effective run fields for every tier, even without override files. Later plugin or override changes do not reseat that lane. The journal records file hashes and effective cells. See [ADR-060](../docs/adr/adr-060-local-roster-overrides.md).
+Local roster files layer project `<checkout>/.crew/agents.json` over personal `~/.crew/agents.json` over the committed defaults. They may change only `agent`, `model`, `effort`, `advisor`, `wait_s` and `tiers`; the charter and other fields stay with the plugin. Start validates the layers and records the effective run fields for every tier, even without override files. Later plugin or override changes do not reseat that lane, including finish passes. Like `effort`, `wait_s` can be set on a role or tier; tier values win over role values. A named tier entry replaces that tier's lower-layer run fields rather than deep-merging them, while retaining the definition's non-run fields. The journal records file hashes and effective cells. See [ADR-060](../docs/adr/adr-060-local-roster-overrides.md).
 
 A frontmatter tier override replaces only the fields it names and keeps a raw override model id exactly as written, with no namespace translation. A provider failure does not reseat the seat on another cell: the retry ladder in `crew/acp/provider.mjs` backs off and retries, and once the retry bound is exhausted the lane stops with the provider failure named.
 
@@ -131,7 +131,9 @@ A frontmatter tier override replaces only the fields it names and keeps a raw ov
 `requires` is validated and carried in the definition, but no check reads it since the required-skill proof was removed (#2323). Scope is context, not enforcement
 (ADR-045): a lane may write any file.
 
-A seat's `wait_s` in `crew/acp/seat.mjs` starts after ACP setup; setup has its own budget, `ACP_SETUP_TIMEOUT_MS` plus `ACP_FIFO_WAIT_MS` in `crew/acp-client.mjs`, as a fixed cost on top of `wait_s`.
+A seat's `wait_s` must be a positive safe integer in seconds. When no override sets it, the seat definition supplies it, or it defaults to 2400 seconds. Start freezes the effective limit for each tier, including this fallback, for the lane and its finish passes. The timer in `crew/acp/seat.mjs` starts after ACP setup; setup has its own budget, `ACP_SETUP_TIMEOUT_MS` plus `ACP_FIFO_WAIT_MS` in `crew/acp-client.mjs`, as a fixed cost on top of `wait_s`.
+
+After an `acp-seat-deadline` cut, the one rerun receives the original prompt plus a note with the previous attempt's limit: it was cut without a return, partial changes remain in the worktree, a long-running command may have been killed, and the seat must return before the limit. Other turn errors keep the original prompt unchanged. A second cut stops `seat-unmeasured`.
 
 ## Checks
 

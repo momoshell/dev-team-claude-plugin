@@ -31,10 +31,23 @@ Put a partial role map in `~/.crew/agents.json` for personal defaults or
 { "planner": { "model": "anthropic/my-model" } }
 ```
 
-The project wins over personal values. Use `agent`, `model`, `effort`, `advisor`
-or per-name `tiers` entries only; tier entries can be null to unseat a role.
-Start validates the files and records them for the lane. A later edit affects
-only new lanes. See [ADR-060](../../docs/adr/adr-060-local-roster-overrides.md).
+The project wins over personal values. Use `agent`, `model`, `effort`, `advisor`,
+`wait_s` or per-name `tiers` entries only; tier entries can be null to unseat a role.
+Like `effort`, `wait_s` can be set on a role or tier, with the tier taking precedence.
+A named tier entry replaces its lower-layer run fields rather than deep-merging
+those fields; the definition's non-run fields remain.
+
+`wait_s` is a positive safe integer in seconds. Unset, it uses the seat definition's
+limit or 2400 seconds. Start validates the files and freezes effective run fields
+for every tier, including fallback wait limits, for the lane and its finish passes.
+Later override or plugin-default edits affect only new lanes.
+
+After an `acp-seat-deadline` cut, the one rerun gets the original prompt plus a note:
+the previous attempt was cut after its effective limit without a return, partial
+changes remain in the worktree, a long-running command may have been killed, and
+the seat must return before the limit. Other turn errors keep the prompt unchanged;
+a second cut stops `seat-unmeasured`.
+See [ADR-060](../../docs/adr/adr-060-local-roster-overrides.md).
 
 ## Checking seat availability
 

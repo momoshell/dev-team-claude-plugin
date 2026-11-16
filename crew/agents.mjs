@@ -73,7 +73,7 @@ function readDefinitions(directory) {
 // Capture complete run fields per tier, including absent advisors and unseated roles.
 export function snapshotRoster(overrides = {}, directory = DEFAULT_DIRECTORY) {
   const definitions = readDefinitions(directory)
-  const cell = (fields) => ({ agent: fields.agent, model: fields.model, effort: fields.effort, advisor: fields.advisor ?? null })
+  const cell = (fields) => ({ agent: fields.agent, model: fields.model, effort: fields.effort, advisor: fields.advisor ?? null, wait_s: fields.wait_s ?? 2400 })
   return Object.fromEntries(AGENT_ROLES.map((role, index) => {
     const fields = withRunOverride(definitions[index], Object.hasOwn(overrides, role) ? overrides[role] : undefined)
     const tiers = Object.fromEntries(TIERS.map((tier) => [tier, fields.tiers?.[tier] === null ? null : cell({ ...fields, ...fields.tiers?.[tier] })]))

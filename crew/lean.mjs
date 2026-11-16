@@ -187,9 +187,14 @@ export async function runLean(spec, deps = {}) {
       }
     }
     const baseStem = request.repair ? `${id}.repair` : id
-    const prompt = request.rerun && prompts.has(baseStem) ? prompts.get(baseStem) : request.repair ? repairPromptFor({ request, spec }) : promptFor({ request, spec, source, charters, body: definition.body, section: sectionText })
+    const previous = prompts.get(baseStem)
+    let prompt = request.rerun && previous ? previous.prompt : request.repair ? repairPromptFor({ request, spec }) : promptFor({ request, spec, source, charters, body: definition.body, section: sectionText })
+    if (request.rerun?.reason === 'acp-seat-deadline') {
+      const waitS = previous?.wait_s ?? definition.wait_s ?? 2400
+      prompt += `\n## Wait limit restart\nThe previous attempt was cut after ${waitS} seconds without a return. Its partial changes remain in the worktree. A long-running command may have been killed. You must return before the ${waitS}-second wait limit.\n`
+    }
     if (request.rerun) prompts.delete(baseStem)
-    else prompts.set(baseStem, prompt)
+    else prompts.set(baseStem, { prompt, wait_s: definition.wait_s ?? 2400 })
     d.mkdirSync(join(spec.taskDir, 'lean', role), { recursive: true })
     const stem = `${baseStem}${request.rerun ? '.rerun' : ''}`
     // A provider failure is retried in a fresh ACP session inside the shared bounds. The issued id,

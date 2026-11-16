@@ -12,7 +12,7 @@ import { main as leanMain, runLean } from './lean.mjs'
 import { runAcpSeat } from './acp/seat.mjs'
 import { readOnlyCommand } from './acp-permission.mjs'
 import { parseAgent, TIERS, validateEnvelope } from './protocols.mjs'
-import { resolveAgents } from './agents.mjs'
+import { resolveAgents, snapshotRoster } from './agents.mjs'
 import { PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS } from './acp/provider.mjs'
 import { git, scratchDir } from '../test/helpers.mjs'
 
@@ -42,6 +42,56 @@ test('crew start layers the project file over the personal file field by field a
       assert.equal(recorded.files.length, Object.keys(overrides).length)
     } finally { rmSync(dir, { recursive: true, force: true }) }
   }
+})
+
+test('start freezes effective wait_s for later lean turns and finish passes', async () => {
+  const dir = scratchDir('wait-snapshot-')
+  try {
+    cpSync(AGENTS, dir, { recursive: true })
+    const planner = join(dir, 'planner.md')
+    writeFileSync(planner, readFileSync(planner, 'utf8').replace('writes: task-dir', 'writes: task-dir\nwait_s: 7').replace(/tiers: .*/, 'tiers: {"build":{"wait_s":3}}'))
+    const defaults = fakes()
+    defaults.deps.snapshotRoster = (overlay) => snapshotRoster(overlay, dir)
+    await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: defaults.deps })
+    const savedDefaults = JSON.parse(written(defaults.calls, '/task/lean.json')[2]).roster.snapshot
+    assert.equal(savedDefaults.planner.wait_s, 7)
+    assert.equal(savedDefaults.planner.tiers.build.wait_s, 3)
+    assert.equal(savedDefaults.reviewer.wait_s, 2400)
+    const overrides = {
+      '/home/.crew/agents.json': JSON.stringify({ builder: { wait_s: 11, tiers: { judge: { wait_s: 19 } } }, lead: { wait_s: 23 } }),
+      '/repo/checkout/.crew/agents.json': JSON.stringify({ lead: { wait_s: 29 } }),
+    }
+    const lane = fakes({ overrides, resolve: (tier, _, overlay) => resolveAgents(tier, dir, overlay) })
+    lane.deps.snapshotRoster = (overlay) => snapshotRoster(overlay, dir)
+    await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: lane.deps })
+    const captured = JSON.parse(written(lane.calls, '/task/lean.json')[2])
+    const expected = { lead: 29, planner: 7, builder: 11, reviewer: 2400, 'tech-lead': 2400 }
+    for (const [role, base] of Object.entries(expected)) {
+      const cell = captured.roster.snapshot[role]
+      const path = join(dir, `${role}.md`)
+      const text = readFileSync(path, 'utf8'), { fields } = parseAgent(text)
+      assert.equal(cell.wait_s, base, role)
+      for (const tier of TIERS) {
+        if (fields.tiers?.[tier] === null) assert.equal(cell.tiers[tier], null)
+        else assert.equal(cell.tiers[tier].wait_s, role === 'planner' && tier === 'build' ? 3 : role === 'builder' && tier === 'judge' ? 19 : base, `${role}/${tier}`)
+      }
+      writeFileSync(path, text.replace(/\nwait_s: \d+/, '').replace('role: ' + role, `role: ${role}\nwait_s: 99`).replace(/tiers: .*/, 'tiers: {"mechanical":{"wait_s":98},"build":{"wait_s":98},"judge":{"wait_s":98}}'))
+    }
+    for (const path of Object.keys(overrides)) overrides[path] = '{later invalid edit'
+    for (const tier of TIERS) for (const finish of [false, true]) {
+      const rows = []
+      const f = leanFixture({ tier, status: finish ? ['', 'M  src/a.mjs\0'] : 'M  src/a.mjs\0', loopDeps: {
+        journal: async (row) => rows.push(row),
+        rebaseBranch: async () => ({ status: 'green', reason: null, head: 'a'.repeat(40), onto: 'c'.repeat(40) }),
+      }, deps: { readFileSync: (path, ...args) => readFileSync(String(path).startsWith(AGENTS) ? join(dir, String(path).slice(AGENTS.length)) : path, ...args) } })
+      Object.assign(f.spec, captured, { id: 'lane', cwd: f.spec.cwd, taskDir: f.spec.taskDir, tier })
+      if (finish) Object.assign(f.spec, { shape: 'finish', finish: { subject: 'fix(crew): finish', planPath: null, findings: [], stop: { reason: 'seat-unmeasured' }, turnOffset: 0 } })
+      const result = await f.go()
+      assert.equal(result.status, 'done', `${tier}/${finish}: ${JSON.stringify(rows.at(-1))}`)
+      assert.ok(f.requests.length > 0)
+      for (const { definition } of f.requests) assert.equal(definition.wait_s, captured.roster.snapshot[definition.role].tiers[tier].wait_s, `${tier}/${finish}/${definition.role}`)
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
 test('crew start refuses a bad override file before any worktree, naming the file and the key', async () => {
@@ -1692,6 +1742,63 @@ test('the wait_s a seat receives is the effective definition value, tier overrid
   assert.equal((await planned({ readFileSync: edit(/tiers: .*/, 'wait_s: 7\ntiers: {"build":{"wait_s":3}}') })).wait_s, 3)
 })
 
+test('deadline reruns append the effective wait limit and restart guidance to the original prompt', async () => {
+  for (const limit of [undefined, 2]) {
+    let clock = 0, attempted = false
+    const f = leanFixture({
+      deps: { readFileSync: (path, ...args) => {
+        const text = readFileSync(path, ...args)
+        const wait = attempted ? 99 : limit
+        return path === join(AGENTS, 'planner.md') && wait !== undefined ? text.replace('writes: task-dir', `writes: task-dir\nwait_s: ${wait}`) : text
+      } },
+      acp: async (input) => {
+        if (attempted) throw new Error('capture ends rerun')
+        attempted = true
+        const client = {
+          start() {}, initialize() {}, newSession() {}, setMode() {},
+          beginPrompt: () => 5, pollPrompt: () => null, cancelPrompt: () => true,
+          close: () => ({ outcome: 'proven' }),
+        }
+        return runAcpSeat({ ...input, definition: { ...input.definition, agent: 'claude', model: 'anthropic/claude-opus-4-6' }, binaries: { claudeAcp: process.execPath, claude: process.execPath },
+          deps: { ...input.deps, clientFactory: () => client, now: () => clock, sleep: (ms) => { clock += ms } } })
+      },
+    })
+    assert.equal((await f.go()).reason, 'seat-unmeasured')
+    assert.equal(f.requests.length, 2)
+    const [original, rerun] = f.requests
+    assert.equal(original.definition.wait_s, limit)
+    assert.equal(rerun.definition.wait_s, 99)
+    assert.equal(clock, (limit ?? 2400) * 1000)
+    assert.equal(rerun.prompt.slice(0, original.prompt.length), original.prompt)
+    assert.doesNotMatch(original.prompt, /## Wait limit restart/)
+    const note = rerun.prompt.slice(original.prompt.length)
+    assert.equal((note.match(/## Wait limit restart/g) ?? []).length, 1)
+    assert.match(note, new RegExp(`cut after ${limit ?? 2400} seconds without a return`))
+    assert.match(note, /partial changes remain in the worktree/)
+    assert.match(note, /long-running command may have been killed/)
+    assert.match(note, new RegExp(`must return before the ${limit ?? 2400}-second wait limit`))
+    assert.equal(rerun.sessionFile, original.sessionFile.replace('.jsonl', '.rerun.jsonl'))
+    for (const input of f.requests) assert.equal(JSON.parse(readFileSync(input.sessionFile, 'utf8').split('\n')[0]).text, input.prompt)
+  }
+})
+
+test('two real deadline cuts stop seat-unmeasured after exactly two attempts', async () => {
+  let clock = 0
+  const f = leanFixture({ acp: (input) => {
+    const client = {
+      start() {}, initialize() {}, newSession() {}, setMode() {},
+      beginPrompt: () => 5, pollPrompt: () => null, cancelPrompt: () => true,
+      close: () => ({ outcome: 'proven' }),
+    }
+    return runAcpSeat({ ...input, definition: { ...input.definition, agent: 'claude', model: 'anthropic/claude-opus-4-6' }, binaries: { claudeAcp: process.execPath, claude: process.execPath },
+      deps: { ...input.deps, clientFactory: () => client, now: () => clock, sleep: (ms) => { clock += ms } } })
+  } })
+  f.spec.roster = { overrides: { planner: { wait_s: 2 } }, files: [] }
+  assert.deepEqual(await f.go(), { status: 'stopped', reason: 'seat-unmeasured', pr: null })
+  assert.equal(f.requests.length, 2)
+  assert.equal(clock, 4000)
+})
+
 // MUTATION: skip the return read or the rerun after a deadline and the late invalid envelope is not evaluated twice.
 test('an expired real seat turn reads its late invalid envelope and reruns once before stopping', async () => {
   const planner = join(AGENTS, 'planner.md')
@@ -1943,7 +2050,7 @@ async function oneTurn(turn, { withFile = true, deps = {} } = {}) {
 
 // MUTATION: refuse to read the return after an ACP refusal, or rerun a provider-routed failure.
 test('a refused ACP turn is read after the turn: a valid return is accepted, an invalid one gets one rerun session, a provider-routed refusal none', async () => {
-  for (const mode of ['valid', 'invalid', 'rate_limit', 'authentication_failed']) {
+  for (const mode of ['valid', 'invalid', 'deadline-text', 'rate_limit', 'authentication_failed']) {
     const f = leanFixture({ acp: async (input) => {
       const role = input.definition.role
       const id = /^Envelope id: (.+)$/m.exec(input.prompt)[1]
@@ -1954,14 +2061,15 @@ test('a refused ACP turn is read after the turn: a valid return is accepted, an 
         : role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
         : { verdict: 'pass', findings: [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['a'], complete: true } }
       writeFileSync(path, role === 'planner' && mode !== 'valid' ? '{' : JSON.stringify({ role, id, status: 'done', summary: 'ok', details }))
+      if (role === 'planner' && mode === 'deadline-text') throw new Error('untyped acp-seat-deadline text')
       return role === 'planner' ? { stopReason: null, refusal: { code: -32603, errorKind: mode === 'valid' || mode === 'invalid' ? 'incomplete_tool_call' : mode, message: 'Claude ended the turn without returning results for tool calls' } } : { stopReason: 'end_turn' }
     } })
     const result = await f.go()
     assert.equal(result.status, mode === 'valid' ? 'done' : 'stopped', mode)
     if (mode !== 'valid') assert.equal(result.reason, 'seat-unmeasured')
     const planners = f.requests.filter((r) => r.definition.role === 'planner')
-    assert.equal(planners.length, mode === 'invalid' ? 2 : 1)
-    if (mode === 'invalid') { assert.equal(planners[1].sessionFile, f.sessionOf('planner', 1).replace('.jsonl', '.rerun.jsonl')); assert.equal(planners[1].prompt, planners[0].prompt) }
+    assert.equal(planners.length, mode === 'invalid' || mode === 'deadline-text' ? 2 : 1)
+    if (mode === 'invalid' || mode === 'deadline-text') { assert.equal(planners[1].sessionFile, f.sessionOf('planner', 1).replace('.jsonl', '.rerun.jsonl')); assert.equal(planners[1].prompt, planners[0].prompt) }
   }
 })
 

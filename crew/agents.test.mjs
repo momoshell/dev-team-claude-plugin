@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync, rmSync, cpSync, chmodSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { AGENT_ROLES, TIERS, parseAgent, validateEnvelope, REVIEW_VERDICTS, FINDING_SEVERITIES, LEAD_DECISIONS } from './protocols.mjs'
-import { resolveAgents } from './agents.mjs'
+import { resolveAgents, loadRoster, withRunOverride } from './agents.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
 // The tier cells the committed definitions must resolve to (the retired roster file's snapshot).
@@ -133,6 +133,51 @@ test('resolveAgents seats a recorded override and merges its tiers per tier name
     assert.equal(resolveAgents('judge', dir, overrides).seats.builder.id, 'builder')
     assert.equal(resolveAgents('mechanical', dir, overrides).seats.planner.effort, 'medium')
   })
+})
+
+test('wait_s roster overrides follow effort precedence at role and tier level', () => withScratch((dir) => {
+  edit(dir, 'builder', (text) => text.replace('effort: high', 'effort: low\nwait_s: 11').replace(/tiers: .*/, 'tiers: {"mechanical":{"wait_s":12,"effort":"medium","extensions":["fff"]},"build":{"wait_s":13},"judge":null}'))
+  const { fields, defects } = parseAgent(readFileSync(join(dir, 'builder.md'), 'utf8'))
+  assert.deepEqual(defects, [])
+  for (const { personal, project = {}, tier = 'build', base, wait, effort = 'low' } of [
+    { personal: { wait_s: 21 }, base: 21, wait: 13 },
+    { personal: { wait_s: 21 }, project: { wait_s: 22 }, tier: 'mechanical', base: 22, wait: 12, effort: 'medium' },
+    { personal: { wait_s: Number.MAX_SAFE_INTEGER, tiers: { build: {} } }, base: Number.MAX_SAFE_INTEGER, wait: Number.MAX_SAFE_INTEGER },
+    { personal: { tiers: { mechanical: { wait_s: 31 } } }, tier: 'mechanical', base: 11, wait: 31 },
+    { personal: { tiers: { mechanical: { wait_s: 31, effort: 'max' } } }, project: { tiers: { mechanical: { wait_s: 32 } } }, tier: 'mechanical', base: 11, wait: 32 },
+    { personal: { wait_s: 21, tiers: { mechanical: { wait_s: 31 } } }, project: { tiers: { mechanical: { effort: 'high' } } }, tier: 'mechanical', base: 21, wait: 21, effort: 'high' },
+    { personal: { tiers: { build: null } }, base: 11, wait: null },
+    { personal: { wait_s: 21 }, tier: 'judge', base: 21, wait: null },
+    { personal: {}, project: { tiers: { judge: { wait_s: 41 } } }, tier: 'judge', base: 11, wait: 41 },
+  ]) {
+    const files = { '/personal/agents.json': JSON.stringify({ builder: personal }), '/project/agents.json': JSON.stringify({ builder: project }) }
+    let loaded
+    assert.doesNotThrow(() => { loaded = loadRoster({ personal: '/personal/agents.json', project: '/project/agents.json', readFileSync: (path) => files[path] }) })
+    const merged = withRunOverride(fields, loaded.overrides.builder)
+    assert.equal(merged.wait_s, base)
+    const resolved = resolveAgents(tier, dir, loaded.overrides)
+    if (wait === null) {
+      assert.equal(merged.tiers[tier], null)
+      assert.equal(resolved.seats.builder, undefined)
+    } else {
+      assert.equal(({ ...merged, ...merged.tiers[tier] }).wait_s, wait)
+      assert.equal(resolved.seats.builder.effort, effort)
+      if (tier === 'mechanical') assert.deepEqual(merged.tiers[tier].extensions, ['fff'])
+    }
+  }
+}))
+
+test('invalid wait_s roster values identify the file and role or tier key', () => {
+  for (const layer of ['personal', 'project']) for (const tier of [false, true]) {
+    for (const value of [null, 0, -1, 1.5, '7', true, [], {}, Number.MAX_SAFE_INTEGER + 1]) {
+      const path = `/${layer}/agents.json`, key = tier ? 'builder.tiers.build.wait_s' : 'builder.wait_s'
+      const entry = tier ? { tiers: { build: { wait_s: value } } } : { wait_s: value }
+      assert.throws(() => loadRoster({ personal: '/personal/agents.json', project: '/project/agents.json', readFileSync: (file) => {
+        if (file === path) return JSON.stringify({ builder: entry })
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' })
+      } }), (error) => error.message.includes(path) && error.message.includes(key))
+    }
+  }
 })
 
 test('the five committed definitions parse clean with standalone lean charters', () => {

@@ -7,7 +7,7 @@ worktree and a journal, then plays five seats over ACP: a **planner** explores
 the code and writes the plan, a **builder** edits the repo, a **reviewer** gives
 a verdict, a **lead** answers escalations with one closed decision, and a
 **tech-lead** gives judge lanes a second review. Code only checks the result: each named test is red on the
-old source and green on the build, and the full suite is green. Commit, rebase
+old source and green on the build, and the project suite is green. Commit, rebase
 and PR happen only on green (ADR-052, ADR-055). A stopped
 finishable lane, including an escalated or provably dead run, can be picked up
 with `crew finish <lane> --return <file>`. The same flag starts another pass on a ready lane. Every seat's full session is

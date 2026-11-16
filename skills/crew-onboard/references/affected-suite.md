@@ -52,6 +52,11 @@ owners and everything that depends on them, transitively, using the project's
 actual dependency graph. Include cross-language dependents where the project has
 them. If the mapping or graph cannot be established, run everything.
 
+Count every dependency kind that can affect a dependent's tests: npm
+`dependencies`, `devDependencies`, `peerDependencies` and `optionalDependencies`;
+Cargo normal dependencies, `dev-dependencies` and `build-dependencies`. Do not
+drop relevant optional, target-specific or feature-dependent edges.
+
 Run everything for a clean tree, or when any shared input changes:
 
 - Lockfiles and root or workspace manifests.
@@ -60,9 +65,12 @@ Run everything for a clean tree, or when any shared input changes:
 - The suite script itself and `.crew/project.json`.
 - Any unknown path or path that cannot be mapped to a crate or package.
 
-A package-local manifest must update the graph or trigger a full run if the
-script cannot establish its effects. Do not silently ignore documentation or
-other paths unless the project has an explicit safe mapping; unknown means full.
+For a changed package-local manifest, select owners and transitive dependents
+using the union of the old (`HEAD`) and new (working-tree) graphs, including
+removed edges. If the script cannot establish both graphs and their effects,
+run everything. Root and workspace manifest changes still require a full run.
+Do not silently ignore documentation or other paths unless the project has an
+explicit safe mapping; unknown means full.
 
 Print the changed paths, selected crates or packages and selection reason, or
 `full: <reason>`, before running checks. These diagnostics let a caller inspect
@@ -85,7 +93,11 @@ memory. A runner selecting dependencies is not necessarily selecting reverse
 - **npm or pnpm workspaces:** inspect `npm help run-script` and `npm help
   workspaces`, or `pnpm --help` and `pnpm --filter --help`, on the installed
   version. Confirm whether filters include dependents, their transitive closure
-  and the selected package itself. Preserve required build and setup steps.
+  and the selected package itself. If the installed tool has no dependent-selection
+  filter, build the workspace graph from package manifests, compute the changed
+  owners and their reverse transitive dependents, and pass those selected packages
+  to the runner. If the graph cannot be established, run everything. Preserve
+  required build and setup steps.
 - **Python:** there is no universal package-dependency selector. Inspect the
   installed runner's help (for example, `python -m pytest --help`) and the
   project's manifests and import/test layout. Establish a project-specific
@@ -94,13 +106,32 @@ memory. A runner selecting dependencies is not necessarily selecting reverse
 
 ## Trial runs before approval
 
-Use a disposable checkout and restore each trial before the next. Save command,
-scope diagnostics, result and elapsed time for each of these four runs:
+Use a disposable checkout, not a working checkout. Before trials, commit the
+candidate script and any trial setup there as a clean baseline, so restoring to
+`HEAD` keeps them. Save each run's command, scope diagnostics, result and elapsed
+time outside that checkout.
+
+Between trials, run these commands from the disposable checkout's root. They
+discard staged and unstaged tracked trial changes and nonignored untracked trial
+files. Never run this cleanup in a working checkout:
+
+```sh
+git restore --source=HEAD --staged --worktree -- .
+git clean -nd
+```
+
+Review the untracked-file deletion preview before running `git clean -fd`. Then
+run `git status --short` and require no output before starting the next trial.
+The committed candidate script stays; the saved results are outside the checkout.
+
+Run these four trials:
 
 1. Clean tree: runs everything. This is also the onboarding behavior.
 2. One-file change in a leaf crate or package: runs a subset that includes it.
-3. Change in a crate or package others depend on: includes all transitive
-   dependents, not just the owner or direct consumers.
+3. Use a chain at least two edges deep: `core <- mid <- app`, where `mid` depends
+   on `core` and `app` depends on `mid`. Change a file in `core`; selection must
+   include `core` (owner), `mid` (direct consumer) and `app` (transitive consumer),
+   plus any other transitive dependents. A one-edge chain cannot check this.
 4. Lockfile change: runs everything.
 
 Compare with the measured full run, and state any unmeasured savings rather than
@@ -108,4 +139,12 @@ guessing. Present the script, scope rules, CI confirmation and timings for
 operator approval. Configure `suite` as a whitespace-split executable and
 arguments, such as `sh tools/crew-suite.sh`; put shell logic inside the script,
 not the command field. Follow the remaining steps in `skills/crew-onboard/SKILL.md`
-to calibrate and commit onboarding. Changing `suite` requires onboarding again.
+to calibrate and commit onboarding.
+
+Re-run onboarding after changing the configured `suite` command, proof entries
+or `worktreeSetup`. Editing only the contents of a script named by the unchanged
+`suite` command does not require re-onboarding. Neither do changes only to
+`builderChecks`, `suiteTimeoutMs` or `proofTimeoutMs`. The onboarding hash covers
+selected configuration values, not script contents or the entire JSON file.
+In either case, commit and push the changes to the base branch before starting
+new lanes; a local commit alone is not enough.

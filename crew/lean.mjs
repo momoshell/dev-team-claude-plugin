@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runAcpSeat } from './acp/seat.mjs'
+import { addSleepCredit } from './host-sleep.mjs'
 import { openMemory, renderSection } from './memory.mjs'
 import { acpProviderFailureKind, acpTextReset, providerRetryDecision, PROVIDER_RETRY_TOTAL_WAIT_MS } from './acp/provider.mjs'
 import { runLoop } from './loop.mjs'
@@ -173,6 +174,7 @@ export async function runLean(spec, deps = {}) {
     const { definition, source, charters, memory } = definitionFor(request, request.tier ?? spec.tier, d, spec.roster?.snapshot ?? spec.roster?.overrides)
     const { role, id } = request
     let recording = { definition }
+    const credit = {}
     try {
     let sectionText = ''
     if (!request.repair) {
@@ -225,7 +227,7 @@ export async function runLean(spec, deps = {}) {
         })
         if (recordError) throw recordError
         // The runtime writes the one turn row of every turn, accepted or not.
-        guardedAppend(sessionFile, `${JSON.stringify({ type: 'turn', stopReason: turn?.stopReason ?? null, usage: turn?.usage ?? null, refusal: turn?.refusal ?? null, ...(!turn?.usage && turn?.usage_partial ? { usage_partial: turn.usage_partial } : {}), ...(typeof turn?.usage_reason === 'string' ? { usage_reason: turn.usage_reason } : {}) })}\n`, 'utf8')
+        guardedAppend(sessionFile, `${JSON.stringify({ type: 'turn', stopReason: turn?.stopReason ?? null, usage: turn?.usage ?? null, refusal: turn?.refusal ?? null, ...(!turn?.usage && turn?.usage_partial ? { usage_partial: turn.usage_partial } : {}), ...(typeof turn?.usage_reason === 'string' ? { usage_reason: turn.usage_reason } : {}), ...addSleepCredit({}, turn) })}\n`, 'utf8')
       } catch (error) {
         failed = true
         if (error?.method === 'session/new' && acpProviderFailureKind(error.errorKind, error.errorMessage) === 'authentication_failed') {
@@ -234,6 +236,8 @@ export async function runLean(spec, deps = {}) {
         }
         turnError = error
       }
+      addSleepCredit(credit, turn)
+      addSleepCredit(credit, turnError)
       // Compare the file with the relayed copy for the muse integrity check.
       const recorded = relayed.join('')
       let intact = false
@@ -245,7 +249,7 @@ export async function runLean(spec, deps = {}) {
           if (update?.sessionUpdate === 'tool_call' && typeof update.toolCallId === 'string') toolIds.add(update.toolCallId)
         } catch { /* skip malformed session lines */ }
       }
-      recording = { definition, stopReason: turn?.stopReason ?? null, usage: turn?.usage ?? null, ...(!turn?.usage && (turnError?.usage_partial ?? turn?.usage_partial) ? { usage_partial: turnError?.usage_partial ?? turn.usage_partial } : {}), ...(typeof turn?.usage_reason === 'string' ? { usage_reason: turn.usage_reason } : {}), toolCalls: recordError ? null : toolIds.size }
+      recording = { definition, stopReason: turn?.stopReason ?? null, usage: turn?.usage ?? null, ...(!turn?.usage && (turnError?.usage_partial ?? turn?.usage_partial) ? { usage_partial: turnError?.usage_partial ?? turn.usage_partial } : {}), ...(typeof turn?.usage_reason === 'string' ? { usage_reason: turn.usage_reason } : {}), toolCalls: recordError ? null : toolIds.size, ...credit }
       if (checkRecords) {
         const after = fingerprint()
         if (typeof after !== 'string') throw violation('acp-seat-record-unmeasured')
@@ -268,7 +272,7 @@ export async function runLean(spec, deps = {}) {
         // The refused attempt's envelope was never earned: the replacement must write its own or leave none.
         if (request.returnPath) d.rmSync(request.returnPath, { force: true })
         attempts += 1
-        recording = { definition }
+        recording = { definition, ...credit }
         continue
       }
       return recording

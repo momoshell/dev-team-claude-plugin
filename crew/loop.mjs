@@ -191,6 +191,8 @@ export function seatTurnRow({ role, id, recording, turnError, parsed, started, e
   const status = parsed?.status
   measure('status', status, ['done', 'insufficient', 'escalate'].includes(status), 'no-return')
   measure('worktree_changed', turnBefore !== turnAfter, role === 'builder' && turnBefore !== null && turnAfter !== null, role === 'builder' ? 'worktree-unmeasured' : 'not-repo-seat')
+  if (recording?.sleep_credited_s !== undefined) row.sleep_credited_s = recording.sleep_credited_s
+  if (recording?.sleep_credit_reason) row.sleep_credit_reason = recording.sleep_credit_reason
   return { ...row, unmeasured }
 }
 

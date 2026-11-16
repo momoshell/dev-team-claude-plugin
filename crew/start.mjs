@@ -17,6 +17,7 @@ import { runSuite } from './checks.mjs'
 import { ISSUE_SOURCE, parseBrief, TIERS } from './protocols.mjs'
 import { resolveAgents, loadRoster, snapshotRoster } from './agents.mjs'
 import { writeRunPid } from './run-pid.mjs'
+import { holdIdleSleep } from './host-sleep.mjs'
 import { askProvenance, readOperatorMessages } from './brief-provenance.mjs'
 import { OnboardRefusal, requireOnboarded, SUITE_TIMEOUT_DEFAULT_MS, WORKTREE_SETUP_TIMEOUT_MS } from './onboard.mjs'
 
@@ -49,7 +50,7 @@ function logStdout(line) {
 }
 
 const defaultDeps = () => ({
-  readFileSync, existsSync, mkdirSync, writeFileSync, appendFileSync, rmSync, openSync, closeSync, resolveAgents, snapshotRoster, runSuite,
+  readFileSync, existsSync, mkdirSync, writeFileSync, appendFileSync, rmSync, openSync, closeSync, resolveAgents, snapshotRoster, runSuite, holdIdleSleep,
   spawnSync: (file, args, options) => spawnSync(file, args, { encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024, ...options }),
   spawnDetached: (file, args, { cwd, log, env }) => {
     const out = openSync(log, 'a')
@@ -240,6 +241,7 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
   } catch (cause) {
     throw new StartRefusal(`cannot launch lane ${lane}; the worktree ${worktree} and branch ${lane} are left for inspection`, { cause })
   }
+  try { d.holdIdleSleep(pid, d) } catch { /* best-effort idle assertion */ }
   if (!writeRunPid(taskDir, pid, d, startedAt)) logLine('crew start: run pid not recorded; finish, record-pr and closeout cannot prove this run dead')
   logLine(`crew start: lane=${lane} loop=lean tier=${tier} shape=${fields.shape} closes=${fields.closes ?? 'none'} pid=${pid}`)
   logLine(`  worktree ${worktree}`)

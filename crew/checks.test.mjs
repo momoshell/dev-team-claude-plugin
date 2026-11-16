@@ -30,6 +30,37 @@ test('the reason vocabulary is a frozen list of unique tokens', () => {
   for (const token of ['invalid-project-config', 'setup-failed', 'nothing-to-commit', 'commit-failed', 'rebase-conflict', 'rebase-failed', 'dirty-worktree', 'push-unmeasured', 'pr-unmeasured', 'invalid-remote-data']) assert.ok(CHECK_REASONS.includes(token), token)
 })
 
+test('runSuite credits a suspended gap before enforcing its timeout', async () => {
+  for (const completionFirst of [false, true]) {
+    let offset = 0, scheduled = false
+    const now = () => offset
+    const result = await node(scratchDir('checks-sleep-'), 'setTimeout(() => {}, 150)', { timeoutMs: 1000 }, {
+      now,
+      setTimeout: (fn, ms) => {
+        scheduled = true
+        return setTimeout(() => { offset += ms + (offset ? 0 : 3_600_000); fn() }, completionFirst ? 1000 : ms)
+      },
+      // Exercise a close delivered before the next sample as well as the timer path.
+      ...(completionFirst ? { sampleNow: () => { if (scheduled) offset = 3_600_025; return now() } } : {}),
+    })
+    assert.equal(result.status, 'green')
+    assert.equal(result.timedOut, false)
+    assert.equal(result.sleep_credited_s, 3600)
+    assert.ok(groupGone(result.pgid))
+  }
+})
+
+test('runSuite reports unavailable suspension sampling without disabling its timeout', async () => {
+  for (const sampleNow of [null, () => { throw new Error('no clock') }]) {
+    const result = await node(scratchDir('checks-sleep-'), 'setInterval(() => {}, 1000)', { timeoutMs: 100 }, { sampleNow })
+    assert.equal(result.reason, 'timeout')
+    assert.equal(result.sleep_credited_s, null)
+    assert.equal(result.sleep_credit_reason, 'clock-unavailable')
+    assert.equal(result.cleanup, 'proven')
+    assert.ok(groupGone(result.pgid))
+  }
+})
+
 test('runSuite reports exit 0 as green with a null reason and a real process group', async () => {
   const result = await node(scratchDir('checks-suite-'), "console.log('out'); console.error('err')")
   assert.equal(result.status, 'green')

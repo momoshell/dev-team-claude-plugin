@@ -444,12 +444,13 @@ test('a muse task-dir seat is refused on an unreadable worktree, settles on an u
   for (const [after, reason] of [['?? src/x.mjs\0', 'acp-seat-wrote-repo'], [null, 'acp-seat-repo-unmeasured']]) {
     let clock = 0, checks = 0
     const client = { start() {}, initialize() {}, newSession() {}, setMode() {}, beginPrompt: () => 1, pollPrompt: () => null,
-      cancelPrompt: () => true, close: () => ({ outcome: 'proven' }) }
+      cancelPrompt: () => true, close: () => { clock += 6000; return { outcome: 'proven' } } }
     await use('pi-turn', { agent: 'muse', model: 'meta/muse-wonder-1.0', definition: { writes: 'task-dir', wait_s: 1 }, deps: {
       repoState: () => checks++ === 0 ? '' : after, clientFactory: () => client, now: () => clock, sleep: (ms) => { clock += ms },
     } }, (run) => {
       assert.equal(run.error?.reason, reason)
-      assert.equal(clock, 1000)
+      assert.equal(clock, 7000)
+      assert.equal(run.error.sleep_credited_s, undefined, 'awake teardown must not earn suspension credit')
       assert.deepEqual(run.leftover, [])
     })
   }
@@ -1324,7 +1325,7 @@ test('Pi brings its own tools: an explicit empty list still launches', async () 
 })
 
 // A fake client under an injected clock: the deadline loop, cancellation and teardown are observable without a transport.
-async function deadlineSeat({ agent = 'pi', wait_s, answerAt = null, answer = { stopReason: 'end_turn', usage: null, refusal: null }, pollAdvance = 0, cancelError = null, closeError = null, closeOutcome = 'proven', pollError = null, exitAt = null, settleOnExit = false, exitPollAdvance = 0, exitPollError = null, onStart = () => {}, usageUpdates = [], setupUpdates = [] } = {}) {
+async function deadlineSeat({ agent = 'pi', wait_s, answerAt = null, answer = { stopReason: 'end_turn', usage: null, refusal: null }, pollAdvance = 0, cancelError = null, closeError = null, closeOutcome = 'proven', pollError = null, exitAt = null, settleOnExit = false, exitPollAdvance = 0, exitPollError = null, onStart = () => {}, usageUpdates = [], setupUpdates = [], gaps = [], sampleNow } = {}) {
   const root = scratchDir('acp-seat-deadline-')
   const runtimeRoot = join(root, 'runtimes')
   mkdirSync(runtimeRoot)
@@ -1365,7 +1366,7 @@ async function deadlineSeat({ agent = 'pi', wait_s, answerAt = null, answer = { 
       definition: { role: 'planner', agent, model: agent === 'pi' ? 'openai/gpt-6.1-sol' : 'anthropic/claude-opus-4-6', effort: 'high', skills: [], ...(wait_s === undefined ? {} : { wait_s }) },
       cwd: root, prompt: 'deadline prompt', sessionFile: join(root, 'session.jsonl'),
       binaries: { claudeAcp: BIN, claude: BIN, pi: BIN },
-      deps: { runtimeRoot, clientFactory: (options) => { sinks = options.sinks; return client }, now: () => clock, sleep: (ms) => { sleeps.push(ms); clock += ms } },
+      deps: { runtimeRoot, clientFactory: (options) => { sinks = options.sinks; return client }, now: () => clock, sampleNow, sleep: (ms) => { sleeps.push(ms); clock += ms + (gaps[sleeps.length - 1] ?? 0) } },
     })
   } catch (caught) { error = caught }
   const leftover = [...runtimes(runtimeRoot)].filter((dir) => !before.has(dir)).map((dir) => join(runtimeRoot, dir))
@@ -1446,6 +1447,53 @@ test('a follow-up prompt cannot inherit running usage from the previous prompt',
       assert.equal(Object.hasOwn(run.error, 'usage_partial'), false)
     })
   } finally { rmSync(taskDir, { recursive: true, force: true }) }
+})
+
+test('seat wait credits a suspended polling gap before enforcing its deadline', async () => {
+  for (const gaps of [[3_600_000], [3_600_000, 3_600_000], [4975], [4976]]) {
+    const credit = gaps.reduce((sum, gap) => sum + (gap + 25 > 5000 ? gap : 0), 0)
+    const answerAt = credit + 100
+    await deadline({ wait_s: 1, gaps, answerAt }, (run) => {
+      if (!credit) assert.equal(run.error?.reason, 'acp-seat-deadline')
+      else {
+        assert.equal(run.error, undefined)
+        assert.equal(run.result.sleep_credited_s, credit / 1000)
+        assert.deepEqual(run.at('cancel'), [])
+      }
+    })
+  }
+  await deadline({ wait_s: 1 }, (run) => {
+    assert.equal(run.error?.reason, 'acp-seat-deadline')
+    assert.equal(run.clock(), 1000)
+  })
+  let jumped = false
+  await museAdvisorConsult('pre-return', (run) => {
+    assert.equal(run.error, undefined)
+    assert.equal(run.result.sleep_credited_s, 3600)
+    assert.equal(run.sent.filter((frame) => frame.method === 'session/prompt').length, 2)
+  }, 'pi-turn', () => ({ deps: (advance) => ({
+    setTimeout: (fn, ms) => setTimeout(() => {
+      advance(ms + (jumped ? 0 : 3_600_000)); jumped = true; fn()
+    }, ms),
+    advisorDeps: { spawn: () => {
+      const child = advisorChild(), end = child.stdin.end
+      child.stdin.end = (value) => setTimeout(() => end(value), 60)
+      return child
+    }, consultTimeoutMs: 3000, childKillGraceMs: 10 },
+  }) }))
+})
+
+test('seat wait reports unavailable suspension sampling without disabling its deadline', async () => {
+  for (const sampleNow of [null, () => { throw new Error('no clock') }]) {
+    await deadline({ wait_s: 1, sampleNow }, (run) => {
+      assert.equal(run.error?.reason, 'acp-seat-deadline')
+      assert.equal(run.clock(), 1000)
+      assert.equal(run.error.sleep_credited_s, null)
+      assert.equal(run.error.sleep_credit_reason, 'clock-unavailable')
+      assert.equal(run.at('cancel').length, 1)
+      assert.equal(run.at('close').length, 1)
+    })
+  }
 })
 
 test('an explicit wait_s answers a turn just before its deadline and cancels a pending one at it, for pi and claude', async () => {
@@ -2103,7 +2151,7 @@ async function museAdvisorConsult(kind, inspect, fixtureName = 'pi-turn', extra 
     await use(fixtureName, { agent: 'muse', model: 'meta/muse-spark-1.3', cwd, taskDir, permissionsOnlyFirst: true, delayPrompt: true, ...more, onPrompt,
       definition: { role: 'builder', wait_s: 1, advisor: { agent: 'pi', model: 'openai/gpt-6.1-sol', effort: 'high' } },
       permissions: [{ toolCallId: 'fire', _update: updates }],
-      deps: { now: () => clock, sleep: (ms) => { clock += ms }, wait: async (ms) => { clock += ms; await new Promise(setImmediate) }, advisorDeps: { spawn: () => advisorChild(kind === 'timeout' || kind === 'stall'), consultTimeoutMs: kind === 'timeout' ? 10 : 3000, childKillGraceMs: 10 } },
+      deps: { now: () => clock, sleep: (ms) => { clock += ms }, wait: async (ms) => { clock += ms; await new Promise(setImmediate) }, advisorDeps: { spawn: () => advisorChild(kind === 'timeout' || kind === 'stall'), consultTimeoutMs: kind === 'timeout' ? 10 : 3000, childKillGraceMs: 10 }, ...more.deps?.((ms) => { clock += ms }) },
     }, (run) => inspect(run, readFileSync(join(taskDir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse), taskDir))
   } finally { rmSync(root, { recursive: true, force: true }) }
 }

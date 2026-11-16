@@ -1,9 +1,52 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { git, scratchDir } from '../test/helpers.mjs'
-import { proveTests, testState } from './proof.mjs'
+import { proveTests, testEvents, testState } from './proof.mjs'
+import { runSuite } from './checks.mjs'
+
+test('proveTests preserves suspension credit across runner and cleanup results', async () => {
+  for (const kind of ['node', 'configured', 'absence', 'setup-failed', 'timeout', 'cleanup-failed', 'unknown']) {
+    const cwd = scratchDir('proof-sleep-')
+    let kept
+    try {
+      git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew'))
+      const entry = { match: '*.test.mjs', setup: 'git status --porcelain', run: 'node --test --test-reporter=junit --test-reporter-destination={report} {file}' }
+      if (kind === 'absence') Object.assign(entry, { run: 'node -e process.exit(1)', list: 'node -e process.exit(1)', manifest: 'package.json' })
+      writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: ['configured', 'absence', 'setup-failed'].includes(kind) ? [entry] : [] }))
+      writeFileSync(join(cwd, 'value.mjs'), 'export const value = 0\n')
+      git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+      writeFileSync(join(cwd, 'package.json'), '{}')
+      writeFileSync(join(cwd, 'value.mjs'), 'export const value = 1\n')
+      writeFileSync(join(cwd, 'value.test.mjs'), "import test from 'node:test'; import assert from 'node:assert/strict'; import { value } from './value.mjs'; test('value', () => assert.equal(value, 1))\n")
+      const calls = []
+      const result = await proveTests({ cwd, tests: [{ file: 'value.test.mjs', title: 'value' }] }, { runSuite: async (spec) => {
+        const run = await runSuite(spec)
+        calls.push(spec)
+        const cleanup = spec.args[0] === 'worktree' && spec.args[1] === 'remove'
+        const fail = kind === 'setup-failed' && spec.args[0] === 'status' || kind === 'timeout' && spec.command === process.execPath || kind === 'cleanup-failed' && cleanup
+        return { ...run, ...(fail ? { status: 'unmeasured', reason: 'timeout' } : {}), ...(kind === 'unknown' && cleanup ? { sleep_credited_s: null, sleep_credit_reason: 'clock-unavailable' } : { sleep_credited_s: calls.length }) }
+      } })
+      kept = result.kept
+      assert.equal(result.sleep_credited_s, kind === 'unknown' ? null : calls.length * (calls.length + 1) / 2, kind)
+      assert.ok(calls.some((spec) => spec.args[1] === 'remove'), kind)
+      if (kind === 'unknown') assert.equal(result.sleep_credit_reason, 'clock-unavailable')
+      if (kind === 'configured') assert.ok(calls.some((spec) => spec.args[0] === 'status'))
+      if (kind === 'absence') assert.ok(calls.some((spec) => spec.args.includes('ls-tree')))
+      if (kind === 'cleanup-failed') assert.equal(result.reason, 'cleanup-unproven')
+      if (['node', 'configured', 'unknown'].includes(kind)) assert.equal(result.status, 'green', kind)
+    } finally {
+      if (kept) rmSync(dirname(kept), { recursive: true, force: true })
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  }
+  for (const sleep_credited_s of [3, null]) {
+    const result = await testEvents({ cwd: '.', files: [] }, { runSuite: async () => ({ status: 'green', reason: null, stdout: '', sleep_credited_s }) })
+    assert.equal(result.sleep_credited_s, sleep_credited_s)
+    if (sleep_credited_s === null) assert.equal(result.sleep_credit_reason, 'clock-unavailable')
+  }
+})
 
 test('a configured runner proves a TypeScript test from its JUnit report', async () => {
   const cwd = scratchDir('proof-junit-')
@@ -598,15 +641,17 @@ test('a failed git worktree add is unmeasured, runs no test and leaves no temp d
   } finally { if (prior === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = prior }
 })
 
-test('proof imports only builtins and its pinned check runner and lane-core leaf', () => {
+test('proof imports only builtins and its pinned check runner and leaves', () => {
   const imports = (file) => [...readFileSync(new URL(file, import.meta.url), 'utf8').matchAll(/from ['"]([^'"]+)['"]/g)].map((m) => m[1])
   const proof = imports('./proof.mjs')
   assert.ok(proof.length > 0)
-  assert.deepEqual(proof.filter((name) => !name.startsWith('node:')), ['./checks.mjs'])
+  assert.deepEqual(proof.filter((name) => !name.startsWith('node:')), ['./checks.mjs', './host-sleep.mjs'])
   const checks = imports('./checks.mjs')
   assert.ok(checks.length > 0)
-  assert.deepEqual(checks.filter((name) => !name.startsWith('node:')), ['./lane-core.mjs'])
+  assert.deepEqual(checks.filter((name) => !name.startsWith('node:')), ['./lane-core.mjs', './host-sleep.mjs'])
   const laneCore = imports('./lane-core.mjs')
   assert.ok(laneCore.length > 0 && laneCore.every((name) => name.startsWith('node:')))
+  const hostSleep = imports('./host-sleep.mjs')
+  assert.ok(hostSleep.length > 0 && hostSleep.every((name) => name.startsWith('node:')))
   assert.deepEqual(imports('./proof-reporter.mjs'), [])
 })

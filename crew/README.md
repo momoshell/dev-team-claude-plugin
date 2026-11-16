@@ -138,6 +138,16 @@ A frontmatter tier override replaces only the fields it names and keeps a raw ov
 
 A seat's `wait_s` must be a positive safe integer in seconds. When no override sets it, the seat definition supplies it, or it defaults to 2400 seconds. Start freezes the effective limit for each tier, including this fallback, for the lane and its finish passes. The timer in `crew/acp/seat.mjs` starts after ACP setup; setup has its own budget, `ACP_SETUP_TIMEOUT_MS` plus `ACP_FIFO_WAIT_MS` in `crew/acp-client.mjs`, as a fixed cost on top of `wait_s`.
 
+### Host sleep
+
+On macOS, `crew start` and `crew finish` launch `caffeinate -i -w <run-pid>` after the detached run starts. This blocks idle sleep only, for that run's lifetime. It does not keep the display on or prevent lid-close sleep. Other platforms, or a missing `caffeinate`, start normally without an assertion.
+
+Seat waits and all `runSuite` subprocesses (suites, proofs, worktree setup, onboarding, and git/gh checks) sample a monotonic elapsed clock at intervals of at most 25 ms (shorter for the remaining budget). A gap strictly greater than 5,000 ms credits the gap minus the scheduled interval before testing expiry. Clocks that exclude suspension produce no suspended gap and need no credit. This is a heuristic: a sufficiently long event-loop stall can also earn credit. Seat setup deadlines and provider backoff budgets are unchanged, as are the values and defaults of `wait_s`, `suiteTimeoutMs` and `proofTimeoutMs`. Work that spends its budget awake still times out.
+
+Credited seconds appear as `sleep_credited_s` on `seat-turn` rows and in suite/proof `check.result` objects. Proof sums credit once across its subprocesses, including setup, probes and cleanup. Measured zero may be absent. If sampling is unavailable, `sleep_credited_s` is `null` with `sleep_credit_reason: 'clock-unavailable'`, and ordinary elapsed-time enforcement remains in effect. A proof containing any unavailable measurement reports an unknown total. Seat `seconds` remains wall duration, not the credited budget.
+
+Sleep does not repair a lost provider connection: that turn fails normally and gets the existing single rerun. A genuine `seat-unmeasured` stop still needs inspection and recovery, not a larger limit.
+
 After an `acp-seat-deadline` cut, the one rerun receives the original prompt plus a note with the previous attempt's limit: it was cut without a return, partial changes remain in the worktree, a long-running command may have been killed, and the seat must return before the limit. Other turn errors keep the original prompt unchanged. A second cut stops `seat-unmeasured`.
 
 ## Checks

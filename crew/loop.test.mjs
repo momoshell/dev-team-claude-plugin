@@ -1659,6 +1659,21 @@ function sequenced(sequence, options = {}) {
   }
   return Object.assign(f, { inputs })
 }
+test('a pre-check base move with an unchanged tree does not reuse an earlier pass (#2412)', async () => {
+  for (const spent of [false, true]) {
+    let bases = 0
+    // The fake tree id never changes, as when the base moved through a commit that left the tree alone.
+    const f = sequenced([redRun(), green()], { spec: finishSpec({ priorReviewRounds: spent ? 2 : 0 }),
+      checkBase: () => ({ ...green(), stdout: ++bases > 1 ? O : 'c'.repeat(40) }),
+      rebase: answers({ ...MOVED, head: 'a'.repeat(40) }, { ...MOVED, onto: O }, { ...MOVED, head: 'a'.repeat(40), onto: O }) })
+    const result = await f.go()
+    assert.equal(f.rows.some((r) => r.event === 'pre-check-base-move'), true)
+    assert.equal(f.rows.some((r) => r.event === 'review-reused'), false)
+    if (spent) { assert.equal(result.reason, 'round-bound'); assert.equal(count(f, 'reviewer'), 1) }
+    else { assert.equal(result.status, 'done'); assert.equal(count(f, 'reviewer'), 2) }
+  }
+})
+
 test('a build reuses a passed tree after an unchanged suite repair (#2412)', async () => {
   const note = { ...finding, severity: 'should-fix' }
   const f = sequenced([redRun(), green()], { bounds: { reviewer: 1 }, edit: (v) => {

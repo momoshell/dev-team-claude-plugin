@@ -847,6 +847,8 @@ export async function runLoop(spec, deps = {}) {
             await emit('pre-check-base-move', { from: currentBase, onto: moved.rebased.onto, review: !isFinish && tier === 'mechanical' ? 'none' : 'full', counted: isFinish || tier !== 'mechanical' })
             rebasedHead = currentBase = moved.rebased.onto
             reviewedTree = reserveBase = recheckScope = null
+            // A moved base needs a full counted review even when the lane's tree id is unchanged, so no earlier pass is reused.
+            for (const role of Object.keys(latestReviews)) delete latestReviews[role]
             uncountedReview = false
           }
         } else uncountedReview = isFinish

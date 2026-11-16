@@ -4,7 +4,8 @@
 // builder conflict turn; an unresolved or spent turn stops with the build uncommitted. A mechanical finish uses its brief and publishes nothing.
 // A publishing rebase conflict also gets one builder conflict turn per run; an unresolved or spent turn stops rebase-conflict.
 // Mechanical: rebase -> build -> proof -> suite -> PR. A fix turn repeats checks; build, judge and mechanical
-// never automatically rerun a red suite (ADR-054 §1). Finish retains its unchanged-tree rerun; no ADR states that rerun.
+// never automatically rerun a red suite (ADR-054 §1). Finish also repairs the first red immediately, then stops on another red.
+// A finish suite that is neither green nor red stops without a repair.
 // Every shape commits only the checked tree; a moved head repeats checks at most three times, stopping if Git dropped the change as upstream.
 // Import-only: every effect (seat turn, filesystem, check, git, journal) crosses an injected seam.
 // A seat's return is never trusted from the callback: the envelope is read back from the path
@@ -938,36 +939,27 @@ export async function runLoop(spec, deps = {}) {
         if (halt) return halt
       }
       const suite = await suiteRun()
-      // Mechanical fixes the first red; finish retains its unchanged-tree rerun.
       if (suite.status === 'red') {
-        const mechanical = !isFinish && tier === 'mechanical'
-        const rerun = mechanical ? suite : await suiteRun()
-        if (rerun.status === 'red') {
-          if (repaired) return stop(suite.reason, rerun)
-          // Give the builder one repair turn, then repeat this lane's checks.
-          const failures = suiteFailures(mechanical ? [suite] : [suite, rerun])
-          feedback = withGuidance([{
-            id: 'suite-repair',
-            severity: 'must-fix',
-            summary: `The full suite is red ${mechanical ? 'after your change' : 'on two runs after your change'}. Fix the failing tests. This is your only repair turn.`,
-            checkout: cwd,
-            failingTests: failures.tests,
-            failingFiles: failures.files,
-            ...(failures.tail.length ? { outputTail: failures.tail } : {}),
-          }])
-          for (const role of isFinish || tier === 'mechanical' ? ['builder'] : ['builder', 'reviewer']) seats[role] = { ...seats[role], rounds: isFinish ? (seats[role].rounds ?? DEFAULT_ROUNDS) + 1 : Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }
-          repairing = true
-          repaired = true
-          continue
-        }
-        if (rerun.status !== 'green') return stop(rerun.reason, rerun)
-        suiteResult = { code: rerun.code, redCode: suite.code }
-        suiteLine = `- Suite: green; exit ${rerun.code} (re-run after red; exit ${suite.code}).`
-      } else {
-        if (suite.status !== 'green') return stop(suite.reason, suite)
-        suiteResult = { code: suite.code }
-        suiteLine = `- Suite: green; exit ${suite.code}.`
+        if (repaired) return stop(suite.reason, suite)
+        // Give the builder one repair turn, then repeat this lane's checks.
+        const failures = suiteFailures([suite])
+        feedback = withGuidance([{
+          id: 'suite-repair',
+          severity: 'must-fix',
+          summary: 'The full suite is red after your change. Fix the failing tests. This is your only repair turn.',
+          checkout: cwd,
+          failingTests: failures.tests,
+          failingFiles: failures.files,
+          ...(failures.tail.length ? { outputTail: failures.tail } : {}),
+        }])
+        for (const role of isFinish || tier === 'mechanical' ? ['builder'] : ['builder', 'reviewer']) seats[role] = { ...seats[role], rounds: isFinish ? (seats[role].rounds ?? DEFAULT_ROUNDS) + 1 : Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }
+        repairing = true
+        repaired = true
+        continue
       }
+      if (suite.status !== 'green') return stop(suite.reason, suite)
+      suiteResult = { code: suite.code }
+      suiteLine = `- Suite: green; exit ${suite.code}.`
       break
     }
     measurements = [...proofLines, suiteLine, ...(!isFinish && tier === 'mechanical' && namedTests.length ? ['- Review: none, mechanical lane, not reviewed.'] : [])]
@@ -998,7 +990,7 @@ export async function runLoop(spec, deps = {}) {
         ...(proved.length ? [...proved.map(({ file, title, base }) => `- ${oneLine(file)}: ${oneLine(title)} ${base?.reason === 'base-package-absent' ? 'had its package absent on the old source (base-package-absent)' : base?.reason === 'base-test-absent' ? 'had its test file absent on the old source (base-test-absent)' : 'was red on the old source'}, green on ${lastProved.has(`${file}\0${title}`) ? 'the build.' : 'an earlier build turn; the last build turn did not name it.'}`), ...(!isFinish && tier === 'mechanical' ? ['Review: none, mechanical lane, not reviewed.'] : [])]
           : !isFinish && tier === 'mechanical' ? ['Proof: mechanical lane, not reviewed.']
             : (!isFinish || planning) && !testsRequired ? ['Proof: no criterion is machine-checked.'] : ['Proof: unmeasured.']),
-        suiteResult ? `Suite passed with exit code ${suiteResult.code}${Object.hasOwn(suiteResult, 'redCode') ? ` on a re-run after a red exit ${suiteResult.redCode}` : ''}.` : 'Suite: unmeasured.',
+        suiteResult ? `Suite passed with exit code ${suiteResult.code}.` : 'Suite: unmeasured.',
         ...(open.length ? ['', '## Open points', ...open.map((f) => `- ${oneLine(f.summary)} (${oneLine(f.location)})`)] : []),
       ].join('\n')
     }

@@ -54,6 +54,10 @@ whose diff reaches a protected path stops `raise-needs-plan`, and you restart it
 from its brief as a build lane.
 Only the checked tree is committed; a rebase that moves the head repeats proof,
 review and suite on the new base. It publishes nothing (`crew/finish.mjs`).
+The first red suite gives the builder its one repair turn immediately, even for
+a flaky failure. There is no unchanged-tree retry. The repair repeats proof,
+review and the suite. A red suite after repair, or a suite that is neither green
+nor red, stops the lane.
 When that run is ready, decide once:
 
 - `crew finish <lane> --accept [--notes <file>]` publishes the PR the run

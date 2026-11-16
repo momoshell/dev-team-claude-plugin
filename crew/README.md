@@ -78,6 +78,7 @@ and restart the lane. Baseline-only stops still refuse. Post-build finish passes
 cannot reopen planning: abandon, close out with `--discard` and restart from the brief
 when the build needs a new plan (ADR-051).
 A `--return` pass whose branch equals its base after the rebase still runs the build; only the commit stage stops `nothing-to-commit`.
+In a finish pass, the first red suite gives the builder its one repair turn immediately, even for a flaky failure. There is no unchanged-tree retry. The repair repeats proof, review and the suite. A red suite after repair, or a suite that is neither green nor red, stops the lane.
 Bare `crew finish <lane>` reports without writing.
 A claim whose run is provably gone is taken over. A committed
 build with no remote branch is uncommitted and finished if HEAD is the commit or

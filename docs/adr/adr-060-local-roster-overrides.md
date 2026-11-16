@@ -15,6 +15,11 @@ committed model needs a local choice that survives plugin updates.
 2. Files contain a partial object keyed by role. Only `agent`, `model`, `effort`,
    `advisor` and `tiers` may be changed. The charter body, `writes`, `skills`,
    `extensions`, `memory` and all other fields stay with the plugin.
+
+   Amendment (2026-11-16, #2419): Since PR #2407, `wait_s` is also an allowed
+   run field on roles and tiers (`RUN_FIELDS` in `crew/protocols.mjs`). Like
+   `effort`, a tier's `wait_s` wins over the role's value. Non-run fields remain
+   plugin-owned, and the layering rules below are unchanged.
 3. Named fields replace lower layers. Tier names merge individually: a named
    entry replaces the plugin tier's run fields, while its non-run fields remain.
    Null unseats; an object can seat a tier the plugin unseated. A top-level

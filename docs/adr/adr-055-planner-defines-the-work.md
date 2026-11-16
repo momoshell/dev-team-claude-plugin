@@ -1,6 +1,6 @@
 # ADR-055 — The planner defines the work, code checks red and green, the reviewer judges
 
-**Status:** builder (§3) and planner (§2) parts ratified 2026-11-03 by operator decision on `~/.crew/reviews/adr-055-readout-2026-11-03.md`; §1, §7, §8 and §12 ratified 2026-11-04 by operator decision D14 in `~/.crew/reviews/codebase-2026-11-04.md`; loops (§6) stays proposed until about 10 lanes run on b1514's round budgets · **Owner:** operator ·
+**Status:** builder (§3) and planner (§2) parts ratified 2026-11-03 by operator decision on `~/.crew/reviews/adr-055-readout-2026-11-03.md`; §1, §7, §8 and §12 ratified 2026-11-04 by operator decision D14 in `~/.crew/reviews/codebase-2026-11-04.md`; §6 pre-check base refresh ratified 2026-11-16 by operator decision (#2403); §6 round budgets stay proposed until about 10 lanes run on b1514's round budgets · **Owner:** operator ·
 **Relates to:** ADR-052 (P1 brief, P3 acceptance gate, §6 the loop), ADR-053 (rejected here), ADR-054 (amended
 here), ADR-038 (superseded here), ADR-030 (superseded here), ADR-051 (finish shape), ADR-048 and ADR-049 (superseded
 here)
@@ -50,6 +50,10 @@ the issue body as the ask in the run brief. The planner names brief text taken a
 reviewer flags criteria based only on brief text that is not the source's words or an operator decision.
 
 Amended by ADR-056: "or approved proposal" is withdrawn from the operator ask.
+
+Clarification (2026-11-16, #2419): `suite` in the original field list above is
+retired. `parseBrief` in `crew/protocols.mjs` refuses it; suite configuration
+belongs in `.crew/project.json`, not brief frontmatter (ADR-057).
 
 Amended 2026-11-03, operator decision: Context items are bare pointers; `out_of_scope` is optional, and absent means none.
 
@@ -270,6 +274,17 @@ Code holds the rule:
 - Amended 2026-11-04, operator direction (b1526, b1528, b1533, b1539): a rebase conflict before publishing, or a finish base conflict, gets one builder conflict turn per run. A resolved head takes the moved-head recheck; an unresolved turn is undone and stops `rebase-conflict`, as does a conflict after the turn is spent.
 - An `escalate` from any seat carries `details.question`, the decision it needs from the operator. An `escalate`
   without one is a bounce to the same seat.
+
+  Clarification (2026-11-16, #2419): The existing operator-selected exception in
+  `crew/loop.mjs` limits questionless retry to builder escalations and done lead
+  escalations, subject to the existing bounds and single-turn handling. Planner,
+  reviewer and tech-lead `insufficient` or `escalate` returns stop `seat-escalated`,
+  using a valid `details.question` or falling back to `summary`; no usable planner
+  artifact or completed review is required. A non-done lead `decision: escalate`
+  stops `lead-escalated` with the same fallback, without questionless retry.
+  Valid non-done lead bounce and accept decisions retain their routing; non-done
+  status alone does not force escalation. This records the shipped exception,
+  not a new escalation policy. See `crew/README.md`.
 - Amended 2026-11-03, operator direction: on build and judge, a builder `insufficient` goes to the lead with its
   envelope. The lead routes it to `builder` (unfinished work, same plan), `planner` (a real gap) or `escalate`
   (a §12 case only). A mechanical lane keeps the §7 restart. Lanes b1493, b1502 and b1504 stopped `round-bound`
@@ -279,6 +294,13 @@ Code holds the rule:
 - Amended 2026-11-03 (b1500, b1509): lead consults have separate full bounds for build, review and moved-head
   recheck. On standard build and judge lanes, the first reviewer turn forced only by a moved-head rebase spends no
   round; on judge the tech-lead turn is free too. Finish recheck reviews still spend a round under the finish review cap.
+
+  Clarification (2026-11-16, #2419): ADR-051 Amendment 2 supersedes that last
+  sentence. Post-suite moved-head finish recheck reviews are uncounted and run
+  even at a spent cap; `counted: false` rows are excluded by `reviewCount` in
+  `crew/finish.mjs`. This differs from a pre-check base move, which requires a
+  full, counted review and can stop `round-bound` at a spent cap (§6's
+  2026-11-16 amendment, #2403).
 - Amended 2026-11-13, operator decision (#2359): build and judge recheck reviews cover unresolved earlier findings, lane code altered by the rebase or conflict turn, and where the base's new commits meet the lane's change. For reviewed commit R, new base O and rebased head H, compare `git diff R^ R` with `git diff O H` to see lane changes; `git diff R^ O` shows base changes. The loop checks that all three comparisons work; if the scope cannot be measured, the review is full and the journal records that fallback.
 - Amended 2026-11-04, operator decision D4: a publishing rebase may trigger at most three moved-head rechecks;
   a fourth move stops as `recheck-bound` before uncommitting or publishing.

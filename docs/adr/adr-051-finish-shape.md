@@ -12,6 +12,14 @@ session makes.
 
 Every repository `file:line` below was read at `39f56478`.
 
+**Current-runtime note (2026-11-16, #2419):** The citations to `crew/crew.mjs`,
+`crew/variants.mjs` and `skills/crew-recovery/references/hand-finish.md` belong to
+the earlier runtime; those files no longer exist. The original decision and its
+stage chain below are historical. The shipped command is `bin/crew.mjs`, with
+finish decisions in `crew/finish.mjs` and execution in `crew/loop.mjs`; see the
+[register entry](README.md) for the current sequence and operator surface.
+Amendment 4 records the pre-build planning exception.
+
 ## What a hand-finish costs today (measured 2026-10-16)
 
 b1214-providerstall escalated when the driver crashed at `review:r1` (`acp-session-busy`). Its hand-finish
@@ -133,6 +141,15 @@ The shipped heads supersede section 1:
 ## Amendment 2 (2026-11-14)
 
 The review after the run's one suite-repair turn and a moved-head recheck review do not count against the three-round finish review cap. Both run even when the cap is spent. If either returns `changes-needed` at the cap, the run stops `round-bound` with its findings. The journal marks these reviews `counted: false`; `reviewCount` and `reviewRounds` exclude them, while the finish report and commit body list every review. See issue #2374.
+
+**Clarification (2026-11-16, #2419):** The suite-repair claim above applies only
+when the pre-check fetch finds the base unchanged. A needed review after repair
+is then uncounted and runs even at a spent cap; a passed identical tree can reuse
+review instead. A pre-check base move requires a full, counted review and can
+stop `round-bound` before review at a spent cap (ADR-055 §6, #2403). The post-suite
+moved-head recheck review remains uncounted, including at a spent cap. Uncounted
+reviews are marked `counted: false` and excluded from `reviewCount` and
+`reviewRounds`.
 
 ## Amendment 3 (2026-11-15)
 

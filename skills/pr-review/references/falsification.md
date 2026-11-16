@@ -57,10 +57,18 @@ behaviour this change touched — not whether its correction happens to land on
 an already-modified line. Two classes are never subject to the bar:
 
 - **vacuity and required proof** — a check that stays green with the behaviour
-  removed, or a named test not red on the old source. `CLAUDE.md` says a test
-  proves a change only when red on the old source and green on the build; this
-  is not a kill proof. The rubric grades vacuity should-fix by default, even
-  when the proof lands in a test file the change did not touch;
+  removed, or a named test that lacks the required proof. `CLAUDE.md` says a test
+  normally proves a change when red on the old source from a failure in its own
+  body and green on the build. The first matching proof entry in the old source's
+  `.crew/project.json` can configure two green-only exceptions: `manifest` allows
+  a new package's own test to prove as `base-package-absent` when that manifest is
+  absent from the old-source commit; `newTestFile: true` allows an absent test
+  file to prove as `base-test-absent`. Both require a no-report old-source result
+  and a green build report. They have no red side and may be vacuous: judge the
+  test, not the absent red side alone. Outside these exceptions, import errors
+  and failing hooks are not body-failure proof. None is a kill proof. The rubric
+  grades vacuity should-fix by default, even when the proof lands in a test file
+  the change did not touch;
 - **an out-of-context repair** the plan or an ADR has not deferred
   (`crew/guidelines/review-do-not-flag.md`) — it stays visible.
 
@@ -105,5 +113,8 @@ When running a model directly over an unreviewed diff, paste this reference afte
 paragraph and before the diff. Ask for: findings as `must-fix` / `should-fix`
 / `consider` with `file:line` and a correction each; a separate **Verified**
 section (not a severity) listing what was checked and held, including each named
-test's result red on the old source and green on the build where you ran it; and a final
+test's actual results where you ran it: normally red on the old source from a
+failure in its own body and green on the build, or its recorded
+`base-package-absent` / `base-test-absent` result and green on the build, with no
+red side; and a final
 `net: merge` or `net: do not merge` line.

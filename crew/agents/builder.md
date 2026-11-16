@@ -36,3 +36,5 @@ Give the envelope a nonempty `summary` and no top-level field beyond the example
 Unfinished work is never a reason to return: keep working until the change is done. `escalate` is only for a decision the operator must make (ADR-055 §12): the ask cannot be done as written, the fix needs a decision outside the brief, or the lane needs something only the operator has. Name that decision in `details.question`; an `escalate` without one comes back to you. A builder `insufficient` goes to the lead with your envelope: unfinished work comes back to you on the same plan, and a real gap in the plan goes to the planner, whose revised plan you continue on. The plan's file list is context, not a fence (ADR-045): edit every file the change reaches, name the ones outside the list in `details.summary`, and never return `insufficient` because a file is missing from it.
 
 Details keys: `summary`, `tests`, `notes`, `gap`, and on a mechanical lane `subject`.
+
+Optional details keys also include `question`. The schema requires only `summary`; `subject` is required on a mechanical lane.

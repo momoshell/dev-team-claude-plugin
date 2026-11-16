@@ -1,6 +1,6 @@
 # ADR-055 — The planner defines the work, code checks red and green, the reviewer judges
 
-**Status:** builder (§3) and planner (§2) parts ratified 2026-11-03 by operator decision on `~/.crew/reviews/adr-055-readout-2026-11-03.md`; §1, §7, §8 and §12 ratified 2026-11-04 by operator decision D14 in `~/.crew/reviews/codebase-2026-11-04.md`; §6 pre-check base refresh ratified 2026-11-16 by operator decision (#2403); §6 round budgets stay proposed until about 10 lanes run on b1514's round budgets · **Owner:** operator ·
+**Status:** builder (§3) and planner (§2) parts ratified 2026-11-03 by operator decision on `~/.crew/reviews/adr-055-readout-2026-11-03.md`; §1, §7, §8 and §12 ratified 2026-11-04 by operator decision D14 in `~/.crew/reviews/codebase-2026-11-04.md`; §6 pre-check base refresh (#2403) and concurrent judge reviews (#2425) ratified 2026-11-16 by operator decision; §6 round budgets stay proposed until about 10 lanes run on b1514's round budgets · **Owner:** operator ·
 **Relates to:** ADR-052 (P1 brief, P3 acceptance gate, §6 the loop), ADR-053 (rejected here), ADR-054 (amended
 here), ADR-038 (superseded here), ADR-030 (superseded here), ADR-051 (finish shape), ADR-048 and ADR-049 (superseded
 here)
@@ -133,10 +133,21 @@ ADR-054's three loops stand, with section 4 above as their proof:
 ```
 mechanical:  brief -> rebase -> build -> refresh base -> prove -> suite -> PR
 build:       brief -> plan -> rebase -> build -> refresh base -> prove -> (suite || review) -> PR
-judge:       brief -> plan -> rebase -> build -> refresh base -> prove -> suite -> review -> second review -> PR
+judge:       brief -> plan -> rebase -> build -> refresh base -> prove -> suite -> (review || second review) -> PR
 ```
 
 The judge loop's second review is the tech-lead's. It drops ADR-038's mutation on the changed surface.
+
+Amended 2026-11-16, operator decision ("yes 1", #2425): whenever a judge round dispatches reviews,
+start the reviewer and tech-lead independently on the same checked tree after a green suite. This includes
+raised lanes and moved-head rechecks. Keep the journal stage `second-review`. Wait for all started checks;
+publication requires a green suite and both seats' passes on that tree. A repair turn gets both seats'
+available findings and omission notices in one feedback list. A red suite still repairs without dispatching
+reviews. Each seat retains its own prior findings and independently reuses its latest pass on the unchanged
+tree with `review-reused`, without spending a round. Changed trees rerun both seats. A halt from either seat
+allows its sibling to finish and journals its return before the loop returns stopped. Existing seat bounds,
+lead routing and free moved-head rechecks remain. Build, mechanical and finish scheduling does not change;
+those runs have no tech-lead turn. This decision does not ratify the proposed round budgets.
 
 Amended 2026-11-16, operator decision (#2403): **every suite run** refreshes the base after the accepted
 builder or suite-repair turn and before proof, review or suite, in build, judge, mechanical and finish runs.

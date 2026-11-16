@@ -21,7 +21,7 @@ const MAX_DROPPED = 10
 const LOOP_STAGES = 'The loop runs each test the builder names on the old source and on the build. It then runs the suite, commits, rebases and opens the PR. Do not run those stages yourself.'
 const stopped = (reason) => ({ status: 'stopped', reason, pr: null })
 
-function recordState(leanDir, sessionFile) {
+function recordState(leanDir, sessionFiles) {
   try {
     const entries = []
     const walk = (path) => {
@@ -29,7 +29,7 @@ function recordState(leanDir, sessionFile) {
       if (stat.isDirectory()) {
         entries.push([relative(leanDir, path), 'dir'])
         for (const name of readdirSync(path).sort()) walk(join(path, name))
-      } else if (path !== sessionFile) {
+      } else if (!sessionFiles.has(path)) {
         if (stat.isFile()) entries.push([relative(leanDir, path), 'file', createHash('sha256').update(readFileSync(path)).digest('hex')])
         else if (stat.isSymbolicLink()) entries.push([relative(leanDir, path), 'link', readlinkSync(path)])
         else throw new Error('unsupported lean record entry')
@@ -170,6 +170,7 @@ export async function runLean(spec, deps = {}) {
   }
 
   const prompts = new Map()
+  const activeSessions = new Map()
   const runSeat = async (request, { emit }) => {
     const { definition, source, charters, memory } = definitionFor(request, request.tier ?? spec.tier, d, spec.roster?.snapshot ?? spec.roster?.overrides)
     const { role, id } = request
@@ -197,7 +198,8 @@ export async function runLean(spec, deps = {}) {
     }
     if (request.rerun) prompts.delete(baseStem)
     else prompts.set(baseStem, { prompt, wait_s: definition.wait_s ?? 2400 })
-    d.mkdirSync(join(spec.taskDir, 'lean', role), { recursive: true })
+    // Keep sibling directory creation out of a concurrent turn's record fingerprint.
+    for (const seatRole of AGENT_ROLES) d.mkdirSync(join(spec.taskDir, 'lean', seatRole), { recursive: true })
     const stem = `${baseStem}${request.rerun ? '.rerun' : ''}`
     // A provider failure is retried in a fresh ACP session inside the shared bounds. The issued id,
     // prompt and definition stay the same; each attempt records to its own session file.
@@ -214,8 +216,13 @@ export async function runLean(spec, deps = {}) {
       const guardedAppend = (...args) => {
         try { const out = d.appendFileSync(...args); if (args[0] === sessionFile) relayed.push(String(args[1])); return out } catch (error) { recordError ??= error; throw error }
       }
+      // Retain each overlap until this attempt ends, even if its sibling finishes first.
+      const sessionFiles = new Set([sessionFile, ...activeSessions.keys()])
+      for (const ignored of activeSessions.values()) ignored.add(sessionFile)
+      activeSessions.set(sessionFile, sessionFiles)
+      try {
       const checkRecords = definition.agent === 'muse' && definition.writes !== 'none'
-      const fingerprint = () => { try { return d.recordState(join(spec.taskDir, 'lean'), sessionFile) } catch { return null } }
+      const fingerprint = () => { try { return d.recordState(join(spec.taskDir, 'lean'), sessionFiles) } catch { return null } }
       const violation = (reason) => Object.assign(new Error(reason), { reason })
       const before = checkRecords ? fingerprint() : null
       if (checkRecords && typeof before !== 'string') throw violation('acp-seat-record-unmeasured')
@@ -253,8 +260,9 @@ export async function runLean(spec, deps = {}) {
       if (checkRecords) {
         const after = fingerprint()
         if (typeof after !== 'string') throw violation('acp-seat-record-unmeasured')
-        if (after !== before || !intact) throw violation('acp-seat-wrote-record')
+        if (after !== before) throw violation('acp-seat-wrote-record')
       }
+      if ((checkRecords || sessionFiles.size > 1) && !intact) throw violation('acp-seat-wrote-record')
       if (failed) throw turnError
       if (turn?.refusal || !turn?.stopReason) {
         const failure = Object.assign(new Error(turn?.refusal?.message ?? 'ACP seat turn returned no stop reason'), { code: turn?.refusal?.code ?? null, errorKind: turn?.refusal?.errorKind ?? null })
@@ -276,6 +284,7 @@ export async function runLean(spec, deps = {}) {
         continue
       }
       return recording
+      } finally { activeSessions.delete(sessionFile) }
     }
     } catch (error) {
       if (['acp-seat-wrote-repo', 'acp-seat-repo-unmeasured', 'acp-seat-wrote-record', 'acp-seat-record-unmeasured'].includes(error?.reason) && request.returnPath) {

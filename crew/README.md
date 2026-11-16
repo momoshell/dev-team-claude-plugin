@@ -47,11 +47,13 @@ body has the quoted operator ask and bare Context pointers, or bare Context poin
 
 ```
 build:      plan -> rebase -> build -> refresh base -> per-test proof -> (project suite || review) -> PR
-judge:      plan -> rebase -> build -> refresh base -> per-test proof -> project suite -> review -> second review -> PR
+judge:      plan -> rebase -> build -> refresh base -> per-test proof -> project suite -> (review || second review) -> PR
 mechanical: rebase -> build -> refresh base -> per-test proof -> project suite -> PR
 ```
 
 Authors write bare `issue N` pointers in `## Context`, not a `## Referenced issues` section. For both issue and operator-request briefs, `crew start` fetches each distinct Context issue other than the source and puts its title and whole quoted body in that section immediately after Context. Referenced issues are context, not asks; only `closes` binds an issue. An unreadable reference refuses start before worktree creation and names the issue. An empty or whitespace-only body appears as `empty body` with its title. `PR N` pointers are not fetched. Finish passes use the same enriched run brief.
+
+On judge lanes, every review round starts the reviewer and tech-lead independently on the same checked tree after a green suite, including raised lanes and moved-head rechecks. The tech-lead stage remains `second-review`. The loop waits for both returns before giving the builder both seats' findings and omission notices in one feedback list, or publishing after both pass. A red suite still goes directly to repair without starting reviews. A halt from either seat drains and journals its sibling before the loop returns stopped. Seat bounds and counting do not change; moved-head recheck turns remain free. Build, mechanical and finish scheduling is unchanged, with no tech-lead turn.
 
 A fix turn carries the red results back to the builder, then repeats proof, the suite and any needed reviews. In build, judge and finish runs, each review role reuses its own latest verdict and findings if it passed the same tree id earlier in that run. Reuse journals `review-reused` with the role, tree and `pass` verdict, without seating the role or spending a review round or reserve review. A changed tree, a pre-check base move or a latest verdict of `changes-needed` still requires review. Proof and the suite repeat as before. Build and judge do not automatically rerun a red suite on an unchanged tree.
 

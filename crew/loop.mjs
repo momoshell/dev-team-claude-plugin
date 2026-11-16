@@ -1,5 +1,5 @@
 // Build: plan -> rebase -> build -> refresh base -> proof -> (suite || review) -> PR.
-// Judge: plan -> rebase -> build -> refresh base -> proof -> suite -> review -> second review -> PR.
+// Judge: plan -> rebase -> build -> refresh base -> proof -> suite -> (review || second review) -> PR.
 // Finish: rebase -> builder triage -> refresh base -> proof -> review -> suite -> commit -> rebase.
 // Every accepted build/repair fetches before checks. A moved base snapshots, rebases and uncommits the build;
 // its next review is full and counted, not a publishing recheck, and spends none of MAX_RECHECKS.
@@ -313,7 +313,7 @@ export async function runLoop(spec, deps = {}) {
   const provedTests = new Map()
   const lastProved = new Set()
   let priorFindings = isFinish ? fin.findings : []
-  const importedTechFindings = new Set(isFinish && fin.findingsRole === 'tech-lead' ? fin.findings : [])
+  const importedTechFindings = new Set(isFinish ? fin.findings.filter((f) => fin.findingsRole === 'tech-lead' || f.role === 'tech-lead') : [])
   let reservePending = false, reserveSpent = false, reserveBase = null
   let secondFindings = []
   let reviewedTree = null, recheckScope = null
@@ -365,8 +365,14 @@ export async function runLoop(spec, deps = {}) {
       }
     }
   }
+  let reviewRound = null
   const stop = async (reason, observation) => {
     const closed = LOOP_REASONS.includes(reason) ? reason : 'runner-threw'
+    // A judge stop stays pending until both seats have journaled their returns.
+    if (reviewRound) {
+      reviewRound.halt ??= { reason: closed, observation }
+      return refusal(reviewRound.halt.reason)
+    }
     await emit('verdict', { status: 'stopped', reason: closed, observation })
     return refusal(closed)
   }
@@ -464,6 +470,7 @@ export async function runLoop(spec, deps = {}) {
     if (planningEntry && ['planner', 'lead'].includes(role)) feedback = [...feedback, guidanceItem, planningHistory]
     let given = feedback
     for (;;) {
+      if (reviewRound?.halt) return { halt: refusal(reviewRound.halt.reason) }
       let held, progressed = false
       if (!free && rounds[role] >= (seats[role].rounds ?? DEFAULT_ROUNDS)) {
         held = { reason: 'round-bound', envelope: null }
@@ -524,6 +531,7 @@ export async function runLoop(spec, deps = {}) {
         const firstBefore = attempts[0].turnBefore
         let latest = attempts[0], rerun = false, repairs = 0, asked = request
         for (;;) {
+          if (reviewRound?.halt) break
           const acceptable = !latest.failure && latest.checked.defects.length === 0 && latest.checked.envelope?.id === id
           if (latest.turnError && !acceptable && !latest.routed && !rerun) {
             await observe(latest)
@@ -608,6 +616,12 @@ export async function runLoop(spec, deps = {}) {
           seats[role] = { ...seats[role], rounds: Math.max(seats[role].rounds ?? DEFAULT_ROUNDS, rounds[role] + 1) }
           continue
         }
+      }
+      if (reviewRound?.ready[role]) {
+        // A spent seat waits for the sibling's initial turn before asking for more work.
+        reviewRound.ready[role].resolve()
+        await Promise.all(Object.values(reviewRound.ready).map((ready) => ready.promise))
+        if (reviewRound.halt) return { halt: refusal(reviewRound.halt.reason) }
       }
       const decided = await consultLead(role, held, given, progressed)
       if (decided.halt) return decided
@@ -934,21 +948,38 @@ export async function runLoop(spec, deps = {}) {
           const halt = await stageChecked()
           if (halt) return halt
           const runReview = () => stage('review', () => reviewTurn('reviewer', priorFindings, { free: rebaseOnly, recheckReview, singleTurn: !rebaseOnly && reservePending, ...(!rebaseOnly && reservePending && reserveBase ? { reserveReview: { baseTree: reserveBase } } : !rebaseOnly && reviewedTree ? { deltaReview: { baseTree: reviewedTree } } : {}) }))
-          let suite, reviewed
+          const runReviews = async () => {
+            const round = tier === 'judge' ? { ready: { reviewer: Promise.withResolvers(), 'tech-lead': Promise.withResolvers() }, halt: null } : null
+            reviewRound = round
+            let results
+            try {
+              results = await Promise.allSettled([
+                runReview().finally(() => round?.ready.reviewer.resolve()),
+                ...(round ? [stage('second-review', () => reviewTurn('tech-lead', secondFindings, { free: rebaseOnly, recheckReview })).finally(() => round.ready['tech-lead'].resolve())] : []),
+              ])
+            } finally { reviewRound = null }
+            if (round?.halt) return [{ halt: await stop(round.halt.reason, round.halt.observation) }]
+            const failed = results.find((result) => result.status === 'rejected')
+            if (failed) throw failed.reason
+            return results.map((result) => result.value)
+          }
+          let suite, reviews = []
           if (tier === 'build') {
-            const pair = await Promise.allSettled([suiteRun(), runReview()])
+            const pair = await Promise.allSettled([suiteRun(), runReviews()])
             const failed = pair.find((result) => result.status === 'rejected')
             if (failed) throw failed.reason
-            ;[suite, reviewed] = pair.map((result) => result.value)
+            ;[suite, reviews] = pair.map((result) => result.value)
           }
           else {
             suite = await suiteRun()
-            if (suite.status === 'green') reviewed = await runReview()
+            if (suite.status === 'green') reviews = await runReviews()
           }
-          if (reviewed?.halt) return reviewed.halt
+          const [reviewed, second] = reviews
+          const reviewHalt = reviews.find((result) => result.halt)?.halt
+          if (reviewHalt) return reviewHalt
           if (suite.status !== 'green' && suite.status !== 'red') return stop(suite.reason, suite)
           let redFindings = [], reviewRed = false
-          if (reviewed && !reviewed.reused) {
+          if (reviewed?.envelope && !reviewed.reused) {
             const review = reviewed.envelope
             priorFindings = review.details.findings
             rememberFindings('reviewer', review.details)
@@ -963,10 +994,16 @@ export async function runLoop(spec, deps = {}) {
               reserveBase = checkedTree
               seats.reviewer = { ...seats.reviewer, rounds: (seats.reviewer.rounds ?? DEFAULT_ROUNDS) + 1 }
             }
-            if (review.details.verdict === 'changes-needed') { reviewRed = true; redFindings = priorFindings }
+            if (review.details.verdict === 'changes-needed') { reviewRed = true; redFindings = [...priorFindings, ...omitted('reviewer', review.details)] }
+          }
+          if (second?.envelope && !second.reused) {
+            secondFindings = second.envelope.details.findings
+            rememberFindings('tech-lead', second.envelope.details)
+            await emit('verdict', { status: 'reviewed', role: 'tech-lead', verdict: second.envelope.details.verdict, findings: secondFindings })
+            if (second.envelope.details.verdict === 'changes-needed') reviewRed = true
           }
           if (suite.status === 'red' || reviewRed) {
-            feedback = [...redFindings, ...(reviewRed ? omitted('reviewer', reviewed.envelope.details) : [])]
+            feedback = tier === 'judge' ? reviews.flatMap((result, index) => [...result.envelope.details.findings, ...omitted(index === 0 ? 'reviewer' : 'tech-lead', result.envelope.details)]) : redFindings
             if (suite.status === 'red') {
               const failures = suiteFailures([suite])
               feedback.push({ id: 'suite-repair', severity: 'must-fix', summary: `The project suite is red after your change: ${suiteCommand}. Fix the failing tests.`, checkout: cwd, failingTests: failures.tests, failingFiles: failures.files, ...(failures.tail.length ? { outputTail: failures.tail } : {}) })
@@ -975,16 +1012,6 @@ export async function runLoop(spec, deps = {}) {
             continue
           }
           suiteLine = `- Suite: green; exit ${suite.code}; ${suiteCommand}.`
-          if (tier === 'judge') {
-            const second = await stage('second-review', () => reviewTurn('tech-lead', secondFindings, { free: rebaseOnly, recheckReview }))
-            if (second.halt) return second.halt
-            if (!second.reused) {
-              secondFindings = second.envelope.details.findings
-              rememberFindings('tech-lead', second.envelope.details)
-              await emit('verdict', { status: 'reviewed', role: 'tech-lead', verdict: second.envelope.details.verdict, findings: secondFindings })
-            }
-            if (second.envelope.details.verdict === 'changes-needed') { feedback = [...secondFindings, ...omitted('tech-lead', second.envelope.details)]; continue }
-          }
           break
         }
 

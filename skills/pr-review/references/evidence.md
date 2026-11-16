@@ -27,8 +27,8 @@ The limits are part of every interpretation:
 
 - **Divergence-as-signal — no exhibit:** nothing in the corpus records two
   reviewers on one line; the rule is design guidance.
-- **Posture by tier — no exhibit:** the lean loop runs one reviewer per round and
-  the tech-lead as the judge tier's automatic second review; escalation goes to
+- **Posture by tier — no exhibit:** the lean loop seats one reviewer on build lanes and
+  two independent review seats on judge lanes; escalation goes to
   the lead (`references/posture.md`). The corpus predates
   that loop and carries no tier-by-tier comparison, so the tier-scaled posture
   is design guidance, not a measured yield.

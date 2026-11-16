@@ -2110,6 +2110,53 @@ test('a muse planner turn that adds, rewrites or deletes a lean record, or write
   }
 })
 
+test('concurrent muse reviews ignore sibling sessions but still refuse other lean record writes (#2425)', async () => {
+  for (const role of ['reviewer', 'tech-lead']) for (const first of ['reviewer', 'tech-lead']) for (const tamper of ['none', 'prior', 'sibling']) {
+    const f = leanFixture({ tier: 'judge', loopDeps: { resolveAgents: (tier) => {
+      const resolved = resolveAgents(tier)
+      resolved.seats[role] = { ...resolved.seats[role], agent: 'muse', provider: 'meta', id: 'muse-wonder-1.0-contributor' }
+      return resolved
+    } } })
+    const prior = join(f.spec.taskDir, 'lean', 'planner', 'prior.jsonl')
+    mkdirSync(join(prior, '..'), { recursive: true })
+    writeFileSync(prior, 'prior')
+    const gates = Object.fromEntries(['reviewer', 'tech-lead'].map((seat) => [seat, Promise.withResolvers()]))
+    const started = Object.fromEntries(['reviewer', 'tech-lead'].map((seat) => [seat, Promise.withResolvers()]))
+    const answered = f.options.runAcpSeat
+    f.options.runAcpSeat = async (input) => {
+      const turn = await answered(input)
+      if (gates[input.definition.role]) {
+        started[input.definition.role].resolve()
+        await gates[input.definition.role].promise
+      }
+      return turn
+    }
+    const pending = f.go()
+    try {
+      await Promise.race([Promise.all(Object.values(started).map((signal) => signal.promise)), pending.then((result) => assert.fail(JSON.stringify(result)))])
+      const muse = f.requests.find((input) => input.definition.role === role)
+      const sibling = f.requests.find((input) => input.definition.role === (role === 'reviewer' ? 'tech-lead' : 'reviewer'))
+      assert.ok(muse)
+      assert.ok(sibling)
+      sibling.deps.appendFileSync(sibling.sessionFile, `${JSON.stringify({ type: 'sibling-update' })}\n`, 'utf8')
+      if (tamper === 'prior') writeFileSync(prior, 'forged')
+      if (tamper === 'sibling') appendFileSyncReal(sibling.sessionFile, 'forged\n')
+      gates[first].resolve()
+      await new Promise(setImmediate)
+    } finally {
+      for (const gate of Object.values(gates)) gate.resolve()
+      await pending
+    }
+    const result = await pending
+    assert.equal(result.status, tamper !== 'none' ? 'stopped' : 'done', `${role}/${first}/${tamper}`)
+    if (tamper !== 'none') assert.equal(result.reason, 'seat-unmeasured')
+    const checkedRole = tamper === 'sibling' ? (role === 'reviewer' ? 'tech-lead' : 'reviewer') : role
+    const checked = f.requests.find((input) => input.definition.role === checkedRole)
+    const returnPath = /^Return path: (.+)$/m.exec(checked.prompt)[1]
+    assert.equal(existsSync(returnPath), tamper === 'none')
+  }
+})
+
 test('a muse planner whose lean records cannot be read before or after its turn stops seat-unmeasured with no return', async () => {
   for (const [failAt, deletionFails] of [[1, false], [2, false], [2, true]]) {
     let calls = 0

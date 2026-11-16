@@ -61,6 +61,39 @@ const run = (f, extra = {}) => {
 const refusal = (f) => { try { run(f).go() } catch (e) { return e } return null }
 const cleanup = (f) => rmSync(f.base, { recursive: true, force: true })
 
+test('finish keeps only the latest open findings per judge seat until a finish review replaces both (#2425)', async () => {
+  for (const mode of ['reviewer-pass', 'tech-lead-pass', 'reuse', 'finish-pass', 'finish-changes', 'first-finish-pass', 'first-finish-changes']) {
+    const tech = { ...FINDING, id: 'T1' }
+    const firstFinish = mode.startsWith('first-finish-')
+    const passed = mode.endsWith('finish-pass')
+    const returned = firstFinish ? { ...FINDING, id: 'R9' } : FINDING
+    const f = fixture({ rows: [builderRow,
+      { event: 'verdict', status: 'reviewed', verdict: 'changes-needed', findings: [FINDING] },
+      { event: 'verdict', status: 'reviewed', role: 'tech-lead', verdict: 'changes-needed', findings: [tech] },
+      ...(mode.includes('finish-') ? [
+        firstFinish ? { event: 'verdict', status: 'stopped', reason: 'round-bound' } : { event: 'finish-decision', choice: 'return' },
+        { event: 'verdict', status: 'reviewed', verdict: passed ? 'pass' : 'changes-needed', findings: passed ? [] : [returned] },
+      ] : mode === 'reuse' ? [
+        { event: 'verdict', status: 'reviewed', role: 'tech-lead', verdict: 'pass', findings: [] },
+        { event: 'review-reused', role: 'tech-lead', verdict: 'pass' },
+      ] : [{ event: 'verdict', status: 'reviewed', ...(mode === 'tech-lead-pass' ? { role: 'tech-lead' } : {}), verdict: 'pass', findings: [] }]),
+      firstFinish && passed ? { event: 'finish-ready', reviewRounds: 1 } : { event: 'verdict', status: 'stopped', reason: 'round-bound' },
+    ] })
+    try {
+      const specPath = join(f.taskDir, 'lean.json')
+      writeFileSync(specPath, JSON.stringify({ ...JSON.parse(readFileSync(specPath, 'utf8')), tier: 'judge' }))
+      if (firstFinish) {
+        const file = join(f.base, 'guidance')
+        writeFileSync(file, 'continue')
+        await decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps: { alive: () => true, spawnDetached: () => 4242, log() {} } })
+      } else run(f).go()
+      const { finish } = JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8'))
+      assert.deepEqual(finish.findings, passed ? [] : mode === 'reviewer-pass' ? [tech] : [returned], mode)
+      assert.equal(finish.findingsRole, mode === 'reviewer-pass' ? 'tech-lead' : undefined, mode)
+    } finally { cleanup(f) }
+  }
+})
+
 test('finish skips scalar journal rows and refuses malformed rows (#2324)', () => {
   for (const [text, malformed] of [['3\n', false], ['{torn\n', true]]) {
     const f = fixture()

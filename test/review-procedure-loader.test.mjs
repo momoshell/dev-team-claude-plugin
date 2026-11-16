@@ -65,18 +65,18 @@ test('the stated empty list is a blind spot, not a broken-checkout claim', () =>
   assert.equal(/broken checkout/i.test(out), false)
 })
 
-test('posture.md names the lean tier posture: one reviewer per round at the lane tier', () => {
+test('posture.md names one build reviewer and two independent judge reviewers', () => {
   const text = readFileSync(join(ROOT, 'skills/pr-review/references/posture.md'), 'utf8')
-  assert.ok(text.includes('One reviewer per round is the standing posture'))
+  assert.ok(text.includes('Build lanes seat one reviewer per round; judge lanes seat two independent reviewers.'))
   assert.ok(text.includes('`TIERS` in `crew/protocols.mjs`'))
   assert.equal(text.includes('crew/drive.mjs'), false)
 })
 
-test('posture.md names the automatic judge second review, with no panel', () => {
+test('posture.md names the automatic concurrent judge second review', () => {
   const text = readFileSync(join(ROOT, 'skills/pr-review/references/posture.md'), 'utf8')
   assert.ok(text.includes("judge loop's automatic\nsecond review"))
-  assert.ok(text.includes('after the reviewer passes and the suite is green'))
-  assert.ok(text.includes('never two reviewers on one round'))
+  assert.ok(text.includes('beside the reviewer after a green suite'))
+  assert.ok(text.includes('run independently on the same checked tree'))
 })
 
 test('no review-skill document calls the shipped panel parked', () => {

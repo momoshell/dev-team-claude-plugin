@@ -144,15 +144,25 @@ function planFor(d, lane, taskDir, recordedTier, rows) {
 }
 
 // The finish spec for a stop: the stop, the findings still open at that point of the journal, and the turn offset.
-function finishFor(d, taskDir, rows, stopped, before, plan) {
+function finishFor(d, taskDir, rows, stopped, before, plan, judge = false) {
   const { subject, plan_path: planPath } = plan
-  const reviewed = rows.slice(0, before).findLast((row) => row.event === 'verdict' && row.status === 'reviewed')
+  const latest = new Map()
+  let finishing = false
+  for (const row of rows.slice(0, before)) {
+    if ((row.event === 'verdict' && row.status === 'stopped') || (row.event === 'finish-decision' && row.choice === 'return')) finishing = true
+    if (row.event !== 'verdict' || row.status !== 'reviewed') continue
+    // A finish reviewer carries both seats' imported findings, so its return replaces both.
+    if (!judge || finishing) latest.clear()
+    latest.set(row.role ?? 'reviewer', row)
+  }
+  const open = [...latest.values()].filter((row) => row.verdict === 'changes-needed' && Array.isArray(row.findings) && row.findings.length)
+  const findings = open.flatMap((row) => row.findings.map((finding) => open.length > 1 && row.role === 'tech-lead' ? { ...finding, role: 'tech-lead' } : finding))
   const rulings = rows.slice(0, before).findLast((row) => row.event === 'lead-rulings')?.rulings
   return {
     planPath, subject, filesInScope: plan.files_in_scope ?? null, testsRequired: planPath !== null && (!Array.isArray(plan.tests) || plan.tests.length > 0), ...(plan.planSummary ? { planSummary: plan.planSummary } : {}),
     stop: { reason: stopped.reason, observation: stopped.observation ?? null },
-    findings: reviewed?.verdict === 'changes-needed' && Array.isArray(reviewed.findings) ? reviewed.findings : [],
-    ...(reviewed?.role === 'tech-lead' ? { findingsRole: 'tech-lead' } : {}),
+    findings,
+    ...((judge ? open.length === 1 && open[0].role === 'tech-lead' : latest.has('tech-lead')) ? { findingsRole: 'tech-lead' } : {}),
     ...(Array.isArray(rulings) && rulings.length ? { rulings } : {}),
     turnOffset: issuedTurns(d, taskDir, rows).turnOffset,
   }
@@ -348,7 +358,7 @@ export function finishLane({ lane, root, deps = {}, guidance, priorReviewRounds 
   if (!planning && !rows.some((row) => row.event === 'envelope' && row.role === 'builder' && Array.isArray(row.defects) && row.defects.length === 0 && !row.error && (guidance === undefined ? ['done', 'insufficient'] : ['done', 'insufficient', 'escalate']).includes(row.parsed?.status) && row.parsed.id === row.id && (guidance === undefined || validateEnvelope('builder', row.parsed, { archived: true }).defects.length === 0))) throw new FinishRefusal('finish-no-build', `lane ${lane} has no schema-valid builder envelope in its journal`)
 
   const plan = planning ? planning.planning.plan : null
-  const finish = finishFor(d, taskDir, rows, stopped, stopAt, planning ? (plan ? { ...plan.details, planSummary: plan.summary } : { subject: null, plan_path: null }) : planFor(d, lane, taskDir, recordedTier, rows))
+  const finish = finishFor(d, taskDir, rows, stopped, stopAt, planning ? (plan ? { ...plan.details, planSummary: plan.summary } : { subject: null, plan_path: null }) : planFor(d, lane, taskDir, recordedTier, rows), spec.tier === 'judge')
   if (planning) Object.assign(finish, planning)
   if (guidance !== undefined) Object.assign(finish, { guidance, priorReviewRounds })
   if (died) finish.recoveredStopAt = Math.min(recoveredStopAt ?? stopAt, stopAt)
@@ -553,7 +563,7 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
     // return: the same finish spec the first pass had, plus the guidance, with the review rounds already spent.
     const plan = planFor(d, lane, taskDir, recordedTier, rows)
     const finish = {
-      ...finishFor(d, taskDir, rows, stopped, readyAt, plan),
+      ...finishFor(d, taskDir, rows, stopped, readyAt, plan, spec.tier === 'judge'),
       ...(recoveredStopAt === undefined ? {} : { recoveredStopAt }),
       guidance: notes,
       priorReviewRounds,

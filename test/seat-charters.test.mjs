@@ -85,7 +85,7 @@ test('CH3: the reviewer charter keeps the rules the loop depends on', () => {
 test('CH4: the tech-lead charter is a delta over the reviewer charter', () => {
   const charter = body('crew/agents/tech-lead.md')
   const reviewer = body('crew/agents/reviewer.md')
-  for (const text of ['](./reviewer.md)', 'after the reviewer passes and the suite is green', 'scout']) has(charter, text)
+  for (const text of ['](./reviewer.md)', 'beside the reviewer after a green suite', 'scout']) has(charter, text)
   assert.ok(flat(charter).length < flat(reviewer).length / 2)
   assert.doesNotMatch(charter, /Restate the brief's ask as `requirements`/)
   const sentences = new Set(flat(reviewer).split(/(?<=\.)\s+/))

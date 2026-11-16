@@ -1477,7 +1477,8 @@ test('seat wait credits a suspended polling gap before enforcing its deadline', 
     }, ms),
     advisorDeps: { spawn: () => {
       const child = advisorChild(), end = child.stdin.end
-      child.stdin.end = (value) => setTimeout(() => end(value), 60)
+      // The consult settles only after the watched wait has seen the jump: a fixed delay raced the first watch tick on a slow host.
+      child.stdin.end = (value) => { const settle = () => jumped ? end(value) : setTimeout(settle, 5); settle() }
       return child
     }, consultTimeoutMs: 3000, childKillGraceMs: 10 },
   }) }))

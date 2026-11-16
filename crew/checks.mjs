@@ -4,6 +4,7 @@ import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { GIT_STATUS_ARGS, HEX_OID, describeError } from './lane-core.mjs'
+import { sampledBudget } from './host-sleep.mjs'
 
 export const FINISH_REVIEW_ROUNDS = 3
 
@@ -77,6 +78,7 @@ export function runSuite({ cwd, command, args = [], timeoutMs = DEFAULT_TIMEOUT_
       resolveRun(unmeasured('spawn-error', { error: describeError(error) }))
       return
     }
+    const budget = sampledBudget(timeoutMs, deps)
     const pgid = Number.isSafeInteger(child.pid) ? child.pid : null
     let stdout = ''
     let stderr = ''
@@ -90,7 +92,7 @@ export function runSuite({ cwd, command, args = [], timeoutMs = DEFAULT_TIMEOUT_
     let exit = { code: null, signal: null }
 
     const classify = (cleanup) => {
-      const base = { code: exit.code, signal: exit.signal, stdout, stderr, timedOut, pgid, cleanup }
+      const base = { code: exit.code, signal: exit.signal, stdout, stderr, timedOut, pgid, cleanup, ...budget.fields() }
       if (spawnError) return { status: 'unmeasured', reason: 'spawn-error', ...base, error: describeError(spawnError) }
       if (cleanup === 'unproven') return { status: 'unmeasured', reason: 'cleanup-unproven', ...base }
       if (timedOut) return { status: 'unmeasured', reason: 'timeout', ...base }
@@ -102,7 +104,7 @@ export function runSuite({ cwd, command, args = [], timeoutMs = DEFAULT_TIMEOUT_
     const settle = (cleanup) => {
       if (done) return
       done = true
-      clearTimeout(deadline)
+      budget.stop()
       const emitters = [child, child.stdout, child.stderr].filter(Boolean)
       for (const emitter of emitters) { emitter.removeAllListeners(); emitter.on('error', () => {}) }
       child.stdout?.destroy()
@@ -113,7 +115,8 @@ export function runSuite({ cwd, command, args = [], timeoutMs = DEFAULT_TIMEOUT_
     const stop = async (force) => {
       if (stopping) return
       stopping = true
-      clearTimeout(deadline)
+      budget.remaining()
+      budget.stop()
       if (!force && groupState(probe, pgid) === 'dead') return settle('proven')
       settle(await reapGroup(child, probe, () => closed) ? 'proven' : 'unproven')
     }
@@ -126,7 +129,7 @@ export function runSuite({ cwd, command, args = [], timeoutMs = DEFAULT_TIMEOUT_
     }
 
     // The deadline outlives `exit`: a leader that exits while descendants hold the pipes is still bounded.
-    const deadline = setTimeout(() => { timedOut = true; void stop(true) }, timeoutMs)
+    budget.watch(() => { timedOut = true; void stop(true) })
     child.on('error', (error) => {
       spawnError = error
       if (pgid === null) settle('proven')

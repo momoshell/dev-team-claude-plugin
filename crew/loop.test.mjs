@@ -2424,7 +2424,7 @@ test('a finish consult distinguishes imported tech-lead findings from reviewer f
     writeFileSync(join(task, 'lean.json'), JSON.stringify({ ...fakes().spec, cwd: root, taskDir: task, tier: 'judge' }))
     writeFileSync(join(task, 'planner-1.json'), JSON.stringify(planner))
     writeFileSync(join(task, 'journal.jsonl'), `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
-    finishLane({ lane: 'lane', root, deps: { log: () => {}, spawnDetached: () => 4242 } })
+    finishLane({ lane: 'lane', root, deps: { platform: 'linux', log: () => {}, spawnDetached: () => 4242 } })
     const finish = JSON.parse(readFileSync(join(task, 'finish.json'), 'utf8')).finish
     let state = 0, builds = 0
     const f = fakes({ spec: { shape: 'finish', tier: 'judge', finish }, review: 1, lead: 'bounce', deps: { repoState: () => String(state++) }, edit: (v) => {
@@ -2732,7 +2732,7 @@ async function committedReadyReturn(conflict, stop = false) {
   assert.equal(g('status', '--porcelain'), '')
   let spawned = 0
   const launched = await decideFinish({ lane: 'lane', root, choice: 'return', file: guidance, deps: {
-    spawnDetached: () => { spawned++; return 4242 }, log: () => {},
+    platform: 'linux', spawnDetached: () => { spawned++; return 4242 }, log: () => {},
   } })
   assert.equal(spawned, 1)
   const finish = JSON.parse(readFileSync(launched.specPath, 'utf8'))
@@ -2772,7 +2772,7 @@ async function committedReadyReturn(conflict, stop = false) {
     assert.equal(readFileSync(join(cwd, 'return.txt'), 'utf8'), 'return edit\n')
     writeFileSync(guidance, 'Keep both edits and resume.')
     await decideFinish({ lane: 'lane', root, choice: 'return', file: guidance, deps: {
-      spawnDetached: () => { spawned++; return 4243 }, log: () => {},
+      platform: 'linux', spawnDetached: () => { spawned++; return 4243 }, log: () => {},
     } })
     assert.equal(spawned, 2)
     assert.equal(JSON.parse(readFileSync(launched.specPath, 'utf8')).finish.guidance, 'Keep both edits and resume.')
@@ -3740,7 +3740,7 @@ test('a mechanical stop after a rebase that moved the head is finishable: crew f
         if (args[0] === 'symbolic-ref') return { status: 'green', stdout: 'lane\n' }
         return { status: 'green', stdout: '' }
       },
-      spawnDetached: (...args) => { spawned.push(args); return 4242 },
+      platform: 'linux', spawnDetached: (...args) => { spawned.push(args); return 4242 },
       now: () => 1_700_000_000_000,
       log: () => {},
     }

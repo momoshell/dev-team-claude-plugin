@@ -5,12 +5,13 @@ import { createHash } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { basename, delimiter, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ACP_POLL_MS, ACP_UPDATE_KINDS, acpClient } from '../acp-client.mjs'
+import { ACP_UPDATE_KINDS, acpClient } from '../acp-client.mjs'
 import { permissionHandler, readOnlyCommand } from '../acp-permission.mjs'
 import { SIGNAL_REFUSAL, signalCommandResult } from '../acp-signal.mjs'
 import { armGrants, PI_AGENT_DIR_ENV, refuse } from './grants.mjs'
 import { AGENT_ROLES, validateEnvelope } from '../protocols.mjs'
 import { gitRepoState } from '../lane-core.mjs'
+import { sampledBudget } from '../host-sleep.mjs'
 import * as claudeAdapter from '../adapters/adapter-claude.mjs'
 import * as piAdapter from '../adapters/adapter-pi.mjs'
 import * as museAdapter from '../adapters/adapter-muse.mjs'
@@ -452,6 +453,13 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
   let client = null
   let started = false
   let closed = null
+  let budget
+  const credit = (value) => {
+    const fields = budget?.fields() ?? {}
+    if (!Object.keys(fields).length) return value
+    if (value && typeof value === 'object' && Object.isExtensible(value)) return Object.assign(value, fields)
+    return Object.assign(value instanceof Error || !value || typeof value !== 'object' ? new Error(String(value?.message ?? value), { cause: value }) : {}, value, fields)
+  }
   try {
     const promptFile = join(runtime, 'system.md')
     writeFileSync(promptFile, '')
@@ -501,7 +509,7 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
     client.initialize()
     client.newSession(launch.sessionParams)
     if (launch.mode) client.setMode(launch.mode)
-    const deadline = now() + waitS * 1000
+    budget = sampledBudget(waitS * 1000, { ...deps, now })
     // ACP's selected rejection carries only an option ID, so give the redirects before the turn.
     const guidance = (readgate ? `\n\nReadgate is active: whole-file reads and cat/head/tail of large files are refused; use a ranged read instead.${grants.mcp_servers.some((server) => server.name === 'fff') ? ' Direct grep/rg/find/fd searches are refused; use mcp__fff__grep or mcp__fff__find_files instead.' : ''}` : '') + (isMuse && writes === 'repo' ? `\n\nSignal gate: rejected process signalling means ${SIGNAL_REFUSAL}` : '')
     const extras = [grants.skeletonread && 'mcp__crew-extras__retrieve', grants.skeletonread && 'mcp__crew-extras__skeleton', grants.subagent && 'mcp__crew-extras__agent'].filter(Boolean)
@@ -534,17 +542,17 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
       // A refused or cancelled turn is terminal: queued advice never turns it into another prompt.
       const terminal = turn.refusal != null || turn.stopReason !== 'end_turn'
       if (advisor && !terminal) {
-        let timer
+        let stopTimer
         const settled = await Promise.race([
           (async () => {
             const verdicts = await Promise.all(advised.values())
             await advisor.settled()
             return verdicts
           })().catch(() => []),
-          new Promise((resolve) => { timer = setTimeout(() => resolve(null), Math.max(0, deadline - now())) }),
+          new Promise((resolve) => { stopTimer = budget.watch(() => resolve(null)) }),
         ])
-        clearTimeout(timer)
-        if (settled === null || now() >= deadline) advisorNotes.length = 0
+        stopTimer()
+        if (settled === null || budget.remaining() <= 0) advisorNotes.length = 0
         else {
           advised.clear()
           const blocks = settled.filter((verdict) => verdict?.block && nonempty(verdict.reason))
@@ -560,7 +568,7 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
       if (!turn.usage && (turn.refusal != null || !['end_turn', 'max_tokens', 'max_turn_requests'].includes(turn.stopReason)) && usagePartial) turn = { ...turn, usage_partial: usagePartial }
       return isMuse ? { ...turn, usage: null, usage_reason: 'usage-unavailable' } : turn
     }
-    while (now() < deadline) {
+    while (budget.remaining() > 0) {
       // Nothing can repair a lost runtime, and the stream it held would stay silent until the deadline.
       try { (deps.statSync ?? statSync)(runtime) } catch (error) {
         if (error.code !== 'ENOENT') throw error
@@ -569,22 +577,22 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
       const turn = client.pollPrompt(promptId)
       if (turn) {
         const finished = await finishTurn(turn)
-        if (finished) return finished
+        if (finished) return credit(finished)
         continue
       }
-      if (now() >= deadline) break
+      if (budget.remaining() <= 0) break
       // A seat that died with no answer would otherwise hold the turn until its deadline.
       if (client.hasExitMarker?.()) {
         // The answer may have settled between the empty poll and the marker.
         const exitedTurn = client.pollPrompt(promptId)
         if (exitedTurn) {
           const finished = await finishTurn(exitedTurn)
-          if (finished) return finished
+          if (finished) return credit(finished)
           continue
         }
         throw Object.assign(new Error(`${role} exited before answering (acp-seat-closed)`), { reason: 'acp-seat-closed' })
       }
-      await wait(Math.max(0, Math.min(ACP_POLL_MS, deadline - now())))
+      await wait(budget.next())
     }
     // The cancel is a courtesy: its answer is never awaited, and a failed write cannot replace the deadline.
     // A turn that settled too late is no longer pending, so the session-wide cancel stands in for the prompt's.
@@ -595,9 +603,11 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
       if (!error || typeof error !== 'object' || !Object.isExtensible(error)) error = Object.assign(new Error(String(error?.message ?? error)), error)
       error.usage_partial = usagePartial
     }
-    throw error
+    throw credit(error)
   } finally {
     promptActive = false
+    const fields = budget?.fields() ?? {}
+    budget?.stop()
     try { closed = client?.close() ?? null } catch { /* teardown never overwrites the turn */ }
     // An unproven teardown keeps the runtime: it holds the evidence the next owner reclaims by.
     if ((!started && !client?.spawned) || closed?.outcome === 'proven') { try { rmSync(runtime, { recursive: true, force: true }) } catch { /* best effort */ } }
@@ -607,7 +617,7 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
       if (typeof after !== 'string' || after !== before) {
         const reason = typeof after !== 'string' ? 'acp-seat-repo-unmeasured' : 'acp-seat-wrote-repo'
         const paths = typeof after === 'string' ? `: ${after.split('\0').filter((field) => field && !before.split('\0').includes(field)).slice(0, 3).join(', ') || 'content changed'}` : ''
-        throw Object.assign(new Error(`${role} worktree check failed${paths} (${reason})`), { reason })
+        throw Object.assign(new Error(`${role} worktree check failed${paths} (${reason})`), { reason }, fields)
       }
     }
   }

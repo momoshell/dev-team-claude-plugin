@@ -25,6 +25,21 @@ Read first, decide second, remove last.
 - The lane journal is `~/.crew/dt-<lane>/<lane>/task/journal.jsonl`: one JSON row per
   event. The last rows say why the lane stopped. Never edit it by hand.
 
+A `seat-unmeasured` stop means the seat failed to produce a usable turn after
+its existing single rerun. Inspect both sessions and their `seat-turn` rows
+before choosing recovery. `sleep_credited_s` records seconds excluded from the
+wait budget; absent or zero means no measured credit. Suite and proof credits
+are in `check.result`. A null credit with
+`sleep_credit_reason: 'clock-unavailable'` means sampling was unavailable and
+the ordinary elapsed limit still applied. Samples are at most 25 ms apart;
+a gap strictly greater than 5,000 ms credits the gap minus the scheduled
+interval. Long event-loop stalls can look like suspension. On macOS, start and
+finish hold a PID-bound `caffeinate -i` idle-sleep assertion when available,
+not a display or lid-close assertion. Neither credit nor inhibition repairs a
+provider connection lost during sleep. Limits and defaults are unchanged;
+a genuine awake timeout or failed connection still needs the finish procedure
+below, not a journal edit or an assumed automatic restart.
+
 ## Finish it
 
 `crew finish <lane>` reports the stop or ready state without changing the lane.

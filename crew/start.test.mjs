@@ -134,6 +134,34 @@ test('a failed detached launch is a StartRefusal that names the left worktree', 
   }
 })
 
+test('crew start binds an idle sleep assertion to the detached run pid', async () => {
+  const f = fakes(), assertions = [], events = []
+  Object.assign(f.deps, {
+    platform: 'darwin',
+    spawn: (...args) => {
+      assertions.push(args)
+      return { on: (name, handler) => events.push([name, handler]), unref: () => events.push(['unref']) }
+    },
+  })
+  const result = await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps })
+  assert.deepEqual(assertions, [['caffeinate', ['-i', '-w', String(result.pid)], { detached: true, stdio: 'ignore' }]])
+  assert.equal(events[0][0], 'error')
+  assert.doesNotThrow(() => events[0][1](Object.assign(new Error('missing'), { code: 'ENOENT' })))
+  assert.equal(events[1][0], 'unref')
+  assert.match(written(f.calls, '/task/run.pid')[2], /^4242 /)
+})
+
+test('idle assertion failures never refuse a crew start', async () => {
+  for (const kind of ['linux', 'missing', 'helper']) {
+    const f = fakes()
+    Object.assign(f.deps, { platform: kind === 'linux' ? 'linux' : 'darwin', spawn: () => { if (kind === 'linux') assert.fail('Linux must not spawn'); throw Object.assign(new Error('missing'), { code: 'ENOENT' }) } })
+    if (kind === 'helper') f.deps.holdIdleSleep = () => { throw new Error('helper failed') }
+    const result = await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps })
+    assert.equal(result.pid, 4242)
+    assert.match(written(f.calls, '/task/run.pid')[2], /^4242 /)
+  }
+})
+
 test('crew start records the run start time beside the pid in run.pid (S3-4)', async () => {
   const { deps, calls } = fakes()
   deps.now = () => 1_700_000_000_000
@@ -171,6 +199,7 @@ const projectFile = (suite = 'npm test', proof = [], suiteTimeoutMs, proofTimeou
 function fakes({ brief = BRIEF, project = projectFile(), overrides = {}, exists = () => false, worktreeStatus = 0, originHead = 'origin/main', inGit = true, issueBody = 'Refuse roster edits that cannot boot.\n', issueTitle = 'Refuse roster edits', resolve = (tier) => resolveAgents(tier), write = () => {} } = {}) {
   const calls = []
   const deps = {
+    platform: 'linux',
     readFileSync: (path) => {
       if (path.endsWith('/.crew/agents.json')) {
         if (Object.hasOwn(overrides, path)) { if (overrides[path] instanceof Error) throw overrides[path]; return overrides[path] }
@@ -457,7 +486,7 @@ const deps = {
   resolveAgents: () => ({ seats: {} }), existsSync: () => false,
   mkdirSync: () => {}, writeFileSync: () => {},
   spawnSync: (file, args) => ({ status: 0, stdout: args.includes('ls-tree') ? (args.at(-1) === '.crew/project.json' ? '100644 blob ' + 'a'.repeat(40) + '\\t.crew/project.json' : (args.at(-1).includes('.') ? '100644 blob ' : '040000 tree ') + 'a'.repeat(40) + '\\t' + args.at(-1) + '\\0') : args.includes('show') ? ${JSON.stringify(JSON.stringify({suite:'npm test',proof:[],onboarded:{hash:createHash('sha256').update(JSON.stringify(['npm test',[]])).digest('hex')}}))} : args.includes('--verify') ? 'a'.repeat(40) : 'origin/main' }),
-  spawnDetached: () => { writeSync(3, 'started\\n'); return 4242 }, crewRoot: '/virtual/crew',
+  platform: 'linux', spawnDetached: () => { writeSync(3, 'started\\n'); return 4242 }, crewRoot: '/virtual/crew',
 }
 const argv = invalid ? ['/d/b1.md'] :
   ['/d/b1.md', '--checkout', '/virtual/' + 'x'.repeat(1024 * 1024) + '/checkout']
@@ -761,7 +790,7 @@ test('start refuses when the selected lane base lacks the approved onboarding', 
         calls.push([file, args])
         return file === 'git' ? spawnSync(file, args, { ...options, encoding: 'utf8' }) : { status: 0, stdout: 'issue body' }
       },
-      spawnDetached: () => { calls.push(['launch']); return 1 }, log: () => {},
+      platform: 'linux', spawnDetached: () => { calls.push(['launch']); return 1 }, log: () => {},
     }
     if (reason) {
       await assert.rejects(startLane({ briefPath, checkout: repo, deps }), (error) => error instanceof StartRefusal && error.message.includes(reason) && error.message.includes('/onboard') && error.message.includes('main'))
@@ -807,7 +836,7 @@ function originBaseFixture(change) {
       calls.push([file, args])
       return file === 'git' ? spawnSync(file, args, { ...options, encoding: 'utf8' }) : { status: 0, stdout: 'issue body' }
     },
-    spawnDetached: () => { calls.push(['launch']); return 1 }, log: () => {},
+    platform: 'linux', spawnDetached: () => { calls.push(['launch']); return 1 }, log: () => {},
   }
   return { root, checkout, briefPath, deps, calls, a, b }
 }
@@ -1199,6 +1228,40 @@ test('without builderChecks no prompt carries a project checks section', async (
   await f.go()
   assert.ok(f.requests.length > 0)
   for (const { prompt } of f.requests) assert.ok(!prompt.includes('## Project checks'))
+})
+
+test('lean journals suspension credit for successful and failed seat attempts', async () => {
+  for (const kind of ['success', 'failure', 'unknown', 'provider-retry']) {
+    const rows = []
+    const f = leanFixture({ loopDeps: { journal: async (row) => rows.push(row) }, deps: { sleep: async () => {} } })
+    const original = f.options.runAcpSeat
+    let attempts = 0
+    f.options.runAcpSeat = async (input) => {
+      if (input.definition.role === 'planner') {
+        attempts++
+        if (kind === 'failure' && attempts === 1) throw Object.assign(new Error('closed'), { reason: 'acp-seat-closed', sleep_credited_s: 10 })
+        if (kind === 'provider-retry' && attempts === 1) return { stopReason: 'end_turn', sleep_credited_s: 10, refusal: { errorKind: 'overloaded', errorMessage: 'overloaded', message: 'overloaded' } }
+        return { ...await original(input), ...(kind === 'unknown' ? { sleep_credited_s: null, sleep_credit_reason: 'clock-unavailable' } : { sleep_credited_s: 20 }) }
+      }
+      return original(input)
+    }
+    assert.equal((await f.go()).status, 'done', kind)
+    const seats = rows.filter((row) => row.event === 'seat-turn' && row.role === 'planner')
+    assert.deepEqual(seats.map((row) => row.sleep_credited_s), kind === 'failure' ? [10, 20] : [kind === 'unknown' ? null : kind === 'provider-retry' ? 30 : 20], kind)
+    if (kind === 'unknown') assert.equal(seats[0].sleep_credit_reason, 'clock-unavailable')
+  }
+})
+
+test('lean forwards suite and proof sleep credits in check results', async () => {
+  const rows = []
+  const f = leanFixture({ loopDeps: {
+    journal: async (row) => rows.push(row),
+    runSuite: async () => ({ ...GREEN, sleep_credited_s: 12 }),
+    proveTests: async () => ({ status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }], sleep_credited_s: null, sleep_credit_reason: 'clock-unavailable' }),
+  } })
+  await f.go()
+  assert.ok(rows.some((row) => row.event === 'check' && row.result?.sleep_credited_s === 12))
+  assert.ok(rows.some((row) => row.event === 'check' && row.result?.sleep_credited_s === null && row.result.sleep_credit_reason === 'clock-unavailable'))
 })
 
 test('a lean seat turn journals its agent, model, effort, distinct tool calls, stop reason and usage (#2287)', async () => {

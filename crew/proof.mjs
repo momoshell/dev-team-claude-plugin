@@ -4,6 +4,7 @@ import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpath
 import { tmpdir } from 'node:os'
 import { basename, dirname, extname, join, matchesGlob, relative, sep } from 'node:path'
 import { literalRelative, runSuite } from './checks.mjs'
+import { addSleepCredit } from './host-sleep.mjs'
 
 export function testState(events) {
   const hits = events ?? []
@@ -114,10 +115,10 @@ function nearestTitle(candidates, title) {
   return best === undefined ? [] : [best]
 }
 
-export async function testEvents({ cwd, files, timeoutMs }) {
-  const run = await runSuite({ cwd, command: process.execPath, args: ['--test', `--test-reporter=${new URL('./proof-reporter.mjs', import.meta.url).href}`, '--test-reporter-destination=stdout', ...files], timeoutMs })
+export async function testEvents({ cwd, files, timeoutMs }, deps = {}) {
+  const run = await (deps.runSuite ?? runSuite)({ cwd, command: process.execPath, args: ['--test', `--test-reporter=${new URL('./proof-reporter.mjs', import.meta.url).href}`, '--test-reporter-destination=stdout', ...files], timeoutMs })
   const events = run.stdout.split('\n').flatMap((line) => { try { return [JSON.parse(line)] } catch { return [] } })
-  return { status: run.status, reason: run.reason, events }
+  return { status: run.status, reason: run.reason, events, ...addSleepCredit({}, run) }
 }
 
 // Refuse symlinked parents as well as the final path, including in the checkout.
@@ -136,20 +137,20 @@ function safePath(root, file, required) {
 export const validProofEntry = (e) => e && typeof e === 'object' && !Array.isArray(e) && typeof e.match === 'string' && e.match.trim() && typeof e.run === 'string' && e.run.trim() && (!Object.hasOwn(e, 'setup') || (typeof e.setup === 'string' && e.setup.trim())) && (!Object.hasOwn(e, 'list') || (typeof e.list === 'string' && e.list.trim())) && (!Object.hasOwn(e, 'manifest') || (typeof e.manifest === 'string' && e.manifest.trim() && !/[\/\\\0]/.test(e.manifest) && e.manifest !== '.' && e.manifest !== '..')) && (!Object.hasOwn(e, 'newTestFile') || typeof e.newTestFile === 'boolean')
 export const entryCommand = (run, values) => run.trim().split(/\s+/).map((token) => token.replace(/\{(file|title|report|stem)\}/g, (_, key) => values[key]))
 
-async function commitAbsent(cwd, base, path, timeoutMs) {
+async function commitAbsent(cwd, base, path, timeoutMs, runCommand) {
   try {
     if (!safePath(cwd, path, true) || realpathSync.native(join(cwd, path)) !== join(realpathSync.native(cwd), path)) return false
-    const run = await runSuite({ cwd, command: 'git', args: ['--literal-pathspecs', 'ls-tree', '--full-tree', '--name-only', base, '--', path], timeoutMs })
+    const run = await runCommand({ cwd, command: 'git', args: ['--literal-pathspecs', 'ls-tree', '--full-tree', '--name-only', base, '--', path], timeoutMs })
     return run.status === 'green' && !run.stdout.trim()
   } catch { return false }
 }
 
-async function packageAbsent(cwd, base, file, manifest, timeoutMs) {
+async function packageAbsent(cwd, base, file, manifest, timeoutMs, runCommand) {
   for (let dir = dirname(file); ; dir = dirname(dir)) {
     const path = dir === '.' ? manifest : `${dir}/${manifest}`
     try {
       if (lstatSync(join(cwd, path), { throwIfNoEntry: false })) {
-        return await commitAbsent(cwd, base, path, timeoutMs)
+        return await commitAbsent(cwd, base, path, timeoutMs, runCommand)
       }
     } catch { return false }
     if (dir === '.') return false
@@ -158,7 +159,18 @@ async function packageAbsent(cwd, base, file, manifest, timeoutMs) {
 
 export const PROOF_TIMEOUT_DEFAULT_MS = 120_000
 
-export async function proveTests(input = {}) {
+export async function proveTests(input = {}, deps = {}) {
+  const credit = {}
+  const runCommand = async (spec) => {
+    try {
+      const run = await (deps.runSuite ?? runSuite)(spec)
+      addSleepCredit(credit, run)
+      return run
+    } catch (error) {
+      addSleepCredit(credit, { sleep_credited_s: null })
+      throw error
+    }
+  }
   const unmeasured = (reason, rows = []) => ({ status: 'unmeasured', reason, rows })
   let tmp, added = null, result, rows = []
   try {
@@ -170,7 +182,7 @@ export async function proveTests(input = {}) {
     // The old source runs in a detached worktree, a checkout like the build's, so an environment difference
     // (a missing .git, for one) can never supply the red.
     const root = join(tmp, 'base')
-    const addRun = await runSuite({ cwd, command: 'git', args: ['worktree', 'add', '--detach', '--quiet', root, base], timeoutMs })
+    const addRun = await runCommand({ cwd, command: 'git', args: ['worktree', 'add', '--detach', '--quiet', root, base], timeoutMs })
     if (addRun.status !== 'green') result = unmeasured(addRun.reason, rows)
     else {
       added = { cwd, root, timeoutMs }
@@ -201,7 +213,7 @@ export async function proveTests(input = {}) {
       for (const entry of new Set([...runners].filter(([row]) => !row.reason).map(([, entry]) => entry))) {
         if (!entry.setup) continue
         const [command, ...args] = entry.setup.trim().split(/\s+/)
-        const setup = await runSuite({ cwd: root, command, args, timeoutMs })
+        const setup = await runCommand({ cwd: root, command, args, timeoutMs })
         if (setup.status !== 'green') { result = unmeasured(setup.status === 'red' ? 'setup-failed' : setup.reason, rows); break }
       }
       for (const [i, row] of rows.entries()) {
@@ -212,7 +224,7 @@ export async function proveTests(input = {}) {
           const report = join(tmp, `report-${i}-${side}.xml`)
           const values = { file: row.file, title: row.title, report, stem: basename(row.file, extname(row.file)) }
           const [command, ...args] = entryCommand(entry.run, values)
-          const run = await runSuite({ cwd: dir, command, args, timeoutMs })
+          const run = await runCommand({ cwd: dir, command, args, timeoutMs })
           if (run.status === 'unmeasured') { row[side] = { state: null, reason: run.reason }; row.reason = run.reason; break }
           let xml, events = null
           try { xml = readFileSync(report, 'utf8'); events = junitEvents(xml) } catch {}
@@ -220,12 +232,12 @@ export async function proveTests(input = {}) {
           let listing
           if ((xml === undefined || events?.length === 0) && entry.list) {
             const [command, ...args] = entryCommand(entry.list, values)
-            listing = await runSuite({ cwd: dir, command, args, timeoutMs })
+            listing = await runCommand({ cwd: dir, command, args, timeoutMs })
           }
           const candidates = events?.length ? events.flatMap((e) => e.classname ? [e.name, `${e.classname}.${e.name}`, `${e.classname}::${e.name}`] : [e.name]) : (listing?.status === 'green' ? listing.stdout.split('\n').map((line) => line.trim()).filter(Boolean) : [])
           row[side] = hits?.length ? testState(hits) : events || (xml === undefined && (run.status === 'green' || (run.status === 'red' && listing?.status === 'green'))) ? { state: null, reason: 'title-unmatched', nearest: nearestTitle(candidates, row.title) } : { state: null, reason: side === 'base' ? 'base-does-not-build' : 'no-report' }
-          if (side === 'base' && row.base.reason === 'base-does-not-build' && entry.manifest && await packageAbsent(cwd, base, row.file, entry.manifest, timeoutMs)) row.base.reason = 'base-package-absent'
-          if (side === 'base' && row.base.reason === 'base-does-not-build' && entry.newTestFile === true && await commitAbsent(cwd, base, row.file, timeoutMs)) row.base.reason = 'base-test-absent'
+          if (side === 'base' && row.base.reason === 'base-does-not-build' && entry.manifest && await packageAbsent(cwd, base, row.file, entry.manifest, timeoutMs, runCommand)) row.base.reason = 'base-package-absent'
+          if (side === 'base' && row.base.reason === 'base-does-not-build' && entry.newTestFile === true && await commitAbsent(cwd, base, row.file, timeoutMs, runCommand)) row.base.reason = 'base-test-absent'
         }
         if (row.reason) continue
         const baseProven = row.base.state === 'red' || row.base.reason === 'base-package-absent' || row.base.reason === 'base-test-absent'
@@ -241,7 +253,7 @@ export async function proveTests(input = {}) {
         })
         const runs = {}
         for (const [side, dir] of [['base', root], ['build', cwd]]) {
-          const run = await testEvents({ cwd: dir, files: [file], timeoutMs })
+          const run = await testEvents({ cwd: dir, files: [file], timeoutMs }, { runSuite: runCommand })
           if (run.status === 'unmeasured') {
             for (const row of fileRows) { row[side] = { state: null, reason: run.reason }; row.reason = run.reason }
             break
@@ -264,10 +276,10 @@ export async function proveTests(input = {}) {
     // deleted under git, so no registered worktree points at a missing path.
     let kept = null
     if (added) {
-      const removed = await runSuite({ cwd: added.cwd, command: 'git', args: ['worktree', 'remove', '--force', '--force', added.root], timeoutMs: added.timeoutMs }).catch(() => null)
+      const removed = await runCommand({ cwd: added.cwd, command: 'git', args: ['worktree', 'remove', '--force', '--force', added.root], timeoutMs: added.timeoutMs }).catch(() => null)
       if (removed?.status !== 'green') { kept = added.root; result = { ...unmeasured('cleanup-unproven', rows), kept } }
     }
     if (tmp && !kept) try { rmSync(tmp, { recursive: true, force: true }) } catch { result = unmeasured('cleanup-unproven', rows) }
   }
-  return result
+  return { ...result, ...credit }
 }

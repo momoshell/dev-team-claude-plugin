@@ -36,6 +36,7 @@ import { FINISH_REVIEW_ROUNDS, composeLanePrBody, openPullRequest, runSuite, wit
 import { HEX_OID, LANE, isObject, parseJournalRows } from './lane-core.mjs'
 import { AGENT_ROLES, TIERS, validateEnvelope } from './protocols.mjs'
 import { deadRun, parsePidRecord, pidRecord, probeAlive, selfStartedAt, writeRunPid } from './run-pid.mjs'
+import { holdIdleSleep } from './host-sleep.mjs'
 import { OnboardRefusal, requireOnboarded } from './onboard.mjs'
 import { reapLaneSeats } from './seat-reap.mjs'
 
@@ -58,7 +59,7 @@ export class FinishRefusal extends Error {
 
 const defaultDeps = () => ({
   readFileSync, readdirSync, existsSync, statSync, mkdirSync, writeFileSync, appendFileSync, rmSync, openPullRequest, run: runSuite,
-  alive: probeAlive, kill: process.kill, spawnSync, sleep: (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms), now: Date.now,
+  holdIdleSleep, alive: probeAlive, kill: process.kill, spawnSync, sleep: (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms), now: Date.now,
   git: (cwd, args) => {
     const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024 })
     return { status: r.status === 0 && !r.error ? 'green' : 'red', stdout: r.stdout ?? '' }
@@ -181,6 +182,7 @@ function launch(d, { crewRoot, taskDir, spec, finish, claim, recovery }) {
     try { d.rmSync(claim, { force: true }) } catch { /* the launch error is the one reported */ }
     throw error
   }
+  try { d.holdIdleSleep(pid, d) } catch { /* best-effort idle assertion */ }
   writeRunPid(taskDir, pid, d, startedAt)
   try { d.writeFileSync(claim, pidRecord(pid, startedAt)) } catch { /* the detached run may already be active */ }
   d.log(`crew finish: lane=${spec.id} stop=${finish.stop.reason} findings=${finish.findings.length} pid=${pid}`)

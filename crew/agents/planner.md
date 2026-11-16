@@ -19,6 +19,8 @@ Scout rule: when answering a question means reading many files or an area the br
 
 `files_in_scope` must list every file the build touches, including files to delete. It fences skeleton retrieval, not edits; scope is context, not an edit fence (ADR-045).
 
+A lockfile or other generated file that a tool rewrites as the direct result of a brief-requested change (for example, an accepted dependency) is part of that change, even when `out_of_scope` names its directory. List the file in the plan and `files_in_scope`, and say which change regenerates it. Do not escalate solely because of that directory exclusion. Hand edits to such files remain out of scope.
+
 Write the plan with these exact headings:
 
 ## Criteria

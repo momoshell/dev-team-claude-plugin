@@ -762,6 +762,7 @@ export async function runLoop(spec, deps = {}) {
     }
     return { rebased }
   }
+  const suiteCommand = oneLine([spec.suite.command, ...(spec.suite.args ?? [])].join(' '))
   const suiteRun = () => stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs }, { command: true }))
   const result = await (async () => {
   try {
@@ -819,8 +820,8 @@ export async function runLoop(spec, deps = {}) {
     }
 
     let proofLines = [PROOF_UNMEASURED]
-    let suiteLine = '- Suite: unmeasured.'
-    let builderSummary = '', suiteResult = null
+    let suiteLine = `- Suite: unmeasured; ${suiteCommand}.`
+    let builderSummary = ''
     const finishReviews = []
     let feedback = isFinish ? [{ id: 'finish-stop', summary: 'The previous lane stopped with the given reason and observation.', reason: fin.stop.reason, observation: fin.stop.observation }, ...(guidanceItem ? [guidanceItem] : []), ...fin.findings] : []
     let repairing = false, recheck = false, rechecks = 0, uncountedReview = false
@@ -968,13 +969,12 @@ export async function runLoop(spec, deps = {}) {
             feedback = [...redFindings, ...(reviewRed ? omitted('reviewer', reviewed.envelope.details) : [])]
             if (suite.status === 'red') {
               const failures = suiteFailures([suite])
-              feedback.push({ id: 'suite-repair', severity: 'must-fix', summary: 'The full suite is red after your change. Fix the failing tests.', checkout: cwd, failingTests: failures.tests, failingFiles: failures.files, ...(failures.tail.length ? { outputTail: failures.tail } : {}) })
+              feedback.push({ id: 'suite-repair', severity: 'must-fix', summary: `The project suite is red after your change: ${suiteCommand}. Fix the failing tests.`, checkout: cwd, failingTests: failures.tests, failingFiles: failures.files, ...(failures.tail.length ? { outputTail: failures.tail } : {}) })
               repairing = true
             }
             continue
           }
-          suiteResult = { code: suite.code }
-          suiteLine = `- Suite: green; exit ${suite.code}.`
+          suiteLine = `- Suite: green; exit ${suite.code}; ${suiteCommand}.`
           if (tier === 'judge') {
             const second = await stage('second-review', () => reviewTurn('tech-lead', secondFindings, { free: rebaseOnly, recheckReview }))
             if (second.halt) return second.halt
@@ -1024,7 +1024,7 @@ export async function runLoop(spec, deps = {}) {
         feedback = withGuidance([{
           id: 'suite-repair',
           severity: 'must-fix',
-          summary: 'The full suite is red after your change. Fix the failing tests. This is your only repair turn.',
+          summary: `The project suite is red after your change: ${suiteCommand}. Fix the failing tests. This is your only repair turn.`,
           checkout: cwd,
           failingTests: failures.tests,
           failingFiles: failures.files,
@@ -1036,8 +1036,7 @@ export async function runLoop(spec, deps = {}) {
         continue
       }
       if (suite.status !== 'green') return stop(suite.reason, suite)
-      suiteResult = { code: suite.code }
-      suiteLine = `- Suite: green; exit ${suite.code}.`
+      suiteLine = `- Suite: green; exit ${suite.code}; ${suiteCommand}.`
       break
     }
     measurements = [...proofLines, suiteLine, ...(!isFinish && tier === 'mechanical' && namedTests.length ? ['- Review: none, mechanical lane, not reviewed.'] : [])]
@@ -1068,7 +1067,7 @@ export async function runLoop(spec, deps = {}) {
         ...(proved.length ? [...proved.map(({ file, title, base }) => `- ${oneLine(file)}: ${oneLine(title)} ${base?.reason === 'base-package-absent' ? 'had its package absent on the old source (base-package-absent)' : base?.reason === 'base-test-absent' ? 'had its test file absent on the old source (base-test-absent)' : 'was red on the old source'}, green on ${lastProved.has(`${file}\0${title}`) ? 'the build.' : 'an earlier build turn; the last build turn did not name it.'}`), ...(!isFinish && tier === 'mechanical' ? ['Review: none, mechanical lane, not reviewed.'] : [])]
           : !isFinish && tier === 'mechanical' ? ['Proof: mechanical lane, not reviewed.']
             : (!isFinish || planning) && !testsRequired ? ['Proof: no criterion is machine-checked.'] : ['Proof: unmeasured.']),
-        suiteResult ? `Suite passed with exit code ${suiteResult.code}.` : 'Suite: unmeasured.',
+        suiteLine,
         ...(open.length ? ['', '## Open points', ...open.map((f) => `- ${oneLine(f.summary)} (${oneLine(f.location)})`)] : []),
       ].join('\n')
     }
@@ -1137,7 +1136,7 @@ export async function runLoop(spec, deps = {}) {
       }
       const postSuite = await suiteRun()
       if (postSuite.status !== 'green') return stop(postSuite.reason, postSuite)
-      suiteResult = { code: postSuite.code }
+      suiteLine = `- Suite: green; exit ${postSuite.code}; ${suiteCommand}.`
       // The tree the checks passed on must be the commit that is published or reported ready.
       const cleanStatus = await readStatus('post-rebase-clean')
       const cleanPaths = cleanStatus.status === 'green' && typeof cleanStatus.stdout === 'string' ? parseChangedPaths(cleanStatus.stdout) : null

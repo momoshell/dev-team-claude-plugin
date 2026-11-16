@@ -61,9 +61,13 @@ the fetch fails; it does not probe seats. The probe is implemented in
 
 ## Onboarding a checkout for lean lanes
 
-1. Pick the checkout's suite command, such as `npm test`, and run it on a clean
-   tree. Commands are split on whitespace without a shell; quotes, backslashes,
-   pipes and shell operators cannot be used as shell syntax.
+1. Pick the checkout's full suite command, such as `npm test`, and time it on a
+   clean tree. If that measured cost is slow enough to matter and CI runs the
+   full suite on every PR, propose a project-owned affected-only lane suite
+   using [the affected-suite guide](references/affected-suite.md). Without that
+   CI, keep the lane suite full. Get operator approval before onboarding the
+   chosen command. Commands are split on whitespace without a shell; quotes,
+   backslashes, pipes and shell operators cannot be used as shell syntax.
 2. Write a draft JSON file outside the checkout. Set `suite` to that command and
    `proof` to an array of runner entries. Node's built-in test runner is the
    default for JavaScript tests, so use `proof: []` if it covers all proof tests.

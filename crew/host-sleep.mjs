@@ -5,8 +5,11 @@ const SAMPLE_MS = 25
 // Heuristic: an event-loop stall over 5s is indistinguishable from host suspension.
 const SUSPEND_GAP_MS = 5_000
 
-export function holdIdleSleep(pid, { platform = process.platform, spawn: launch = spawn } = {}) {
-  if (platform !== 'darwin') return
+export function holdIdleSleep(pid, { platform = process.platform, spawn: launch } = {}) {
+  if (platform !== 'darwin' || !Number.isSafeInteger(pid) || pid <= 1) return
+  // Test workers must inject a spawn to avoid holding real host sleep assertions.
+  if (launch === undefined && process.env.NODE_TEST_CONTEXT !== undefined) return
+  if (launch === undefined) launch = spawn
   try {
     const child = launch('caffeinate', ['-i', '-w', String(pid)], { detached: true, stdio: 'ignore' })
     child.on('error', () => {})
@@ -27,7 +30,7 @@ export function addSleepCredit(total, part) {
 
 export function sampledBudget(ms, { now = monotonicNow, sampleNow = now, setTimeout: schedule = setTimeout, clearTimeout: clear = clearTimeout } = {}) {
   const start = now()
-  let last, credited = 0, interval = SAMPLE_MS, available = typeof sampleNow === 'function', timer
+  let last, credited = 0, interval = SAMPLE_MS, available = typeof sampleNow === 'function', timer, stopped = false, finalRemaining
   const read = () => {
     try {
       const value = sampleNow()
@@ -37,6 +40,7 @@ export function sampledBudget(ms, { now = monotonicNow, sampleNow = now, setTime
   }
   if (available) last = read()
   const remaining = () => {
+    if (stopped) return finalRemaining
     if (available) {
       const current = read()
       if (available) {
@@ -49,7 +53,13 @@ export function sampledBudget(ms, { now = monotonicNow, sampleNow = now, setTime
     return Math.max(0, ms - (now() - start) + credited)
   }
   const next = () => (interval = Math.min(SAMPLE_MS, remaining()))
-  const stop = () => { clear(timer); timer = undefined }
+  const cancel = () => { clear(timer); timer = undefined }
+  const stop = () => {
+    if (stopped) return
+    finalRemaining = remaining()
+    stopped = true
+    cancel()
+  }
   return {
     remaining, next, stop,
     fields() {
@@ -58,12 +68,13 @@ export function sampledBudget(ms, { now = monotonicNow, sampleNow = now, setTime
     },
     watch(expire) {
       const tick = () => {
+        if (stopped) return
         const delay = next()
         if (delay <= 0) expire()
         else timer = schedule(tick, delay)
       }
       tick()
-      return stop
+      return cancel
     },
   }
 }

@@ -2175,6 +2175,15 @@ test('a muse builder advisor pre-return verdict settles before the seat returns,
     assert.equal(prompts.length, 2)
     assert.match(prompts[1].params.prompt[0].text, /guard handles a grounded edge case/)
   })
+  let advanceClock, prompts = 0
+  await museAdvisorConsult('pre-return', (run) => {
+    assert.equal(run.sent.filter((frame) => frame.method === 'session/prompt').length, 2)
+    assert.equal(run.error?.reason, 'acp-seat-deadline')
+  }, 'pi-turn', () => ({
+    delayPrompt: false,
+    onPrompt: () => { if (++prompts === 2) advanceClock(1000) },
+    deps: (advance) => { advanceClock = advance; return {} },
+  }))
 })
 
 test('a muse return the seat rewrites after a blocked pre-return verdict is kept', async () => {

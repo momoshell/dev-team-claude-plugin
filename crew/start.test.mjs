@@ -1,13 +1,14 @@
 import { test } from 'node:test'
 import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
-import { spawn, spawnSync } from 'node:child_process'
+import childProcess, { spawn, spawnSync } from 'node:child_process'
 import fs, { appendFileSync as appendFileSyncReal, cpSync, existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { laneName, main, runBrief, startLane, StartRefusal } from './start.mjs'
 import { projectHash } from './onboard.mjs'
+import { holdIdleSleep } from './host-sleep.mjs'
 import { main as leanMain, runLean } from './lean.mjs'
 import { runAcpSeat } from './acp/seat.mjs'
 import { readOnlyCommand } from './acp-permission.mjs'
@@ -131,6 +132,55 @@ test('a failed detached launch is a StartRefusal that names the left worktree', 
     const { deps } = fakes()
     deps.spawnDetached = () => { if (result instanceof Error) throw result; return result }
     await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), (e) => e instanceof StartRefusal && e.message.includes('/repo/dt-b1') && e.message.includes('branch b1'))
+  }
+})
+
+test('idle sleep rejects unsafe run pids before spawning', () => {
+  const calls = []
+  for (const pid of [1, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity, '4242', null, undefined]) {
+    holdIdleSleep(pid, { platform: 'darwin', spawn: (...args) => {
+      calls.push(args)
+      return { on() {}, unref() {} }
+    } })
+  }
+  assert.deepEqual(calls, [])
+})
+
+test('crew start never launches real caffeinate in a test worker', async () => {
+  const f = fakes(), calls = []
+  const originalSpawn = childProcess.spawn, platform = Object.getOwnPropertyDescriptor(process, 'platform')
+  delete f.deps.platform
+  delete f.deps.spawn
+  try {
+    assert.notEqual(process.env.NODE_TEST_CONTEXT, undefined)
+    Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' })
+    childProcess.spawn = (...args) => { calls.push(args); return { on() {}, unref() {} } }
+    syncBuiltinESMExports()
+    const result = await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps })
+    assert.equal(result.pid, 4242)
+    assert.deepEqual(calls, [])
+  } finally {
+    Object.defineProperty(process, 'platform', platform)
+    childProcess.spawn = originalSpawn
+    syncBuiltinESMExports()
+  }
+})
+
+test('idle sleep retains its default spawn outside a test worker', () => {
+  const calls = [], events = []
+  const originalSpawn = childProcess.spawn, context = process.env.NODE_TEST_CONTEXT
+  try {
+    delete process.env.NODE_TEST_CONTEXT
+    childProcess.spawn = (...args) => { calls.push(args); return { on: (name) => events.push(name), unref: () => events.push('unref') } }
+    syncBuiltinESMExports()
+    holdIdleSleep(4242, { platform: 'darwin' })
+    assert.deepEqual(calls, [['caffeinate', ['-i', '-w', '4242'], { detached: true, stdio: 'ignore' }]])
+    assert.deepEqual(events, ['error', 'unref'])
+  } finally {
+    if (context === undefined) delete process.env.NODE_TEST_CONTEXT
+    else process.env.NODE_TEST_CONTEXT = context
+    childProcess.spawn = originalSpawn
+    syncBuiltinESMExports()
   }
 })
 

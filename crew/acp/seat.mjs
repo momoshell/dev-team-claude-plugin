@@ -455,6 +455,7 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
   let closed = null
   let budget
   const credit = (value) => {
+    budget?.stop()
     const fields = budget?.fields() ?? {}
     if (!Object.keys(fields).length) return value
     if (value && typeof value === 'object' && Object.isExtensible(value)) return Object.assign(value, fields)
@@ -606,8 +607,8 @@ export async function runAcpSeat({ definition, cwd, taskDir, prompt, sessionFile
     throw credit(error)
   } finally {
     promptActive = false
-    const fields = budget?.fields() ?? {}
     budget?.stop()
+    const fields = budget?.fields() ?? {}
     try { closed = client?.close() ?? null } catch { /* teardown never overwrites the turn */ }
     // An unproven teardown keeps the runtime: it holds the evidence the next owner reclaims by.
     if ((!started && !client?.spawned) || closed?.outcome === 'proven') { try { rmSync(runtime, { recursive: true, force: true }) } catch { /* best effort */ } }

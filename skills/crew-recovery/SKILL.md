@@ -30,8 +30,11 @@ Read first, decide second, remove last.
   They include captured lines before the journal's 4096-character tails; capture
   remains bounded by the runner's 64 MiB output limit per subprocess. Green checks
   write no output artifact, including a green proof with an expected red base run.
-  `outputFile: null` with `outputError: {code, message}` means the write failed,
-  not that the streams were empty; the lane continues with the same check result.
+  A stream the runner did not return is `null` in the file. `outputFile: null`
+  with `outputError: {code, message}` means no file exists, not that the streams
+  were empty: code `output-uncaptured` means the runner returned no streams (it
+  threw, for one), any other code means the write failed. The lane continues with
+  the same check result.
   The row's `seconds` measures the runner, not the output write. Null seconds with
   `secondsReason: 'clock-unmeasured'` means unknown timing, not a zero-length run.
   After closeout, use the archived journal and resolve the filename beside it in

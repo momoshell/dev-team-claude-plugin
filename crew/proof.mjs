@@ -161,10 +161,11 @@ export const PROOF_TIMEOUT_DEFAULT_MS = 120_000
 
 export async function proveTests(input = {}, deps = {}) {
   const credit = {}
-  let stdout = '', stderr = ''
+  // Null until a runner returns that stream: a runner that threw captured nothing, which is not an empty stream.
+  let stdout = null, stderr = null
   const capture = (result) => {
-    stdout += result.stdout ?? ''
-    stderr += result.stderr ?? ''
+    if (typeof result?.stdout === 'string') stdout = (stdout ?? '') + result.stdout
+    if (typeof result?.stderr === 'string') stderr = (stderr ?? '') + result.stderr
     return result
   }
   const runCommand = async (spec) => {

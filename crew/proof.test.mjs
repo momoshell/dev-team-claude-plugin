@@ -48,6 +48,20 @@ test('proveTests preserves suspension credit across runner and cleanup results',
   }
 })
 
+test('a proof whose runner returns no stream reports it as uncaptured, not empty (#2410)', async () => {
+  const cwd = scratchDir('proof-uncaptured-')
+  {
+    const tests = [{ file: 'a.test.mjs', title: 'a' }]
+    const thrown = await proveTests({ cwd, tests }, { runSuite: async () => { throw new Error('boom') } })
+    assert.equal(thrown.reason, 'runner-threw')
+    assert.equal(thrown.stdout, null)
+    assert.equal(thrown.stderr, null)
+    const partial = await proveTests({ cwd, tests }, { runSuite: async () => ({ status: 'unmeasured', reason: 'timeout', stderr: 'late' }) })
+    assert.equal(partial.stdout, null)
+    assert.equal(partial.stderr, 'late')
+  }
+})
+
 test('failed proofs retain captured output from Node runners, configured runners and setup (#2410)', async () => {
   for (const mode of ['node', 'configured', 'runner-failure', 'setup-failure']) {
     const cwd = scratchDir('proof-output-')
@@ -634,7 +648,7 @@ test('a throw inside proveTests is unmeasured runner-threw with the rows it had'
   const tests = [{ file: 'x.test.mjs', title: 'x' }]
   try {
     process.env.TMPDIR = join(tmp, 'absent')
-    assert.deepEqual(await proveTests({ cwd, tests }), { status: 'unmeasured', reason: 'runner-threw', rows: [{ ...tests[0], base: { state: null, reason: 'not-run' }, build: { state: null, reason: 'not-run' }, proven: false, reason: null }], stdout: '', stderr: '' })
+    assert.deepEqual(await proveTests({ cwd, tests }), { status: 'unmeasured', reason: 'runner-threw', rows: [{ ...tests[0], base: { state: null, reason: 'not-run' }, build: { state: null, reason: 'not-run' }, proven: false, reason: null }], stdout: null, stderr: null })
   } finally { if (prior === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = prior }
 })
 

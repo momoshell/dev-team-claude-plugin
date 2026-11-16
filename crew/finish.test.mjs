@@ -73,7 +73,7 @@ test('finish skips scalar journal rows and refuses malformed rows (#2324)', () =
 
 test('review rounds count one per reviewer turn, not one per repaired return (S3-5)', async () => {
   const review = [0, 1, 2].map((n) => ({ event: 'envelope', role: 'reviewer', id: 'lane9.reviewer.5', defects: n < 2 ? ['bad'] : [] }))
-  review.push({ event: 'verdict', status: 'reviewed' })
+  review.push({ event: 'verdict', status: 'reviewed' }, ...['reviewer', 'tech-lead'].map((role) => ({ event: 'review-reused', role, tree: 'e'.repeat(40), verdict: 'pass' })))
   const stop = { event: 'verdict', status: 'stopped', stage: 'review', reason: 'seat-escalated' }
   for (const path of ['stop', 'ready']) {
     const r = path === 'ready' ? ready([], { before: review, legacy: true }) : null

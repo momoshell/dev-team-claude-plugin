@@ -86,6 +86,7 @@ test('a lead bounce to a planner whose rounds are spent gives the planner one mo
 test('a lead accept on a spent bound with nothing to accept is a bounce to that seat (b1487)', async () => {
   const A = 'a'.repeat(40), C = 'c'.repeat(40)
   const f = sequenced([green(), redRun(), green()], { bounds: { reviewer: 1 }, lead: 'accept',
+    checkedTree: () => ({ ...green(), stdout: String(f.calls.filter((c) => c === 'seat:builder' || c === 'uncommit').length).repeat(40) }),
     rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C }),
     commit: answers({ status: 'green', reason: null, head: A, files: ['lib.mjs'] }, { status: 'green', reason: null, head: C, files: ['lib.mjs'] }) })
   assert.equal((await f.go()).status, 'done')
@@ -492,10 +493,11 @@ test('a judge lane runs the tech-lead second review after the reviewer passes an
   }
 })
 
-test('a tech-lead changes-needed goes back to the builder like a review finding, then proof, review, suite and the second review run again', async () => {
+test('a tech-lead changes-needed goes back to the builder, then proof, suite and any needed reviews run again', async () => {
   const t = { ...finding, id: 'T1' }
-  for (const drop of [false, true]) {
-    const f = fakes({ spec: { tier: 'judge' }, secondReview: 1, edit: (v, r) => { if (drop && r.role === 'tech-lead' && r.feedback.length) v.details.closed = []; return v } })
+  for (const changed of [false, true]) for (const drop of [false, true]) {
+    const f = fakes({ spec: { tier: 'judge' }, secondReview: 1,
+      checkedTree: () => ({ ...green(), stdout: changed ? String(count(f, 'builder')).repeat(40) : 'e'.repeat(40) }), edit: (v, r) => { if (drop && r.role === 'tech-lead' && r.feedback.length) v.details.closed = []; return v } })
     const result = await f.go()
     assert.ok(count(f, 'tech-lead') >= 1)
     assert.deepEqual(f.requests.filter((r) => r.role === 'builder')[1].feedback, [t])
@@ -505,7 +507,9 @@ test('a tech-lead changes-needed goes back to the builder like a review finding,
       assert.ok(f.requests.some((r) => r.role === 'tech-lead' && r.repair && r.repair.defects.some((d) => d.includes('prior finding T1'))))
     } else {
       const at = f.calls.indexOf('seat:tech-lead')
-      assert.deepEqual(f.calls.slice(at + 1), ['seat:builder', 'fetch', 'check-base', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'suite', 'seat:reviewer', 'seat:tech-lead', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase', 'publish'])
+      assert.deepEqual(f.calls.slice(at + 1), ['seat:builder', 'fetch', 'check-base', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'suite', ...(changed ? ['seat:reviewer'] : []), 'seat:tech-lead', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase', 'publish'])
+      assert.equal(count(f, 'reviewer'), changed ? 2 : 1)
+      assert.equal(count(f, 'tech-lead'), 2)
       assert.deepEqual(result, { status: 'done', reason: null, pr: PR })
     }
   }
@@ -526,7 +530,8 @@ test('the tech-lead turn is bounded like any seat, and a lead bounce past the bu
   assert.equal(count(bounded, 'tech-lead'), 1)
   assert.equal(bounded.requests.find((r) => r.role === 'lead').feedback[0].role, 'tech-lead')
   for (const tier of ['build', 'judge']) {
-    const f = fakes({ spec: { tier }, review: tier === 'build' ? 2 : 0, secondReview: tier === 'judge' ? 2 : 0, lead: 'bounce', edit: (v) => { if (v.role === 'lead' && count(f, 'lead') > 1) v.details = { decision: 'accept' }; return v } })
+    const f = fakes({ spec: { tier }, review: tier === 'build' ? 2 : 0, secondReview: tier === 'judge' ? 2 : 0, lead: 'bounce',
+      checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder')).repeat(40) }), edit: (v) => { if (v.role === 'lead' && count(f, 'lead') > 1) v.details = { decision: 'accept' }; return v } })
     assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR }, tier)
     if (tier === 'build') assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'builder', 'reviewer', 'builder', 'reviewer', 'lead', 'builder', 'reviewer'])
     else { assert.equal(count(f, 'reviewer'), 3); assert.equal(count(f, 'tech-lead'), 3); assert.equal(count(f, 'lead'), 1) }
@@ -1508,7 +1513,7 @@ test('a pass on the last reviewer round with a red suite grants one reserve re-r
 
 test('a red suite after the suite-repair reserve re-review stops round-bound with no further builder turn', async () => {
   const red = { ...redRun(), stdout: 'not ok 1 - failing test' }
-  const f = sequenced([red, red, red], { bounds: { builder: 3, reviewer: 2 } })
+  const f = sequenced([red, red, red], { bounds: { builder: 3, reviewer: 2 }, checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder')).repeat(40) }) })
   assert.deepEqual(await f.go(), stopped('round-bound'))
   assert.equal(count(f, 'reviewer'), 3)
   assert.equal(count(f, 'builder'), 3)
@@ -1654,12 +1659,85 @@ function sequenced(sequence, options = {}) {
   }
   return Object.assign(f, { inputs })
 }
+test('a pre-check base move with an unchanged tree does not reuse an earlier pass (#2412)', async () => {
+  for (const spent of [false, true]) {
+    let bases = 0
+    // The fake tree id never changes, as when the base moved through a commit that left the tree alone.
+    const f = sequenced([redRun(), green()], { spec: finishSpec({ priorReviewRounds: spent ? 2 : 0 }),
+      checkBase: () => ({ ...green(), stdout: ++bases > 1 ? O : 'c'.repeat(40) }),
+      rebase: answers({ ...MOVED, head: 'a'.repeat(40) }, { ...MOVED, onto: O }, { ...MOVED, head: 'a'.repeat(40), onto: O }) })
+    const result = await f.go()
+    assert.equal(f.rows.some((r) => r.event === 'pre-check-base-move'), true)
+    assert.equal(f.rows.some((r) => r.event === 'review-reused'), false)
+    if (spent) { assert.equal(result.reason, 'round-bound'); assert.equal(count(f, 'reviewer'), 1) }
+    else { assert.equal(result.status, 'done'); assert.equal(count(f, 'reviewer'), 2) }
+  }
+})
+
+test('a build reuses a passed tree after an unchanged suite repair (#2412)', async () => {
+  const note = { ...finding, severity: 'should-fix' }
+  const f = sequenced([redRun(), green()], { bounds: { reviewer: 1 }, edit: (v) => {
+    if (v.role === 'reviewer') v.details.findings = [note]
+    return v
+  } })
+  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
+  assert.equal(count(f, 'reviewer'), 1)
+  assert.equal(count(f, 'lead'), 0)
+  assert.equal(builderTurns(f).length, 2)
+  assert.equal(f.calls.filter((c) => c === 'proof').length, 2)
+  assert.equal(f.inputs.length, 2)
+  assert.deepEqual(f.rows.filter((r) => r.event === 'review-reused').map(({ role, tree, verdict }) => ({ role, tree, verdict })), [{ role: 'reviewer', tree: 'e'.repeat(40), verdict: 'pass' }])
+  assert.equal(f.rows.filter((r) => r.event === 'verdict' && r.status === 'reviewed').length, 1)
+  assert.match(f.seen.publish.body, /## Open points\n- Fix the defect \(lib.mjs:1\)/)
+})
+
+test('a judge reuses each roles pass on an unchanged recheck tree (#2412)', async () => {
+  const A = 'a'.repeat(40), C = 'c'.repeat(40)
+  const f = sequenced([green(), redRun(), green()], { spec: { tier: 'judge' },
+    rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C }),
+    commit: answers({ status: 'green', reason: null, head: A }, { status: 'green', reason: null, head: C }),
+    edit: (v) => {
+      if (['reviewer', 'tech-lead'].includes(v.role)) v.details.findings = [{ ...finding, id: v.role === 'reviewer' ? 'R1' : 'T1', severity: 'should-fix', summary: `${v.role} note` }]
+      return v
+    },
+  })
+  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
+  assert.equal(count(f, 'reviewer'), 1)
+  assert.equal(count(f, 'tech-lead'), 1)
+  assert.equal(builderTurns(f).length, 2)
+  assert.equal(f.calls.filter((c) => c === 'proof').length, 3)
+  assert.equal(f.inputs.length, 3)
+  assert.deepEqual(f.rows.filter((r) => r.event === 'review-reused').map(({ role, tree, verdict }) => ({ role, tree, verdict })), ['reviewer', 'tech-lead'].map((role) => ({ role, tree: 'e'.repeat(40), verdict: 'pass' })))
+  assert.equal(f.rows.filter((r) => r.event === 'verdict' && r.status === 'reviewed').length, 2)
+  assert.match(f.seen.publish.body, /## Open points\n- reviewer note \(lib.mjs:1\)\n- tech-lead note \(lib.mjs:1\)/)
+})
+
+test('a finish reuses a passed tree after an unchanged suite repair (#2412)', async () => {
+  const note = { ...finding, severity: 'should-fix' }
+  const f = sequenced([redRun(), green()], { spec: finishSpec(), edit: (v) => {
+    if (v.role === 'reviewer') { v.details.findings = [note]; v.details.closed = [] }
+    return v
+  } })
+  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: null })
+  assert.equal(count(f, 'reviewer'), 1)
+  assert.equal(builderTurns(f).length, 2)
+  assert.equal(f.calls.filter((c) => c === 'proof').length, 2)
+  assert.equal(f.inputs.length, 2)
+  assert.deepEqual(f.rows.filter((r) => r.event === 'review-reused').map(({ role, tree, verdict }) => ({ role, tree, verdict })), [{ role: 'reviewer', tree: 'e'.repeat(40), verdict: 'pass' }])
+  const report = JSON.parse(f.writes.get('/virtual/task/finish-report.json'))
+  assert.deepEqual(report.reviews, [{ verdict: 'pass', findings: [note] }])
+  assert.equal(report.reviewRounds, 1)
+  assert.equal(f.rows.at(-1).event, 'finish-ready')
+  assert.match(report.body, /## Open points\n- Fix the defect \(lib.mjs:1\)/)
+  assert.equal(f.calls.includes('publish'), false)
+})
+
 const EFFECTS = ['paths', 'commit', 'fetch', 'rebase', 'publish']
 const PUBLISH_EFFECTS = EFFECTS.filter((effect) => effect !== 'fetch')
 
 // MUTATION: retry a finish red on the unchanged tree instead of dispatching its repair.
 test('a finish first red repairs immediately with one run of diagnostics and ordinary green measurements', async () => {
-  const f = sequenced([{ ...redRun(7), stdout: SPEC_OUT, stderr: TAP_OUT }, green()], { spec: { ...finishSpec(), suite: { command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 1800000 } } })
+  const f = sequenced([{ ...redRun(7), stdout: SPEC_OUT, stderr: TAP_OUT }, green()], { spec: { ...finishSpec(), suite: { command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 1800000 } }, checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder')).repeat(40) }) })
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: null })
   assert.equal(builderTurns(f).length, 2)
   assert.deepEqual(f.calls.slice(f.calls.indexOf('suite'), f.calls.lastIndexOf('suite') + 1), ['suite', 'seat:builder', 'fetch', 'check-base', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'seat:reviewer', 'suite'])
@@ -1828,7 +1906,7 @@ test('a finish suite repair tolerates empty diagnostics and spent builder and re
 // MUTATION: retry a repaired red or let it reach commit and publication.
 test('a finish red after repair stops without an unchanged-tree retry', async () => {
   const after = { ...redRun(2), stderr: TAP_OUT }
-  const f = sequenced([redOut(SPEC_OUT), after, green()], { spec: finishSpec() })
+  const f = sequenced([redOut(SPEC_OUT), after, green()], { spec: finishSpec(), checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder')).repeat(40) }) })
   assert.deepEqual(await f.go(), stopped('exit-nonzero'))
   assert.equal(builderTurns(f).length, 2)
   assert.equal(f.inputs.length, 2)
@@ -2290,7 +2368,7 @@ test('the suite runs after exactly the measured changed paths are staged, again 
   assert.equal((await f.go()).status, 'done')
   assert.deepEqual(f.seen['suite-stage'], { cwd: '/virtual/checkout', command: 'git', args: ['--literal-pathspecs', 'add', '--', 'lib.mjs', 'new.test.mjs'] })
   assert.deepEqual(f.calls.slice(f.calls.indexOf('suite-stage')), ['suite-stage', 'checked-tree', 'suite', 'seat:reviewer', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase', 'publish'])
-  const r = sequenced([redRun(1), green()])
+  const r = sequenced([redRun(1), green()], { checkedTree: () => ({ ...green(), stdout: String(count(r, 'builder')).repeat(40) }) })
   assert.equal((await r.go()).status, 'done')
   assert.equal(r.calls.filter((c) => c === 'suite-stage').length, 2)
   const at = r.calls.lastIndexOf('seat:builder')
@@ -2593,7 +2671,8 @@ test('a round-2 reviewer request carries the previous reviewed tree while round-
   const final = reserve.requests.filter((r) => r.role === 'reviewer').at(-1)
   assert.deepEqual(final.reserveReview, { baseTree: 'e'.repeat(40) })
   assert.equal(Object.hasOwn(final, 'deltaReview'), false)
-  const recheck = fakes({ rebase: answers({ ...MOVED, head: 'a'.repeat(40) }, MOVED, { ...MOVED, head: 'a'.repeat(40) }) })
+  const recheck = fakes({ rebase: answers({ ...MOVED, head: 'a'.repeat(40) }, MOVED, { ...MOVED, head: 'a'.repeat(40) }),
+    checkedTree: () => ({ ...green(), stdout: String(1 + recheck.calls.filter((c) => c === 'uncommit').length).repeat(40) }) })
   assert.equal((await recheck.go()).status, 'done')
   const recheckReviews = recheck.requests.filter((r) => r.role === 'reviewer')
   assert.equal(recheckReviews.length, 2)
@@ -2820,7 +2899,7 @@ test('a finish run whose base rebase conflicts stops, names the conflicting path
 
 // MUTATION: restore the repaired review stop or the old builder grant.
 test('a finish review that asks for changes after the suite repair goes back to the builder, and the repaired tree is proven, reviewed and suite-run before ready', async () => {
-  const f = sequenced([redRun(), green()], { spec: finishSpec(), edit: (v, req) => req.role === 'reviewer' && count(f, 'builder') === 2 ? { ...v, details: { ...v.details, verdict: 'changes-needed', findings: [finding] } } : v })
+  const f = sequenced([redRun(), green()], { spec: finishSpec(), checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder')).repeat(40) }), edit: (v, req) => req.role === 'reviewer' && count(f, 'builder') === 2 ? { ...v, details: { ...v.details, verdict: 'changes-needed', findings: [finding] } } : v })
   assert.equal((await f.go()).status, 'done')
   assert.deepEqual(builderTurns(f)[2].feedback, [finding])
   assert.equal(count(f, 'lead'), 0)
@@ -2831,7 +2910,7 @@ test('a finish review that asks for changes after the suite repair goes back to 
 })
 
 test('a finish run with its review cap spent reviews the suite repair without a round and reaches finish-ready (#2374)', async () => {
-  const f = sequenced([redRun(), green()], { spec: finishSpec({ priorReviewRounds: 2 }) })
+  const f = sequenced([redRun(), green()], { spec: finishSpec({ priorReviewRounds: 2 }), checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder')).repeat(40) }) })
   assert.equal((await f.go()).status, 'done')
   assert.equal(count(f, 'reviewer'), 2)
   assert.equal(f.rows.find((row) => row.event === 'finish-ready').reviewRounds, 3)
@@ -2846,6 +2925,7 @@ test('a finish run with its review cap spent reviews the suite repair without a 
 test('a finish run with its review cap spent rechecks a moved head without a round and reaches finish-ready (#2374)', async () => {
   const A = 'a'.repeat(40), C = 'c'.repeat(40)
   const f = fakes({ spec: finishSpec({ priorReviewRounds: 2 }), unseated: ['planner'],
+    checkedTree: () => ({ ...green(), stdout: String(1 + f.calls.filter((c) => c === 'uncommit').length).repeat(40) }),
     rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C, onto: O }),
     commit: answers({ status: 'green', reason: null, head: A, files: ['lib.mjs'] }, { status: 'green', reason: null, head: C, files: ['lib.mjs'] }) })
   assert.equal((await f.go()).status, 'done')
@@ -2857,7 +2937,8 @@ test('an uncounted finish review that asks for changes with the cap spent stops 
   const A = 'a'.repeat(40), C = 'c'.repeat(40)
   for (const kind of ['repair', 'recheck']) {
     let reviews = 0
-    const options = { spec: finishSpec({ priorReviewRounds: 2 }), unseated: ['planner'], edit: (v) => {
+    const options = { spec: finishSpec({ priorReviewRounds: 2 }), unseated: ['planner'],
+      checkedTree: () => ({ ...green(), stdout: String(f.calls.filter((c) => c === 'seat:builder' || c === 'uncommit').length).repeat(40) }), edit: (v) => {
       if (v.role === 'reviewer' && ++reviews === 2) v.details = { ...v.details, verdict: 'changes-needed', findings: [finding] }
       return v
     } }
@@ -3192,7 +3273,8 @@ test('a recheck review resets the delta base so the next delta review diffs from
 
 test('a judge recheck whose suite is red makes the next review a full review (#2320)', async () => {
   const A = 'a'.repeat(40)
-  const f = sequenced([green(), redRun(), green()], { spec: { tier: 'judge' }, rebase: answers({ ...MOVED, head: A }, MOVED, { ...MOVED, head: A }) })
+  const f = sequenced([green(), redRun(), green()], { spec: { tier: 'judge' }, rebase: answers({ ...MOVED, head: A }, MOVED, { ...MOVED, head: A }),
+    checkedTree: () => ({ ...green(), stdout: String(f.calls.filter((c) => c === 'seat:builder' || c === 'uncommit').length).repeat(40) }) })
   assert.equal((await f.go()).status, 'done')
   const reviews = f.requests.filter((r) => r.role === 'reviewer')
   assert.equal(reviews.length, 2)
@@ -3297,7 +3379,8 @@ test('a reviewer findings_omitted count reaches the builder fix turn (S6-12)', a
 
 test('each builder check round fetches the base before checks in every lane shape (#2403)', async () => {
   for (const shape of ['build', 'judge', 'mechanical', 'finish']) {
-    const f = sequenced([redRun(), green()], { spec: shape === 'finish' ? finishSpec() : { tier: shape }, edit: (v) => {
+    // The repair changes the tree, so a role's earlier pass is not reused (#2412).
+    const f = sequenced([redRun(), green()], { spec: shape === 'finish' ? finishSpec() : { tier: shape }, checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder')).repeat(40) }), edit: (v) => {
       if (v.role === 'builder') v.details.subject = 'fix: lane'
       return v
     } })
@@ -3368,6 +3451,8 @@ test('a pre-check base move makes the next review full and counted (#2403)', asy
     const options = { spec: finish ? finishSpec({ priorReviewRounds: mode === 'finish-spent' ? 2 : 0 }) : {},
       review: mode === 'delta' || mode === 'reserve' ? 1 : 0,
       bounds: { reviewer: mode === 'reserve' ? 1 : 2 },
+      // Each builder turn changes the tree, so a role's earlier pass is not reused (#2412).
+      checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder')).repeat(40) }),
       checkBase: () => ({ ...green(), stdout: ++bases > 1 && movedBase ? O : (mode === 'recheck-repair' && bases > 1 ? O : 'c'.repeat(40)) }),
       rebase: mode === 'recheck-repair' ? answers({ ...MOVED, head: 'a'.repeat(40) }, { ...MOVED, onto: O }, { ...MOVED, onto: O }, { ...MOVED, head: 'a'.repeat(40), onto: O }) : answers({ ...MOVED, head: 'a'.repeat(40) }, { ...MOVED, onto: O }, { ...MOVED, head: 'a'.repeat(40), onto: O }),
       edit: (v, r) => {
@@ -3544,6 +3629,7 @@ test('a publishing rebase that conflicts gives the builder one conflict turn, th
   const conflict = { status: 'red', reason: 'rebase-conflict', conflicts: ['lib.mjs'] }
   for (const tier of ['build', 'judge', 'mechanical']) {
     const f = fakes({ spec: { tier }, bounds: { builder: 1 }, cleanHead: `${MOVED.head}\n`,
+      checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder')).repeat(40) }),
       rebase: answers({ ...MOVED, head: A }, conflict, { ...MOVED, onto: O }, { ...MOVED, head: C, onto: O }),
       commit: answers({ status: 'green', reason: null, head: A, files: ['lib.mjs'] }, { status: 'green', reason: null, head: C, files: ['lib.mjs'] }),
       edit: (v, r) => { if (r.role === 'builder') { v.details.subject = r.feedback[0]?.id === 'rebase-conflict' ? 'fix: wrong' : 'fix: mechanical'; if (r.feedback[0]?.id === 'rebase-conflict') v.details.tests = [] } return v },
@@ -3656,6 +3742,7 @@ test('a finish run whose final rebase moves the head puts the build on the new b
   const A = 'a'.repeat(40), C = 'c'.repeat(40)
   for (const priorReviewRounds of [0, 2]) {
     const f = fakes({ spec: finishSpec({ priorReviewRounds }), unseated: ['planner'],
+      checkedTree: () => ({ ...green(), stdout: String(1 + f.calls.filter((c) => c === 'uncommit').length).repeat(40) }),
       rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C, onto: O }),
       commit: answers({ status: 'green', reason: null, head: A, files: ['lib.mjs'] }, { status: 'green', reason: null, head: C, files: ['lib.mjs'] }) })
     const bases = [], prove = f.deps.proveTests
@@ -3775,6 +3862,7 @@ test("the lead's bound is per phase: plan routing before the first review never 
   let builds = 0, leads = 0
   const f = sequenced([green(), green(), redRun(), green()], {
     bounds: { lead: 1 }, review: 1, lead: 'bounce',
+    checkedTree: () => ({ ...green(), stdout: String(f.calls.filter((c) => c === 'seat:builder' || c === 'uncommit').length).repeat(40) }),
     rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C }),
     commit: answers({ status: 'green', reason: null, head: A, files: ['lib.mjs'] }, { status: 'green', reason: null, head: C, files: ['lib.mjs'] }),
     edit: (v) => {
@@ -3791,6 +3879,7 @@ test("the lead's bound is per phase: plan routing before the first review never 
 test('a moved-head recheck sends the reviewer and the tech-lead the reviewed commit, the new base and the rebased head as its scope (#2359)', async () => {
   const A = 'a'.repeat(40), C = 'c'.repeat(40)
   const f = fakes({ spec: { tier: 'judge' }, rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C }),
+    checkedTree: () => ({ ...green(), stdout: String(1 + f.calls.filter((c) => c === 'uncommit').length).repeat(40) }),
     commit: answers({ status: 'green', reason: null, head: A }, { status: 'green', reason: null, head: C }) })
   const comparisons = [], run = f.deps.run
   f.deps.run = (input) => { if (input.args.includes('--no-ext-diff')) comparisons.push(input.args.slice(-2)); return run(input) }
@@ -3815,6 +3904,7 @@ test('a moved-head recheck whose reviewed commit is not an object id stays a ful
   const A = 'a'.repeat(40), C = 'c'.repeat(40)
   for (const [reviewed, rebased] of [['unknown', MOVED.head], [A, 'unknown']]) {
     const f = fakes({ spec: { tier: 'judge' }, rebase: answers({ ...MOVED, head: A }, { ...MOVED, head: rebased, onto: O }, { ...MOVED, head: C }),
+      checkedTree: () => ({ ...green(), stdout: String(1 + f.calls.filter((c) => c === 'uncommit').length).repeat(40) }),
       commit: answers({ status: 'green', reason: null, head: reviewed }, { status: 'green', reason: null, head: C }) })
     assert.equal((await f.go()).status, 'done')
     const turn = f.requests.filter((r) => r.role === 'reviewer')[1]
@@ -3828,6 +3918,7 @@ test('a moved-head recheck whose reviewed commit is not an object id stays a ful
   }
   for (const failed of [0, 1, 2]) {
     const f = fakes({ spec: { tier: 'judge' }, rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C }),
+      checkedTree: () => ({ ...green(), stdout: String(1 + f.calls.filter((c) => c === 'uncommit').length).repeat(40) }),
       commit: answers({ status: 'green', reason: null, head: A }, { status: 'green', reason: null, head: C }) })
     const run = f.deps.run
     let comparisons = 0
@@ -3844,13 +3935,15 @@ test('a re-review forced only by a moved-head rebase spends no reviewer or tech-
   const A = 'a'.repeat(40), C = 'c'.repeat(40)
   const rebase = () => answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C })
   const commit = () => answers({ status: 'green', reason: null, head: A, files: ['lib.mjs'] }, { status: 'green', reason: null, head: C, files: ['lib.mjs'] })
-  const judge = fakes({ spec: { tier: 'judge' }, review: 1, bounds: { 'tech-lead': 1 }, rebase: rebase(), commit: commit() })
+  const judge = fakes({ spec: { tier: 'judge' }, review: 1, bounds: { 'tech-lead': 1 }, rebase: rebase(), commit: commit(),
+    checkedTree: () => ({ ...green(), stdout: String(judge.calls.filter((c) => c === 'seat:builder' || c === 'uncommit').length).repeat(40) }) })
   assert.equal((await judge.go()).status, 'done')
   assert.deepEqual(judge.requests.map((r) => r.role), ['planner', 'builder', 'reviewer', 'builder', 'reviewer', 'tech-lead', 'reviewer', 'tech-lead'])
 
   // MUTATION: keep the recheck free after a builder fix, or spend an available round on the rebase-only review.
   for (const bound of [1, 2]) {
-    const build = sequenced([green(), redRun(), green()], { bounds: { reviewer: bound }, rebase: rebase(), commit: commit() })
+    const build = sequenced([green(), redRun(), green()], { bounds: { reviewer: bound }, rebase: rebase(), commit: commit(),
+      checkedTree: () => ({ ...green(), stdout: String(build.calls.filter((c) => c === 'seat:builder' || c === 'uncommit').length).repeat(40) }) })
     const result = await build.go()
     if (bound === 1) {
       assert.deepEqual(result, stopped('lead-escalated'))
@@ -3882,6 +3975,7 @@ test('a build or judge lane whose publishing rebase moves the head reruns the pr
   for (const mode of ['build', 'judge', 'red']) {
     const options = {
       spec: { tier: mode === 'judge' ? 'judge' : 'build' }, bounds: { reviewer: 3 },
+      checkedTree: () => ({ ...green(), stdout: String(f.calls.filter((c) => c === 'seat:builder' || c === 'uncommit').length).repeat(40) }),
       rebase: answers({ ...MOVED, head: 'a'.repeat(40) }, { ...MOVED, onto: O }, { ...MOVED, head: c }),
       commit: answers({ status: 'green', reason: null, head: 'a'.repeat(40), files: ['lib.mjs'] }, { status: 'green', reason: null, head: c, files: ['lib.mjs'] }),
     }

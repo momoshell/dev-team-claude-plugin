@@ -795,6 +795,17 @@ export async function runLoop(spec, deps = {}) {
     let repairing = false, recheck = false, rechecks = 0, uncountedReview = false
     let committed, rebased, measurements, laneBody, reviewStatus, checkedTree
     const readTree = () => stage('checked-tree', () => callCheck('checked-tree', d.run, { cwd, command: 'git', args: ['write-tree'] }, { command: true }))
+    const latestReviews = {}
+    const reviewTurn = async (role, findings, options) => {
+      const previous = latestReviews[role]
+      if (previous?.tree === checkedTree && previous.result.envelope.details.verdict === 'pass') {
+        await emit('review-reused', { role, tree: checkedTree, verdict: 'pass' })
+        return { ...previous.result, reused: true }
+      }
+      const result = await seatTurn(role, findings, options)
+      if (result.envelope) latestReviews[role] = { tree: checkedTree, result }
+      return result
+    }
     const stageChecked = async () => {
       if (stagePaths.length > 0) {
         const staged = await stage('suite-stage', () => callCheck('suite-stage', d.run, { cwd, command: 'git', args: ['--literal-pathspecs', 'add', '--', ...stagePaths] }, { command: true }))
@@ -838,6 +849,8 @@ export async function runLoop(spec, deps = {}) {
             await emit('pre-check-base-move', { from: currentBase, onto: moved.rebased.onto, review: !isFinish && tier === 'mechanical' ? 'none' : 'full', counted: isFinish || tier !== 'mechanical' })
             rebasedHead = currentBase = moved.rebased.onto
             reviewedTree = reserveBase = recheckScope = null
+            // A moved base needs a full counted review even when the lane's tree id is unchanged, so no earlier pass is reused.
+            for (const role of Object.keys(latestReviews)) delete latestReviews[role]
             uncountedReview = false
           }
         } else uncountedReview = isFinish
@@ -888,7 +901,7 @@ export async function runLoop(spec, deps = {}) {
         if (!isFinish) {
           const halt = await stageChecked()
           if (halt) return halt
-          const runReview = () => stage('review', () => seatTurn('reviewer', priorFindings, { free: rebaseOnly, recheckReview, singleTurn: !rebaseOnly && reservePending, ...(!rebaseOnly && reservePending && reserveBase ? { reserveReview: { baseTree: reserveBase } } : !rebaseOnly && reviewedTree ? { deltaReview: { baseTree: reviewedTree } } : {}) }))
+          const runReview = () => stage('review', () => reviewTurn('reviewer', priorFindings, { free: rebaseOnly, recheckReview, singleTurn: !rebaseOnly && reservePending, ...(!rebaseOnly && reservePending && reserveBase ? { reserveReview: { baseTree: reserveBase } } : !rebaseOnly && reviewedTree ? { deltaReview: { baseTree: reviewedTree } } : {}) }))
           let suite, reviewed
           if (tier === 'build') {
             const pair = await Promise.allSettled([suiteRun(), runReview()])
@@ -903,7 +916,7 @@ export async function runLoop(spec, deps = {}) {
           if (reviewed?.halt) return reviewed.halt
           if (suite.status !== 'green' && suite.status !== 'red') return stop(suite.reason, suite)
           let redFindings = [], reviewRed = false
-          if (reviewed) {
+          if (reviewed && !reviewed.reused) {
             const review = reviewed.envelope
             priorFindings = review.details.findings
             rememberFindings('reviewer', review.details)
@@ -932,11 +945,13 @@ export async function runLoop(spec, deps = {}) {
           suiteResult = { code: suite.code }
           suiteLine = `- Suite: green; exit ${suite.code}.`
           if (tier === 'judge') {
-            const second = await stage('second-review', () => seatTurn('tech-lead', secondFindings, { free: rebaseOnly, recheckReview }))
+            const second = await stage('second-review', () => reviewTurn('tech-lead', secondFindings, { free: rebaseOnly, recheckReview }))
             if (second.halt) return second.halt
-            secondFindings = second.envelope.details.findings
-            rememberFindings('tech-lead', second.envelope.details)
-            await emit('verdict', { status: 'reviewed', role: 'tech-lead', verdict: second.envelope.details.verdict, findings: secondFindings })
+            if (!second.reused) {
+              secondFindings = second.envelope.details.findings
+              rememberFindings('tech-lead', second.envelope.details)
+              await emit('verdict', { status: 'reviewed', role: 'tech-lead', verdict: second.envelope.details.verdict, findings: secondFindings })
+            }
             if (second.envelope.details.verdict === 'changes-needed') { feedback = [...secondFindings, ...omitted('tech-lead', second.envelope.details)]; continue }
           }
           break
@@ -946,8 +961,9 @@ export async function runLoop(spec, deps = {}) {
         if (halt) return halt
 
         // ADR-051 Amendment 2: repair and moved-head reviews run even at the cap.
-        const reviewed = await stage('review', () => seatTurn('reviewer', priorFindings, { singleTurn: isFinish, free: uncountedReview }))
+        const reviewed = await stage('review', () => reviewTurn('reviewer', priorFindings, { singleTurn: isFinish, free: uncountedReview }))
         if (reviewed.halt) return reviewed.halt
+        if (reviewed.reused) break
         const review = reviewed.envelope
         priorFindings = review.details.findings
         rememberFindings('reviewer', review.details)

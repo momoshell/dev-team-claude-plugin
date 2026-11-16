@@ -23,6 +23,8 @@ Give the envelope a nonempty `summary` and no top-level field beyond the example
 
 Details keys: `decision`.
 
+Optional details keys: `question`, `target`, `instructions` (required when their routing rules above apply).
+
 Return a made decision with `status: "done"`, carrying it in `details.decision`. The loop also acts on a valid decision carried by a non-`done` status (for example `insufficient` with `bounce`); an envelope with no valid decision is refused.
 
 For `insufficient` and `escalate`, `details.decision` remains required and validated. Unknown, empty or invalid other detail fields are dropped and named in `dropped` on each journal `envelope` row; valid allowed fields survive, and `parsed` preserves the raw return. For a non-done `decision: escalate`, name the specific operator question in `details.question`; if absent or invalid, `summary` carries it without a questionless retry. Valid bounce and accept decisions keep their routing. This tolerance does not apply to `done` or builder returns.

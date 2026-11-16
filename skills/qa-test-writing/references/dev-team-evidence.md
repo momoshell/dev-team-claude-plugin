@@ -23,8 +23,15 @@ behind it works or not: #578 shipped a `doesNotMatch`
 against a key that is never serialised, #603's tripwire matched only a column-0
 `function`, and #581's guard could only pass by finding hits. Until ADR-055,
 the retired kill-mutation proof caught that shape.
-The loop now runs each named test red on the old source and green on the build;
-this is not a kill proof.
+The loop normally proves each named test red on the old source from a failure
+in its own body and green on the build. The first matching proof entry in the
+old source's `.crew/project.json` can configure two green-only exceptions:
+`manifest` lets a new package's own test prove as `base-package-absent` when
+that manifest is absent from the old-source commit; `newTestFile: true` lets an
+absent test file prove as `base-test-absent`. Both require a no-report old-source
+result and a green build report. They have no red side and may be vacuous;
+absence alone is not evidence of vacuity. Outside these exceptions, an import
+error or failing hook is not body-failure proof. None is a kill proof.
 
 ### The method: mutation, not reading
 

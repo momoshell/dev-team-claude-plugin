@@ -1,10 +1,13 @@
 // crew finish <lane> reports a stopped lane; --return <file> starts a finish pass (ADR-051).
 //
 // A finish pass re-enters the lane in its own worktree: rebase onto the current base ->
-// builder triage -> proof -> review -> suite -> commit -> rebase. A base or publishing conflict gets one builder
-// conflict turn; an unresolved or spent turn stops rebase-conflict. A failed base turn leaves the build uncommitted.
-// A mechanical lane is finished on its brief. Only the checked tree is committed; a rebase
-// that moves the head repeats proof, review and suite. Post-build passes never re-plan; a pre-build planning
+// builder triage -> refresh base -> proof -> review -> suite -> commit -> rebase.
+// Every build/repair fetches before checks; a moved base snapshots, rebases and uncommits the build.
+// Its review is full and counted, including after suite repair, without spending a publishing recheck.
+// Initial, pre-check and publishing conflicts share one builder conflict turn; an unresolved or spent turn stops
+// rebase-conflict. A failed move restores uncommitted work only when cleanup is proven.
+// A mechanical lane is finished on its brief. Only the checked tree is committed; the post-suite rebase
+// still repeats proof, review and suite when it moves the head. Post-build passes never re-plan; a pre-build planning
 // stop can resume its planner or lead first. Neither entry re-runs the baseline or publishes; the operator decides:
 // `--accept [--notes <file>]` publishes the PR the finish run measured (merging stays the operator's),
 // `--return <file>` runs a finish pass on a finishable stop, dead run or ready lane with the file as guidance

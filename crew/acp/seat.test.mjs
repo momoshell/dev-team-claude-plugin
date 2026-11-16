@@ -1324,7 +1324,7 @@ test('Pi brings its own tools: an explicit empty list still launches', async () 
 })
 
 // A fake client under an injected clock: the deadline loop, cancellation and teardown are observable without a transport.
-async function deadlineSeat({ agent = 'pi', wait_s, answerAt = null, answer = { stopReason: 'end_turn', usage: null, refusal: null }, pollAdvance = 0, cancelError = null, closeError = null, closeOutcome = 'proven', pollError = null, exitAt = null, settleOnExit = false, exitPollAdvance = 0, exitPollError = null, onStart = () => {} } = {}) {
+async function deadlineSeat({ agent = 'pi', wait_s, answerAt = null, answer = { stopReason: 'end_turn', usage: null, refusal: null }, pollAdvance = 0, cancelError = null, closeError = null, closeOutcome = 'proven', pollError = null, exitAt = null, settleOnExit = false, exitPollAdvance = 0, exitPollError = null, onStart = () => {}, usageUpdates = [], setupUpdates = [] } = {}) {
   const root = scratchDir('acp-seat-deadline-')
   const runtimeRoot = join(root, 'runtimes')
   mkdirSync(runtimeRoot)
@@ -1333,13 +1333,18 @@ async function deadlineSeat({ agent = 'pi', wait_s, answerAt = null, answer = { 
   const sleeps = []
   let pending = false
   let exitSeen = false
+  let sinks
   const client = {
-    start() { onStart() }, initialize() {}, newSession() {}, setMode() {},
+    start() { onStart(); for (const update of setupUpdates) sinks.usage_update({ sessionId: 's', update }) }, initialize() {}, newSession() {}, setMode() {},
     prompt() { throw new Error('the seat never calls the blocking prompt') },
     cancel() { events.push(['cancel-session', clock]) },
     // settleOnExit: the answer lands after the empty poll, at the moment the exit marker is observed.
     hasExitMarker() { if (settleOnExit) { exitSeen = true; return true } return exitAt !== null && clock >= exitAt },
-    beginPrompt() { events.push(['begin', clock]); pending = true; return 41 },
+    beginPrompt() {
+      events.push(['begin', clock]); pending = true
+      for (const update of usageUpdates) sinks.usage_update({ sessionId: 's', update })
+      return 41
+    },
     pollPrompt(id) {
       events.push(['poll', id, clock])
       if (pollError || (exitSeen && exitPollError)) throw pollError ?? exitPollError
@@ -1360,7 +1365,7 @@ async function deadlineSeat({ agent = 'pi', wait_s, answerAt = null, answer = { 
       definition: { role: 'planner', agent, model: agent === 'pi' ? 'openai/gpt-6.1-sol' : 'anthropic/claude-opus-4-6', effort: 'high', skills: [], ...(wait_s === undefined ? {} : { wait_s }) },
       cwd: root, prompt: 'deadline prompt', sessionFile: join(root, 'session.jsonl'),
       binaries: { claudeAcp: BIN, claude: BIN, pi: BIN },
-      deps: { runtimeRoot, clientFactory: () => client, now: () => clock, sleep: (ms) => { sleeps.push(ms); clock += ms } },
+      deps: { runtimeRoot, clientFactory: (options) => { sinks = options.sinks; return client }, now: () => clock, sleep: (ms) => { sleeps.push(ms); clock += ms } },
     })
   } catch (caught) { error = caught }
   const leftover = [...runtimes(runtimeRoot)].filter((dir) => !before.has(dir)).map((dir) => join(runtimeRoot, dir))
@@ -1373,6 +1378,75 @@ async function deadline(options, inspect) {
   const run = await deadlineSeat(options)
   try { return inspect(run) } finally { run.cleanup() }
 }
+
+test('interrupted pi prompts retain the latest running token usage', async () => {
+  const first = { inputTokens: 10, outputTokens: 5, cachedReadTokens: 2, cachedWriteTokens: 1, totalTokens: 18 }
+  const last = { inputTokens: 13, outputTokens: 7, cachedReadTokens: 2, cachedWriteTokens: 5, totalTokens: 27 }
+  for (const mode of ['deadline', 'exit', 'failure', 'refusal', 'cancelled']) {
+    const failure = Object.assign(new Error('prompt failed'), { method: 'session/prompt', errorKind: 'pi-agent-error' })
+    await deadline({ wait_s: 1, usageUpdates: [first, last].map((usage) => ({ sessionUpdate: 'usage_update', usage })),
+      ...(mode === 'exit' ? { exitAt: 0 } : mode === 'failure' ? { pollError: failure } : ['refusal', 'cancelled'].includes(mode) ? { answerAt: 0, answer: { stopReason: mode === 'cancelled' ? 'cancelled' : null, usage: null, refusal: mode === 'refusal' ? { message: 'refused' } : null } } : {}),
+    }, (run) => {
+      const partial = { kind: 'tokens', ...last }
+      if (run.error) {
+        assert.deepEqual(run.error.usage_partial, partial, mode)
+        assert.equal(Object.hasOwn(run.error, 'usage'), false)
+        if (mode === 'failure') assert.equal(run.error, failure)
+        else assert.equal(run.error.reason, mode === 'exit' ? 'acp-seat-closed' : 'acp-seat-deadline')
+      } else {
+        assert.deepEqual(run.result.usage_partial, partial, mode)
+        assert.equal(run.result.usage, null)
+      }
+    })
+  }
+})
+
+test('interrupted Claude prompts retain context usage and reported cost', async () => {
+  for (const cost of [undefined, { amount: 0.114063, currency: 'USD' }, { amount: 0, currency: 'USD' }]) {
+    await deadline({ agent: 'claude', wait_s: 1, usageUpdates: [
+      { sessionUpdate: 'usage_update', used: 24725, size: 1000000, cost: { amount: 0.1, currency: 'USD' } },
+      { sessionUpdate: 'usage_update', used: 25474, size: 1000000, ...(cost ? { cost } : {}) },
+    ] }, (run) => {
+      assert.equal(run.error?.reason, 'acp-seat-deadline')
+      assert.deepEqual(run.error.usage_partial, { kind: 'context', used: 25474, ...(cost ? { cost } : {}) })
+      assert.equal(Object.hasOwn(run.error, 'usage'), false)
+    })
+  }
+})
+
+test('partials are absent without prompt measurements and on normal completion', async () => {
+  const update = { sessionUpdate: 'usage_update', usage: { inputTokens: 2 } }
+  for (const options of [
+    {}, { onStart: () => { throw new Error('boot failed') } }, { setupUpdates: [update] },
+    { usageUpdates: [{ sessionUpdate: 'usage_update', size: 1000000 }, { sessionUpdate: 'usage_update', usage: { inputTokens: '2' } }] },
+    ...['end_turn', 'max_tokens', 'max_turn_requests'].flatMap((stopReason) => [null, { inputTokens: 3 }].map((usage) => ({ usageUpdates: [update], answerAt: 0, answer: { stopReason, usage, refusal: null } }))),
+  ]) {
+    await deadline({ wait_s: 1, ...options }, (run) => {
+      assert.equal(Object.hasOwn(run.error ?? run.result, 'usage_partial'), false)
+      if (run.result) assert.deepEqual(run.result, options.answer)
+    })
+  }
+})
+
+test('a follow-up prompt cannot inherit running usage from the previous prompt', async () => {
+  const taskDir = scratchDir('muse-partial-reset-')
+  try {
+    let prompts = 0
+    await use('pi-turn', {
+      agent: 'muse', model: 'meta/muse-spark-1.3', taskDir, permissionsOnlyFirst: true,
+      definition: { role: 'builder', extensions: ['subagent'] },
+      onPrompt: () => { if (++prompts === 2) throw new Error('follow-up failed') },
+      permissions: [{ toolCallId: 'reads', _update: [
+        { sessionUpdate: 'usage_update', used: 25474 },
+        ...Array.from({ length: 8 }, (_, i) => ({ sessionUpdate: 'tool_call', toolCallId: `read-${i}`, kind: 'read', rawInput: { path: `dir${i % 3}/file.mjs` } })),
+      ] }],
+    }, (run) => {
+      assert.equal(prompts, 2)
+      assert.ok(run.error)
+      assert.equal(Object.hasOwn(run.error, 'usage_partial'), false)
+    })
+  } finally { rmSync(taskDir, { recursive: true, force: true }) }
+})
 
 test('an explicit wait_s answers a turn just before its deadline and cancels a pending one at it, for pi and claude', async () => {
   for (const agent of ['pi', 'claude']) {

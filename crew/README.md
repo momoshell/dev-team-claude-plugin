@@ -172,7 +172,16 @@ Everything durable is a file; session chat is never the record.
   in `unmeasured`: `not-reported`, `turn-failed`, `usage-unavailable`,
   `no-return`, `clock-unmeasured`, `not-repo-seat` or `worktree-unmeasured`.
   `tool_calls` counts the distinct `toolCallId`s of the `tool_call` updates relayed into the turn's session file (`crew/lean.mjs`); it is null when a session-file write failed.
-  `crew show` reads them; the visualizer reads them.
+  An interrupted or refused prompt with running measurements but no final usage
+  also carries `usage_partial`: `{ kind: 'tokens', ...reportedTokenFields }`
+  for token snapshots (pi), or `{ kind: 'context', used, cost? }` for context
+  snapshots (Claude). Token fields use the same ACP names as `usage`; context
+  `cost`, when reported, is `{ amount, currency }`. The last snapshot replaces
+  earlier ones; context size is not token spend. `usage` stays null with its
+  existing unmeasured reason. Normal completion and turns with no running
+  measurement omit `usage_partial`; unknown is not zero. Snapshots do not carry
+  into another prompt or attempt. `crew show` and visualizer token totals still
+  read only `usage`, never `usage_partial`.
 
 ## Files
 

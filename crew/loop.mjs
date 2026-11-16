@@ -185,6 +185,7 @@ export function seatTurnRow({ role, id, recording, turnError, parsed, started, e
   measure('tool_calls', calls, Number.isSafeInteger(calls) && calls >= 0, reason)
   measure('stop_reason', stopReason, typeof stopReason === 'string', reason)
   measure('usage', usage, usage !== null && typeof usage === 'object' && (Object.getPrototypeOf(usage) === Object.prototype || Object.getPrototypeOf(usage) === null), turnError ? reason : recording?.usage_reason === 'usage-unavailable' ? 'usage-unavailable' : reason)
+  if (row.usage === null && recording?.usage_partial) row.usage_partial = recording.usage_partial
   const seconds = (ended - started) / 1000
   measure('seconds', seconds, typeof started === 'number' && typeof ended === 'number' && Number.isFinite(seconds), 'clock-unmeasured')
   const status = parsed?.status

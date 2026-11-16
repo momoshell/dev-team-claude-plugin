@@ -151,6 +151,14 @@ moved-head recheck review remains uncounted, including at a spent cap. Uncounted
 reviews are marked `counted: false` and excluded from `reviewCount` and
 `reviewRounds`.
 
+**Current-runtime note (2026-11-17, #2435):** The #2433 amendment in
+[ADR-055 §6](adr-055-planner-defines-the-work.md#6-the-loops) limits pre-check
+refresh to the first check round of each run or finish pass. Later suite repairs
+do not fetch or move the base before checks, so a needed finish suite-repair review
+is uncounted and runs even at a spent cap; a passed identical tree can reuse review
+instead. A first-round base move still requires a full, counted review. The
+post-suite moved-head recheck review remains uncounted.
+
 ## Amendment 3 (2026-11-15)
 
 The guidance file given to `--return` stays in force for the whole pass. Every builder turn and lead consult of that pass carries the `finish-return` item. It outranks the plan and lead rulings where they differ. Reviewer and conflict turns do not receive it. A new `--return` replaces the previous guidance. See issue #2384.

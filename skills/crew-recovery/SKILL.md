@@ -78,12 +78,14 @@ it again from its brief so the planner writes a new plan.
 On an escalation, the file answers the operator question. The pass re-enters the
 lane in its own worktree and rebases onto the current base,
 then runs builder triage, refreshes the base, proves the builder's named
-tests, reviews, runs the suite, commits and rebases. After every accepted build or repair,
-the loop fetches before checks. A moved base temporarily snapshots the measured lane paths,
-rebases through the ignored/generated-file rules and soft-resets onto the fresh base,
-leaving the build uncommitted. Proof measures old source there. The next review is full
-and counted, with earlier findings retained; the journal records the move and full scope.
-This spends no publishing recheck and grants no rounds. Initial finish, pre-check and
+tests, reviews, runs the suite, commits and rebases. Each new finish pass gets one
+pre-check refresh, on its first check round. Later proof retries, review fixes and suite
+repairs neither fetch nor move the base before checks. If the base moves on that first
+round, the loop temporarily snapshots the measured lane paths, rebases through the
+ignored/generated-file rules and soft-resets onto the fresh base, leaving the build
+uncommitted. Proof measures old source there. That move requires a full, counted review,
+with earlier findings retained; the journal records the move and full scope.
+It spends no publishing recheck and grants no rounds. Initial finish, pre-check and
 publishing conflicts share one builder conflict turn. An unresolved or spent turn stops
 `rebase-conflict`; failed moves restore uncommitted work only when cleanup is proven. A mechanical lane is finished on its brief; one
 whose diff reaches a protected path stops `raise-needs-plan`, and you restart it
@@ -91,8 +93,9 @@ from its brief as a build lane.
 Only the checked tree is committed; the post-suite rebase still repeats proof,
 review and suite on the new base. It publishes nothing (`crew/finish.mjs`).
 The first red suite gives the builder its one repair turn immediately, even for
-a flaky failure. There is no unchanged-tree retry. The repair repeats proof,
-review and the suite. A red suite after repair, or a suite that is neither green
+a flaky failure. There is no unchanged-tree retry. The repair repeats proof and the
+suite, and repeats review unless the reviewer already passed the same tree in this
+finish run. A red suite after repair, or a suite that is neither green
 nor red, stops the lane.
 When that run is ready, decide once:
 
@@ -100,9 +103,11 @@ When that run is ready, decide once:
   measured. Merging stays yours.
 - `crew finish <lane> --return <file>` runs one more finish pass with the file
   as the builder's guidance. Reviews count against the three review rounds,
-  except the suite-repair review when its pre-check base is unchanged, and a
-  post-suite moved-head recheck review; those run even when the cap is spent.
-  A pre-check move makes a repair review full and counted, so a spent cap stops it.
+  except needed suite-repair and post-suite moved-head recheck reviews; those
+  are uncounted and run even when the cap is spent. The reviewer reuses its latest
+  pass on an identical tree in the same finish run instead of reviewing again.
+  A first-round pre-check base move requires a full, counted review, so a spent
+  cap stops it.
 - `crew finish <lane> --abandon` ends the lane unpublished. It also decides a
   stopped lane, once per stop.
 

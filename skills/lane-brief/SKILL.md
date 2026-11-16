@@ -24,6 +24,10 @@ in `crew/checks.mjs` (`rebase-conflict` and its `regenerate` detail).
    issue must leave no behaviour undefined: when it adds or changes a setting, state its default and what
    unset means in each environment the code runs in. The planner and the reviewer otherwise each pick a
    reading, and the lane escalates.
+   When the issue or a decision on it specifies a test's inputs, fixture or expected result, check on the
+   base that those inputs can produce that result, by arithmetic, code-path inspection or a quick run.
+   If they cannot, correct the issue before dispatch; if the check was not performed, mark that premise
+   unmeasured in the issue rather than omitting it.
 3. Write the brief to `~/.crew/briefs/<lane>.md`. Use `<project>-<issue>-<slug>` for the lane name (for example,
    `devteam-1962-lane-names`); see `LANE` in `crew/lane-core.mjs` for the allowed characters. Choose `source`, the issue bound by `closes`, whether the
    work is `mechanical`, and what is `out_of_scope`. Use Context pointers to the files and symbols the planner

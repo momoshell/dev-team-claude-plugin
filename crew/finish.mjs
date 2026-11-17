@@ -40,6 +40,7 @@ import { deadRun, parsePidRecord, pidRecord, probeAlive, selfStartedAt, writeRun
 import { holdIdleSleep } from './host-sleep.mjs'
 import { OnboardRefusal, requireOnboarded } from './onboard.mjs'
 import { reapLaneSeats } from './seat-reap.mjs'
+import { runEndCommand } from './run-end-command.mjs'
 
 const HOME = dirname(dirname(fileURLToPath(import.meta.url)))
 const LEAN = join(HOME, 'crew', 'lean.mjs')
@@ -557,6 +558,7 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
       if (edited?.status !== 'green') throw new FinishRefusal('finish-publish', `the pull request ${published.pr.number} (${published.pr.url ?? 'no url'}) is open but could not be updated with the measured text, and is not recorded: ${edited?.reason ?? 'unmeasured'}`)
       d.appendFileSync(journal, `${JSON.stringify({ event: 'pr', lane, stage: 'publish', at: d.now(), pr: published.pr })}\n`)
       decision()
+      await runEndCommand({ ...spec, id: lane, taskDir }, { status: 'done', pr: published.pr }, { crewRoot, readFileSync: d.readFileSync, appendFileSync: d.appendFileSync, now: d.now, ...d.runEndCommandDeps })
       d.log(`crew finish: lane=${lane} published ${published.pr.url ?? ''}`)
       return { lane, choice, pr: published.pr }
     }

@@ -79,6 +79,7 @@ test('a lane whose run died with no terminal row lists as stopped run-died; term
     const root = join(home, '.crew'), archiveRoot = join(home, 'archive')
     const tails = [
       ['stopped', { event: 'verdict', status: 'stopped', reason: 'x' }, false],
+      ['notified', { event: 'verdict', status: 'stopped', reason: 'review-cap' }, false, { event: 'run-end-command', ending: 'stopped', payload: 'review-cap', status: 'green' }],
       ['pr', { event: 'pr', pr: { url: PR } }, false],
       ['ready', { event: 'finish-ready' }, false],
       ['abandon', { event: 'finish-decision', choice: 'abandon' }, false],
@@ -87,11 +88,11 @@ test('a lane whose run died with no terminal row lists as stopped run-died; term
       ['unknown', { event: 'stage-start', stage: 'build' }, false],
       ['missing', { event: 'stage-start', stage: 'build' }, false],
     ]
-    for (const [name, tail] of tails) {
+    for (const [name, tail, , notification] of tails) {
       const dir = join(root, `dt-${name}`, name)
       put(join(dir, 'crew.json'), JSON.stringify({ members: { planner: { agent: 'pi' } } }))
       put(join(dir, 'task', 'lean.json'), JSON.stringify({ id: name }))
-      put(join(dir, 'task', 'journal.jsonl'), jsonl([tail, { event: 'stage-end' }]))
+      put(join(dir, 'task', 'journal.jsonl'), jsonl([tail, { event: 'stage-end' }, ...(notification ? [notification] : [])]))
       if (name !== 'missing') put(join(dir, 'task', 'run.pid'), name === 'live' ? '124\n' : name === 'unknown' ? '125\n' : '123\n')
     }
     const opts = { root, archiveRoot }
@@ -99,6 +100,7 @@ test('a lane whose run died with no terminal row lists as stopped run-died; term
     const actual = laneRows({ ...opts, alive: (pid) => pid === 123 ? false : pid === 124 ? true : null })
     for (const [name, , dead] of tails) {
       const row = actual.find((r) => r.lane === name)
+      if (name === 'notified') assert.deepEqual([row.status, row.reason], ['stopped', 'review-cap'])
       if (dead) assert.deepEqual([row.status, row.reason], ['stopped', 'run-died'])
       else assert.deepEqual(row, baseline.find((r) => r.lane === name))
     }

@@ -11,6 +11,7 @@ import { addSleepCredit } from './host-sleep.mjs'
 import { openMemory, renderSection } from './memory.mjs'
 import { acpProviderFailureKind, acpTextReset, providerRetryDecision, PROVIDER_RETRY_TOTAL_WAIT_MS } from './acp/provider.mjs'
 import { runLoop } from './loop.mjs'
+import { runEndCommand } from './run-end-command.mjs'
 import { withRunOverride } from './agents.mjs'
 import { AGENT_ROLES, parseAgent } from './protocols.mjs'
 import { loadMap, resolveSeatSkills } from '../hooks/skill-gate.mjs'
@@ -304,6 +305,7 @@ export async function runLean(spec, deps = {}) {
     try { described = { code: error?.code ?? null, message: String(error?.message ?? error) } } catch { described = { code: null, message: 'unprintable error' } }
     result = { ...stopped('runner-threw'), error: described }
   }
+  await runEndCommand(spec, result, d.runEndCommandDeps)
   d.log(JSON.stringify({ event: 'loop-result', ...result }))
   return result
 }

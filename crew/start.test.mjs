@@ -853,6 +853,7 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
     return { stopReason: 'end_turn', usage: null, refusal: null }
   })
   const options = {
+    runEndCommandDeps: { crewRoot: join(dir, 'personal') },
     log: (line) => logs.push(line),
     runAcpSeat: (input) => { if (!acp) return fakeAcp(input); requests.push(input); return fakeAcp(input) },
     loopDeps: {
@@ -1074,13 +1075,71 @@ test('a judge tech-lead turn gets the reviewer map grants by scope, the builder 
 const terminal = (logs) => logs.map((line) => JSON.parse(line)).filter((row) => row.event === 'loop-result')
 
 test('a thrown loop and a failing journal reach the result and the loop-result line with their described errors', async () => {
-  for (const mode of ['throw', 'journal']) {
-    const f = mode === 'journal' ? leanFixture({ loopDeps: { journal: async () => { throw EPERM } } }) : leanFixture()
+  const command = ' notify \t --flag ; $(literal) "two words" '
+  for (const [mode, config, execution, journalFails] of [
+    ['throw', 'configured', GREEN],
+    ['journal', 'configured', GREEN],
+    ['stop', 'configured', GREEN],
+    ['pr', 'configured', GREEN],
+    ['finish-ready', 'configured', GREEN],
+    ['throw', 'absent'],
+    ['throw', '{}'],
+    ...['{', 'null', '[]', '{"runEndCommand":null}', '{"runEndCommand":3}', '{"runEndCommand":"  "}', JSON.stringify({ runEndCommand: 'bad\0command' }), 'unreadable'].map((config) => ['throw', config]),
+    ['throw', 'configured', { ...GREEN, status: 'red', reason: 'exit-nonzero', code: 9, stdout: 'discard output', stderr: 'discard error' }],
+    ['throw', 'configured', { ...GREEN, status: 'unmeasured', reason: 'timeout', code: null, signal: 'SIGKILL', timedOut: true }],
+    ['throw', 'configured', { ...GREEN, status: 'unmeasured', reason: 'spawn-error', code: null }],
+    ['throw', 'configured', { ...GREEN, status: 'unmeasured', reason: 'output-limit', code: null, stdout: 'discard output' }],
+    ['throw', 'configured', 'throws'],
+    ['throw', 'configured', null],
+    ['throw', 'configured', GREEN, true],
+  ]) {
+    const f = leanFixture({
+      tier: mode === 'finish-ready' ? 'mechanical' : 'build',
+      status: mode === 'finish-ready' ? ['', 'M  src/a.mjs\0'] : 'M  src/a.mjs\0',
+      loopDeps: mode === 'journal' ? { journal: async () => { throw EPERM } }
+        : mode === 'stop' ? { openPullRequest: async () => ({ ...GREEN, status: 'unmeasured', reason: 'spawn-error', code: null }) } : {},
+    })
     if (mode === 'throw') f.options.loopDeps = Object.defineProperty({}, 'run', { enumerable: true, get() { throw EPERM } })
+    if (mode === 'finish-ready') Object.assign(f.spec, { shape: 'finish', finish: { subject: 'fix(crew): finish', planPath: null, findings: [], stop: { reason: 'seat-unmeasured' }, turnOffset: 0 } })
+    f.spec.cwd = join(f.spec.cwd, 'checkout $literal; space')
+    mkdirSync(join(f.spec.cwd, '.crew'), { recursive: true })
+    for (const name of ['settings.json', 'project.json']) writeFileSync(join(f.spec.cwd, '.crew', name), JSON.stringify({ runEndCommand: 'project-unsafe' }))
+    f.spec.runEndCommand = 'lane-unsafe'
+    const calls = [], rows = [], reads = []
+    const { crewRoot } = f.options.runEndCommandDeps
+    mkdirSync(crewRoot, { recursive: true })
+    if (config !== 'absent' && config !== 'unreadable') writeFileSync(join(crewRoot, 'settings.json'), config === 'configured' ? JSON.stringify({ runEndCommand: command }) : config)
+    Object.assign(f.options.runEndCommandDeps, {
+      readFileSync: (path, ...args) => { reads.push(path); if (config === 'unreadable') throw EPERM; return readFileSync(path, ...args) },
+      run: async (input) => { calls.push(input); if (execution === 'throws') throw EPERM; return execution },
+      journal: async (row) => { rows.push(row); if (journalFails) throw EPERM },
+      now: () => 1234,
+    })
     const result = await f.go()
+    // Check dispatch before reading any new row: this fails in its own body on old source.
+    assert.equal(calls.length, config === 'configured' ? 1 : 0, `${mode}/${config}`)
     if (mode === 'throw') assert.deepEqual(result, { status: 'stopped', reason: 'runner-threw', pr: null, error: { code: 'EPERM', message: 'denied' } })
-    else { assert.ok(result.journal.unwritten > 0); assert.deepEqual(result.journal.error, { code: 'EPERM', message: 'denied' }) }
+    else if (mode === 'journal') { assert.ok(result.journal.unwritten > 0); assert.deepEqual(result.journal.error, { code: 'EPERM', message: 'denied' }) }
+    else if (mode === 'stop') { assert.equal(result.status, 'stopped'); assert.equal(result.reason, 'spawn-error') }
+    else assert.deepEqual(result, { status: 'done', reason: null, pr: mode === 'pr' ? { number: 7, url: 'https://example.test/7' } : null })
     assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
+    assert.equal(f.logs.length, 1)
+    assert.deepEqual(reads, [join(crewRoot, 'settings.json')])
+    if (config === 'absent' || config === '{}') { assert.deepEqual(rows, []); continue }
+    const ending = result.status === 'stopped' ? 'stopped' : result.pr ? 'pr' : 'finish-ready'
+    const payload = ending === 'stopped' ? result.reason : ending === 'pr' ? result.pr.url : 'finish-ready'
+    if (config === 'configured') assert.deepEqual(calls, [{ cwd: f.spec.cwd, command: 'notify', args: ['--flag', ';', '$(literal)', '"two', 'words"', 'lane', ending, payload, f.spec.cwd], timeoutMs: 5000 }])
+    const measured = execution && typeof execution === 'object' ? execution : null
+    const configured = config === 'configured' ? command : config.startsWith('{"runEndCommand"') ? JSON.parse(config).runEndCommand : null
+    const reason = config === 'unreadable' ? 'settings-unreadable'
+      : config !== 'configured' ? (config.startsWith('{"runEndCommand"') ? 'invalid-command' : 'invalid-settings')
+        : measured ? measured.reason : 'runner-threw'
+    assert.deepEqual(rows, [{
+      event: 'run-end-command', lane: 'lane', ending, payload,
+      command: typeof configured === 'string' ? configured : null,
+      at: 1234, status: measured?.status ?? 'unmeasured', reason,
+      code: measured?.code ?? null, signal: measured?.signal ?? null, timedOut: measured?.timedOut ?? null,
+    }])
   }
 })
 

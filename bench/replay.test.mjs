@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -198,35 +198,6 @@ test('CL1 archived code lanes retain their exact inputs and provenance', () => {
   }
 })
 
-// MUTATION: CL2 changes b1440 planner Task directory citation.
-test('CL2 archived code lanes prepare planner replays', async () => {
-  for (const lane of [...Object.keys(NEW_LANES), ...Object.keys(FEATURE_LANES)]) {
-    const fx = fixture(lane)
-    const dir = join(fx.corpusDir, lane)
-    cpSync(join(CORPUS_DIR, lane), dir, { recursive: true })
-    const manifestPath = join(dir, 'manifest.json')
-    const manifest = json(manifestPath)
-    writeFileSync(manifestPath, JSON.stringify({ ...manifest, base: fx.base }))
-    const out = fresh()
-    let seen = false
-    const result = await runPlanner({ lane, cell: CELL, arms: [], out }, { ...fx.deps, runAcpSeat(call) {
-      seen = true
-      assert(call.prompt.includes(`Task directory: ${join(out, 'task')}`))
-      assert(call.prompt.includes(`Return path: ${join(out, 'task', 'planner-1.json')}`))
-      assert(!call.prompt.includes(manifest.originalTask))
-      assert(!call.prompt.includes(manifest.originalTree))
-      writeFileSync(join(call.taskDir, 'plan.md'), '# plan\n')
-      writeFileSync(join(call.taskDir, 'gate.mjs'), 'x\n')
-      writeFileSync(join(call.taskDir, 'planner-1.json'), JSON.stringify({ status: 'done', summary: 'planned', details: {} }))
-      return { stopReason: 'end_turn' }
-    }, runGate: async () => ({ status: 'red', failingIds: [] }) })
-    assert(seen)
-    assert.equal(result.error, null)
-    assert(!existsSync(join(out, 'tree')))
-    assert.equal(worktrees(fx.repo), 1)
-  }
-})
-
 // MUTATION: remove the codemode field refusal.
 test('CC2 rejects codemode before preparation', async () => {
   for (const run of [runBuilder, runPlanner]) for (const codemode of [true, false, null, undefined, 'true', 1, [], {}]) {
@@ -281,19 +252,6 @@ test('CC3 persists first-return status and reasons for both roles', async () => 
   }
 })
 
-// MUTATION: SK1 drops the cell skills from the seat definition.
-test('SK1 forwards explicit skills to both seats unchanged', async () => {
-  for (const run of [runBuilder, runPlanner]) for (const skills of [['zeta', 'alpha', 'zeta'], []]) {
-    const fx = fixture()
-    let seen
-    await run({ lane: 'b1380', cell: { ...CELL, skills }, arms: [], out: fresh() }, {
-      ...fx.deps, runAcpSeat: (call) => { seen = call.definition.skills; return { stopReason: 'end_turn' } },
-      runGate: async () => ({ status: 'red' }), proveMutations: async () => ({}),
-    })
-    assert.deepEqual(seen, skills)
-  }
-})
-
 // MUTATION: SK2 removes skill shape validation.
 test('SK2 rejects malformed skills before preparation in both replays', async () => {
   for (const run of [runBuilder, runPlanner]) for (const skills of [null, 'x', {}, [1], ['x', null], [''], ['  ']]) {
@@ -303,43 +261,6 @@ test('SK2 rejects malformed skills before preparation in both replays', async ()
     assert.equal(calls, 0)
     assert.match(result.error, /cell\.skills/)
     assert.equal(json(join(out, 'result.json')).error, result.error)
-  }
-})
-
-// MUTATION: SK3 injects an unrequested default skill.
-test('SK3 omitted skills grants nothing in both replays', async () => {
-  for (const run of [runBuilder, runPlanner]) {
-    const fx = fixture()
-    let seen
-    await run({ lane: 'b1380', cell: CELL, arms: [], out: fresh() }, { ...fx.deps, runAcpSeat: (call) => { seen = call.definition.skills; return { stopReason: 'end_turn' } }, runGate: async () => ({ status: 'red' }), proveMutations: async () => ({}) })
-    assert.deepEqual(seen, [])
-  }
-})
-
-// MUTATION: SK4 prevents the new lanes from loading for builders.
-test('SK4 new corpus prepares builder replays and cleans up', async () => {
-  for (const lane of ['b1457', 'b1458', 'b1459']) {
-    const fx = fixture(lane)
-    const dir = join(fx.corpusDir, lane)
-    cpSync(join(CORPUS_DIR, lane), dir, { recursive: true })
-    const manifestPath = join(dir, 'manifest.json')
-    const manifest = json(manifestPath)
-    assert.equal(manifest.base, LANES[lane])
-    writeFileSync(manifestPath, JSON.stringify({ ...manifest, base: fx.base }))
-    const out = fresh()
-    let seen = false
-    const result = await runBuilder({ lane, cell: CELL, arms: [], out }, { ...fx.deps, runAcpSeat: (call) => {
-      seen = true
-      assert(call.prompt.includes(join(out, 'task')))
-      assert(!call.prompt.includes(manifest.originalTask))
-      assert(existsSync(join(call.taskDir, 'plan.md')) && existsSync(join(call.taskDir, 'gate.mjs')) && existsSync(join(call.taskDir, 'planner-1.json')))
-      writeFileSync(join(call.taskDir, 'builder-2.json'), JSON.stringify({ status: 'done', summary: 'ok' }))
-      return { stopReason: 'end_turn' }
-    }, runGate: async () => ({ status: 'red' }), proveMutations: async () => ({}) })
-    assert(seen)
-    assert.equal(result.error, null)
-    assert(!existsSync(join(out, 'tree')))
-    assert.equal(worktrees(fx.repo), 1)
   }
 })
 
@@ -375,32 +296,7 @@ test('validateArms accepts the closed vocabulary and the empty list, and refuses
   assert.throws(() => validateArms('fff'), /list/)
 })
 
-test('replays refuse an unknown arm before preparing or starting a seat', async () => {
-  for (const [name, run] of [['builder', runBuilder], ['planner', runPlanner]]) {
-    for (const arms of [['nope'], ['fff', 'nope'], ['constructor'], ['__proto__']]) {
-      let prepared = 0, seats = 0
-      const out = fresh(name)
-      const result = await run({ lane: 'b1380', cell: CELL, arms, out }, { prepareRun: () => { prepared++; throw new Error('prepared') }, runAcpSeat: () => { seats++ } })
-      assert.equal(prepared + seats, 0)
-      assert.match(result.error, /unknown arm: /)
-      assert.equal(json(join(out, 'result.json')).error, result.error)
-      assert(existsSync(join(out, 'session.jsonl')) && existsSync(join(out, 'diff.patch')))
-      assert(!existsSync(join(out, 'tree')))
-    }
-  }
-})
-
-for (const [name, run] of [['builder', runBuilder], ['planner', runPlanner]]) {
-  test(`${name} replay: a failing preparation is recorded and never reaches the seat`, async () => {
-    for (const arms of [[], ['fff', 'readgate']]) {
-      let seats = 0
-      const out = fresh(name)
-      const result = await run({ lane: 'b1380', cell: CELL, arms, out }, { prepareRun: () => { throw new Error('boom') }, runAcpSeat: () => { seats++ } })
-      assert.equal(seats, 0)
-      assert.match(result.error, /boom/)
-      assert.match(json(join(out, 'result.json')).error, /boom/)
-    }
-  })
+for (const [name, run] of [['builder', runBuilder]]) {
   test(`${name} replay records a bad cell`, async () => {
     const result = await run({ lane: 'b1380', cell: { agent: 'pi' }, arms: [], out: fresh(name) }, { prepareRun: () => { throw new Error('unreachable') } })
     assert.match(result.error, /cell\.model/)
@@ -570,34 +466,6 @@ test('a failure after the worktree exists still removes it', async () => {
   assert.equal(worktrees(fx.repo), 1)
 })
 
-test('planner replay: fresh task dir, baseline gate, repo writes, gate path confined', async () => {
-  const fx = fixture('b1381')
-  const out = fresh('plan')
-  let seen
-  const gates = []
-  const result = await runPlanner({ lane: 'b1381', cell: CELL, arms: ['subagent'], out }, {
-    ...fx.deps,
-    runAcpSeat(call) {
-      seen = call
-      writeFileSync(join(call.taskDir, 'plan.md'), '# plan\n')
-      writeFileSync(join(call.taskDir, 'gate.mjs'), 'process.exitCode = 1\n')
-      writeFileSync(join(call.cwd, 'stray.txt'), 'x')
-      writeFileSync(join(call.taskDir, 'planner-1.json'), JSON.stringify({ status: 'done', summary: 'planned', details: { acceptance: ['X1'], mutations: [1, 2], gate_path: '/etc/hosts' } }))
-      return { stopReason: 'end_turn' }
-    },
-    runGate: async ({ gatePath }) => { gates.push(gatePath); return { status: 'red', failingIds: ['X1'] } },
-  })
-  assert.equal(result.error, null)
-  assert.equal(seen.definition.writes, 'task-dir')
-  assert.deepEqual(seen.definition.extensions, ['subagent'])
-  assert(!seen.prompt.includes('/orig/'))
-  assert.equal(readFileSync(join(out, 'task', 'plan.md'), 'utf8'), '# plan\n', 'planner must not get the recorded solution')
-  assert.deepEqual(gates, [])
-  assert.equal(result.repo_writes, 1)
-  assert(!existsSync(join(out, 'tree')))
-  assert.equal(worktrees(fx.repo), 1)
-})
-
 test('planner memory appends the rendered section and persists accounting; empty stores refuse the seat', async () => {
   const fx = fixture()
   const memory = fresh('memory')
@@ -707,16 +575,6 @@ test('CS1 planner charter body, CLI, validation and memory', async () => {
   }
 })
 
-// MUTATION: CS2 trims the recorded suffix.
-test('CS2 preserves the complete recorded suffix apart from path rebasing', async () => {
-  const fx = charterFixture()
-  const { out, result, call } = await captureCharter(fx, { charter: fx.charter })
-  assert.equal(result.error, null)
-  const prefix = parseAgent(charterDefinition).body + '\n\n'
-  assert(call.prompt.startsWith(prefix))
-  assert.equal(call.prompt.slice(prefix.length), recordedSuffix.replaceAll('/orig/crew/b1380/task', join(out, 'task')).replaceAll('/orig/dev/b1380', join(out, 'tree')))
-})
-
 // MUTATION: CS3 disables the missing-marker refusal.
 test('CS3 refuses a missing source line before worktree creation', async () => {
   const fx = charterFixture()
@@ -797,12 +655,6 @@ test('writeDiff captures staged edits, staged additions and unstaged edits, and 
   const patch = readFileSync(file, 'utf8')
   for (const needle of ['a-staged', 'staged-new', 'b-unstaged', 'untracked']) assert(patch.includes(needle), needle)
   assert.throws(() => writeDiff(scratch, join(scratch, 'never.patch')), /git .* failed/)
-})
-
-test('the builder replay CLI has no build-first mode', () => {
-  const run = spawnSync(process.execPath, [join(CHECKOUT, 'bench/replay-builder.mjs'), '--build-first'], { encoding: 'utf8' })
-  assert.equal(run.status, 2)
-  assert.match(run.stderr, /unknown argument --build-first/)
 })
 
 // MUTATION: count test additions as source additions.

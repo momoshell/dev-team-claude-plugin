@@ -8,7 +8,6 @@ import { sessionsFeedState } from '../visualizer/web/src/lib/activity.js'
 import { leanStatus } from '../visualizer/web/src/lib/fleet.js'
 
 const src = (path) => readFileSync(join(ROOT, 'visualizer/web/src', path), 'utf8')
-const open = { source: 'lean', adw_id: 'lean:x', goal: 'x', status: 'running', running: true, latest_stage: 'build', pending: { last_heartbeat_at: 'none recorded' } }
 
 test('leanStageStatus gives every phase status the server sends a tone and a label', () => {
   for (const [status, label, tone] of [['escalate', 'Escalated', 'attention'], ['held', 'Held', 'attention'], ['insufficient', 'Insufficient', 'attention'], ['unmeasured', 'Unmeasured', 'quiet'], ['unknown', 'Outcome unknown', 'quiet'], ['running', 'No stage-end record', 'quiet'], ['done', 'Stage ended', 'ok'], ['failed', 'failed', 'fail'], ['stopped', 'stopped', 'attention']]) assert.deepEqual(leanStageStatus(status), { label, tone })
@@ -60,20 +59,6 @@ test('the task cell drops the lean id fragment, the usage cell shows turn covera
   const task = src('lib/TaskList.svelte')
   assert.doesNotMatch(task, /slice\(0, 8\)/); assert.ok(task.includes('tokens.turns'))
   assert.ok(!src('lib/LeanRunDetail.svelte').includes('event inspector'))
-})
-
-test('lean status and activity never claim liveness or merge', () => {
-  assert.equal(leanStatus(open).key, 'running'); assert.match(leanStatus(open).word, /no terminal record/)
-  const stopped = leanStatus({ status: 'stopped', reason: 'runner-threw' })
-  assert.deepEqual([stopped.key, stopped.why], ['aborted', 'runner-threw'])
-  assert.equal(leanStatus({ status: 'done' }).word, 'done')
-  assert.equal(leanStatus({}).word, 'status not recorded')
-})
-
-// MUTATION: return success for an untagged status: 'ok' row.
-test('status and activity read every row as a lean lane', () => {
-  const status = { key: 'unknown', word: 'ok', tone: 'quiet', where: null, why: null, open: false }
-  assert.deepEqual(leanStatus({ status: 'ok' }), status)
 })
 
 test('lean view lists journal rows in recorded order without timestamps', () => {

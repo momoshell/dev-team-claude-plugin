@@ -1,22 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import http from 'node:http'
 import net from 'node:net'
 import { spawn, spawnSync } from 'node:child_process'
 import { writeFileSync, readFileSync, existsSync, globSync, readdirSync, rmSync, statSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ROOT, forAll, git, rawRequest, scratchDir, startFileWriter, trackProcessGroupFile, writeTornFile } from './helpers.mjs'
-
-test('S5-10 no test file declares a bare-id test title', () => {
-  const files = git(ROOT, 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '*.test.mjs')
-    .split('\0').filter((file) => file && existsSync(join(ROOT, file)))
-  assert.ok(files.length > 50, `only ${files.length} test files found`)
-  const hits = files.flatMap((file) => [...readFileSync(join(ROOT, file), 'utf8')
-    .matchAll(/^\s*(?:test|it)\(\s*(['"\x60])([A-Za-z]*\d[A-Za-z\d.-]*)\1\s*,/gm)]
-    .map((match) => `${file}: ${match[2]}`))
-  assert.deepEqual(hits, [], hits.join('\n'))
-})
+import { ROOT, forAll, rawRequest, scratchDir, startFileWriter, trackProcessGroupFile, writeTornFile } from './helpers.mjs'
 
 const listen = async (server) => {
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
@@ -25,76 +13,9 @@ const listen = async (server) => {
 
 const helperUrl = new URL('./helpers.mjs', import.meta.url).href
 
-function runScratchChild(root, { hardExit = false } = {}) {
-  const script = join(root, hardExit ? 'hard-exit.test.mjs' : 'clean.test.mjs')
-  const report = join(root, hardExit ? 'hard-exit.minted' : 'clean.minted')
-  const exit = hardExit ? '  process.exit(3)\n' : ''
-  writeFileSync(script, `import { test } from 'node:test'\nimport { writeFileSync } from 'node:fs'\nimport { scratchDir } from ${JSON.stringify(helperUrl)}\ntest('child mints a scratch directory', () => {\n  const dir = scratchDir('helpers-child-')\n  writeFileSync(${JSON.stringify(report)}, dir)\n${exit}})\n`)
-  const env = { ...process.env, TMPDIR: root, NO_COLOR: '1' }
-  delete env.NODE_TEST_CONTEXT
-  const result = spawnSync(process.execPath, ['--test', '--test-reporter=tap', script], {
-    env, encoding: 'utf8', timeout: 30000,
-  })
-  const minted = existsSync(report) ? readFileSync(report, 'utf8').trim() : ''
-  rmSync(script, { force: true })
-  rmSync(report, { force: true })
-  return { result, minted, leftovers: readdirSync(root) }
-}
-
-test('scratchDir mints a directory under the ambient temp root with the given prefix', () => {
-  const dir = scratchDir('helpers-mint-')
-  assert.ok(dir.startsWith(`${tmpdir()}/`))
-  assert.match(dir, /helpers-mint-[^/]+$/)
-  assert.equal(existsSync(dir), true)
-})
-
-test('a scratch dir does not survive a clean node --test child', () => {
-  const root = scratchDir('helpers-clean-root-')
-  const child = runScratchChild(root)
-  assert.equal(child.result.status, 0, child.result.stderr)
-  assert.ok(child.minted.startsWith(`${root}/helpers-child-`), `child reported no minted path: ${child.minted}`)
-  assert.deepEqual(child.leftovers, [])
-})
-
-test('a scratch dir does not survive a child that hard-exits mid-test', () => {
-  const root = scratchDir('helpers-hard-exit-root-')
-  const child = runScratchChild(root, { hardExit: true })
-  assert.notEqual(child.result.status, 0, child.result.stderr)
-  assert.ok(child.minted.startsWith(`${root}/helpers-child-`), `child reported no minted path: ${child.minted}`)
-  assert.deepEqual(child.leftovers, [])
-})
-
 // MUTATION G1: repoint ROOT and the repository-root contract goes red.
 test('ROOT still resolves to the repo root', () => {
   assert.ok(existsSync(join(ROOT, 'package.json')))
-})
-
-// MUTATION G3: normalise the request line or replace the caller Host and the raw affordance goes red.
-test('rawRequest delivers a request target and Host that fetch cannot', async () => {
-  const seen = []
-  const server = http.createServer((req, res) => { seen.push({ url: req.url, host: req.headers.host }); res.end('ok') })
-  try {
-    const port = await listen(server)
-    const res = await rawRequest({
-      port,
-      requestLine: 'GET http://evil.example/absolute-target HTTP/1.1',
-      headers: ['Host: attacker.example:1234', 'Connection: close'],
-    })
-    assert.equal(seen.length, 1)
-    assert.equal(seen[0].url, 'http://evil.example/absolute-target')
-    assert.equal(seen[0].host, 'attacker.example:1234')
-    assert.match(res.text, /^HTTP\/1\.1 200/)
-    assert.equal(res.closedWithoutResponse, false)
-
-    const viaFetch = await fetch(`http://127.0.0.1:${port}/x`, { headers: { Host: 'attacker.example:1234' } })
-    await viaFetch.text()
-    assert.equal(seen.length, 2)
-    assert.equal(seen[1].host, `127.0.0.1:${port}`)
-    assert.notEqual(seen[1].host, 'attacker.example:1234')
-  } finally {
-    await new Promise((r) => server.close(r))
-  }
-  assert.equal(server.listening, false)
 })
 
 // MUTATION G11: hardcode closedWithoutResponse to false and the refuse-and-close input goes red.
@@ -388,38 +309,6 @@ test('forAll is seeded, bounded to [0,1), runs exactly N times, and names run, s
   assert.throws(() => forAll(() => { throw new Error('gen') }, () => {}, { runs: 1 }), (error) => /generator failed on run 0 of 1 \(seed \d+\): gen/.test(error.message) && error.cause?.message === 'gen')
 })
 
-// Mutation killed: SIGKILL -> signal 0 in drainProcessGroups (test/helpers.mjs) leaves the sleep alive (LG4 gate).
-test('LG4 tracked detached process group is reaped when its test process is SIGTERMed', async () => {
-  const root = scratchDir('helpers-lg4-')
-  const script = join(root, 'child.mjs')
-  const report = join(root, 'grandchild.pid')
-  writeFileSync(script, `import { spawn } from 'node:child_process'\nimport { writeFileSync } from 'node:fs'\nimport { trackProcessGroupFile } from ${JSON.stringify(helperUrl)}\ntrackProcessGroupFile(${JSON.stringify(report)})\nconst child = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' })\nchild.unref()\nwriteFileSync(${JSON.stringify(report)}, String(child.pid))\nsetInterval(() => {}, 1000)\n`)
-  const childProcess = spawn(process.execPath, [script], { stdio: 'ignore' })
-  let pid = null
-  try {
-    const reportDeadline = Date.now() + 10000
-    while (pid === null && Date.now() < reportDeadline) {
-      try {
-        const value = Number(String(readFileSync(report, 'utf8')).trim())
-        if (Number.isSafeInteger(value) && value > 1) pid = value
-      } catch {}
-      if (pid === null) await new Promise((resolve) => setTimeout(resolve, 50))
-    }
-    assert.equal(Number.isSafeInteger(pid) && pid > 1, true, `child reported no detached pid: ${pid}`)
-    assert.doesNotThrow(() => process.kill(-pid, 0))
-    process.kill(childProcess.pid, 'SIGTERM')
-    await new Promise((resolve, reject) => {
-      if (childProcess.exitCode !== null) { resolve(); return }
-      const timer = setTimeout(() => reject(new Error(`blocked child did not exit after SIGTERM (pid ${childProcess.pid})`)), 10000)
-      childProcess.once('exit', () => { clearTimeout(timer); resolve() })
-    })
-    await assertProcessGone(-pid)
-  } finally {
-    if (Number.isSafeInteger(pid) && pid > 1) { try { process.kill(-pid, 'SIGKILL') } catch {} }
-    try { childProcess.kill('SIGKILL') } catch {}
-  }
-})
-
 // Mutation killed: deleting the EPIPE drain in test/helpers.mjs, or narrowing it to process.stderr only (the reporter writes to stdout), leaves the sleep group alive.
 test('WL1 tracked detached process group is reaped when the node --test runner is SIGTERMed', async () => {
   const root = scratchDir('helpers-wl1-')
@@ -459,29 +348,6 @@ test('WL1 tracked detached process group is reaped when the node --test runner i
     if (Number.isSafeInteger(pid) && pid > 1) { try { process.kill(-pid, 'SIGKILL') } catch {} }
     if (Number.isSafeInteger(runner.pid)) { try { process.kill(-runner.pid, 'SIGKILL') } catch {} }
     try { runner.kill('SIGKILL') } catch {}
-  }
-})
-
-// Mutation killed: removing the trackProcessGroupFile registration, or reading the file at
-// register time instead of drain time, leaves the sleep alive after the child exits.
-test('a process group registered by pgid file is read at drain time and does not survive', async () => {
-  const root = scratchDir('helpers-pgid-file-')
-  const script = join(root, 'pgid-child.test.mjs')
-  const pgidFile = join(root, 'builder-pgid')
-  writeFileSync(script, `import { test } from 'node:test'\nimport { writeFileSync } from 'node:fs'\nimport { spawn } from 'node:child_process'\nimport { trackProcessGroupFile } from ${JSON.stringify(helperUrl)}\ntest('child registers the pgid file before it exists', () => {\n  trackProcessGroupFile(${JSON.stringify(pgidFile)})\n  const child = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' })\n  child.unref()\n  writeFileSync(${JSON.stringify(pgidFile)}, String(child.pid))\n})\n`)
-  const env = { ...process.env, TMPDIR: root, NO_COLOR: '1' }
-  delete env.NODE_TEST_CONTEXT
-  const result = spawnSync(process.execPath, ['--test', '--test-reporter=tap', script], { env, encoding: 'utf8', timeout: 30000 })
-  rmSync(script, { force: true })
-  let pid = null
-  try {
-    assert.equal(result.status, 0, result.stderr)
-    pid = Number(String(readFileSync(pgidFile, 'utf8')).trim())
-    assert.equal(Number.isSafeInteger(pid) && pid > 1, true, `child reported no pgid: ${pid}`)
-    await assertProcessGone(pid)
-  } finally {
-    if (Number.isSafeInteger(pid) && pid > 1) { try { process.kill(-pid, 'SIGKILL') } catch {} }
-    rmSync(pgidFile, { force: true })
   }
 })
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { appendFileSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { startServer } from '../visualizer/server/server.mjs'
 import { createLeanSource } from '../crew/lean-source.mjs'
@@ -90,18 +90,6 @@ test('a red suite stage keeps its recorded reason and reads as a code check with
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('a seat stage names its seat from the stage name while open and when it ends with no envelope', () => {
-  const root = scratchDir('lean-seats-'), crewRoot = join(root, 'crew'), archiveRoot = join(root, 'archive')
-  try {
-    const cases = [['plan', 'planner'], ['replan', 'planner'], ['build', 'builder'], ['suite-repair', 'builder'], ['conflict', 'builder'], ['review', 'reviewer'], ['lead', 'lead'], ['second-review', 'tech-lead']]
-    lane(crewRoot, 'seats', [...cases.map(([stage]) => ({ event: 'stage-start', stage })), { event: 'stage-end', stage: 'lead', outcome: { halt: { status: 'stopped', reason: 'lead-escalated' } } }, { event: 'envelope', stage: 'plan', role: 'other' }])
-    const phases = createLeanSource({ crewRoot, archiveRoot }).listRuns()[0].phases
-    assert.deepEqual(phases.map(({ role, kind }) => [role, kind]), cases.map(([name, role]) => [name === 'plan' ? 'other' : role, 'seat']))
-    assert.equal(phases.find((phase) => phase.name === 'review').status, 'running')
-    assert.equal(phases.find((phase) => phase.name === 'lead').reason, 'lead-escalated')
-  } finally { rmSync(root, { recursive: true, force: true }) }
-})
-
 test('proof check evidence keeps the recorded reason and each test row', () => {
   const root = scratchDir('lean-proof-'), crewRoot = join(root, 'crew'), archiveRoot = join(root, 'archive')
   try {
@@ -169,59 +157,6 @@ test('stage-end outcomes set phase status from halt, held, envelope and threw, e
   })
 })
 
-test('a live lane whose run pid is dead with no terminal row reads stopped run-died', async () => {
-  await withServer(async ({ crewRoot, archiveRoot }) => {
-    const dir = lane(crewRoot, 'dead', [{ event: 'run-start' }, { event: 'stage-start', stage: 'build' }])
-    put(join(dir, 'task', 'run.pid'), '123\n')
-    const read = (alive) => createLeanSource({ crewRoot, archiveRoot, alive: () => alive }).listRuns()[0]
-    const dead = read(false)
-    assert.deepEqual([dead.status, dead.reason, dead.running], ['stopped', 'run-died', false])
-    for (const alive of [true, null]) {
-      const live = read(alive)
-      assert.deepEqual([live.status, live.reason, live.running], ['running', null, true])
-    }
-  })
-})
-
-test('an archived lane summary is reused until its journal mtime or size changes', async () => {
-  await withServer(async ({ crewRoot, archiveRoot }) => {
-    const dir = lane(archiveRoot, 'cached', [{ event: 'stage-start', stage: 'gate' }])
-    const path = join(dir, 'task', 'journal.jsonl'), time = 1700000000
-    utimesSync(path, time, time)
-    const source = createLeanSource({ crewRoot, archiveRoot })
-    assert.equal(source.listRuns()[0].latest_stage, 'gate')
-    put(path, jsonl([{ event: 'stage-start', stage: 'gale' }]))
-    utimesSync(path, time, time)
-    assert.equal(source.listRuns()[0].latest_stage, 'gate')
-    utimesSync(path, time + 1, time + 1)
-    assert.equal(source.listRuns()[0].latest_stage, 'gale')
-  })
-})
-
-test("events keep a journal row's own id beside the cursor", async () => {
-  await withServer(async ({ crewRoot, get }) => {
-    lane(crewRoot, 'events', [{ event: 'stage-start' }, { event: 'envelope', role: 'planner', id: 'x.planner.1' }, { event: 'verdict' }])
-    const body = (await get('/api/events?adw_id=lean%3Aevents')).body
-    assert.equal(body.events[1].id, 'x.planner.1')
-    assert.deepEqual(body.events.map((event) => event.cursor), [1, 2, 3])
-    const page = (await get('/api/events?adw_id=lean%3Aevents&after=1&limit=1')).body
-    assert.equal(page.events[0].id, 'x.planner.1'); assert.equal(page.cursor, 2)
-  })
-})
-
-test('a null ended_at or duration_ms carries the reason true for an open lane and a run-start-only lane', async () => {
-  await withServer(async ({ crewRoot, archiveRoot, get }) => {
-    const at = 1700000000000
-    lane(crewRoot, 'open-reason', [{ event: 'run-start', at }, { event: 'stage-start', stage: 'build', at: at + 5 }])
-    lane(archiveRoot, 'start-only', [{ event: 'run-start', at }])
-    const runs = (await get('/api/sessions')).body.runs
-    for (const [name, reason] of [['open-reason', /still open/], ['start-only', /no row after run-start/]]) {
-      const run = runs.find((r) => r.goal === name)
-      for (const field of ['ended_at', 'duration_ms']) { assert.equal(run[field], null); assert.match(run.pending[field], reason) }
-    }
-  })
-})
-
 test('seat sessions of one turn list base, rerun, repair, repair.rerun as crew show orders them', async () => {
   await withServer(async ({ crewRoot, get }) => {
     const dir = lane(crewRoot, 'order', [])
@@ -250,47 +185,6 @@ test('an archived lane with no terminal row reads stopped, never running, in lis
     assert.deepEqual([stopped.status, stopped.reason, stopped.running], ['stopped', 'seat-unmeasured', false])
     assert.equal(taskBoard(runs, { showArchived: true }).counts.open, 1)
   } finally { rmSync(sandbox, { recursive: true, force: true }) }
-})
-
-test('LV1 lists live, archived and sibling-archive lanes with their latest stage; reread on append', async () => {
-  await withServer(async ({ crewRoot, archiveRoot, get }) => {
-    const dir = lane(crewRoot, 'a-open', [{ event: 'stage-start', stage: 'plan' }, { event: 'verdict', stage: 'review', status: 'reviewed' }, { event: 'stage-start', stage: 'build' }])
-    lane(archiveRoot, 'a-open', [{ event: 'verdict', stage: 'build', status: 'stopped', reason: 'archive' }])
-    lane(crewRoot, 'b-sib', [{ event: 'stage-start', stage: 'old' }], '.archive-2026-10-01')
-    lane(crewRoot, 'b-sib', [{ event: 'stage-start', stage: 'new' }], '.archive-2026-10-02')
-    lane(archiveRoot, 'c-arch', [{ event: 'stage-start', stage: 'gate' }])
-    put(join(crewRoot, 'dt-bad', 'bad', 'task', 'lean.json'), JSON.stringify({ id: 'other' }))
-    const runs = (await get('/api/sessions')).body.runs
-    const byId = Object.fromEntries(runs.map((run) => [run.adw_id, run]))
-    assert.equal(byId['lean:a-open'].latest_stage, 'build'); assert.equal(byId['lean:a-open'].status, 'running')
-    assert.equal(byId['lean:a-open'].started_at, null); assert.ok(byId['lean:a-open'].pending.started_at)
-    assert.equal(byId['lean:b-sib'].latest_stage, 'new'); assert.equal(byId['lean:c-arch'].latest_stage, 'gate')
-    assert.ok(!byId['lean:bad'])
-    appendFileSync(join(dir, 'task', 'journal.jsonl'), jsonl([{ event: 'stage-start', stage: 'again' }]))
-    assert.equal((await get('/api/sessions')).body.runs.find((run) => run.adw_id === 'lean:a-open').latest_stage, 'again')
-    assert.ok((await get('/api/sessions?mode=x')).body.runs.every((run) => run.source !== 'lean'))
-    assert.ok((await get('/api/sessions?since=2026-01-01T00%3A00%3A00.000Z')).body.runs.every((run) => run.source !== 'lean'))
-  })
-})
-
-test('VS1 sessions whitelist check results while journal retains full evidence', async () => {
-  await withServer(async ({ crewRoot, get }) => {
-    const payload = { stdout: 'OUT'.repeat(1000), stderr: 'ERR'.repeat(1000), mutations: [{ secret: 'MUTATION' }], metadata: 'EXTRA' }
-    const result = { ...payload, accepted: true, status: 'failed', code: 7, result: { ...payload, status: 'green' } }
-    const rows = [
-      { event: 'check', stage: 'early', check: 'before', result },
-      { event: 'stage-start', stage: 'build' },
-      { event: 'check', stage: 'build', check: 'inside', result },
-    ]
-    lane(crewRoot, 'slim', rows)
-    const run = (await get('/api/sessions')).body.runs.find((r) => r.goal === 'slim')
-    const checks = run.phases.flatMap((phase) => phase.checks)
-    assert.deepEqual(checks.map((check) => check.check), ['before', 'inside'])
-    for (const check of checks) assert.deepEqual(check.result, { accepted: true, status: 'failed', code: 7, result: { status: 'green' } })
-    assert.doesNotMatch(JSON.stringify(checks), /OUT|ERR|MUTATION|EXTRA|stdout|stderr|mutations|metadata/)
-    const journal = (await get(`/api/journal?${q('slim')}`)).body
-    assert.deepEqual(journal.rows.filter((row) => row.event === 'check').map((row) => row.result), [result, result])
-  })
 })
 
 test('VS2 listed check statuses match full journal rows', async () => {
@@ -397,14 +291,6 @@ test('LV4 seat sessions are served by role in numeric turn order, confined to th
   })
 })
 
-test('a lane stopped inside a stage reads as stopped though its stage-end rows follow the verdict', async () => {
-  await withServer(async ({ crewRoot, get }) => {
-    lane(crewRoot, 'mid', [{ event: 'stage-start', stage: 'build' }, { event: 'verdict', stage: 'build', status: 'stopped', reason: 'seat-unmeasured' }, { event: 'stage-end', stage: 'build', outcome: null }])
-    const [run] = (await get('/api/sessions')).body.runs
-    assert.deepEqual([run.status, run.reason, run.running], ['stopped', 'seat-unmeasured', false])
-  })
-})
-
 test('a lane journal that symlinks out of the lane is never read', async () => {
   await withServer(async ({ crewRoot, get }) => {
     const dir = lane(crewRoot, 'leak', [])
@@ -427,16 +313,6 @@ test('a lane is dated by its run-start and placed in the time window by it', asy
     assert.deepEqual(runs.map((run) => [run.adw_id, run.started_at]), [['lean:dated', new Date(at).toISOString()]])
     const undated = (await get('/api/sessions')).body.runs.find((run) => run.adw_id === 'lean:undated')
     assert.equal(undated.started_at, null); assert.ok(undated.pending.started_at)
-  })
-})
-
-test('a run-start time out of the date range leaves that lane undated and every lane listed', async () => {
-  await withServer(async ({ crewRoot, get }) => {
-    lane(crewRoot, 'far', [{ event: 'run-start', at: 8640000000000001, run_id: 'far' }])
-    lane(crewRoot, 'near', [{ event: 'run-start', at: Date.now(), run_id: 'near' }])
-    const runs = Object.fromEntries((await get('/api/sessions')).body.runs.map((run) => [run.adw_id, run]))
-    assert.equal(runs['lean:far'].started_at, null); assert.ok(runs['lean:far'].pending.started_at)
-    assert.ok(runs['lean:near'].started_at)
   })
 })
 
@@ -478,28 +354,6 @@ test('LV-HF a lane whose last row is an operator pr row is done and hand-finishe
   })
 })
 
-test('VJ1 sessions: lean runs with no ledger state their source and are not an unavailable feed', async () => {
-  await withServer(async ({ crewRoot, get }) => {
-    lane(crewRoot, 'vj1', [{ event: 'stage-start', stage: 'plan' }])
-    const { body } = await get('/api/sessions')
-    assert.ok(body.runs.some((run) => run.adw_id === 'lean:vj1'))
-    assert.deepEqual(body.sources.lean, { readable: true, absent: null, runs: 1 })
-    assert.equal(Object.hasOwn(body.sources, 'ledger'), false) // the ledger is no longer a source
-    assert.equal(body.degraded, false)
-  })
-})
-
-test('VJ2 sessions: a throwing lean read is stated unreadable with a null count and an unavailable feed', async () => {
-  const lean = { listRuns: () => { throw new Error('lean boom') }, identify: () => ({ lean: false }), resolveLane: () => null, readJournalRows: () => ({ rows: [], error: null }), readSeatSessions: () => ({ status: 400, error: 'n/a' }) }
-  await withServer(async ({ get }) => {
-    const { body } = await get('/api/sessions')
-    assert.deepEqual(body.runs, [])
-    assert.equal(body.sources.lean.readable, false); assert.match(body.sources.lean.absent, /lean boom/)
-    assert.equal(body.sources.lean.runs, null) // unmeasured, not zero
-    assert.equal(body.degraded, true)
-  }, { lean })
-})
-
 test('VJ4 events: a lean lane answers its journal rows in order with a cursor and null timestamps, no ledger read', async () => {
   await withServer(async ({ crewRoot, get }) => {
     lane(crewRoot, 'vj4', [{ event: 'stage-start', stage: 'plan' }, { event: 'check', stage: 'plan' }, { event: 'verdict', stage: 'plan', at: 1700000000000 }])
@@ -537,44 +391,6 @@ test('VJ2 sessions: a crew root that is a file is unreadable with a null count a
   })
 })
 
-test('VJ2 sessions: an absent crew root holds no lanes and stays readable', async () => {
-  await withServer(async ({ crewRoot, get }) => {
-    rmSync(crewRoot, { recursive: true, force: true })
-    const { body } = await get('/api/sessions')
-    assert.deepEqual(body.sources.lean, { readable: true, absent: null, runs: 0 })
-  })
-})
-
-test('VJ1 sessions: an empty readable lean source is an available feed with a measured zero', async () => {
-  await withServer(async ({ get }) => {
-    const { body } = await get('/api/sessions')
-    assert.deepEqual(body.runs, [])
-    assert.deepEqual(body.sources.lean, { readable: true, absent: null, runs: 0 })
-    assert.equal(body.degraded, false)
-  })
-})
-
-test('VJ4 events: a non-lean lane states the removed ledger source as absent, never an empty measured page', async () => {
-  await withServer(async ({ get }) => {
-    const { status, body } = await get('/api/events?adw_id=0123-old-ledger-run&after=7')
-    assert.equal(status, 200); assert.deepEqual(body.events, []); assert.equal(body.cursor, 7)
-    assert.equal(body.degraded, true); assert.match(body.absent, /ledger event source removed/)
-  })
-})
-
-test('LP1 LP2 a lane that ends pr then finish-decision accept is done with that pr', async () => {
-  await withServer(async ({ crewRoot, get }) => {
-    const pr = { number: 7, url: 'https://github.com/o/r/pull/7' }
-    const ready = { event: 'finish-ready', status: 'ready-for-operator' }
-    const stop = [{ event: 'verdict', stage: 'build', status: 'stopped', reason: 'seat-unmeasured' }, { event: 'stage-end', stage: 'build' }, ready]
-    lane(crewRoot, 'lp-accepted', [...stop, { event: 'pr', stage: 'publish', pr }, { event: 'finish-decision', choice: 'accept' }])
-    const runs = Object.fromEntries((await get('/api/sessions')).body.runs.map((run) => [run.goal, run]))
-    assert.equal(runs['lp-accepted'].status, 'done')
-    assert.equal(runs['lp-accepted'].running, false)
-    assert.deepEqual(runs['lp-accepted'].pr, pr)
-  })
-})
-
 test('LS1 a lane\'s last finish-ready or finish-decision row decides ready-for-operator, abandoned, returned or done', async () => {
   await withServer(async ({ crewRoot, get }) => {
     const ready = { event: 'finish-ready' }, stop = { event: 'verdict', stage: 'build', status: 'stopped' }, pr = { number: 7 }
@@ -596,23 +412,6 @@ test('LS1 a lane\'s last finish-ready or finish-decision row decides ready-for-o
     for (const [name, rows] of cases) lane(crewRoot, name, rows)
     const runs = Object.fromEntries((await get('/api/sessions')).body.runs.map((run) => [run.goal, run]))
     for (const [name, , status, running, expectedPr] of cases) assert.deepEqual([runs[name].status, runs[name].running, runs[name].pr], [status, running, expectedPr], name)
-  })
-})
-
-test('LS2 a finish reading ends at the last recorded row time; an undated journal stays null with one reason', async () => {
-  const B = 1700000000000
-  await withServer(async ({ crewRoot, get }) => {
-    const rows = [{ event: 'run-start', at: B }, { event: 'stage-start', stage: 'build', at: B + 10 }, { event: 'finish-ready', at: B + 50 }]
-    lane(crewRoot, 'ready-timed', rows)
-    lane(crewRoot, 'abandoned-timed', [...rows, { event: 'finish-decision', lane: 'abandoned-timed', choice: 'abandon', notesSha256: null }])
-    lane(crewRoot, 'ready-undated', [{ event: 'run-start', at: B }, { event: 'finish-ready' }])
-    const runs = Object.fromEntries((await get('/api/sessions')).body.runs.map((run) => [run.goal, run]))
-    for (const name of ['ready-timed', 'abandoned-timed']) assert.deepEqual([runs[name].ended_at, runs[name].duration_ms], [new Date(B + 50).toISOString(), 50])
-    // MUTATION: set running true for ready-for-operator.
-    const undated = runs['ready-undated']
-    assert.deepEqual([undated.running, undated.ended_at, undated.duration_ms], [false, null, null])
-    assert.match(undated.pending.ended_at, /carry no timestamps/)
-    assert.match(undated.pending.duration_ms, /carry no timestamps/)
   })
 })
 

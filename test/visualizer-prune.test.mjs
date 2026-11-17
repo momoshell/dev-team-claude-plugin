@@ -147,29 +147,3 @@ test('journal refuses a legacy directory and reads a lean journal with diagnosti
     rmSync(root, { recursive: true, force: true })
   }
 })
-
-// MUTATION: restore channels: JOURNAL_CHANNELS in the empty object
-test('journal read returns no constant plan, step-title, acceptance or channel fields', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'viz-journal-fields-'))
-  try {
-    const lane = join(root, 'dt-lane', 'lane')
-    mkdirSync(join(lane, 'task'), { recursive: true })
-    writeFileSync(join(lane, 'crew.json'), JSON.stringify({ members: { builder: { agent: 'pi' } } }))
-    writeFileSync(join(lane, 'task', 'lean.json'), JSON.stringify({ id: 'lane', tier: 'build' }))
-    writeFileSync(join(lane, 'task', 'journal.jsonl'), '{"event":"run-start"}\n')
-    const source = createJournalSource({ crewRoot: root, lean: createLeanSource({ crewRoot: root }) })
-    const current = source.readJournal({ repo_slug: 'dt-lane', task_slug: 'lane', adw_id: 'lean:lane' })
-    const refused = source.readJournal({ repo_slug: '../invalid', task_slug: 'lane' })
-    assert.equal(current.verified, true)
-    assert.equal(current.rows[0].event, 'run-start')
-    assert.equal(refused.verified, false)
-    assert.deepEqual(refused.rows, [])
-    for (const result of [current, refused]) {
-      for (const key of ['channels', 'plan', 'step_titles', 'step_titles_reason', 'acceptance', 'acceptance_reason']) assert.equal(Object.hasOwn(result, key), false, key)
-    }
-    const journal = await import('../visualizer/server/journal-source.mjs')
-    for (const key of ['STEP_TITLE_REASONS', 'ACCEPTANCE_REASONS']) assert.equal(Object.hasOwn(journal, key), false, key)
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
-})

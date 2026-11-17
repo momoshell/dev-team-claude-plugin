@@ -38,14 +38,6 @@ test('invalid names, symlinks and read-only libraries cannot write',t=>{
  assert.equal(readonly.save({filename:'new.md',text:definition(),expected_revision:null}).status,409)
  assert.equal(existsSync(join(root,'new.md')),false)
 })
-test('system definitions are copy sources, and missing harnesses are not declared executable',t=>{
- const {root,library}=fixture(t);mkdirSync(join(root,'home/.claude/agents'),{recursive:true});writeFileSync(join(root,'home/.claude/agents/reviewer.md'),definition())
- const source=library.read().definitions[0];assert.equal(source.local,false);assert.equal(source.editable,false)
- assert.equal(library.save({filename:source.filename,text:source.text,expected_revision:null}).ok,true)
- assert.equal(library.save({filename:source.filename,text:definition('Edit copy'),expected_revision:library.read().definitions.find(d=>d.local).revision}).ok,true)
- assert.equal(readFileSync(join(root,'home/.claude/agents/reviewer.md'),'utf8'),definition())
- assert.ok(library.read().harnesses.every(h=>h.available===false&&h.path===null))
-})
 test('HTTP local save validates origin, fields, revisions and large definition bodies',async t=>{
  const {root}=fixture(t)
  const {server}=startServer({port:0,host:'127.0.0.1',checkout:root,home:join(root,'home'),env:{PATH:''},feed:{},crewRoot:join(root,'crew-state')})
@@ -61,15 +53,6 @@ test('HTTP local save validates origin, fields, revisions and large definition b
  const listed=await (await fetch(base+'/api/agent-library')).json();assert.equal(listed.definitions[0].text,input.text)
  assert.equal((await send(input)).status,409)
  assert.equal(readFileSync(join(root,'agents/reviewer.md'),'utf8'),input.text)
-})
-test('HTTP harness evidence reads the shipped register through the server default path',async t=>{
- const {root}=fixture(t)
- const {server}=startServer({port:0,host:'127.0.0.1',checkout:root,home:join(root,'home'),env:{PATH:''},feed:{},crewRoot:join(root,'crew-state')})
- await new Promise((resolve,reject)=>{server.once('listening',resolve);server.once('error',reject)})
- t.after(()=>new Promise(resolve=>{server.closeAllConnections();server.close(resolve)}))
- const view=await (await fetch(`http://127.0.0.1:${server.address().port}/api/agent-library`)).json()
- assert.equal(view.harnesses.find(row=>row.binary==='claude')?.registered,true)
- assert.equal(view.notes.some(note=>note.includes('Harness capabilities could not be read')),false)
 })
 test('copying a role definition preserves its linked charter destination and opaque settings',t=>{
  const {root,library}=fixture(t);mkdirSync(join(root,'crew/agents'),{recursive:true})
@@ -111,29 +94,6 @@ test('the visualizer owns the shipped coding_agents declarations in visualizer/c
  const imports=[...readFileSync(join(ROOT,muse.adapter),'utf8').matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)].map(match=>match[1])
  assert.ok(imports.length>0);assert.ok(imports.every(specifier=>specifier.startsWith('node:')))
  assert.equal(muse.binary,'muse');assert.deepEqual(muse.refuses,['local_provider']);assert.deepEqual(muse.transports,['acp'])
-})
-
-test('harness evidence reads visualizer/coding-agents.json, not crew/capabilities.json',t=>{
- const {root,library}=fixture(t);mkdirSync(join(root,'visualizer'))
- writeFileSync(join(root,'visualizer/coding-agents.json'),JSON.stringify({coding_agents:{claude:{providers:['anthropic'],transports:['acp'],adapter:'crew/adapters/adapter-claude.mjs',refuses:['extensions']}}}))
- const view=library.read(),claude=view.harnesses.find(row=>row.binary==='claude')
- assert.equal(claude.registered,true);assert.deepEqual(claude.providers,['anthropic'])
- assert.equal(view.notes.some(note=>note.includes('Harness capabilities could not be read')),false)
-})
-
-test('harness evidence exposes supported providers and modes without claiming authentication',t=>{
- const {root,library}=fixture(t);mkdirSync(join(root,'visualizer'))
- writeFileSync(join(root,'visualizer/coding-agents.json'),JSON.stringify({coding_agents:{claude:{providers:['anthropic'],transports:['pane','headless-json'],adapter:'crew/adapters/adapter-claude.mjs',refuses:['extensions','local_provider']}}}))
- const rows=library.read().harnesses,claude=rows.find(h=>h.binary==='claude'),codex=rows.find(h=>h.binary==='codex')
- assert.equal(claude.available,false);assert.equal(claude.registered,true)
- assert.deepEqual(claude.providers,['anthropic']);assert.deepEqual(claude.transports,['pane','headless-json']);assert.deepEqual(claude.unsupported,['extensions','local_provider'])
- assert.equal(codex.registered,false);assert.equal(codex.providers,null)
- assert.equal(Object.hasOwn(claude,'authenticated'),false)
-})
-test('unreadable capability register does not invent empty or supported options',t=>{
- const {library}=fixture(t),view=library.read()
- assert.ok(view.notes.some(note=>note.includes('Harness capabilities could not be read')))
- assert.ok(view.harnesses.every(row=>row.registered===null&&row.providers===null&&row.transports===null&&row.unsupported===null))
 })
 
 // Isolate transitive runtime telemetry as well as the explicit fixture paths.

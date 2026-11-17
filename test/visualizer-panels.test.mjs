@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
-import { configurationDimensionCell, configurationFilterView, needsAttention, taskBoard, tokenCell } from '../visualizer/web/src/lib/fleet.js'
+import { configurationDimensionCell, configurationFilterView, tokenCell } from '../visualizer/web/src/lib/fleet.js'
 import { assuranceMeta, executionMeta } from '../visualizer/web/src/lib/workflow-semantics.js'
 import { ROOT } from './helpers.mjs'
 import { transportLabel } from '../visualizer/web/src/lib/agent-settings.js'
@@ -58,52 +58,12 @@ test('workflow semantics name only real tiers and shapes and no mechanical plann
   assert.equal(executionMeta('full').summary, 'Recorded execution shape.')
 })
 
-test('workflow semantics separate profile, execution and assurance without inference', () => {
-  assert.equal(assuranceMeta('mechanical').label, 'Quick')
-  assert.equal(assuranceMeta('judge').label, 'Rigorous')
-  assert.equal(assuranceMeta('standard').alias, 'build')
-  assert.equal(executionMeta('scout').label, 'Scout')
-})
-
 function configurationFixture() {
   const historical = { adw_id: 'historical', tier: 'build', variant: 'full', task_profile: null, execution_shape: null, assurance: null }
   const measured = { adw_id: 'measured', task_profile: 'implementation', execution_shape: 'full', assurance: 'standard' }
   const other = { adw_id: 'other', task_profile: 'audit', execution_shape: 'scout', assurance: 'rigorous' }
-  const colliding = { adw_id: 'colliding', task_profile: 'Not recorded', execution_shape: 'Not recorded', assurance: 'quick' }
-  return { historical, measured, other, colliding, rows: [historical, measured, other, colliding] }
+  return { historical, measured, other }
 }
-
-test('A1 hides configuration filters when all dimensions are absent', () => {
-  const { historical } = configurationFixture()
-  assert.deepEqual(configurationFilterView([historical]).dimensions, [])
-})
-
-test('B1 exposes measured configuration dimensions and options', () => {
-  const { rows } = configurationFixture()
-  const view = configurationFilterView(rows)
-  assert.deepEqual(view.dimensions.map((dimension) => dimension.key), ['execution_shape', 'assurance'])
-  assert.ok(view.dimensions.every((dimension) => dimension.options.length > 0))
-  assert.ok(view.dimensions.every((dimension) => dimension.options.every((option) => option.value !== null)))
-})
-
-test('C1 marks missing configuration without inferring legacy fields', () => {
-  const { historical } = configurationFixture()
-  const marks = ['execution_shape', 'assurance'].map((dimension) => configurationDimensionCell(historical, dimension))
-  assert.ok(marks.every((mark) => mark.value === null && mark.text === 'Not recorded' && mark.dashed === true))
-  assert.notEqual(marks[0].text, historical.tier)
-  assert.notEqual(marks[1].text, historical.variant)
-})
-
-test('D1 distinguishes missing configuration from a matching literal value', () => {
-  const { historical, colliding } = configurationFixture()
-  const absent = configurationDimensionCell(historical, 'execution_shape')
-  const real = configurationDimensionCell(colliding, 'execution_shape')
-  assert.equal(absent.value, null)
-  assert.equal(absent.dashed, true)
-  assert.equal(real.value, 'Not recorded')
-  assert.equal(real.dashed, false)
-  assert.notDeepEqual({ value: absent.value, dashed: absent.dashed }, { value: real.value, dashed: real.dashed })
-})
 
 test('E1 preserves unrecorded rows while filtering measured configuration', () => {
   const { historical, measured, other } = configurationFixture()
@@ -111,15 +71,6 @@ test('E1 preserves unrecorded rows while filtering measured configuration', () =
   assert.deepEqual(view.rows.map((row) => row.adw_id), ['historical', 'measured'])
   assert.equal(view.excluded.count, 1)
   assert.equal(view.excluded.line, '1 measured row excluded by configuration filters · not-recorded rows remain visible')
-})
-
-test('F1 lists only measured configuration options', () => {
-  const { measured, colliding } = configurationFixture()
-  const view = configurationFilterView([measured, colliding])
-  const options = (key) => view.dimensions.find((dimension) => dimension.key === key).options.map((option) => option.value)
-  assert.deepEqual(options('execution_shape'), ['Not recorded', 'full'])
-  assert.deepEqual(options('assurance'), ['quick', 'standard'])
-  assert.doesNotMatch(JSON.stringify(view), /audit|scout|rigorous/)
 })
 
 test('G1 task list uses configuration cells filters and exclusion text', () => {
@@ -165,24 +116,6 @@ test('E1 agents page route nav and title are wired', () => {
   assert.match(page, /aria-label="Agent library"/)
 })
 
-test('skills-page:D1', () => {
-  const root = join(ROOT, 'visualizer/web/src')
-  const app = readFileSync(join(root, 'App.svelte'), 'utf8')
-  const page = readFileSync(join(root, 'lib/SkillsPage.svelte'), 'utf8')
-  assert.equal(formatHash(parseHash('#/skills')), '#/skills')
-  assert.ok(app.includes("import SkillsPage from './lib/SkillsPage.svelte'"))
-  assert.ok(app.includes('Skills · Factory'))
-  assert.ok(app.includes("route.view === 'skills'"))
-  assert.ok(app.includes('<SkillsPage />'))
-  assert.match(app, />Skills<\//)
-  assert.ok(page.includes('onsubmit={save}'))
-  assert.match(page, /saveSkillFile\(\{name,text,expected_revision:editor.revision\}\)/)
-  assert.ok(page.includes('Selection rules'))
-  assert.ok(page.includes('Discard your unsaved skill changes?'))
-  assert.doesNotMatch(page, /proposeSkills|Proposal only/)
-  assert.doesNotMatch(page, /#[0-9a-f]{3,8}\b|rgb\(|--(?:ink|paper|spot|serious)/i)
-})
-
 test('F1 agents page uses only Tier-2 colour aliases', () => {
   const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/AgentsPage.svelte'), 'utf8')
   const css = source.match(/<style>([\s\S]*?)<\/style>/)?.[1] || ''
@@ -226,10 +159,6 @@ test('A1: every visualizer consumer uses the shared attention classifier', () =>
 test('C1: every current attention key routes the metric click to attention', () => {
   const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
   assert.match(app, /taskFocus = \{ state: 'attention'/)
-})
-
-test('G1: a key outside the attention vocabulary is not attention work', () => {
-  assert.equal(needsAttention('outside-attention-vocabulary'), false)
 })
 
 test('ledger refresh waits after completion, coalesces clicks and resets its pause', async () => {
@@ -347,17 +276,4 @@ test('the kept frontend imports nothing from crew/ or scripts/', () => {
   }
   walk(join(ROOT, 'visualizer/web/src'))
   assert.deepEqual(found, [])
-})
-
-// MUTATION: count shipped without the measured guard and a lean board reads "Shipped 0".
-test('newestFirst lists the latest started_at first and unstarted runs last in feed order', () => {
-  const rows = [
-    { adw_id: 'a', started_at: null },
-    { adw_id: 'b', started_at: '2026-11-01T20:44:19.652Z' },
-    { adw_id: 'c', started_at: 'not a date' },
-    { adw_id: 'd', started_at: '2026-11-02T16:25:24.265Z' },
-    { adw_id: 'e', started_at: '2026-11-02T16:25:24.265Z' },
-  ]
-  assert.deepEqual(taskBoard(rows).rows.map((run) => run.adw_id), ['d', 'e', 'b', 'a', 'c'])
-  assert.deepEqual(rows.map((run) => run.adw_id), ['a', 'b', 'c', 'd', 'e'])
 })

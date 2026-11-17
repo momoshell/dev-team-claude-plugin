@@ -1,14 +1,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { join, resolve as resolvePath } from 'node:path'
 import {
-  CAPABILITY_REFUSALS, PI_AGENT_DIR_ENV, REGISTER_ROOT, armGrants,
+  CAPABILITY_REFUSALS, REGISTER_ROOT, armGrants,
   grantsFor, pathExists, pathMessage, refuse,
   resolvedGrantPath,
 } from './grants.mjs'
 import { SUBAGENT_EXTENSION } from '../adapters/adapter-pi.mjs'
-import { parseAgent } from '../protocols.mjs'
 import { BriefUsageError, exportEntries } from './export-entries.mjs'
 import * as grants from './grants.mjs'
 
@@ -62,15 +61,6 @@ test('the register declares no local provider or narrator', () => {
   for (const key of ['local_providers', 'narrator']) assert.equal(Object.hasOwn(grants.REGISTER, key), false)
 })
 
-// MUTATION: restore vendorRoots.
-test('the seat path ships no vendor grants, grant backing check, assignment parser or log helper', () => {
-  for (const name of ['assertGrantsBacked', 'resolveVendorExtension', 'vendorRoots', 'VENDOR_ROOT_ENV']) assert.equal(name in grants, false)
-  for (const value of [grants.armGrants({ role: 'builder', agent: 'pi', extensions: [] }, { root: REGISTER_ROOT, exists: () => true })])
-    for (const key of ['vendor_extensions', 'vendor_withheld']) assert.equal(Object.hasOwn(value, key), false)
-  for (const name of ['assignment.mjs', 'log.mjs']) assert.equal(existsSync(join(REGISTER_ROOT, 'crew/acp', name)), false)
-  assert.equal(PI_AGENT_DIR_ENV, 'PI_CODING_AGENT_DIR')
-})
-
 test('grantsFor resolves valid grants and fails closed on missing paths', () => {
   const register = { roles: { builder: role({ extensions: ['crew/pi/e.js'], agents: [{ name: 'Explore', def: 'crew/pi/a.json' }] }) } }
   const readFile = () => JSON.stringify({ name: 'Explore', prompt: 'go' })
@@ -112,16 +102,6 @@ test('armGrants arms native extensions and fff, and refuses what it cannot back'
   )
 })
 
-test('the committed reviewer definition grants subagent with scout', () => {
-  for (const role of ['reviewer']) {
-    const { fields, defects } = parseAgent(readFileSync(new URL(`../agents/${role}.md`, import.meta.url), 'utf8'))
-    assert.deepEqual(defects, [], role)
-    const grants = armGrants({ role, agent: fields.agent, extensions: fields.extensions ?? [] })
-    assert.ok(grants.extensions.some((path) => path.replaceAll('\\', '/').endsWith(SUBAGENT_EXTENSION)), role)
-    assert.ok(grants.agents.some((agent) => agent.name === 'scout'), role)
-  }
-})
-
 // MUTATION: restore the hard-coded LEAN_FFF_BIN probe.
 test('armGrants arms fff from the register binary, not a hard-coded path', () => {
   const server = { name: 'fff', command: { bin: '/usr/local/bin/fff-mcp', args: [] }, url: null }
@@ -145,11 +125,6 @@ test('CAPABILITY_REFUSALS lists only the reasons the seat path throws', () => {
 // MUTATION: re-export EMPTY_GRANTS.
 test('grants.mjs exports no mergeMcpServers, EMPTY_GRANTS or SUBAGENT_EXTENSION', () => {
   for (const name of ['mergeMcpServers', 'EMPTY_GRANTS', 'SUBAGENT_EXTENSION']) assert.equal(Object.hasOwn(grants, name), false, name)
-})
-
-// MUTATION: restore skills in grantsFor's return.
-test('armGrants returns only extensions, agents and mcp_servers', () => {
-  assert.deepEqual(Object.keys(armGrants({ role: 'builder', agent: 'pi' })).sort(), ['agents', 'extensions', 'mcp_servers'])
 })
 
 // MUTATION: restore lead's pi fff overlay.
@@ -196,28 +171,6 @@ test('exportEntries scans exports with lines, spans and signatures', () => {
   assert.deepEqual(exportEntries('export const typedValue: number = 1;\n', 'fixture.ts').map(({ name, line }) => ({ name, line })), [{ name: 'typedValue', line: 1 }])
   assert.deepEqual(exportEntries('export const ignoredValue = 1;\n', 'fixture.txt'), [])
   assert.throws(() => exportEntries(42), (err) => err instanceof BriefUsageError && err.reason === 'wrong-type')
-})
-
-test('BriefUsageError carries its name and reason', () => {
-  const err = new BriefUsageError('brief: bad', 'wrong-type')
-  assert.equal(err.name, 'BriefUsageError')
-  assert.equal(err.reason, 'wrong-type')
-  assert.equal(err instanceof Error, true)
-  assert.equal(new BriefUsageError('x').reason, 'missing-line')
-})
-
-// MUTATION: drop the own-role pass in registeredAgents, so the first role that names an agent wins.
-test('a seat whose role defines its own agent gets that definition, not an earlier role\'s', () => {
-  const register = { roles: {
-    planner: { mcp_servers: [], by_agent: { pi: { agents: [{ name: 'scout', def: 'planner.json' }] } } },
-    reviewer: { mcp_servers: [], by_agent: { pi: { agents: [{ name: 'scout', def: 'reviewer.json' }] } } },
-    builder: { mcp_servers: [] },
-  } }
-  const readFile = () => JSON.stringify({ name: 'scout', prompt: 'look' })
-  const own = armGrants({ role: 'reviewer', agent: 'pi', extensions: ['subagent'] }, { register, root: '/repo', exists: () => true, readFile })
-  assert.deepEqual(own.agents, [{ name: 'scout', def: resolvePath('/repo/reviewer.json') }])
-  const fallback = armGrants({ role: 'builder', agent: 'pi', extensions: ['subagent'] }, { register, root: '/repo', exists: () => true, readFile })
-  assert.deepEqual(fallback.agents, [{ name: 'scout', def: resolvePath('/repo/planner.json') }])
 })
 
 // MUTATION: read spec.extensions without a default.

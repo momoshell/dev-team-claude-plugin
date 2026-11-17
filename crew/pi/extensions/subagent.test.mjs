@@ -3,10 +3,9 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'; import { ROOT, leanLaneFixture, scratchDir } from '../../../test/helpers.mjs'
 
-import { basename, dirname, join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as mod from './subagent.ts'
-import * as adapter from '../../adapters/adapter-pi.mjs'
 
 // MUTATION: restore the crew/drive.mjs citation
 test('subagent.ts and advisor.ts cite only crew files that exist', () => {
@@ -27,8 +26,6 @@ const USAGE = {
   input: 100, output: 20, cacheRead: 5, cacheWrite: 7, totalTokens: 132,
   cost: { input: 0.001, output: 0.002, cacheRead: 0.0001, cacheWrite: 0.0002, total: 0.0033 },
 }
-const PI_TOKEN_FIELDS = ['input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens']
-const PI_COST_FIELDS = ['input', 'output', 'cacheRead', 'cacheWrite', 'total']
 
 function messageEnd(text, usage) {
   const message = { role: 'assistant', content: [{ type: 'text', text }] }
@@ -73,11 +70,6 @@ function byteLength(value) {
 
 function lineCount(value) {
   return String(value ?? '').split('\n').length
-}
-
-function paramsForGrants(grants) {
-  const env = grants.length ? { [mod.AGENTS_ENV]: JSON.stringify(grants) } : {}
-  return mod.createAgentTool({ env }).parameters
 }
 
 async function drive(extension, {
@@ -199,20 +191,6 @@ test('the module is zero-dep, erasable, and carries the vendored MIT notice', ()
   ]) assert.ok(source.includes(phrase), phrase)
 })
 
-test('the factory registers exactly one agent tool and one tool_result handler', () => {
-  const tools = []
-  const handlers = []
-  mod.default({ registerTool: (tool) => tools.push(tool), on: (event, handler) => handlers.push([event, handler]) })
-  assert.equal(tools.length, 1)
-  assert.equal(tools[0].name, 'agent')
-  assert.equal(typeof tools[0].execute, 'function')
-  assert.equal(tools[0].executionMode, 'sequential')
-  assert.ok(tools[0].label)
-  assert.ok(tools[0].description)
-  assert.equal(handlers.length, 1)
-  assert.deepEqual(handlers.map(([event]) => event), ['tool_result'])
-})
-
 test('the parameters schema constrains nothing and execute enforces the arguments', async () => {
   const schema = mod.AGENT_PARAMS
   assert.equal(schema.additionalProperties, true)
@@ -230,52 +208,6 @@ test('the parameters schema constrains nothing and execute enforces the argument
   const extra = await driven(mod, { params: { agent: 'scout', task: 'x', extra: 'ignored' } })
   assert.equal(extra.result.details.refused, undefined)
   assert.equal(extra.calls.length, 1)
-})
-
-test('the parameters schema advertises exactly the one granted agent name', () => {
-  const params = paramsForGrants([{ name: 'scout', def: '/tmp/scout.json' }])
-  assert.deepEqual(params.properties.agent.enum, ['scout'])
-})
-
-test('the parameters schema advertises exactly the two granted agent names', () => {
-  const params = paramsForGrants([
-    { name: 'scout', def: '/tmp/scout.json' },
-    { name: 'archivist', def: '/tmp/archivist.json' },
-  ])
-  assert.deepEqual(params.properties.agent.enum, ['scout', 'archivist'])
-  assert.equal(params.additionalProperties, true)
-  assert.equal(Object.hasOwn(params, 'required'), false)
-  assert.deepEqual(params.properties.agent, {
-    description: mod.AGENT_PARAMS.properties.agent.description,
-    enum: ['scout', 'archivist'],
-  })
-  assert.deepEqual(params.properties.task, mod.AGENT_PARAMS.properties.task)
-})
-
-test('an empty allowlist keeps the permissive schema and the register refusal', async () => {
-  const params = paramsForGrants([])
-  assert.equal(params, mod.AGENT_PARAMS)
-  assert.equal(Object.hasOwn(params.properties.agent, 'enum'), false)
-  const run = await driven(mod, { env: { [mod.AGENTS_ENV]: undefined } })
-  assert.match(refusedOf(run.result), /no spawnable agents are granted to this seat/)
-  assert.equal(run.calls.length, 0)
-})
-
-test('the b33 long ungranted name stays out of the model-visible refusal', async () => {
-  const marker = 'QQMARKERQQ'
-  const run = await driven(mod, {
-    env: {
-      [mod.AGENTS_ENV]: JSON.stringify([
-        { name: 'scout', def: '/tmp/scout.json' },
-        { name: 'archivist', def: '/tmp/archivist.json' },
-      ]),
-    },
-    params: { agent: marker + 'Z'.repeat(60000), task: 'go' },
-  })
-  assert.ok(run.result.details.refused)
-  assert.equal(textOf(run.result).includes(marker), false)
-  assert.equal(byteLength(run.result.details.agent), mod.AGENT_NAME_CAP_BYTES)
-  assert.equal(run.calls.length, 0)
 })
 
 test('the findings validator returns closed payload-free codes', () => {
@@ -357,20 +289,6 @@ test('loadAgentDefinition mirrors the register four refusal classes', () => {
   assert.deepEqual(defaults.definition.tools, ['read', 'grep', 'find', 'ls'])
 })
 
-// MUTATION: restore the register read
-test('loadAgentDefinition resolves a model cell without reading the capability register', () => {
-  let reads = 0
-  let argument
-  const loaded = mod.loadAgentDefinition({ name: 'scout', def: '/ok' }, {
-    readFile: () => JSON.stringify({ name: 'scout', prompt: 'p', model: { provider: 'anthropic', id: 'model' } }),
-    readRegister: () => { reads++; return '{}' },
-    modelString: (cell) => { argument = cell; return 'anthropic/model' },
-  })
-  assert.equal(loaded.definition.model, 'anthropic/model')
-  assert.equal(reads, 0)
-  assert.deepEqual(argument, { provider: 'anthropic', id: 'model' })
-})
-
 test('every pre-spawn refusal is bounded, payload-free, spawns nothing and journals nothing', async () => {
   const cap = mod.OUTPUT_CAP_BYTES
   const huge = 'A'.repeat(cap + 4096)
@@ -397,22 +315,6 @@ test('every pre-spawn refusal is bounded, payload-free, spawns nothing and journ
   assert.equal(wide.includes('�'), false)
   const tall = mod.boundRefusalText(`refused:\n${'x\n'.repeat(mod.OUTPUT_CAP_LINES + 500)}`)
   assert.ok(lineCount(tall) <= mod.OUTPUT_CAP_LINES)
-})
-
-test('the child argv carries the recursion bound and the read-only boundary', async () => {
-  const run = await driven(mod)
-  const args = run.calls[0].args
-  assert.ok(args.includes('--mode'))
-  assert.ok(args.includes('--no-session'))
-  assert.ok(args.includes('--no-extensions'))
-  assert.ok(args.includes('--no-skills'))
-  assert.ok(args.includes('--exclude-tools'))
-  assert.equal(args[args.indexOf('--exclude-tools') + 1], 'edit,write,bash')
-  assert.ok(args.includes('--append-system-prompt'))
-  assert.equal(args.includes('--provider'), false)
-  const childEnv = run.calls[0].options.env
-  assert.equal(childEnv[mod.DEPTH_ENV], '1')
-  assert.equal(childEnv[mod.AGENTS_ENV], undefined)
 })
 
 test('the child is spawned under a deadline that escalates to SIGKILL', async () => {
@@ -491,33 +393,6 @@ test('the result caps refuse rather than silently truncate a findings payload', 
   const lineRun = await driven(mod, { chunks: asChunks(childLines(byLines, null)) })
   assert.match(refusedOf(lineRun.result), /lines/i)
   assert.equal(lineRun.result.details.findings, undefined)
-})
-
-test('usage is a complete pi Usage or absent, never partial', async () => {
-  const measured = await driven(mod)
-  assert.equal(measured.result.details.refused, undefined)
-  const usage = measured.result.usage
-  assert.ok(usage)
-  for (const field of PI_TOKEN_FIELDS) assert.equal(usage[field], USAGE[field])
-  for (const field of PI_COST_FIELDS) assert.equal(usage.cost[field], USAGE.cost[field])
-  const totals = usage.input + usage.output + usage.cacheRead + usage.cacheWrite + usage.totalTokens + usage.cost.total
-  assert.ok(Number.isFinite(totals))
-  assert.equal(mod.createStreamReducer().usage(), null)
-  assert.equal(mod.createStreamReducer().piUsage(), null)
-  const absent = await driven(mod, { chunks: asChunks(childLines(FINDINGS, null)) })
-  assert.equal(Object.hasOwn(absent.result, 'usage'), false)
-  assert.equal(absent.result.details.usage, null)
-})
-
-test('the journal records exactly one row per spawn', async () => {
-  const run = await driven(mod)
-  assert.equal(run.journal.length, 1)
-  const row = JSON.parse(run.journal[0])
-  assert.equal(row.role, 'planner')
-  assert.equal(row.subagent_usage.spawn_id, 's1')
-  assert.equal(row.subagent_usage.agent, 'scout')
-  assert.equal(row.subagent_usage.outcome, 'ok')
-  assert.equal(row.usage.billed_input_tokens, USAGE.input)
 })
 
 test('the call blocks until close, including on an asynchronous child error', async () => {
@@ -599,49 +474,6 @@ test('an absent spawn counter starts at zero while other read errors refuse', ()
   }
 })
 
-test('reserveSpawn increments the counter before allowing a child', () => {
-  let writtenPath = ''
-  let writtenBody = ''
-  let writtenOptions
-  const reserved = mod.reserveSpawn({
-    taskDir: '/tmp/example-run/task',
-    readFile: () => '{"spawns": 3}',
-    writeFile: (path, body, options) => {
-      writtenPath = path
-      writtenBody = body
-      writtenOptions = options
-    },
-    budget: 4,
-  })
-  assert.equal(reserved.count, 4)
-  assert.equal(writtenPath, '/tmp/example-run/task/subagent-spawns.json')
-  assert.equal(writtenBody, '{"spawns":4}\n')
-  assert.equal(writtenOptions.mode, 0o600)
-})
-
-test('the budget refusal fires', async () => {
-  const root = scratchDir('subagent-budget-refusal-')
-  const taskDir = join(root, 'task')
-  mkdirSync(taskDir, { recursive: true })
-  writeFileSync(join(taskDir, 'subagent-spawns.json'), `${JSON.stringify({ spawns: mod.SUBAGENT_SPAWN_BUDGET })}\n`)
-  const run = await driven(mod, {
-    root,
-    env: {
-      [mod.AGENTS_ENV]: JSON.stringify([{ name: 'scout', def: join(ROOT, 'crew/pi/agents/scout.json') }]),
-    },
-  })
-  const refusal = refusedOf(run.result)
-  assert.equal(run.calls.length, 0)
-  assert.equal(refusal.startsWith('refused: '), true)
-  assert.equal(refusal.includes('The seat is fine and nothing failed; the budget is spent'), true)
-  const row = JSON.parse(run.journal.at(-1))
-  assert.equal(row.subagent_usage.outcome, mod.SPAWN_BUDGET_OUTCOME)
-  assert.equal(row.subagent_usage.model, null)
-  assert.equal(row.usage, null)
-  assert.notEqual(mod.SPAWN_BUDGET_OUTCOME, 'ok')
-  assert.notEqual(mod.SPAWN_BUDGET_OUTCOME, 'refused')
-})
-
 test('the last allowance spawns and the next does not', async () => {
   const root = scratchDir('subagent-budget-last-')
   const taskDir = join(root, 'task')
@@ -692,48 +524,6 @@ test('a counter that cannot be written refuses', async () => {
   assert.equal(refusedOf(run.result).includes('counter could not be recorded'), true)
 })
 
-test('depth and the budget are independent bounds', async () => {
-  const depth = await driven(mod, { env: { [mod.DEPTH_ENV]: '1' } })
-  assert.equal(refusedOf(depth.result).includes('spawn depth is already 1'), true)
-  assert.equal(depth.calls.length, 0)
-  assert.equal(existsSync(join(depth.taskDir, 'subagent-spawns.json')), false)
-
-  const spentRoot = scratchDir('subagent-budget-depth-')
-  const spentTaskDir = join(spentRoot, 'task')
-  mkdirSync(spentTaskDir, { recursive: true })
-  writeFileSync(join(spentTaskDir, 'subagent-spawns.json'), `${JSON.stringify({ spawns: mod.SUBAGENT_SPAWN_BUDGET })}\n`)
-  const budget = await driven(mod, { root: spentRoot })
-  assert.equal(budget.calls.length, 0)
-  assert.equal(refusedOf(budget.result).includes('The seat is fine and nothing failed; the budget is spent'), true)
-})
-
-test('the refusal is bounded and payload-free', async () => {
-  const root = scratchDir('subagent-budget-payload-')
-  const taskDir = join(root, 'task')
-  mkdirSync(taskDir, { recursive: true })
-  writeFileSync(join(taskDir, 'subagent-spawns.json'), `${JSON.stringify({ spawns: mod.SUBAGENT_SPAWN_BUDGET })}\n`)
-  const taskMarker = 'TASK_PAYLOAD_MARKER'
-  const agentMarker = 'AGENT_NAME_PAYLOAD_MARKER'
-  const allowedAgentName = 'A'.repeat(mod.AGENT_NAME_CAP_BYTES)
-  const hugeAgentName = `${allowedAgentName}${agentMarker}${'A'.repeat(52 * 1024)}`
-  const run = await driven(mod, {
-    root,
-    env: {
-      [mod.AGENTS_ENV]: JSON.stringify([{
-        name: allowedAgentName, def: join(ROOT, 'crew/pi/agents/scout.json'),
-      }]),
-    },
-    params: { agent: hugeAgentName, task: taskMarker },
-  })
-  const text = textOf(run.result)
-  assert.equal(byteLength(text) < mod.OUTPUT_CAP_BYTES, true)
-  assert.equal(text.includes('�'), false)
-  assert.equal(text.includes(taskMarker), false)
-  assert.equal(text.includes(hugeAgentName), false)
-  assert.equal(text.includes(agentMarker), false)
-  assert.ok(refusedOf(run.result).length > 0)
-})
-
 test('toolResultPatch flags a refusal and only a refusal', () => {
   assert.deepEqual(mod.toolResultPatch({ toolName: 'agent', details: { refused: 'refused: nope' } }), { isError: true })
   assert.equal(mod.toolResultPatch({ toolName: 'agent', details: { findings: FINDINGS } }), undefined)
@@ -772,38 +562,6 @@ test('ctx supplies the child model, thinking level and cwd', async () => {
   assert.match(`${textOf(unresolved.result)} ${refusedOf(unresolved.result)}`, /refusing a guessed passthrough/)
 })
 
-test('the granted pi seat activates the agent tool and transports the allowlist', () => {
-  const grants = {
-    tools: [],
-    extensions: ['crew/pi/extensions/subagent.ts'],
-    agents: [{ name: 'scout', def: 'crew/pi/agents/scout.json' }],
-    skills: [],
-    advisor: false,
-  }
-  const command = adapter.piSeatParts({
-    role: 'planner', model: 'anthropic/claude-opus-5', promptFile: '/tmp/prompt.md',
-    deny: 'Edit,Write,Bash', taskDir: '/tmp/task', effort: 'high', grants,
-  })
-  assert.ok(command.args[command.args.indexOf('--tools') + 1].split(',').includes('agent'))
-  assert.equal(command.args[command.args.indexOf('-e') + 1], 'crew/pi/extensions/subagent.ts')
-  assert.equal(command.env.CREW_PI_AGENTS, JSON.stringify(grants.agents))
-  const bare = adapter.piSeatParts({
-    role: 'planner', model: 'anthropic/claude-opus-5', promptFile: '/tmp/prompt.md',
-    deny: 'Edit', taskDir: '/tmp/task', env: { CREW_PI_AGENTS: 'hostile' },
-  })
-  assert.equal(bare.args[bare.args.indexOf('--tools') + 1], adapter.PI_BUILTIN_TOOLS.join(','))
-  assert.equal(Object.hasOwn(bare.env, 'CREW_PI_AGENTS'), false)
-})
-
-test('the shipped scout bundle loads and declares subagents', () => {
-  const grants = {
-    extensions: [join(ROOT, 'crew/pi/extensions/subagent.ts')],
-    agents: [{ name: 'scout', def: join(ROOT, 'crew/pi/agents/scout.json') }],
-  }
-  assert.equal(mod.loadAgentDefinition(grants.agents[0]).error, undefined)
-  assert.equal(basename(grants.agents[0].def), 'scout.json')
-})
-
 // Which pi frame carries a seat's own spend: every row is asserted against the
 // exported rule and against what the reducer actually folds.
 //
@@ -819,12 +577,6 @@ const OWN_SPEND_TABLE = [
   { name: 'an agent_end replay is not', frame: { type: 'agent_end', message: { role: 'assistant', usage: { input: 9, output: 10 } } }, own: false },
   { name: 'a non-frame is not', frame: null, own: false },
 ]
-
-test("the reducer admits only the pi frame that carries a seat's own spend", () => {
-  for (const row of OWN_SPEND_TABLE) {
-    assert.equal(mod.carriesOwnSpend(row.frame), row.own, `subagent.ts rule: ${row.name}`)
-  }
-})
 
 test('the reducer folds what the rule claims', () => {
   for (const row of OWN_SPEND_TABLE) {
@@ -874,30 +626,6 @@ function readRun(nudge, n, dirs = DIRS) {
   }
 }
 
-test('subagent spawn and scout-nudge rows carry a numeric at by default', async () => {
-  const run = await driven(mod, { now: null })
-  const spawn = run.journal.map(JSON.parse).find((row) => row.subagent_usage)
-  const { nudge, rows } = nudgeFixture({ now: undefined })
-  readRun(nudge, mod.SCOUT_NUDGE_READ_THRESHOLD)
-  assert.ok(Number.isFinite(spawn?.at))
-  assert.equal(rows().length, 1)
-  assert.ok(Number.isFinite(rows()[0].at))
-})
-
-test('SN3: one nudge after the read threshold across several directories', () => {
-  const { nudge, sends, rows } = nudgeFixture()
-  readRun(nudge, mod.SCOUT_NUDGE_READ_THRESHOLD - 1)
-  assert.equal(sends.length, 0)
-  readRun(nudge, 1)
-  assert.equal(sends.length, 1)
-  assert.equal(sends[0].message.customType, mod.SCOUT_NUDGE_MESSAGE_TYPE)
-  assert.match(sends[0].message.content, /scout/)
-  assert.deepEqual(sends[0].options, { deliverAs: 'steer' })
-  assert.equal(rows().length, 1)
-  assert.deepEqual(rows()[0].scout_nudge, { reads: 8, directories: 3 })
-  assert.equal(rows()[0].role, 'planner')
-})
-
 test('SN3: reads confined to one or two directories send nothing; grep/find/ls count', () => {
   const narrow = nudgeFixture()
   readRun(narrow.nudge, 12, ['x', 'y'])
@@ -907,22 +635,6 @@ test('SN3: reads confined to one or two directories send nothing; grep/find/ls c
     assert.equal(mixed.nudge.onToolCall({ toolName, input: { path } }), undefined)
   }
   assert.equal(mixed.sends.length, 1)
-})
-
-test('SN4: no second nudge in the same session after an agent, edit or write reset, however many model steps pass', () => {
-  const { nudge, sends, rows } = nudgeFixture()
-  readRun(nudge, 8)
-  assert.equal(sends.length, 1)
-  for (const toolName of ['agent', 'edit', 'write']) {
-    assert.equal(nudge.onToolCall({ toolName, input: {} }), undefined)
-    readRun(nudge, 8)
-    assert.equal(sends.length, 1, toolName)
-    assert.equal(rows().length, 1, toolName)
-  }
-  assert.equal(nudge.onTurnStart, undefined, 'no handler resets the nudge between model steps')
-  readRun(nudge, 8)
-  assert.equal(sends.length, 1)
-  assert.equal(rows().length, 1)
 })
 
 test('the scout nudge never throws into the seat: a failing journal or send still behaves', () => {

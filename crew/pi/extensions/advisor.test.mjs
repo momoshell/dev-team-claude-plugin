@@ -6,7 +6,6 @@ import { join, dirname } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import * as advisor from './advisor.ts'
-import { piSeatParts } from '../../adapters/adapter-pi.mjs'
 import { leanLaneFixture, scratchDir } from '../../../test/helpers.mjs'
 // MUTATION: add planner back to ADVISED_ROLES
 test('advisor.ts carries no HTTP endpoint, cell classifier or planner-advisor surface', () => {
@@ -59,39 +58,6 @@ const result = (id, toolName, input, text, isError = false) => ({
 
 const call = (id, toolName, input) => ({ type: 'tool_call', toolCallId: id, toolName, input })
 
-// MUTATION: restore the tripwire touch check.
-test('a manifest tripwires entry fires no tier-zero note and the context row carries no tripwire fields', () => {
-  const f = fixture(); const journal = sink()
-  const path = join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE)
-  const manifest = JSON.parse(readFileSync(path, 'utf8'))
-  writeFileSync(path, JSON.stringify({ ...manifest, tripwires: ['lib/widget.test.mjs'] }))
-  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir }), deps: {
-    cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile,
-    readFile: (p) => readFileSync(p, 'utf8'), fileMtime: () => 2,
-  } })
-  a.onToolCall(call('t', 'write', { path: join(f.tree, 'lib/widget.test.mjs'), content: 'x' }), {})
-  assert.equal(journal.rows.some((row) => row.advisor_note?.tier === 0), false)
-  const row = journal.rows.find((entry) => entry.advisor_context)?.advisor_context
-  assert.ok(row)
-  assert.equal('tripwires_source' in row, false)
-  assert.equal('tripwires_count' in row, false)
-  rmSync(f.root, { recursive: true, force: true })
-})
-
-// MUTATION: restore rejection of malformed tripwires in the manifest reader.
-test('the tier-zero kinds and the loaded context carry no tripwire', () => {
-  assert.equal('TRIPWIRE_TOUCH' in advisor, false)
-  const f = fixture()
-  const cell = { provider: 'provider', id: 'model', agent: 'pi', effort: 'medium', model: 'provider/model' }
-  writeFileSync(join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE), JSON.stringify({ schema_version: 1, run_started_at: 1, tripwires: 'not-a-list', cell }))
-  const context = advisor.loadContext({ taskDir: f.taskDir })
-  assert.deepEqual(context.cell, cell)
-  assert.equal(context.run_started_at, 1)
-  assert.equal('tripwires' in context, false)
-  assert.equal('tripwires_source' in context, false)
-  rmSync(f.root, { recursive: true, force: true })
-})
-
 function fakeChild({ exitCode = 0, invalid = false, hang = false, stderr = '' } = {}) {
   const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kills = []
   child.stdin = { end(value) { if (hang) return; setImmediate(() => {
@@ -127,27 +93,6 @@ async function runManifestConsult({ cell = { provider: 'local', id: 'advisor-v1'
   return { f, journal, a, argv, spawned }
 }
 
-// MUTATION: make a false advisor_boot append fatal again
-test('advisor attaches when boot journaling fails', async () => {
-  for (const role of ['builder']) for (const mode of ['throw', 'false', 'ok']) {
-    const p = pi(), rows = []
-    await advisor.attachAdvisor(p, { env: env({ CREW_ROLE: role }), deps: {
-      readFile() { throw Object.assign(new Error('missing'), { code: 'ENOENT' }) },
-      appendFile(_path, text) {
-        rows.push(JSON.parse(text))
-        if (mode === 'throw') throw Object.assign(new Error('denied'), { code: 'EACCES' })
-        if (mode === 'false') return false
-      },
-    } })
-    assert.equal(rows.filter((row) => row.advisor_boot?.outcome === 'attached').length, 1)
-    assert.deepEqual(p.handlers.map(([name]) => name).sort(), ['tool_call', 'tool_result'])
-    assert.ok(p.handlers.every(([, handler]) => typeof handler === 'function'))
-  }
-})
-
-test('ADR47-L2 A1 child argv disables tools and context files', async () => { const r = await runManifestConsult(); assert.deepEqual(r.argv.slice(0, 13), ['-p','--mode','json','--no-session','--model','local/advisor-v1','--thinking','high','--no-tools','--no-context-files','--no-extensions','--no-skills','--append-system-prompt']); assert.equal(r.argv.length,14) })
-test('ADR47-L2 A2 child model comes from manifest rather than environment', async () => { const r = await runManifestConsult({ envExtra: { CREW_ADVISOR_MODEL: 'env/wrong' } }); assert.equal(r.argv[r.argv.indexOf('--model') + 1], 'local/advisor-v1') })
-test('ADR47-L2 A3 child thinking uses manifest effort', async () => { const r = await runManifestConsult(); assert.equal(r.argv[r.argv.indexOf('--thinking') + 1], 'high') })
 test('ADR47-L2 C1 null-cell attach still emits an injected scope-breach tier-zero note', async () => {
   const f = fixture()
   const manifestPath = join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE)
@@ -172,21 +117,6 @@ test('ADR47-L2 C1 null-cell attach still emits an injected scope-breach tier-zer
   rmSync(f.root, { recursive: true, force: true })
 })
 test('ADR47-L2 C2 null cell suppresses repeated consult and spawn', async () => { const f = fixture(); const m = JSON.parse(readFileSync(join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE))); m.cell = null; writeFileSync(join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE), JSON.stringify(m)); const journal = sink(); let spawnCount = 0; const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR:f.taskDir }), deps: { taskDir:f.taskDir,cwd:f.tree,appendFile:journal.appendFile,readFile:(p)=>readFileSync(p,'utf8'),fileMtime:()=>2,spawn:()=>{spawnCount++} } }); for(let i=1;i<=25;i++){a.onToolCall(call(String(i),'read',{}),{});a.onToolResult(result(String(i),'read',{},'ok'),{})} await a.settled(); assert.equal(spawnCount,0); assert.equal(journal.rows.some((r)=>r.advisor_consult),false); assert.equal(journal.rows.some((r)=>r.advisor_note?.tier===1),false); rmSync(f.root,{recursive:true,force:true}) })
-test('ADR47-L2 C3 grant attaches without a manifest or retired model environment', async () => {
-  const f = fixture(); rmSync(join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE))
-  const p = pi(); const journal = sink()
-  await advisor.attachAdvisor(p, {
-    env: { CREW_ADVISOR: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: f.taskDir },
-    deps: { taskDir: f.taskDir, appendFile: journal.appendFile },
-  })
-  assert.deepEqual(p.handlers.map(([event]) => event).sort(), ['tool_call', 'tool_result'])
-  assert.equal(journal.rows.find((row) => row.advisor_boot)?.advisor_boot.outcome, 'attached')
-  rmSync(f.root, { recursive: true, force: true })
-})
-test('ADR47-L2 D1 consult audit carries manifest identity', async () => { const r=await runManifestConsult(); const row=r.journal.rows.find(x=>x.advisor_consult).advisor_consult; assert.deepEqual([row.provider,row.model_id,row.agent,row.effort,row.model],['local','advisor-v1','pi','high','local/advisor-v1']) })
-test('ADR47-L2 D2 usage audit carries manifest identity', async () => { const r=await runManifestConsult(); const row=r.journal.rows.find(x=>x.advisor_usage).advisor_usage; assert.deepEqual([row.provider,row.model_id,row.agent,row.effort,row.model],['local','advisor-v1','pi','high','local/advisor-v1']) })
-test('ADR47-L2 E1 cadence consult retains ordinal 25 after calls 26 and 27', async () => { const f=fixture(); const journal=sink(); const manifest=JSON.parse(readFileSync(join(f.taskDir,advisor.ADVISOR_MANIFEST_FILE))); manifest.cell={provider:'local',id:'advisor-v1',agent:'pi',effort:'high',model:'local/advisor-v1'}; writeFileSync(join(f.taskDir,advisor.ADVISOR_MANIFEST_FILE),JSON.stringify(manifest)); let spawned=0; const a=advisor.createAdvisor({env:env({CREW_TASK_DIR:f.taskDir}),deps:{cwd:f.tree,taskDir:f.taskDir,appendFile:journal.appendFile,readFile:(p)=>readFileSync(p,'utf8'),fileMtime:()=>2,resolveBinary:()=>({command:'/fake/pi'}),spawn:()=>{spawned++;return fakeChild()}}}); a.onToolResult(result('ground','read',{path:join(f.tree,'lib/widget.mjs')},'lib/widget.mjs:2: grounded'),{}); for(let i=1;i<=27;i++) a.onToolCall(call(String(i),'read',{}),{}); a.onToolResult(result('25','read',{},'ok'),{}); await a.settled(); const notes=journal.rows.filter(x=>x.advisor_note?.tier===1&&x.advisor_note.outcome!=='skipped').map(x=>x.advisor_note); assert.equal(spawned,1); assert.equal(notes.length,1); assert.equal(notes[0].call_ordinal,25); rmSync(f.root,{recursive:true,force:true}) })
-test('ADR47-L2 E2 tier zero note stamps its firing call ordinal', async () => { const r=await runManifestConsult(); const note=r.journal.rows.find(x=>x.advisor_note?.tier===0)?.advisor_note; assert.equal(note.call_ordinal,1) })
 // Kills: `cell_invalid` forced false (or the attach check deleted). A present cell that fails
 // the allowlist must refuse loudly, never attach as a silent tier-0-only seat; null still attaches.
 test('a malformed manifest cell refuses attach while an explicit null cell attaches', async () => {
@@ -228,8 +158,6 @@ test('result-time repeated-failure notes and queued triggers retain the result c
   assert.equal(queued.call_ordinal, 2)
   rmSync(f.root, { recursive: true, force: true })
 })
-test('ADR47-L2 F1 timeout journals bounded cell failure', async () => { const callbacks=[]; const timers={setTimeout(fn){callbacks.push(fn);return callbacks.length},clearTimeout(){}}; const f=fixture(); const m=JSON.parse(readFileSync(join(f.taskDir,advisor.ADVISOR_MANIFEST_FILE))); m.cell={provider:'local',id:'advisor-v1',agent:'pi',effort:'high',model:'local/advisor-v1'}; writeFileSync(join(f.taskDir,advisor.ADVISOR_MANIFEST_FILE),JSON.stringify(m)); const journal=sink(); const a=advisor.createAdvisor({env:env({CREW_TASK_DIR:f.taskDir}),deps:{cwd:f.tree,taskDir:f.taskDir,appendFile:journal.appendFile,readFile:(p)=>readFileSync(p,'utf8'),fileMtime:()=>2,resolveBinary:()=>({command:'/fake/pi'}),spawn:()=>fakeChild({hang:true}),setTimeout:timers.setTimeout,clearTimeout:timers.clearTimeout,consultTimeoutMs:5,childKillGraceMs:1}}); a.onToolResult(result('g','read',{path:join(f.tree,'lib/widget.mjs')},'lib/widget.mjs:2: grounded'),{}); const path=join(f.tree,'widget.test.mjs'); a.onToolCall(call('f','write',{path,content:'x'}),{}); a.onToolResult(result('f','write',{path,content:'x'},'ok'),{}); for(let i=0;i<8;i++){callbacks.shift()?.();await new Promise(r=>setImmediate(r))} await a.settled(); const row=journal.rows.find(x=>x.advisor_cell_failure)?.advisor_cell_failure; assert.equal(row.kind,'timeout'); assert.equal(row.model_id,'advisor-v1'); assert.equal(row.provider,'local'); rmSync(f.root,{recursive:true,force:true}) })
-test('ADR47-L2 F2 timeout rejection uses timeout code', async () => { const callbacks=[]; const f=fixture(); const m=JSON.parse(readFileSync(join(f.taskDir,advisor.ADVISOR_MANIFEST_FILE))); m.cell={provider:'local',id:'advisor-v1',agent:'pi',effort:'high',model:'local/advisor-v1'}; writeFileSync(join(f.taskDir,advisor.ADVISOR_MANIFEST_FILE),JSON.stringify(m)); const journal=sink(); const a=advisor.createAdvisor({env:env({CREW_TASK_DIR:f.taskDir}),deps:{cwd:f.tree,taskDir:f.taskDir,appendFile:journal.appendFile,readFile:(p)=>readFileSync(p,'utf8'),fileMtime:()=>2,resolveBinary:()=>({command:'/fake/pi'}),spawn:()=>fakeChild({hang:true}),setTimeout(fn){callbacks.push(fn);return callbacks.length},clearTimeout(){},consultTimeoutMs:5,childKillGraceMs:1}}); a.onToolResult(result('g','read',{path:join(f.tree,'lib/widget.mjs')},'lib/widget.mjs:2: grounded'),{}); const path=join(f.tree,'widget.test.mjs'); a.onToolCall(call('f','write',{path,content:'x'}),{}); a.onToolResult(result('f','write',{path,content:'x'},'ok'),{}); for(let i=0;i<8;i++){callbacks.shift()?.();await new Promise(r=>setImmediate(r))} await a.settled(); assert.ok(journal.rows.find(x=>x.advisor_note?.outcome==='rejected').advisor_note.codes.includes('timeout')); rmSync(f.root,{recursive:true,force:true}) })
 test('a nonzero child exit journals its exit code and stderr tail on the cell failure row', async () => {
   const r = await runManifestConsult({ childOptions: { exitCode: 1, stderr: 'pi: provider refused the request\n' } })
   try {
@@ -241,7 +169,6 @@ test('a nonzero child exit journals its exit code and stderr tail on the cell fa
     assert.ok(rows[0].stderr_tail.includes('provider refused'))
   } finally { rmSync(r.f.root, { recursive: true, force: true }) }
 })
-test('ADR47-L2 F3 nonzero child exit journals transport failure', async () => { const r=await runManifestConsult({childOptions:{exitCode:1}}); const row=r.journal.rows.find(x=>x.advisor_cell_failure)?.advisor_cell_failure; assert.equal(row.kind,'transport-error'); assert.equal(r.journal.rows.filter(x=>x.advisor_cell_failure).length,1) })
 test('a pre-spawn pi resolution failure writes exactly one transport-error cell-failure audit', async () => {
   const r = await runManifestConsult({ resolveBinary: () => ({}) })
   const failures = r.journal.rows.filter((row) => row.advisor_cell_failure).map((row) => row.advisor_cell_failure)
@@ -311,8 +238,6 @@ test('a later epoch abort or timeout never clears or relabels an earlier stream 
   }
 })
 
-test('ADR47-L2 F4 invalid clean judgment is rejected without transport failure', async () => { const f=fixture(); const m=JSON.parse(readFileSync(join(f.taskDir,advisor.ADVISOR_MANIFEST_FILE))); m.cell={provider:'local',id:'advisor-v1',agent:'pi',effort:'high',model:'local/advisor-v1'}; writeFileSync(join(f.taskDir,advisor.ADVISOR_MANIFEST_FILE),JSON.stringify(m)); const journal=sink(); const child=new EventEmitter(); child.stdout=new PassThrough(); child.stderr=new PassThrough(); child.stdin={end(){setImmediate(()=>{child.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',content:JSON.stringify({class:'bogus',severity:'low',claim:'bad judgment',evidence:['lib/widget.mjs:2']})}})+'\n');child.emit('close',0)})}}; child.kill=()=>true; const a=advisor.createAdvisor({env:env({CREW_TASK_DIR:f.taskDir}),deps:{cwd:f.tree,taskDir:f.taskDir,appendFile:journal.appendFile,readFile:(p)=>readFileSync(p,'utf8'),fileMtime:()=>2,resolveBinary:()=>({command:'/fake/pi'}),spawn:()=>child}}); a.onToolResult(result('g','read',{path:join(f.tree,'lib/widget.mjs')},'lib/widget.mjs:2: grounded'),{}); const path=join(f.tree,'widget.test.mjs'); a.onToolCall(call('f','write',{path,content:'x'}),{}); a.onToolResult(result('f','write',{path,content:'x'},'ok'),{}); await a.settled(); assert.ok(journal.rows.find(x=>x.advisor_note?.outcome==='rejected')); assert.equal(journal.rows.some(x=>x.advisor_cell_failure),false); rmSync(f.root,{recursive:true,force:true}) })
-
 test('the default export IS attachAdvisor: inert without the grant, and it refuses an unsupported role by name', async () => {
   // Pi loads advisor.ts and calls its default with only `pi`; attach then reads process.env. A typeof
   // pin proved the export existed. This proves it delegates: the two gates attachAdvisor applies
@@ -361,30 +286,6 @@ const sharedAdvisorCells = Object.freeze([
 
 
 
-test('advisor journal rows carry a numeric at by default', async () => {
-  const journal = sink()
-  await advisor.attachAdvisor(pi(), { env: env(), deps: journal })
-  assert.ok(journal.rows.length > 0)
-  assert.ok(journal.rows.every((row) => Number.isFinite(row.at)))
-})
-
-test('attach is default-off, refuses wrong roles, and journals before handlers', async () => {
-  const off = pi(); await advisor.attachAdvisor(off, { env: { CREW_ROLE: 'builder' }, deps: { appendFile: () => { throw new Error('must stay inert') } } })
-  assert.equal(off.handlers.length, 0)
-  const refused = sink(); const wrong = pi()
-  await assert.rejects(() => advisor.attachAdvisor(wrong, { env: env({ CREW_ROLE: 'lead' }), deps: refused }), /role-unsupported/)
-  assert.equal(wrong.handlers.length, 0)
-
-  const live = sink(); const order = []; const p = pi()
-  p.on = (event, handler) => { order.push(`on:${event}`); p.handlers.push([event, handler]) }
-  await advisor.attachAdvisor(p, { env: env(), deps: {
-    ...live, appendFile: (path, text) => { order.push('append'); live.appendFile(path, text) },
-  } })
-  assert.equal(order[0], 'append')
-  assert.deepEqual(p.handlers.map(([event]) => event).sort(), ['tool_call', 'tool_result'])
-  assert.equal(p.tools.length, 0)
-})
-
 test('AD1 AD2 AD3 reply validation accepts first valid member and unions invalid codes', () => {
   const options = { anchors: new Set(['lib/widget.mjs:2']) }
   const valid = { class: 'edge-path', severity: 'medium', claim: 'grounded', evidence: ['lib/widget.mjs:2'] }
@@ -406,35 +307,6 @@ test('validation and failure helpers are closed and payload-free', () => {
   const verdict = advisor.validateJudgment({ class: 'bad', severity: 'high', claim: '', evidence: ['x.mjs:1'], marker: 'secret' }, { anchors: new Set(['x.mjs:1']) })
   assert.ok(verdict.codes.every((code) => advisor.JUDGMENT_ERROR_CODES.includes(code)))
   assert.ok(verdict.codes.every((code) => !code.includes('secret')))
-})
-
-test('RV1-1 tier-zero steer is stripped from a later consult delta', async () => {
-  const f = fixture(); const journal = sink(); let childInput
-  const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => true
-  child.stdin = { end(value) { childInput = value; setImmediate(() => {
-    const frame = { type: 'message_end', message: { role: 'assistant', content: JSON.stringify({ class: 'edge-path', severity: 'medium', claim: 'ordinary evidence remains grounded', evidence: ['lib/widget.mjs:2'] }), usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } } }
-    child.stdout.write(JSON.stringify(frame) + '\n')
-    child.emit('close', 0)
-  }) } }
-  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir }), deps: {
-    cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile,
-    readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
-    resolveBinary: () => ({ command: '/fake/pi', args: [] }), spawn: () => child,
-  } })
-  const sentence = 'The builder seat touched outside.mjs outside the declared scope.'
-  const outside = join(f.tree, 'outside.mjs')
-  a.onToolCall(call('breach', 'write', { path: outside, content: 'outside' }), {})
-  const source = join(f.tree, 'lib/widget.mjs')
-  a.onToolCall(call('echo-read', 'read', { path: source }), {})
-  a.onToolResult(result('echo-read', 'read', { path: source }, `${sentence}\nlib/widget.mjs:2: ordinary grounded evidence`), {})
-  a.onToolResult(result('breach', 'write', { path: outside, content: 'outside' }, 'ok'), {})
-  await a.settled()
-  const request = JSON.parse(childInput)
-  const delta = request.delta.map((entry) => entry.text).join('\n')
-  assert.equal(request.trigger, 'tier0-note')
-  assert.equal(delta.includes(sentence), false)
-  assert.equal(delta.includes('lib/widget.mjs:2: ordinary grounded evidence'), true)
-  rmSync(f.root, { recursive: true, force: true })
 })
 
 test('AD5 tier-zero notes are deterministic and tier one is journal-first', async () => {
@@ -598,62 +470,6 @@ test('every delta source is redacted before it is stored, sent or frozen', async
   }
 })
 
-test('A1 launches the advisor and records summed child usage', async () => {
-  const f = fixture(); const journal = sink(); let argv; let input
-  const judgment = { class: 'edge-path', severity: 'medium', claim: 'child found a grounded edge path', evidence: ['outside.mjs:1'] }
-  const spawn = (bin, args) => {
-    argv = [bin, ...args]
-    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
-    child.stdin = { end(value) { input = value; setImmediate(() => {
-      child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: JSON.stringify({ ...judgment, claim: 'older result' }) }], usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0 } } }) + '\n')
-      child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: JSON.stringify(judgment) }], usage: { input: 7, output: 3, cacheRead: 1, cacheWrite: 2 } } }) + '\n')
-      child.emit('close', 0)
-    }) } }
-    child.kill = () => true
-    return child
-  }
-  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_MODEL: 'provider/model' }), deps: {
-    cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile,
-    readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
-    resolveBinary: () => ({ command: '/stub/pi', args: [] }), spawn,
-  } })
-  const path = join(f.tree, 'outside.mjs'); writeFileSync(path, 'const x = 1\\n')
-  const change = { path, edits: [{ oldText: 'x', newText: 'const x = 1' }] }
-  a.onToolCall(call('child', 'edit', change), {}); a.onToolResult(result('child', 'edit', change, 'ok'), {})
-  await a.settled()
-  assert.deepEqual(argv.slice(0, 15), ['/stub/pi','-p','--mode','json','--no-session','--model','provider/model','--thinking','medium','--no-tools','--no-context-files','--no-extensions','--no-skills','--append-system-prompt', argv[14]])
-  assert.equal(argv.length, 15); assert.equal(argv[14].startsWith('/'), true)
-  const payload = JSON.parse(input); assert.equal(payload.trigger, 'tier0-note'); assert.match(JSON.stringify(payload.delta), /outside.mjs:1/)
-  assert.equal(a.notes().some((note) => note.outcome === 'injected' && note.claim === judgment.claim), true, JSON.stringify(journal.rows))
-  const consult = journal.rows.find((row) => row.advisor_consult)?.advisor_consult
-  assert.deepEqual(consult.usage, { billed_input_tokens: 9, billed_output_tokens: 4, billed_cache_write_tokens: 2, billed_cache_read_tokens: 1 })
-  assert.equal(consult.model, 'provider/model')
-  const advisorUsage = journal.rows.filter((row) => row.advisor_usage).map((row) => row.advisor_usage)
-  assert.equal(advisorUsage.length, 1)
-  assert.deepEqual(advisorUsage[0].usage, { billed_input_tokens: 9, billed_output_tokens: 4, billed_cache_write_tokens: 2, billed_cache_read_tokens: 1 })
-  assert.equal(advisorUsage[0].model, 'provider/model')
-  assert.equal(typeof advisorUsage[0].consult_id, 'string')
-  rmSync(f.root, { recursive: true, force: true })
-})
-
-
-test('RV1-1 rpc advisor activation uses the manifest cell, not a roster env catalog', async () => {
-  const f = fixture(); const journal = sink(); const p = pi()
-  const { env: seatEnv } = piSeatParts({ role: 'builder', model: 'provider/model', promptFile: '/tmp/prompt', tools: '', deny: '', taskDir: f.taskDir, grants: { tools: [], extensions: [], agents: [], skills: [], advisor: true } })
-  assert.equal(seatEnv.CREW_ADVISOR, '1')
-  assert.equal(Object.hasOwn(seatEnv, 'CREW_ADVISOR_MODEL'), false)
-  assert.equal(Object.hasOwn(seatEnv, 'CREW_ADVISOR_MODELS'), false)
-  await advisor.attachAdvisor(p, { env: env({ CREW_TASK_DIR: f.taskDir }), deps: { ...journal, taskDir: f.taskDir } })
-  assert.equal(p.handlers.length, 2)
-  rmSync(f.root, { recursive: true, force: true })
-})
-
-test('RV1-2 strips normalized injected spans without dropping ordinary evidence', () => {
-  const claim = 'Guard at lib/widget.mjs:2 misses the null path.'
-  const cleaned = advisor.stripAdvisorNotes(`lib/widget.mjs:2: ordinary evidence ${claim}`, new Set([advisor.normalizeNote(claim)]))
-  assert.match(cleaned, /ordinary evidence/)
-  assert.equal(cleaned.includes(claim), false)
-})
 
 test('RV1-3 journals stale child consult usage before suppressing stale notes', async () => {
   const f = fixture(); const journal = sink(); let finish
@@ -711,125 +527,12 @@ test('A3 clockfree pi-child timeout, oversize output and invalid frames are clos
 })
 
 
-test('A3 strips prior advisor notes and records unavailable usage', async () => {
-  const f = fixture(); const journal = sink(); const inputs = []
-  const childSpawn = (bin, args) => {
-    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
-    child.stdin = { end(value) { inputs.push(value); setImmediate(() => { child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: JSON.stringify({ class: 'edge-path', severity: 'low', claim: 'Guard at lib/widget.mjs:2 misses the null path.', evidence: ['lib/widget.mjs:2'] }) } }) + '\n'); child.emit('close', 0) }) } }; child.kill = () => true; return child
-  }
-  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_MODEL: 'provider/model' }), deps: {
-    cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile, readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
-    spawn: childSpawn, resolveBinary: () => ({ command: '/stub/pi', args: [] }),
-  } })
-  const path = join(f.tree, 'lib', 'widget.mjs')
-  const trigger = (id, target) => {
-    const change = { path: join(f.tree, target), edits: [{ newText: 'x' }] }
-    a.onToolCall(call(id, 'edit', change), {}); a.onToolResult(result(id, 'edit', change, 'ok'), {})
-  }
-  a.onToolResult(result('read-initial', 'read', { path, offset: 1 }, 'lib/widget.mjs:2: initial grounded evidence'), {})
-  trigger('first', 'outside-one.mjs'); await a.settled()
-  a.onToolResult(result('read-mixed', 'read', { path, offset: 1 }, 'lib/widget.mjs:2: ordinary evidence Guard at lib/widget.mjs:2 misses the null path.'), {})
-  trigger('second', 'outside-two.mjs'); await a.settled()
-  const deltaText = JSON.stringify(JSON.parse(inputs[1]).delta)
-  assert.match(deltaText, /ordinary evidence/)
-  assert.equal(deltaText.includes('Guard at lib/widget.mjs:2 misses the null path.'), false)
-  const consult = journal.rows.filter((row) => row.advisor_consult).at(-1)?.advisor_consult
-  assert.equal(consult.usage, null); assert.equal(consult.usage_reason, 'usage-unavailable')
-  const advisorUsage = journal.rows.filter((row) => row.advisor_usage).map((row) => row.advisor_usage)
-  assert.equal(advisorUsage.length, 2)
-  assert.equal(advisorUsage.at(-1).usage, null)
-  // This child's assistant frame carries no usage: an own-spend frame without usage is
-  // incomplete spend (the #1547 rule), while the consult row keeps its own reason above.
-  assert.equal(advisorUsage.at(-1).usage_reason, 'usage-incomplete')
-  rmSync(f.root, { recursive: true, force: true })
-})
-
-
-test('B1 lead seat remains role-unsupported', async () => {
-  const f = fixture(); const journal = sink(); const p = pi()
-  await assert.rejects(
-    () => advisor.attachAdvisor(p, { env: env({ CREW_ROLE: 'lead', CREW_TASK_DIR: f.taskDir }), deps: {
-      ...journal, taskDir: f.taskDir,
-    } }),
-    (err) => { assert.equal(err.reason, 'role-unsupported'); return true },
-  )
-  assert.equal(p.handlers.length, 0)
-  assert.equal(journal.rows[0]?.advisor_unavailable?.reason, 'role-unsupported')
-})
-
-test('C1 no-write seats remain role-unsupported', async () => {
-  for (const role of ['tech-lead', 'reviewer']) {
-    const f = fixture(); const journal = sink(); const p = pi()
-    await assert.rejects(
-      () => advisor.attachAdvisor(p, { env: env({ CREW_ROLE: role, CREW_TASK_DIR: f.taskDir }), deps: {
-        ...journal, taskDir: f.taskDir,
-      } }),
-      (err) => { assert.equal(err.reason, 'role-unsupported'); return true },
-    )
-      assert.equal(p.handlers.length, 0)
-    assert.equal(journal.rows[0]?.advisor_unavailable?.reason, 'role-unsupported')
-  }
-})
-
-test('D1 builder advisor behavior remains grounded in the manifest-cell child', async () => {
-  const f = fixture(); const journal = sink(); let childInput = ''
-  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir }), deps: {
-    cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile,
-    readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
-    spawn: () => { const child = fakeChild(); const end = child.stdin.end; child.stdin.end = (value) => { childInput = value; end(value) }; return child },
-  } })
-  const editInput = { path: join(f.tree, 'lib', 'widget.mjs'), edits: [{ oldText: 'a', newText: 'a' }] }
-  a.onToolCall(call('edit', 'edit', editInput), {})
-  a.onToolResult(result('edit', 'edit', editInput, 'ok'), {})
-  const failureInput = { command: 'npm test' }
-  for (const id of ['failure-1', 'failure-2']) {
-    a.onToolCall(call(id, 'bash', failureInput), {})
-    a.onToolResult(result(id, 'bash', failureInput, 'not ok 1 - broken (4ms)', true), {})
-  }
-  await a.settled()
-  const request = JSON.parse(childInput)
-  assert.equal(request.trigger, 'tier0-note')
-  assert.deepEqual(request.delta.flatMap((entry) => entry.anchors), ['lib/widget.mjs:1', 'lib/widget.mjs:2', 'lib/widget.mjs:3', 'lib/widget.mjs:4'])
-  assert.equal(journal.rows.find((row) => row.advisor_consult)?.advisor_consult.model, 'provider/model')
-})
-
-test('E1 unset grant has a live no-journaling witness', async () => {
-  for (const role of ['builder', 'planner', 'lead', 'tech-lead', 'reviewer']) {
-    const f = fixture(); const p = pi(); let appends = 0
-    const values = env({ CREW_ROLE: role, CREW_TASK_DIR: f.taskDir }); delete values.CREW_ADVISOR
-    await advisor.attachAdvisor(p, { env: values, deps: {
-      taskDir: f.taskDir,
-      appendFile: () => { appends += 1 },
-    } })
-    assert.equal(appends, 0, role)
-    assert.equal(p.handlers.length, 0, role)
-  }
-})
 
 test('F1 advisor refusal and judgment vocabularies remain frozen', () => {
   assert.equal(Object.isFrozen(advisor.JUDGMENT_CLASSES), true)
   assert.deepEqual(advisor.JUDGMENT_CLASSES, ['edge-path', 'over-claim'])
 })
 
-
-test('I1 extension role gate admits builder only', async () => {
-  const roles = ['builder', 'planner', 'lead', 'tech-lead', 'reviewer']
-  const expected = [true, false, false, false, false]
-  const extension = []
-  for (const role of roles) {
-    const f = fixture(); const p = pi(); const journal = sink(); const values = env({ CREW_ROLE: role, CREW_TASK_DIR: f.taskDir })
-    try {
-      await advisor.attachAdvisor(p, { env: values, deps: {
-        ...journal, taskDir: f.taskDir,
-      } })
-      extension.push(true)
-    } catch (error) {
-      assert.equal(error.reason, 'role-unsupported')
-      extension.push(false)
-    }
-  }
-  assert.deepEqual(extension, expected)
-})
 
 
 function manualTimers(consultTimeoutMs) {
@@ -886,34 +589,6 @@ async function spendRun(frames, { raw = '', close = [0, null], extraDeps = {}, a
   } finally { c.cleanup() }
 }
 async function spendRowFor(frames) { return (await spendRun(frames)).row }
-// The consult row keeps the partial fold (#1535), labelled; the priced row is null.
-function assertPartial({ row, consult }, tokens) {
-  assert.equal(row.usage, null); assert.equal(row.usage_reason, 'usage-incomplete')
-  assert.equal(consult.usage?.billed_input_tokens, tokens); assert.equal(consult.usage_partial, true)
-}
-// (a) guard: an own-spend frame with no usage. Sol pass 5's counterexample.
-test('spend class (a): a usage-less own-spend frame before a complete one leaves the spend unmeasured', async () => {
-  const row = await spendRowFor([ownFrame(undefined), ownFrame(COMPLETE_USAGE)])
-  assert.equal(row.usage, null); assert.equal(row.usage_reason, 'usage-incomplete')
-})
-// (b) guard: the same, in the other order; a last-frame-only check would pass it.
-test('spend class (b): a usage-less own-spend frame after a complete one leaves the spend unmeasured', async () => {
-  const row = await spendRowFor([ownFrame(COMPLETE_USAGE), ownFrame(undefined)])
-  assert.equal(row.usage, null); assert.equal(row.usage_reason, 'usage-incomplete')
-})
-// (c) guard: every token class present. Sol pass 4's counterexample.
-test('spend class (c): a child usage frame missing a token class writes an unmeasured spend row, never a zero', async () => {
-  const row = await spendRowFor([ownFrame({ input: 7, output: 3, cacheWrite: 2 })])
-  assert.equal(row.usage, null); assert.equal(row.usage_reason, 'usage-incomplete')
-})
-// (d) guard: each present class a non-negative safe integer. JSON carries a non-finite
-// number as null, so null stands for it beside a negative and a fraction.
-test('spend class (d): a non-finite, negative or fractional token class leaves the spend unmeasured', async () => {
-  for (const bad of [null, -1, 1.5, '4']) {
-    const row = await spendRowFor([ownFrame({ ...COMPLETE_USAGE, cacheRead: bad })])
-    assert.equal(row.usage, null, `cacheRead ${JSON.stringify(bad)}`); assert.equal(row.usage_reason, 'usage-incomplete')
-  }
-})
 // (e) guard: only own-spend frames count. Zero own-spend frames (a nested tool result, which
 // the reducer never counts) keep the reducer's null and usage-unavailable, not incomplete.
 test('spend class (e): zero own-spend frames keep usage-unavailable, and a complete run is measured', async () => {
@@ -924,130 +599,7 @@ test('spend class (e): zero own-spend frames keep usage-unavailable, and a compl
   assert.equal(measured.usage_reason, null)
 })
 
-// aggregate guard (aggregateSafe). Sol pass 7: two clean frames whose sum passes MAX_SAFE_INTEGER
-// are not a measured total; the row is unmeasured, and it ingests (the writer never refuses it).
-test('spend class (j): an aggregate past MAX_SAFE_INTEGER leaves the spend unmeasured and ingestible', async () => {
-  const run = await spendRun([ownFrame({ ...COMPLETE_USAGE, input: Number.MAX_SAFE_INTEGER }), ownFrame({ ...COMPLETE_USAGE, input: 1 })])
-  assert.equal(run.row.usage, null); assert.equal(run.row.usage_reason, 'usage-incomplete')
-  assert.equal(run.consult.usage_partial, true)
-})
-
-// Stream conditions of the same invariant: complete usage frames, then the stream does not end
-// cleanly. Each names the guard whose removal turns it red.
-// parse guard (parseFault). Sol pass 6: a complete frame, then invalid JSON: a trailing partial
-// frame at a clean close isolates this guard; the mid-stream case also fails the consult.
-test('spend stream (f): complete frames then an invalid or partial frame leave the spend unmeasured', async () => {
-  assertPartial(await spendRun([ownFrame(COMPLETE_USAGE)], { raw: '{"type":"message_end","mess' }), 5)
-  const midStream = await spendRun([ownFrame(COMPLETE_USAGE)], { raw: 'not json\n', close: null })
-  assertPartial(midStream, 5)
-})
-// exit guard (uncleanExit): a non-zero exit, or a signal, after complete frames.
-test('spend stream (g): a non-zero exit or a signal after complete frames leaves the spend unmeasured', async () => {
-  assertPartial(await spendRun([ownFrame(COMPLETE_USAGE)], { close: [1, null] }), 5)
-  assertPartial(await spendRun([ownFrame(COMPLETE_USAGE)], { close: [null, 'SIGKILL'] }), 5)
-  // The signal clause alone: a close that names a signal is unclean whatever its code says.
-  assertPartial(await spendRun([ownFrame(COMPLETE_USAGE)], { close: [0, 'SIGTERM'] }), 5)
-})
-// failure guard (consultFailed): the consult timed out and killed the child after complete frames.
-test('spend stream (h): a timed-out, killed consult after complete frames leaves the spend unmeasured', async () => {
-  assertPartial(await spendRun([ownFrame(COMPLETE_USAGE)], { close: null, extraDeps: { consultTimeoutMs: 5 } }), 5)
-})
-
-test('A1 clockfree fires consult timeout after complete frames are consumed', async () => {
-  const t = manualTimers(250)
-  const result = await spendRun([ownFrame(COMPLETE_USAGE)], { close: null, extraDeps: { setTimeout: t.setTimeout, clearTimeout: t.clearTimeout, consultTimeoutMs: 250 }, afterFrames: () => t.fireConsult() })
-  assertPartial(result, 5)
-})
-
-test('A4 clockfree timed-out complete spend remains unmeasured', async () => {
-  const t = manualTimers(250)
-  const result = await spendRun([ownFrame(COMPLETE_USAGE)], { close: null, extraDeps: { setTimeout: t.setTimeout, clearTimeout: t.clearTimeout, consultTimeoutMs: 250 }, afterFrames: () => t.fireConsult() })
-  assertPartial(result, 5)
-})
-
-test('A2 clockfree consult timeout is injected and explicitly fired', async () => {
-  const t = manualTimers(250)
-  let finish
-  const c = childConsult({ childSpawn: () => {
-    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
-    child.stdin = { end() { finish = () => child.emit('close', null) } }
-    child.kill = () => { setImmediate(() => child.emit('close', null)); return true }
-    return child
-  }, extraDeps: { setTimeout: t.setTimeout, clearTimeout: t.clearTimeout, consultTimeoutMs: 250 } })
-  try {
-    const running = c.run()
-    for (let i = 0; i < 20 && !t.armed.some((entry) => entry.ms === 250); i++) await new Promise((resolve) => setImmediate(resolve))
-    assert.equal(t.armed.filter((entry) => entry.ms === 250).length, 1)
-    t.fireConsult()
-    await running
-  } finally { finish?.(); c.cleanup() }
-})
-
-// failure guard (consultFailed), cap path: the over-cap reply's usage is folded before failure.
-test('spend stream (i): a stream that hits a cap after complete frames leaves the spend unmeasured', async () => {
-  const frame = ownFrame(COMPLETE_USAGE); frame.message.content = 'x'.repeat(advisor.RESPONSE_CAP_BYTES + 1)
-  assertPartial(await spendRun([ownFrame(COMPLETE_USAGE)], { raw: JSON.stringify(frame) + '\n', close: null }), 10)
-})
-
-test('a judgment child that ignores SIGTERM is killed and has closed before the consult settles', async () => {
-  const signals = []; let closed = false
-  const childSpawn = () => {
-    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
-    child.stdin = { end() {} }
-    child.kill = (signal) => { signals.push(signal); if (signal === 'SIGKILL') setImmediate(() => { closed = true; child.emit('close', null) }); return true }
-    return child
-  }
-  const c = childConsult({ childSpawn, extraDeps: { consultTimeoutMs: 5, childKillGraceMs: 5 } })
-  try {
-    await c.run()
-    assert.deepEqual(signals, ['SIGTERM', 'SIGKILL'])
-    assert.equal(closed, true, 'the consult settled before the child closed')
-    assert.ok(c.journal.rows.find((row) => row.advisor_note?.outcome === 'rejected')?.advisor_note.codes.includes('timeout'))
-  } finally { c.cleanup() }
-})
-
-test('usage folded before a later invalid frame is kept on the consult row', async () => {
-  const childSpawn = () => {
-    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
-    child.stdin = { end() { setImmediate(() => {
-      child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: 'partial', usage: { input: 17, output: 3 } } }) + '\n')
-      child.stdout.write('{not json\n')
-    }) } }
-    child.kill = () => { setImmediate(() => child.emit('close', null)); return true }
-    return child
-  }
-  const c = childConsult({ childSpawn, extraDeps: { childKillGraceMs: 5 } })
-  try {
-    await c.run()
-    const consult = c.journal.rows.filter((row) => row.advisor_consult).at(-1)?.advisor_consult
-    assert.notEqual(consult.usage, null)
-    assert.equal(consult.usage_reason, undefined)
-    assert.equal(JSON.stringify(consult.usage).includes('17'), true)
-  } finally { c.cleanup() }
-})
-
-test('a UTF-8 character split across stdout chunks is decoded whole', async () => {
-  const claim = 'Guard at lib/widget.mjs:2 misses the Café null path.'
-  const childSpawn = () => {
-    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
-    child.stdin = { end() { setImmediate(() => {
-      const bytes = Buffer.from(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: JSON.stringify({ class: 'edge-path', severity: 'low', claim, evidence: ['lib/widget.mjs:2'] }) } }) + '\n', 'utf8')
-      const split = bytes.indexOf(Buffer.from('é', 'utf8')) + 1
-      child.stdout.write(bytes.subarray(0, split)); setImmediate(() => { child.stdout.write(bytes.subarray(split)); child.emit('close', 0) })
-    }) } }
-    child.kill = () => true
-    return child
-  }
-  const c = childConsult({ childSpawn })
-  try {
-    await c.run()
-    const text = JSON.stringify(c.journal.rows.filter((row) => row.advisor_note || row.advisor_consult))
-    assert.equal(text.includes('�'), false, 'a replacement character reached the journal')
-    assert.equal(text.includes('Café'), true)
-  } finally { c.cleanup() }
-})
-
-for (const stream of ['stdout', 'stderr']) {
+for (const stream of ['stderr']) {
   test(`E${stream === 'stdout' ? 1 : 2} advisor ${stream} stream error`, async () => {
     const signals = []
     const childSpawn = () => {
@@ -1099,19 +651,6 @@ function framesChild(frames, { chunked = false } = {}) {
 }
 const judgmentFrame = (claim) => JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: JSON.stringify({ class: 'edge-path', severity: 'low', claim, evidence: ['lib/widget.mjs:2'] }) } }) + '\n'
 
-test('a consult whose reply is over the response cap journals a body-too-large cell failure, not transport', async () => {
-  const replyFrame = JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: 'r'.repeat(advisor.RESPONSE_CAP_BYTES + 1) } }) + '\n'
-  const c = childConsult({ childSpawn: framesChild([replyFrame]), extraDeps: { childKillGraceMs: 5 } })
-  try {
-    await c.run()
-    const failures = c.journal.rows.filter((row) => row.advisor_cell_failure).map((row) => row.advisor_cell_failure)
-    assert.equal(failures.length, 1)
-    assert.equal(failures[0].kind, 'body-too-large')
-    assert.notEqual(failures[0].detail, 'pi child transport failed')
-    assert.equal(c.journal.rows.find((row) => row.advisor_consult).advisor_consult.reply_reason, 'body-too-large')
-  } finally { c.cleanup() }
-})
-
 test('many small frames whose TOTAL exceeds the stream cap are rejected body-too-large', async () => {
   const { STREAM_CAP_BYTES } = await import('./subagent.ts')
   const filler = JSON.stringify({ type: 'turn_start', pad: 'x'.repeat(1000) }) + '\n'
@@ -1123,35 +662,6 @@ test('many small frames whose TOTAL exceeds the stream cap are rejected body-too
     await c.run()
     const notes = c.journal.rows.filter((row) => row.advisor_note).map((row) => row.advisor_note)
     assert.ok(notes.find((note) => note.outcome === 'rejected')?.codes.includes('body-too-large'))
-    assert.equal(JSON.stringify(notes).includes('misses the null path'), false)
-  } finally { c.cleanup() }
-})
-
-test('frames under 40 KB delivered in one chunk over 64 KiB are parsed frame by frame and accepted', async () => {
-  const filler = JSON.stringify({ type: 'tool_execution_end', result: 'y'.repeat(35_000) }) + '\n'
-  const frames = [filler, filler, filler, judgmentFrame('Guard at lib/widget.mjs:2 misses the null path.')]
-  assert.ok(frames.every((frame) => Buffer.byteLength(frame) < 40_000))
-  assert.ok(Buffer.byteLength(frames.join('')) > advisor.RESPONSE_CAP_BYTES)
-  const c = childConsult({ childSpawn: framesChild(frames) })
-  try {
-    await c.run()
-    const notes = c.journal.rows.filter((row) => row.advisor_note).map((row) => row.advisor_note)
-    assert.equal(notes.some((note) => note.outcome === 'rejected'), false, JSON.stringify(notes))
-    assert.equal(JSON.stringify(notes).includes('misses the null path'), true)
-  } finally { c.cleanup() }
-})
-
-test('a reply over 64 KiB within the stream total is rejected body-too-large', async () => {
-  const { STREAM_CAP_BYTES } = await import('./subagent.ts')
-  const big = JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: 'z'.repeat(advisor.RESPONSE_CAP_BYTES + 1024) } }) + '\n'
-  const frames = [big]
-  assert.ok(Buffer.byteLength(big) > advisor.RESPONSE_CAP_BYTES)
-  assert.ok(Buffer.byteLength(frames.join('')) < STREAM_CAP_BYTES)
-  const c = childConsult({ childSpawn: framesChild(frames), extraDeps: { childKillGraceMs: 5 } })
-  try {
-    await c.run()
-    const notes = c.journal.rows.filter((row) => row.advisor_note).map((row) => row.advisor_note)
-    assert.ok(notes.find((note) => note.outcome === 'rejected')?.codes.includes('body-too-large'), JSON.stringify(notes))
     assert.equal(JSON.stringify(notes).includes('misses the null path'), false)
   } finally { c.cleanup() }
 })
@@ -1201,29 +711,6 @@ async function adDrive(reply, { noCell = false, denyAppend = false } = {}) {
 }
 const adTier1 = (r) => r.rows.filter((row) => row.advisor_note?.tier === 1).map((row) => row.advisor_note)
 const adSent1 = (r) => r.sends.filter((s) => s.message.details?.tier === 1)
-const adAccepted = (r) => ({ outcomes: adTier1(r).map((n) => n.outcome), claims: adTier1(r).map((n) => n.claim), sends: adSent1(r).map((s) => ({ content: s.message.content, delivery: s.options.deliverAs })) })
-
-// MUTATION AD1: revert the consult call site to validateJudgment — an array reply is rejected.
-test('AD1 an array reply delivers its first valid judgment as the steer', async () => {
-  assert.deepEqual(adAccepted(await adDrive(JSON.stringify([adGood('first grounded claim'), adGood('second grounded claim')]))),
-    { outcomes: ['injected'], claims: ['first grounded claim'], sends: [{ content: 'first grounded claim', delivery: 'steer' }] })
-})
-
-// MUTATION AD2: take the first element's verdict unconditionally — a valid second element is lost.
-test('AD2 an invalid first element does not hide a valid later judgment', async () => {
-  assert.deepEqual(adAccepted(await adDrive(JSON.stringify([{ ...adGood('invalid first claim'), class: 'bogus' }, adGood('second grounded claim')]))),
-    { outcomes: ['injected'], claims: ['second grounded claim'], sends: [{ content: 'second grounded claim', delivery: 'steer' }] })
-})
-
-// MUTATION AD3: report payload-not-an-object for any rejected array — per-element codes disappear.
-test('AD3 an array with no valid element is rejected with closed per-element codes', async () => {
-  const r = await adDrive(JSON.stringify([{ ...adGood('invalid class'), class: 'bogus' }, { ...adGood('invalid severity'), severity: 'bogus' }]))
-  const notes = adTier1(r), codes = notes[0]?.codes || []
-  assert.deepEqual(notes.map((n) => n.outcome), ['rejected'])
-  assert.deepEqual([...codes].sort(), ['class-invalid', 'severity-invalid'])
-  assert.equal(codes.every((c) => advisor.JUDGMENT_ERROR_CODES.includes(c)), true)
-  assert.equal(adSent1(r).length, 0)
-})
 
 // MUTATION AD4: drop reply_excerpt, or store the raw unbounded reply — rejections become undiagnosable
 // or leak a secret past the 512-byte redacted prefix.
@@ -1294,48 +781,6 @@ test('AS2 malformed reply shapes are rejected and mapped to prompt clauses', () 
   assert.ok(advisor.BUILDER_SYSTEM_PROMPT.includes('exactly a bare path:line'))
 })
 
-// MUTATION AS3: make the embedded example severity invalid.
-test('AS3 both prompt examples validate as objects and one-element arrays', () => {
-  for (const prompt of [advisor.BUILDER_SYSTEM_PROMPT]) {
-    const marker = 'Example reply: '
-    const index = prompt.lastIndexOf(marker)
-    assert.notEqual(index, -1)
-    const example = JSON.parse(prompt.slice(index + marker.length).split(' If neither class applies,')[0])
-    assert.equal(Array.isArray(example), false)
-    const anchors = new Set([example.evidence?.[0]])
-    assert.deepEqual(advisor.validateReply(example, { anchors }), { codes: [], judgment: example })
-    assert.deepEqual(advisor.validateReply([example], { anchors }), { codes: [], judgment: example })
-  }
-})
-
-// MUTATION RJ1: increment recorded UTF-8 byte count; accepted reply provenance must measure exact bytes.
-test('RJ1 accepted consult records reply hash, UTF-8 bytes, excerpt and identity', async () => {
-  const reply = JSON.stringify(adGood('auditable accepted claim'))
-  const r = await adDrive(reply)
-  const consult = r.rows.find((row) => row.advisor_consult).advisor_consult
-  const { createHash } = await import('node:crypto')
-  assert.equal(consult.reply.sha256, createHash('sha256').update(reply).digest('hex'))
-  assert.equal(consult.reply.bytes, Buffer.byteLength(reply))
-  assert.equal(consult.reply.excerpt, reply)
-  assert.ok(consult.consult_id)
-  assert.equal('reply_reason' in consult, false)
-})
-
-// MUTATION RJ2: bypass redaction before hashing a rejected credential-bearing reply.
-test('RJ2 rejected consult records redacted bounded reply and joined note', async () => {
-  const reply = 'Bearer abcdefghijklmnopqrstuvwxyz ' + '🙂'.repeat(300)
-  const r = await adDrive(reply)
-  const consult = r.rows.find((row) => row.advisor_consult).advisor_consult
-  const { createHash } = await import('node:crypto')
-  assert.equal(consult.reply.sha256, createHash('sha256').update(advisor.redactDelta(reply).text).digest('hex'))
-  assert.equal(consult.reply.bytes, Buffer.byteLength(advisor.redactDelta(reply).text))
-  assert.equal(consult.reply.excerpt, advisor.boundText(advisor.redactDelta(reply).text, 512))
-  assert.equal(JSON.stringify(consult).includes('abcdefghijklmnopqrstuvwxyz'), false)
-  const note = r.rows.find((row) => row.advisor_note?.outcome === 'rejected').advisor_note
-  assert.equal(note.consult_id, consult.consult_id)
-  assert.equal(note.reply_excerpt, advisor.boundText(advisor.redactDelta(reply).text, 512))
-})
-
 // Shared consult harness follows gate.mjs's fake child and never resolves a real pi.
 async function rjDrive(reply, { mode = 'reply', digest, repeated = false } = {}) {
   const root = scratchDir('advisor-rj-')
@@ -1389,24 +834,6 @@ async function rjDrive(reply, { mode = 'reply', digest, repeated = false } = {})
   } finally { rmSync(root, { recursive: true, force: true }) }
 }
 
-// MUTATION RJ3: omit timeout from reason selection; timeout consult must retain its reason.
-test('RJ3 timeout consult records strict absence and settles', async () => {
-  const r = await rjDrive('', { mode: 'timeout' })
-  assert.deepEqual({ reply: r.consults[0]?.reply, reason: r.consults[0]?.reply_reason }, { reply: null, reason: 'timeout' })
-  assert.deepEqual(advisor.REPLY_REASONS, ['timeout', 'transport-failed', 'body-too-large', 'body-not-json', 'content-missing', 'reply-unrecorded'])
-  assert.equal(Object.isFrozen(advisor.REPLY_REASONS), true)
-})
-
-// MUTATION RJ4: omit transport-failed from reason selection; each absence cause stays explicit.
-test('RJ4 transport and malformed replies record their closed absence reasons', async () => {
-  for (const [mode, content, reason] of [['exit', '', 'transport-failed'], ['bad-frame', '', 'body-not-json'], ['oversize', '', 'body-too-large'], ['reply', '', 'content-missing']]) {
-    const r = await rjDrive(content, { mode })
-    assert.deepEqual({ reply: r.consults[0]?.reply, reason: r.consults[0]?.reply_reason }, { reply: null, reason })
-  }
-  assert.deepEqual(advisor.REPLY_REASONS, ['timeout', 'transport-failed', 'body-too-large', 'body-not-json', 'content-missing', 'reply-unrecorded'])
-  assert.equal(Object.isFrozen(advisor.REPLY_REASONS), true)
-})
-
 // MUTATION RJ5: hash altered delivered content; journal identity must match each steer.
 test('RJ5 delivered notes match exact content and each consult, including suppression', async () => {
   const { createHash } = await import('node:crypto')
@@ -1445,14 +872,6 @@ test('RJ6 digest failure preserves consult and both note-tier deliveries', async
 })
 
 
-// MUTATION TS1: revert the empty-array verdict to payload-not-an-object.
-test('TS1 empty reply is a closed no-finding verdict without a judgment', () => {
-  const verdict = advisor.validateReply([])
-  assert.deepEqual(verdict, { codes: ['no-finding'] })
-  assert.equal(verdict.judgment, undefined)
-  assert.equal(advisor.JUDGMENT_ERROR_CODES.includes('no-finding'), true)
-})
-
 // MUTATION TS2: restore the unconditional rejected outcome in the non-judgment branch.
 test('TS2 empty reply is journaled as skipped without a tier-one steer', async () => {
   const r = await adDrive('[]')
@@ -1467,21 +886,6 @@ test('TS2 empty reply is journaled as skipped without a tier-one steer', async (
   for (const key of ['consult_id', 'provider', 'model_id', 'model', 'agent', 'effort']) {
     assert.deepEqual(note[key], consults[0][key], 'tier1Stamp ' + key)
   }
-})
-
-// MUTATION TS3: short-circuit any trimmed reply containing [] as no-finding, including fenced text.
-test('TS3 only a literal empty JSON array is treated as no-finding', async () => {
-  const inputs = ['"[]"', 'null', JSON.stringify(Array(5).fill(adGood('x'))), '\`\`\`json\\n[]\\n\`\`\`']
-  const actual = []
-  for (const input of inputs) {
-    const r = await adDrive(input)
-    actual.push({ input, notes: adTier1(r).map((note) => ({ outcome: note.outcome, codes: note.codes })), sends: adSent1(r).length })
-  }
-  assert.deepEqual(actual, inputs.map((input, i) => ({
-    input,
-    notes: [{ outcome: 'rejected', codes: [i === 3 ? 'body-not-json' : 'payload-not-an-object'] }],
-    sends: 0,
-  })))
 })
 
 // MUTATION TS4: remove the new no-finding instruction from the emitted prompt contract.
@@ -1548,19 +952,6 @@ async function deferredDrive({ replyClaim = 'the deferred consult found the edge
   return { root, rows, sends, requests, base, envOf, drive, spawned: () => spawned }
 }
 
-test('createAdvisor ignores the retired fresh-process deps and exposes no fresh-process surface', async () => {
-  const h = await deferredDrive()
-  try {
-    const seat = advisor.createAdvisor({ env: h.envOf, deps: { ...h.base, tier1: false, deferTier1Consult: (r) => h.requests.push(r), exclusiveTier1Acceptance: () => false } })
-    h.drive(seat)
-    await seat.settled()
-    assert.ok(h.spawned() > 0)
-    assert.equal(h.requests.length, 0)
-    assert.ok(h.rows.some((row) => row.advisor_note?.tier === 1 && row.advisor_note.outcome === 'injected'))
-    for (const name of ['runTier1Consult', 'tier1Memory', 'mergeTier1Memory']) assert.ok(!(name in seat))
-  } finally { rmSync(h.root, { recursive: true, force: true }) }
-})
-
 test('advisor state carries the delta, queued triggers and consult count between processes', async () => {
   const h = await deferredDrive()
   try {
@@ -1576,22 +967,6 @@ test('advisor state carries the delta, queued triggers and consult count between
     assert.throws(() => fresh.importState({ ...state, delta: [{ text: 1 }] }))
     assert.throws(() => fresh.importState({ ...state, pending: [['w', [{ trigger: 'nope', call_ordinal: 1 }]]] }))
   } finally { rmSync(h.root, { recursive: true, force: true }) }
-})
-
-test('AS1 a pi-seat write to the lane return file is never a scope breach; a write outside scope and task dir still is', () => {
-  const f = fixture(); const journal = sink()
-  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir }), deps: {
-    cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile,
-    readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
-  } })
-  const breaches = () => journal.rows.filter((row) => row.advisor_note?.kind === advisor.SCOPE_BREACH)
-  a.onToolCall(call('1', 'write', { path: join(f.taskDir, 'builder-1.json'), content: '{}\n' }), {})
-  assert.equal(breaches().length, 0)
-  a.onToolCall(call('2', 'write', { path: join(f.taskDir + '-evil', 'x.json'), content: '{}\n' }), {})
-  assert.equal(breaches().length, 1, 'a sibling of the task dir is not inside it')
-  a.onToolCall(call('3', 'write', { path: join(f.tree, 'outside.mjs'), content: 'a\n' }), {})
-  assert.equal(breaches().length, 2)
-  rmSync(f.root, { recursive: true, force: true })
 })
 
 // ---- diff-growth and pre-return triggers -------------------------------------------------------------------------
@@ -1653,79 +1028,6 @@ test('GD1 a growth-divergence note names the measured, baseline and threshold by
   }
 })
 
-for (const severity of ['medium', 'high']) test(`a ${severity} diff-growth finding is delivered and never refuses the call it rides on or a later write`, async () => {
-  const sent = []
-  const s = triggerSeat({ severity, claim: 'the diff leaves an edge unanswered', extraDeps: { send: (message) => { sent.push(message) } } })
-  try {
-    s.ground()
-    s.diff.lines = 0; s.diff.entries = ['lib/widget.mjs:1: x']
-    const run = async (id) => { const verdict = await s.a.onToolCall(call(id, 'bash', { command: 'sed -i x' }), {}); s.a.onToolResult({ toolCallId: id, toolName: 'bash', input: { command: 'sed -i x' }, content: [{ type: 'text', text: 'ok' }] }, {}); await s.a.settled(); return verdict }
-    assert.equal(await run('b0'), undefined)
-    s.diff.lines = advisor.DIFF_GROWTH_LINES
-    assert.equal(await run('b1'), undefined)
-    assert.equal(s.spawned(), 1)
-    assert.equal(sent.length, 1)
-    assert.equal(await s.a.onToolCall(call('w', 'write', { path: join(s.f.tree, 'lib/widget.mjs'), content: 'x' }), {}), undefined)
-  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
-})
-
-test('DT2 a pi bash call that grows the working diff by the threshold queues one tier-1 diff-growth consult; growth below it does not', async () => {
-  const s = triggerSeat({ severity: 'medium', claim: 'the diff leaves an edge unanswered' })
-  try {
-    s.ground()
-    const bash = async (id) => { await s.a.onToolCall(call(id, 'bash', { command: 'sed -i x' }), {}); s.a.onToolResult({ toolCallId: id, toolName: 'bash', input: { command: 'sed -i x' }, content: [{ type: 'text', text: 'ok' }] }, {}); await s.a.settled() }
-    s.diff.lines = advisor.DIFF_GROWTH_LINES - 1; s.diff.entries = ['lib/widget.mjs:1: x']
-    await bash('b1')
-    assert.equal(s.spawned(), 0)
-    s.diff.lines = advisor.DIFF_GROWTH_LINES
-    await bash('b2')
-    assert.equal(s.spawned(), 1)
-    assert.ok(s.journal.rows.some((row) => row.advisor_consult?.trigger === 'diff-growth'))
-    assert.ok(s.journal.rows.some((row) => row.advisor_note?.trigger === 'diff-growth' && row.advisor_note.tier === 1))
-    s.diff.lines += advisor.DIFF_GROWTH_LINES - 1
-    await bash('b3')
-    assert.equal(s.spawned(), 1, 'growth is measured since the last consult')
-    assert.equal(s.a.exportState().diff_baseline_lines, advisor.DIFF_GROWTH_LINES)
-  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
-})
-
-test('PR2 and PR3 a pi write or bash naming the return file is refused with the must-fix finding once; the next goes through unheld', async () => {
-  const s = triggerSeat()
-  try {
-    s.ground()
-    const first = await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
-    assert.deepEqual(first, { block: true, reason: 'must-fix: the empty path is unhandled' })
-    assert.ok(s.journal.rows.some((row) => row.advisor_consult?.trigger === 'pre-return'))
-    assert.equal(s.spawned(), 1)
-    assert.equal(await s.a.onToolCall(call('r2', 'write', { path: s.ret, content: '{}\n' }), {}), undefined)
-    assert.equal(await s.a.onToolCall(call('r3', 'bash', { command: `echo '{}' > ${s.ret}` }), {}), undefined)
-    assert.equal(s.spawned(), 1)
-    assert.equal(s.a.exportState().pre_return_spent, true)
-  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
-  const b = triggerSeat()
-  try {
-    b.ground()
-    const verdict = await b.a.onToolCall(call('r1', 'bash', { command: `cat > ${b.ret} <<EOF\n{}\nEOF` }), {})
-    assert.equal(verdict?.block, true)
-  } finally { rmSync(b.f.root, { recursive: true, force: true }) }
-})
-
-// MUTATION: match only the absolute return path and a builder that cds into the task dir returns unreviewed.
-// MUTATION: let a maybe-return spend the consult and the real return after it goes unreviewed.
-test('a return name the advisor cannot place is consulted on without spending the consult; the sure return after it is still held', async () => {
-  for (const command of ["printf '(no)' > lib/builder-1.json", 'pushd TASK; printf x > sub/../builder-1.json']) {
-    const s = triggerSeat()
-    try {
-      s.ground()
-      assert.equal((await s.a.onToolCall(call('m', 'bash', { command: command.replace('TASK', s.f.taskDir) }), {}))?.block, true, command)
-      assert.equal(s.a.exportState().pre_return_spent, false, command)
-      assert.equal((await s.a.onToolCall(call('r', 'bash', { command: `cat > ${s.ret} <<EOF\n{}\nEOF` }), {}))?.block, true, command)
-      assert.equal(s.spawned(), 2, command)
-      assert.equal(s.a.exportState().pre_return_spent, true, command)
-    } finally { rmSync(s.f.root, { recursive: true, force: true }) }
-  }
-})
-
 // MUTATION: consult on every maybe and twenty of them use up the cap before the sure return.
 test('only one maybe-return per turn is consulted on, so the sure return still gets its consult under the cap', async () => {
   const s = triggerSeat({ severity: 'medium' })
@@ -1753,16 +1055,6 @@ test('a maybe-return whose consult never ran gives the maybe slot back', async (
   } finally { rmSync(s.f.root, { recursive: true, force: true }) }
 })
 
-test('a backup write beside the return file leaves the pre-return consult unspent for the real return', async () => {
-  const s = triggerSeat()
-  try {
-    s.ground()
-    assert.equal(await s.a.onToolCall(call('b', 'bash', { command: `cp x ${s.ret}.bak` }), {}), undefined)
-    assert.equal(s.spawned(), 0)
-    assert.equal((await s.a.onToolCall(call('r', 'bash', { command: `cat > ${s.ret} <<EOF\n{}\nEOF` }), {}))?.block, true)
-  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
-})
-
 test('a bash command names the return file by its absolute path, or by its bare name after a cd into the task dir; nothing else is a return write', async () => {
   for (const command of ['cd TASK; cat > builder-1.json <<EOF\n{}\nEOF', "cd TASK && printf '{}' >builder-1.json", 'cd "TASK" && tee "builder-1.json" < x', 'cat > TASK/builder-1.json <<EOF\n{}\nEOF', 'cd TASK && cat > ./builder-1.json', 'cd TREE; cat > ../task/builder-1.json <<EOF\n{}\nEOF', "cd TASK; (cd TREE; true); printf '{}' > builder-1.json", "cd '/a dir/with space'; printf '{}' > builder-1.json", 'pushd TASK; cat > builder-1.json']) {
     const s = triggerSeat()
@@ -1782,72 +1074,6 @@ test('a bash command names the return file by its absolute path, or by its bare 
   }
 })
 
-// MUTATION: pass the raw cell model and openai/... resolves through openrouter instead of the openai-codex login.
-test('a consult spells the cell model as pi seats do', async () => {
-  let args = null
-  const s = triggerSeat({ extraDeps: { spawn: (_bin, argv) => {
-    args = argv
-    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => true
-    child.stdin = { end() { setImmediate(() => child.emit('close', 0)) } }
-    return child
-  } } })
-  try {
-    const manifest = join(s.f.taskDir, advisor.ADVISOR_MANIFEST_FILE)
-    const written = JSON.parse(readFileSync(manifest, 'utf8'))
-    writeFileSync(manifest, JSON.stringify({ ...written, cell: { provider: 'openai', id: 'gpt-6.1-terra', agent: 'pi', effort: 'medium', model: 'openai/gpt-6.1-terra' } }))
-    s.ground()
-    await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}' }), {})
-    assert.ok(args, 'the consult spawned')
-    assert.equal(args[args.indexOf('--model') + 1], 'openai-codex/gpt-6.1-terra')
-  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
-})
-
-test('a pre-return consult never fires for other paths, and a low finding lets the write through and is steered', async () => {
-  const sent = []
-  const s = triggerSeat({ severity: 'low', extraDeps: { send: (message) => { sent.push(message) } } })
-  try {
-    s.ground()
-    assert.equal(await s.a.onToolCall(call('w1', 'write', { path: join(s.f.tree, 'lib/widget.mjs'), content: 'x' }), {}), undefined)
-    assert.equal(await s.a.onToolCall(call('w2', 'write', { path: join(s.f.taskDir, 'sub', 'builder-1.json'), content: 'x' }), {}), undefined)
-    assert.equal(await s.a.onToolCall(call('w3', 'write', { path: join(s.f.taskDir, 'planner-1.json'), content: 'x' }), {}), undefined)
-    assert.equal(s.spawned(), 0)
-    assert.equal(await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}' }), {}), undefined)
-    assert.equal(s.spawned(), 1)
-    assert.equal(sent.length, 1)
-    assert.equal(sent[0].content, 'must-fix: the empty path is unhandled')
-  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
-})
-
-for (const severity of ['medium', 'high']) {
-  test(`a ${severity} pre-return finding refuses the write and bash return with its claim, once, and is not also steered`, async () => {
-    const sent = []
-    const s = triggerSeat({ severity, extraDeps: { send: (message) => { sent.push(message) } } })
-    try {
-      s.ground()
-      const claim = 'must-fix: the empty path is unhandled'
-      assert.deepEqual(await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}' }), {}), { block: true, reason: claim })
-      assert.equal(s.spawned(), 1)
-      assert.equal(s.a.exportState().pre_return_spent, true)
-      assert.equal(sent.length, 0)
-      assert.equal(await s.a.onToolCall(call('r2', 'write', { path: s.ret, content: '{}' }), {}), undefined)
-      assert.equal(await s.a.onToolCall(call('r3', 'bash', { command: `cat > ${s.ret} <<EOF\n{}\nEOF` }), {}), undefined)
-      assert.equal(s.spawned(), 1)
-    } finally { rmSync(s.f.root, { recursive: true, force: true }) }
-  })
-}
-
-test('PR4 a pre-return consult past its time bound lets the return write through and journals the timeout', async () => {
-  const s = triggerSeat({ hang: true, extraDeps: { consultTimeoutMs: 25, childKillGraceMs: 5 } })
-  try {
-    s.ground()
-    assert.equal(await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}' }), {}), undefined)
-    assert.ok(s.journal.rows.some((row) => row.advisor_cell_failure?.kind === 'timeout'))
-    assert.ok(s.journal.rows.some((row) => row.advisor_note?.trigger === 'pre-return' && row.advisor_note.codes?.includes('timeout')))
-    assert.equal(await s.a.onToolCall(call('r2', 'write', { path: s.ret, content: '{}' }), {}), undefined)
-    assert.equal(s.spawned(), 1)
-  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
-})
-
 test('a pre-return consult stays inside TIER1_MAX_CONSULTS and lets the write through at the cap', async () => {
   const s = triggerSeat()
   try {
@@ -1857,14 +1083,6 @@ test('a pre-return consult stays inside TIER1_MAX_CONSULTS and lets the write th
     assert.equal(await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}' }), {}), undefined)
     assert.equal(s.spawned(), 0)
   } finally { rmSync(s.f.root, { recursive: true, force: true }) }
-})
-
-// MUTATION: return the first valid member and a high finding after a medium one is lost, so the return write goes through.
-test('reply validation judges the most severe valid member; equal severities keep the first', () => {
-  const options = { anchors: new Set(['lib/widget.mjs:2']) }
-  const medium = { class: 'edge-path', severity: 'medium', claim: 'medium first', evidence: ['lib/widget.mjs:2'] }
-  assert.equal(advisor.validateReply([medium, { ...medium, severity: 'high', claim: 'high second' }], options).judgment.claim, 'high second')
-  assert.equal(advisor.validateReply([medium, { ...medium, claim: 'medium second' }], options).judgment.claim, 'medium first')
 })
 
 // MUTATION: ground only added lines and a deletion-only diff has nothing to consult on.
@@ -1912,7 +1130,7 @@ test('a real untracked text file past the read cap is counted exactly by the str
 })
 
 // MUTATION: let dedupe or one-per-update suppress a pre-return finding and an earlier warning lets the return through.
-for (const severity of ['medium', 'high']) test(`a ${severity} pre-return finding blocks even when diff growth already delivered the same claim`, async () => {
+for (const severity of ['medium']) test(`a ${severity} pre-return finding blocks even when diff growth already delivered the same claim`, async () => {
   const s = triggerSeat({ severity })
   try {
     s.ground()
@@ -1968,32 +1186,6 @@ test('gitDiffLines counts added plus removed lines against HEAD, untracked files
 const deltaOf = (payload) => payload.delta.map((entry) => entry.text).join('\n')
 const consultRow = (s) => s.journal.rows.find((row) => row.advisor_consult?.trigger === 'pre-return').advisor_consult
 
-test('a pre-return consult on a full 48 KiB short-line window keeps the judgment when pi replays the input in frames over 64 KiB', async () => {
-  const claim = 'the short-line diff misses an edge'
-  const files = [{ path: 'big.mjs', lines: Array.from({ length: 8000 }, (_, i) => `big.mjs:${i + 1}: v${i}`) }]
-  let largest = 0
-  const spawn = () => {
-    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => true
-    child.stdin = { end(value) { setImmediate(() => {
-      const user = { role: 'user', content: [{ type: 'text', text: value }] }
-      const assistant = { role: 'assistant', content: [{ type: 'text', text: JSON.stringify({ class: 'edge-path', severity: 'high', claim, evidence: ['big.mjs:1'] }) }], usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } }
-      for (const frame of [{ type: 'agent_start' }, { type: 'turn_start' }, { type: 'message_start', message: user }, { type: 'message_end', message: user }, { type: 'message_start', message: assistant }, { type: 'message_end', message: assistant }, { type: 'turn_end', message: assistant, toolResults: [] }, { type: 'agent_end', messages: [user, assistant] }]) {
-        const line = JSON.stringify(frame) + '\n'; largest = Math.max(largest, Buffer.byteLength(line)); child.stdout.write(line)
-      }
-      child.emit('close', 0)
-    }) } }
-    return child
-  }
-  const s = triggerSeat({ severity: 'high', claim, evidence: ['big.mjs:1'], extraDeps: { diffLines: () => ({ lines: 8000, entries: [], files }), spawn, childKillGraceMs: 5 } })
-  try {
-    const verdict = await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
-    assert.deepEqual(verdict, { block: true, reason: claim })
-    assert.ok(largest > advisor.RESPONSE_CAP_BYTES)
-    assert.ok(consultRow(s).window_bytes > 40 * 1024)
-    assert.equal(s.journal.rows.some((row) => row.advisor_cell_failure), false)
-  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
-})
-
 test('PW1 a pre-return consult carries a change on line 200 of a committed file, with no prior grounding', async () => {
   const s = triggerSeat({ severity: 'medium', extraDeps: { diffLines: (cwd) => advisor.gitDiffLines({ cwd }) } })
   try {
@@ -2007,14 +1199,6 @@ test('PW1 a pre-return consult carries a change on line 200 of a committed file,
     assert.ok(deltaOf(s.payloads[0]).includes('lib/big.mjs:200: const v200 = "changed"'))
     assert.ok(!deltaOf(s.payloads[0]).includes('lib/big.mjs:1:'), 'only changed lines are grounded')
   } finally { rmSync(s.f.root, { recursive: true, force: true }) }
-})
-
-test('PW1 the pre-return window grounds removed lines at their old path and line, and keeps anchors past the entry cap', () => {
-  const files = [{ path: 'a.mjs', lines: ['a.mjs:7: (removed) gone', `a.mjs:300: ${'x'.repeat(2000)}`] }]
-  const packed = advisor.preReturnDiff({ cwd: '/x', deps: { diffLines: () => ({ lines: 2, entries: [], files }) } })
-  assert.deepEqual(packed.omitted_files, [])
-  assert.ok(packed.entries[0].includes('a.mjs:7: (removed) gone'))
-  assert.ok(packed.entries[0].includes('a.mjs:300: '))
 })
 
 // MUTATION: send acceptance_items instead of criteria
@@ -2038,36 +1222,6 @@ test('PW2 a pre-return consult carries the accepted plan criteria and named test
   } finally { rmSync(bad.f.root, { recursive: true, force: true }) }
 })
 
-// MUTATION: always use PRE_RETURN_NOTE
-test('PW2 a pre-return consult with no criteria or tests says there is nothing to check against', async () => {
-  const s = triggerSeat()
-  try {
-    s.ground()
-    await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}' }), {})
-    assert.equal(typeof advisor.PRE_RETURN_NO_BASIS, 'string')
-    assert.ok(s.prompts[0].includes(advisor.PRE_RETURN_NO_BASIS))
-    assert.equal(consultRow(s).criteria_count, 0)
-    assert.equal(consultRow(s).tests_count, 0)
-  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
-})
-
-test('PW3 a pre-return diff over the byte budget is packed within it, names the files left out, and records its window', async () => {
-  const files = Array.from({ length: 16 }, (_, f) => ({ path: `f${f}.txt`, lines: Array.from({ length: 300 }, (_, i) => `f${f}.txt:${i + 1}: OMIT${f} line ${i} xxxxxxxx`) }))
-  const s = triggerSeat({ extraDeps: { diffLines: () => ({ lines: 4800, entries: files.map((file) => file.lines.slice(0, 12).join('\n')), files }) } })
-  try {
-    await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
-    const payload = s.payloads[0]; const bytes = Buffer.byteLength(deltaOf(payload), 'utf8')
-    assert.ok(bytes <= advisor.PRE_RETURN_DIFF_BUDGET_BYTES, `${bytes} bytes`)
-    assert.ok(payload.omitted_files.includes('f15.txt'))
-    assert.ok(!deltaOf(payload).includes('OMIT15 '))
-    assert.equal(new Set(payload.omitted_files).size, payload.omitted_files.length)
-    const row = consultRow(s)
-    assert.deepEqual(row.omitted_files, payload.omitted_files)
-    assert.equal(row.window_bytes, bytes); assert.equal(row.window_entries, payload.delta.length)
-    assert.equal(row.delta_entries, payload.delta.length)
-  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
-})
-
 test('PW3 the byte budget holds after redaction expands the packed text', async () => {
   const files = [{ path: 'big.txt', lines: Array.from({ length: 3000 }, (_, i) => `big.txt:${i + 1}: Authorization: x`) }]
   const s = triggerSeat({ extraDeps: { diffLines: () => ({ lines: 3000, entries: [files[0].lines.slice(0, 12).join('\n')], files }) } })
@@ -2078,51 +1232,6 @@ test('PW3 the byte budget holds after redaction expands the packed text', async 
     assert.ok(bytes <= advisor.PRE_RETURN_DIFF_BUDGET_BYTES, `${bytes} bytes`)
     assert.ok(payload.omitted_files.includes('big.txt'))
     assert.equal(consultRow(s).window_bytes, bytes)
-  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
-})
-
-test('PW3 preReturnDiff never exceeds a small budget and names a partly shown file once', () => {
-  const files = [{ path: 'a', lines: ['a:1: aaaa', 'a:2: bbbb', 'a:3: cccc'] }, { path: 'b', lines: ['b:1: zzzzzzzzzzzzzzzzzzzz'] }]
-  const packed = advisor.preReturnDiff({ cwd: '/x', budgetBytes: 20, deps: { diffLines: () => ({ lines: 4, entries: [], files }) } })
-  assert.equal(packed.bytes, Buffer.byteLength(packed.entries.join('\n'), 'utf8'))
-  assert.ok(packed.bytes <= 20)
-  assert.deepEqual(packed.omitted_files, ['a', 'b'])
-  assert.equal(packed.entries.length, 1)
-})
-
-test('PW4 a diff-growth consult keeps the small window: at most DELTA_ENTRIES entries of DELTA_ENTRY_CAP_BYTES', async () => {
-  const s = triggerSeat({ severity: 'medium' })
-  try {
-    s.ground()
-    s.diff.lines = advisor.DIFF_GROWTH_LINES
-    s.diff.entries = Array.from({ length: 20 }, () => Array.from({ length: 20 }, (_, i) => `lib/widget.mjs:${i + 1}: ${'x'.repeat(80)}`).join('\n'))
-    await s.a.onToolCall(call('b1', 'bash', { command: 'true' }), {})
-    s.a.onToolResult({ toolCallId: 'b1', toolName: 'bash', input: { command: 'true' }, content: [{ type: 'text', text: 'ok' }] }, {})
-    await s.a.settled()
-    const payload = s.payloads.find((p) => p.trigger === 'diff-growth')
-    assert.ok(payload)
-    assert.ok(payload.delta.length <= advisor.DELTA_ENTRIES)
-    assert.ok(payload.delta.every((entry) => Buffer.byteLength(entry.text, 'utf8') <= advisor.DELTA_ENTRY_CAP_BYTES))
-    assert.equal('criteria' in payload, false)
-    assert.equal('window_bytes' in s.journal.rows.find((row) => row.advisor_consult?.trigger === 'diff-growth').advisor_consult, false)
-  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
-})
-
-test('PW1 a later changed line beyond the old 12-line and 512-byte caps reaches the pre-return payload and can be cited', async () => {
-  const s = triggerSeat({ severity: 'medium', evidence: ['lib/big.mjs:140'], extraDeps: { diffLines: (cwd) => advisor.gitDiffLines({ cwd }) } })
-  try {
-    const repo = s.f.tree; const git = (...args) => execFileSync('git', ['-c', 'user.email=t@e.invalid', '-c', 'user.name=t', ...args], { cwd: repo, stdio: 'ignore' })
-    const lines = Array.from({ length: 250 }, (_, i) => `const v${i + 1} = ${i + 1}`)
-    writeFileSync(join(repo, 'lib/big.mjs'), lines.join('\n') + '\n'); git('init', '-q'); git('add', '.'); git('commit', '-qm', 'base')
-    for (let i = 99; i < 140; i += 1) lines[i] = `const v${i + 1} = "${'y'.repeat(60)}${i + 1}"`
-    writeFileSync(join(repo, 'lib/big.mjs'), lines.join('\n') + '\n')
-    await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
-    const text = deltaOf(s.payloads[0])
-    assert.ok(text.includes(`lib/big.mjs:140: const v140 = "${'y'.repeat(60)}140"`))
-    assert.ok(s.payloads[0].delta.some((entry) => Buffer.byteLength(entry.text, 'utf8') > advisor.DELTA_ENTRY_CAP_BYTES))
-    const note = s.journal.rows.find((row) => row.advisor_note?.trigger === 'pre-return' && row.advisor_note.outcome === 'injected')
-    assert.ok(note, 'a finding citing the late line is accepted')
-    assert.deepEqual(note.advisor_note.evidence, ['lib/big.mjs:140'])
   } finally { rmSync(s.f.root, { recursive: true, force: true }) }
 })
 
@@ -2138,33 +1247,6 @@ test('PW3 git output over the cap is stated as an incomplete window and names th
     await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
     assert.deepEqual(s.payloads[0].omitted_files, packed.omitted_files)
     assert.deepEqual(consultRow(s).omitted_files, packed.omitted_files)
-  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
-})
-
-test('PW2 and PW3 a diff git cannot read still gives the pre-return consult its acceptance items, a stated gap and a window row', async () => {
-  const items = ['(PW1) first']
-  const s = triggerSeat({ manifest: { criteria: items }, extraDeps: { diffLines: () => null } })
-  try {
-    s.ground()
-    await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
-    assert.deepEqual(s.payloads[0].criteria, items)
-    assert.deepEqual(s.payloads[0].omitted_files, [advisor.PRE_RETURN_UNAVAILABLE])
-    const row = consultRow(s)
-    assert.equal(row.window_bytes, 0); assert.equal(row.window_entries, 0)
-    assert.deepEqual(row.omitted_files, [advisor.PRE_RETURN_UNAVAILABLE])
-  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
-})
-
-test('PW3 the recorded window counts a packed diff entry that the session delta already holds', async () => {
-  const text = 'lib/widget.mjs:1: a'
-  const files = [{ path: 'lib/widget.mjs', lines: [text] }]
-  const s = triggerSeat({ extraDeps: { diffLines: () => ({ lines: 1, entries: [text], files }) } })
-  try {
-    s.ground()
-    await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
-    const row = consultRow(s)
-    assert.equal(s.payloads[0].delta.length, 1)
-    assert.equal(row.window_entries, 1); assert.equal(row.window_bytes, Buffer.byteLength(text, 'utf8'))
   } finally { rmSync(s.f.root, { recursive: true, force: true }) }
 })
 

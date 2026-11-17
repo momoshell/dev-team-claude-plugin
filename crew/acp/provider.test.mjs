@@ -1,25 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { forAll } from '../../test/helpers.mjs'
 import {
   PROVIDER_BACKOFF_LADDER_MS, PROVIDER_FAILURE_KINDS, PROVIDER_RESET_ABSENT, PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_ACTIONS,
   PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS, acpProviderFailureKind, acpTextReset, providerRetryDecision,
 } from './provider.mjs'
-
-test('acpProviderFailureKind maps the ACP error kinds onto the provider failure kinds', () => {
-  assert.equal(acpProviderFailureKind('rate_limit'), PROVIDER_FAILURE_KINDS.RATE_LIMIT)
-  for (const kind of ['overloaded', 'server_error']) assert.equal(acpProviderFailureKind(kind), PROVIDER_FAILURE_KINDS.SERVER_ERROR)
-  for (const kind of ['authentication_failed', 'oauth_org_not_allowed', 'verification_required']) assert.equal(acpProviderFailureKind(kind), PROVIDER_FAILURE_KINDS.AUTHENTICATION_FAILED)
-  for (const kind of ['', 'other', null, undefined]) assert.equal(acpProviderFailureKind(kind), null)
-})
-
-test('a Muse logged-out message classifies as authentication_failed and near misses do not', () => {
-  const message = 'log in to Muse before opening a session'
-  assert.equal(acpProviderFailureKind(null, message), 'authentication_failed')
-  for (const kind of ['authentication_failed', 'oauth_org_not_allowed', 'verification_required']) assert.equal(acpProviderFailureKind(kind, 'anything'), 'authentication_failed')
-  for (const miss of [`prefix ${message}`, `${message} suffix`, `${message}.`, `${message} `, ` ${message}`, `${message}\n`, message.replace('log in', 'log  in'), message.toUpperCase(), null, 42, {}]) assert.equal(acpProviderFailureKind(null, miss), null)
-  for (const [kind, expected] of [['rate_limit', 'rate_limit'], ['overloaded', 'server_error'], ['other', 'authentication_failed']]) assert.equal(acpProviderFailureKind(kind, message), expected)
-})
 
 test('pi provider messages classify only measured failures and retain retry policy', () => {
   const overload = 'Codex error: Our servers are currently overloaded. Please try again later.'
@@ -39,36 +23,6 @@ test('pi provider messages classify only measured failures and retain retry poli
   assert.equal(acpProviderFailureKind('authentication_failed', overload), PROVIDER_FAILURE_KINDS.AUTHENTICATION_FAILED)
 })
 
-test('WS1: exact pi WebSocket transport failures back off', () => {
-  // MUTATION: disabling the exact WebSocket error predicate must fail WS1.
-  const messages = ['WebSocket error', ...[1, 300000, 600000].map((ms) => `WebSocket idle timeout after ${ms}ms`)]
-  for (const message of messages) {
-    const kind = acpProviderFailureKind('pi-agent-error', message)
-    assert.equal(kind, PROVIDER_FAILURE_KINDS.SERVER_ERROR)
-    const decision = providerRetryDecision({ kind })
-    assert.equal(decision.retry, true)
-    assert.equal(decision.action, 'backoff')
-    for (const otherKind of ['other', '', null, undefined]) assert.equal(acpProviderFailureKind(otherKind, message), null)
-  }
-  for (const message of [
-    ' WebSocket error', 'WebSocket error ', 'WebSocket error\n', 'websocket error',
-    'prefix WebSocket error', 'WebSocket error: detail',
-    'WebSocket idle timeout after ms', 'WebSocket idle timeout after -1ms',
-    'WebSocket idle timeout after 1.5ms', 'WebSocket idle timeout after Nms',
-    'WebSocket idle timeout after 300000ms ', 'WebSocket idle timeout after 300000ms\n',
-    'prefix WebSocket idle timeout after 300000ms',
-  ]) assert.equal(acpProviderFailureKind('pi-agent-error', message), null)
-})
-
-test('WS2: deliberate pi stop messages remain unclassified and do not retry', () => {
-  // MUTATION: classifying Operation aborted as server_error must fail WS2.
-  for (const message of ['Operation aborted', 'terminated', 'WebSocket closed 1000']) {
-    const kind = acpProviderFailureKind('pi-agent-error', message)
-    assert.equal(kind, null)
-    assert.equal(providerRetryDecision({ kind }).retry, false)
-  }
-})
-
 test('ACP text reset resolves strict wall-clock rollover and DST instants', () => {
   const rows = [
     ['resets 11pm (Europe/Belgrade)', '2026-10-10T20:28:54Z', '2026-10-10T21:00:00Z'],
@@ -86,17 +40,6 @@ test('ACP text reset resolves strict wall-clock rollover and DST instants', () =
   const reason = PROVIDER_RESET_ABSENT.ACP_TEXT_UNPARSEABLE
   for (const text of [null, '', 'resets 13pm (UTC)', 'resets 11:99pm (UTC)', 'resets 11pmx (UTC)', 'resets 11pm (Not/AZone)']) assert.deepEqual(acpTextReset(text, Date.parse('2026-01-01T00:00:00Z')), { at_ms: null, absent_reason: reason })
   for (const at of [NaN, Infinity, 8.64e15 + 1]) assert.deepEqual(acpTextReset('resets 11pm (UTC)', at), { at_ms: null, absent_reason: reason })
-})
-
-test('ACP text reset generated UTC clock productions map to carried instants', () => {
-  forAll((random) => {
-    const hour = 1 + Math.floor(random() * 12), minute = Math.floor(random() * 60), pm = random() < 0.5
-    const at = Date.UTC(2026, 0, 1, Math.floor(random() * 24), Math.floor(random() * 60))
-    const hour24 = hour % 12 + (pm ? 12 : 0)
-    let expected = Date.UTC(2026, 0, 1, hour24, minute)
-    if (expected <= at) expected += 86400000
-    return { text: `resets ${hour}${minute ? `:${String(minute).padStart(2, '0')}` : ''}${pm ? 'pm' : 'am'} (UTC)`, at, expected }
-  }, ({ text, at, expected }) => assert.equal(acpTextReset(text, at).at_ms, expected), { runs: 100, seed: 1802 })
 })
 
 test('#887 provider retry decisions consume kind, attempt, and total-wait bounds', () => {

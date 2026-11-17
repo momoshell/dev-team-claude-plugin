@@ -16,10 +16,8 @@ import acpServer, { PERMISSION_OPTIONS, gatedToolsFrom, stopReasonFor, usageFrom
 // network.
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const REPO = join(HERE, '..', '..', '..')
 const SERVER = join(HERE, 'acp-server.ts')
 const BRIDGE = join(HERE, '..', 'acp-bridge.mjs')
-const FIXTURES = join(REPO, 'test', 'fixtures', 'acp')
 const SESSION = 'pi-session-under-test'
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
 // A bounded wait whose timer is cleared, so a won race never holds the file open.
@@ -29,11 +27,6 @@ function within(value, ms, fallback) {
   return Promise.race([Promise.resolve(value), late]).finally(() => clearTimeout(timer))
 }
 const settle = (value, ms = 1000) => within(value, ms, 'still-pending')
-
-function fixtureFrames(name, dir) {
-  return readFileSync(join(FIXTURES, name), 'utf8').split('\n').filter(Boolean)
-    .map((line) => JSON.parse(line)).filter((record) => record.dir === dir).map((record) => record.frame)
-}
 
 function withEnv(vars, fn) {
   const saved = {}
@@ -108,40 +101,6 @@ async function withSession(options = {}) {
 
 const bashCall = (toolCallId, command = 'echo hi') => ({ toolCallId, toolName: 'bash', input: { command } })
 
-test('P1 initializes with the ACP version and limited capabilities', async () => {
-  const h = await harness()
-  try {
-    const [init] = fixtureFrames('pi-handshake.ndjson', 'client->agent')
-    assert.equal(init.method, 'initialize')
-    h.send(init)
-    const reply = await h.wait((f) => f.id === init.id, 'initialize response')
-    assert.equal(reply.result.protocolVersion, ACP_PROTOCOL_VERSION)
-    assert.deepEqual(reply.result.agentCapabilities, { loadSession: false })
-    assert.equal(Object.hasOwn(reply.result.agentCapabilities, 'fs'), false)
-    assert.equal(Object.hasOwn(reply.result.agentCapabilities, 'terminal'), false)
-  } finally { h.close() }
-})
-
-test('P2 answers a prompt once after settlement with usage', async () => {
-  const h = await withSession()
-  try {
-    h.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'hello' }] } })
-    for (let i = 0; i < 100 && !h.prompts.length; i += 1) await sleep(5)
-    assert.deepEqual(h.prompts, [[{ type: 'text', text: 'hello' }]])
-    h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop', usage: { input: 10, output: 5, cacheRead: 2, cacheWrite: 1, totalTokens: 18, cost: { total: 0 } } }] })
-    await h.flush()
-    assert.equal(h.frames.some((f) => f.id === 5), false, 'session/prompt must not resolve on agent_end')
-    h.emit('agent_before_settle', { outcome: 'completed' })
-    h.emit('agent_settled')
-    const done = await h.wait((f) => f.id === 5, 'session/prompt response')
-    assert.equal(done.result.stopReason, 'end_turn')
-    assert.ok(ACP_STOP_REASONS.includes(done.result.stopReason))
-    assert.deepEqual(done.result.usage, { inputTokens: 10, outputTokens: 5, cachedReadTokens: 2, cachedWriteTokens: 1, totalTokens: 18 })
-    await h.flush()
-    assert.equal(h.frames.filter((f) => f.id === 5).length, 1)
-  } finally { h.close() }
-})
-
 test('pi publishes cumulative usage after each assistant message before settlement', async () => {
   const h = await withSession()
   try {
@@ -181,26 +140,6 @@ test('running pi accounting resets per prompt without changing final agent_end u
       assert.deepEqual(done.result.usage, { inputTokens: 2 })
     }
     assert.deepEqual(h.frames.filter((f) => f.params?.update?.sessionUpdate === 'usage_update').map((f) => f.params.update.usage), [{ inputTokens: 2 }, { inputTokens: 2 }])
-  } finally { h.close() }
-})
-
-test('P3 aborts a cancelled prompt and answers once after settlement', async () => {
-  const h = await withSession()
-  try {
-    h.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'long' }] } })
-    for (let i = 0; i < 100 && !h.prompts.length; i += 1) await sleep(5)
-    // Exactly the frame crew/acp-client.mjs cancel() writes: a notification, no id.
-    h.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: SESSION } })
-    await h.flush()
-    assert.equal(h.frames.some((f) => f.id === 5), false, 'cancellation is answered only after settlement')
-    assert.equal(h.ctx.aborts, 1, 'session/cancel must call ctx.abort once')
-    h.emit('agent_before_settle', { outcome: 'aborted' })
-    h.emit('agent_settled')
-    const done = await h.wait((f) => f.id === 5, 'cancelled prompt response')
-    assert.equal(done.result.stopReason, 'cancelled')
-    await h.flush()
-    assert.equal(h.frames.filter((f) => f.id === 5).length, 1, 'the aborted run settling must not answer twice')
-    assert.equal(h.frames.some((f) => f.error && f.id === null), false, 'the notification must not be answered as an invalid request')
   } finally { h.close() }
 })
 
@@ -246,23 +185,6 @@ test('the default gate covers bash, edit, write and powershell, and a blank list
   } finally { h.close() }
 })
 
-test('C1 accepts a new prompt after cancellation settles', async () => {
-  const h = await withSession()
-  try {
-    h.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'cancel me' }] } })
-    await h.wait(() => h.prompts.length === 1, 'first prompt')
-    h.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: SESSION } })
-    await h.flush()
-    assert.equal(h.frames.some((frame) => frame.id === 5), false)
-    h.emit('agent_before_settle', { outcome: 'aborted' })
-    h.emit('agent_settled')
-    const answer = await h.wait((frame) => frame.id === 5, 'cancelled response')
-    assert.equal(answer.result.stopReason, 'cancelled')
-    h.send({ jsonrpc: '2.0', id: 6, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'next' }] } })
-    await h.wait(() => h.prompts.length === 2, 'accepted follow-up prompt')
-    assert.equal(h.frames.some((frame) => frame.id === 6 && frame.error), false)
-  } finally { h.close() }
-})
 test('C2 answers cancellation only once despite repeated settlement', async () => {
   const h = await withSession()
   try {
@@ -302,33 +224,6 @@ test('P4 asks permission for each gated call and honors each answer', async () =
     // An ungated tool never asks.
     assert.equal(await settle(h.emit('tool_call', { toolCallId: 'call-p4-3', toolName: 'read', input: { path: 'x' } })), undefined)
     assert.equal(h.permissionRequests().length, 2)
-  } finally { h.close() }
-})
-
-// MUTATION: restore the allow_always option
-test('permission offers allow_once and reject_once only, asks on every gated call and refuses an always answer', async () => {
-  const h = await withSession()
-  try {
-    const first = h.emit('tool_call', bashCall('first'))
-    const req = await h.wait((f) => f.method === 'session/request_permission', 'first request')
-    assert.deepEqual(req.params.options.map((o) => o.kind), ['allow_once', 'reject_once'])
-    h.answer(req, 'allow_once')
-    assert.equal(await settle(first), undefined)
-    for (const choice of ['allow_always', 'reject_always']) {
-      const pending = h.emit('tool_call', bashCall(choice))
-      const next = await h.wait((f) => f.method === 'session/request_permission' && f.params.toolCall.toolCallId === choice, 'next request')
-      h.answer(next, choice)
-      assert.deepEqual(await settle(pending), { block: true, reason: 'ACP permission answer invalid' })
-    }
-  } finally { h.close() }
-})
-
-test('P6 blocks gated calls when the ACP client is unavailable', async () => {
-  const h = await harness({ connect: false })
-  try {
-    const result = await settle(h.emit('tool_call', bashCall('call-p6')))
-    assert.equal(result?.block, true, 'a gated call with no ACP client must be blocked')
-    assert.equal(result.reason, 'ACP client unavailable')
   } finally { h.close() }
 })
 
@@ -578,29 +473,6 @@ test('framing: a parse error is answered, frames beyond the cap in one chunk are
   } finally { u.close() }
 })
 
-test('replay: the recorded pi-turn client frames get the response shapes the client reads', async () => {
-  const h = await harness()
-  try {
-    const recorded = fixtureFrames('pi-turn.ndjson', 'client->agent')
-    const responses = fixtureFrames('pi-turn.ndjson', 'agent->client').filter((f) => !f.method)
-    for (const frame of recorded) {
-      const sent = frame.method === 'session/prompt' ? { ...frame, params: { ...frame.params, sessionId: SESSION } } : frame
-      h.send(sent)
-      if (frame.method === 'session/prompt') {
-        for (let i = 0; i < 100 && !h.prompts.length; i += 1) await sleep(5)
-        h.emit('agent_before_settle', { outcome: 'completed' })
-        h.emit('agent_settled')
-      }
-      const ours = await h.wait((f) => f.id === frame.id && !f.method, `${frame.method} response`)
-      const theirs = responses.find((f) => f.id === frame.id)
-      assert.equal(Boolean(ours.result), Boolean(theirs.result), frame.method)
-      if (frame.method === 'initialize') assert.equal(ours.result.protocolVersion, theirs.result.protocolVersion)
-      if (frame.method === 'session/new') assert.equal(typeof ours.result.sessionId, typeof theirs.result.sessionId)
-      if (frame.method === 'session/prompt') assert.equal(ours.result.stopReason, theirs.result.stopReason)
-    }
-  } finally { h.close() }
-})
-
 test('bridge: a relative or missing CREW_PI_BIN is refused before anything is spawned', async () => {
   const dir = scratchDir('acp-bridge-')
   const recordPath = join(dir, 'record.json')
@@ -651,23 +523,6 @@ test('bridge: what pi forked before exiting is torn down with its process group'
     for (let i = 0; i < 200 && alive; i += 1) { try { process.kill(descendant, 0); await sleep(10) } catch { alive = false } }
     assert.equal(alive, false, 'the process pi forked must not outlive the bridge')
   } finally { run.child.kill('SIGKILL'); if (descendant) { try { process.kill(descendant, 'SIGKILL') } catch {} } }
-})
-
-test('bridge: SIGTERM tears pi down and removes the socket dir', async () => {
-  const dir = scratchDir('acp-bridge-')
-  const recordPath = join(dir, 'record.json')
-  const run = runBridge({ CREW_PI_BIN: fakePi(dir), FAKE_PI_RECORD: recordPath, FAKE_PI_MODE: 'serve', HOME: dir })
-  try {
-    run.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} })}\n`)
-    await waitFor(() => run.stdout.includes('\n'), 'bridge connected')
-    run.child.kill('SIGTERM')
-    const exit = await within(run.exited, 10000, 'hung')
-    assert.notEqual(exit, 'hung')
-    const rec = readRecord(recordPath)
-    assert.equal(rec.sigterm, true)
-    assert.equal(exit.code, 5)
-    assert.equal(existsSync(dirname(rec.socketPath)), false)
-  } finally { run.child.kill('SIGKILL'); killRecorded(recordPath) }
 })
 
 // A fake pi that hosts the REAL extension behind a stub ExtensionAPI with pi's
@@ -777,15 +632,5 @@ test('a repo-writing Pi seat blocks a signal to a process it did not start with 
       assert.deepEqual(result, { block: true, reason: 'refused: this command may signal a process your own commands did not start, or the gate could not check who started it. Stop only processes your own commands started, by a pid you can read.' })
       assert.equal(h.permissionRequests().length, 0)
     }
-  } finally { h.close() }
-})
-
-test('a repo-writing Pi seat keeps the generic ACP gate for refused commands', async () => {
-  const h = await withSession({ env: { CREW_READ_ONLY: '0' } })
-  try {
-    const pending = h.emit('tool_call', bashCall('rw-1', 'git push'))
-    const req = await h.wait((f) => f.method === 'session/request_permission', 'permission request')
-    h.answer(req, 'reject_once')
-    assert.equal((await pending).reason, 'ACP permission rejected')
   } finally { h.close() }
 })

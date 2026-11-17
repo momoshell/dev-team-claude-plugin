@@ -117,6 +117,17 @@ test('ADR47-L2 C1 null-cell attach still emits an injected scope-breach tier-zer
   rmSync(f.root, { recursive: true, force: true })
 })
 test('ADR47-L2 C2 null cell suppresses repeated consult and spawn', async () => { const f = fixture(); const m = JSON.parse(readFileSync(join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE))); m.cell = null; writeFileSync(join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE), JSON.stringify(m)); const journal = sink(); let spawnCount = 0; const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR:f.taskDir }), deps: { taskDir:f.taskDir,cwd:f.tree,appendFile:journal.appendFile,readFile:(p)=>readFileSync(p,'utf8'),fileMtime:()=>2,spawn:()=>{spawnCount++} } }); for(let i=1;i<=25;i++){a.onToolCall(call(String(i),'read',{}),{});a.onToolResult(result(String(i),'read',{},'ok'),{})} await a.settled(); assert.equal(spawnCount,0); assert.equal(journal.rows.some((r)=>r.advisor_consult),false); assert.equal(journal.rows.some((r)=>r.advisor_note?.tier===1),false); rmSync(f.root,{recursive:true,force:true}) })
+test('ADR47-L2 C3 grant attaches without a manifest or retired model environment', async () => {
+  const f = fixture(); rmSync(join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE))
+  const p = pi(); const journal = sink()
+  await advisor.attachAdvisor(p, {
+    env: { CREW_ADVISOR: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: f.taskDir },
+    deps: { taskDir: f.taskDir, appendFile: journal.appendFile },
+  })
+  assert.deepEqual(p.handlers.map(([event]) => event).sort(), ['tool_call', 'tool_result'])
+  assert.equal(journal.rows.find((row) => row.advisor_boot)?.advisor_boot.outcome, 'attached')
+  rmSync(f.root, { recursive: true, force: true })
+})
 // Kills: `cell_invalid` forced false (or the attach check deleted). A present cell that fails
 // the allowlist must refuse loudly, never attach as a silent tier-0-only seat; null still attaches.
 test('a malformed manifest cell refuses attach while an explicit null cell attaches', async () => {

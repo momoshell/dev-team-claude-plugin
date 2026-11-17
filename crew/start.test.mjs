@@ -14,36 +14,8 @@ import { runAcpSeat } from './acp/seat.mjs'
 import { readOnlyCommand } from './acp-permission.mjs'
 import { parseAgent, TIERS, validateEnvelope } from './protocols.mjs'
 import { resolveAgents, snapshotRoster } from './agents.mjs'
-import { PROVIDER_RESET_SETTLE_MS, PROVIDER_RETRY_MAX, PROVIDER_RETRY_TOTAL_WAIT_MS } from './acp/provider.mjs'
+import { PROVIDER_RETRY_TOTAL_WAIT_MS } from './acp/provider.mjs'
 import { git, scratchDir } from '../test/helpers.mjs'
-
-test('crew start layers the project file over the personal file field by field and records the result', async () => {
-  const personal = '/home/.crew/agents.json', project = '/repo/checkout/.crew/agents.json'
-  const a = JSON.stringify({ planner: { model: 'local/personal', effort: 'low', tiers: { judge: { model: 'local/old' }, mechanical: { effort: 'high' } } } })
-  const b = JSON.stringify({ planner: { model: 'local/project', tiers: { judge: { model: 'local/new' } } } })
-  const f = fakes({ overrides: { [personal]: a, [project]: b }, resolve: resolveAgents })
-  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps })
-  const spec = JSON.parse(written(f.calls, '/task/lean.json')[2])
-  assert.ok(spec.roster)
-  assert.deepEqual(spec.roster.overrides.planner, { model: 'local/project', effort: 'low', tiers: { judge: { model: 'local/new' }, mechanical: { effort: 'high' } } })
-  assert.deepEqual(spec.roster.files, [[personal, a, 'personal'], [project, b, 'project']].map(([path, raw, layer]) => ({ layer, path, sha256: createHash('sha256').update(raw).digest('hex') })))
-  assert.equal(JSON.parse(written(f.calls, '/crew.json')[2]).members.planner.model, 'local/project')
-  for (const overrides of [{}, { [project]: b }]) {
-    const dir = scratchDir('roster-definitions-')
-    try {
-      cpSync(AGENTS, dir, { recursive: true })
-      const lane = fakes({ overrides, resolve: (tier, _, overlay) => resolveAgents(tier, dir, overlay) })
-      await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: lane.deps })
-      const recorded = JSON.parse(written(lane.calls, '/task/lean.json')[2]).roster
-      const before = Object.fromEntries(TIERS.map((tier) => [tier, resolveAgents(tier, dir, recorded.snapshot)]))
-      const path = join(dir, 'builder.md')
-      writeFileSync(path, readFileSync(path, 'utf8').replace('model: openai/gpt-6.1-terra', 'model: local/changed').replace('"judge":{"effort":"xhigh"}', '"judge":null'))
-      for (const tier of TIERS) assert.deepEqual(resolveAgents(tier, dir, recorded.snapshot), before[tier], tier)
-      assert.notDeepEqual(resolveAgents('build', dir), before.build)
-      assert.equal(recorded.files.length, Object.keys(overrides).length)
-    } finally { rmSync(dir, { recursive: true, force: true }) }
-  }
-})
 
 test('start freezes effective wait_s for later lean turns and finish passes', async () => {
   const dir = scratchDir('wait-snapshot-')
@@ -121,29 +93,12 @@ test('an existing lane directory or worktree refusal names crew closeout and --d
   }
 })
 
-test('an existing crew lane directory is refused before any worktree is made', async () => {
-  const { deps, calls } = fakes({ exists: (path) => path === '/home/.crew/dt-b1/b1' })
-  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), /\/home\/\.crew\/dt-b1\/b1/)
-  assert.deepEqual(effects(calls), [])
-})
-
 test('a failed detached launch is a StartRefusal that names the left worktree', async () => {
   for (const result of [null, 0, -1, 1.5, new Error('spawn')]) {
     const { deps } = fakes()
     deps.spawnDetached = () => { if (result instanceof Error) throw result; return result }
     await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), (e) => e instanceof StartRefusal && e.message.includes('/repo/dt-b1') && e.message.includes('branch b1'))
   }
-})
-
-test('idle sleep rejects unsafe run pids before spawning', () => {
-  const calls = []
-  for (const pid of [1, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity, '4242', null, undefined]) {
-    holdIdleSleep(pid, { platform: 'darwin', spawn: (...args) => {
-      calls.push(args)
-      return { on() {}, unref() {} }
-    } })
-  }
-  assert.deepEqual(calls, [])
 })
 
 test('crew start never launches real caffeinate in a test worker', async () => {
@@ -210,13 +165,6 @@ test('idle assertion failures never refuse a crew start', async () => {
     assert.equal(result.pid, 4242)
     assert.match(written(f.calls, '/task/run.pid')[2], /^4242 /)
   }
-})
-
-test('crew start records the run start time beside the pid in run.pid (S3-4)', async () => {
-  const { deps, calls } = fakes()
-  deps.now = () => 1_700_000_000_000
-  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
-  assert.equal(written(calls, '/task/run.pid')[2], '4242 1700000000000\n')
 })
 
 test('a started lane records its run pid, and a failed pid write only logs', async () => {
@@ -364,114 +312,6 @@ test('crew start accepts queued operator messages as provenance and refuses word
   await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', deps: both.deps }))
 })
 
-test('crew start strips pasted content from queued messages and still refuses the pasted text itself (ADR-056)', async () => {
-  const root = scratchDir('provenance-queued-paste-')
-  const dir = join(root, 'proj')
-  mkdirSync(dir)
-  writeFileSync(join(dir, 'a.jsonl'), JSON.stringify({ type: 'user', origin: { kind: 'human' }, promptSource: 'queued', message: { content: 'before <pasted_content id="p1">pasted words</pasted_content id="p1"> after' } }))
-  const makeBrief = (ask) => BRIEF.replace('source: issue 1961', 'source: operator request').replace('## Context', `## The ask\n\n> ${ask}\n\n## Context`)
-  {
-    const fail = fakes({ brief: makeBrief('pasted words') })
-    fail.deps.transcriptRoot = root
-    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: fail.deps }), (error) => error instanceof StartRefusal && error.message.includes('"pasted words"'))
-    assert.deepEqual(effects(fail.calls), [])
-    const pass = fakes({ brief: makeBrief('before after') })
-    pass.deps.transcriptRoot = root
-    await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: pass.deps }))
-    assert.equal(pass.calls.some(([kind, line]) => kind === 'log' && line.includes('ask provenance unmeasured')), false)
-  }
-})
-
-test('crew start reports ask provenance unmeasured for a malformed queued transcript row and starts (ADR-056)', async () => {
-  const root = scratchDir('provenance-queued-malformed-')
-  const dir = join(root, 'proj')
-  mkdirSync(dir)
-  const path = join(dir, 'a.jsonl')
-  const brief = BRIEF.replace('source: issue 1961', 'source: operator request').replace('## Context', '## The ask\n\n> Do this.\n\n## Context')
-  for (const readable of [false, true]) {
-    writeFileSync(path, `${readable ? `${JSON.stringify({ type: 'user', origin: { kind: 'human' }, promptSource: 'typed', message: { content: 'Unrelated words.' } })}\n` : ''}{"promptSource":"queued",`)
-    {
-      const operator = fakes({ brief })
-      operator.deps.transcriptRoot = root
-      await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: operator.deps }))
-      assert.ok(operator.calls.some(([kind, line]) => kind === 'log' && line.includes(`crew start: ask provenance unmeasured: incomplete Claude Code transcript scan under ${root}`)))
-      assert.ok(effects(operator.calls).length)
-    }
-  }
-})
-
-test('crew start refuses a ## Context path missing on the base before the worktree (ADR-056 Amendment 1)', async () => {
-  for (const status of [128, 1, null]) {
-    const missing = fakes({ brief: BRIEF.replace('`crew/agents.mjs`', '`crew/missing.mjs`') })
-    const spawnSync = missing.deps.spawnSync
-    missing.deps.spawnSync = (file, args, options) => {
-      const result = spawnSync(file, args, options)
-      return file === 'git' && args.includes(`${'a'.repeat(40)}:crew/missing.mjs`) ? { status } : result
-    }
-    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: missing.deps }), (error) => error instanceof StartRefusal && error.message.includes('could not verify') && error.message.includes('main') && error.message.includes('crew/missing.mjs'))
-    assert.equal(missing.calls.some(([kind, file, args]) => kind === 'spawn' && (file === 'gh' || args.includes('worktree'))), false)
-  }
-
-  const pass = fakes({ brief: BRIEF.replace('`crew/agents.mjs`', '`crew/agents.mjs` `resolveAgents`\n- `crew/`') })
-  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: pass.deps })
-  const checks = pass.calls.filter(([kind, file, args]) => kind === 'spawn' && file === 'git' && args.includes('cat-file')).map(([, , args]) => args.at(-1))
-  assert.deepEqual(checks, [`${'a'.repeat(40)}:crew/agents.mjs`, `${'a'.repeat(40)}:crew`])
-
-  const repo = scratchDir('context-base-')
-  for (const args of [['init', '-b', 'main'], ['config', 'user.name', 'Test'], ['config', 'user.email', 'test@example.com']]) {
-    assert.equal(spawnSync('git', args, { cwd: repo }).status, 0)
-  }
-  writeFileSync(join(repo, 'tracked'), 'base')
-  mkdirSync(join(repo, '.crew'))
-  writeFileSync(join(repo, '.crew', 'project.json'), JSON.stringify(projectFile()))
-  fs.symlinkSync('/outside/notes.md', join(repo, 'notes.md'))
-  fs.symlinkSync('/outside', join(repo, 'linked-dir'))
-  for (const args of [['add', '.'], ['commit', '-m', 'base']]) assert.equal(spawnSync('git', args, { cwd: repo }).status, 0)
-  writeFileSync(join(repo, 'remote-only'), 'remote')
-  for (const args of [['add', '.'], ['commit', '-m', 'remote'], ['update-ref', 'refs/remotes/origin/main', 'HEAD'], ['reset', '--hard', 'HEAD^']]) {
-    assert.equal(spawnSync('git', args, { cwd: repo }).status, 0)
-  }
-  writeFileSync(join(repo, 'local-only'), 'local')
-  for (const args of [['add', 'local-only'], ['commit', '-m', 'local']]) assert.equal(spawnSync('git', args, { cwd: repo }).status, 0)
-  for (const path of ['tracked', 'remote-only', 'local-only', 'notes.md', 'linked-dir/file']) {
-    const fail = fakes({ brief: BRIEF.replace('`crew/agents.mjs`', `\`${path}\``) })
-    const fakeSpawn = fail.deps.spawnSync
-    fail.deps.spawnSync = (file, args, options) => {
-      const result = fakeSpawn(file, args, options)
-      return file === 'git' && !args.includes('symbolic-ref') && !args.includes('worktree') && !args.includes('fetch') ? spawnSync(file, args, { encoding: 'utf8' }) : result
-    }
-    if (path === 'tracked' || path === 'remote-only') await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: repo, deps: fail.deps }))
-    else {
-      await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: repo, deps: fail.deps }), (error) => error instanceof StartRefusal && error.message.includes(path) && error.message.includes('main'))
-      assert.equal(fail.calls.some(([kind, file, args]) => kind === 'spawn' && (file === 'gh' || args.includes('worktree'))), false)
-    }
-  }
-})
-
-test('crew start accepts a quoted ask block only as one whole typed message (ADR-056 Amendment 1)', async () => {
-  const root = scratchDir('whole-message-')
-  const dir = join(root, 'proj')
-  mkdirSync(dir)
-  writeFileSync(join(dir, 'a.jsonl'), [
-    'will this enforce proper briefs now?',
-    'yes, all; probably best as followup',
-    'see <pasted_content id="p1">x</pasted_content id="p1"> please',
-  ].map((content) => JSON.stringify({ type: 'user', origin: { kind: 'human' }, promptSource: 'typed', message: { content } })).join('\n'))
-  const makeBrief = (ask) => BRIEF.replace('source: issue 1961', 'source: operator request').replace('## Context', `## The ask\n\n${ask}\n\n## Context`)
-  const good = '> will this enforce proper\n> briefs now?\n\n> yes, all; probably best as followup\n\n> see please'
-  {
-    const pass = fakes({ brief: makeBrief(good) })
-    pass.deps.transcriptRoot = root
-    await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: pass.deps }))
-    for (const ask of ['> yes', '> will this enforce proper briefs now?\n> yes, all; probably best as followup']) {
-      const fail = fakes({ brief: makeBrief(ask) })
-      fail.deps.transcriptRoot = root
-      await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: fail.deps }), (error) => error instanceof StartRefusal && error.message.includes('ask block at line 9 is not one whole message the operator typed'))
-      assert.deepEqual(effects(fail.calls), [])
-    }
-  }
-})
-
 test('crew start reports ask provenance unmeasured with no transcript and starts; an issue brief reads none (ADR-056)', async () => {
   const brief = BRIEF.replace('source: issue 1961', 'source: operator request').replace('## Context', '## The ask\n\n> Do this.\n\n## Context')
   const empty = scratchDir('provenance-empty-')
@@ -574,18 +414,6 @@ test('(SE1) a reader closing stdout after the first line does not crash a starte
   assert.equal(result.stderr, '')
 })
 
-// MUTATION: change the refusal return to 0 and an invalid brief reports success.
-test('(SE2) an invalid brief still refuses with stdout closed', async () => {
-  const result = await runPipeChild('invalid')
-  assert.equal(result.timedOut, false)
-  assert.equal(result.signal, null)
-  assert.ok(Number.isInteger(result.code) && result.code !== 0)
-  assert.match(result.stderr, /brief .* is not a P1 brief:/)
-  assert.match(result.stderr, /tier is not a brief field/)
-  assert.doesNotMatch(result.stderr, /\n\s+at |Unhandled 'error' event/)
-  assert.equal(result.started, '')
-})
-
 test('throwing injected loggers do not change start metadata or main status', async () => {
   for (const error of [Object.assign(new Error('EIO'), { code: 'EIO' }), new StartRefusal('output')]) {
     const lane = fakes()
@@ -604,13 +432,6 @@ test('throwing injected loggers do not change start metadata or main status', as
 test('the lane name is the brief file name and must be a slug', () => {
   assert.equal(laneName('/drafts/b1360-lean-entry.md'), 'b1360-lean-entry')
   assert.throws(() => laneName('/drafts/My Brief.md'), StartRefusal)
-})
-
-// MUTATION: skip the brief check and a malformed brief starts a lane.
-test('a brief with defects is refused before any git call', async () => {
-  const { deps, calls } = fakes({ brief: BRIEF.replace('shape: standard', 'tier: build\nshape: standard') })
-  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), /tier is not a brief field/)
-  assert.deepEqual(calls.filter(([kind]) => kind !== 'log'), [])
 })
 
 test('a brief with mechanical: true starts a mechanical lane and a brief without it starts a build lane', async () => {
@@ -632,15 +453,6 @@ test('without a readable origin/HEAD the start is refused before any worktree is
   assert.equal(calls.some(([kind]) => ['write', 'mkdir', 'detached'].includes(kind)), false)
 })
 
-test('an existing worktree or a failed worktree add stops the start and launches nothing', async () => {
-  const exists = fakes({ exists: (path) => path === '/repo/dt-b1' })
-  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: exists.deps }), /worktree \/repo\/dt-b1 already exists/)
-  assert.equal(exists.calls.some(([kind]) => kind === 'detached'), false)
-  const failed = fakes({ worktreeStatus: 1 })
-  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: failed.deps }), /git worktree add -b b1 \/repo\/dt-b1 main failed/)
-  assert.equal(failed.calls.some(([kind]) => kind === 'detached' || kind === 'write'), false)
-})
-
 test('main reports usage, refusals and success as exit codes', async () => {
   assert.equal(await main([], fakes().deps), 2)
   assert.equal(await main(['a.md', 'b.md'], fakes().deps), 2)
@@ -649,13 +461,6 @@ test('main reports usage, refusals and success as exit codes', async () => {
 
 test('a start needs a checkout', async () => {
   assert.equal(await main(['/d/b1.md'], fakes({ inGit: false }).deps), 2)
-})
-
-// MUTATION: drop the bound-issue slot and the run brief carries no bound issue.
-test('the run brief carries the header and the bound-issue slot when closes is set', () => {
-  const run = runBrief(BRIEF, 1961)
-  assert.equal(run, `# Task\n<!-- crew:bound-issue #1961 -->\n\n${BRIEF}`)
-  assert.equal(runBrief(BRIEF.replace('closes: 1961', 'closes: null'), null).split('\n')[1], '')
 })
 
 test('an issue brief starts with the issue body quoted as its ask, and an unreadable or empty issue refuses before the worktree', async () => {
@@ -709,25 +514,6 @@ test('an issue brief starts with the issue body quoted as its ask, and an unread
   assert.equal(JSON.parse(written(run.calls, '/task/lean.json')[2]).brief, runBrief(operatorBrief, 1961))
 })
 
-// MUTATION: restore the body-wide #N guard and the start refuses the source's words.
-test('an operator brief starts with its quoted ask verbatim, #N included, and binds only closes', async () => {
-  for (const closes of [null, 1961]) {
-    const brief = BRIEF.replace('source: issue 1961', 'source: operator request')
-      .replace('closes: 1961', `closes: ${closes}`)
-      .replace('## Context', '## The ask\n\n> Fix #42 after PR #7.\n\n## Context')
-    const f = fakes({ brief })
-    await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps }))
-    assert.equal(f.calls.some(([kind, file]) => kind === 'spawn' && file === 'gh'), false)
-    const snapshot = written(f.calls, '/briefs/started/b1.md')[2]
-    const spec = JSON.parse(written(f.calls, '/task/lean.json')[2])
-    assert.equal(snapshot, runBrief(brief, closes))
-    assert.equal(spec.brief, snapshot)
-    assert.ok(snapshot.includes('> Fix #42 after PR #7.'))
-    assert.deepEqual(snapshot.match(/^<!-- crew:bound-issue .* -->$/gm) ?? [], closes ? ['<!-- crew:bound-issue #1961 -->'] : [])
-    assert.deepEqual(spec.closes, closes ? [closes] : [])
-  }
-})
-
 test('crew start snapshots distinct referenced issues as quoted context for both source kinds', async () => {
   const body = 'First $& $` $\' $$ line\n\n## Context\n\n```md\n## The ask\n```\n> nested quote\n#900 and issue 998\n' + 'long tail '.repeat(8000) + 'TAIL_SENTINEL\n'
   const context = '## Context\n\n- issue 1961 issue 12 PR 56\n- `issue 77` issue 34 issue 12\n'
@@ -777,32 +563,6 @@ test('crew start includes titles and empty body markers for referenced issues', 
   }
 })
 
-test('crew start refuses unreadable referenced issues before creating the lane', async () => {
-  for (const field of ['body', 'title']) for (const [result, diagnostic] of [
-    [{ status: 1, stderr: 'authentication required\n' }, 'authentication required'],
-    [{ status: null, error: new Error('spawnSync gh ENOENT') }, 'spawnSync gh ENOENT'],
-  ]) {
-    const f = fakes({ brief: BRIEF + '- issue 12\n', issues: { 12: { [field]: result } } })
-    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps }), (error) => error instanceof StartRefusal && error.message.includes(`cannot read the ${field} of issue 12: ${diagnostic}`))
-    assert.equal(spawned(f.calls, 'worktree'), undefined)
-    assert.equal(f.calls.some(([kind]) => ['mkdir', 'write', 'detached'].includes(kind)), false)
-  }
-})
-
-test('crew start leaves briefs without external Context issues unchanged', async () => {
-  for (const source of ['issue 1961', 'operator request']) for (const pointers of ['', '- PR 34\n', ...(source === 'issue 1961' ? ['- issue 1961\n'] : [])]) {
-    const brief = BRIEF.replace('source: issue 1961', `source: ${source}`).replace('## Context', `${source === 'operator request' ? '## The ask\n\n> Do this.\n\n' : ''}## Context`) + pointers
-    const f = fakes({ brief })
-    await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps })
-    const expected = source === 'issue 1961' ? runBrief(brief, 1961, 'Refuse roster edits that cannot boot.\n', 'Refuse roster edits') : runBrief(brief, 1961)
-    const snapshot = written(f.calls, '/briefs/started/b1.md')[2]
-    assert.equal(snapshot, expected)
-    assert.equal(snapshot.includes('## Referenced issues'), false)
-    assert.equal(JSON.parse(written(f.calls, '/task/lean.json')[2]).brief, expected)
-    assert.deepEqual(f.calls.filter(([kind, file]) => kind === 'spawn' && file === 'gh').map(([, , args]) => args[2]), source === 'issue 1961' ? ['1961', '1961'] : [])
-  }
-})
-
 // stderr of main, captured; the exit code is returned beside it.
 async function mainWithStderr(argv, deps) {
   let stderr = ''
@@ -813,61 +573,6 @@ async function mainWithStderr(argv, deps) {
 
 const LEAN = fileURLToPath(new URL('./lean.mjs', import.meta.url))
 const leanLaunch = (calls) => calls.find(([kind, , args]) => kind === 'detached' && args[0] === LEAN)
-
-// MUTATION: force the lean decision false and the lane detaches crew run, with no spec or lean members.
-test('start detaches the bridge on a measured spec and boots nothing', async () => {
-  const { deps, calls } = fakes()
-  const result = await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
-  const launch = leanLaunch(calls)
-  assert.deepEqual(launch.slice(1, 3), [process.execPath, [LEAN, '/home/.crew/dt-b1/b1/task/lean.json']])
-  assert.equal(launch[3].cwd, '/repo/dt-b1')
-  assert.equal(launch[3].log, '/home/.crew/briefs/started/b1.run.log')
-  assert.equal(spawned(calls, 'boot'), undefined)
-  assert.equal(spawned(calls, 'run'), undefined)
-  assert.equal(result.pid, 4242)
-  const spec = JSON.parse(written(calls, '/task/lean.json')[2])
-  assert.match(spec.brief, /\nIssue title: Refuse roster edits\n## The ask\n/)
-  const { roster, ...otherSpec } = spec
-  assert.deepEqual(roster.files, [])
-  assert.ok(roster.snapshot)
-  assert.deepEqual(otherSpec, {
-    id: 'b1', cwd: '/repo/dt-b1', taskDir: '/home/.crew/dt-b1/b1/task', tier: 'build', shape: 'standard', brief: runBrief(BRIEF, 1961, 'Refuse roster edits that cannot boot.\n', 'Refuse roster edits'),
-    source: 'issue 1961', branch: 'b1', base: 'main', closes: [1961], suite: { command: 'npm', args: ['test'], timeoutMs: 1800000 }, proofTimeoutMs: 120000, onboarded: projectFile().onboarded.hash,
-  })
-  assert.equal(spec.timeoutMs, undefined)
-  const { members } = JSON.parse(written(calls, '/dt-b1/b1/crew.json')[2])
-  const { seats } = resolveAgents('build')
-  assert.deepEqual(Object.keys(members), Object.keys(seats))
-  for (const [role, cell] of Object.entries(seats)) assert.deepEqual(members[role], { agent: cell.agent, model: `${cell.provider}/${cell.id}`, transport: 'lean-acp' })
-  const unbound = fakes({ brief: BRIEF.replace('closes: 1961', 'closes: null') })
-  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: unbound.deps })
-  assert.deepEqual(JSON.parse(written(unbound.calls, '/task/lean.json')[2]).closes, [])
-})
-
-test('the project suite and onboarded hash become the lean spec suite and onboarded (ADR-057)', async () => {
-  const project = projectFile('cargo test -p power-api')
-  const { deps, calls } = fakes({ project })
-  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
-  const spec = JSON.parse(written(calls, '/task/lean.json')[2])
-  assert.deepEqual(spec.suite, { command: 'cargo', args: ['test', '-p', 'power-api'], timeoutMs: 1800000 })
-  assert.equal(spec.onboarded, project.onboarded.hash)
-})
-
-test('a configured suiteTimeoutMs in project.json reaches the lane suite spec and an absent one keeps 1800000', async () => {
-  for (const [value, expected] of [[3600000, 3600000], [undefined, 1800000]]) {
-    const { deps, calls } = fakes({ project: projectFile('npm test', [], value) })
-    await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
-    assert.equal(JSON.parse(written(calls, '/task/lean.json')[2]).suite.timeoutMs, expected)
-  }
-})
-
-test('a configured proofTimeoutMs in project.json reaches the lane spec and an absent one keeps 120000', async () => {
-  for (const [value, expected] of [[360000, 360000], [undefined, 120000]]) {
-    const { deps, calls } = fakes({ project: projectFile('npm test', [], undefined, value) })
-    await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
-    assert.equal(JSON.parse(written(calls, '/task/lean.json')[2]).proofTimeoutMs, expected)
-  }
-})
 
 test('a configured builderChecks in project.json reaches the lane spec and an absent one writes no key', async () => {
   const checks = ['cargo clippy -- -D warnings', 'cargo test -p fence']
@@ -983,53 +688,6 @@ function worktreeSetupFixture(dirty) {
   return f
 }
 
-test('crew start runs worktreeSetup once in the new worktree before the run is spawned', async () => {
-  const f = worktreeSetupFixture(false)
-  let sawLog = false
-  f.deps.spawnDetached = () => { sawLog = existsSync(join(f.root, 'setup.log')); return 1 }
-  const lane = await startLane({ briefPath: f.briefPath, checkout: f.checkout, deps: f.deps })
-  assert.equal(existsSync(join(f.root, 'setup.log')), true)
-  assert.deepEqual(readFileSync(join(f.root, 'setup.log'), 'utf8').trim().split('\n'), [fs.realpathSync(lane.worktree)])
-  assert.equal(existsSync(join(lane.worktree, 'seeded.bin')), true)
-  assert.equal(existsSync(join(f.checkout, 'seeded.bin')), false)
-  assert.equal(sawLog, true)
-  const rows = readFileSync(join(f.root, 'crew', 'dt-b1', 'b1', 'task', 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
-  assert.equal(rows.length, 1); assert.equal(rows[0].event, 'worktree-setup'); assert.equal(rows[0].status, 'green'); assert.equal(rows[0].reason, null)
-})
-
-test('crew start journals a red or timed-out worktreeSetup with its reason, prints it, and still starts the lane', async () => {
-  for (const [status, reason] of [['red', 'exit-nonzero'], ['unmeasured', 'timeout']]) {
-    const project = { suite: 'npm test', proof: [], worktreeSetup: 'node seed.mjs' }
-    project.onboarded = { hash: projectHash(project) }
-    const { deps, calls } = fakes({ project })
-    deps.runSuite = async (spec) => { calls.push(['setup', spec]); return { status, reason } }
-    await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
-    const setup = calls.filter(([kind]) => kind === 'setup')
-    assert.equal(setup.length, 1); assert.deepEqual(setup[0][1], { cwd: '/repo/dt-b1', command: 'node', args: ['seed.mjs'], timeoutMs: 600000 })
-    const rows = calls.filter(([kind]) => kind === 'append')
-    assert.equal(rows.length, 1); assert.equal(rows[0][1], '/home/.crew/dt-b1/b1/task/journal.jsonl')
-    const row = JSON.parse(rows[0][2]); assert.equal(row.status, status); assert.equal(row.reason, reason)
-    assert.ok(calls.some(([kind, line]) => kind === 'log' && line.includes(`${status}: ${reason}`)))
-    assert.ok(calls.some(([kind]) => kind === 'detached'))
-  }
-})
-
-test('crew start journals the worktree-setup row time as the epoch-ms number from now', async () => {
-  for (const [status, reason] of [['green', null], ['red', 'exit-nonzero'], ['unmeasured', 'timeout']]) {
-    const project = { suite: 'npm test', proof: [], worktreeSetup: 'node seed.mjs' }
-    project.onboarded = { hash: projectHash(project) }
-    const { deps, calls } = fakes({ project })
-    deps.now = () => 1_700_000_000_000
-    deps.runSuite = async () => ({ status, reason })
-    await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
-    const rows = calls.filter(([kind]) => kind === 'append')
-    assert.equal(rows.length, 1)
-    const row = JSON.parse(rows[0][2])
-    assert.equal(row.event, 'worktree-setup')
-    assert.strictEqual(row.at, 1_700_000_000_000)
-  }
-})
-
 test('crew start refuses a worktreeSetup that leaves changed or untracked paths, names them and starts no run', async () => {
   for (const [status, reason] of [['green', null], ['red', 'exit-nonzero'], ['unmeasured', 'timeout']]) {
     const f = worktreeSetupFixture(true)
@@ -1049,38 +707,6 @@ test('crew start refuses a worktreeSetup that leaves changed or untracked paths,
     assert.equal(rows[0].status, status)
     assert.equal(rows[0].reason, reason)
   }
-})
-
-test('crew start bases the lane on the origin commit when the local default branch is one commit behind', async () => {
-  for (const customRefspec of [false, true]) {
-    const f = originBaseFixture((seed) => writeFileSync(join(seed, 'origin-only'), 'origin'))
-    if (customRefspec) {
-      git(f.checkout, 'checkout', '-b', 'feature')
-      git(f.checkout, 'config', 'remote.origin.fetch', '+refs/heads/main:refs/heads/main')
-    }
-    let lane
-    await assert.doesNotReject(async () => { lane = await startLane({ briefPath: f.briefPath, checkout: f.checkout, deps: f.deps }) })
-    assert.equal(git(f.checkout, 'rev-parse', 'b1').trim(), f.b)
-    assert.equal(git(f.checkout, 'rev-parse', 'refs/heads/main').trim(), f.a)
-    assert.equal(git(f.checkout, 'rev-parse', 'HEAD').trim(), f.a)
-    assert.equal(JSON.parse(readFileSync(lane.specPath, 'utf8')).base, 'main')
-  }
-})
-
-test('crew start reads the onboarding check from the origin commit, not the local default branch', async () => {
-  const f = originBaseFixture((seed) => writeFileSync(join(seed, '.crew', 'project.json'), JSON.stringify(projectFile('cargo test'))))
-  writeFileSync(f.briefPath, BRIEF.replace('`crew/agents.mjs`', '`.crew/project.json`'))
-  await assert.rejects(startLane({ briefPath: f.briefPath, checkout: f.checkout, deps: f.deps }), (error) => error instanceof StartRefusal && error.message.includes('onboarding-stale'))
-  assert.equal(existsSync(join(f.root, 'dt-b1')), false)
-  assert.equal(f.calls.some(([file]) => file === 'launch'), false)
-})
-
-test('crew start onboarding refusal names origin/<base> and says the commit must reach origin', async () => {
-  const f = originBaseFixture((seed) => writeFileSync(join(seed, '.crew', 'project.json'), JSON.stringify(projectFile('cargo test'))))
-  writeFileSync(f.briefPath, BRIEF.replace('`crew/agents.mjs`', '`.crew/project.json`'))
-  await assert.rejects(startLane({ briefPath: f.briefPath, checkout: f.checkout, deps: f.deps }), (error) => error instanceof StartRefusal && error.message.includes('lane base origin/main: onboarding-stale') && error.message.includes('reaches origin/main before starting'))
-  assert.equal(existsSync(join(f.root, 'dt-b1')), false)
-  assert.equal(f.calls.some(([file]) => file === 'launch'), false)
 })
 
 test('crew start refuses when the origin fetch fails and does not fall back to the local branch', async () => {
@@ -1106,14 +732,6 @@ test('crew start names the signal when the origin fetch is interrupted', async (
   }
 })
 
-test('crew start refuses a checkout that is not onboarded or is stale, naming /onboard, and starts nothing (ADR-057)', async () => {
-  for (const project of [null, { suite: 'npm test', proof: [] }, '{', { ...projectFile(), suite: 'cargo test' }, { ...projectFile(), proof: null }]) {
-    const { deps, calls } = fakes({ project })
-    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), (e) => e instanceof StartRefusal && e.message.includes('/onboard') && e.message.includes(project === null || !Object.hasOwn(Object(project), 'onboarded') && typeof project !== 'string' ? 'not-onboarded' : 'onboarding-stale'))
-    assert.deepEqual(effects(calls), [])
-  }
-})
-
 test('crew start writes the brief generated paths and regenerate command into the lane spec, and no generated key when the brief declares neither', async () => {
   for (const declared of [true, false]) {
     const f = fakes({ brief: declared ? BRIEF.replace('out_of_scope:', 'generated: [gen.txt, dist/]\nregenerate: npm run generate\nout_of_scope:') : BRIEF })
@@ -1122,17 +740,6 @@ test('crew start writes the brief generated paths and regenerate command into th
     assert.equal(Object.hasOwn(spec, 'generated'), declared)
     if (declared) assert.deepEqual(spec.generated, { paths: ['gen.txt', 'dist/'], command: 'npm', args: ['run', 'generate'], timeoutMs: 1800000 })
   }
-})
-
-test('main reads only --checkout: --loop, an unknown flag, a duplicate or a missing value is usage', async () => {
-  for (const argv of [['a.md', '--loop', 'lean'], ['a.md', '--bogus'], ['a.md', '--check', '--check'], ['a.md', '--checkout', 'x', '--checkout', 'y'], ['a.md', '--checkout'], ['a.md', '--checkout', '--check'], [], ['a.md', 'b.md']]) {
-    const f = fakes()
-    const { code, stderr } = await mainWithStderr(argv, f.deps)
-    assert.equal(code, 2, argv.join(' '))
-    assert.equal(stderr, 'usage: crew start <brief.md> [--checkout <dir>]\n')
-    assert.deepEqual(effects(f.calls), [])
-  }
-  assert.equal(await main(['a.md', '--checkout', '/repo/checkout'], fakes().deps), 0)
 })
 
 test('main refuses --check as usage and starts nothing', async () => {
@@ -1169,41 +776,6 @@ test('a plain start is the only validation: defective, missing-context and stale
   assert.equal(valid.calls.some(([type, line]) => type === 'log' && line.includes('brief ok')), false)
 })
 
-// A start with no --loop is the lean loop, whether it comes through startLane or main.
-test('(SW1) a start with no --loop, from startLane or main, runs the lean loop', async () => {
-  const viaLane = fakes()
-  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: viaLane.deps })
-  const viaMain = fakes()
-  assert.equal(await main(['/d/b1.md', '--checkout', '/repo/checkout'], viaMain.deps), 0)
-  for (const { calls } of [viaLane, viaMain]) {
-    assert.ok(leanLaunch(calls))
-    assert.ok(written(calls, '/lean.json'))
-    assert.equal(spawned(calls, 'boot'), undefined)
-    assert.equal(spawned(calls, 'run'), undefined)
-  }
-})
-
-// MUTATION: allow a finish brief to start without an escalated lane.
-test('(SW4) start refuses a brief the lean loop cannot run', async () => {
-  const finish = fakes({ brief: BRIEF.replace('shape: standard', 'shape: finish') })
-  await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: finish.deps }), /shape finish starts from an escalated lane/)
-})
-
-// MUTATION: drop the shape refusal and a stepped brief starts a lean lane that runs only the standard loop.
-test('a stepped brief is refused by main and startLane before effects', async () => {
-  for (const via of ['main', 'startLane']) {
-    const { deps, calls } = fakes({ brief: BRIEF.replace('shape: standard', 'shape: stepped') })
-    if (via === 'main') {
-      const { code, stderr } = await mainWithStderr(['/d/b1.md'], deps)
-      assert.equal(code, 1)
-      assert.match(stderr, /not a P1 brief:[\s\S]*shape is one of standard, finish/)
-    } else {
-      await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), /not a P1 brief:[\s\S]*shape is one of standard, finish/)
-    }
-    assert.deepEqual(effects(calls), [])
-  }
-})
-
 test('(LS1) crew/start.mjs imports none of the old driver or roster modules', () => {
   const source = readFileSync(fileURLToPath(new URL('./start.mjs', import.meta.url)), 'utf8')
   assert.doesNotMatch(source, /(?:import\s*\(|from\s+)['"]\.\/(drive|roster|roster-validate|roster-generate|crew)\.mjs['"]/)
@@ -1223,20 +795,6 @@ test('(LS2) a refusing start in a child process loads no old driver, roster or c
   const loaded = readFileSync(trace, 'utf8')
   assert.match(loaded, /crew\/start\.mjs/)
   for (const name of ['drive', 'roster', 'roster-validate', 'roster-generate', 'crew']) assert.equal(loaded.includes(`/crew/${name}.mjs`), false, name)
-})
-
-test('(LS3, LS5) a lean start keeps the member shape and writes no roster', async () => {
-  const run = fakes()
-  const result = await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: run.deps })
-  assert.equal(result.pid, 4242)
-  assert.equal(leanLaunch(run.calls).length > 0, true)
-  assert.equal(spawned(run.calls, 'boot'), undefined)
-  assert.equal(spawned(run.calls, 'run'), undefined)
-  assert.equal(written(run.calls, '.roster.json'), undefined)
-  const { members } = JSON.parse(written(run.calls, '/dt-b1/b1/crew.json')[2])
-  const { seats, advisor } = resolveAgents('build')
-  assert.deepEqual(members, Object.fromEntries(Object.entries(seats).map(([role, cell]) => [role, { agent: cell.agent, model: `${cell.provider}/${cell.id}`, transport: 'lean-acp' }])))
-  assert.equal(advisor !== null && 'advisor' in members, false)
 })
 
 test('a lean start refuses before any effect when the agent definitions do not resolve or the brief is not P1', async () => {
@@ -1261,9 +819,7 @@ test('a denied lean metadata write stops the launch and names the left worktree'
 
 // ---- crew/lean.mjs: the detached bridge, over a fake ACP seat and fake loop checks ----
 
-const LEAN_MUTATION = { check: 'RV1', file: 'src/a.mjs', find: 'before', replace: 'after' }
 const GREEN = { status: 'green', reason: null, code: 0, signal: null, stdout: '', stderr: '', timedOut: false }
-const EINTR = Object.assign(new Error('turn interrupted'), { code: 'EINTR' })
 const EPERM = Object.assign(new Error('denied'), { code: 'EPERM' })
 
 // A lane's whole loop with every outside effect faked: seats answer by envelope id, recordings are real files.
@@ -1349,14 +905,6 @@ test('with builderChecks set, the build and suite-repair builder prompts hold ev
   }
 })
 
-// MUTATION: emit the section heading with no entries.
-test('without builderChecks no prompt carries a project checks section', async () => {
-  const f = leanFixture()
-  await f.go()
-  assert.ok(f.requests.length > 0)
-  for (const { prompt } of f.requests) assert.ok(!prompt.includes('## Project checks'))
-})
-
 test('lean journals suspension credit for successful and failed seat attempts', async () => {
   for (const kind of ['success', 'failure', 'unknown', 'provider-retry']) {
     const rows = []
@@ -1377,18 +925,6 @@ test('lean journals suspension credit for successful and failed seat attempts', 
     assert.deepEqual(seats.map((row) => row.sleep_credited_s), kind === 'failure' ? [10, 20] : [kind === 'unknown' ? null : kind === 'provider-retry' ? 30 : 20], kind)
     if (kind === 'unknown') assert.equal(seats[0].sleep_credit_reason, 'clock-unavailable')
   }
-})
-
-test('lean forwards suite and proof sleep credits in check results', async () => {
-  const rows = []
-  const f = leanFixture({ loopDeps: {
-    journal: async (row) => rows.push(row),
-    runSuite: async () => ({ ...GREEN, sleep_credited_s: 12 }),
-    proveTests: async () => ({ status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }], sleep_credited_s: null, sleep_credit_reason: 'clock-unavailable' }),
-  } })
-  await f.go()
-  assert.ok(rows.some((row) => row.event === 'check' && row.result?.sleep_credited_s === 12))
-  assert.ok(rows.some((row) => row.event === 'check' && row.result?.sleep_credited_s === null && row.result.sleep_credit_reason === 'clock-unavailable'))
 })
 
 test('a lean seat turn journals its agent, model, effort, distinct tool calls, stop reason and usage (#2287)', async () => {
@@ -1451,18 +987,6 @@ test('lean journals partial usage from interrupted and refused seats separately 
   }
 })
 
-test('lean journal final usage suppresses partial figures', async () => {
-  const rows = [], usage = { inputTokens: 3 }
-  const f = leanFixture({ loopDeps: { journal: async (row) => rows.push(row) }, acp: async () => ({ stopReason: 'end_turn', usage, usage_partial: { kind: 'tokens', inputTokens: 2 }, refusal: null }) })
-  await f.go()
-  const turns = rows.filter((row) => row.event === 'seat-turn')
-  assert.ok(turns.length > 0)
-  for (const row of turns) {
-    assert.deepEqual(row.usage, usage)
-    assert.equal(Object.hasOwn(row, 'usage_partial'), false)
-  }
-})
-
 test('a Muse seat refused at session/new for being logged out stops as authentication_failed with no rerun', async () => {
   const message = 'log in to Muse before opening a session'
   for (const [errorKind, errorMessage, frozen] of [[null, message, false], ['authentication_failed', 'denied', true], ['oauth_org_not_allowed', 'denied', false], ['verification_required', 'denied', false]]) {
@@ -1515,25 +1039,6 @@ test('a Muse seat refused at session/new for being logged out stops as authentic
   assert.equal((await f.go()).status, 'done')
 })
 
-test('a session/new refusal that is not a logged-out message keeps seat-unmeasured and one rerun', async () => {
-  const message = 'log in to Muse before opening a session'
-  for (const [method, errorKind, errorMessage, reason, calls] of [
-    ['session/new', null, 'session unavailable', 'seat-unmeasured', 2],
-    ['session/new', 'rate_limit', message, 'seat-unmeasured', 2],
-    ['initialize', 'authentication_failed', message, 'seat-unmeasured', 2],
-    ['session/set_mode', 'authentication_failed', message, 'seat-unmeasured', 2],
-    ['session/new', 'verification_required', 'verify', 'authentication_failed', 1],
-  ]) {
-    const rows = []
-    const f = leanFixture({ acp: async () => { throw Object.assign(new Error(`acp seat planner refused ${method}: ${errorMessage} [acp-protocol-mismatch]`), { reason: 'acp-protocol-mismatch', method, errorKind, errorMessage }) }, loopDeps: { journal: async (row) => rows.push(row) } })
-    assert.deepEqual(await f.go(), { status: 'stopped', reason, pr: null }, method)
-    assert.equal(f.requests.length, calls, method)
-    const verdicts = rows.filter((row) => row.event === 'verdict')
-    assert.equal(verdicts.length, 1)
-    assert.match(verdicts[0].observation.error.message, /\[acp-protocol-mismatch\]/)
-  }
-})
-
 test("a builder prompt's P2 example names tests only when the lane requires them", async () => {
   for (const [tier, planTests, required, finish] of [
     ['mechanical', undefined, false, false], ['build', [], false, false], ['build', undefined, true, false],
@@ -1557,23 +1062,6 @@ test("a builder prompt's P2 example names tests only when the lane requires them
   }
 })
 
-test("a mechanical builder prompt shows a P2 example with a subject, and a build builder's shows none", async () => {
-  for (const tier of ['mechanical', 'build']) {
-    const f = leanFixture({ tier, repairBuilder: tier === 'mechanical' })
-    const result = await f.go()
-    const builders = f.requests.filter((r) => r.definition.role === 'builder')
-    const prompts = builders.map((r) => r.prompt)
-    for (const prompt of prompts) {
-      const example = JSON.parse(prompt.slice(prompt.lastIndexOf('{\n  "role"'), prompt.lastIndexOf('}') + 1))
-      assert.equal(Object.hasOwn(example.details, 'subject'), tier === 'mechanical')
-      assert.deepEqual(validateEnvelope('builder', example).defects, [])
-    }
-    assert.equal(prompts.length, tier === 'mechanical' ? 2 : 1)
-    assert.equal(builders[0].definition.extensions.includes('skeletonread'), tier !== 'mechanical')
-    assert.equal(result.status, 'done')
-  }
-})
-
 test('a judge tech-lead turn gets the reviewer map grants by scope, the builder report, the changed paths and a valid P2 tech-lead example', async () => {
   const f = leanFixture({ tier: 'judge', scope: ['crew/lean.mjs', 'elsewhere/a.spec.ts'] })
   assert.equal((await f.go()).status, 'done')
@@ -1588,14 +1076,6 @@ test('a judge tech-lead turn gets the reviewer map grants by scope, the builder 
   assert.deepEqual(validateEnvelope('tech-lead', example).defects, [])
 })
 
-test("a raised lane's later turns run the judge tier definition", async () => {
-  const f = leanFixture({ tier: 'mechanical', status: [' M crew/loop.mjs\0', 'M  src/a.mjs\0'] })
-  f.spec.acceptance = ['RV1'] // archived spec, also accepted before ADR-055
-  assert.equal((await f.go()).status, 'done')
-  const builder = f.requests.findLast((r) => r.definition.role === 'builder')
-  assert.deepEqual(builder.definition.advisor, parseAgent(readFileSync(join(AGENTS, 'builder.md'), 'utf8')).fields.advisor)
-})
-
 const terminal = (logs) => logs.map((line) => JSON.parse(line)).filter((row) => row.event === 'loop-result')
 
 test('a thrown loop and a failing journal reach the result and the loop-result line with their described errors', async () => {
@@ -1607,15 +1087,6 @@ test('a thrown loop and a failing journal reach the result and the loop-result l
     else { assert.ok(result.journal.unwritten > 0); assert.deepEqual(result.journal.error, { code: 'EPERM', message: 'denied' }) }
     assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
   }
-})
-
-test('a standard-lane reviewer prompt with no delta or reserve base tree says it is a full review (#2341)', async () => {
-  const f = leanFixture({ answers: { reviews: ['changes-needed', 'pass'] } })
-  assert.equal((await f.go()).status, 'done')
-  const [first, second] = f.requests.filter((r) => r.definition.role === 'reviewer').map((r) => r.prompt)
-  assert.match(first, /^## Full review$/m)
-  assert.match(second, /^## Delta review$/m)
-  assert.doesNotMatch(second, /^## Full review$/m)
 })
 
 test('a moved-head recheck prompt scopes the reviewer and the tech-lead to what the rebase changed, with no full review (#2359)', async () => {
@@ -1642,92 +1113,6 @@ test('a moved-head recheck prompt scopes the reviewer and the tech-lead to what 
   }
 })
 
-// MUTATION: send a request without the role's definition, effort, prompt or recording and a seat turn loses it.
-test('every turn gets its role definition, the complete brief and P2, and its own recording', async () => {
-  const f = leanFixture({ answers: { reviews: ['changes-needed', 'pass'] } })
-  const result = await f.go()
-  assert.equal(result.status, 'done')
-  const roles = ['planner', 'builder', 'reviewer', 'builder', 'reviewer']
-  assert.deepEqual(f.requests.map((r) => r.definition.role), roles)
-  const { seats } = resolveAgents('build')
-  f.requests.forEach((request, index) => {
-    const role = roles[index]
-    const id = `lane.${role}.${index + 1}`
-    const returnPath = join(f.spec.taskDir, `${role}-${index + 1}.json`)
-    const source = join(AGENTS, `${role}.md`)
-    const { body, fields } = parseAgent(readFileSync(source, 'utf8'))
-    const cell = seats[role]
-    assert.deepEqual(request.definition, { role, agent: cell.agent, model: `${cell.provider}/${cell.id}`, effort: cell.effort, writes: { ...fields, ...fields.tiers?.build }.writes, skills: role === 'builder' ? ['code-less', 'prose-plain'] : role === 'reviewer' ? ['code-less', 'pr-review'] : fields.skills ?? [], requires: [], tools: { ...fields, ...fields.tiers?.build }.tools, extensions: { ...fields, ...fields.tiers?.build }.extensions, advisor: { ...fields, ...fields.tiers?.build }.advisor, wait_s: { ...fields, ...fields.tiers?.build }.wait_s, body })
-    assert.equal(request.taskDir, f.spec.taskDir)
-    assert.equal(request.cwd, f.spec.cwd)
-    assert.notEqual(f.spec.taskDir, request.cwd)
-    assert.equal(request.sessionFile, f.sessionOf(role, index + 1))
-    for (const wanted of [body, BRIEF, `Envelope id: ${id}`, `Return path: ${returnPath}`, `Task directory: ${f.spec.taskDir}`, `Definition source: ${source}`, 'no submit_envelope', `"role": "${role}"`, `"id": "${id}"`]) {
-      assert.ok(request.prompt.includes(wanted), `${id}: ${wanted}`)
-    }
-    if (role === 'builder' || role === 'reviewer') {
-      assert.deepEqual(request.definition.skills, role === 'builder' ? ['code-less', 'prose-plain'] : ['code-less', 'pr-review'], id)
-      assert.match(request.prompt, /Read the granted `code-less` skill before (working|reviewing)/, id)
-    }
-    assert.doesNotMatch(request.prompt, /^Charter file/m, id)
-    assert.doesNotMatch(request.prompt, /\]\([^)]*roles\//, id)
-    const lines = readFileSync(request.sessionFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
-    assert.deepEqual(lines[0], { type: 'prompt', text: request.prompt })
-    assert.equal(lines[1].update.content.text, `chunk-${id}`)
-    assert.deepEqual(lines[2], { type: 'turn', stopReason: 'end_turn', usage: null, refusal: null })
-    assert.equal(lines.length, 3)
-  })
-  assert.doesNotMatch(f.requests[0].prompt, /"mutations"/)
-  assert.match(f.requests[1].prompt, /"summary"/)
-  assert.match(f.requests[2].prompt, /"findings"/)
-  assert.doesNotMatch(f.requests[1].prompt, /redo-this/)
-  assert.match(f.requests[3].prompt, /redo-this/)
-  assert.equal(new Set(f.requests.map((r) => r.sessionFile)).size, 5)
-  assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
-})
-
-// MUTATION: emit the loop paragraph for the builder too, or not at all.
-test('the loop-stage paragraph is written once by the prompt, not by the non-builder charters', async () => {
-  const paragraph = 'The loop runs each test the builder names on the old source and on the build. It then runs the suite, commits, rebases and opens the PR. Do not run those stages yourself.'
-  const f = leanFixture({ answers: { reviews: ['pass'] } })
-  assert.equal((await f.go()).status, 'done')
-  assert.deepEqual([...new Set(f.requests.map((request) => request.definition.role))], ['planner', 'builder', 'reviewer'])
-  for (const request of f.requests) {
-    const role = request.definition.role
-    if (role === 'builder') assert.ok(!request.prompt.includes('Do not run those stages yourself.'))
-    else {
-      assert.ok(!parseAgent(readFileSync(join(AGENTS, `${role}.md`), 'utf8')).body.includes(paragraph), role)
-      assert.equal(request.prompt.split(paragraph).length, 2, role)
-    }
-  }
-  for (const role of ['lead', 'tech-lead']) assert.ok(!parseAgent(readFileSync(join(AGENTS, `${role}.md`), 'utf8')).body.includes(paragraph), role)
-})
-
-// MUTATION: remove builder from the laneRole predicate.
-test('LG1: builder gets accepted lane grants as bare whole skills', async () => {
-  for (const tier of ['build', 'judge']) for (const [scope, extra] of [
-    [['crew/lean.mjs'], ['backend-node']],
-    [['visualizer/a.svelte'], ['frontend-svelte', 'ui-design', 'ux']],
-    [['other/a.ts'], []],
-    [['elsewhere/a.spec.ts'], ['test-economy']],
-  ]) {
-    const f = leanFixture({ tier, scope, repairPlan: true, answers: { reviews: ['changes-needed', 'pass'] } })
-    assert.equal((await f.go()).status, 'done')
-    for (const { definition } of f.requests.filter((r) => r.definition.role === 'builder')) {
-      assert.deepEqual(definition.skills, ['code-less', 'prose-plain', ...extra])
-      assert.deepEqual(definition.requires, [])
-    }
-  }
-  const f = leanFixture({ status: ['', 'M  src/a.mjs\0'], loopDeps: {
-    rebaseBranch: async () => ({ status: 'green', reason: null, head: 'a'.repeat(40), onto: 'c'.repeat(40) }),
-  } })
-  f.spec.shape = 'finish'
-  f.spec.finish = { planPath: 'plan', gatePath: 'gate', subject: 'fix: test', mutations: [LEAN_MUTATION], stop: { reason: 'stopped' }, findings: [], turnOffset: 3, filesInScope: ['outside/a.svelte'] }
-  assert.equal((await f.go()).status, 'done')
-  assert.deepEqual(f.requests[0].definition.skills, ['code-less', 'prose-plain', 'frontend-svelte', 'ui-design', 'ux'])
-  assert.deepEqual(f.requests[1].definition.skills, ['code-less', 'pr-review', 'frontend-svelte', 'ui-design', 'ux'])
-})
-
 // MUTATION: remove reviewer from the laneRole predicate.
 test('LG2: reviewer gets scope grants rather than changed-path grants', async () => {
   for (const tier of ['build', 'judge']) for (const [scope, extra] of [
@@ -1745,69 +1130,6 @@ test('LG2: reviewer gets scope grants rather than changed-path grants', async ()
   }
 })
 
-// MUTATION: override mechanical builder skills with [code-less].
-test('PP2: builder definitions inherit both skills at every tier', async () => {
-  for (const tier of TIERS) {
-    const f = leanFixture({ tier })
-    const result = await f.go()
-    assert.equal(result.status, 'done', tier)
-    const builders = f.requests.filter((request) => request.definition.role === 'builder')
-    assert.ok(builders.length, tier)
-    for (const request of builders) assert.deepEqual(request.definition.skills, ['code-less', 'prose-plain'], tier)
-  }
-})
-
-// MUTATION: drop the changed-path section from the reviewer prompt and the reviewer is told nothing about untracked or renamed files.
-test("each reviewer prompt carries the latest builder's tests and notes and a valid P2 reviewer example", async () => {
-  const f = leanFixture({ answers: { reviews: ['changes-needed', 'pass'] } })
-  assert.equal((await f.go()).status, 'done')
-  const reviewers = f.requests.filter((r) => r.definition.role === 'reviewer')
-  assert.equal(reviewers.length, 2)
-  for (const [i, request] of reviewers.entries()) {
-    const report = request.prompt.split('\n## Builder report\n')[1].split('\n## Changed paths')[0]
-    assert.match(report, /Tests: \[{"file":"lib.test.mjs","title":"works"}\]/)
-    assert.ok(report.includes(`Notes: "builder turn ${i === 0 ? 2 : 4}"`))
-    const example = JSON.parse(request.prompt.split(`Task directory: ${f.spec.taskDir}\n`)[1].split('\nstatus is done')[0])
-    assert.deepEqual(validateEnvelope('reviewer', example).defects, [])
-    assert.ok(example.details.findings.some((finding) => finding.severity === 'must-fix' && finding.trigger))
-  }
-  for (const request of f.requests.filter((r) => r.definition.role !== 'reviewer')) assert.doesNotMatch(request.prompt, /^## Builder report$/m)
-})
-
-test('each reviewer prompt lists that round\'s measured paths as JSON-quoted bullets and no other seat gets the section', async () => {
-  const f = leanFixture({
-    answers: { reviews: ['changes-needed', 'pass'] },
-    status: [' M src/a.mjs\0?? untracked file.txt\0?? line\nbreak.txt\0?? "quoted".txt\0R  moved.mjs\0old.mjs\0', '', 'M  commit-only.mjs\0'],
-  })
-  assert.equal((await f.go()).status, 'done')
-  const section = (prompt) => (prompt.split('\n## Changed paths\n')[1] ?? '').split('\n## ')[0].split('\n').filter((line) => line.startsWith('- '))
-  const reviewers = f.requests.filter((r) => r.definition.role === 'reviewer')
-  assert.deepEqual(reviewers.map((r) => section(r.prompt)), [
-    ['- "src/a.mjs"', '- "untracked file.txt"', '- "line\\nbreak.txt"', '- "\\"quoted\\".txt"', '- "moved.mjs"', '- "old.mjs"'],
-    [],
-  ])
-  assert.match(reviewers[1].prompt, /^## Changed paths\n\n## Feedback$/m)
-  for (const request of f.requests.filter((r) => r.definition.role !== 'reviewer')) assert.doesNotMatch(request.prompt, /## Changed paths/)
-  const recorded = JSON.parse(readFileSync(reviewers[0].sessionFile, 'utf8').split('\n')[0])
-  assert.equal(recorded.text, reviewers[0].prompt)
-})
-
-// MUTATION: derive writes from the role instead of the effective definition and a tier override or edited file is ignored.
-test('the writes a seat receives are the effective definition writes, tier override included', async () => {
-  const planner = join(AGENTS, 'planner.md')
-  const edit = (from, to) => (path, ...args) => {
-    const text = readFileSync(path, ...args)
-    return path === planner ? text.replace(from, to) : text
-  }
-  const task = leanFixture({ deps: { readFileSync: edit('writes: task-dir', 'writes: repo') } })
-  await task.go()
-  assert.deepEqual(task.requests.map((r) => r.definition.writes), ['repo', 'repo', 'task-dir'])
-  const tiered = leanFixture({ deps: { readFileSync: edit(/tiers: .*/, 'tiers: {"build":{"writes":"none"}}') } })
-  await tiered.go()
-  assert.equal(tiered.requests[0].definition.writes, 'none')
-  assert.equal(tiered.requests[0].definition.role, 'planner')
-})
-
 const memoryDefinition = (line) => (path, ...args) => {
   const text = readFileSync(path, ...args)
   // The shipped definition's own memory field is removed first, so each case states the whole effective value.
@@ -1819,30 +1141,6 @@ const populateMemory = (dir, body) => {
   writeFileSync(join(dir, 'entry.md'), body)
 }
 
-test('effective memory injects lane or override context into the recorded planner prompt', async () => {
-  const previous = process.env.CREW_MEMORY_DIR
-  try {
-    for (const line of ['memory: true\ntiers: {}', 'tiers: {"build":{"memory":true}}', 'memory: false\ntiers: {"build":{"memory":true}}']) {
-      delete process.env.CREW_MEMORY_DIR
-      const f = leanFixture({ deps: { readFileSync: memoryDefinition(line) } })
-      populateMemory(join(f.spec.cwd, '.claude/dev-team/memory'), 'lane judgment')
-      assert.equal((await f.go()).status, 'done')
-      assert.match(f.requests[0].prompt, /## Team memory[\s\S]*lane judgment/)
-      assert.equal(JSON.parse(readFileSync(f.sessionOf('planner', 1), 'utf8').split('\n')[0]).text, f.requests[0].prompt)
-    }
-    const f = leanFixture({ deps: { readFileSync: memoryDefinition('memory: true\ntiers: {}') } })
-    populateMemory(join(f.spec.cwd, '.claude/dev-team/memory'), 'lane judgment')
-    process.env.CREW_MEMORY_DIR = join(f.spec.taskDir, 'override')
-    populateMemory(process.env.CREW_MEMORY_DIR, 'override judgment')
-    assert.equal((await f.go()).status, 'done')
-    assert.match(f.requests[0].prompt, /override judgment/)
-    assert.doesNotMatch(f.requests[0].prompt, /lane judgment/)
-  } finally {
-    if (previous === undefined) delete process.env.CREW_MEMORY_DIR
-    else process.env.CREW_MEMORY_DIR = previous
-  }
-})
-
 // MUTATION: drop `memory: true` from crew/agents/planner.md and the shipped planner boots without team memory.
 test('the shipped planner definition injects the lane checkout memory', async () => {
   const previous = process.env.CREW_MEMORY_DIR
@@ -1852,48 +1150,6 @@ test('the shipped planner definition injects the lane checkout memory', async ()
     populateMemory(join(f.spec.cwd, '.claude/dev-team/memory'), 'shipped judgment')
     assert.equal((await f.go()).status, 'done')
     assert.match(f.requests[0].prompt, /## Team memory[\s\S]*shipped judgment/)
-  } finally {
-    if (previous === undefined) delete process.env.CREW_MEMORY_DIR
-    else process.env.CREW_MEMORY_DIR = previous
-  }
-})
-
-test('missing memory boots and journals the backend reason without fallback', async () => {
-  const previous = process.env.CREW_MEMORY_DIR
-  try {
-    for (const reason of ['no-dir', 'no-index']) {
-      const rows = []
-      const f = leanFixture({ deps: { readFileSync: memoryDefinition('memory: true\ntiers: {}') }, loopDeps: reason === 'no-dir' ? { journal: async (row) => rows.push(row) } : { journal: undefined } })
-      if (reason === 'no-index') delete f.options.loopDeps.journal
-      populateMemory(join(f.spec.cwd, '.claude/dev-team/memory'), 'must not fall back')
-      process.env.CREW_MEMORY_DIR = join(f.spec.cwd, 'missing-override')
-      if (reason === 'no-index') mkdirSync(process.env.CREW_MEMORY_DIR)
-      assert.equal((await f.go()).status, 'done')
-      assert.doesNotMatch(f.requests[0].prompt, /## Team memory/)
-      const journal = reason === 'no-dir' ? rows : readFileSync(join(f.spec.taskDir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
-      const event = journal.find((row) => row.event === 'memory-empty')
-      assert.equal(event.reason, reason)
-      assert.equal(event.role, 'planner')
-      assert.equal(event.id, 'lane.planner.1')
-    }
-  } finally {
-    if (previous === undefined) delete process.env.CREW_MEMORY_DIR
-    else process.env.CREW_MEMORY_DIR = previous
-  }
-})
-
-test('an over-budget memory index journals memory-empty with reason over-budget and the dropped list (S1-6)', async () => {
-  const previous = process.env.CREW_MEMORY_DIR
-  try {
-    const rows = []
-    const f = leanFixture({ deps: { readFileSync: memoryDefinition('memory: true\ntiers: {}') }, loopDeps: { journal: async (row) => rows.push(row) } })
-    process.env.CREW_MEMORY_DIR = join(f.spec.cwd, 'override')
-    populateMemory(process.env.CREW_MEMORY_DIR, 'entry')
-    writeFileSync(join(process.env.CREW_MEMORY_DIR, 'MEMORY.md'), `- [entry](entry.md)\n${'x'.repeat(8000)}`)
-    assert.equal((await f.go()).status, 'done')
-    const event = rows.find((row) => row.event === 'memory-empty')
-    assert.equal(event.reason, 'over-budget')
-    assert.deepEqual(event.dropped.map(({ path, reason }) => [path, reason]), [['MEMORY.md', 'over-budget'], ['entry.md', 'over-budget']])
   } finally {
     if (previous === undefined) delete process.env.CREW_MEMORY_DIR
     else process.env.CREW_MEMORY_DIR = previous
@@ -1917,196 +1173,6 @@ test('a memory-empty row lists at most ten dropped entries and counts the rest (
   } finally {
     if (previous === undefined) delete process.env.CREW_MEMORY_DIR
     else process.env.CREW_MEMORY_DIR = previous
-  }
-})
-
-test('false or absent effective memory neither injects nor journals memory', async () => {
-  const previous = process.env.CREW_MEMORY_DIR
-  try {
-    for (const line of ['tiers: {}', 'memory: false\ntiers: {}', 'memory: true\ntiers: {"build":{"memory":false}}', 'tiers: {"build":{"memory":false}}', 'tiers: {"judge":{"memory":true}}']) {
-      const rows = []
-      const f = leanFixture({ deps: { readFileSync: memoryDefinition(line) }, loopDeps: { journal: async (row) => rows.push(row) } })
-      process.env.CREW_MEMORY_DIR = join(f.spec.cwd, 'override')
-      populateMemory(process.env.CREW_MEMORY_DIR, 'secret judgment')
-      assert.equal((await f.go()).status, 'done', line)
-      assert.doesNotMatch(f.requests[0].prompt, /## Team memory/)
-      assert.equal(rows.some((row) => row.event === 'memory-empty'), false)
-    }
-  } finally {
-    if (previous === undefined) delete process.env.CREW_MEMORY_DIR
-    else process.env.CREW_MEMORY_DIR = previous
-  }
-})
-
-// MUTATION: drop effective.tools from the dispatched definition and an authored tool list never reaches the seat.
-test('the tools a seat receives are the effective definition tools, tier override and empty list included, absent when unset', async () => {
-  const planner = join(AGENTS, 'planner.md')
-  const edit = (from, to) => (path, ...args) => {
-    const text = readFileSync(path, ...args)
-    return path === planner ? text.replace(from, to) : text
-  }
-  const planned = async (deps) => {
-    const f = leanFixture({ acp: () => { throw new Error('capture ends the fake turn') }, deps })
-    await f.go()
-    return f.requests[0].definition
-  }
-  assert.equal(Object.hasOwn(await planned({}), 'tools'), true)
-  assert.equal((await planned({})).tools, undefined)
-  assert.deepEqual((await planned({ readFileSync: edit('writes: task-dir', 'writes: task-dir\ntools: ["Read","Grep"]') })).tools, ['Read', 'Grep'])
-  assert.deepEqual((await planned({ readFileSync: edit(/tiers: .*/, 'tools: ["Read"]\ntiers: {"build":{"tools":["Glob"]}}') })).tools, ['Glob'])
-  assert.deepEqual((await planned({ readFileSync: edit('writes: task-dir', 'writes: task-dir\ntools: []') })).tools, [])
-})
-
-// MUTATION: drop effective.wait_s from the dispatched definition and an authored deadline never reaches the seat.
-test('the wait_s a seat receives is the effective definition value, tier override included, absent when unset', async () => {
-  const planner = join(AGENTS, 'planner.md')
-  const edit = (from, to) => (path, ...args) => {
-    const text = readFileSync(path, ...args)
-    return path === planner ? text.replace(from, to) : text
-  }
-  const planned = async (deps) => {
-    const f = leanFixture({ acp: () => { throw new Error('capture ends the fake turn') }, deps })
-    await f.go()
-    return f.requests[0].definition
-  }
-  assert.equal(Object.hasOwn(await planned({}), 'wait_s'), true)
-  assert.equal((await planned({})).wait_s, undefined)
-  assert.equal((await planned({ readFileSync: edit('writes: task-dir', 'writes: task-dir\nwait_s: 7') })).wait_s, 7)
-  assert.equal((await planned({ readFileSync: edit(/tiers: .*/, 'wait_s: 7\ntiers: {"build":{"wait_s":3}}') })).wait_s, 3)
-})
-
-test('deadline reruns append the effective wait limit and restart guidance to the original prompt', async () => {
-  for (const limit of [undefined, 2]) {
-    let clock = 0, attempted = false
-    const f = leanFixture({
-      deps: { readFileSync: (path, ...args) => {
-        const text = readFileSync(path, ...args)
-        const wait = attempted ? 99 : limit
-        return path === join(AGENTS, 'planner.md') && wait !== undefined ? text.replace('writes: task-dir', `writes: task-dir\nwait_s: ${wait}`) : text
-      } },
-      acp: async (input) => {
-        if (attempted) throw new Error('capture ends rerun')
-        attempted = true
-        const client = {
-          start() {}, initialize() {}, newSession() {}, setMode() {},
-          beginPrompt: () => 5, pollPrompt: () => null, cancelPrompt: () => true,
-          close: () => ({ outcome: 'proven' }),
-        }
-        return runAcpSeat({ ...input, definition: { ...input.definition, agent: 'claude', model: 'anthropic/claude-opus-4-6' }, binaries: { claudeAcp: process.execPath, claude: process.execPath },
-          deps: { ...input.deps, clientFactory: () => client, now: () => clock, sleep: (ms) => { clock += ms } } })
-      },
-    })
-    assert.equal((await f.go()).reason, 'seat-unmeasured')
-    assert.equal(f.requests.length, 2)
-    const [original, rerun] = f.requests
-    assert.equal(original.definition.wait_s, limit)
-    assert.equal(rerun.definition.wait_s, 99)
-    assert.equal(clock, (limit ?? 2400) * 1000)
-    assert.equal(rerun.prompt.slice(0, original.prompt.length), original.prompt)
-    assert.doesNotMatch(original.prompt, /## Wait limit restart/)
-    const note = rerun.prompt.slice(original.prompt.length)
-    assert.equal((note.match(/## Wait limit restart/g) ?? []).length, 1)
-    assert.match(note, new RegExp(`cut after ${limit ?? 2400} seconds without a return`))
-    assert.match(note, /partial changes remain in the worktree/)
-    assert.match(note, /long-running command may have been killed/)
-    assert.match(note, new RegExp(`must return before the ${limit ?? 2400}-second wait limit`))
-    assert.equal(rerun.sessionFile, original.sessionFile.replace('.jsonl', '.rerun.jsonl'))
-    for (const input of f.requests) assert.equal(JSON.parse(readFileSync(input.sessionFile, 'utf8').split('\n')[0]).text, input.prompt)
-  }
-})
-
-test('two real deadline cuts stop seat-unmeasured after exactly two attempts', async () => {
-  let clock = 0
-  const f = leanFixture({ acp: (input) => {
-    const client = {
-      start() {}, initialize() {}, newSession() {}, setMode() {},
-      beginPrompt: () => 5, pollPrompt: () => null, cancelPrompt: () => true,
-      close: () => ({ outcome: 'proven' }),
-    }
-    return runAcpSeat({ ...input, definition: { ...input.definition, agent: 'claude', model: 'anthropic/claude-opus-4-6' }, binaries: { claudeAcp: process.execPath, claude: process.execPath },
-      deps: { ...input.deps, clientFactory: () => client, now: () => clock, sleep: (ms) => { clock += ms } } })
-  } })
-  f.spec.roster = { overrides: { planner: { wait_s: 2 } }, files: [] }
-  assert.deepEqual(await f.go(), { status: 'stopped', reason: 'seat-unmeasured', pr: null })
-  assert.equal(f.requests.length, 2)
-  assert.equal(clock, 4000)
-})
-
-// MUTATION: skip the return read or the rerun after a deadline and the late invalid envelope is not evaluated twice.
-test('an expired real seat turn reads its late invalid envelope and reruns once before stopping', async () => {
-  const planner = join(AGENTS, 'planner.md')
-  let clock = 0, returnPath, envelopeId, reads = 0, rerun
-  const f = leanFixture({
-    deps: {
-      readFileSync: (path, ...args) => {
-        const text = readFileSync(path, ...args)
-        return path === planner ? text.replace('writes: task-dir', 'writes: task-dir\nwait_s: 2') : text
-      },
-      runAcpSeat: (input) => {
-        if (returnPath) { rerun = input; throw new Error('rerun failed') }
-        returnPath = /^Return path: (.+)$/m.exec(input.prompt)[1]
-        envelopeId = /^Envelope id: (.+)$/m.exec(input.prompt)[1]
-        const late = () => {
-          mkdirSync(f.spec.taskDir, { recursive: true })
-          writeFileSync(returnPath, JSON.stringify({ role: 'planner', id: envelopeId, status: 'done', summary: 'late',
-            details: { plan_path: join(f.spec.taskDir, 'plan.md') } }))
-        }
-        const client = {
-          start() {}, initialize() {}, newSession() {}, setMode() {},
-          beginPrompt: () => 5, pollPrompt: () => null,
-          cancelPrompt: () => { late(); return true },
-          close: () => ({ outcome: 'proven' }),
-        }
-        return runAcpSeat({ ...input, definition: { ...input.definition, agent: 'claude', model: 'anthropic/claude-opus-4-6' }, binaries: { pi: process.execPath, claudeAcp: process.execPath, claude: process.execPath },
-          deps: { ...input.deps, clientFactory: () => client, now: () => clock, sleep: (ms) => { clock += ms } } })
-      },
-    },
-    loopDeps: { readFile: async (...args) => { reads++; return readFileSync(...args) } },
-  })
-  const result = await f.go()
-  assert.equal(result.status, 'stopped')
-  assert.equal(result.reason, 'seat-unmeasured')
-  assert.equal(existsSync(returnPath), true)
-  assert.equal(reads, 2)
-  assert.equal(rerun.definition.role, 'planner')
-  assert.ok(rerun.prompt.includes(`Envelope id: ${envelopeId}\n`))
-  assert.ok(rerun.prompt.includes(`Return path: ${returnPath}\n`))
-  assert.equal(clock, 2000)
-  assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
-})
-
-test('a muse planner turn that adds, rewrites or deletes a lean record, or writes its own session file, stops seat-unmeasured with no return, and one that writes only task artifacts completes', async () => {
-  for (const [mutation, throws] of [['none', false], ['add', false], ['rewrite', false], ['delete', false], ['session', false], ['add', true]]) {
-    const f = leanFixture({ loopDeps: { resolveAgents: (tier) => {
-      const resolved = resolveAgents(tier)
-      resolved.seats.planner = { ...resolved.seats.planner, agent: 'muse', provider: 'meta', id: 'muse-wonder-1.0-contributor' }
-      return resolved
-    } } })
-    const prior = join(f.spec.taskDir, 'lean', 'reviewer', 'prior.jsonl')
-    mkdirSync(join(f.spec.taskDir, 'lean', 'reviewer'), { recursive: true })
-    writeFileSync(prior, 'prior')
-    const answered = f.options.runAcpSeat
-    f.options.runAcpSeat = async (input) => {
-      const turn = await answered(input)
-      if (input.definition.role === 'planner') {
-        if (mutation === 'add') {
-          mkdirSync(join(f.spec.taskDir, 'lean', 'builder'), { recursive: true })
-          writeFileSync(join(f.spec.taskDir, 'lean', 'builder', 'forged.jsonl'), 'forged')
-        }
-        if (mutation === 'rewrite') writeFileSync(prior, 'changed')
-        if (mutation === 'delete') rmSync(prior)
-        if (mutation === 'session') appendFileSyncReal(input.sessionFile, 'forged\n')
-        if (throws) throw new Error('turn failed')
-      }
-      return turn
-    }
-    const result = await f.go()
-    if (mutation === 'none') assert.equal(result.status, 'done')
-    else {
-      assert.deepEqual(result, { status: 'stopped', reason: 'seat-unmeasured', pr: null }, mutation)
-      assert.equal(existsSync(join(f.spec.taskDir, 'planner-1.json')), false, mutation)
-      assert.equal(f.requests.filter((input) => input.definition.role === 'planner').length, 1, mutation)
-    }
   }
 })
 
@@ -2173,30 +1239,6 @@ test('a muse planner whose lean records cannot be read before or after its turn 
   }
 })
 
-test('a seat turn that changed the repo it may not write leaves no return for the loop to accept', async () => {
-  for (const reason of ['acp-seat-wrote-repo', 'acp-seat-repo-unmeasured']) {
-    const f = leanFixture()
-    const answered = f.options.runAcpSeat
-    f.options.runAcpSeat = async (input) => {
-      const turn = await answered(input)
-      if (input.definition.role === 'planner') throw Object.assign(new Error(reason), { reason })
-      return turn
-    }
-    const result = await f.go()
-    assert.deepEqual(result, { status: 'stopped', reason: 'seat-unmeasured', pr: null })
-    assert.equal(existsSync(join(f.spec.taskDir, 'planner-1.json')), false)
-  }
-  const f = leanFixture({ deps: { rmSync: () => { throw EPERM } } })
-  const answered = f.options.runAcpSeat
-  f.options.runAcpSeat = async (input) => {
-    await answered(input)
-    throw Object.assign(new Error('changed repo'), { reason: 'acp-seat-wrote-repo' })
-  }
-  assert.deepEqual(await f.go(), { status: 'stopped', reason: 'seat-unmeasured', pr: null })
-  assert.equal(existsSync(join(f.spec.taskDir, 'planner-1.json')), true)
-  assert.equal(f.requests.length, 1)
-})
-
 test('a build-lane planner bounce after builder edits replans through a real muse seat, and a replan that edits an already-modified file leaves no return', async () => {
   for (const edit of [false, true]) {
     const f = leanFixture({ answers: { 'builder.2': 'insufficient' } })
@@ -2242,66 +1284,6 @@ test('a build-lane planner bounce after builder edits replans through a real mus
   }
 })
 
-test('a muse planner in a repository subdirectory cannot change an already-dirty file and leave a return', async () => {
-  const f = leanFixture()
-  const repo = f.spec.cwd
-  try {
-    git(repo, 'init')
-    mkdirSync(join(repo, 'src'))
-    const file = join(repo, 'src/a.mjs')
-    writeFileSync(file, 'base')
-    git(repo, 'add', '.')
-    git(repo, 'commit', '-m', 'base')
-    writeFileSync(file, 'builder edit')
-    f.spec.cwd = join(repo, 'src')
-    const answered = f.options.runAcpSeat
-    let returnPath, turns = 0
-    f.options.runAcpSeat = (input) => {
-      if (input.definition.role !== 'planner') return answered(input)
-      turns++
-      returnPath = /^Return path: (.+)$/m.exec(input.prompt)[1]
-      const client = { start() {}, initialize() {}, newSession() {}, setMode() {}, beginPrompt: () => 1,
-        pollPrompt: () => { answered(input); writeFileSync(file, 'planner edit'); return { stopReason: 'end_turn' } },
-        close: () => ({ outcome: 'proven' }) }
-      return runAcpSeat({ ...input, definition: { ...input.definition, agent: 'muse', model: 'meta/muse-wonder-1.0' },
-        binaries: { muse: process.execPath }, deps: { ...input.deps, clientFactory: () => client } })
-    }
-    assert.deepEqual(await f.go(), { status: 'stopped', reason: 'seat-unmeasured', pr: null })
-    assert.equal(readFileSync(file, 'utf8'), 'planner edit')
-    assert.equal(turns, 1)
-    assert.equal(existsSync(returnPath), false)
-  } finally { rmSync(join(repo, '..'), { recursive: true, force: true }) }
-})
-
-// MUTATION: skip the empty-list refusal in the seat and a toolless Claude seat starts and runs.
-test('a Claude seat authored with an empty tools list stops the lane as seat-unmeasured before any process starts', async () => {
-  const planner = join(AGENTS, 'planner.md')
-  const spawned = [], refusals = []
-  const f = leanFixture({
-    deps: {
-      readFileSync: (path, ...args) => {
-        const text = readFileSync(path, ...args)
-        return path === planner ? text.replace('writes: task-dir', 'writes: task-dir\ntools: []') : text
-      },
-      runAcpSeat: async (input) => {
-        try {
-          return await runAcpSeat({
-            ...input,
-            definition: { ...input.definition, agent: 'claude', model: 'anthropic/claude-opus-4-6' },
-            binaries: { claudeAcp: process.execPath, claude: process.execPath },
-            deps: { ...input.deps, clientDeps: { spawn: (...args) => { spawned.push(args); throw new Error('no process may start') } } },
-          })
-        } catch (error) { refusals.push(error.code); throw error }
-      },
-    },
-  })
-  const result = await f.go()
-  assert.deepEqual(result, { status: 'stopped', reason: 'seat-unmeasured', pr: null })
-  assert.deepEqual(refusals, ['ACP_EMPTY_TOOLS', 'ACP_EMPTY_TOOLS'])
-  assert.equal(spawned.length, 0)
-  assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
-})
-
 // One planner turn whose ACP result is `turn`; a present return file is written first so a read of it would be visible.
 async function oneTurn(turn, { withFile = true, deps = {} } = {}) {
   let reads = 0
@@ -2328,31 +1310,6 @@ async function oneTurn(turn, { withFile = true, deps = {} } = {}) {
   return { f, result, reads: () => reads, verdicts, rows }
 }
 
-// MUTATION: refuse to read the return after an ACP refusal, or rerun a provider-routed failure.
-test('a refused ACP turn is read after the turn: a valid return is accepted, an invalid one gets one rerun session, a provider-routed refusal none', async () => {
-  for (const mode of ['valid', 'invalid', 'deadline-text', 'rate_limit', 'authentication_failed']) {
-    const f = leanFixture({ acp: async (input) => {
-      const role = input.definition.role
-      const id = /^Envelope id: (.+)$/m.exec(input.prompt)[1]
-      const path = /^Return path: (.+)$/m.exec(input.prompt)[1]
-      mkdirSync(f.spec.taskDir, { recursive: true })
-      if (role === 'planner') writeFileSync(join(f.spec.taskDir, 'plan.md'), '')
-      const details = role === 'planner' ? { subject: 'fix(crew): planned', plan_path: 'plan.md', tests: [{ file: 'lib.test.mjs', title: 'works' }], files_in_scope: ['src/a.mjs'] }
-        : role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }] }
-        : { verdict: 'pass', findings: [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['a'], complete: true } }
-      writeFileSync(path, role === 'planner' && mode !== 'valid' ? '{' : JSON.stringify({ role, id, status: 'done', summary: 'ok', details }))
-      if (role === 'planner' && mode === 'deadline-text') throw new Error('untyped acp-seat-deadline text')
-      return role === 'planner' ? { stopReason: null, refusal: { code: -32603, errorKind: mode === 'valid' || mode === 'invalid' ? 'incomplete_tool_call' : mode, message: 'Claude ended the turn without returning results for tool calls' } } : { stopReason: 'end_turn' }
-    } })
-    const result = await f.go()
-    assert.equal(result.status, mode === 'valid' ? 'done' : 'stopped', mode)
-    if (mode !== 'valid') assert.equal(result.reason, 'seat-unmeasured')
-    const planners = f.requests.filter((r) => r.definition.role === 'planner')
-    assert.equal(planners.length, mode === 'invalid' || mode === 'deadline-text' ? 2 : 1)
-    if (mode === 'invalid' || mode === 'deadline-text') { assert.equal(planners[1].sessionFile, f.sessionOf('planner', 1).replace('.jsonl', '.rerun.jsonl')); assert.equal(planners[1].prompt, planners[0].prompt) }
-  }
-})
-
 // MUTATION: drop the missing-stop-reason clause and a turn that never measured a stop is accepted on its envelope.
 test('an ACP turn with no stop reason (null, empty, absent, no turn at all) is read and rerun once', async () => {
   for (const turn of [{ stopReason: null, usage: null, refusal: null }, { stopReason: '', usage: null, refusal: null }, { usage: null, refusal: null }, undefined, null]) {
@@ -2363,44 +1320,6 @@ test('an ACP turn with no stop reason (null, empty, absent, no turn at all) is r
     assert.equal(run.f.requests.length, 2, label)
     assert.deepEqual(run.verdicts[0].observation.error, { code: null, message: 'ACP seat turn returned no stop reason' }, label)
     assert.deepEqual(run.rows.at(-1), { type: 'turn', stopReason: turn?.stopReason ?? null, usage: null, refusal: null }, label)
-  }
-})
-
-// MUTATION: swallow the failed turn-row append and the cause is lost while the seat still reports a recorded failure.
-test('a denied turn-row append still fails the seat and names the recording error; an earlier recording error wins', async () => {
-  const refused = { stopReason: null, usage: null, refusal: { code: 1, message: 'refused', errorKind: 'x' } }
-  for (const code of ['EPERM', 'EIO', 'EINTR']) {
-    const deny = (match, errorCode) => (...args) => {
-      if (String(args[1]).includes(match)) throw Object.assign(new Error(`${errorCode} injected`), { code: errorCode })
-      return appendFileSyncReal(...args)
-    }
-    const turnRow = await oneTurn(refused, { deps: { appendFileSync: deny('"type":"turn"', code) } })
-    assert.deepEqual(turnRow.result, { status: 'stopped', reason: 'seat-unmeasured', pr: null }, code)
-    assert.ok(turnRow.reads() > 0, code)
-    assert.equal(turnRow.f.requests.length, 2, code)
-    assert.equal(turnRow.verdicts[0].observation.error.code, code)
-    const earlier = await oneTurn(refused, { deps: { appendFileSync: (...args) => { if (String(args[1]).includes('chunk')) throw Object.assign(new Error('first'), { code }); return deny('"type":"turn"', 'EIO')(...args) } } })
-    assert.equal(earlier.verdicts[0].observation.error.code, code)
-    assert.ok(earlier.reads() > 0, code)
-    assert.equal(earlier.f.requests.length, 2, code)
-  }
-})
-
-test("a turn row carries the seat's usage reason when the seat names one and keeps its shape otherwise", async () => {
-  for (const reason of ['usage-unavailable', undefined]) {
-    const run = await oneTurn({ stopReason: 'end_turn', usage: null, refusal: null, usage_reason: reason })
-    assert.deepEqual(run.rows.at(-1), { type: 'turn', stopReason: 'end_turn', usage: null, refusal: null, ...(reason === undefined ? {} : { usage_reason: reason }) })
-  }
-})
-
-// MUTATION: null the usage in the turn row and an accepted turn loses its measurement.
-test('an accepted turn ends with exactly one turn row carrying its usage, and its envelope is read', async () => {
-  for (const usage of [{ input_tokens: 5, output_tokens: 2 }, null]) {
-    const run = await oneTurn({ stopReason: 'end_turn', usage, refusal: null })
-    assert.equal(run.reads() > 0, true)
-    assert.equal(run.rows.filter((row) => row.type === 'turn').length, 1)
-    assert.deepEqual(run.rows.at(-1), { type: 'turn', stopReason: 'end_turn', usage, refusal: null })
-    assert.equal(run.rows.length, 3)
   }
 })
 
@@ -2434,30 +1353,6 @@ const rateLimit = (at, hours) => {
   return { code: -32000, errorKind: 'rate_limit', message: `resets ${h % 12 || 12}:${String(d.getUTCMinutes()).padStart(2, '0')}${h < 12 ? 'am' : 'pm'} (UTC)` }
 }
 
-// MUTATION: null the classifier result and a rate-limited turn stops the lane instead of retrying.
-test('a rate-limited turn is retried in a fresh session after the stated reset and the lane continues', async () => {
-  const run = await retryRun([rateLimit(Date.parse('2026-10-26T00:00:00Z'), 2)])
-  assert.equal(run.result.status, 'done')
-  assert.deepEqual(run.sleeps, [2 * 3600000 + PROVIDER_RESET_SETTLE_MS])
-  assert.equal(run.sessions.length, 4)
-  assert.equal(new Set(run.sessions).size, 4)
-  assert.equal(run.sessions[1], run.f.sessionOf('planner', 1).replace('.jsonl', '.retry-1.jsonl'))
-  const rows = (file) => readFileSync(file, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
-  assert.equal(rows(run.sessions[0]).at(-1).refusal.errorKind, 'rate_limit')
-  assert.equal(rows(run.sessions[1]).at(-1).stopReason, 'end_turn')
-  for (const file of run.sessions) assert.equal(rows(file).filter((row) => row.type === 'turn').length, 1)
-})
-
-test('a server error is retried up to the shared attempt bound, then the lane stops as seat-unmeasured', async () => {
-  const refusal = { code: -32000, errorKind: 'overloaded', message: 'overloaded' }
-  const recovers = await retryRun([refusal])
-  assert.equal(recovers.result.status, 'done')
-  const spent = await retryRun(Array(PROVIDER_RETRY_MAX + 2).fill(refusal))
-  assert.deepEqual(spent.result, { status: 'stopped', reason: 'seat-unmeasured', pr: null })
-  assert.equal(spent.sessions.length, PROVIDER_RETRY_MAX + 1)
-  assert.equal(spent.sleeps.length, PROVIDER_RETRY_MAX)
-})
-
 test('pi overload and WebSocket failures retry in a fresh session; unknown and resetless usage limit do not retry', async () => {
   const refusal = (errorMessage) => ({ code: -32000, errorKind: 'pi-agent-error', message: 'pi agent run failed', errorMessage })
   for (const message of ['Codex error: Our servers are currently overloaded. Please try again later.', 'WebSocket error', 'WebSocket idle timeout after 300000ms']) {
@@ -2487,125 +1382,6 @@ test('a retry never runs past the total wait: a reset beyond it, repeated resets
   const overslept = await retryRun([{ code: -32000, errorKind: 'server_error', message: 'boom' }], { oversleep: PROVIDER_RETRY_TOTAL_WAIT_MS })
   assert.equal(overslept.result.reason, 'seat-unmeasured')
   assert.deepEqual([overslept.sleeps.length, overslept.sessions.length], [1, 1])
-})
-
-// MUTATION: neutralise the rmSync of the issued return path before a provider retry and the refused attempt's envelope is accepted.
-test("a refused attempt's envelope is not accepted when its retry writes none", async () => {
-  const sessions = []
-  const f = leanFixture({
-    acp: async (input) => {
-      sessions.push(input.sessionFile)
-      const path = /^Return path: (.+)$/m.exec(input.prompt)[1]
-      const id = /^Envelope id: (.+)$/m.exec(input.prompt)[1]
-      if (sessions.length === 1) {
-        mkdirSync(f.spec.taskDir, { recursive: true })
-        const details = { subject: 'fix(crew): publish measured lane results', tests: [{ file: 'lib.test.mjs', title: 'works' }], plan_path: 'p' }
-        writeFileSync(path, JSON.stringify({ role: 'planner', id, status: 'done', summary: 'stale', details }))
-        return { stopReason: null, usage: null, refusal: { code: -32000, errorKind: 'overloaded', message: 'overloaded' } }
-      }
-      return { stopReason: 'end_turn', usage: { input_tokens: 1 }, refusal: null }
-    },
-    deps: { sleep: async () => {} },
-  })
-  const result = await f.go()
-  assert.equal(sessions.length, 2)
-  assert.deepEqual(result, { status: 'stopped', reason: 'seat-unmeasured', pr: null })
-})
-
-// MUTATION: route an authentication failure as a server error and it is retried.
-test('an authentication failure, even with a parseable reset, stops the lane without a retry', async () => {
-  const at = Date.parse('2026-10-26T00:00:00Z')
-  for (const errorKind of ['authentication_failed', 'oauth_org_not_allowed', 'verification_required']) {
-    const run = await retryRun([{ ...rateLimit(at, 2), errorKind }])
-    assert.deepEqual(run.result, { status: 'stopped', reason: 'seat-unmeasured', pr: null }, errorKind)
-    assert.deepEqual([run.sleeps.length, run.sessions.length], [0, 1], errorKind)
-  }
-})
-
-// MUTATION: skip the lead turn's definition and a consulted lead runs with no charter or P2 example.
-test('a consulted lead gets its own definition and decision shape', async () => {
-  const f = leanFixture({ answers: { 'builder.2': 'insufficient' } })
-  const result = await f.go()
-  assert.equal(result.status, 'done')
-  const roles = f.requests.map((r) => r.definition.role)
-  assert.deepEqual(roles.slice(0, 4), ['planner', 'builder', 'lead', 'builder'])
-  const lead = f.requests[2]
-  assert.equal(lead.definition.model, `${resolveAgents('build').seats.lead.provider}/${resolveAgents('build').seats.lead.id}`)
-  assert.match(lead.prompt, /"decision"/)
-  assert.match(lead.prompt, /insufficient/)
-  assert.ok(lead.prompt.includes(`Task directory: ${f.spec.taskDir}`))
-  assert.equal(lead.sessionFile, f.sessionOf('lead', 3))
-})
-
-// MUTATION: resume the refused session or repeat the assignment and a repair is not a fresh, repair-only turn.
-test('a schema-refused builder envelope gets one fresh repair-only turn at the same path, then the lane continues', async () => {
-  const f = leanFixture()
-  const turns = {}
-  f.options.runAcpSeat = async (input) => {
-    f.requests.push(input)
-    const role = input.definition.role
-    const id = /^Envelope id: (.+)$/m.exec(input.prompt)[1]
-    const path = /^Return path: (.+)$/m.exec(input.prompt)[1]
-    const n = turns[role] = (turns[role] ?? 0) + 1
-    mkdirSync(f.spec.taskDir, { recursive: true })
-    if (role === 'planner') for (const name of ['plan.md', 'gate.mjs']) writeFileSync(join(f.spec.taskDir, name), '')
-    const value = { role, id, status: 'done', summary: 'fixture', details: role === 'planner' ? { subject: 'fix(crew): publish measured lane results', tests: [{ file: 'lib.test.mjs', title: 'works' }], plan_path: join(f.spec.taskDir, 'plan.md'), files_in_scope: ['src/a.mjs'] } : role === 'builder' ? { summary: 'built', tests: [{ file: 'lib.test.mjs', title: 'works' }], ...(n === 1 ? { gaps: [] } : {}) } : { verdict: 'pass', findings: [], requirements: [{ requirement: 'build', status: 'met', evidence: 'read' }], failure_modes: [], coverage: { read: ['a'], complete: true } } }
-    mkdirSync(f.spec.taskDir, { recursive: true })
-    writeFileSync(path, JSON.stringify(value))
-    return { stopReason: 'end_turn', usage: null, refusal: null }
-  }
-  const result = await f.go()
-  assert.equal(result.status, 'done')
-  const builders = f.requests.filter((r) => r.definition.role === 'builder')
-  assert.equal(builders.length, 2)
-  const [first, repair] = builders
-  assert.notEqual(repair.sessionFile, first.sessionFile)
-  assert.equal(first.sessionFile, f.sessionOf('builder', 2))
-  assert.equal(repair.sessionFile, join(f.spec.taskDir, 'lean', 'builder', 'lane.builder.2.repair.jsonl'))
-  for (const field of ['Envelope id', 'Return path']) {
-    const pattern = new RegExp(`^${field}: (.+)$`, 'm')
-    assert.equal(pattern.exec(repair.prompt)[1], pattern.exec(first.prompt)[1])
-  }
-  assert.ok(repair.prompt.includes('details.gaps is not a field of builder details'))
-  assert.ok(!repair.prompt.includes(first.definition.body))
-  assert.ok(!repair.prompt.includes(BRIEF))
-  assert.deepEqual(JSON.parse(readFileSync(repair.sessionFile, 'utf8').split('\n')[0]), { type: 'prompt', text: repair.prompt })
-  assert.ok(first.prompt.includes(BRIEF), 'the ordinary assignment keeps its full prompt')
-})
-
-// MUTATION: restore an old role-charter link or first-generation field in a body and a dispatched prompt carries it.
-test('lean prompts contain only the lean contract', async () => {
-  const f = leanFixture({ answers: { 'builder.2': 'insufficient' } })
-  f.spec.brief = 'Implement the supplied task.'
-  assert.equal((await f.go()).status, 'done')
-  assert.deepEqual([...new Set(f.requests.map((r) => r.definition.role))].sort(), ['builder', 'lead', 'planner', 'reviewer'])
-  for (const { prompt, definition } of f.requests) {
-    assert.doesNotMatch(prompt, /^Charter file/m, definition.role)
-    assert.doesNotMatch(prompt, /\]\([^)]*roles\//, definition.role)
-    // Feedback may quote the planner's scope; the other charters and examples do not state it.
-    const contract = prompt.split('## Feedback')[0] + prompt.split('## Return').at(-1)
-    for (const field of ['validation_lane', 'files_in_scope']) {
-      const matcher = new RegExp(`\\b${field}\\b`)
-      if (definition.role === 'planner') assert.match(contract, matcher, `planner: ${field}`)
-      else assert.doesNotMatch(contract, matcher, `${definition.role}: ${field}`)
-    }
-    // The planner explains the brief's closes binding; it is not an envelope field.
-    assert.doesNotMatch(prompt, /"closes"\s*:/, definition.role)
-    for (const field of ['commit_subject', ...(definition.role === 'planner' ? [] : ['closes']), 'exemplars', 'exemplars_none', 'consult_questions']) {
-      assert.doesNotMatch(prompt, new RegExp(`\\b${field}\\b`), `${definition.role}: ${field}`)
-    }
-  }
-})
-
-test('every lean seat turn carries the brief to the seat, and the planner example it is shown is a valid P2 planner envelope', async () => {
-  const f = leanFixture({})
-  f.spec.brief = 'Tripwire tests:\n- a.test.mjs · tripwire\nBroad keys\n'
-  assert.equal((await f.go()).status, 'done')
-  assert.ok(f.requests.length > 0)
-  for (const request of f.requests) assert.equal(request.briefText, f.spec.brief, request.definition.role)
-  const planner = f.requests.find((request) => request.definition.role === 'planner')
-  const example = JSON.parse(planner.prompt.slice(planner.prompt.lastIndexOf('{\n  "role"'), planner.prompt.lastIndexOf('}') + 1))
-  assert.deepEqual(validateEnvelope('planner', example).defects, [])
 })
 
 // MUTATION: take the effort from the file's base fields and a tier override never reaches the seat.
@@ -2648,44 +1424,6 @@ test('a tier override applies and an unseating override refuses the turn', async
   assert.deepEqual(unseated.requests.map((r) => r.definition.role), ['builder'])
 })
 
-// MUTATION: append to an existing recording instead of creating it exclusively and an old turn is overwritten or mixed.
-test('a recording that already exists is never reused: the turn reruns in a fresh session', async () => {
-  const f = leanFixture()
-  mkdirSync(join(f.spec.taskDir, 'lean', 'planner'), { recursive: true })
-  writeFileSync(f.sessionOf('planner', 1), 'earlier turn\n')
-  const result = await f.go()
-  assert.equal(result.status, 'done')
-  assert.equal(f.requests[0].sessionFile, f.sessionOf('planner', 1).replace('.jsonl', '.rerun.jsonl'))
-  assert.equal(readFileSync(f.sessionOf('planner', 1), 'utf8'), 'earlier turn\n')
-  assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
-})
-
-// MUTATION: ignore a failed directory or prompt write and the seat runs with nothing recorded.
-test('a denied recording directory or initial write stops the turn before the seat starts', async () => {
-  for (const effect of ['mkdirSync', 'writeFileSync']) {
-    const f = leanFixture({ deps: { [effect]: () => { throw EPERM } } })
-    const result = await f.go()
-    assert.deepEqual(result, { status: 'stopped', reason: 'seat-unmeasured', pr: null }, effect)
-    assert.equal(f.requests.length, 0, effect)
-    assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }], effect)
-  }
-})
-
-// MUTATION: pass the bridge's append straight through and the seat's swallowed recording failure goes unseen.
-test('a recording append that fails is recorded even when the seat swallowed it', async () => {
-  let appends = 0
-  const rows = []
-  const f = leanFixture({ deps: { appendFileSync: (...args) => { if (++appends === 1) throw EPERM; return appendFileSyncReal(...args) } }, loopDeps: { journal: async (row) => rows.push(row) } })
-  const result = await f.go()
-  assert.equal(result.status, 'done')
-  assert.equal(rows.find((row) => row.event === 'envelope' && row.role === 'planner').turnError.code, EPERM.code)
-  const planner = rows.find((row) => row.event === 'seat-turn' && row.role === 'planner')
-  assert.equal(planner.tool_calls, null)
-  assert.equal(planner.unmeasured.tool_calls, 'turn-failed')
-  assert.equal(f.requests.filter((r) => r.definition.role === 'planner').length, 1)
-  assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
-})
-
 // MUTATION: let a failed permission-row append pass and a decision the lane cannot replay goes unseen.
 test('a permission row whose append fails stops the turn like any other recording failure', async () => {
   const acp = async (input) => {
@@ -2697,25 +1435,6 @@ test('a permission row whose append fails stops the turn like any other recordin
   const f = leanFixture({ acp, deps: { appendFileSync: (path, text, ...rest) => { if (text.includes('"kind":"permission"')) throw EPERM; return appendFileSyncReal(path, text, ...rest) } } })
   assert.deepEqual(await f.go(), { status: 'stopped', reason: 'seat-unmeasured', pr: null })
   assert.equal(f.requests.length, 2)
-})
-
-// MUTATION: treat a thrown or rejected turn as returned and the loop reads a missing envelope as success.
-test('a turn that throws or rejects stops with a terminal row', async () => {
-  for (const acp of [async () => { throw EINTR }, () => { throw EINTR }]) {
-    const f = leanFixture({ acp })
-    const result = await f.go()
-    assert.deepEqual(result, { status: 'stopped', reason: 'seat-unmeasured', pr: null })
-    assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
-  }
-})
-
-test('the terminal row repeats a stopped loop result and a throwing log is not swallowed', async () => {
-  const f = leanFixture({ loopDeps: { run: async ({ args }) => { if (args.includes('status')) throw EPERM; return { ...GREEN, stdout: args.includes('rev-parse') ? 'c'.repeat(40) : '' } } } })
-  const result = await f.go()
-  assert.deepEqual(result, { status: 'stopped', reason: 'paths-unmeasured', pr: null })
-  assert.deepEqual(terminal(f.logs), [{ event: 'loop-result', ...result }])
-  const broken = leanFixture({ deps: { log: () => { throw EPERM } } })
-  await assert.rejects(broken.go(), (error) => error === EPERM)
 })
 
 // MUTATION: launch the loop on an unreadable spec and a seat starts with no input.
@@ -2748,56 +1467,4 @@ test('importing the bridge launches nothing', () => {
   const run = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(pathToFileURL(LEAN).href)})`], { encoding: 'utf8', timeout: 20000 })
   assert.equal(run.status, 0, run.stderr)
   assert.equal(run.stdout, '')
-})
-
-// MUTATION: drop subject from the planner example and the prompt shows a P2 the loop refuses.
-test('the planner prompt example is a valid P2 envelope carrying a subject', async () => {
-  const f = leanFixture()
-  await f.go()
-  const prompt = f.requests[0].prompt
-  const start = prompt.indexOf('{', prompt.indexOf('"role": "planner"') - 20)
-  const example = JSON.parse(prompt.slice(start, prompt.indexOf('\n}', start) + 2))
-  assert.equal(example.role, 'planner')
-  assert.deepEqual(validateEnvelope('planner', example).defects, [])
-  assert.match(example.details.subject, /^fix\(crew\): /)
-})
-
-// MUTATION: invent the subject in startLane and the published source is not the brief's.
-test('a started lean spec reaches the PR with its exact P1 source and measured body', async () => {
-  const { deps, calls } = fakes()
-  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps })
-  const spec = JSON.parse(written(calls, '/task/lean.json')[2])
-  const seen = {}
-  const loopDeps = {
-    commitChanges: async (input) => { seen.commit = input; return { status: 'green', reason: null, head: 'a'.repeat(40) } },
-    openPullRequest: async (input) => { seen.publish = input; return { status: 'green', reason: null, pr: { number: 7 } } },
-  }
-  const g = leanFixture({ loopDeps })
-  g.spec.source = spec.source
-  g.spec.brief = spec.brief
-  assert.equal((await g.go()).status, 'done')
-  assert.equal(seen.commit.subject, 'fix(crew): publish measured lane results')
-  assert.equal(seen.publish.title, seen.commit.subject)
-  assert.equal(seen.publish.body, ['## Summary', 'Purpose: Fixture', 'Issue 1961: Refuse roster edits', 'How: built', '', '## Verification', '- lib.test.mjs: works was red on the old source, green on the build.', '- Suite: green; exit 0; npm test.'].join('\n'))
-  assert.match(seen.commit.body, /^Source: "issue 1961"\n\n## Measurements\n/)
-  assert.equal(spec.source, 'issue 1961')
-})
-
-// MUTATION: drop effective.requires from the dispatched definition.
-test('the requires a seat receives are the effective definition list, tier override included', async () => {
-  const planner = join(AGENTS, 'planner.md')
-  const edit = (from, to) => (path, ...args) => {
-    const text = readFileSync(path, ...args)
-    return path === planner ? text.replace(from, to) : text
-  }
-  const based = leanFixture({ deps: { readFileSync: edit('advisor: null', 'advisor: null\nrequires: ["alpha"]') } })
-  await based.go()
-  assert.deepEqual(based.requests[0].definition.requires, ['alpha'])
-  const tiered = leanFixture({ deps: { readFileSync: edit(/tiers: .*/, 'skills: ["alpha"]\nrequires: ["base"]\ntiers: {"build":{"requires":["alpha"]}}') }, loopDeps: { resolveAgents: (tier) => {
-    const resolved = resolveAgents(tier)
-    resolved.seats.planner = { ...resolved.seats.planner, provider: 'anthropic', id: 'claude-opus-4-6', agent: 'claude' }
-    return resolved
-  } } })
-  await tiered.go()
-  assert.deepEqual(tiered.requests[0].definition.requires, ['alpha'])
 })

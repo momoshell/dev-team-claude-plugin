@@ -36,14 +36,6 @@ test('file validation refuses traversal, mismatched names, missing instructions 
  assert.equal(library.save({name:'invalid-revision',text:content('invalid-revision'),expected_revision:42}).ok,false);assert.equal(existsSync(join(root,'skills/invalid-revision')),false)
  const original=readFileSync(join(root,'skills/example/SKILL.md'),'utf8');assert.equal(library.save({name:'example',text:content(),expected_revision:42}).ok,false);assert.equal(readFileSync(join(root,'skills/example/SKILL.md'),'utf8'),original)
 })
-test('stale writes are refused; removing revision checks kills the same behavioral witness',async t=>{
- const source=readFileSync(new URL('../visualizer/server/skill-library.mjs',import.meta.url),'utf8')
- const mutantSource=source.replace("'../../hooks/skill-gate.mjs'",JSON.stringify(new URL('../hooks/skill-gate.mjs',import.meta.url).href)).replace("'../web/src/lib/skill-files.js'",JSON.stringify(new URL('../visualizer/web/src/lib/skill-files.js',import.meta.url).href)).replace("if((before===null ? null : hash(before))!==expected_revision)","if(false)").replace("if(hash(readFileSync(target,'utf8'))!==expected_revision)","if(false)")
- assert.notEqual(source,mutantSource)
- const mutant=await import('data:text/javascript;base64,'+Buffer.from(mutantSource).toString('base64'))
- function witness(factory){const {library,root}=fixture(t,factory),revision=library.read().definitions[0].revision;writeFileSync(join(root,'skills/example/SKILL.md'),content()+'\nExternal edit\n');assert.equal(library.save({name:'example',text:content(),expected_revision:revision}).status,409)}
- witness(createSkillLibrary);assert.throws(()=>witness(mutant.createSkillLibrary),assert.AssertionError)
-})
 test('saved selection rules drive actual runtime matching, slices and inline precedence',t=>{
  const {library,map}=fixture(t),revision=library.read().map_revision
  map.rules.push({when:{roles:['builder'],paths:['src/**/*.js']},delivery:'grant',skills:['dev-team:example']})

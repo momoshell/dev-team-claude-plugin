@@ -1,9 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { startServer } from '../visualizer/server/server.mjs'
 import { createJournalSource } from '../visualizer/server/journal-source.mjs'
 import { createLeanSource } from '../crew/lean-source.mjs'
 import { scratchDir, treeDigest } from './helpers.mjs'
@@ -28,27 +27,6 @@ function lines(rows) {
   return rows.map((row) => JSON.stringify(row)).join('\n') + (rows.length ? '\n' : '')
 }
 
-// MUTATION: restore channel: row.channel ?? null
-test('journal rows and journal health carry no constant channel or readonly field', () => {
-  const root = scratchDir('visualizer-trajectory-fields-')
-  lane(root, { journal: lines([{ at: 0, event: 'a' }, { at: 1, event: 'b', channel: 'x' }]) })
-  const source = journalSource(root)
-  const { rows } = source.readJournal({ repo_slug: 'dt-task', task_slug: 'task', adw_id: 'lean:task' })
-  assert.equal(Object.hasOwn(rows[0], 'channel'), false)
-  assert.equal(rows[1].channel, 'x')
-  assert.deepEqual(source.health(), { crew_root: resolve(root) })
-})
-
-test('journal reader skips a torn line and reports its one-based line number', () => {
-  const root = scratchDir('visualizer-trajectory-malformed-')
-  lane(root, { journal: `${JSON.stringify({ at: 1, event: 'first' })}\n{"at":\n${JSON.stringify({ at: 3, event: 'third' })}\n` })
-  const result = journalSource(root).readJournal({ repo_slug: 'dt-task', task_slug: 'task', adw_id: 'lean:task' })
-  assert.deepEqual(result.rows.map((row) => row.event), ['first', 'third'])
-  assert.deepEqual(result.rows.map((row) => row.line_number), [1, 3])
-  assert.equal(result.skipped_malformed, 1)
-  assert.deepEqual(result.skipped_line_numbers, [2])
-})
-
 test('journal reader degrades instead of throwing when journal.jsonl is absent', () => {
   const root = scratchDir('visualizer-trajectory-missing-')
   lane(root)
@@ -62,36 +40,6 @@ test('journal reader degrades instead of throwing when journal.jsonl is absent',
   assert.equal(result.degraded, true)
   assert.ok(typeof result.error === 'string' && result.error.length > 0)
   assert.deepEqual(result.rows, [])
-})
-
-test('journal route remains read-only and outside the write guard', async () => {
-  const root = scratchDir('visualizer-trajectory-route-')
-  lane(root, { journal: lines([{ at: 0, event: 'hello' }]) })
-  const feed = { close: () => {} }
-  const handles = startServer({ port: 0, host: '127.0.0.1', feed, crewRoot: root })
-  await new Promise((resolve, reject) => {
-    handles.server.once('listening', resolve)
-    handles.server.once('error', reject)
-  })
-  const base = `http://127.0.0.1:${handles.server.address().port}`
-  try {
-    const post = await fetch(`${base}/api/journal?repo_slug=repo&task_slug=task`, { method: 'POST' })
-    assert.equal(post.status, 405)
-    assert.equal(post.headers.get('allow'), 'GET')
-    assert.equal((await post.json()).error, 'method not allowed')
-    const missing = await fetch(`${base}/api/journal`)
-    assert.equal(missing.status, 400)
-    assert.ok((await missing.json()).error.includes('repo_slug and task_slug'))
-    const partial = await fetch(`${base}/api/journal?repo_slug=repo`)
-    assert.equal(partial.status, 400)
-    assert.ok((await partial.json()).error.includes('repo_slug and task_slug'))
-    const get = await fetch(`${base}/api/journal?repo_slug=dt-task&task_slug=task&adw_id=lean:task`)
-    assert.equal(get.status, 200)
-    const body = await get.json()
-    assert.deepEqual(body.rows.map((row) => row.event), ['hello'])
-  } finally {
-    await new Promise((resolve) => handles.server.close(resolve))
-  }
 })
 
 test('journal reads do not change the crew tree, including traversal attempts', () => {

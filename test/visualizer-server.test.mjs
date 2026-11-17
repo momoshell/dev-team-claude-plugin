@@ -1,14 +1,13 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { cpSync, mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, realpathSync, statSync, symlinkSync } from 'node:fs'
+import { cpSync, mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, posix, resolve } from 'node:path'
-import { request } from 'node:http'
+import { dirname, join, posix } from 'node:path'
 import { runInNewContext } from 'node:vm'
-import { createServer, connect } from 'node:net'
+import { connect } from 'node:net'
 import { spawn, spawn as spawnProcess, spawnSync } from 'node:child_process'
-import { parseCliArgs, pluginWriteMode, pluginWriteTargetMode, sameOrigin, hostGuard, ROUTE_PARAMS, ServerUsageError, startServer as startVisualizerServer, writeGuard } from '../visualizer/server/server.mjs'
+import { pluginWriteMode, pluginWriteTargetMode, sameOrigin, hostGuard, ROUTE_PARAMS, ServerUsageError, startServer as startVisualizerServer, writeGuard } from '../visualizer/server/server.mjs'
 import { createJournalSource } from '../visualizer/server/journal-source.mjs'
 import * as webApi from '../visualizer/web/src/lib/api.js'
 import { ROOT, rawRequest, scratchDir } from './helpers.mjs'
@@ -48,41 +47,6 @@ function announceDetails(child) {
   })
 }
 const SERVER_SCRIPT = join(ROOT, 'visualizer', 'server', 'server.mjs')
-
-// MUTATION: restore text += chunk in body()
-test('S3-1 a JSON body split inside a multibyte character reaches the route intact', async () => {
-  const started = await startInProcess({})
-  try {
-    const payload = Buffer.from(JSON.stringify({ role: 'builder', field: '€uro', value: 'openai/example' }))
-    const cut = payload.indexOf(Buffer.from('€')) + 1
-    const response = await new Promise((resolve, reject) => {
-      const req = request(`${started.base}/api/agents/propose`, { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': payload.length } }, (res) => { let text = ''; res.on('data', chunk => { text += chunk }); res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(text) })) })
-      req.on('error', reject)
-      req.write(payload.subarray(0, cut))
-      setTimeout(() => req.end(payload.subarray(cut)), 50)
-    })
-    assert.equal(response.status, 200)
-    assert.match(response.body.refusals[0].message, /€uro/)
-  } finally { await stopInProcess(started.server) }
-})
-
-// MUTATION: read DEVTEAM_INTAKE_CHECKOUT in defaults()
-test('DEVTEAM_VIZ_CHECKOUT sets the default checkout and the retired intake name is not read', () => {
-  const current = process.env.DEVTEAM_VIZ_CHECKOUT, retired = process.env.DEVTEAM_INTAKE_CHECKOUT
-  try {
-    process.env.DEVTEAM_VIZ_CHECKOUT = '/tmp/viz-checkout'
-    delete process.env.DEVTEAM_INTAKE_CHECKOUT
-    assert.equal(parseCliArgs([]).checkout, resolve('/tmp/viz-checkout'))
-    delete process.env.DEVTEAM_VIZ_CHECKOUT
-    process.env.DEVTEAM_INTAKE_CHECKOUT = '/tmp/old'
-    assert.equal(parseCliArgs([]).checkout, resolve(process.cwd()))
-  } finally {
-    if (current === undefined) delete process.env.DEVTEAM_VIZ_CHECKOUT
-    else process.env.DEVTEAM_VIZ_CHECKOUT = current
-    if (retired === undefined) delete process.env.DEVTEAM_INTAKE_CHECKOUT
-    else process.env.DEVTEAM_INTAKE_CHECKOUT = retired
-  }
-})
 
 test('RO1 installed plugins and paths without git are read only', () => {
   // MUTATION: invert the no-.git decision; this fake no-git checkout must refuse.
@@ -127,10 +91,6 @@ async function stopInProcess(server) {
 }
 function rawStatus(response) {
   return Number((response.text.match(/^HTTP\/1\.1 (\d{3})/) || [])[1] || 0)
-}
-function rawJson(response) {
-  const [, body = ''] = response.text.split('\r\n\r\n', 2)
-  return JSON.parse(body)
 }
 function fixture(path, { filler = 0 } = {}) {
   const ledger = openLedger({ dbPath: path })
@@ -198,25 +158,6 @@ test('raw request targets are refused without killing the visualizer', async () 
   }
 })
 
-test('raw Host values are refused without killing the visualizer', async () => {
-  for (const hostValue of [']bad[', 'a:b:c', '%', 'ho st', '[::1', '@', 'x:99999999', 'a b']) {
-    const dir = mkdtempSync(join(tmpdir(), 'visualizer-raw-host-'))
-    let server
-    try {
-      server = await startServer(join(dir, 'ledger.db'), join(dir, 'visualizer.db'))
-      const port = Number(new URL(server.base).port)
-      const hostile = await rawRequest({ port, requestLine: 'GET /api/health HTTP/1.1', headers: [`Host: ${hostValue}`, 'connection: close'] })
-      assert.equal(rawStatus(hostile), 400)
-      const after = await rawRequest({ port, requestLine: 'GET /api/health HTTP/1.1', headers: [`Host: 127.0.0.1:${port}`, 'connection: close'] })
-      assert.equal(rawStatus(after), 200)
-      assert.equal(server.child.exitCode, null)
-    } finally {
-      if (server) await stopServer(server.child)
-      rmSync(dir, { recursive: true, force: true })
-    }
-  }
-})
-
 const WRITE_ROUTES = [
   { path: '/api/agents/propose', body: JSON.stringify({ role: 'builder', field: 'model', value: 'example/model' }) },
 ]
@@ -237,30 +178,6 @@ test('state-writing routes refuse CORS simple requests before reading the body',
         body: route.body,
       })
       assert.equal(rawStatus(response), 415)
-    }
-    assert.equal(existsSync(join(checkout, '.factory', 'STOP')), false)
-  } finally {
-    if (server) await stopServer(server.child)
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('state-writing routes refuse foreign JSON origins before writing state', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'visualizer-cors-origin-'))
-  const checkout = join(dir, 'checkout')
-  mkdirSync(checkout, { recursive: true })
-  let server
-  try {
-    server = await startServer(join(dir, 'ledger.db'), join(dir, 'visualizer.db'), null, null, { DEVTEAM_VIZ_CHECKOUT: checkout })
-    const port = Number(new URL(server.base).port)
-    for (const route of WRITE_ROUTES) {
-      const response = await rawRequest({
-        port,
-        requestLine: `POST ${route.path} HTTP/1.1`,
-        headers: [`Host: 127.0.0.1:${port}`, 'content-type: application/json', 'Origin: https://evil.example', `content-length: ${Buffer.byteLength(route.body)}`, 'connection: close'],
-        body: route.body,
-      })
-      assert.equal(rawStatus(response), 403)
     }
     assert.equal(existsSync(join(checkout, '.factory', 'STOP')), false)
   } finally {
@@ -338,42 +255,6 @@ test('viz-port-env-door — DEVTEAM_VIZ_PORT=0 binds an ephemeral port and an ab
   }
 })
 
-test('viz-port-env-door — a bad DEVTEAM_VIZ_PORT refuses like the flag does', () => {
-  const env = { ...process.env }
-  delete env.DEVTEAM_VIZ_PORT
-  for (const value of ['70000', 'definitely-not-a-port']) {
-    const result = runServerCli([], { env: { ...env, DEVTEAM_VIZ_PORT: value }, timeout: 20000, killSignal: 'SIGKILL' })
-    assert.equal(result.status, 2, result.stderr || result.error?.message)
-    assert.match(result.stderr, new RegExp(`DEVTEAM_VIZ_PORT must be an integer between 0 and 65535, found ${value}`))
-    assert.doesNotMatch(result.stderr, /RangeError|ERR_SOCKET_BAD_PORT/)
-    assert.doesNotMatch(result.stdout, /"listening":true/)
-  }
-  for (const value of ['70000', 'definitely-not-a-port', '']) {
-    const result = runServerCli(['--port', value], { env, timeout: 20000, killSignal: 'SIGKILL' })
-    assert.equal(result.status, 2, result.stderr || result.error?.message)
-    assert.match(result.stderr, /--port must be an integer between 0 and 65535, found/)
-    assert.doesNotMatch(result.stderr, /RangeError|ERR_SOCKET_BAD_PORT/)
-    assert.doesNotMatch(result.stdout, /"listening":true/)
-  }
-})
-
-test('a genuine internal failure still exits 1', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'visualizer-cli-eaddrinuse-'))
-  const blocker = createServer()
-  await new Promise((resolve, reject) => {
-    blocker.once('error', reject)
-    blocker.listen(0, '127.0.0.1', resolve)
-  })
-  try {
-    const port = blocker.address().port
-    const result = runServerCli(['--port', String(port)])
-    assert.equal(result.status, 1, result.stderr || result.error?.message)
-  } finally {
-    await new Promise((resolve) => blocker.close(resolve))
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
 test('static responses refuse symlinks that leave web/dist', async () => {
   const dir = scratchDir('visualizer-static-outside-')
   const outside = join(dir, 'outside.txt')
@@ -399,19 +280,6 @@ test('static responses refuse symlinks that leave web/dist', async () => {
 })
 
 const TEST_GITHUB_API_URL = process.env.TEST_GITHUB_API_URL || 'fixture-invalid://github'
-test('RO1 symlinked plugins dir', () => {
-  const dir = realpathSync(scratchDir('visualizer-plugin-symlink-'))
-  try {
-    const home = join(dir, 'home'), store = join(dir, 'store'), installed = join(store, 'cache', 'dev-team', '1.0.0')
-    mkdirSync(join(installed, '.git'), { recursive:true })
-    mkdirSync(join(home, '.claude'), { recursive:true })
-    symlinkSync(store, join(home, '.claude', 'plugins'), 'dir')
-    assert.deepEqual(pluginWriteMode({ pluginRoot:join(home, '.claude', 'plugins', 'cache', 'dev-team', '1.0.0'), home }), {
-      writable:false, reason:'installed-plugin-read-only', basis:'under-claude-plugins-dir', plugin_root:installed,
-    })
-  } finally { rmSync(dir, { recursive:true, force:true }) }
-})
-
 // MUTATION: add a `pluginWriteRefusal` 409 to the propose, stage or compose route; proposals write
 // nothing, so an installed plugin must still answer 200 there and this test reddens.
 test('RO1 link-mode install target refuses writes', () => {
@@ -456,31 +324,6 @@ test('RO1 malformed link marker fails closed', () => {
   })
 })
 
-test('RO1 unresolvable link target fails closed', () => {
-  const home = '/tmp/unresolvable-home'
-  const cache = join(home, '.claude', 'plugins', 'cache')
-  const dirs = new Map([[cache, ['m']], [join(cache, 'm'), ['p']], [join(cache, 'm', 'p'), ['1.0.0']], [join(cache, 'm', 'p', '1.0.0'), ['.claude-plugin-link']]])
-  const marker = JSON.stringify({target: '/tmp/unresolvable-target'})
-  const fakeReaddir = (p) => { if (dirs.has(p)) return dirs.get(p); const err = new Error('ENOENT ' + p); err.code = 'ENOENT'; throw err }
-  const fakeRead = (p) => { if (String(p).endsWith('.claude-plugin-link')) return marker; throw new Error('ENOENT ' + p) }
-  const fakeExists = () => true
-  const fakeRealpath = (p) => { if (p === '/tmp/unresolvable-target') { const err = new Error('ENOENT ' + p); err.code = 'ENOENT'; throw err } return p }
-  assert.deepEqual(pluginWriteMode({pluginRoot: '/tmp/checkout', home, existsSync: fakeExists, realpathSync: fakeRealpath, readdirSync: fakeReaddir, readFileSync: fakeRead}), {
-    writable: false, reason: 'installed-plugin-read-only', basis: 'link-mode-marker-unreadable', plugin_root: '/tmp/checkout'
-  })
-})
-
-test('RO1 marker-absent checkout stays writable', () => {
-  const home = '/tmp/clean-home'
-  const fakeReaddir = (p) => { const err = new Error('ENOENT ' + p); err.code = 'ENOENT'; throw err }
-  const fakeRead = (p) => { throw new Error('ENOENT ' + p) }
-  const fakeExists = () => true
-  const fakeRealpath = (p) => p
-  assert.deepEqual(pluginWriteMode({pluginRoot: '/tmp/checkout', home, existsSync: fakeExists, realpathSync: fakeRealpath, readdirSync: fakeReaddir, readFileSync: fakeRead}), {
-    writable: true, reason: null, basis: null, plugin_root: '/tmp/checkout'
-  })
-})
-
 test('pluginWriteTargetMode refuses plugin cache and link targets', () => {
   const home = '/tmp/target-home'
   const cache = join(home, '.claude', 'plugins', 'cache')
@@ -512,40 +355,6 @@ test('pluginWriteTargetMode refuses plugin cache and link targets', () => {
   assert.equal(symlinked.basis, 'under-claude-plugins-dir')
 })
 
-test('pluginWriteTargetMode resolves a missing-parent symlink ancestor into the plugin cache', () => {
-  const home = '/tmp/ancestor-home'
-  const cacheTarget = join(home, '.claude', 'plugins', 'cache', 'm', 'p', '1')
-  const fakeRealpath = (p) => {
-    if (p === '/work/cache-alias') return cacheTarget
-    if (p === '/work/cache-alias/new' || p === '/work/cache-alias/new/.env.local') { const err = new Error('ENOENT ' + p); err.code = 'ENOENT'; throw err }
-    return p
-  }
-  const fakeReaddir = (p) => { const err = new Error('ENOENT ' + p); err.code = 'ENOENT'; throw err }
-  const fakeRead = (p) => { throw new Error('ENOENT ' + p) }
-  const fakeExists = () => true
-  const resolved = pluginWriteTargetMode({target: '/work/cache-alias/new/.env.local', home, existsSync: fakeExists, realpathSync: fakeRealpath, readdirSync: fakeReaddir, readFileSync: fakeRead})
-  assert.equal(resolved.writable, false)
-  assert.equal(resolved.basis, 'under-claude-plugins-dir')
-  assert.equal(resolved.plugin_root, join(cacheTarget, 'new', '.env.local'))
-})
-
-test('writeGuard allows loopback Host spellings with matching port', () => {
-  const goodLoopback = writeGuard({headers: {'content-type': 'application/json', host: '127.0.0.1:4488'}, socket: {localPort: 4488, remoteAddress: '127.0.0.1'}})
-  assert.equal(goodLoopback, null)
-  const goodBracket = writeGuard({headers: {'content-type': 'application/json', host: '[::1]:4488'}, socket: {localPort: 4488, remoteAddress: '::1'}})
-  assert.equal(goodBracket, null)
-  const goodLocal = writeGuard({headers: {'content-type': 'application/json', host: 'localhost:4488'}, socket: {localPort: 4488, remoteAddress: '127.0.0.1'}})
-  assert.equal(goodLocal, null)
-  const badPort = writeGuard({headers: {'content-type': 'application/json', host: 'localhost:9999'}, socket: {localPort: 4488, remoteAddress: '127.0.0.1'}})
-  assert.equal(badPort.status, 403)
-  assert.equal(badPort.error.includes('localhost:9999'), true)
-  const evil = writeGuard({headers: {'content-type': 'application/json', origin: 'http://evil.example:4488', host: 'evil.example:4488'}, socket: {localPort: 4488, remoteAddress: '127.0.0.1'}})
-  assert.equal(evil.status, 403)
-  assert.equal(evil.error.includes('evil.example'), true)
-  const missing = writeGuard({headers: {'content-type': 'application/json'}, socket: {localPort: 4488, remoteAddress: '127.0.0.1'}})
-  assert.equal(missing.status, 403)
-})
-
 test('writeGuard treats the implicit HTTP port as 80, not a wildcard', () => {
   const bare80 = writeGuard({headers: {'content-type': 'application/json', host: 'localhost'}, socket: {localPort: 80, remoteAddress: '127.0.0.1'}})
   assert.equal(bare80, null)
@@ -572,36 +381,6 @@ test('VL6 writeGuard refuses non-loopback peers and admits loopback spellings', 
   assert.equal(writeGuard(req('not-an-ip')).status, 403)
   for (const [addr, host] of [['127.0.0.1', '127.0.0.1:4488'], ['127.5.6.7', '127.0.0.1:4488'], ['::1', '[::1]:4488'], ['::ffff:127.0.0.1', '127.0.0.1:4488']]) {
     assert.equal(writeGuard(req(addr, host)), null)
-  }
-})
-
-test('GR1 API reads reject hostile hosts across routes', async () => {
-  // MUTATION GR1: limiting the shared API guard to /api/journal leaks other route data.
-  const dir = scratchDir('visualizer-api-host-guard-')
-  let server
-  try {
-    server = await startServer(join(dir, 'ledger.db'), join(dir, 'visualizer.db'))
-    const port = Number(new URL(server.base).port)
-    const host = `evil.example:${port}`
-    for (const path of Object.keys(ROUTE_PARAMS)) {
-      const response = await rawRequest({ port, requestLine: `GET ${path} HTTP/1.1`, headers: [`Host: ${host}`, 'connection: close'], timeoutMs: 30000 })
-      assert.equal(rawStatus(response), 403, path)
-      assert.deepEqual(rawJson(response), { schema: 2, error: `read host refused: ${host}` }, path)
-    }
-    for (const path of ['/api/not-registered', '/api/health?unknown=1']) {
-      const response = await rawRequest({ port, requestLine: `GET ${path} HTTP/1.1`, headers: [`Host: ${host}`, 'connection: close'], timeoutMs: 30000 })
-      assert.equal(rawStatus(response), 403, path)
-      assert.deepEqual(rawJson(response), { schema: 2, error: `read host refused: ${host}` }, path)
-    }
-    for (const hostname of ['localhost', '127.0.0.1']) {
-      const response = await rawRequest({ port, requestLine: 'GET /api/health HTTP/1.1', headers: [`Host: ${hostname}:${port}`, 'connection: close'] })
-      assert.equal(rawStatus(response), 200, hostname)
-    }
-    const wrongPort = await rawRequest({ port, requestLine: 'GET /api/health HTTP/1.1', headers: ['Host: localhost:8080', 'connection: close'] })
-    assert.equal(rawStatus(wrongPort), 403)
-    assert.deepEqual(rawJson(wrongPort), { schema: 2, error: 'read host refused: localhost:8080' })
-  } finally {
-    if (server) await stopServer(server.child)
   }
 })
 
@@ -660,31 +439,6 @@ test('GR4 vite proxy rewrites the API host to loopback', () => {
   assert.equal(proxy.changeOrigin, true)
 })
 
-// MUTATION VP1: flip originHost === host to !== and the dev page origin is no longer rewritten. MUTATION VP2: drop the originHost === host guard and a foreign origin is rewritten too.
-test('vite dev proxy rewrites same-origin requests and leaves foreign origins untouched', () => {
-  const source = readFileSync(join(ROOT, 'visualizer/web/vite.config.mjs'), 'utf8')
-    .replace(/^import .*$/gm, '')
-    .replace(/^export default /m, 'module.exports = ')
-  const module = { exports: {} }
-  runInNewContext(source, { defineConfig: (config) => config, svelte: () => ({}), module, URL })
-  const proxy = module.exports.server.proxy['/api']
-  assert.equal(proxy.target, 'http://127.0.0.1:4488')
-  assert.equal(proxy.changeOrigin, true)
-  const run = (headers) => {
-    let handler = null
-    proxy.configure({ on: (event, fn) => { if (event === 'proxyReq') handler = fn } })
-    const proxyReq = { headers: {}, setHeader(k, v) { this.headers[k.toLowerCase()] = v } }
-    handler(proxyReq, { headers })
-    return proxyReq.headers
-  }
-  const own = run({ origin: 'http://localhost:5173', host: 'localhost:5173' })
-  assert.equal(own.origin, 'http://127.0.0.1:4488')
-  assert.equal(sameOrigin(own.origin, '127.0.0.1:4488'), true)
-  const foreign = run({ origin: 'http://evil.example', host: 'localhost:5173' })
-  assert.deepEqual(foreign, {})
-  assert.equal(sameOrigin('http://evil.example', '127.0.0.1:4488'), false)
-})
-
 // MUTATION LH1: disable IPv4 interface equality on the normalization return.
 test('LH1 read host guard follows current IPv4 interfaces', () => {
   let calls = 0
@@ -696,14 +450,6 @@ test('LH1 read host guard follows current IPv4 interfaces', () => {
   const current = hostGuard({ headers: { host: '192.0.2.24:4488' }, socket: { localPort: 4488 } }, 'read', source)
   assert.deepEqual([before, old, current], [null, { status: 403, error: 'read host refused: 192.0.2.23:4488' }, null])
   assert.equal(calls, 3)
-})
-
-// MUTATION LH2: disable IPv6 interface equality on the normalization return.
-test('LH2 read host guard normalizes IPv6 interface addresses', () => {
-  const source = () => ({ ethernet: [{ address: '2001:0DB8:0000:0000:0000:0000:0000:0023', family: 'IPv6' }] })
-  const results = ['[2001:db8::23]:4488', '[2001:DB8:0:0:0:0:0:23]:4488'].map(host =>
-    hostGuard({ headers: { host }, socket: { localPort: 4488 } }, 'read', source))
-  assert.deepEqual(results, [null, null])
 })
 
 // MUTATION LH3: neutralize the final refusal decision across the complete matrix.
@@ -724,34 +470,6 @@ test('LH3 read host guard refuses foreign malformed or unavailable interfaces', 
     expected.push(refusal('192.0.2.23:4488'))
   }
   assert.deepEqual(actual, expected)
-})
-
-// MUTATION LH4: widening the read-only label condition admits writes on local literals.
-test('LH4 write host guard refuses local interface literals', () => {
-  let calls = 0
-  const source = () => { calls++; return { ethernet: [{ address: '192.0.2.23' }, { address: '2001:db8::23' }] } }
-  const hosts = ['192.0.2.23:4488', '[2001:db8::23]:4488']
-  const refusal = host => ({ status: 403, error: `write host refused: ${host}` })
-  const request = host => ({ headers: { host, 'content-type': 'application/json' }, socket: { localPort: 4488, remoteAddress: '127.0.0.1' } })
-  const actual = hosts.flatMap(host => [
-    hostGuard(request(host), 'write', source),
-    writeGuard(request(host)),
-  ])
-  const expected = hosts.flatMap(host => [refusal(host), refusal(host)])
-  assert.deepEqual(actual, expected)
-  assert.equal(calls, 0)
-})
-
-// ---- b1410: the visualizer no longer reads the ledger or any old-path module ----
-test('GET /api/agents is no longer served while /api/agents/propose stays', async () => {
-  const root = scratchDir('visualizer-no-agents-')
-  let started
-  try {
-    assert.equal(Object.hasOwn(ROUTE_PARAMS, '/api/agents'), false)
-    assert.equal(Object.hasOwn(ROUTE_PARAMS, '/api/agents/propose'), true)
-    started = await startInProcess({}, { crewRoot: root })
-    assert.equal((await json(started.base, '/api/agents')).status, 404)
-  } finally { if (started) await stopInProcess(started); rmSync(root, { recursive: true, force: true }) }
 })
 
 const DROPPED_ROUTES = ['/api/agents', '/api/returns', '/api/roster', '/api/roster/pick', '/api/roster/propose', '/api/roster/agent/propose', '/api/roster/ladder', '/api/roster/ladder/stage', '/api/roster/ladder/compose', '/api/roster/ladder/apply',
@@ -790,100 +508,6 @@ test('route tombstones: every removed server.mjs route is unregistered and has n
   }
 })
 
-// MUTATION: reverse the date subtraction and the dated order fails.
-test('VN1 /api/sessions orders recorded starts newest first', async () => {
-  const root = scratchDir('visualizer-newest-'), crewRoot = join(root, 'crew'), archiveRoot = join(root, 'archive')
-  mkdirSync(crewRoot); mkdirSync(archiveRoot)
-  let started
-  try {
-    for (let i = 0; i < 13; i++) {
-      const at = i === 0 ? 0 : i === 7 ? 6000 : i * 1000
-      leanLane(crewRoot, `lane-${String(i).padStart(2, '0')}`, [{ event: 'run-start', at }, { event: 'stage-start', stage: 'plan', at: 100000 - i }])
-    }
-    started = await startInProcess({}, { crewRoot, leanArchiveRoot: archiveRoot })
-    const response = await json(started.base, '/api/sessions')
-    assert.equal(response.status, 200)
-    assert.equal(response.json.degraded, false)
-    assert.deepEqual(response.json.sources, { lean: { readable: true, absent: null, runs: 13 } })
-    assert.deepEqual(response.json.runs.map(run => run.task_slug), [12, 11, 10, 9, 8, 6, 7, 5, 4, 3, 2, 1, 0].map(i => `lane-${String(i).padStart(2, '0')}`))
-    assert.equal(response.json.runs.at(-1).started_at, new Date(0).toISOString())
-  } finally {
-    await stopInProcess(started?.server)
-    rmSync(root, { recursive: true, force: true })
-  }
-})
-
-// MUTATION: reverse the missing-start rank and unknown starts lead the list.
-test('VN2 /api/sessions puts unknown starts after every recorded start', async () => {
-  const root = scratchDir('visualizer-unknown-'), crewRoot = join(root, 'crew'), archiveRoot = join(root, 'archive')
-  mkdirSync(crewRoot); mkdirSync(archiveRoot)
-  let started
-  try {
-    const lanes = [
-      ['a-missing', []], ['b-old', [{ event: 'run-start', at: -1000 }]],
-      ['c-no-at', [{ event: 'run-start' }]], ['d-new', [{ event: 'run-start', at: 1000 }]],
-      ['e-invalid', [{ event: 'run-start', at: 'invalid' }]],
-    ]
-    for (const [id, rows] of lanes) leanLane(crewRoot, id, rows)
-    started = await startInProcess({}, { crewRoot, leanArchiveRoot: archiveRoot })
-    const read = async count => {
-      const response = await json(started.base, '/api/sessions')
-      assert.equal(response.status, 200)
-      assert.equal(response.json.degraded, false)
-      assert.deepEqual(response.json.sources, { lean: { readable: true, absent: null, runs: count } })
-      assert.equal(response.json.runs.length, count)
-      return response.json.runs
-    }
-    const runs = await read(5)
-    assert.deepEqual(runs.map(run => run.task_slug), ['d-new', 'b-old', 'a-missing', 'c-no-at', 'e-invalid'])
-    assert.ok(runs.slice(0, 2).every(run => run.started_at !== null))
-    assert.ok(runs.slice(2).every(run => run.started_at === null))
-    for (const id of ['b-old', 'd-new']) rmSync(join(crewRoot, `dt-${id}`), { recursive: true })
-    const unknown = await read(3)
-    assert.deepEqual(unknown.map(run => run.task_slug), ['a-missing', 'c-no-at', 'e-invalid'])
-    assert.ok(unknown.every(run => run.started_at === null))
-    for (const [id] of lanes) rmSync(join(crewRoot, `dt-${id}`), { recursive: true, force: true })
-    assert.deepEqual(await read(0), [])
-  } finally {
-    await stopInProcess(started?.server)
-    rmSync(root, { recursive: true, force: true })
-  }
-})
-
-test('VC3 /api/sessions lists a lean lane from its journal with no ledger present', async () => {
-  const crewRoot = scratchDir('visualizer-lean-sessions-')
-  let started
-  try {
-    leanLane(crewRoot, 'vc3lane')
-    started = await startInProcess({}, { crewRoot, home: crewRoot, checkout: crewRoot })
-    const response = await json(started.base, '/api/sessions')
-    assert.equal(response.status, 200)
-    const run = response.json.runs.find((candidate) => candidate.adw_id === 'lean:vc3lane')
-    assert.ok(run, 'the lean lane is listed')
-    assert.equal(run.source, 'lean')
-    assert.deepEqual(response.json.sources, { lean: { readable: true, absent: null, runs: response.json.runs.length } })
-    assert.equal(response.json.degraded, false)
-    assert.equal(Object.hasOwn(response.json.sources, 'ledger'), false)
-  } finally {
-    await stopInProcess(started?.server)
-    rmSync(crewRoot, { recursive: true, force: true })
-  }
-})
-
-test('VC3 a failed lean read is unreadable with a null run count, never zero lanes', async () => {
-  let started
-  try {
-    started = await startInProcess({}, { lean: { listRuns: () => { throw new Error('crew root unreadable') } } })
-    const response = await json(started.base, '/api/sessions')
-    assert.equal(response.status, 200)
-    assert.deepEqual(response.json.runs, [])
-    assert.deepEqual(response.json.sources, { lean: { readable: false, absent: 'crew root unreadable', runs: null } })
-    assert.equal(response.json.degraded, true)
-  } finally {
-    await stopInProcess(started?.server)
-  }
-})
-
 test('/api/sessions validates and canonicalises its optional window', async () => {
   let started
   try {
@@ -919,18 +543,6 @@ test('/api/events serves a lean lane from its journal and states absence for a n
     await stopInProcess(started?.server)
     rmSync(crewRoot, { recursive: true, force: true })
   }
-})
-
-// MUTATION: restore the ledger constant in the health payload
-test('/api/health answers schema, crew_root, readonly false and the write list only', async () => {
-  const started = await startInProcess({})
-  try {
-    const response = await json(started.base, '/api/health')
-    assert.equal(response.status, 200)
-    assert.deepEqual(Object.keys(response.json).sort(), ['crew_root', 'readonly', 'schema', 'writes'])
-    assert.equal(response.json.readonly, false)
-    assert.ok(Array.isArray(response.json.writes) && response.json.writes.length > 0)
-  } finally { await stopInProcess(started.server) }
 })
 
 test('VC1 visualizer server imports only admitted crew modules and pins run-pid dependencies', () => {

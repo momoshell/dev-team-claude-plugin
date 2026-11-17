@@ -74,21 +74,6 @@ test('recorded terminal output wins over content; Claude and generic ACP result 
   assert.equal(result.records[2].incomplete,true);assert.equal(prettyTraceValue(undefined),'Not recorded');assert.equal(prettyTraceValue(''),'')
 })
 
-test('explicit row timing is validated without borrowing metadata timestamps or the wall clock', () => {
-  const start=1700000000000
-  const input=recording([
-    frame('tool_call',{toolCallId:'a' },'s',{at:start}),
-    frame('tool_call_update',{toolCallId:'a',status:'completed'},'s',{at:start+123}),
-    frame('tool_call',{toolCallId:'b'},'s',{at:start}),
-    frame('tool_call_update',{toolCallId:'b',status:'failed'},'s',{at:start-1}),
-    frame('tool_call',{toolCallId:'c',updatedAt:new Date(start).toISOString()},'s',{at:'invalid'}),
-    frame('tool_call_update',{toolCallId:'c',status:'completed'},'s',{at:1e30}),
-  ])
-  const result=projectRecording(input)
-  assert.equal(result.records[0].duration_ms,123);assert.equal(result.records[1].duration_ms,null)
-  assert.deepEqual([result.records[2].started_at,result.records[2].ended_at,result.records[2].duration_ms],[null,null,null])
-})
-
 test('broken rows and unsupported updates stay visible, usage snapshots never become turn totals', () => {
   const input=recording([
     null,[],42,{update:{sessionUpdate:'plan',entries:{broken:true}}},

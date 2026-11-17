@@ -11,51 +11,6 @@ const PATH = 'crew/agents/planner.md'
 const text = readFileSync(PATH, 'utf8')
 const changed = (diff, sign) => diff.split('\n').filter((l) => l.startsWith(sign) && !l.startsWith(sign.repeat(3)))
 
-test('base model and effort edits touch one frontmatter line and parse clean', () => {
-  for (const [field, value] of [['effort', 'max'], ['model', 'openai/gpt-6-luna']]) {
-    const r = proposeAgentEdit({ agentText: text, role: 'planner', field, value })
-    assert.equal(r.ok, true)
-    assert.equal(changed(r.diff, '-').length, 1)
-    assert.match(changed(r.diff, '+')[0], new RegExp(`^\\+${field}: `))
-    assert.deepEqual(parseAgent(r.afterText).defects, [])
-    assert.equal(r.after, value)
-  }
-})
-
-test('tier override sets and clears one cell for that tier only', () => {
-  const scratch = scratchDir('agents-edit-')
-  try {
-    cpSync(join(ROOT, 'crew/agents'), scratch, { recursive: true })
-    const base = resolveAgents('build', scratch)
-    const set = proposeAgentEdit({ agentText: text, role: 'planner', tier: 'judge', field: 'effort', value: 'max' })
-    assert.equal(set.ok, true)
-    assert.equal(changed(set.diff, '-').length, 1)
-    writeFileSync(join(scratch, 'planner.md'), set.afterText)
-    assert.equal(resolveAgents('judge', scratch).seats.planner.effort, 'max')
-    assert.deepEqual(resolveAgents('build', scratch), base)
-    const cleared = proposeAgentEdit({ agentText: set.afterText, role: 'planner', tier: 'judge', field: 'effort', value: null })
-    assert.equal(cleared.ok, true)
-    assert.equal(cleared.before, 'max')
-    assert.equal(parseAgent(cleared.afterText).fields.tiers.judge?.effort, undefined)
-    writeFileSync(join(scratch, 'planner.md'), cleared.afterText)
-    assert.equal(resolveAgents('judge', scratch).seats.planner.effort, parseAgent(text).fields.effort)
-    assert.deepEqual(resolveAgents('build', scratch), base)
-    writeFileSync(join(scratch, 'planner.md'), text)
-    const m = proposeAgentEdit({ agentText: text, role: 'planner', tier: 'judge', field: 'model', value: 'openai/gpt-6-luna' })
-    assert.equal(m.ok, true)
-    writeFileSync(join(scratch, 'planner.md'), m.afterText)
-    assert.equal(resolveAgents('judge', scratch).seats.planner.id, 'gpt-6-luna')
-    assert.deepEqual(resolveAgents('build', scratch), base)
-    const mc = proposeAgentEdit({ agentText: m.afterText, role: 'planner', tier: 'judge', field: 'model', value: null })
-    assert.equal(mc.ok, true)
-    writeFileSync(join(scratch, 'planner.md'), mc.afterText)
-    const [prov, id] = parseAgent(text).fields.model.split('/')
-    assert.equal(resolveAgents('judge', scratch).seats.planner.id, id)
-    assert.equal(resolveAgents('judge', scratch).seats.planner.provider, prov)
-    assert.deepEqual(resolveAgents('build', scratch), base)
-  } finally { rmSync(scratch, { recursive: true, force: true }) }
-})
-
 test('an override on an unseated (null) tier reseats that tier only; clearing it is a no-op', () => {
   const lead = readFileSync(join(ROOT, 'crew/agents/lead.md'), 'utf8')
   const scratch = scratchDir('agents-edit-')

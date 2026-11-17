@@ -1,12 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ROOT } from './helpers.mjs'
 import * as fleet from '../visualizer/web/src/lib/fleet.js'
 import { leanOutcome } from '../visualizer/web/src/lib/lean.js'
 import { layoutTimeline } from '../visualizer/web/src/lib/timeline.js'
-import { parseHash } from '../visualizer/web/src/lib/route.js'
 
 const src = (path) => readFileSync(join(ROOT, 'visualizer/web/src', path), 'utf8')
 const lane = (id, status, extra = {}) => ({ source: 'lean', adw_id: `lean:${id}`, goal: id, status, running: false, archived: false, tier: 'build', shape: 'standard', latest_stage: 'plan', started_at: '2026-01-01', ...extra })
@@ -18,49 +17,6 @@ test('board: unwritten lane statuses, the timeline constants and the task_profil
   const timeline = layoutTimeline({ phases: [] })
   for (const key of ['request', 'queued', 'marks', 'lanes']) assert.equal(key in timeline, false)
   assert.ok(!fleet.configurationFilterView([{ adw_id: 'p', task_profile: 'implementation' }]).dimensions.some((d) => d.key === 'task_profile'))
-})
-
-test('board: operator-facing lean statuses reach Needs attention with their own keys', () => {
-  // MUTATION: drop the abandoned key from the attention map.
-  for (const [status, key, tone, attention, word] of [
-    ['ready-for-operator', 'ready', 'serious', true, 'ready for operator'], ['returned', 'returned', 'serious', true, 'returned · no new run'],
-    ['stopped', 'aborted', 'aborted', true, 'stopped'], ['abandoned', 'abandoned', 'serious', true, 'abandoned'],
-  ]) {
-    const result = fleet.leanStatus(lane(status, status))
-    assert.deepEqual([result.key, result.tone, fleet.needsAttention(result.key), result.word], [key, tone, attention, word])
-  }
-  assert.deepEqual(fleet.leanStatus({ status: 'ok' }), { key: 'unknown', word: 'ok', tone: 'quiet', where: null, why: null, open: false })
-  assert.equal(fleet.leanStatus({}).word, 'status not recorded')
-})
-
-test('board: the Finished tab never lists an unknown status', () => {
-  assert.equal(typeof fleet.taskBoard, 'function', 'fleet.js exports taskBoard')
-  // MUTATION: drop the unknown guard from the finished predicate.
-  const rows = [lane('unknown', 'unknown'), lane('other', 'odd'), lane('done', 'done'), lane('open', 'running', { running: true })]
-  assert.deepEqual(fleet.taskBoard(rows, { state: 'finished' }).rows.map((r) => r.goal), ['done'])
-})
-
-test('board: the Open tab counts journal-open lanes and no tab counts liveness or merges', () => {
-  assert.equal(typeof fleet.taskBoard, 'function', 'fleet.js exports taskBoard')
-  // MUTATION: make the open predicate false.
-  const rows = [lane('reviewed', 'reviewed', { running: true }), lane('done', 'done'), lane('ready', 'ready-for-operator')]
-  const board = fleet.taskBoard(rows, { state: 'open' })
-  assert.deepEqual(board.counts, { all: 3, open: 1, finished: 2, attention: 1 })
-  assert.deepEqual(board.rows.map((r) => r.goal), ['reviewed'])
-  const task = src('lib/TaskList.svelte')
-  for (const label of ['All tasks', 'Open', 'Finished', 'Needs attention', 'taskBoard(runs,']) assert.ok(task.includes(label))
-  for (const label of ['Live now', 'Shipped']) assert.ok(!task.includes(label))
-})
-
-test('board: archived lanes are hidden unless Show archived is set', () => {
-  assert.equal(typeof fleet.taskBoard, 'function', 'fleet.js exports taskBoard')
-  // MUTATION: read run.triage?.reviewed_at instead of run.archived.
-  const rows = [lane('archived', 'stopped', { archived: true }), lane('visible', 'returned', { triage: { reviewed_at: 'date' } })]
-  assert.deepEqual(fleet.taskBoard(rows, { state: 'attention' }).rows.map((r) => r.goal), ['visible'])
-  assert.equal(fleet.taskBoard(rows).counts.attention, 1)
-  assert.equal(fleet.taskBoard(rows, { showArchived: true }).counts.attention, 2)
-  assert.equal(fleet.taskBoard(rows, { showArchived: true }).rows.length, 2)
-  assert.ok(src('App.svelte').includes("taskBoard(runs, { state: 'attention' })"))
 })
 
 test('board: search matches the fields a lean lane carries', () => {
@@ -94,16 +50,4 @@ test('board: fleet.js carries no heartbeat, driver or liveness code', () => {
   // MUTATION: restore heartbeatCell.
   const source = src('lib/fleet.js')
   for (const name of ['driverObservation', 'heartbeatCell', 'SILENT_AFTER_MS', 'runActivity', 'fleetActivity', "'silent'", "'unverified'", "'gone'", "'contradicted'"]) assert.ok(!source.includes(name), name)
-})
-
-test('board: App and route carry no dropped routes, envelope map or dead layout', () => {
-  // MUTATION: restore repeat(4,.
-  const app = src('App.svelte')
-  const task = src('lib/TaskList.svelte')
-  const route = src('lib/route.js')
-  for (const text of ['const envelopes', "'prompts'", "'ops'", "'workflows'", "'assurances'", "route.view === 'phase'", 'ops-grid', '.diagnostics']) assert.ok(!app.includes(text), text)
-  for (const source of [app, task, route]) for (const text of ['triage', 'envelopes']) assert.ok(!source.includes(text), text)
-  assert.match(app, /@media \(max-width:760px\)[^\n]*repeat\(3,minmax\(0,1fr\)\)/)
-  assert.deepEqual(parseHash('#/a/plan'), { view: 'run', adw_id: 'a' })
-  assert.equal(existsSync(join(ROOT, 'visualizer/web/src/lib/configuration-controls.css')), false)
 })

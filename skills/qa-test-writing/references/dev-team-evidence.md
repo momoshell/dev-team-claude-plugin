@@ -423,4 +423,4 @@ and a compound `cd` that silently changed what a relative path meant.
 
 ## Live vocabulary
 
-`CHECK_REASONS` in `crew/checks.mjs` and `crew/checks.test.mjs` is a live vocabulary with independent expectations.
+`CHECK_REASONS` in `crew/checks.mjs` is a live vocabulary. `crew/checks.test.mjs` checks that result reasons belong to it, but no longer pins its members, frozen state or uniqueness independently.

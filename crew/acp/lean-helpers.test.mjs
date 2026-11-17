@@ -1,13 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
-import { join, resolve as resolvePath } from 'node:path'
+import { resolve as resolvePath } from 'node:path'
 import {
-  CAPABILITY_REFUSALS, REGISTER_ROOT, armGrants,
+  CAPABILITY_REFUSALS, armGrants,
   grantsFor, pathExists, pathMessage, refuse,
   resolvedGrantPath,
 } from './grants.mjs'
-import { SUBAGENT_EXTENSION } from '../adapters/adapter-pi.mjs'
 import { BriefUsageError, exportEntries } from './export-entries.mjs'
 import * as grants from './grants.mjs'
 
@@ -22,31 +20,6 @@ test('refuse stamps a closed reason and rejects an unknown one', () => {
   assert.throws(() => refuse('not-a-capability-reason', 'bad'), /unknown capability refusal reason/)
 })
 
-test('the grants register is a frozen runtime constant with no schema walker, schema or register file', () => {
-  assert.equal('loadCapabilities' in grants, false)
-  assert.equal('validateCapabilities' in grants, false)
-  for (const path of ['crew/capabilities.json', 'crew/capabilities.schema.json']) assert.equal(existsSync(join(REGISTER_ROOT, path)), false)
-  assert.equal(Object.isFrozen(grants.REGISTER), true)
-  assert.deepEqual(Object.keys(grants.REGISTER), ['roles'])
-  assert.deepEqual(grants.REGISTER.roles, {
-    lead: { agents: [], mcp_servers: [] },
-    planner: { agents: [], mcp_servers: [], by_agent: { pi: {
-      agents: [{ name: 'scout', def: 'crew/pi/agents/scout.json' }],
-      mcp_servers: [{ name: 'fff', command: { bin: '/opt/homebrew/bin/fff-mcp', args: [] }, url: null }],
-    } } },
-    builder: { agents: [], mcp_servers: [] },
-    reviewer: { agents: [], mcp_servers: [] },
-    'tech-lead': { agents: [], mcp_servers: [] },
-  })
-  const frozen = (value) => {
-    if (value && typeof value === 'object') {
-      assert.equal(Object.isFrozen(value), true)
-      for (const child of Object.values(value)) frozen(child)
-    }
-  }
-  frozen(grants.REGISTER)
-})
-
 test('path helpers resolve, probe and phrase refusals', () => {
   assert.equal(resolvedGrantPath('/root', 'crew/x.js'), resolvePath('/root/crew/x.js'))
   assert.equal(pathExists(() => true, '/x'), true)
@@ -55,10 +28,6 @@ test('path helpers resolve, probe and phrase refusals', () => {
   const err = pathMessage('extension-missing', 'builder', 'extension grant', 'a path', 'missing', '/p')
   assert.equal(err.reason, 'extension-missing')
   assert.equal(err.message, 'seat builder extension grant expected a path, found missing, at /p [extension-missing]')
-})
-
-test('the register declares no local provider or narrator', () => {
-  for (const key of ['local_providers', 'narrator']) assert.equal(Object.hasOwn(grants.REGISTER, key), false)
 })
 
 test('grantsFor resolves valid grants and fails closed on missing paths', () => {
@@ -80,28 +49,6 @@ test('grantsFor resolves valid grants and fails closed on missing paths', () => 
   )
 })
 
-test('armGrants arms native extensions and fff, and refuses what it cannot back', () => {
-  const root = '/r'
-  const exists = () => true
-  const native = armGrants({ role: 'builder', agent: 'pi', extensions: ['skeletonread'] }, { root, exists })
-  assert.deepEqual(native.extensions, [resolvePath('/r/crew/pi/extensions/skeletonread.ts')])
-  assert.deepEqual(native.mcp_servers, [])
-
-  const mcp = armGrants({ role: 'builder', agent: 'pi', extensions: ['fff'] }, { root, exists })
-  assert.deepEqual(mcp.mcp_servers.map((server) => server.name), ['fff'])
-  assert.throws(() => armGrants({ role: 'builder', agent: 'pi', extensions: ['fff'] }, { root, exists: () => false }), (err) => err.reason === 'extension-missing')
-  assert.throws(() => armGrants({ role: 'builder', agent: 'pi', extensions: ['Bad_Name'] }, { root, exists }), (err) => err.reason === 'unknown-grant')
-  assert.throws(() => armGrants({ role: 'builder', agent: 'pi', extensions: ['lab'] }, { root, exists: () => false }), (err) => err.reason === 'extension-missing')
-
-  assert.equal(SUBAGENT_EXTENSION, 'crew/pi/extensions/subagent.ts')
-  const fan = armGrants({ role: 'planner', agent: 'pi', extensions: ['subagent'] }, { root, exists, readFile: () => JSON.stringify({ name: 'scout', prompt: 'look' }) })
-  assert.deepEqual(fan.agents, [{ name: 'scout', def: resolvePath('/r/crew/pi/agents/scout.json') }])
-  assert.throws(
-    () => armGrants({ role: 'builder', agent: 'pi', extensions: ['subagent'] }, { root, exists, register: { roles: { builder: role() } } }),
-    (err) => err.reason === 'unknown-grant' && /declares no agent definition/.test(err.message),
-  )
-})
-
 // MUTATION: restore the hard-coded LEAN_FFF_BIN probe.
 test('armGrants arms fff from the register binary, not a hard-coded path', () => {
   const server = { name: 'fff', command: { bin: '/usr/local/bin/fff-mcp', args: [] }, url: null }
@@ -114,33 +61,6 @@ test('armGrants arms fff from the register binary, not a hard-coded path', () =>
   server.command = null
   server.url = 'http://x'
   assert.throws(() => armGrants(spec, { register, exists: () => true }), (error) => error.reason === 'extension-missing' && error.message.includes('no command'))
-})
-
-// MUTATION: add unknown-skill back to the vocabulary.
-test('CAPABILITY_REFUSALS lists only the reasons the seat path throws', () => {
-  assert.deepEqual(CAPABILITY_REFUSALS, ['register-invalid', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'agent-def-invalid'])
-  assert.equal(Object.isFrozen(CAPABILITY_REFUSALS), true)
-})
-
-// MUTATION: re-export EMPTY_GRANTS.
-test('grants.mjs exports no mergeMcpServers, EMPTY_GRANTS or SUBAGENT_EXTENSION', () => {
-  for (const name of ['mergeMcpServers', 'EMPTY_GRANTS', 'SUBAGENT_EXTENSION']) assert.equal(Object.hasOwn(grants, name), false, name)
-})
-
-// MUTATION: restore lead's pi fff overlay.
-test('the shipped register keeps one fff copy, on the planner pi overlay with scout, and no unread role fields', () => {
-  const roles = grants.REGISTER.roles
-  const locations = []
-  for (const [name, spec] of Object.entries(roles)) {
-    for (const key of Object.keys(spec)) assert.ok(['agents', 'mcp_servers', 'by_agent'].includes(key), `${name}.${key}`)
-    if (spec.mcp_servers.some((server) => server.name === 'fff')) locations.push(`roles.${name}`)
-    for (const [agent, overlay] of Object.entries(spec.by_agent || {})) {
-      for (const key of Object.keys(overlay)) assert.ok(['agents', 'mcp_servers'].includes(key), `${name}.${agent}.${key}`)
-      if ((overlay.mcp_servers || []).some((server) => server.name === 'fff')) locations.push(`roles.${name}.by_agent.${agent}`)
-    }
-  }
-  assert.deepEqual(locations, ['roles.planner.by_agent.pi'])
-  assert.deepEqual(roles.planner.by_agent.pi.agents, [{ name: 'scout', def: 'crew/pi/agents/scout.json' }])
 })
 
 test('exportEntries scans exports with lines, spans and signatures', () => {

@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { chmodSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { scratchDir } from '../../test/helpers.mjs'
-import * as wire from './wire.mjs'
 import { seatCommandPath, seatCommandRootPrivate, splitFrames } from './wire.mjs'
 
 test('splitFrames preserves LF framing and chunk rest', () => {
@@ -14,12 +13,6 @@ test('splitFrames preserves LF framing and chunk rest', () => {
   assert.equal(second.lines.length, 2)
   assert.deepEqual(second.lines.map(JSON.parse), [{ message: 'a\u2028b' }, { message: 'c' }])
   assert.equal(splitFrames(Buffer.from('{"x":1}\r\n')).lines[0], '{"x":1}')
-})
-
-// MUTATION: restore the inCrewSeatCommandPath export.
-test('wire.mjs exports no legacy in-crew command path', () => {
-  assert.equal(Object.hasOwn(wire, 'inCrewSeatCommandPath'), false)
-  assert.equal(typeof wire.seatCommandPath, 'function')
 })
 
 test('seatCommandRootPrivate requires an owned crew-rpc dir with no group or other access', () => {

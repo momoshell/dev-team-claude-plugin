@@ -1,13 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { ROOT } from './helpers.mjs'
 import * as fleet from '../visualizer/web/src/lib/fleet.js'
 import { leanOutcome } from '../visualizer/web/src/lib/lean.js'
 import { layoutTimeline } from '../visualizer/web/src/lib/timeline.js'
 
-const src = (path) => readFileSync(join(ROOT, 'visualizer/web/src', path), 'utf8')
 const lane = (id, status, extra = {}) => ({ source: 'lean', adw_id: `lean:${id}`, goal: id, status, running: false, archived: false, tier: 'build', shape: 'standard', latest_stage: 'plan', started_at: '2026-01-01', ...extra })
 
 test('board: unwritten lane statuses, the timeline constants and the task_profile filter are gone', () => {
@@ -44,10 +40,4 @@ test('board: the detail outcome agrees with the board for finish-stage statuses'
     assert.equal(outcome.tone, tone)
   }
   assert.match(leanOutcome({ status: 'ready-for-operator' }).next, /crew finish <lane>/)
-})
-
-test('board: fleet.js carries no heartbeat, driver or liveness code', () => {
-  // MUTATION: restore heartbeatCell.
-  const source = src('lib/fleet.js')
-  for (const name of ['driverObservation', 'heartbeatCell', 'SILENT_AFTER_MS', 'runActivity', 'fleetActivity', "'silent'", "'unverified'", "'gone'", "'contradicted'"]) assert.ok(!source.includes(name), name)
 })

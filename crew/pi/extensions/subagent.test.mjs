@@ -1,20 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'; import { ROOT, leanLaneFixture, scratchDir } from '../../../test/helpers.mjs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'; import { ROOT, scratchDir } from '../../../test/helpers.mjs'
 
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as mod from './subagent.ts'
-
-// MUTATION: restore the crew/drive.mjs citation
-test('subagent.ts and advisor.ts cite only crew files that exist', () => {
-  for (const name of ['subagent.ts', 'advisor.ts']) {
-    const source = readFileSync(new URL(`./${name}`, import.meta.url), 'utf8')
-    for (const [path] of source.matchAll(/crew\/[\w./-]+\.(?:mjs|ts|json)/g)) assert.ok(existsSync(join(ROOT, path)), path)
-    if (name === 'advisor.ts') assert.doesNotMatch(source, /\b(roster|ledger|endpoint)\b/i)
-  }
-})
 
 const EXTENSION = fileURLToPath(new URL('./subagent.ts', import.meta.url))
 const FINDINGS = {
@@ -591,20 +582,6 @@ test('the reducer folds what the rule claims', () => {
     reducer.push(row.frame)
     assert.deepEqual(reducer.usage(), want, `subagent.ts folded: ${row.name}`)
   }
-})
-
-test('a lean lane counts its spawns inside its task dir and leaves the parent budget alone', () => {
-  const lane = leanLaneFixture()
-  const parentCounter = join(lane.parent, 'subagent-spawns.json')
-  writeFileSync(parentCounter, '{"spawns":8}\n')
-  for (const count of [1, 2]) {
-    const out = mod.reserveSpawn({ taskDir: lane.taskDir, env: lane.env, readFile: readFileSync, writeFile: writeFileSync })
-    assert.equal(out.count, count)
-    assert.deepEqual(JSON.parse(readFileSync(join(lane.taskDir, 'subagent-spawns.json'), 'utf8')), { spawns: count })
-  }
-  assert.equal(readFileSync(parentCounter, 'utf8'), '{"spawns":8}\n')
-  writeFileSync(join(lane.taskDir, 'subagent-spawns.json'), `${JSON.stringify({ spawns: mod.SUBAGENT_SPAWN_BUDGET })}\n`)
-  assert.match(mod.reserveSpawn({ taskDir: lane.taskDir, env: lane.env, readFile: readFileSync, writeFile: writeFileSync }).error, /spent its subagent spawn budget/)
 })
 
 

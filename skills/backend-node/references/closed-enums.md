@@ -8,18 +8,16 @@ Production code reads the set when it validates a value.
 Exhibit: `crew/loop.mjs` extends the check vocabulary into its own reason list.
 
 Pin the expected members independently in the test.
-Exhibit: `crew/checks.test.mjs` asserts the count and names tokens by literal.
-
 Pin immutability independently with `Object.isFrozen`, and uniqueness with a
-`Set` size check. Exhibit: `crew/checks.test.mjs`.
+`Set` size check. `crew/checks.test.mjs` checks result-reason membership only;
+it no longer pins the vocabulary's members, frozen state or uniqueness.
 
 The paired assertions catch value drift and freeze drift. A mutation that
 removes the freeze must make the test fail even when members are unchanged; a
 mutation that adds a member must also make the literal expectation fail.
 
 Pin that a downstream vocabulary stays a superset when it extends the set.
-Exhibit: `crew/loop.test.mjs` asserts every `CHECK_REASONS` entry is in the
-loop's reasons.
+`crew/loop.test.mjs` no longer checks this relationship for `CHECK_REASONS`.
 
 Do not infer closure from an uppercase name or an exported array alone.
 

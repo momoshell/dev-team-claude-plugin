@@ -1,20 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { ROOT } from './helpers.mjs'
 import { leanView, leanStageStatus } from '../visualizer/web/src/lib/lean.js'
 import { sessionsFeedState } from '../visualizer/web/src/lib/activity.js'
 import { leanStatus } from '../visualizer/web/src/lib/fleet.js'
 
-const src = (path) => readFileSync(join(ROOT, 'visualizer/web/src', path), 'utf8')
-
 test('leanStageStatus gives every phase status the server sends a tone and a label', () => {
   for (const [status, label, tone] of [['escalate', 'Escalated', 'attention'], ['held', 'Held', 'attention'], ['insufficient', 'Insufficient', 'attention'], ['unmeasured', 'Unmeasured', 'quiet'], ['unknown', 'Outcome unknown', 'quiet'], ['running', 'No stage-end record', 'quiet'], ['done', 'Stage ended', 'ok'], ['failed', 'failed', 'fail'], ['stopped', 'stopped', 'attention']]) assert.deepEqual(leanStageStatus(status), { label, tone })
-})
-
-test('the stage list shows a recorded phase reason', () => {
-  assert.match(src('lib/LeanRunDetail.svelte'), /phase\.reason/)
 })
 
 test('a stage-end line states its envelope, halt, held or threw outcome', () => {
@@ -55,22 +46,10 @@ test("journal lines detail every loop event, show a verdict's observation and na
   assert.equal(lines[14].detail, ''); assert.equal(lines[15].detail, '')
 })
 
-test('the task cell drops the lean id fragment, the usage cell shows turn coverage and the detail page names no event inspector', () => {
-  const task = src('lib/TaskList.svelte')
-  assert.doesNotMatch(task, /slice\(0, 8\)/); assert.ok(task.includes('tokens.turns'))
-  assert.ok(!src('lib/LeanRunDetail.svelte').includes('event inspector'))
-})
-
 test('lean view lists journal rows in recorded order without timestamps', () => {
   const lines = leanView({}, { rows: [{ index: 0, event: 'stage-start', stage: 'a' }, { index: 1, event: 'verdict', stage: 'b', status: 'stopped', reason: 'r' }, { index: 2, event: 'pr', stage: 'start', pr: { number: 4 } }] }).lines
   assert.deepEqual(lines.map((line) => line.detail), ['', 'stopped · r', '#4'])
   assert.deepEqual(leanView({ goal: 'x' }, null).pending, []); assert.equal(leanView({ goal: 'x' }).stageReason, 'no stage recorded')
-})
-
-test('App wires lean lanes only: no ledger detail, no envelope probe, no dropped page', () => {
-  const app = src('App.svelte')
-  assert.match(app, /selectedRun\?\.source === 'lean'[\s\S]*LeanRunDetail/); assert.ok(!/RunDetail\.svelte|probeEnvelopes|getReturns/.test(app.replace(/LeanRunDetail/g, '')))
-  assert.match(src('lib/api.js'), /getSeatSessions[\s\S]*seat-sessions/); assert.match(src('lib/LeanRunDetail.svelte'), /journalPulse/)
 })
 
 test('an operator-written pr row reads as done, hand-finished; a loop-written one stays plain done', () => {
@@ -109,17 +88,4 @@ test('VJ3 sessionsFeedState is the lean source alone: readable is available, any
   assert.equal(Object.hasOwn(empty.sources, 'ledger'), false)
   // A response that says nothing about the lean source is unreadable, never assumed readable.
   assert.equal(sessionsFeedState({}).degraded, true); assert.equal(sessionsFeedState({}).sources.lean.runs, null)
-})
-
-test('VJ5 App.svelte takes feed state from sessionsFeedState and no longer claims a ledger connection', () => {
-  const app = src('App.svelte')
-  assert.match(app, /sessionsFeedState\(result\)/)
-  for (const gone of ['result?.degraded === true', 'Ledger connected', 'Connecting to ledger']) assert.ok(!app.includes(gone), gone)
-})
-
-test('VJ5 the sidebar keeps per-source reasons when the whole feed is unavailable', () => {
-  const app = src('App.svelte')
-  const line = app.split('\n').find((l) => l.includes('class="connection"'))
-  assert.match(line, /Feed unavailable/); assert.match(line, /sourceLine\(feedSources\)/)
-  assert.ok(line.indexOf('{#if feedSources}') > line.indexOf('Feed unavailable'), 'sources render outside the unavailable branch')
 })

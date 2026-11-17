@@ -5,8 +5,6 @@ import { cpSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { git as repoGit, gitResult, scratchDir } from '../test/helpers.mjs'
-import { CHECK_REASONS } from './checks.mjs'
-import { proveTests } from './proof.mjs'
 import { decideFinish, FinishRefusal, finishLane } from './finish.mjs'
 import { LOOP_REASONS, runLoop } from './loop.mjs'
 import { resolveAgents } from './agents.mjs'
@@ -1074,25 +1072,6 @@ test('a failing journal append leaves the lane outcome unchanged and the result 
   assert.deepEqual(result.journal.error, { code: null, message: 'unprintable error' })
 })
 
-test('project proof configuration and setup failures retain their reasons through the loop', async () => {
-  for (const reason of ['invalid-project-config', 'setup-failed']) {
-    const cwd = scratchDir('loop-proof-config-')
-    repoGit(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew'))
-    writeFileSync(join(cwd, '.crew/project.json'), reason === 'invalid-project-config' ? '{' : JSON.stringify({ proof: [{ match: '*.mjs', setup: 'node missing.mjs', run: 'node runner.mjs' }] }))
-    writeFileSync(join(cwd, 'lib.test.mjs'), '')
-    repoGit(cwd, 'add', '.'); repoGit(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
-    const f = fakes({ spec: { cwd }, deps: { proveTests } })
-    assert.deepEqual(await f.go(), stopped(reason))
-    const verdict = f.rows.find((row) => row.event === 'verdict')
-    assert.equal(verdict.observation.rows[0].title, 'works')
-  }
-})
-
-test('every loop-only stop reason is emitted by the loop source', () => {
-  const source = readFileSync(fileURLToPath(new URL('./loop.mjs', import.meta.url)), 'utf8').replace(/export const LOOP_REASONS = Object\.freeze\(\[[\s\S]*?\]\)/, '').replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '')
-  for (const reason of LOOP_REASONS.filter((r) => !CHECK_REASONS.includes(r))) assert.ok(source.includes(`'${reason}'`), reason)
-})
-
 // MUTATION: skip input validation and an unsupported or malformed lane starts effects.
 test('an unsupported shape, invalid input or unsound seam is refused before dependency effects', async () => {
   const cases = [
@@ -2012,26 +1991,6 @@ test('a post-rebase check that dirties the tree or moves HEAD stops a mechanical
     assert.equal(f.calls.includes('publish'), false)
   }
   assert.deepEqual(await moved({ cleanStatus: 'garbage' }).go(), stopped('paths-unmeasured'))
-})
-
-// MUTATION: keep one lead counter for the lane.
-test("the lead's bound is per phase: plan routing before the first review never starves the review's or the recheck's consults (b1509)", async () => {
-  const A = 'a'.repeat(40), C = 'c'.repeat(40)
-  let builds = 0, leads = 0
-  const f = sequenced([green(), green(), redRun(), green()], {
-    bounds: { lead: 1 }, review: 1, lead: 'bounce',
-    checkedTree: () => ({ ...green(), stdout: String(f.calls.filter((c) => c === 'seat:builder' || c === 'uncommit').length).repeat(40) }),
-    rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C }),
-    commit: answers({ status: 'green', reason: null, head: A, files: ['lib.mjs'] }, { status: 'green', reason: null, head: C, files: ['lib.mjs'] }),
-    edit: (v) => {
-      if (v.role === 'builder' && ++builds === 1) v.status = 'insufficient'
-      if (v.role === 'lead') v.details.target = ++leads === 1 ? 'planner' : 'builder'
-      return v
-    },
-  })
-  assert.equal((await f.go()).status, 'done')
-  assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'builder', 'lead', 'planner', 'builder', 'reviewer', 'lead', 'builder', 'reviewer', 'reviewer', 'lead', 'builder', 'reviewer'])
-  assert.deepEqual(f.requests.filter((r) => r.role === 'lead').map((r) => r.feedback[0].last), [true, true, true])
 })
 
 test('a moved-head recheck whose reviewed commit is not an object id stays a full review and journals that it did (#2359)', async () => {

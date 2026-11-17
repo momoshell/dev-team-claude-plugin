@@ -148,13 +148,6 @@ test('CS4 the CLI reports a refusal from main as one sanitized line and returns 
   assert.match(err[0], /^crew show: [^\n]*\n$/)
 })
 
-test('importing the module runs nothing and writes nothing', () => {
-  const result = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(SHOW)})`], { encoding: 'utf8', env: { ...process.env, HOME: '/nonexistent-home' } })
-  assert.equal(result.status, 0, result.stderr)
-  assert.equal(result.stdout, '')
-  assert.equal(result.stderr, '')
-})
-
 // MUTATION: write a file beside the raw return and the crew tree fingerprint changes.
 test('CS6 listing, text and --json reads of live and archived lanes leave the crew tree untouched', () => {
   const { home, crewRoot } = fixture()

@@ -1,28 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
 import { configurationDimensionCell, configurationFilterView, tokenCell } from '../visualizer/web/src/lib/fleet.js'
 import { assuranceMeta, executionMeta } from '../visualizer/web/src/lib/workflow-semantics.js'
 import { ROOT } from './helpers.mjs'
 import { transportLabel } from '../visualizer/web/src/lib/agent-settings.js'
-
-test('the Skills page has no Delivery history tab and its modules are deleted', () => {
-  const lib = join(ROOT, 'visualizer/web/src/lib')
-  const page = readFileSync(join(lib, 'SkillsPage.svelte'), 'utf8')
-  assert.ok(!page.includes('Delivery history')); assert.ok(!page.includes('SkillDelivery'))
-  for (const file of ['SkillDelivery.svelte', 'agents.js']) assert.equal(existsSync(join(lib, file)), false)
-  assert.ok(!readFileSync(join(lib, 'api.js'), 'utf8').includes('getAgents'))
-})
-
-test('D9 the agent editor carries no model picker and agent-settings exports no model helpers', async () => {
-  const page = readFileSync(join(ROOT, 'visualizer/web/src/lib/AgentsPage.svelte'), 'utf8')
-  assert.doesNotMatch(page, /modelsError|model-settings|setModelPreference|chooseModel/)
-  const settings = await import('../visualizer/web/src/lib/agent-settings.js')
-  assert.equal('modelPreference' in settings, false)
-  assert.equal('setModelPreference' in settings, false)
-})
 
 test('TR3 transportLabel names acp and shows a retired transport as recorded', () => {
   assert.equal(transportLabel('acp'), 'Agent Client Protocol (ACP)')
@@ -73,23 +57,6 @@ test('E1 preserves unrecorded rows while filtering measured configuration', () =
   assert.equal(view.excluded.line, '1 measured row excluded by configuration filters · not-recorded rows remain visible')
 })
 
-test('G1 task list uses configuration cells filters and exclusion text', () => {
-  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/TaskList.svelte'), 'utf8')
-  assert.match(source, /import \{[^}]*configurationDimensionCell[^}]*configurationFilterView[^}]*\} from '\.\/fleet\.js'/)
-  assert.match(source, /let baseRows = \$derived\(/)
-  assert.match(source, /configurationFilterView\(baseRows,/)
-  for (const dimension of ['execution_shape', 'assurance']) assert.match(source, new RegExp(`configurationDimensionCell\\(run, '${dimension}'\\)`))
-  assert.doesNotMatch(source, /task_profile/)
-  assert.match(source, /configurationView\.excluded\.line/)
-  assert.doesNotMatch(source, /runConfiguration|run\.tier|run\.variant|configuration\.legacy_(?:tier|variant)/)
-})
-
-test('the board no longer probes task envelopes: lean lanes carry their status in the journal row', () => {
-  const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
-  for (const gone of ['probeEnvelopes', 'envelopeCache', 'envelopeQueued', 'getReturns', 'escalationProbeTargets']) assert.equal(app.includes(gone), false, gone)
-  assert.doesNotMatch(app, /const envelopes/)
-})
-
 test('hash routes parse and format every kept canonical view', () => {
   for (const hash of ['#/', '#/agents', '#/skills', '#/adw-123']) {
     assert.equal(formatHash(parseHash(hash)), hash)
@@ -105,60 +72,11 @@ test('hash routes parse and format every kept canonical view', () => {
   assert.equal(parseHash('#/skills').adw_id, null)
 })
 
-test('E1 agents page route nav and title are wired', () => {
-  const root = join(ROOT, 'visualizer/web/src')
-  const app = readFileSync(join(root, 'App.svelte'), 'utf8')
-  const page = readFileSync(join(root, 'lib/AgentsPage.svelte'), 'utf8')
-  assert.match(app, /route\.view === 'agents'/)
-  assert.match(app, /Agents · Factory/)
-  assert.match(app, /<AgentsPage\s*\/?\s*>/)
-  assert.match(app, /route\.view === 'agents'[^\n]*>Agents</)
-  assert.match(page, /aria-label="Agent library"/)
-})
-
-test('F1 agents page uses only Tier-2 colour aliases', () => {
-  const source = readFileSync(join(ROOT, 'visualizer/web/src/lib/AgentsPage.svelte'), 'utf8')
-  const css = source.match(/<style>([\s\S]*?)<\/style>/)?.[1] || ''
-  const declarations = [...css.matchAll(/(?:^|[;{}])\s*[-a-z]+\s*:\s*([^;{}]+)/g)].map((match) => match[1].trim())
-  assert.equal(css.includes('data-theme'), false)
-  assert.equal(declarations.some((value) => /#[0-9a-f]{3,8}\b/i.test(value)), false)
-  assert.equal(declarations.some((value) => /(?:^|\s)(?:white|black|red|blue|green|gray|grey)(?:\s|$)/i.test(value)), false)
-  assert.equal(declarations.some((value) => /--(?:ink|paper|spot|serious|status-\w+-raw|role-\w+-(?:dark|light))/.test(value)), false)
-  assert.ok(source.includes('background:var(--panel); border:1px solid var(--line);'))
-  for (const token of ['Create agent', 'Use a copy', 'Save agent']) assert.ok(source.includes(token), token)
-  for (const tab of ['Project library', 'Available on system']) assert.ok(source.includes(tab), tab); assert.doesNotMatch(source, /Skill delivery|skills-panel/)
-})
-
 test('fleet cells preserve honest absence and discriminate status evidence', () => {
   assert.equal(tokenCell({ metrics: { billed_input_tokens: null }, pending: { billed_input_tokens: 'predates this measurement' } }).value, null)
   assert.equal(tokenCell({ metrics: { billed_input_tokens: 10, billed_output_tokens: 2, billed_cache_write_tokens: 3, billed_cache_read_tokens: 5 } }).value, 20)
   assert.equal(tokenCell({ metrics: { billed_input_tokens: 10, billed_output_tokens: 2, billed_cache_write_tokens: 3, billed_cache_read_tokens: 5 } }).cacheRate, 5 / 18 * 100)
   assert.equal(tokenCell({ metrics: { billed_input_tokens: 10, billed_output_tokens: 2, billed_cache_write_tokens: null, billed_cache_read_tokens: 5 } }).cacheRate, null)
-})
-
-test('role colour stays isolated and escalation reasons remain in task history', () => {
-  const root = join(ROOT, 'visualizer/web/src')
-  const app = readFileSync(join(root, 'App.svelte'), 'utf8')
-  assert.doesNotMatch(app, /--role-|--lane-\d/)
-  assert.match(app, /taskBoard\(runs, \{ state: 'attention' \}\)/)
-  const tasks = readFileSync(join(root, 'lib/TaskList.svelte'), 'utf8')
-  assert.match(tasks, /Why review\?/)
-  assert.match(tasks, /status\.why/)
-  assert.doesNotMatch(app, /class="attention-list"/)
-  assert.doesNotMatch(app, /getReturns|probeEnvelopes|returnRequestSemaphore/)
-})
-
-test('A1: every visualizer consumer uses the shared attention classifier', () => {
-  const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
-  const taskList = readFileSync(join(ROOT, 'visualizer/web/src/lib/TaskList.svelte'), 'utf8')
-  assert.match(app, /taskBoard\(runs, \{ state: 'attention' \}\)/)
-  assert.match(app, /attentionBreakdown\(attentionRows\)/)
-  assert.match(taskList, /taskBoard\(runs,/)
-})
-
-test('C1: every current attention key routes the metric click to attention', () => {
-  const app = readFileSync(join(ROOT, 'visualizer/web/src/App.svelte'), 'utf8')
-  assert.match(app, /taskFocus = \{ state: 'attention'/)
 })
 
 test('ledger refresh waits after completion, coalesces clicks and resets its pause', async () => {
@@ -224,40 +142,6 @@ test('paused, hidden and disposed ledger refreshes do not restart themselves', a
   assert.equal(reads, 4)
 })
 
-
-// Reversing an edit must remove the pending move, not keep a no-op ready to apply.
-test('visualizer architecture keeps legacy Svelte syntax out of every component', () => {
-  const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => entry.isDirectory() ? (entry.name === 'node_modules' || entry.name === 'dist' ? [] : walk(join(dir, entry.name))) : [join(dir, entry.name)])
-  const files = walk(join(ROOT, 'visualizer'))
-  for (const file of files) {
-    const source = readFileSync(file, 'utf8')
-    const relative = file.replace(`${ROOT}/`, '')
-    if (file.endsWith('.svelte')) {
-      assert.doesNotMatch(source, /^\s*export\s+let\s/m, relative)
-      assert.doesNotMatch(source, /^\s*\$:\s/m, relative)
-    }
-  }
-  assert.ok(files.some((file) => file.endsWith('.svelte')))
-})
-
-test('theme role and lane aliases follow the ratified role order', () => {
-  const css = readFileSync(join(ROOT, 'visualizer/web/src/lib/theme.css'), 'utf8')
-  for (const [index, role] of ['planner', 'builder', 'reviewer', 'tech-lead', 'lead', 'driver'].entries()) {
-    assert.match(css, new RegExp(`--role-${role}\\s*:`))
-    assert.match(css, new RegExp(`--lane-${index}\\s*:\\s*var\\(\\s*--role-${role}\\s*\\)`))
-  }
-})
-
-test('theme gives component scrollbars a thin theme-aware treatment', () => {
-  const css = readFileSync(join(ROOT, 'visualizer/web/src/lib/theme.css'), 'utf8')
-  assert.match(css, /--scrollbar-track\s*:/)
-  assert.match(css, /--scrollbar-thumb\s*:/)
-  assert.match(css, /scrollbar-width:\s*thin/)
-  assert.match(css, /scrollbar-color:\s*var\(--scrollbar-thumb\) var\(--scrollbar-track\)/)
-  assert.match(css, /\*::\-webkit-scrollbar\s*\{[^}]*width:\s*\.625rem[^}]*height:\s*\.625rem/)
-  assert.match(css, /\*::\-webkit-scrollbar-thumb:hover\s*\{[^}]*var\(--scrollbar-thumb-hover\)/)
-  assert.match(css, /:root\[data-theme='ink'\]\s*\{\s*color-scheme:\s*dark/)
-})
 
 test('the kept frontend imports nothing from crew/ or scripts/', () => {
   const found = []

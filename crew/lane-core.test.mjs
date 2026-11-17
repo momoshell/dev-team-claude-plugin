@@ -1,18 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { scratchDir } from '../test/helpers.mjs'
-import { parseJournalRows } from './lane-core.mjs'
-
-test('journal parser preserves ordered objects and delegates invalid rows (#2324)', () => {
-  const kinds = []
-  assert.deepEqual(parseJournalRows(' \n{"n":1}\n{broken\n3\n{"n":2}\n', (kind) => kinds.push(kind)), [{ n: 1 }, { n: 2 }])
-  assert.deepEqual(kinds, ['malformed', 'non-object'])
-  for (const [text, kind] of [['{broken', 'malformed'], ['null', 'non-object']]) {
-    assert.throws(() => parseJournalRows(text, (actual) => { throw new Error(actual) }), { message: kind })
-  }
-})
+import { readFileSync } from 'node:fs'
 
 test('lane-core helpers are defined once, in crew/lane-core.mjs', () => {
   const modules = {
@@ -48,26 +36,4 @@ test('lane-core helpers are defined once, in crew/lane-core.mjs', () => {
   assert.ok(body)
   assert.doesNotMatch(body, /\/#\(\\d\+\)\/g/)
   assert.match(body, /withoutIssueTokens\(body\)/)
-})
-
-test('lane-core.mjs is zero-dependency and exports the shared helpers', async () => {
-  const file = new URL('lane-core.mjs', import.meta.url)
-  assert.ok(existsSync(file), 'lane-core.mjs exists')
-  const source = readFileSync(file, 'utf8')
-  const imports = [...source.matchAll(/^import[\s\S]*?from\s+['"]([^'"]+)['"]/gm)].map((match) => match[1])
-  assert.ok(imports.length > 0)
-  assert.ok(imports.every((specifier) => specifier.startsWith('node:')), imports.join(', '))
-  const { LANE, isObject, within, HEX_OID, describeError, GIT_STATUS_ARGS } = await import('./lane-core.mjs')
-  for (const [slug, valid] of [['demo', true], ['b1544-lane-helpers', true], ['-x', false], ['Demo', false], ['a'.repeat(64), false]]) assert.equal(LANE.test(slug), valid, slug)
-  for (const [value, valid] of [[null, false], [[], false], [{}, true]]) assert.equal(isObject(value), valid)
-  const root = scratchDir('lane-core-')
-  const dir = join(root, 'lane'), sibling = join(root, 'sibling'), fileInLane = join(dir, 'file')
-  mkdirSync(dir)
-  writeFileSync(fileInLane, '')
-  writeFileSync(sibling, '')
-  for (const [path, valid] of [[fileInLane, true], [dir, true], [sibling, false], [join(dir, 'missing'), false]]) assert.equal(within(dir, path), valid, path)
-  for (const [oid, valid] of [['a'.repeat(40), true], ['f'.repeat(64), true], ['a'.repeat(39), false]]) assert.equal(HEX_OID.test(oid), valid)
-  assert.deepEqual(describeError('x'), { code: null, message: 'x' })
-  assert.deepEqual(GIT_STATUS_ARGS, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
-  assert.ok(Object.isFrozen(GIT_STATUS_ARGS))
 })

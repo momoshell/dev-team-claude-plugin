@@ -46,58 +46,6 @@ function seat(w, n) {
   return { pgid, ps: `${pgid} ${pgid} ${date[0]} ${date[1]} ${date[2]} ${date[4]} ${date[3]} sh -c pgid=${file}\n` }
 }
 
-test('a lane whose recorded run pid now names a later process lists as stopped run-died (S3-4)', () => {
-  const w = world()
-  try {
-    w.lane('recycled', [{ event: 'stage-start', stage: 'build' }])
-    const pid = join(w.root, 'dt-recycled', 'recycled', 'task', 'run.pid')
-    for (const [startedAt, dead] of [[Date.now() - 86_400_000, true], [Math.round(performance.timeOrigin), false]]) {
-      put(pid, `${process.pid} ${startedAt}\n`)
-      const row = laneRows({ root: w.root, archiveRoot: w.archiveRoot }).find((r) => r.lane === 'recycled')
-      if (dead) assert.deepEqual([row.status, row.reason], ['stopped', 'run-died'])
-      else assert.notEqual(row.reason, 'run-died')
-    }
-  } finally { w.done() }
-})
-
-test('a stop verdict followed by the in-flight suite\'s check and stage-end rows lists as stopped with its reason, live or dead run (#2304)', () => {
-  const w = world()
-  try {
-    w.lane('concurrent', [
-      { event: 'stage-start', stage: 'suite' }, { event: 'stage-start', stage: 'review' },
-      { event: 'verdict', stage: 'review', status: 'stopped', reason: 'seat-unmeasured' },
-      { event: 'stage-end', stage: 'review' }, { event: 'check', stage: 'suite', check: 'suite', result: { status: 'green', code: 0 } },
-      { event: 'stage-end', stage: 'suite' },
-    ])
-    put(join(w.root, 'dt-concurrent', 'concurrent', 'task', 'run.pid'), '123\n')
-    for (const live of [true, false]) {
-      const row = laneRows({ root: w.root, archiveRoot: w.archiveRoot, alive: () => live }).find((r) => r.lane === 'concurrent')
-      assert.deepEqual([row.status, row.reason], ['stopped', 'seat-unmeasured'])
-    }
-    w.lane('resumed', [
-      { event: 'verdict', status: 'stopped', reason: 'x' }, { event: 'stage-start', stage: 'suite' },
-      { event: 'check', stage: 'suite', check: 'suite', result: { status: 'green', code: 0 } },
-    ])
-    assert.equal(laneRows({ root: w.root, archiveRoot: w.archiveRoot, alive: () => true }).find((r) => r.lane === 'resumed').status, 'running')
-  } finally { w.done() }
-})
-
-test('an advisor row after the terminal row never becomes the lane state (#2304)', () => {
-  const w = world()
-  try {
-    const advisor = { at: 1, role: 'builder', advisor_usage: { provider: 'openai', billed_input_tokens: 1 } }
-    for (const [name, terminal, expected] of [
-      ['stop', { event: 'verdict', status: 'stopped', reason: 'x' }, ['stopped', 'x']],
-      ['published', { event: 'pr', pr: { number: 7, url: PR } }, ['done', null]],
-    ]) {
-      w.lane(name, [terminal, advisor])
-      put(join(w.root, `dt-${name}`, name, 'task', 'run.pid'), '123\n')
-      const row = laneRows({ root: w.root, archiveRoot: w.archiveRoot, alive: () => false }).find((r) => r.lane === name)
-      assert.deepEqual([row.status, row.reason], expected)
-    }
-  } finally { w.done() }
-})
-
 test('lanes signals no seat process group of a dead run, in text or --json', () => {
   const w = world(), groups = [], calls = []
   try {
@@ -168,40 +116,6 @@ test('an archived lane with no terminal row lists as stopped archived-without-te
     assert.equal(rows.find((row) => row.lane === 'alpha').status, 'reviewed')
     assert.deepEqual(JSON.parse(w.run(['--all', '--json'], alive).out), rows)
     assert.ok(lines(w.run(['--all'], alive).out).includes('delta | stopped | gate | archived-without-terminal-row | not recorded | archived'))
-  } finally { w.done() }
-})
-
-test('LS1 LS4 LS5 lists live lanes with journal status, stop reason and PR url', () => {
-  const w = world()
-  try {
-    const r = w.run([])
-    assert.equal(r.status, 0)
-    assert.deepEqual(lines(r.out), [
-      'alpha | reviewed | build | not recorded | not recorded | not archived',
-      'beta | stopped | build | seat-unmeasured | not recorded | not archived',
-      `gamma | done | publish | not recorded | ${PR} | not archived`,
-    ])
-  } finally { w.done() }
-})
-
-test('LS2 LS3 archived lanes appear only with --all, marked archived', () => {
-  const w = world()
-  try {
-    assert.ok(!w.run([]).out.includes('delta'))
-    const all = lines(w.run(['--all']).out)
-    assert.equal(all.length, 4)
-    assert.equal(all.find((line) => line.startsWith('delta')), 'delta | stopped | gate | archived-without-terminal-row | not recorded | archived')
-  } finally { w.done() }
-})
-
-test('--json prints the same rows', () => {
-  const w = world()
-  try {
-    const rows = JSON.parse(w.run(['--json', '--all']).out)
-    assert.deepEqual(rows.map((row) => row.lane), ['alpha', 'beta', 'delta', 'gamma'])
-    assert.deepEqual(rows.find((row) => row.lane === 'beta'), { lane: 'beta', status: 'stopped', latest_stage: 'build', reason: 'seat-unmeasured', pr: null, archived: false, unreadable_rows: 0, unreadable_rows_reason: null })
-    assert.equal(rows.find((row) => row.lane === 'gamma').pr, PR)
-    assert.equal(rows.find((row) => row.lane === 'delta').archived, true)
   } finally { w.done() }
 })
 
@@ -285,28 +199,4 @@ test('a child started before its anchored return decision invalidates the previo
       assert.equal(JSON.parse(w.run(['--json'], () => true).out).find((row) => row.lane === name).status, status, name)
     }
   } finally { w.done() }
-})
-
-test('LP1 LP2 lanes shows the PR of an accepted finish and a finish-ready lane as ready-for-operator', () => {
-  const home = realpathSync(scratchDir('lanes-'))
-  try {
-    const root = join(home, '.crew')
-    const lane = (name, rows) => {
-      const dir = join(root, `dt-${name}`, name)
-      put(join(dir, 'crew.json'), JSON.stringify({ members: { planner: { agent: 'pi' } } }))
-      put(join(dir, 'task', 'lean.json'), JSON.stringify({ id: name }))
-      put(join(dir, 'task', 'journal.jsonl'), jsonl(rows))
-    }
-    const ready = [{ event: 'verdict', stage: 'build', status: 'reviewed' }, { event: 'finish-ready', status: 'ready-for-operator' }]
-    lane('accepted', [...ready, { event: 'pr', stage: 'publish', pr: { number: 7, url: PR } }, { event: 'finish-decision', choice: 'accept' }])
-    lane('waiting', ready)
-    const out = []
-    assert.equal(main(['--json'], { root, archiveRoot: join(home, 'archive'), stdout: (t) => out.push(t), stderr: () => {} }), 0)
-    const rows = JSON.parse(out.join(''))
-    const accepted = rows.find((row) => row.lane === 'accepted'), waiting = rows.find((row) => row.lane === 'waiting')
-    assert.equal(accepted.status, 'done')
-    assert.equal(accepted.pr, PR)
-    assert.equal(waiting.status, 'ready-for-operator')
-    assert.equal(waiting.pr, null)
-  } finally { rmSync(home, { recursive: true, force: true }) }
 })

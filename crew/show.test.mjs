@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, statSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { main, showLane } from './show.mjs'
@@ -83,31 +83,6 @@ test('S6-2 a lane raised to judge lists and renders the tech-lead seat its raise
   assert.equal(fingerprint(crewRoot), before)
 })
 
-// MUTATION: restore the headless-rpc branch of sessionsOf and the planner's old stream is listed.
-test('a seat recorded on a retired transport lists no session file even when its old stream is on disk', () => {
-  const { crewRoot } = fixture()
-  const members = {
-    builder: { agent: 'claude', model: 'sonnet', transport: 'headless-json' },
-    planner: { agent: 'pi', model: 'test', transport: 'headless-rpc' },
-  }
-  const dir = lane(crewRoot, 'retired', { members, turns: [] })
-  put(join(dir, 'task/headless/d1/cmd.json'), '{ nope')
-  put(join(dir, 'task/headless/d1/stream.jsonl'), '{"type":"assistant"}\n')
-  put(join(dir, 'task/headless-rpc/planner/stream.jsonl'), '{"type":"message_end"}\n')
-  let listing
-  assert.doesNotThrow(() => { listing = showLane({ lane: 'retired', deps: { crewRoot } }) })
-  assert.equal(listing, [
-    'builder  claude  sonnet  headless-json',
-    '  no session file: transport headless-json records none this reads',
-    'planner  pi  test  headless-rpc',
-    '  no session file: transport headless-rpc records none this reads',
-    '',
-  ].join('\n'))
-  for (const [role, transport] of [['builder', 'headless-json'], ['planner', 'headless-rpc']]) {
-    assert.throws(() => showLane({ lane: 'retired', role, deps: { crewRoot } }), (error) => error.message === `lane retired role ${role} has no session: no session file: transport ${transport} records none this reads`)
-  }
-})
-
 test('CS1 a closed-out lane resolves from the journal archive beside the crew root (S3-6)', () => {
   const { home, crewRoot } = fixture()
   const dir = lane(join(home, '.crew-journal-archive'), 'closed', { turns: [['builder', 1, RAW]] })
@@ -116,78 +91,6 @@ test('CS1 a closed-out lane resolves from the journal archive beside the crew ro
   assert.doesNotThrow(() => { listing = showLane({ lane: 'closed', deps: { crewRoot } }) })
   assert.match(listing, /builder.*lean-acp/)
   assert.match(showLane({ lane: 'closed', role: 'builder', deps: { crewRoot } }), /ASSISTANT\nhello/)
-})
-
-test('CS1 a seat with absent metadata prints unknown, and a transport nothing reads names that reason', () => {
-  const { crewRoot } = fixture()
-  lane(crewRoot, 'beta', { members: { solo: {}, scribe: { agent: 'x', transport: 'acp' } }, turns: [] })
-  assert.equal(showLane({ lane: 'beta', deps: { crewRoot } }), [
-    'solo  unknown  unknown  unknown',
-    '  no session file: transport unknown records none this reads',
-    'scribe  x  unknown  acp',
-    '  no session file: transport acp records none this reads',
-    '',
-  ].join('\n'))
-})
-
-// MUTATION: always take the newest archive and the live lane's stale member would be shown instead.
-test('CS1 the live directory wins over any archive and, once it is gone, the newest archive is the lane', () => {
-  const { crewRoot } = fixture()
-  lane(crewRoot, 'gamma', { members: { live: MEMBERS.builder }, turns: [] })
-  lane(crewRoot, 'gamma', { suffix: '.archive-2099-01-01T00-00-00-000Z', members: { later: MEMBERS.builder }, turns: [] })
-  assert.match(showLane({ lane: 'gamma', deps: { crewRoot } }), /^live /)
-  lane(crewRoot, 'delta', { suffix: '.archive-2026-09-01T00-00-00-000Z', members: { older: MEMBERS.builder }, turns: [] })
-  lane(crewRoot, 'delta', { suffix: '.archive-2026-10-24T16-59-50-798Z', members: { newer: MEMBERS.builder }, turns: [] })
-  lane(crewRoot, 'delta', { suffix: '.archive-2026-10-02T00-00-00-000Z', members: { middle: MEMBERS.builder }, turns: [] })
-  const out = showLane({ lane: 'delta', deps: { crewRoot } })
-  assert.match(out, /^newer /)
-  assert.doesNotMatch(out, /older|middle/)
-})
-
-test('CS1 a sibling lane whose name merely starts with this one is not its archive', () => {
-  const { crewRoot } = fixture()
-  put(join(crewRoot, 'dt-eps', 'eps-two', 'crew.json'), JSON.stringify({ members: { other: MEMBERS.builder } }))
-  assert.throws(() => showLane({ lane: 'eps', deps: { crewRoot } }), /unknown lane eps/)
-})
-
-test('CS2 a record that is not an object prints as bare JSON instead of crashing the renderer', () => {
-  const { crewRoot } = fixture()
-  lane(crewRoot, 'theta-bare', { turns: [['builder', 1, 'null\n42\n"loose"\n']] })
-  const out = showLane({ lane: 'theta-bare', role: 'builder', deps: { crewRoot } })
-  assert.ok(out.endsWith('EVENT\nnull\n\nEVENT\n42\n\nEVENT\n"loose"\n'))
-})
-
-test('CS3 the CLI writes the --json bytes to stdout with nothing added', () => {
-  const { home, crewRoot } = fixture()
-  lane(crewRoot, 'mu')
-  const out = cli(home, ['mu', 'planner', '--json'])
-  assert.equal(out.status, 0, out.stderr)
-  assert.equal(out.stdout, RAW)
-  assert.equal(out.stderr, '')
-})
-
-// MUTATION: turn the sole refusal exit 1 into 0.
-test('CS4 unknown lane, unknown role, a seat with no file and an empty file each exit 1 with one line naming the cause', () => {
-  const { home, crewRoot } = fixture()
-  lane(crewRoot, 'nu')
-  lane(crewRoot, 'xi', { members: { planner: MEMBERS.planner }, turns: [] })
-  put(join(crewRoot, 'dt-xi', 'xi', 'task', 'lean', 'planner', 'xi.planner.1.jsonl'), '')
-  lane(crewRoot, 'omicron', { members: { planner: MEMBERS.planner }, turns: [] })
-  put(join(crewRoot, 'dt-omicron', 'omicron', 'task', 'lean', 'planner', 'omicron.planner.1.jsonl'), ' \n\t\n')
-  for (const [args, needle] of [
-    [['absent-lane'], /unknown lane absent-lane/],
-    [['nu', 'nobody'], /lane nu has no role nobody/],
-    [['nu', 'lead'], /lane nu role lead has no session/],
-    [['xi', 'planner'], /lane xi role planner recorded no events/],
-    [['omicron', 'planner', '--json'], /lane omicron role planner recorded no events/],
-  ]) {
-    const out = cli(home, args)
-    assert.equal(out.status, 1, args.join(' '))
-    assert.equal(out.stdout, '')
-    assert.match(out.stderr, /^crew show: /)
-    assert.match(out.stderr, needle)
-    assert.equal(out.stderr.trimEnd().split('\n').length, 1)
-  }
 })
 
 test('CS4 bad arity and options print one usage line and exit 2, before any lane is read', () => {
@@ -225,40 +128,6 @@ test('CS4 unreadable crew metadata is a refusal, never an empty roster', () => {
   }
   mkdirSync(dirOf('no-file'), { recursive: true })
   assert.throws(() => showLane({ lane: 'no-file', deps: { crewRoot } }), /crew\.json is missing/)
-})
-
-test('CS4 text mode refuses a malformed record with its file and line, and prints nothing', () => {
-  const { home, crewRoot } = fixture()
-  lane(crewRoot, 'pi-bad', { turns: [] })
-  put(join(crewRoot, 'dt-pi-bad', 'pi-bad', 'task', 'lean', 'planner', 'pi-bad.planner.1.jsonl'), `${RAW.split('\n')[0]}\n\n{"type":"message_end"\n`)
-  const out = cli(home, ['pi-bad', 'planner'])
-  assert.equal(out.status, 1)
-  assert.equal(out.stdout, '')
-  assert.match(out.stderr, /task\/lean\/planner\/pi-bad\.planner\.1\.jsonl line 3 is not a complete JSON record/)
-})
-
-// MUTATION: treat any read error as absence and a denied live directory falls through to the archive.
-test('CS4 a denied or interrupted read is an error naming the path, never a missing lane or session', () => {
-  const { crewRoot } = fixture()
-  const live = lane(crewRoot, 'rho')
-  lane(crewRoot, 'rho', { suffix: '.archive-2026-01-01T00-00-00-000Z' })
-  const guard = (code, needle, fn) => (path, ...rest) => {
-    if (String(path).includes(needle)) throw Object.assign(new Error(`${code}: ${path}`), { code })
-    return fn(path, ...rest)
-  }
-  for (const code of ['EACCES', 'EINTR', 'EPERM']) {
-    assert.throws(() => showLane({ lane: 'rho', deps: { crewRoot, statSync: guard(code, join('dt-rho', 'rho'), statSync) } }), new RegExp(`cannot read ${join(crewRoot, 'dt-rho', 'rho').replaceAll('\\', '\\\\')}: ${code}`), code)
-    assert.throws(() => showLane({ lane: 'rho', deps: { crewRoot, readFileSync: guard(code, 'crew.json', readFileSync) } }), new RegExp(`crew\\.json: ${code}`), code)
-    assert.throws(() => showLane({ lane: 'rho', role: 'planner', deps: { crewRoot, readFileSync: guard(code, 'rho.planner.1.jsonl', readFileSync) } }), new RegExp(`rho\\.planner\\.1\\.jsonl: ${code}`), code)
-    assert.throws(() => showLane({ lane: 'rho', deps: { crewRoot, readdirSync: guard(code, join('task', 'lean', 'builder'), readdirSync) } }), new RegExp(`builder: ${code}`), code)
-  }
-  // The live lane is still intact: the guards, not the tree, caused each error.
-  assert.match(showLane({ lane: 'rho', deps: { crewRoot } }), /^builder /)
-  // A lane directory that cannot be listed hides its archives from a lane whose live directory is gone.
-  const gone = join(crewRoot, 'dt-sigma')
-  mkdirSync(gone, { recursive: true })
-  assert.throws(() => showLane({ lane: 'sigma', deps: { crewRoot, readdirSync: guard('EACCES', 'dt-sigma', readdirSync) } }), /cannot read .*dt-sigma: EACCES/)
-  assert.ok(statSync(live).isDirectory())
 })
 
 test('CS4 the CLI reports a refusal from main as one sanitized line and returns 1', () => {

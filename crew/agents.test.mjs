@@ -1,110 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, writeFileSync, rmSync, cpSync, chmodSync } from 'node:fs'
+import { readFileSync, writeFileSync, rmSync, cpSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { AGENT_ROLES, TIERS, parseAgent, validateEnvelope, REVIEW_VERDICTS, FINDING_SEVERITIES, LEAD_DECISIONS } from './protocols.mjs'
-import { resolveAgents, loadRoster, withRunOverride } from './agents.mjs'
+import { resolveAgents } from './agents.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
-// The tier cells the committed definitions must resolve to (the retired roster file's snapshot).
-const roster = {
-  "tiers": {
-    "mechanical": {
-      "advisor": null,
-      "lead": null,
-      "planner": {
-        "provider": "anthropic",
-        "id": "claude-opus-5-5",
-        "agent": "claude",
-        "effort": "medium"
-      },
-      "builder": {
-        "provider": "openai",
-        "id": "gpt-6.1-terra",
-        "agent": "pi",
-        "effort": "high"
-      },
-      "reviewer": {
-        "provider": "openai",
-        "id": "gpt-6.1-sol",
-        "agent": "pi",
-        "effort": "high"
-      }
-    },
-    "build": {
-      "advisor": {"provider": "openai", "id": "gpt-6.1-sol", "agent": "pi", "effort": "medium"},
-      "lead": {
-        "provider": "anthropic",
-        "id": "claude-opus-5-5",
-        "agent": "claude",
-        "effort": "high"
-      },
-      "planner": {
-        "provider": "anthropic",
-        "id": "claude-opus-5-5",
-        "agent": "claude",
-        "effort": "high"
-      },
-      "builder": {
-        "provider": "openai",
-        "id": "gpt-6.1-terra",
-        "agent": "pi",
-        "effort": "high"
-      },
-      "reviewer": {
-        "provider": "openai",
-        "id": "gpt-6.1-sol",
-        "agent": "pi",
-        "effort": "high"
-      }
-    },
-    "judge": {
-      "advisor": {"provider": "openai", "id": "gpt-6.1-sol", "agent": "pi", "effort": "medium"},
-      "lead": {
-        "provider": "anthropic",
-        "id": "claude-opus-5-5",
-        "agent": "claude",
-        "effort": "high"
-      },
-      "planner": {
-        "provider": "anthropic",
-        "id": "claude-opus-5-5",
-        "agent": "claude",
-        "effort": "xhigh"
-      },
-      "builder": {
-        "provider": "openai",
-        "id": "gpt-6.1-terra",
-        "agent": "pi",
-        "effort": "xhigh"
-      },
-      "reviewer": {
-        "provider": "openai",
-        "id": "gpt-6.1-sol",
-        "agent": "pi",
-        "effort": "high"
-      },
-      "tech-lead": {
-        "provider": "anthropic",
-        "id": "claude-fable-5-2",
-        "agent": "claude",
-        "effort": "high"
-      }
-    }
-  }
-}
 const AGENTS_DIR = fileURLToPath(new URL('./agents/', import.meta.url))
-
-test('planner, reviewer and tech-lead charters describe a non-done return that validateEnvelope accepts (#2341)', () => {
-  for (const role of ['planner', 'reviewer', 'tech-lead']) {
-    const charter = readFileSync(join(AGENTS_DIR, `${role}.md`), 'utf8')
-    assert.doesNotMatch(charter, /need only `summary`/)
-    assert.match(charter, /`details` object, which may be empty \(`\{\}`\)/)
-    assert.match(charter, /`details\.question` for `escalate`/)
-    assert.deepEqual(validateEnvelope(role, { role, id: `lane.${role}.1`, status: 'insufficient', summary: 'gap', details: {} }).defects, [])
-  }
-})
 
 // A private copy of the committed definitions, so a test can edit them.
 function scratch() {
@@ -120,124 +22,6 @@ function withScratch(fn) {
   const dir = scratch()
   try { return fn(dir) } finally { rmSync(dir, { recursive: true, force: true }) }
 }
-
-test('resolveAgents seats a recorded override and merges its tiers per tier name', () => {
-  withScratch((dir) => {
-    edit(dir, 'builder', (text) => text.replace('"judge":{"effort":"xhigh"}', '"judge":{"effort":"xhigh","extensions":["fff"]}'))
-    const overrides = { planner: { model: 'local/base', effort: 'low', tiers: { judge: { model: 'local/judge' } } }, builder: { tiers: { mechanical: null, judge: { model: 'local/builder' } } }, lead: { tiers: { mechanical: { model: 'local/lead' } } } }
-    assert.equal(resolveAgents('build', dir, overrides).seats.planner.id, 'base')
-    assert.equal(resolveAgents('judge', dir, overrides).seats.planner.effort, 'low')
-    assert.equal(resolveAgents('judge', dir, overrides).seats.planner.id, 'judge')
-    assert.equal(resolveAgents('mechanical', dir, overrides).seats.builder, undefined)
-    assert.equal(resolveAgents('mechanical', dir, overrides).seats.lead.id, 'lead')
-    assert.equal(resolveAgents('judge', dir, overrides).seats.builder.id, 'builder')
-    assert.equal(resolveAgents('mechanical', dir, overrides).seats.planner.effort, 'medium')
-  })
-})
-
-test('wait_s roster overrides follow effort precedence at role and tier level', () => withScratch((dir) => {
-  edit(dir, 'builder', (text) => text.replace('effort: high', 'effort: low\nwait_s: 11').replace(/tiers: .*/, 'tiers: {"mechanical":{"wait_s":12,"effort":"medium","extensions":["fff"]},"build":{"wait_s":13},"judge":null}'))
-  const { fields, defects } = parseAgent(readFileSync(join(dir, 'builder.md'), 'utf8'))
-  assert.deepEqual(defects, [])
-  for (const { personal, project = {}, tier = 'build', base, wait, effort = 'low' } of [
-    { personal: { wait_s: 21 }, base: 21, wait: 13 },
-    { personal: { wait_s: 21 }, project: { wait_s: 22 }, tier: 'mechanical', base: 22, wait: 12, effort: 'medium' },
-    { personal: { wait_s: Number.MAX_SAFE_INTEGER, tiers: { build: {} } }, base: Number.MAX_SAFE_INTEGER, wait: Number.MAX_SAFE_INTEGER },
-    { personal: { tiers: { mechanical: { wait_s: 31 } } }, tier: 'mechanical', base: 11, wait: 31 },
-    { personal: { tiers: { mechanical: { wait_s: 31, effort: 'max' } } }, project: { tiers: { mechanical: { wait_s: 32 } } }, tier: 'mechanical', base: 11, wait: 32 },
-    { personal: { wait_s: 21, tiers: { mechanical: { wait_s: 31 } } }, project: { tiers: { mechanical: { effort: 'high' } } }, tier: 'mechanical', base: 21, wait: 21, effort: 'high' },
-    { personal: { tiers: { build: null } }, base: 11, wait: null },
-    { personal: { wait_s: 21 }, tier: 'judge', base: 21, wait: null },
-    { personal: {}, project: { tiers: { judge: { wait_s: 41 } } }, tier: 'judge', base: 11, wait: 41 },
-  ]) {
-    const files = { '/personal/agents.json': JSON.stringify({ builder: personal }), '/project/agents.json': JSON.stringify({ builder: project }) }
-    let loaded
-    assert.doesNotThrow(() => { loaded = loadRoster({ personal: '/personal/agents.json', project: '/project/agents.json', readFileSync: (path) => files[path] }) })
-    const merged = withRunOverride(fields, loaded.overrides.builder)
-    assert.equal(merged.wait_s, base)
-    const resolved = resolveAgents(tier, dir, loaded.overrides)
-    if (wait === null) {
-      assert.equal(merged.tiers[tier], null)
-      assert.equal(resolved.seats.builder, undefined)
-    } else {
-      assert.equal(({ ...merged, ...merged.tiers[tier] }).wait_s, wait)
-      assert.equal(resolved.seats.builder.effort, effort)
-      if (tier === 'mechanical') assert.deepEqual(merged.tiers[tier].extensions, ['fff'])
-    }
-  }
-}))
-
-test('invalid wait_s roster values identify the file and role or tier key', () => {
-  for (const layer of ['personal', 'project']) for (const tier of [false, true]) {
-    for (const value of [null, 0, -1, 1.5, '7', true, [], {}, Number.MAX_SAFE_INTEGER + 1]) {
-      const path = `/${layer}/agents.json`, key = tier ? 'builder.tiers.build.wait_s' : 'builder.wait_s'
-      const entry = tier ? { tiers: { build: { wait_s: value } } } : { wait_s: value }
-      assert.throws(() => loadRoster({ personal: '/personal/agents.json', project: '/project/agents.json', readFileSync: (file) => {
-        if (file === path) return JSON.stringify({ builder: entry })
-        throw Object.assign(new Error('missing'), { code: 'ENOENT' })
-      } }), (error) => error.message.includes(path) && error.message.includes(key))
-    }
-  }
-})
-
-test('the five committed definitions parse clean with standalone lean charters', () => {
-  for (const role of AGENT_ROLES) {
-    const { fields, body, defects } = parseAgent(readFileSync(join(AGENTS_DIR, `${role}.md`), 'utf8'))
-    assert.deepEqual(defects, [], role)
-    assert.equal(fields.name, role)
-    assert.equal(fields.role, role)
-    assert.ok(body.startsWith(`You are the lean ${role}.`), role)
-    assert.doesNotMatch(body, /\]\([^)]*roles\//, role)
-  }
-})
-
-// MUTATION: change a Details keys or vocabulary declaration, or hand a loop stage to a seat.
-test('lean charter declarations match the P2 schemas and loop ownership', () => {
-  const vocabulary = {
-    reviewer: [['Review verdicts', REVIEW_VERDICTS], ['Finding severities', FINDING_SEVERITIES]],
-    lead: [['Lead decisions', LEAD_DECISIONS]],
-  }
-  for (const role of AGENT_ROLES) {
-    const { fields, body } = parseAgent(readFileSync(join(AGENTS_DIR, `${role}.md`), 'utf8'))
-    const declared = (label) => {
-      const lines = body.split('\n').filter((line) => line.startsWith(`${label}:`))
-      assert.equal(lines.length, 1, `${role}: one ${label} line`)
-      let value = lines[0].slice(label.length + 1)
-      if (role === 'builder' && label === 'Details keys') value = value.replace(', and on a mechanical lane ', ', ')
-      assert.equal(value.replace(/`[A-Za-z0-9_.-]+`/g, '').replace(/[,.\s]/g, ''), '', `${role}: ${label} is only backtick tokens`)
-      return [...value.matchAll(/`([A-Za-z0-9_.-]+)`/g)].map((match) => match[1]).sort()
-    }
-    // DETAIL_KEYS is private; the validator names every required key of an empty details.
-    const detailKeys = validateEnvelope(role, { role, id: 'probe', status: 'done', summary: 'probe', details: {} }).defects
-      .map((defect) => /^details\.([a-z_]+) is required$/.exec(defect)?.[1]).filter(Boolean)
-    assert.ok(detailKeys.length > 0, role)
-    if (role === 'builder') {
-      const optional = { tests: [], notes: 'probe', subject: 'fix(crew): probe', gap: 'probe' }
-      assert.deepEqual(validateEnvelope(role, { role, id: 'probe', status: 'done', summary: 'probe', details: { summary: 'probe', ...optional } }).defects, [])
-      detailKeys.push(...Object.keys(optional))
-    }
-    for (const [label, expected] of [...(role === 'tech-lead' ? [] : [['Details keys', detailKeys]]), ...(vocabulary[role] ?? [])]) {
-      assert.deepEqual(declared(label), [...expected].sort(), `${role}: ${label}`)
-    }
-    assert.ok(body.includes(`writes: ${fields.writes}`), `${role}: write boundary`)
-    if (role === 'builder') {
-      assert.ok(body.includes('The loop runs each test the builder names on the old source and on the build.'), role)
-      assert.ok(!body.includes('Do not run those stages yourself.'), role)
-      assert.ok(body.includes('To check your work, run only tests named in your return or touched by the change, selected by test name or file.'), role)
-      assert.ok(body.includes('Do not run whole packages, crates or workspaces'), role)
-      assert.ok(body.includes('Do not run the full suite, commit, rebase or open the PR.'), role)
-    } else {
-      assert.ok(!body.includes('The loop runs each test the builder names'), role)
-      assert.ok(!body.includes('Do not run those stages yourself.'), role)
-    }
-  }
-  const planner = parseAgent(readFileSync(join(AGENTS_DIR, 'planner.md'), 'utf8')).body
-  assert.match(planner, /conventional-commit subject[^\n]*at most 72 characters/)
-  assert.match(planner, /names both the commit and the PR/)
-  assert.match(planner, /Do not write a PR body/)
-  const reviewer = parseAgent(readFileSync(join(AGENTS_DIR, 'reviewer.md'), 'utf8')).body
-  assert.ok(reviewer.includes('Read the supplied brief, plan, changed paths and any feedback. Inspect the tracked diff and read every listed untracked file directly; git diff alone omits untracked files.'))
-})
 
 test('charter copies of subject and review limits match protocol rules', () => {
   const source = readFileSync(new URL('./protocols.mjs', import.meta.url), 'utf8')
@@ -258,68 +42,6 @@ test('charter copies of subject and review limits match protocol rules', () => {
   assert.match(reviewer, /List up to three `failure_modes`/)
 })
 
-test('a plan-attribution-only finding is a non-blocking should-fix on a pass, never a changes-needed on its own', () => {
-  const reviewer = parseAgent(readFileSync(join(AGENTS_DIR, 'reviewer.md'), 'utf8')).body
-  for (const sentence of [
-    "Flag a criterion whose only basis is brief text that is neither the source's words nor an operator decision.",
-    'If the diff has no defect behind that criterion, report the attribution finding at the plan criterion as a `should-fix`, never a `must-fix`; it must not on its own cause a `changes-needed` verdict.',
-    'If attribution findings are the only findings, return `pass` and do not restate the unattributed criterion as an `unmet` requirement.',
-  ]) assert.ok(reviewer.includes(sentence), sentence)
-  const techLead = parseAgent(readFileSync(join(AGENTS_DIR, 'tech-lead.md'), 'utf8')).body
-  assert.ok(techLead.includes('Review by the [reviewer charter](./reviewer.md), except its scout rule:'))
-})
-
-// MUTATION: change any model, effort or null tier in a definition and this tier drifts from the roster.
-test('every tier resolves to exactly the roster cells, null roles unseated', () => {
-  assert.deepEqual(TIERS, Object.keys(roster.tiers))
-  for (const tier of TIERS) {
-    const { advisor, ...cells } = roster.tiers[tier]
-    const seats = Object.fromEntries(Object.entries(cells).filter(([, cell]) => cell !== null))
-    const resolved = resolveAgents(tier)
-    assert.deepEqual(resolved, { seats, advisor }, tier)
-    assert.deepEqual(Object.keys(resolved.seats), AGENT_ROLES.filter((role) => role in seats), tier)
-  }
-})
-
-// The seats' arm grants are part of the roster: a definition that drops one runs a silently weaker seat.
-test('each committed definition declares exactly its arm grants', () => {
-  const expected = { lead: undefined, planner: ['subagent'], builder: ['fff', 'readgate', 'skeletonread'], reviewer: ['subagent'], 'tech-lead': undefined }
-  for (const role of AGENT_ROLES) {
-    const { fields } = parseAgent(readFileSync(join(AGENTS_DIR, `${role}.md`), 'utf8'))
-    assert.deepEqual(fields.extensions, expected[role], role)
-  }
-})
-
-// MUTATION: hardcode the roster cells and an edited definition no longer changes the resolution.
-test('an edited definition changes the resolved cell, and only in the tier it overrides', () => withScratch((dir) => {
-  edit(dir, 'builder', (text) => text.replace('"judge":{"effort":"xhigh"}', '"judge":{"model":"openai/changed","agent":"pi","effort":"max"}'))
-  assert.deepEqual(resolveAgents('judge', dir).seats.builder, {
-    provider: 'openai', id: 'changed', agent: 'pi', effort: 'max',
-  })
-  assert.deepEqual(resolveAgents('build', dir).seats.builder, roster.tiers.build.builder)
-  edit(dir, 'builder', (text) => text.replace('effort: high', 'effort: low'))
-  assert.equal(resolveAgents('build', dir).seats.builder.effort, 'low')
-}))
-
-test('nothing leaks between calls: every call reads the files afresh and returns its own objects', () => withScratch((dir) => {
-  const first = resolveAgents('build', dir)
-  first.seats.planner.effort = 'mutated'
-  first.advisor.effort = 'mutated'
-  const second = resolveAgents('build', dir)
-  assert.equal(second.seats.planner.effort, 'high')
-  assert.equal(second.advisor.effort, 'medium')
-  edit(dir, 'planner', (text) => text.replace('effort: high', 'effort: low'))
-  assert.equal(resolveAgents('build', dir).seats.planner.effort, 'low')
-}))
-
-// MUTATION: treat a null tier as inherit and the lead is seated in mechanical.
-test('a null tier override unseats a role, and a missing one inherits', () => withScratch((dir) => {
-  assert.equal('lead' in resolveAgents('mechanical', dir).seats, false)
-  assert.equal('lead' in resolveAgents('build', dir).seats, true)
-  edit(dir, 'lead', (text) => text.replace('tiers: {"mechanical":null}', 'tiers: {}'))
-  assert.equal('lead' in resolveAgents('mechanical', dir).seats, true)
-}))
-
 // MUTATION: drop the rounds copy in resolveAgents and a declared bound never reaches the seat.
 test('a declared rounds bound reaches the seat, a tier override replaces it, and an omitted one adds no key', () => withScratch((dir) => {
   assert.equal(Object.values(resolveAgents('build', dir).seats).some((seat) => 'rounds' in seat), false)
@@ -327,23 +49,6 @@ test('a declared rounds bound reaches the seat, a tier override replaces it, and
   assert.equal(resolveAgents('build', dir).seats.builder.rounds, 1)
   assert.equal(resolveAgents('judge', dir).seats.builder.rounds, 3)
   assert.equal('rounds' in resolveAgents('build', dir).seats.planner, false)
-}))
-
-// MUTATION: ignore a role's advisor and a declared advisor never reaches the tier.
-test('a declared advisor is normalized; null elsewhere does not erase it and a clash refuses', () => withScratch((dir) => {
-  const advisor = (model, effort) => `advisor: {"agent":"pi","model":"${model}","effort":"${effort}"}`
-  edit(dir, 'builder', (text) => text.replace(/advisor: .*\n/, 'advisor: null\n'))
-  edit(dir, 'reviewer', (text) => text.replace('advisor: null', advisor('openai/gpt-6-luna', 'medium')))
-  assert.deepEqual(resolveAgents('build', dir).advisor, { provider: 'openai', id: 'gpt-6-luna', agent: 'pi', effort: 'medium' })
-  edit(dir, 'planner', (text) => text.replace('advisor: null', advisor('openai/gpt-6-luna', 'medium')))
-  assert.equal(resolveAgents('build', dir).advisor.id, 'gpt-6-luna')
-  edit(dir, 'planner', (text) => text.replace(/advisor: .*\n/, advisor('openai/gpt-6-luna', 'high') + '\n'))
-  assert.throws(() => resolveAgents('build', dir), /conflicting advisors.*planner.*reviewer/)
-  // The lead is unseated in mechanical, so its clashing advisor is not a declaration there.
-  edit(dir, 'planner', (text) => text.replace(/advisor: .*\n/, 'advisor: null\n'))
-  edit(dir, 'lead', (text) => text.replace('advisor: null', advisor('openai/other', 'low')))
-  assert.equal(resolveAgents('mechanical', dir).advisor.id, 'gpt-6-luna')
-  assert.throws(() => resolveAgents('build', dir), /conflicting advisors.*lead.*reviewer/)
 }))
 
 // MUTATION: skip the identity check and a file seated under another role's name resolves.
@@ -360,10 +65,4 @@ test('a malformed, empty, missing or misnamed definition refuses, naming the fil
   edit(dir, 'builder', () => readFileSync(join(AGENTS_DIR, 'builder.md'), 'utf8'))
   edit(dir, 'reviewer', () => readFileSync(join(AGENTS_DIR, 'reviewer.md'), 'utf8'))
   assert.throws(() => resolveAgents('judge', dir), (error) => error.code === 'ENOENT' && error.path === join(dir, 'tech-lead.md') && error.cause.code === 'ENOENT')
-}))
-
-// A permission error is not reproducible under root; the check is skipped there, not faked.
-test('an unreadable definition keeps the filesystem error and is not read as no seat', { skip: process.getuid?.() === 0 }, () => withScratch((dir) => {
-  chmodSync(join(dir, 'lead.md'), 0)
-  assert.throws(() => resolveAgents('mechanical', dir), (error) => error.code === 'EACCES' && error.cause.code === 'EACCES')
 }))

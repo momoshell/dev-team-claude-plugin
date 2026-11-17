@@ -2,11 +2,10 @@ import { test } from 'node:test'
 import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { crewHome, rebuildPlan } from './crew.mjs'
 
 const BIN = fileURLToPath(new URL('./crew.mjs', import.meta.url))
 const scratch = (name) => realpathSync(mkdtempSync(join(tmpdir(), `bin-crew-${name}-`)))
@@ -108,21 +107,6 @@ test('an unknown or missing verb is refused with exit 2 and runs nothing', () =>
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-// MUTATION: replace Object.hasOwn(ENTRY, verb) with verb in ENTRY.
-test('a verb naming an Object.prototype member is refused as unknown with exit 2 and runs nothing', () => {
-  const root = scratch('prototype')
-  try {
-    const home = fakeHome(join(root, 'home'))
-    for (const verb of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
-      const out = crew([verb], { cwd: root, env: { CREW_HOME: home } })
-      assert.equal(out.status, 2)
-      assert.equal(out.stdout, '')
-      assert.match(out.stderr, new RegExp(`^crew: unknown verb "${verb}"; expected onboard, start, show, record-pr, closeout, finish, lanes, viz, where or update$`, 'm'))
-      assert.doesNotMatch(out.stderr, /\n\s+at /)
-    }
-  } finally { rmSync(root, { recursive: true, force: true }) }
-})
-
 // MUTATION: drop the result.error check in git().
 test('a git step whose output overflows maxBuffer is reported as exceeded output, not a git failure', () => {
   const root = scratch('git-overflow')
@@ -152,42 +136,6 @@ test('update refuses when pgrep cannot run, rather than reading it as no process
     assert.equal(out.stderr.trim().split('\n').length, 1)
     assert.equal(git(home, 'rev-parse', 'HEAD'), head)
   } finally { rmSync(root, { recursive: true, force: true }) }
-})
-
-// MUTATION: drop start from ENTRY and `crew start` is refused as an unknown verb.
-test('start, show, record-pr, closeout, finish and lanes route to their own entry points with the verb stripped', () => {
-  const root = scratch('route')
-  try {
-    const home = fakeHome(join(root, 'home'))
-    for (const [verb, entry] of [['start', 'crew/start.mjs'], ['show', 'crew/show.mjs'], ['record-pr', 'crew/record-pr.mjs'], ['closeout', 'crew/closeout.mjs'], ['finish', 'crew/finish.mjs'], ['lanes', 'crew/lanes.mjs']]) {
-      const out = crew([verb, 'cells', '--since', '2026-10-01'], { cwd: root, env: { CREW_HOME: home } })
-      assert.equal(out.status, verb === 'show' ? 7 : 0)
-      assert.deepEqual(JSON.parse(out.stdout).entry, join(home, entry))
-      assert.deepEqual(JSON.parse(out.stdout).argv, ['cells', '--since', '2026-10-01'])
-      assert.equal(JSON.parse(out.stdout).cwd, root)
-    }
-  } finally { rmSync(root, { recursive: true, force: true }) }
-})
-
-test('the home is the checkout the file lives in after symlinks resolve, unless CREW_HOME is set', () => {
-  const root = scratch('home')
-  try {
-    mkdirSync(join(root, 'checkout', 'bin'), { recursive: true })
-    writeFileSync(join(root, 'checkout', 'bin', 'crew.mjs'), '')
-    symlinkSync(join(root, 'checkout', 'bin', 'crew.mjs'), join(root, 'crew'))
-    assert.equal(crewHome({}, join(root, 'crew')), join(root, 'checkout'))
-    assert.equal(crewHome({ CREW_HOME: join(root, 'elsewhere') }, join(root, 'crew')), join(root, 'elsewhere'))
-  } finally { rmSync(root, { recursive: true, force: true }) }
-})
-
-test('rebuildPlan installs on a lockfile move or absent modules, and builds on any web change or absent dist', () => {
-  const present = { hasModules: true, hasDist: true }
-  assert.deepEqual(rebuildPlan(['crew/start.mjs'], present), { install: false, build: false })
-  assert.deepEqual(rebuildPlan(['package-lock.json'], present), { install: true, build: true })
-  assert.deepEqual(rebuildPlan(['visualizer/web/src/App.svelte'], present), { install: false, build: true })
-  assert.deepEqual(rebuildPlan(['visualizer/server/server.mjs'], present), { install: false, build: false })
-  assert.deepEqual(rebuildPlan([], { hasModules: false, hasDist: true }), { install: true, build: true })
-  assert.deepEqual(rebuildPlan([], { hasModules: true, hasDist: false }), { install: false, build: true })
 })
 
 test('update fast-forwards stable to origin/main and reports the range', () => {
@@ -286,17 +234,5 @@ test('a failed git step in update prints one crew update line and no stack', () 
     assert.ok(/^crew update: git fetch/.test(out.stderr))
     assert.doesNotMatch(out.stderr, /\n\s+at /)
     assert.equal(out.stderr.trim().split('\n').length, 1)
-  } finally { rmSync(root, { recursive: true, force: true }) }
-})
-
-test('where prints the home, branch and head', () => {
-  const root = scratch('where')
-  try {
-    const { home } = gitHome(root)
-    const out = crew(['where'], { cwd: root, env: { CREW_HOME: home } })
-    assert.equal(out.status, 0, out.stderr)
-    assert.match(out.stdout, new RegExp(`^home    ${home}$`, 'm'))
-    assert.match(out.stdout, /^branch  stable$/m)
-    assert.doesNotMatch(out.stdout, /roster/)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })

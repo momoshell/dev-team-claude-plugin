@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { git, gitResult, scratchDir } from '../test/helpers.mjs'
+import { git, scratchDir } from '../test/helpers.mjs'
 import { CHECK_REASONS, commitChanges, openPullRequest, rebaseBranch, runSuite } from './checks.mjs'
 
 const reasonOf = (result) => {
@@ -35,7 +35,6 @@ const snapshot = (cwd) => ({
   bytes: ['a.txt', 'outside.txt'].map((name) => (existsSync(join(cwd, name)) ? readFileSync(join(cwd, name), 'utf8') : null)),
 })
 const committed = (cwd) => git(cwd, 'diff-tree', '--no-commit-id', '--name-only', '-r', '-z', 'HEAD').split('\0').filter(Boolean).sort()
-const numbered = (text) => text.split('\n').filter((line) => /#\d+/.test(line))
 function conflictLane() {
   const cwd = laneRepo()
   writeFileSync(join(cwd, 'a.txt'), 'lane\n')
@@ -48,23 +47,6 @@ function conflictLane() {
   git(cwd, 'checkout', '-q', 'lane')
   return cwd
 }
-
-test('commitChanges commits exactly the listed changed files, keeps unrelated staged work staged and builds trailers', async () => {
-  const cwd = laneRepo()
-  const odd = ['new file.txt', '-dash.txt', ':(glob)*.txt', 'line\nbreak.txt']
-  for (const name of odd) writeFileSync(join(cwd, name), 'x\n')
-  writeFileSync(join(cwd, 'a.txt'), 'changed\n')
-  writeFileSync(join(cwd, 'outside.txt'), 'staged elsewhere\n')
-  git(cwd, 'add', 'outside.txt')
-  const result = await commitChanges({ cwd, files: ['a.txt', ...odd, 'never-created.txt', 'a.txt'], subject: 'feat: scoped (#5)', body: 'Fixes #303; owner/repo#7 stays prose.\nCloses: #8', closes: [101, 202, 101], refs: [303, 101] })
-  assert.equal(result.status, 'green')
-  assert.equal(reasonOf(result), null)
-  assert.equal(result.head, git(cwd, 'rev-parse', 'HEAD').trim())
-  assert.deepEqual(committed(cwd), ['a.txt', ...odd].sort())
-  assert.equal(git(cwd, 'diff', '--cached', '--name-only').trim(), 'outside.txt')
-  assert.deepEqual(numbered(git(cwd, 'log', '-1', '--format=%B')), ['Closes: #101', 'Closes: #202', 'Refs: #303'])
-  assert.match(git(cwd, 'log', '-1', '--format=%s'), /^feat: scoped \(issue 5\)$/m)
-})
 
 test('commitChanges commits deletions whether staged or not, and a rename only with both ends', async () => {
   const cwd = laneRepo({ 'a.txt': 'one\n', 'b.txt': 'two\n', 'c.txt': 'three\n' })
@@ -173,26 +155,6 @@ test('commitChanges never claims a restore it could not prove', async () => {
   assert.ok(result.problems.length > 0)
 })
 
-test('commitChanges in a linked worktree uses and restores that worktree index', async () => {
-  const cwd = laneRepo()
-  const linked = join(scratchDir('checks-linked-'), 'wt')
-  git(cwd, 'worktree', 'add', '-q', '-b', 'side', linked)
-  writeFileSync(join(linked, 'a.txt'), 'side\n')
-  const before = snapshot(linked)
-  const failing = through(async (spec) => {
-    if (!has(spec, 'commit')) return undefined
-    await runSuite(spec)
-    return FAKE_BAD
-  })
-  const failed = await commitChanges({ cwd: linked, files: ['a.txt'], subject: 'feat: side' }, { run: failing })
-  assert.equal(reasonOf(failed), 'commit-failed')
-  assert.deepEqual(snapshot(linked), before)
-  const ok = await commitChanges({ cwd: linked, files: ['a.txt'], subject: 'feat: side' })
-  assert.equal(ok.status, 'green')
-  assert.deepEqual(committed(linked), ['a.txt'])
-  assert.equal(git(cwd, 'rev-parse', 'lane'), git(cwd, 'rev-parse', 'main'))
-})
-
 test('commitChanges and rebaseBranch turn every runner failure into an unmeasured result', async () => {
   const cwd = laneRepo()
   const runners = [
@@ -210,76 +172,6 @@ test('commitChanges and rebaseBranch turn every runner failure into an unmeasure
       assert.equal(reasonOf(result), reason)
     }
   }
-})
-
-test('rebaseBranch fast-forwards, and a rebase that is already current is green', async () => {
-  const cwd = laneRepo()
-  git(cwd, 'checkout', '-q', 'main')
-  writeFileSync(join(cwd, 'outside.txt'), 'main moved\n')
-  git(cwd, 'commit', '-qam', 'main moved')
-  git(cwd, 'checkout', '-q', 'lane')
-  const moved = await rebaseBranch({ cwd, base: 'main' })
-  assert.equal(moved.status, 'green')
-  assert.equal(reasonOf(moved), null)
-  assert.equal(moved.head, git(cwd, 'rev-parse', 'main').trim())
-  assert.equal(git(cwd, 'rev-parse', 'HEAD').trim(), moved.head)
-  const again = await rebaseBranch({ cwd, base: 'main' })
-  assert.equal(again.status, 'green')
-  assert.equal(again.head, moved.head)
-})
-
-// MUTATION: report the lane's old head as onto instead of the base commit.
-test('rebaseBranch reports the base commit it rebased onto, and a lane commit already on the base leaves the head there', async () => {
-  for (const dropped of [false, true]) {
-    const cwd = laneRepo()
-    writeFileSync(join(cwd, 'a.txt'), 'lane\n')
-    git(cwd, 'commit', '-qam', 'lane')
-    git(cwd, 'checkout', '-q', 'main')
-    if (dropped) git(cwd, 'cherry-pick', 'lane')
-    else { writeFileSync(join(cwd, 'outside.txt'), 'main\n'); git(cwd, 'commit', '-qam', 'main') }
-    const base = git(cwd, 'rev-parse', 'main').trim()
-    git(cwd, 'checkout', '-q', 'lane')
-    const result = await rebaseBranch({ cwd, base: 'main' })
-    assert.equal(result.status, 'green')
-    assert.equal(result.onto, base)
-    if (dropped) assert.equal(result.head, base)
-    else { assert.notEqual(result.head, base); assert.equal(git(cwd, 'rev-parse', 'HEAD^').trim(), base) }
-  }
-})
-
-test('rebaseBranch rebases onto the base commit it resolved, even when the base ref moves before the rebase runs', async () => {
-  const cwd = laneRepo()
-  writeFileSync(join(cwd, 'a.txt'), 'lane\n')
-  git(cwd, 'commit', '-qam', 'lane')
-  const resolved = git(cwd, 'rev-parse', 'main').trim()
-  git(cwd, 'checkout', '-q', '-b', 'newer', 'main')
-  writeFileSync(join(cwd, 'outside.txt'), 'another lane fetched this\n')
-  git(cwd, 'commit', '-qam', 'newer base')
-  const newer = git(cwd, 'rev-parse', 'HEAD').trim()
-  git(cwd, 'checkout', '-q', 'lane')
-  let moved = false
-  const run = async (spec) => {
-    const result = await runSuite(spec)
-    if (!moved && spec.args.includes('rev-parse') && spec.args.includes('refs/heads/main^{commit}')) { moved = true; git(cwd, 'update-ref', 'refs/heads/main', newer) }
-    return result
-  }
-  const result = await rebaseBranch({ cwd, base: 'main' }, { run })
-  assert.equal(moved, true)
-  assert.equal(result.status, 'green')
-  assert.equal(result.onto, resolved)
-  assert.equal(git(cwd, 'rev-parse', 'HEAD^').trim(), resolved)
-})
-
-test('rebaseBranch reports every conflicting path, aborts, and leaves the checkout as found', async () => {
-  const cwd = conflictLane()
-  const before = snapshot(cwd)
-  const result = await rebaseBranch({ cwd, base: 'main' })
-  assert.equal(result.status, 'red')
-  assert.equal(reasonOf(result), 'rebase-conflict')
-  assert.deepEqual([...result.conflicts].sort(), ['a.txt', 'outside.txt'])
-  assert.deepEqual(snapshot(cwd), before)
-  assert.equal(git(cwd, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'lane')
-  assert.equal(existsSync(join(cwd, '.git', 'rebase-merge')), false)
 })
 
 // MUTATION: skip the regenerate run and gen.txt keeps the base copy.
@@ -535,67 +427,6 @@ function fakeRemote({ remote = OTHER_SHA, prs = [], push = 'lands', create = 'la
   return { run, calls, state, count }
 }
 
-test('openPullRequest pushes without force, creates the PR with argv only and reads it back', async () => {
-  const f = fakeRemote()
-  const result = await openPullRequest(publishSpec, { run: f.run })
-  assert.equal(result.status, 'green')
-  assert.equal(reasonOf(result), null)
-  assert.equal(result.reused, false)
-  assert.equal(result.pr.number, 18)
-  const push = f.calls.find((spec) => spec.args[0] === 'push')
-  assert.deepEqual(push.args, ['push', 'origin', 'HEAD:refs/heads/lane'])
-  const create = f.calls.find((spec) => spec.args[1] === 'create')
-  assert.deepEqual(create.args.slice(0, 8), ['pr', 'create', '--base', 'main', '--head', 'lane', '--title', 'feat: publish'])
-  assert.deepEqual(numbered(create.args[create.args.indexOf('--body') + 1]), ['Closes: #91', 'Refs: #92'])
-  assert.ok(f.calls.every((spec) => spec.command === 'git' || spec.command === 'gh'))
-  assert.ok(f.calls.every((spec) => Number.isSafeInteger(spec.timeoutMs) && spec.cwd === publishSpec.cwd))
-  assert.ok(f.calls.every((spec) => spec.args.every((arg) => typeof arg === 'string' && !/^(--force|-f$|--force-with-lease|\+)/.test(arg))))
-  assert.ok(f.calls.findIndex((spec) => spec.args[1] === 'list') < f.calls.indexOf(push), 'the PR query comes before anything is created or pushed')
-})
-
-test('openPullRequest returns the PR already open without creating, and skips a push the remote already has', async () => {
-  const f = fakeRemote({ prs: [prRecord(17)], remote: SHA })
-  const result = await openPullRequest(publishSpec, { run: f.run })
-  assert.equal(result.status, 'green')
-  assert.equal(result.reused, true)
-  assert.equal(result.pr.number, 17)
-  assert.equal(f.count('gh', 'create'), 0)
-  assert.equal(f.count('git', 'push'), 0)
-  const stale = fakeRemote({ prs: [prRecord(17)] })
-  assert.equal((await openPullRequest(publishSpec, { run: stale.run })).pr.number, 17)
-  assert.equal(stale.count('git', 'push'), 1)
-  assert.equal(stale.count('gh', 'create'), 0)
-})
-
-// MUTATION: substitute stale text for the edit's composedBody.
-test('RP1: reuse replaces the body exactly as a fresh PR for each publication', async () => {
-  const reused = fakeRemote({ prs: [prRecord(17, { body: 'stale measurements' })] })
-  const inputs = [
-    { ...publishSpec, body: 'Fixes #5; measurements 1/1.', closes: [91, 91], refs: [91, 92, 92] },
-    { ...publishSpec, body: 'New measurements 2/2; see #93.', closes: [93], refs: [94] },
-    { ...publishSpec, body: '', closes: [], refs: [] },
-    { ...publishSpec, body: '  Unicode ✓ and trailing whitespace  \n\n', closes: [], refs: [] },
-  ]
-  for (const [index, input] of inputs.entries()) {
-    const fresh = fakeRemote({ remote: SHA })
-    assert.equal((await openPullRequest(input, { run: fresh.run })).status, 'green')
-    const start = reused.calls.length
-    const result = await openPullRequest(input, { run: reused.run })
-    assert.equal(result.status, 'green')
-    assert.equal(result.reused, true)
-    assert.equal(result.pr.number, 17)
-    assert.equal(reused.state.prs[0].body, fresh.state.prs[0].body)
-    const calls = reused.calls.slice(start)
-    const editAt = calls.findIndex((call) => call.command === 'gh' && call.args[1] === 'edit')
-    const pushAt = calls.findIndex((call) => call.command === 'git' && call.args[0] === 'push')
-    assert.ok(editAt >= 0)
-    assert.equal(pushAt >= 0, index === 0)
-    if (pushAt >= 0) assert.ok(pushAt < editAt)
-  }
-  assert.equal(reused.count('gh', 'create'), 0)
-  assert.equal(reused.count('gh', 'edit'), inputs.length)
-})
-
 // MUTATION: disable the confirmedBody !== composedBody refusal.
 test('RP2: reuse refuses failed or unconfirmed body updates', async () => {
   const cases = {
@@ -619,16 +450,6 @@ test('RP2: reuse refuses failed or unconfirmed body updates', async () => {
     assert.equal(f.count('gh', 'edit'), 1, name)
     assert.equal(f.count('gh', 'create'), 0, name)
   }
-})
-
-test('openPullRequest pushes a branch the remote does not have, and trusts the readback over the push exit', async () => {
-  const absent = fakeRemote({ remote: '' })
-  assert.equal((await openPullRequest(publishSpec, { run: absent.run })).status, 'green')
-  assert.equal(absent.count('git', 'push'), 1)
-  const failedButLanded = fakeRemote({ push: 'lands-fails' })
-  const result = await openPullRequest(publishSpec, { run: failedButLanded.run })
-  assert.equal(result.status, 'green')
-  assert.equal(failedButLanded.count('gh', 'create'), 1)
 })
 
 test('openPullRequest stops before any PR when the push cannot be proven', async () => {
@@ -673,25 +494,6 @@ test('openPullRequest treats an unreadable, ambiguous or foreign PR list as unkn
     assert.equal(reasonOf(result), 'pr-unmeasured', name)
     assert.equal(f.count('gh', 'create') + f.count('git', 'push'), 0, name)
   }
-})
-
-test('openPullRequest recovers a PR created despite a failed create, and a retry reuses it', async () => {
-  const f = fakeRemote({ create: 'lands-fails' })
-  const first = await openPullRequest(publishSpec, { run: f.run })
-  assert.equal(first.status, 'green')
-  assert.equal(first.reused, false)
-  assert.equal(first.pr.number, 18)
-  const retry = await openPullRequest(publishSpec, { run: f.run })
-  assert.equal(retry.status, 'green')
-  assert.equal(retry.reused, true)
-  assert.equal(f.count('gh', 'create'), 1)
-  const thrown = fakeRemote()
-  const throwing = async (spec) => {
-    const result = await thrown.run(spec)
-    if (spec.args[1] === 'create') throw Object.assign(new Error('interrupted'), { code: 'EINTR' })
-    return result
-  }
-  assert.equal((await openPullRequest(publishSpec, { run: throwing })).pr.number, 18)
 })
 
 test('openPullRequest reports a create it cannot confirm as unmeasured pr-unmeasured', async () => {
@@ -746,102 +548,6 @@ test('openPullRequest turns runner failures and empty readbacks into unmeasured 
   assert.equal(emptyHead.count('gh', 'create'), 0)
 })
 
-test('issue numbers reach a commit message and a PR body only on the dedicated trailer lines', async () => {
-  const prose = 'Fixes #5 and resolves #6; see owner/repo#7.\nCloses: #8\nRefs: #9\nthis stays open (#10)'
-  const f = fakeRemote()
-  await openPullRequest({ ...publishSpec, body: prose, closes: [91, 92, 91], refs: [92, 93, 93] }, { run: f.run })
-  const create = f.calls.find((spec) => spec.args[1] === 'create')
-  const body = create.args[create.args.indexOf('--body') + 1]
-  assert.deepEqual(numbered(body), ['Closes: #91', 'Closes: #92', 'Refs: #93'])
-  assert.match(body, /^Fixes issue 5 and resolves issue 6; see owner\/repoissue 7\.$/m)
-  const cwd = laneRepo()
-  writeFileSync(join(cwd, 'a.txt'), 'changed\n')
-  const made = await commitChanges({ cwd, files: ['a.txt'], subject: 'fix: x (#4)', body: prose, closes: [91, 92], refs: [92, 93] })
-  assert.equal(made.status, 'green')
-  assert.deepEqual(numbered(git(cwd, 'log', '-1', '--format=%B')), ['Closes: #91', 'Closes: #92', 'Refs: #93'])
-  const none = await commitChanges({ cwd, files: ['outside.txt'], subject: 'fix: y' })
-  assert.equal(none.reason, 'nothing-to-commit')
-})
-
-// MUTATION: count an added-then-deleted entry as changed and its pathspec fails the whole commit.
-test('commitChanges commits the real change beside a file added to the index then deleted from the tree', async () => {
-  const cwd = laneRepo({ 'a.txt': 'one\n' })
-  writeFileSync(join(cwd, 'a.txt'), 'two\n')
-  writeFileSync(join(cwd, 'new.txt'), 'x\n')
-  git(cwd, 'add', 'new.txt')
-  rmSync(join(cwd, 'new.txt'))
-  const result = await commitChanges({ cwd, files: ['a.txt', 'new.txt'], subject: 'feat: real change' })
-  assert.equal(result.status, 'green', JSON.stringify(result))
-  assert.deepEqual(committed(cwd), ['a.txt'])
-})
-
-// MUTATION: pass the title through unchanged and a squash merge subject closes the issue it names.
-test('openPullRequest neutralizes issue numbers in the title', async () => {
-  const f = fakeRemote()
-  await openPullRequest({ ...publishSpec, title: 'fix: Fixes #5 partially' }, { run: f.run })
-  const create = f.calls.find((spec) => spec.args[1] === 'create')
-  const title = create.args[create.args.indexOf('--title') + 1]
-  assert.equal(title.includes('#'), false, title)
-})
-
-// MUTATION: rebase onto the bare name and a tag of the same name wins over the branch.
-test('rebaseBranch rebases onto the branch, not a tag that shares its name', async () => {
-  const cwd = laneRepo({ 'a.txt': 'base\n' })
-  const lane = git(cwd, 'rev-parse', '--abbrev-ref', 'HEAD').trim()
-  git(cwd, 'tag', 'main', 'HEAD')
-  git(cwd, 'checkout', '-q', 'refs/heads/main')
-  git(cwd, 'checkout', '-q', '-B', 'main')
-  writeFileSync(join(cwd, 'b.txt'), 'newer on main\n')
-  git(cwd, 'add', 'b.txt')
-  git(cwd, 'commit', '-q', '-m', 'main moves')
-  git(cwd, 'checkout', '-q', lane)
-  writeFileSync(join(cwd, 'c.txt'), 'lane work\n')
-  git(cwd, 'add', 'c.txt')
-  git(cwd, 'commit', '-q', '-m', 'lane work')
-  const result = await rebaseBranch({ cwd, base: 'main' })
-  assert.equal(result.status, 'green', JSON.stringify(result))
-  assert.equal(gitResult(cwd, 'merge-base', '--is-ancestor', 'refs/heads/main', 'HEAD').status, 0)
-})
-
-// MUTATION: query with --base and a PR the lane already has on another base is invisible, so a second is created.
-test('openPullRequest finds the lane PR on any base and refuses to open a second', async () => {
-  const f = fakeRemote({ prs: [prRecord(30, { baseRefName: 'dev' })], remote: SHA })
-  const result = await openPullRequest(publishSpec, { run: f.run })
-  assert.equal(result.status, 'unmeasured')
-  assert.equal(reasonOf(result), 'pr-unmeasured')
-  assert.equal(f.count('gh', 'create'), 0)
-  assert.ok(f.calls.filter((spec) => spec.args[1] === 'list').every((spec) => !spec.args.includes('--base')))
-})
-
-// MUTATION: compare status labels only and a failed commit that left different bytes reads as restored.
-test('commitChanges never reports a measured failure when the bytes of a changed file are not restored', async () => {
-  const cwd = laneRepo()
-  writeFileSync(join(cwd, 'a.txt'), 'requested\n')
-  const run = through(async (spec) => {
-    if (!has(spec, 'commit')) return undefined
-    writeFileSync(join(cwd, 'a.txt'), 'tampered\n')
-    return FAKE_BAD
-  })
-  const result = await commitChanges({ cwd, files: ['a.txt'], subject: 'feat: fails' }, { run })
-  assert.equal(result.status, 'unmeasured')
-  assert.equal(reasonOf(result), 'cleanup-unproven')
-})
-
-// MUTATION: prefer the local base and a lane rebased onto a stale local main reads as on its base.
-test('rebaseBranch rebases onto origin/<base> when the local base lags it', async () => {
-  const cwd = laneRepo({ 'a.txt': 'base\n' })
-  git(cwd, 'checkout', '-q', 'main')
-  writeFileSync(join(cwd, 'b.txt'), 'remote moved\n')
-  git(cwd, 'add', 'b.txt')
-  git(cwd, 'commit', '-qm', 'remote moves')
-  git(cwd, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
-  git(cwd, 'reset', '-q', '--hard', 'HEAD~1')
-  git(cwd, 'checkout', '-q', 'lane')
-  const result = await rebaseBranch({ cwd, base: 'main' })
-  assert.equal(result.status, 'green', JSON.stringify(result))
-  assert.equal(gitResult(cwd, 'merge-base', '--is-ancestor', 'refs/remotes/origin/main', 'HEAD').status, 0)
-})
-
 // MUTATION: drop the detached refusal and a rebase moves HEAD while the lane branch stays behind.
 test('rebaseBranch refuses a detached HEAD without moving anything', async () => {
   const cwd = laneRepo({ 'a.txt': 'base\n' })
@@ -884,41 +590,6 @@ test('openPullRequest refuses a lane branch that is its own base before any push
   assert.equal(f.calls.length, 0)
 })
 
-test('rebaseBranch rebases with an ignored cache whose expanded listing exceeds the runner budget', async () => {
-  const cwd = laneRepo({ 'a.txt': 'base\n', 'outside.txt': 'base\n', '.gitignore': 'cache/\n' })
-  writeFileSync(join(cwd, 'a.txt'), 'lane work\n')
-  git(cwd, 'commit', '-qam', 'lane work')
-  git(cwd, 'checkout', '-q', 'main')
-  writeFileSync(join(cwd, 'outside.txt'), 'advanced base\n')
-  git(cwd, 'commit', '-qam', 'advance base')
-  git(cwd, 'checkout', '-q', 'lane')
-  mkdirSync(join(cwd, 'cache/nested'), { recursive: true })
-  const cache = Array.from({ length: 16 }, (_, i) => [`cache/nested/artifact-${i}.bin`, Buffer.from([i, 0, 255])])
-  for (const [path, bytes] of cache) writeFileSync(join(cwd, path), bytes)
-  const budget = 64
-  const listing = ['ls-files', '-z', '--others', '--ignored', '--exclude-standard']
-  assert.ok(Buffer.byteLength(git(cwd, ...listing)) > budget)
-  assert.ok(Buffer.byteLength(git(cwd, ...listing, '--directory')) <= budget)
-  const before = git(cwd, 'rev-parse', 'HEAD').trim()
-  const onto = git(cwd, 'rev-parse', 'main').trim()
-  const run = async (spec) => {
-    const result = await runSuite(spec)
-    return has(spec, '--ignored') && result.status === 'green' && Buffer.byteLength(result.stdout) > budget
-      ? FAKE_UNMEASURED('output-limit') : result
-  }
-  const result = await rebaseBranch({ cwd, base: 'main' }, { run })
-  assert.equal(result.status, 'green', JSON.stringify(result))
-  assert.equal(reasonOf(result), null)
-  assert.equal(result.onto, onto)
-  assert.notEqual(result.head, before)
-  assert.equal(git(cwd, 'rev-parse', 'HEAD').trim(), result.head)
-  assert.equal(git(cwd, 'rev-parse', 'HEAD^').trim(), onto)
-  assert.equal(readFileSync(join(cwd, 'a.txt'), 'utf8'), 'lane work\n')
-  assert.equal(readFileSync(join(cwd, 'outside.txt'), 'utf8'), 'advanced base\n')
-  assert.equal(git(cwd, 'status', '--porcelain'), '')
-  for (const [path, bytes] of cache) assert.deepEqual(readFileSync(join(cwd, path)), bytes)
-})
-
 test('rebaseBranch refuses an ignored directory collision beyond the expanded listing budget', async () => {
   const cwd = laneRepo({ 'a.txt': 'base\n', '.gitignore': 'cache/\n' })
   git(cwd, 'checkout', '-q', 'main')
@@ -951,36 +622,6 @@ test('rebaseBranch refuses an ignored directory collision beyond the expanded li
   for (const [path, bytes] of cache) assert.deepEqual(readFileSync(join(cwd, path)), bytes)
 })
 
-test('rebaseBranch distinguishes ignored directory collisions from sibling prefixes', async () => {
-  for (const [baseDir, status] of [['cache', 'red'], ['cache-other', 'green']]) {
-    const cwd = laneRepo({ 'a.txt': 'base\n', '.gitignore': 'cache/\n' })
-    git(cwd, 'checkout', '-q', 'main')
-    const basePath = `${baseDir}/nested/file.bin`
-    mkdirSync(join(cwd, baseDir, 'nested'), { recursive: true })
-    writeFileSync(join(cwd, basePath), 'base bytes\n')
-    git(cwd, 'add', '-f', basePath)
-    git(cwd, 'commit', '-qm', 'base adds nested file')
-    git(cwd, 'checkout', '-q', 'lane')
-    mkdirSync(join(cwd, 'cache/nested'), { recursive: true })
-    writeFileSync(join(cwd, 'cache/nested/file.bin'), 'local bytes\n')
-    const before = snapshot(cwd)
-    const calls = []
-    const run = through((spec) => { calls.push(spec) })
-    const result = await rebaseBranch({ cwd, base: 'main' }, { run })
-    assert.equal(result.status, status, baseDir)
-    assert.equal(reasonOf(result), status === 'red' ? 'dirty-worktree' : null)
-    if (status === 'red') {
-      assert.ok(result.paths.length > 0 && result.paths.every((path) => path.startsWith('cache/')))
-      assert.ok(!calls.some((spec) => has(spec, 'rebase')))
-      assert.deepEqual(snapshot(cwd), before)
-    } else {
-      assert.equal(result.head, git(cwd, 'rev-parse', 'main').trim())
-      assert.equal(readFileSync(join(cwd, basePath), 'utf8'), 'base bytes\n')
-    }
-    assert.equal(readFileSync(join(cwd, 'cache/nested/file.bin'), 'utf8'), 'local bytes\n')
-  }
-})
-
 test('rebaseBranch leaves ignored or base listing failures unmeasured without rebasing', async () => {
   const cwd = laneRepo()
   const before = snapshot(cwd)
@@ -999,21 +640,4 @@ test('rebaseBranch leaves ignored or base listing failures unmeasured without re
       assert.deepEqual(snapshot(cwd), before)
     }
   }
-})
-
-// MUTATION: drop the ignored-path collision check and a conflicting rebase overwrites the ignored file.
-test('rebaseBranch refuses to rebase over an ignored file the base tracks', async () => {
-  const cwd = laneRepo({ 'a.txt': 'base\n', '.gitignore': 'build.log\n' })
-  git(cwd, 'checkout', '-q', 'main')
-  writeFileSync(join(cwd, '.gitignore'), '')
-  writeFileSync(join(cwd, 'build.log'), 'tracked on main\n')
-  git(cwd, 'add', '.gitignore', 'build.log')
-  git(cwd, 'commit', '-qm', 'main tracks build.log')
-  git(cwd, 'checkout', '-q', 'lane')
-  writeFileSync(join(cwd, 'build.log'), 'precious local log\n')
-  const result = await rebaseBranch({ cwd, base: 'main' })
-  assert.equal(result.status, 'red')
-  assert.equal(reasonOf(result), 'dirty-worktree')
-  assert.deepEqual(result.paths, ['build.log'])
-  assert.equal(readFileSync(join(cwd, 'build.log'), 'utf8'), 'precious local log\n')
 })

@@ -462,3 +462,19 @@ tests, median named tests per lane and plans naming none. Target: a median of 0.
 Also count bug-fix lanes whose defect was introduced by a lane with no test,
 reporting that count against the number of bug-fix lanes inspected. The
 follow-up has not run; no measurement tooling is added here.
+
+### Clarification 2026-11-17: tests named in issues (#2438)
+
+The explicit-test-ask override applies only when adding or changing tests is the
+purpose of the lane. A test merely named or listed within a behaviour change in
+the source or a referenced issue follows the same no-test rule and its exceptions.
+Referenced issues remain context, not asks.
+
+When the planner omits such a test under the rule, Not machine-checked names the
+test and explains why the rule calls for no test. The reviewer and tech-lead do
+not report that omission as an unmet requirement merely because an issue names
+the test. Findings justified by the existing exceptions or an unmet ask for a
+lane whose purpose is adding or changing tests still apply.
+
+Issue #2438 identifies an interpretation risk, not a measured planner failure.
+The exceptions, proof and suite contracts are unchanged.

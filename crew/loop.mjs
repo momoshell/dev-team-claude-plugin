@@ -421,7 +421,7 @@ export async function runLoop(spec, deps = {}) {
   }
   // Runs one check seam; a throw or a result that contradicts its own status is unmeasured, never trusted.
   let outputNumber = 0
-  const callCheck = async (name, fn, input, { command = false } = {}) => {
+  const callCheck = async (name, fn, input, { command = false, cancellable = false } = {}) => {
     const retained = name === 'suite' || name === 'proof'
     let result, started, ended
     if (retained) try { started = d.now() } catch {}
@@ -457,7 +457,9 @@ export async function runLoop(spec, deps = {}) {
     await emit('check', { check: name, result: journaled(result), ...metadata })
     const sound = result !== null && typeof result === 'object' && !Array.isArray(result)
       && (result.reason === null || CHECK_REASONS.includes(result.reason))
-      && ['green', 'red', 'unmeasured'].includes(result.status) && (result.status === 'green') === (result.reason === null)
+      && (['green', 'red', 'unmeasured'].includes(result.status)
+        || (cancellable && name === 'suite' && result.status === 'cancelled' && result.reason === 'cancelled' && result.cleanup === 'proven' && result.timedOut === false))
+      && (result.status === 'green') === (result.reason === null)
       && (!command || result.status !== 'green' || (result.code === 0 && !result.signal && result.timedOut === false))
     return sound ? result : { status: 'unmeasured', reason: 'runner-threw' }
   }
@@ -779,7 +781,7 @@ export async function runLoop(spec, deps = {}) {
     return { rebased }
   }
   const suiteCommand = oneLine([spec.suite.command, ...(spec.suite.args ?? [])].join(' '))
-  const suiteRun = () => stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs, suiteLock: spec.suiteLock, lane: spec.id }, { command: true }))
+  const suiteRun = (signal) => stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs, suiteLock: spec.suiteLock, lane: spec.id, ...(signal ? { signal } : {}) }, { command: true, cancellable: !!signal }))
   const result = await (async () => {
   try {
     try { await d.mkdir(spec.taskDir, { recursive: true }) } catch (error) { return await stop('runner-threw', { mkdir: describe(error) }) }
@@ -971,7 +973,12 @@ export async function runLoop(spec, deps = {}) {
           }
           let suite, reviews = []
           if (tier === 'build') {
-            const pair = await Promise.allSettled([suiteRun(), runReviews()])
+            const cancellation = new AbortController()
+            const pair = await Promise.allSettled([suiteRun(cancellation.signal), runReviews().then((results) => {
+              if (results.every((result) => !result.halt && result.envelope)
+                && results.some((result) => !result.reused && result.envelope.details.verdict === 'changes-needed')) cancellation.abort()
+              return results
+            })])
             const failed = pair.find((result) => result.status === 'rejected')
             if (failed) throw failed.reason
             ;[suite, reviews] = pair.map((result) => result.value)
@@ -983,7 +990,9 @@ export async function runLoop(spec, deps = {}) {
           const [reviewed, second] = reviews
           const reviewHalt = reviews.find((result) => result.halt)?.halt
           if (reviewHalt) return reviewHalt
-          if (suite.status !== 'green' && suite.status !== 'red') return stop(suite.reason, suite)
+          const cancelled = tier === 'build' && suite.status === 'cancelled'
+            && reviews.some((result) => !result.reused && result.envelope?.details.verdict === 'changes-needed')
+          if (suite.status !== 'green' && suite.status !== 'red' && !cancelled) return stop(suite.reason, suite)
           let redFindings = [], reviewRed = false
           if (reviewed?.envelope && !reviewed.reused) {
             const review = reviewed.envelope

@@ -11,7 +11,7 @@ export const FINISH_REVIEW_ROUNDS = 3
 
 export const CHECK_REASONS = Object.freeze([
   'invalid-input', 'unsupported-platform', 'exit-nonzero', 'signal', 'spawn-error', 'timeout', 'output-limit',
-  'suite-lock-timeout', 'suite-lock-unavailable', 'cleanup-unproven', 'proof-unproven', 'invalid-project-config', 'setup-failed', 'runner-threw', 'nothing-to-commit', 'commit-failed', 'rebase-conflict', 'rebase-failed',
+  'suite-lock-timeout', 'suite-lock-unavailable', 'cancelled', 'cleanup-unproven', 'proof-unproven', 'invalid-project-config', 'setup-failed', 'runner-threw', 'nothing-to-commit', 'commit-failed', 'rebase-conflict', 'rebase-failed',
   'dirty-worktree', 'push-unmeasured', 'pr-unmeasured', 'invalid-remote-data',
 ])
 
@@ -64,11 +64,12 @@ async function reapGroup(child, probe, isClosed) {
   return until(REAP_SETTLE_MS)
 }
 
-export async function runSuite({ cwd, command, args = [], timeoutMs = DEFAULT_TIMEOUT_MS, suiteLock = false, lane } = {}, deps = {}) {
+export async function runSuite({ cwd, command, args = [], timeoutMs = DEFAULT_TIMEOUT_MS, suiteLock = false, lane, signal } = {}, deps = {}) {
   if (process.platform === 'win32') return Promise.resolve(unmeasured('unsupported-platform'))
   const valid = typeof cwd === 'string' && cwd !== '' && typeof command === 'string' && command !== ''
     && Array.isArray(args) && args.every((arg) => typeof arg === 'string')
     && validTimeout(timeoutMs) && typeof suiteLock === 'boolean' && (lane === undefined || (typeof lane === 'string' && lane !== '' && !lane.includes('\0')))
+    && (signal === undefined || signal instanceof AbortSignal)
   if (!valid) return unmeasured('invalid-input')
   const lock = suiteLock ? await acquireSuiteLock({ cwd, lane }) : null
   const wait = lock ? { suite_lock_wait_s: lock.suite_lock_wait_s } : {}
@@ -93,6 +94,7 @@ export async function runSuite({ cwd, command, args = [], timeoutMs = DEFAULT_TI
     let timedOut = false
     let overflow = false
     let stopping = false
+    let cancelling = false
     let closed = false
     let done = false
     let spawnError = null
@@ -105,6 +107,7 @@ export async function runSuite({ cwd, command, args = [], timeoutMs = DEFAULT_TI
       if (cleanup === 'unproven') return { status: 'unmeasured', reason: 'cleanup-unproven', ...base }
       if (timedOut) return { status: 'unmeasured', reason: 'timeout', ...base }
       if (overflow) return { status: 'unmeasured', reason: 'output-limit', ...base }
+      if (cancelling) return { status: 'cancelled', reason: 'cancelled', ...base }
       if (base.code === null) return { status: 'unmeasured', reason: 'signal', ...base }
       if (base.code === 0) return { status: 'green', reason: null, ...base }
       return { status: 'red', reason: 'exit-nonzero', ...base }
@@ -113,6 +116,7 @@ export async function runSuite({ cwd, command, args = [], timeoutMs = DEFAULT_TI
       if (done) return
       done = true
       budget.stop()
+      signal?.removeEventListener('abort', cancel)
       const emitters = [child, child.stdout, child.stderr].filter(Boolean)
       for (const emitter of emitters) { emitter.removeAllListeners(); emitter.on('error', () => {}) }
       child.stdout?.destroy()
@@ -120,12 +124,20 @@ export async function runSuite({ cwd, command, args = [], timeoutMs = DEFAULT_TI
       resolveRun(classify(cleanup))
     }
     // `force` is false only for an ordinary close, where a group already proven dead needs no signalling.
-    const stop = async (force) => {
-      if (stopping) return
+    const stop = async (force, cancellation = false) => {
+      if (done || stopping) return
       stopping = true
-      budget.stop()
+      cancelling ||= cancellation
+      if (!cancellation) budget.stop()
       if (!force && groupState(probe, pgid) === 'dead') return settle('proven')
-      settle(await reapGroup(child, probe, () => closed) ? 'proven' : 'unproven')
+      const proven = await reapGroup(child, probe, () => closed)
+      if (proven || !cancellation) return settle(proven ? 'proven' : 'unproven')
+      // Keep the cancellation mark: signals were sent, but the original deadline and close path still apply.
+      stopping = false
+      if (timedOut || overflow || spawnError || closed) void stop(true)
+    }
+    const cancel = () => {
+      if (!closed && child.exitCode === null && child.signalCode === null) void stop(true, true)
     }
     const append = (chunk, target) => {
       if (overflow) return
@@ -160,6 +172,8 @@ export async function runSuite({ cwd, command, args = [], timeoutMs = DEFAULT_TI
         void stop(true)
       }
     }
+    signal?.addEventListener('abort', cancel, { once: true })
+    if (signal?.aborted) cancel()
   })
   // Keep ownership if the suite group may have survived. A future contender
   // must prove both this launcher and its recorded process group dead.

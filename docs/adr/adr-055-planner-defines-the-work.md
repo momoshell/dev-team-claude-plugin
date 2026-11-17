@@ -138,6 +138,14 @@ judge:       brief -> plan -> rebase -> build -> refresh base -> prove -> suite 
 
 The judge loop's second review is the tech-lead's. It drops ADR-038's mutation on the changed surface.
 
+Amended 2026-11-18 (#2459): [ADR-054 §2's dated cancellation amendment](adr-054-each-tier-runs-its-own-loop.md)
+lets a non-finish build round cancel a pending suite after all reviews return a
+valid `changes-needed` verdict. The next builder waits for proven group and pipe
+cleanup, falling back to ordinary waiting if proof fails. Completed suite results
+and passing reviews are unchanged. Cancellation journals its own status and
+seconds; only a later green suite can be cited by the PR. Red-suite diagnostics
+may arrive one round later. Judge, mechanical and finish scheduling is unchanged.
+
 Amended 2026-11-16, operator decision ("yes 1", #2425): whenever a judge round dispatches reviews,
 start the reviewer and tech-lead independently on the same checked tree after a green suite. This includes
 raised lanes and moved-head rechecks. Keep the journal stage `second-review`. Wait for all started checks;

@@ -69,6 +69,29 @@ any red check -> one builder fix turn with every red result -> back to prove (bo
   behaviour, and adds a second review by the tech-lead seat, a different model family from the reviewer. Escalations go
   to the lead, then the tech-lead.
 
+#### Amendment 2026-11-18: cancel a discarded build suite (#2459)
+
+In a non-finish build round, after all reviews return and the valid verdict is
+`changes-needed`, cancel a suite that is still running. Before the next permitted
+builder turn, prove the POSIX process group absent (only `ESRCH` counts) and its
+pipes closed, using the runner's TERM/KILL cleanup. If that proof fails, retain
+the ordinary wait/completion/deadline path; an unproven cancellation cannot
+release a builder. Seat bounds and reserve reviews do not change.
+
+A completed suite keeps its result, red or green. A passing review still waits
+for the suite. A successful cancellation journals `status: 'cancelled'`, elapsed
+`seconds` and available output, never a green or red result. The builder receives
+the review findings without a fabricated suite-repair finding. Publication must
+cite a later green suite, never the cancelled run.
+
+Measured in the-power lanes since 2026-11-12, read 2026-11-18: 12 build rounds had
+`changes-needed` beside a suite; they spent 140 suite minutes, including 91 minutes
+after review ended. Of those 12 suites, 8 were green and 4 red. Cancelling can
+defer red-suite diagnostics by one round; how many of those 4 red results added
+information beyond review was not measured. Judge, mechanical and finish runs,
+proof and setup commands are unchanged. Section 1's prohibition on automatically
+rerunning a red suite on an unchanged tree still holds.
+
 ### 3. Measurement before each loop is adopted
 
 *Replaced 2026-11-02 by ADR-055's "Measurement before ratifying": every loop is measured on its first 10 lanes, and

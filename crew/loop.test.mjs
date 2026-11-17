@@ -8,6 +8,7 @@ import { git as repoGit, gitResult, scratchDir } from '../test/helpers.mjs'
 import { decideFinish, FinishRefusal, finishLane } from './finish.mjs'
 import { LOOP_REASONS, runLoop } from './loop.mjs'
 import { resolveAgents } from './agents.mjs'
+import { runSuite } from './checks.mjs'
 import { stateless } from './lean-journal-order.mjs'
 
 const PR = { number: 73, url: 'https://example.test/pr/73', state: 'OPEN', headRefName: 'lane', baseRefName: 'main' }
@@ -758,6 +759,73 @@ test('a refused, unreadable, empty or stale envelope stops the lane and a lead a
 
 // MUTATION: drop the changes-needed branch and the findings never reach a second build.
 test('from round 2 the reviewer hears the earlier findings, and a return that drops one is refused', async () => {
+  for (const cleanup of ['proven', 'delayed', 'unknown']) {
+    const cwd = scratchDir('loop-cancel-suite-'), ready = join(cwd, 'ready.json')
+    const descendant = `console.log('suite ready'); require('node:fs').writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ pgid: process.ppid, pid: process.pid })); setTimeout(() => process.exit(0), 3000)`
+    // The detached child holds the pipes beyond the cancellation proof window, then closes them naturally.
+    const source = `const child = require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], { stdio: 'inherit', detached: ${cleanup === 'delayed'} }); process.on('SIGTERM', () => ${cleanup === 'delayed' ? 'process.exit(0)' : "child.kill('SIGTERM')"}); child.on('exit', () => process.exit(0)); setTimeout(() => { child.kill('SIGKILL'); process.exit(0) }, 5000)`
+    const f = fakes({ review: 1, deps: { now: Date.now } })
+    const suite = f.deps.runSuite, seat = f.deps.runSeat
+    let first = true, group, running, cancelled = false
+    const probes = []
+    f.deps.runSuite = async (input) => {
+      if (!first) return suite(input)
+      first = false
+      input.signal?.addEventListener('abort', () => { cancelled = true }, { once: true })
+      running = runSuite({ ...input, cwd, command: process.execPath, args: ['-e', source], timeoutMs: 7000 }, cleanup === 'unknown' ? {
+        probeKill: () => {
+          probes.push(count(f, 'builder'))
+          throw Object.assign(new Error('unknown group'), { code: 'EIO' })
+        },
+      } : {})
+      return running
+    }
+    f.deps.runSeat = async (request) => {
+      if (request.role === 'reviewer' && !group) {
+        const deadline = Date.now() + 5000
+        while (!group && Date.now() < deadline) {
+          try { group = JSON.parse(readFileSync(ready, 'utf8')) } catch (error) { if (error.code !== 'ENOENT') throw error }
+          if (!group) await new Promise((resolve) => setTimeout(resolve, 10))
+        }
+        assert.ok(group, 'review waits for the suite process to be ready')
+      }
+      if (request.role === 'builder' && count(f, 'builder') === 1) {
+        assert.notEqual(cleanup, 'unknown', 'unknown cleanup cannot release another builder')
+        assert.throws(() => process.kill(-group.pgid, 0), { code: 'ESRCH' })
+        assert.deepEqual(request.feedback, [finding])
+      }
+      return seat(request)
+    }
+    try {
+      const result = await f.go()
+      const check = f.rows.find((row) => row.event === 'check' && row.check === 'suite')
+      assert.equal(check.result.status, cleanup === 'unknown' ? 'unmeasured' : 'cancelled', cleanup)
+      assert.equal(cancelled, true, 'review requests cancellation while the suite is running')
+      assert.equal(typeof check.seconds, 'number')
+      assert.ok(check.seconds > 0)
+      assert.match(JSON.parse(f.writes.get(join(f.spec.taskDir, check.outputFile))).stdout, /suite ready/)
+      assert.equal(f.requests.some((request) => request.feedback.some((item) => item.id === 'suite-repair')), false)
+      if (cleanup !== 'unknown') {
+        assert.equal(check.result.reason, 'cancelled')
+        assert.equal(check.result.cleanup, 'proven')
+        assert.equal(result.status, 'done')
+        assert.equal(f.rows.filter((row) => row.event === 'check' && row.check === 'suite').at(-1).result.status, 'green')
+        assert.match(f.seen.publish.body, /- Suite: green; exit 0;/)
+        assert.doesNotMatch(f.seen.publish.body, /Suite: cancelled/)
+      } else {
+        assert.deepEqual(result, stopped('cleanup-unproven'))
+        assert.equal(count(f, 'builder'), 1)
+        assert.ok(probes.length > 1 && probes.every((turns) => turns === 1))
+        assert.equal(f.seen.publish, undefined)
+      }
+    } finally {
+      if (group) {
+        try { process.kill(-group.pgid, 'SIGKILL') } catch {}
+        if (cleanup === 'delayed') { try { process.kill(group.pid, 'SIGKILL') } catch {} }
+      }
+      await running
+    }
+  }
   const normal = fakes({ review: 1 })
   assert.equal((await normal.go()).status, 'done')
   assert.deepEqual(normal.requests.filter((r) => r.role === 'reviewer').map((r) => r.feedback), [[], [finding]])

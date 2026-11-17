@@ -239,6 +239,7 @@ export async function runLoop(spec, deps = {}) {
     && text(spec.suite?.command) && (spec.suite.args === undefined || Array.isArray(spec.suite.args))
     && (spec.suite.timeoutMs === undefined || validTimeout(spec.suite.timeoutMs))
     && (spec.proofTimeoutMs === undefined || validTimeout(spec.proofTimeoutMs))
+    && (spec.suiteLock === undefined || typeof spec.suiteLock === 'boolean')
     && (!Object.hasOwn(spec, 'generated') || validGenerated(spec.generated))
     && (spec.closes === undefined || Array.isArray(spec.closes))
     && (!Object.hasOwn(spec, 'roster') || rosterSound(spec.roster))
@@ -778,7 +779,7 @@ export async function runLoop(spec, deps = {}) {
     return { rebased }
   }
   const suiteCommand = oneLine([spec.suite.command, ...(spec.suite.args ?? [])].join(' '))
-  const suiteRun = () => stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs }, { command: true }))
+  const suiteRun = () => stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs, suiteLock: spec.suiteLock, lane: spec.id }, { command: true }))
   const result = await (async () => {
   try {
     try { await d.mkdir(spec.taskDir, { recursive: true }) } catch (error) { return await stop('runner-threw', { mkdir: describe(error) }) }
@@ -911,7 +912,7 @@ export async function runLoop(spec, deps = {}) {
         recheck = false
         if (!namedTests.length && (!isFinish || planning) && !testsRequired) proofLines = [tier === 'mechanical' ? '- proof: none, mechanical lane, not reviewed' : '- proof: none, no criterion is machine-checked']
         if (namedTests.length) {
-          const proof = await stage('proof', () => callCheck('proof', d.proveTests, { cwd, base: 'HEAD', tests: namedTests, timeoutMs: spec.proofTimeoutMs }))
+          const proof = await stage('proof', () => callCheck('proof', d.proveTests, { cwd, base: 'HEAD', tests: namedTests, timeoutMs: spec.proofTimeoutMs, lane: spec.id }))
           const rows = Array.isArray(proof.rows) ? proof.rows : []
           const proofOK = proof.status === 'green' && proof.reason === null && rows.length === namedTests.length && rows.every((row) => row?.proven === true)
           if (!proofOK && proof.status === 'red') {
@@ -1157,7 +1158,7 @@ export async function runLoop(spec, deps = {}) {
 
     if (rebased.head !== committed.head) {
       if (namedTests.length) {
-        const reproven = await stage('proof', () => callCheck('proof', d.proveTests, { cwd, base: `${rebased.head}^`, tests: namedTests, timeoutMs: spec.proofTimeoutMs }))
+        const reproven = await stage('proof', () => callCheck('proof', d.proveTests, { cwd, base: `${rebased.head}^`, tests: namedTests, timeoutMs: spec.proofTimeoutMs, lane: spec.id }))
         if (reproven.status !== 'green' || reproven.reason !== null || !Array.isArray(reproven.rows) || reproven.rows.length !== namedTests.length || !reproven.rows.every((row) => row?.proven === true)) return stop(reproven.reason ?? 'runner-threw', journaled(reproven))
         lastProved.clear()
         for (const row of reproven.rows) {

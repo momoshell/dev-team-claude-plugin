@@ -170,7 +170,7 @@ export async function proveTests(input = {}, deps = {}) {
   }
   const runCommand = async (spec) => {
     try {
-      const run = capture(await (deps.runSuite ?? runSuite)(spec))
+      const run = capture(await (deps.runSuite ?? runSuite)({ ...spec, ...(input?.lane === undefined ? {} : { lane: input.lane }) }))
       addSleepCredit(credit, run)
       return run
     } catch (error) {

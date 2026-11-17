@@ -73,6 +73,27 @@ the fetch fails; it does not probe seats. The probe is implemented in
    default for JavaScript tests, so use `proof: []` if it covers all proof tests.
    Optionally set `suiteTimeoutMs` to a safe integer from 1 to `2**31-1` ms;
    if absent, the suite timeout is `SUITE_TIMEOUT_DEFAULT_MS` (`crew/onboard.mjs`).
+   Optionally set boolean `suiteLock: true` to queue project suites across this
+   checkout's lane processes and worktrees using its shared Git common directory.
+   Absent or false disables it; other values are refused. It covers start,
+   finish and publishing-rebase suite rechecks, not proof, worktree setup,
+   onboarding or builder checks. Lane concurrency does not change. Acquisition
+   has a separate two-hour bound; `suiteTimeoutMs` starts after acquisition.
+   The journal result records `suite_lock_wait_s`; bounded waiting stops
+   unmeasured with `suite-lock-timeout` and `suite_lock_holder` diagnostics.
+   Lock I/O or resolution failures stop with `suite-lock-unavailable`.
+   Only proven-dead ownership is reclaimed, never by age; uncertain/unreadable
+   holders stay unknown, and a surviving suite group prevents reclamation.
+   To clear an unknown or wrongly live-judged holder, ensure no suite of the
+   checkout is running or waiting, then remove `<git-common-dir>/crew-suite-lock/`.
+   Resolve the common directory with `git rev-parse --git-common-dir`.
+   Start captures the setting for the lane and its finish passes; editing it
+   does not retrofit running lanes or require re-onboarding.
+   Suite, proof (both sides, setup and listing) and `worktreeSetup` commands
+   receive `CREW_LANE`, the lane name, overriding an inherited value only in
+   the child environment. A script can name per-lane services instead of
+   queueing. This is separate from affected-package selection. Onboarding
+   has no lane name to supply. No unchanged-tree red-suite retry is added.
    Optionally set top-level `proofTimeoutMs` to a safe integer from 1 to
    `2**31-1` ms for every proof run; if absent, it defaults to
    `PROOF_TIMEOUT_DEFAULT_MS` (`crew/proof.mjs`). It is not set per runner entry.
@@ -125,7 +146,7 @@ the fetch fails; it does not probe seats. The probe is implemented in
    have matching onboarding; proof reads runner entries from the lane's
    old-source worktree. Re-run
    onboarding after changing the suite, proof entries or `worktreeSetup`. Changing only
-   `suiteTimeoutMs`, `proofTimeoutMs` or `builderChecks` in `.crew/project.json` does not require
+   `suiteLock`, `suiteTimeoutMs`, `proofTimeoutMs` or `builderChecks` in `.crew/project.json` does not require
    re-onboarding.
    Write a brief with
    `skills/lane-brief/SKILL.md`, then run `crew start <brief>` in the checkout.

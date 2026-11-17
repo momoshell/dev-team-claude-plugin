@@ -5,12 +5,13 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { GIT_STATUS_ARGS, HEX_OID, describeError } from './lane-core.mjs'
 import { sampledBudget } from './host-sleep.mjs'
+import { acquireSuiteLock } from './suite-lock.mjs'
 
 export const FINISH_REVIEW_ROUNDS = 3
 
 export const CHECK_REASONS = Object.freeze([
   'invalid-input', 'unsupported-platform', 'exit-nonzero', 'signal', 'spawn-error', 'timeout', 'output-limit',
-  'cleanup-unproven', 'proof-unproven', 'invalid-project-config', 'setup-failed', 'runner-threw', 'nothing-to-commit', 'commit-failed', 'rebase-conflict', 'rebase-failed',
+  'suite-lock-timeout', 'suite-lock-unavailable', 'cleanup-unproven', 'proof-unproven', 'invalid-project-config', 'setup-failed', 'runner-threw', 'nothing-to-commit', 'commit-failed', 'rebase-conflict', 'rebase-failed',
   'dirty-worktree', 'push-unmeasured', 'pr-unmeasured', 'invalid-remote-data',
 ])
 
@@ -63,17 +64,23 @@ async function reapGroup(child, probe, isClosed) {
   return until(REAP_SETTLE_MS)
 }
 
-export function runSuite({ cwd, command, args = [], timeoutMs = DEFAULT_TIMEOUT_MS } = {}, deps = {}) {
+export async function runSuite({ cwd, command, args = [], timeoutMs = DEFAULT_TIMEOUT_MS, suiteLock = false, lane } = {}, deps = {}) {
   if (process.platform === 'win32') return Promise.resolve(unmeasured('unsupported-platform'))
   const valid = typeof cwd === 'string' && cwd !== '' && typeof command === 'string' && command !== ''
     && Array.isArray(args) && args.every((arg) => typeof arg === 'string')
-    && validTimeout(timeoutMs)
-  if (!valid) return Promise.resolve(unmeasured('invalid-input'))
+    && validTimeout(timeoutMs) && typeof suiteLock === 'boolean' && (lane === undefined || (typeof lane === 'string' && lane !== '' && !lane.includes('\0')))
+  if (!valid) return unmeasured('invalid-input')
+  const lock = suiteLock ? await acquireSuiteLock({ cwd, lane }) : null
+  const wait = lock ? { suite_lock_wait_s: lock.suite_lock_wait_s } : {}
+  if (lock && !lock.ok) return unmeasured(lock.reason, { ...wait, suite_lock_holder: lock.suite_lock_holder ?? null, ...(lock.error ? { error: lock.error } : {}) })
   const probe = deps.probeKill ?? ((pid, signal) => process.kill(pid, signal))
-  return new Promise((resolveRun) => {
+  const result = await new Promise((resolveRun) => {
     let child
     try {
-      child = spawn(command, args, { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: cleanEnv() })
+      const env = cleanEnv()
+      if (lane !== undefined) env.CREW_LANE = lane
+      const launch = lock ? lock.command(command, args) : { command, args }
+      child = spawn(launch.command, launch.args, { cwd, detached: true, stdio: lock ? ['pipe', 'pipe', 'pipe', 'ipc'] : ['ignore', 'pipe', 'pipe'], env })
     } catch (error) {
       resolveRun(unmeasured('spawn-error', { error: describeError(error) }))
       return
@@ -89,16 +96,17 @@ export function runSuite({ cwd, command, args = [], timeoutMs = DEFAULT_TIMEOUT_
     let closed = false
     let done = false
     let spawnError = null
+    let leaderSignal = null
     let exit = { code: null, signal: null }
 
     const classify = (cleanup) => {
-      const base = { code: exit.code, signal: exit.signal, stdout, stderr, timedOut, pgid, cleanup, ...budget.fields() }
+      const base = { code: leaderSignal ? null : exit.code, signal: leaderSignal ?? exit.signal, stdout, stderr, timedOut, pgid, cleanup, ...budget.fields() }
       if (spawnError) return { status: 'unmeasured', reason: 'spawn-error', ...base, error: describeError(spawnError) }
       if (cleanup === 'unproven') return { status: 'unmeasured', reason: 'cleanup-unproven', ...base }
       if (timedOut) return { status: 'unmeasured', reason: 'timeout', ...base }
       if (overflow) return { status: 'unmeasured', reason: 'output-limit', ...base }
-      if (exit.code === null) return { status: 'unmeasured', reason: 'signal', ...base }
-      if (exit.code === 0) return { status: 'green', reason: null, ...base }
+      if (base.code === null) return { status: 'unmeasured', reason: 'signal', ...base }
+      if (base.code === 0) return { status: 'green', reason: null, ...base }
       return { status: 'red', reason: 'exit-nonzero', ...base }
     }
     const settle = (cleanup) => {
@@ -140,7 +148,25 @@ export function runSuite({ cwd, command, args = [], timeoutMs = DEFAULT_TIMEOUT_
     child.stderr.setEncoding('utf8')
     child.stdout.on('data', (chunk) => append(chunk, 'stdout'))
     child.stderr.on('data', (chunk) => append(chunk, 'stderr'))
+    if (lock) {
+      child.on('message', (message) => {
+        if (message?.type === 'spawn-error') spawnError = Object.assign(new Error(message.message), { code: message.code })
+        if (message?.type === 'signal') leaderSignal = message.signal
+      })
+      child.stdin.on('error', () => {})
+      if (pgid !== null) try { lock.start(child) } catch (error) {
+        spawnError = error
+        child.stdin.end()
+        void stop(true)
+      }
+    }
   })
+  // Keep ownership if the suite group may have survived. A future contender
+  // must prove both this launcher and its recorded process group dead.
+  if (lock && (result.cleanup === 'proven' || (result.reason === 'spawn-error' && result.pgid === null))) {
+    try { lock.release() } catch { /* conservative: an unreleased owner is never reclaimed by age */ }
+  }
+  return { ...result, ...wait }
 }
 
 // A literal repo-relative path: no absolute, backslash, NUL, empty, dot, dotdot or .git segment.

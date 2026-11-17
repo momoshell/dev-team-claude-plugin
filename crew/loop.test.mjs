@@ -904,7 +904,7 @@ test('a finish first red repairs immediately with one run of diagnostics and ord
   assert.ok(feedback.outputTail[0].length <= 2000)
   assert.equal(f.inputs.length, 2)
   assert.deepEqual(f.inputs[1], f.inputs[0])
-  assert.deepEqual(f.inputs[0], { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 1800000 })
+  assert.deepEqual(f.inputs[0], { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 1800000, suiteLock: undefined, lane: f.spec.id })
   assert.equal(f.calls.filter((c) => c === 'proof').length, 2)
   assert.equal(count(f, 'reviewer'), 2)
   assert.deepEqual(f.rows.filter((r) => r.event === 'check' && r.check === 'suite').map((r) => r.result.status), ['red', 'green'])

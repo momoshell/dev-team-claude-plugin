@@ -24,6 +24,30 @@ Keep the three levels separate:
 Keep `builderChecks` narrower than the suite: touched code or one package, not
 workspace-wide checks. They do not replace the suite gate.
 
+## Shared test services
+
+Affected-package selection does not isolate databases, ports or containers.
+Suite, proof (base/build, setup and listing) and `worktreeSetup` commands receive
+`CREW_LANE`, the lane name, overriding an inherited value only in the child.
+A project script can use it to name per-lane services. Onboarding supplies no
+lane name.
+
+Alternatively, optional boolean `suiteLock: true` in `.crew/project.json`
+queues project suites across the checkout's lane processes and worktrees using
+the shared Git common directory. Separate checkouts stay independent. Absent
+or false disables it; invalid values are refused. It covers start, finish and
+publishing-rebase suite rechecks, not proof, worktree setup, onboarding or
+builder checks, and does not limit lane concurrency. Start captures it for the
+lane and its finish passes; edits do not retrofit running lanes.
+
+Acquisition has a separate two-hour bound, outside `suiteTimeoutMs`. The journal
+result records `suite_lock_wait_s`; a bounded wait stops unmeasured with
+`suite-lock-timeout` and `suite_lock_holder` diagnostics. Lock I/O or resolution
+failure stops `suite-lock-unavailable`. Reclamation requires proven death, not
+age. Unreadable or uncertain holders remain unknown and unreclaimed; surviving
+suite groups prevent reclamation even after their launcher dies. Queueing adds
+no automatic retry of an unchanged red suite.
+
 ## Read the lane change from Git
 
 On lane or finish suite invocations, the change is uncommitted over the held
@@ -147,7 +171,7 @@ to calibrate and commit onboarding.
 Re-run onboarding after changing the configured `suite` command, proof entries
 or `worktreeSetup`. Editing only the contents of a script named by the unchanged
 `suite` command does not require re-onboarding. Neither do changes only to
-`builderChecks`, `suiteTimeoutMs` or `proofTimeoutMs`. The onboarding hash covers
+`suiteLock`, `builderChecks`, `suiteTimeoutMs` or `proofTimeoutMs`. The onboarding hash covers
 selected configuration values, not script contents or the entire JSON file.
 In either case, commit and push the changes to the base branch before starting
 new lanes; a local commit alone is not enough.

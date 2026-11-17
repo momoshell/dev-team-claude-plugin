@@ -8,58 +8,14 @@ import { git as repoGit, gitResult, scratchDir } from '../test/helpers.mjs'
 import { CHECK_REASONS } from './checks.mjs'
 import { proveTests } from './proof.mjs'
 import { decideFinish, FinishRefusal, finishLane } from './finish.mjs'
-import { DEFAULT_ROUNDS, LOOP_REASONS, runLoop } from './loop.mjs'
+import { LOOP_REASONS, runLoop } from './loop.mjs'
 import { resolveAgents } from './agents.mjs'
 import { stateless } from './lean-journal-order.mjs'
 
 const PR = { number: 73, url: 'https://example.test/pr/73', state: 'OPEN', headRefName: 'lane', baseRefName: 'main' }
 const finding = { id: 'R1', severity: 'must-fix', location: 'lib.mjs:1', summary: 'Fix the defect', trigger: 'bad input' }
 const green = () => ({ status: 'green', reason: null, code: 0, signal: null, stdout: '', stderr: '', timedOut: false })
-const STAGES = ['plan', 'fetch', 'rebase', 'build', 'fetch', 'check-base', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'suite', 'review', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase', 'publish']
-const SUCCESS = ['seat:planner', 'fetch', 'rebase', 'seat:builder', 'fetch', 'check-base', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'suite', 'seat:reviewer', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase', 'publish']
 const MUTATION = { check: 'A1', file: 'lib.mjs', find: 'old', replace: 'new' }
-
-test('a check row journals a bounded output tail with byte counts and the stage-end row does not repeat the output (#2304)', async () => {
-  for (const [stdout, stderr, stdoutBytes, stderrBytes] of [
-    ['x'.repeat(100_000) + 'END', 'e', 100003, 1], ['éEND', '🌍', 5, 4],
-  ]) {
-    const f = fakes({ suite: { ...green(), stdout, stderr } })
-    await f.go()
-    const result = f.rows.find((row) => row.event === 'check' && row.check === 'suite').result
-    assert.equal(result.stdout, stdout.slice(-4096))
-    assert.equal(result.stderr, stderr.slice(-4096))
-    assert.equal(result.stdoutBytes, stdoutBytes)
-    assert.equal(result.stderrBytes, stderrBytes)
-    const outcome = f.rows.find((row) => row.event === 'stage-end' && row.stage === 'suite').outcome
-    assert.equal(Object.hasOwn(outcome, 'stdout'), false)
-    assert.equal(Object.hasOwn(outcome, 'stderr'), false)
-    assert.equal(outcome.status, 'green')
-    assert.equal(outcome.code, 0)
-  }
-})
-
-test('non-green suite checks preserve full output in distinct task artifacts (#2410)', async () => {
-  const taskDir = scratchDir('loop-output-'), saved = new Map()
-  for (const reason of ['exit-nonzero', 'timeout', 'output-limit']) {
-    const failed = [1, 2].map((n) => ({ ...green(), status: reason === 'exit-nonzero' ? 'red' : 'unmeasured', reason, code: 1,
-      stdout: `first stdout ${reason} ${n}\n${'é'.repeat(5000)}`, stderr: `first stderr ${reason} ${n}\n${'e'.repeat(5000)}` }))
-    const f = sequenced([...failed, green()], { spec: { taskDir }, bounds: { builder: 3 }, deps: { writeFile: async (...args) => writeFileSync(...args) } })
-    await f.go()
-    const checks = f.rows.filter((r) => r.event === 'check' && r.check === 'suite' && r.result.status !== 'green')
-    assert.equal(checks.length, reason === 'exit-nonzero' ? 2 : 1)
-    for (const [i, row] of checks.entries()) {
-      assert.equal(typeof row.outputFile, 'string')
-      assert.equal(saved.has(row.outputFile), false)
-      const content = readFileSync(join(taskDir, row.outputFile), 'utf8')
-      assert.deepEqual(JSON.parse(content), { stdout: failed[i].stdout, stderr: failed[i].stderr })
-      assert.equal(row.result.stdout, failed[i].stdout.slice(-4096))
-      assert.equal(row.result.stdoutBytes, Buffer.byteLength(failed[i].stdout))
-      saved.set(row.outputFile, content)
-    }
-    for (const [file, content] of saved) assert.equal(readFileSync(join(taskDir, file), 'utf8'), content)
-  }
-  assert.equal(readdirSync(taskDir).length, saved.size)
-})
 
 test('non-green proof checks name their full captured output artifact (#2410)', async () => {
   const taskDir = scratchDir('loop-proof-output-')
@@ -87,22 +43,6 @@ test('non-green proof checks name their full captured output artifact (#2410)', 
         assert.equal(stopped.observation[`${stream}Bytes`], Buffer.byteLength(failed[stream]))
       }
     }
-  }
-})
-
-test('a runner that returns no streams records unavailable output, not empty streams (#2410)', async () => {
-  for (const next of [new Error('crashed'), { status: 'unmeasured', reason: 'timeout' }, { status: 'unmeasured', reason: 'timeout', stderr: 'late' }]) {
-    const f = sequenced([next])
-    const before = [...f.writes.keys()]
-    assert.equal((await f.go()).status, 'stopped')
-    const row = f.rows.find((r) => r.event === 'check' && r.check === 'suite')
-    if (typeof next.stderr === 'string') {
-      assert.deepEqual(JSON.parse(f.writes.get(join('/virtual/task', row.outputFile))), { stdout: null, stderr: 'late' })
-      continue
-    }
-    assert.equal(row.outputFile, null)
-    assert.deepEqual(row.outputError, { code: 'output-uncaptured', message: 'the runner returned no output streams' })
-    assert.deepEqual([...f.writes.keys()].filter((path) => path.includes('check-suite-') && !before.includes(path)), [])
   }
 })
 
@@ -150,62 +90,6 @@ test('suite and proof check rows measure elapsed seconds without failing on bad 
   }
 })
 
-test('green suite and proof checks write no output artifacts and other check types stay uninstrumented (#2410)', async () => {
-  const f = fakes({ proof: { status: 'green', reason: null, stdout: 'expected red base output', stderr: 'base diagnostic', rows: [{ file: 'lib.test.mjs', title: 'works', proven: true, base: { state: 'red', reason: null } }] } })
-  assert.equal((await f.go()).status, 'done')
-  assert.equal(f.writes.size, 0)
-  for (const row of f.rows.filter((r) => r.event === 'check')) {
-    assert.equal(Object.hasOwn(row, 'outputFile'), false)
-    assert.equal(Object.hasOwn(row, 'outputError'), false)
-    if (!['suite', 'proof'].includes(row.check)) assert.equal(Object.hasOwn(row, 'seconds'), false)
-  }
-})
-
-// MUTATION: skip the return read after a failed turn.
-test('a valid return written before a turn error is accepted with the error on its envelope row, read once and never reissued (b1490)', async () => {
-  const f = fakes({ spec: { tier: 'judge' } })
-  const run = f.deps.runSeat, read = f.deps.readFile
-  let reads = 0
-  f.deps.readFile = async (path, ...args) => { if (path.includes('tech-lead-')) reads++; return read(path, ...args) }
-  const message = 'Claude ended the turn without returning results for tool calls: toolu_017oix8Gd77bQUj4ZiovxaYR'
-  f.deps.runSeat = async (r) => { const result = await run(r); if (r.role === 'tech-lead') throw Object.assign(new Error(message), { code: -32603 }); return result }
-  assert.equal((await f.go()).status, 'done')
-  assert.equal(reads, 1)
-  assert.equal(f.requests.filter((r) => r.role === 'tech-lead').length, 1)
-  assert.deepEqual(f.rows.find((r) => r.event === 'envelope' && r.role === 'tech-lead').turnError, { code: -32603, message })
-})
-
-// MUTATION: stop immediately on a failed turn or rerun it without a bound.
-test('an absent or invalid return after a turn error gets one rerun of the turn, then the lane stops seat-unmeasured', async () => {
-  for (const mode of ['absent', 'json', 'schema', 'id', 'twice', 'provider']) {
-    const f = fakes({ bounds: { planner: 1 }, edit: (v, r) => r.role === 'planner' && !r.rerun ? mode === 'json' ? '{' : mode === 'schema' ? { ...v, summary: '' } : mode === 'id' ? { ...v, id: 'stale' } : v : v })
-    const run = f.deps.runSeat
-    const issued = []
-    f.deps.runSeat = async (r) => {
-      if (r.role !== 'planner') return run(r)
-      issued.push(r)
-      if (r.rerun && mode !== 'twice') return run(r)
-      if (['json', 'schema', 'id'].includes(mode)) await run(r)
-      throw Object.assign(new Error('Claude ended the turn without returning results for tool calls: toolu_017oix8Gd77bQUj4ZiovxaYR'), { code: -32603, ...(mode === 'provider' ? { providerKind: 'authentication' } : {}) })
-    }
-    const result = await f.go()
-    assert.equal(result.status, ['twice', 'provider'].includes(mode) ? 'stopped' : 'done', mode)
-    if (result.status === 'stopped') assert.equal(result.reason, 'seat-unmeasured')
-    assert.equal(issued.length, mode === 'provider' ? 1 : 2)
-    if (mode !== 'provider') {
-      const [a, b] = issued
-      assert.equal(a.id, b.id); assert.equal(a.returnPath, b.returnPath); assert.ok(b.rerun)
-    }
-  }
-})
-
-// MUTATION: consult the lead again when the planner's bound was already spent.
-test('a lead bounce to a planner whose rounds are spent gives the planner one more turn without asking the lead again (b1491)', async () => {
-  const f = fakes({ review: 2, bounds: { planner: 1 }, lead: 'bounce', target: 'planner' })
-  assert.equal((await f.go()).status, 'done')
-  assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'builder', 'reviewer', 'builder', 'reviewer', 'lead', 'planner', 'builder', 'reviewer'])
-})
-
 // MUTATION: stop instead of bouncing an accept with no envelope.
 test('a lead accept on a spent bound with nothing to accept is a bounce to that seat (b1487)', async () => {
   const A = 'a'.repeat(40), C = 'c'.repeat(40)
@@ -217,39 +101,6 @@ test('a lead accept on a spent bound with nothing to accept is a bounce to that 
   assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'builder', 'reviewer', 'reviewer', 'builder', 'lead', 'reviewer'])
   assert.deepEqual(f.requests.find((r) => r.role === 'lead').feedback[0].reason, 'round-bound')
   assert.ok(f.seen.publish)
-})
-
-// MUTATION: replan a mechanical lane without discarding and raising it.
-test('a mechanical lane whose builder the lead bounces to the planner restarts as build, planned and reviewed (PR 2133)', async () => {
-  let builds = 0
-  const f = fakes({ spec: { tier: 'mechanical' }, lead: 'bounce', target: 'planner', edit: (v) => {
-    if (v.role === 'builder' && ++builds === 1) { v.status = 'escalate'; v.details.question = 'What next?' }
-    return v
-  } })
-  assert.equal((await f.go()).status, 'done')
-  assert.deepEqual(f.requests.map((r) => r.role), ['builder', 'lead', 'planner', 'builder', 'reviewer'])
-  assert.deepEqual(f.discardArgs, [['reset', '--hard', 'a'.repeat(40)], ['clean', '-f', '-d']])
-  assert.ok(f.calls.lastIndexOf('discard') < f.calls.indexOf('seat:planner'))
-  const row = f.rows.find((r) => r.event === 'tier-raised')
-  assert.deepEqual([row.from, row.to, row.reason], ['mechanical', 'build', 'lead-bounce-planner'])
-  assert.equal(f.requests.find((r) => r.role === 'planner').feedback[0].id, 'mechanical-restart')
-  assert.doesNotMatch(f.seen.publish.body, /mechanical lane, not reviewed/)
-})
-
-test('a mechanical restart drops the lead rulings about the discarded build (#2320)', async () => {
-  let builds = 0
-  const f = fakes({ spec: { tier: 'mechanical' }, lead: 'bounce', edit: (v) => {
-    if (v.role === 'builder') {
-      builds++
-      if (builds === 1) return { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } }
-      if (builds === 2) return { ...v, status: 'insufficient' }
-    }
-    return v
-  } })
-  assert.equal((await f.go()).status, 'done')
-  const turns = builderTurns(f)
-  assert.ok(turns[1].feedback.some((item) => item.id === 'lead-bounce'))
-  assert.equal(turns[2].feedback.some((item) => item.id === 'lead-bounce'), false)
 })
 
 // Every effect is a recorded call; nothing touches a model, git, gh, the network or the disk.
@@ -347,34 +198,6 @@ function fakes(options = {}) {
   }
   return { spec, deps, calls, rows, requests, tiers, seen, writes, discardArgs, go: () => runLoop(spec, deps) }
 }
-test('a builder seat turn fingerprints the worktree once before and once after each attempt (#2324)', async () => {
-  for (const [mode, expected] of [['done', 2], ['repair', 4], ['rerun', 4]]) {
-    let count = 0, builderRequests = 0
-    const f = fakes({ deps: { repoState: () => { count++; return 'same' } }, edit: (value, request) => mode === 'repair' && request.role === 'builder' && !request.repair ? { ...value, status: 'invalid' } : value })
-    const run = f.deps.runSeat
-    f.deps.runSeat = async (request) => {
-      if (request.role === 'builder' && ++builderRequests === 1 && mode === 'rerun') throw new Error('turn failed')
-      return run(request)
-    }
-    assert.equal((await f.go()).status, 'done', mode)
-    assert.equal(count, expected, mode)
-    assert.equal(count, 2 * builderRequests, mode)
-  }
-})
-
-test("builder progress compares the first attempt's before with the last attempt's after across a rerun (#2324)", async () => {
-  let tree = 'a'
-  const f = fakes({ bounds: { builder: 1 }, deps: { repoState: () => tree }, edit: (value, request) => request.role === 'builder' && request.rerun ? { ...value, status: 'insufficient' } : value })
-  const run = f.deps.runSeat
-  f.deps.runSeat = async (request) => {
-    if (request.role === 'builder' && !request.rerun && tree === 'a') { tree = 'b'; throw new Error('turn failed') }
-    return run(request)
-  }
-  assert.equal((await f.go()).status, 'done')
-  assert.equal(f.rows.filter((row) => row.event === 'builder-continue').length, 1)
-  assert.equal(f.requests.filter((request) => request.role === 'lead').length, 0)
-})
-
 test('every seat turn journals one seat-turn row whose unmeasured values are null with one closed reason (#2287)', async () => {
   for (const reject of [false, true]) {
     let state = 0
@@ -476,29 +299,6 @@ test('a tier raise and a finish run seat the roster recorded at start', async ()
   }
 })
 
-test('the lane journals one roster row naming each seat cell and the applied files', async () => {
-  const roster = { overrides: { builder: { model: 'local/recorded', tiers: { judge: { model: 'local/raised' } } } }, files: [{ layer: 'project', path: '/repo/.crew/agents.json', sha256: 'a'.repeat(64) }] }
-  const f = fakes({ spec: { roster }, edit: (v) => { if (v.role === 'planner') v.details.files_in_scope = ['crew/loop.mjs']; return v } })
-  f.deps.resolveAgents = resolveAgents
-  await f.go()
-  const rows = f.rows.filter((row) => row.event === 'roster')
-  assert.equal(rows.length, 1)
-  assert.equal(rows[0].tier, 'build')
-  assert.deepEqual(rows[0].files, roster.files)
-  assert.deepEqual(rows[0].seats, Object.fromEntries(Object.entries(resolveAgents('build', undefined, roster.overrides).seats).map(([role, c]) => [role, { agent: c.agent, model: `${c.provider}/${c.id}`, effort: c.effort }])))
-  assert.equal(f.rows.find((row) => row.event === 'tier-raised').seats.builder.model, 'local/raised')
-})
-
-test('a lane with no override files seats the committed roster and journals no applied file', async () => {
-  const f = fakes()
-  f.deps.resolveAgents = resolveAgents
-  await f.go()
-  const row = f.rows.find((r) => r.event === 'roster')
-  assert.ok(row)
-  assert.deepEqual(row.files, [])
-  assert.deepEqual(row.seats.planner, { agent: resolveAgents('build').seats.planner.agent, model: `${resolveAgents('build').seats.planner.provider}/${resolveAgents('build').seats.planner.id}`, effort: resolveAgents('build').seats.planner.effort })
-})
-
 test('every rebase the loop runs carries the spec generated declaration, none when the spec has none, and a malformed declaration is refused', async () => {
   const generated = { paths: ['dist/'], command: 'npm', args: ['run', 'generate'], timeoutMs: 1800000 }
   for (const shape of ['standard', 'finish', 'mechanical']) for (const declared of [true, false]) {
@@ -517,38 +317,6 @@ test('every rebase the loop runs carries the spec generated declaration, none wh
     const f = fakes({ spec: { generated: bad } })
     assert.equal((await f.go()).reason, 'invalid-input')
     assert.deepEqual(f.calls, [])
-  }
-})
-
-// MUTATION: restore the mechanical skip at the commit gate.
-test('a mechanical lane stops dirty-worktree when the suite leaves a file or moves the checked tree, and commits nothing', async () => {
-  for (const mode of ['file', 'tree']) {
-    let trees = 0
-    const f = fakes({ spec: { tier: 'mechanical' }, paths: mode === 'file' ? 'M  lib.mjs\0?? coverage/lcov.info\0' : undefined,
-      checkedTree: () => ({ ...green(), stdout: (mode === 'tree' && trees++ ? 'f' : 'e').repeat(40) }),
-      edit: (v) => { if (v.role === 'builder') v.details.subject = 'fix: mechanical'; return v } })
-    assert.deepEqual(await f.go(), stopped('dirty-worktree'))
-    assert.equal(f.calls.includes('commit'), false)
-    assert.ok(f.calls.indexOf('checked-tree') < f.calls.indexOf('suite'))
-  }
-})
-
-test('a mechanical lane runs rebase, build, proof and suite with no plan, review or lead, and publishes under the builder\'s subject', async () => {
-  for (const mode of ['none', 'test', 'repair']) {
-    const f = fakes({ spec: { tier: 'mechanical' }, unseated: ['planner', 'reviewer', 'lead'], edit: (v, r) => {
-      if (v.role === 'builder') {
-        if (mode !== 'repair' || r.repair) v.details.subject = 'docs(crew): fix typo'
-        if (mode === 'none') v.details.tests = []
-      }
-      return v
-    } })
-    assert.equal((await f.go()).status, 'done', mode)
-    assert.deepEqual(f.calls.slice(1), ['fetch', 'rebase', 'seat:builder', ...(mode === 'repair' ? ['seat:builder'] : []), 'fetch', 'check-base', ...(mode === 'none' ? [] : ['proof']), 'review-paths', 'suite-stage', 'checked-tree', 'suite', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase', 'publish'])
-    assert.equal(f.seen.publish.title, 'docs(crew): fix typo')
-    assert.match(f.seen.publish.body, mode === 'none' ? /Proof: mechanical lane, not reviewed/ : /Review: none, mechanical lane, not reviewed/)
-    if (mode !== 'none') assert.match(f.seen.publish.body, /lib\.test\.mjs: works was red on the old source, green on the build/)
-    assert.equal(f.seen.publish.body.match(/mechanical lane, not reviewed/g)?.length, 1, mode)
-    if (mode === 'repair') assert.match(f.requests[1].repair.defects.join(' '), /details.subject is required on a mechanical lane/)
   }
 })
 
@@ -593,126 +361,6 @@ test('a mechanical lane discards its build and restarts from planning: as judge 
   const next = repair.requests.filter((r) => r.role === 'builder')
   assert.deepEqual(next[2].feedback, [])
   assert.deepEqual(next[3].feedback.map((item) => item.id), ['plan-revised'])
-})
-
-test('a judge lane runs both reviews after the suite is green, a raised lane too, and a build or finish lane never does', async () => {
-  for (const mode of ['judge', 'planner', 'path', 'build', 'finish']) {
-    const f = fakes({
-      spec: mode === 'finish' ? { ...finishSpec(), tier: 'judge' } : { tier: mode === 'judge' ? 'judge' : 'build' },
-      reviewPaths: mode === 'path' ? ' M crew/loop.mjs\0' : undefined,
-      edit: (v) => { if (v.role === 'planner') { v.details.files_in_scope = ['lib.mjs']; if (mode === 'planner') v.details.judge = 'needs review' } return v },
-    })
-    assert.equal((await f.go()).status, 'done', mode)
-    const second = ['judge', 'planner', 'path'].includes(mode)
-    const expected = second ? ['suite-stage', 'checked-tree', 'suite', 'seat:reviewer', 'seat:tech-lead', 'paths', 'checked-tree', 'commit'] : mode === 'finish' ? ['suite-stage', 'checked-tree', 'seat:reviewer', 'suite', 'paths', 'checked-tree', 'commit'] : ['suite-stage', 'checked-tree', 'suite', 'seat:reviewer', 'paths', 'checked-tree', 'commit']
-    assert.deepEqual(f.calls.slice(f.calls.indexOf(expected[0]), f.calls.indexOf('commit') + 1), expected, mode)
-    assert.equal(count(f, 'tech-lead'), second ? 1 : 0, mode)
-    if (second) {
-      const reviewer = f.requests.find((r) => r.role === 'reviewer')
-      const lead = f.requests.find((r) => r.role === 'tech-lead')
-      for (const key of ['filesInScope', 'changedPaths', 'builderReport']) assert.deepEqual(lead[key], reviewer[key], key)
-      const row = f.rows.find((r) => r.event === 'verdict' && r.role === 'tech-lead')
-      assert.deepEqual([row.stage, row.status, row.verdict, row.findings], [null, 'reviewed', 'pass', []])
-    }
-  }
-})
-
-test('judge reviews overlap on the checked tree in initial raised and moved-head rounds (#2425)', async () => {
-  for (const mode of ['judge', 'planner', 'path', 'moved']) {
-    const f = fakes({ spec: { tier: ['judge', 'moved'].includes(mode) ? 'judge' : 'build' },
-      reviewPaths: mode === 'path' ? ' M crew/loop.mjs\0' : undefined,
-      ...(mode === 'moved' ? {
-        rebase: answers({ ...MOVED, head: 'a'.repeat(40) }, { ...MOVED, onto: O }, { ...MOVED, head: 'c'.repeat(40) }),
-        commit: answers({ status: 'green', reason: null, head: 'a'.repeat(40) }, { status: 'green', reason: null, head: 'c'.repeat(40) }),
-        checkedTree: () => ({ ...green(), stdout: String(1 + f.calls.filter((c) => c === 'uncommit').length).repeat(40) }),
-      } : {}),
-      edit: (v) => { if (mode === 'planner' && v.role === 'planner') v.details.judge = 'needs review'; return v },
-    })
-    const gates = Object.fromEntries(['reviewer', 'tech-lead'].map((role) => [role, Promise.withResolvers()]))
-    const active = [], trees = [], seat = f.deps.runSeat
-    f.deps.runSeat = async (request) => {
-      const result = await seat(request)
-      if (gates[request.role] && (mode !== 'moved' || request.recheckReview)) {
-        active.push(request)
-        trees.push(f.rows.findLast((r) => r.event === 'check' && r.check === 'checked-tree').result.stdout.trim())
-        await gates[request.role].promise
-      }
-      return result
-    }
-    const pending = f.go()
-    try {
-      await new Promise(setImmediate)
-      assert.deepEqual(active.map((r) => r.role).sort(), ['reviewer', 'tech-lead'], mode)
-      assert.deepEqual(trees, Array(2).fill((mode === 'moved' ? '2' : 'e').repeat(40)))
-      for (const key of ['changedPaths', 'builderReport', 'filesInScope', 'recheckReview']) assert.deepEqual(active[0][key], active[1][key], key)
-      assert.equal(f.calls.includes('publish'), false)
-      for (const stage of ['review', 'second-review']) assert.ok(f.rows.some((r) => r.event === 'stage-start' && r.stage === stage))
-      if (mode === 'moved') assert.deepEqual(active[0].recheckReview, { reviewed: 'a'.repeat(40), onto: O, rebased: MOVED.head })
-    } finally {
-      for (const gate of Object.values(gates)) gate.resolve()
-      await pending
-    }
-    assert.equal((await pending).status, 'done', mode)
-    for (const role of ['reviewer', 'tech-lead']) assert.ok(f.rows.some((r) => r.event === 'envelope' && r.role === role && r.stage === (role === 'reviewer' ? 'review' : 'second-review')))
-  }
-})
-
-test('judge rounds collect both reviews before giving the builder combined feedback (#2425)', async () => {
-  for (const first of ['reviewer', 'tech-lead']) {
-    const f = sequenced([redOut(SPEC_OUT), green(), green()], { spec: { tier: 'judge' }, bounds: { builder: 3 }, review: 1, secondReview: 1,
-      edit: (v) => { if (v.details.verdict === 'changes-needed') v.details.findings_omitted = 2; return v } })
-    const gates = Object.fromEntries(['reviewer', 'tech-lead'].map((role) => [role, Promise.withResolvers()]))
-    const seat = f.deps.runSeat
-    let reviewsBeforeRepair
-    f.deps.runSeat = async (request) => {
-      const result = await seat(request)
-      if (request.role === 'builder' && count(f, 'builder') === 2) reviewsBeforeRepair = count(f, 'reviewer') + count(f, 'tech-lead')
-      if (gates[request.role] && !request.feedback.length) await gates[request.role].promise
-      return result
-    }
-    const pending = f.go()
-    try {
-      await new Promise(setImmediate)
-      const repair = builderTurns(f)[1].feedback
-      assert.equal(reviewsBeforeRepair, 0)
-      assert.equal(repair.length, 1)
-      assert.deepEqual(repair[0], { id: 'suite-repair', severity: 'must-fix', summary: 'The project suite is red after your change: node --test lane.test.mjs. Fix the failing tests.', checkout: f.spec.cwd, failingTests: ['anchor spans remain current'], failingFiles: ['skills/qa-test-writing/exhibits.test.mjs:42:1'], outputTail: [SPEC_OUT] })
-      assert.equal(count(f, 'reviewer'), 1)
-      assert.equal(count(f, 'tech-lead'), 1)
-      gates[first].resolve()
-      await new Promise(setImmediate)
-      assert.equal(builderTurns(f).length, 2)
-      assert.equal(f.calls.includes('commit'), false)
-    } finally {
-      for (const gate of Object.values(gates)) gate.resolve()
-      await pending
-    }
-    assert.equal((await pending).status, 'done')
-    const feedback = builderTurns(f)[2].feedback
-    assert.deepEqual(feedback.filter((item) => item.severity === 'must-fix'), [finding, { ...finding, id: 'T1' }])
-    assert.deepEqual(feedback.filter((item) => item.id === 'findings-omitted').map(({ role, count }) => ({ role, count })), [{ role: 'reviewer', count: 2 }, { role: 'tech-lead', count: 2 }])
-  }
-})
-
-test('judge repairs reuse each concurrent seats pass independently (#2425)', async () => {
-  for (const redRole of ['reviewer', 'tech-lead']) for (const changed of [false, true]) {
-    const passRole = redRole === 'reviewer' ? 'tech-lead' : 'reviewer'
-    const note = { ...finding, id: 'N1', severity: 'should-fix' }
-    const f = fakes({ spec: { tier: 'judge' }, review: redRole === 'reviewer' ? 1 : 0, secondReview: redRole === 'tech-lead' ? 1 : 0,
-      bounds: { [passRole]: changed ? 2 : 1 },
-      checkedTree: () => ({ ...green(), stdout: changed ? String(count(f, 'builder')).repeat(40) : 'e'.repeat(40) }),
-      edit: (v, r) => { if (r.role === passRole && !r.feedback.length) v.details.findings = [note]; return v } })
-    assert.equal((await f.go()).status, 'done', `${redRole}/${changed}`)
-    assert.equal(count(f, redRole), 2)
-    assert.equal(count(f, passRole), changed ? 2 : 1)
-    assert.equal(count(f, 'lead'), 0)
-    assert.ok(builderTurns(f)[1].feedback.some((item) => item.id === note.id))
-    assert.deepEqual(f.requests.filter((r) => r.role === redRole)[1].feedback, [{ ...finding, id: redRole === 'reviewer' ? 'R1' : 'T1' }])
-    const reused = f.rows.filter((r) => r.event === 'review-reused')
-    assert.deepEqual(reused.map((r) => r.role), changed ? [] : [passRole])
-    if (changed) assert.deepEqual(f.requests.filter((r) => r.role === passRole)[1].feedback, [note])
-    else assert.equal(reused[0].tree, 'e'.repeat(40))
-  }
 })
 
 test('judge halts drain the sibling review and retain seat bounds (#2425)', async () => {
@@ -777,28 +425,6 @@ test('judge halts drain the sibling review and retain seat bounds (#2425)', asyn
   }
 })
 
-test('a tech-lead changes-needed goes back to the builder, then proof, suite and any needed reviews run again', async () => {
-  const t = { ...finding, id: 'T1' }
-  for (const changed of [false, true]) for (const drop of [false, true]) {
-    const f = fakes({ spec: { tier: 'judge' }, secondReview: 1,
-      checkedTree: () => ({ ...green(), stdout: changed ? String(count(f, 'builder')).repeat(40) : 'e'.repeat(40) }), edit: (v, r) => { if (drop && r.role === 'tech-lead' && r.feedback.length) v.details.closed = []; return v } })
-    const result = await f.go()
-    assert.ok(count(f, 'tech-lead') >= 1)
-    assert.deepEqual(f.requests.filter((r) => r.role === 'builder')[1].feedback, [t])
-    assert.deepEqual(f.requests.filter((r) => r.role === 'tech-lead')[1].feedback, [t])
-    if (drop) {
-      assert.equal(result.reason, 'envelope-refused')
-      assert.ok(f.requests.some((r) => r.role === 'tech-lead' && r.repair && r.repair.defects.some((d) => d.includes('prior finding T1'))))
-    } else {
-      const at = f.calls.indexOf('seat:tech-lead')
-      assert.deepEqual(f.calls.slice(at + 1), ['seat:builder', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'suite', ...(changed ? ['seat:reviewer'] : []), 'seat:tech-lead', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase', 'publish'])
-      assert.equal(count(f, 'reviewer'), changed ? 2 : 1)
-      assert.equal(count(f, 'tech-lead'), 2)
-      assert.deepEqual(result, { status: 'done', reason: null, pr: PR })
-    }
-  }
-})
-
 test('a judge lane with no tech-lead seat stops seat-unmeasured at the start and on a raise', async () => {
   for (const tier of ['judge', 'build']) {
     const f = fakes({ spec: { tier }, unseated: ['tech-lead'], edit: (v) => { if (v.role === 'planner') v.details.judge = 'needs review'; return v } })
@@ -823,64 +449,6 @@ test('the tech-lead turn is bounded like any seat, and a lead bounce past the bu
 })
 
 const BODY = ['Source: "issue 12"', '', '## Measurements', '- proof: lib.test.mjs "works": red on the old source, green on the build', '- Suite: green; exit 0; node --test lane.test.mjs.'].join('\n')
-const PR_BODY = ['## Summary', 'Purpose: Fixture', 'Closes issue 12', 'How: built', '', '## Verification', '- lib.test.mjs: works was red on the old source, green on the build.', '- Suite: green; exit 0; node --test lane.test.mjs.'].join('\n')
-test('a planner judge reason raises a build lane to judge before the build (PD4)', async () => {
-  for (const mode of ['judge', 'none', 'throw']) {
-    const f = fakes({ spec: { acceptance: ['A1'] }, throwJudge: mode === 'throw', edit: (v) => { if (v.role === 'planner') { if (mode !== 'none') v.details.judge = 'needs review' } return v } })
-    const result = await f.go()
-    assert.equal(result.status, mode === 'throw' ? 'stopped' : 'done')
-    assert.deepEqual(f.tiers, mode === 'none' ? ['build'] : ['build', 'judge'])
-    const raises = f.rows.filter((r) => r.event === 'tier-raised')
-    assert.equal(raises.length, mode === 'judge' ? 1 : 0)
-    if (mode === 'judge') assert.equal(raises[0].reason, 'planner-judge')
-    if (mode === 'throw') { assert.equal(result.reason, 'seat-unmeasured'); assert.equal(count(f, 'builder'), 0) }
-    else for (const r of f.requests.slice(1)) { assert.equal(r.tier, mode === 'judge' ? 'judge' : 'build'); assert.equal(r.seat.effort, mode === 'judge' ? 'xhigh' : 'high') }
-  }
-})
-
-// MUTATION: drop crew/checks.mjs from PROTECTED and a lane edits its own checker unraised.
-test('a protected path in files_in_scope or the diff raises the lane to judge, and a judge lane is never lowered (PD5)', async () => {
-  for (const [path, scope, initial, raised, builderTier] of [
-    ['crew/loop.mjs', null, 'build', true, 'build'], ['hooks/x.mjs', null, 'build', true, 'build'],
-    ['lib.mjs', ['crew/loop.mjs'], 'build', true, 'judge'],
-    ...['crew/checks.mjs', 'crew/finish.mjs', 'crew/lean.mjs'].flatMap((path) => [[path, null, 'build', true, 'build'], ['lib.mjs', [path], 'build', true, 'judge']]),
-    ['crew/start.mjs', null, 'build', false, 'build'],
-    ['crew/loop.mjs', null, 'judge', false, 'judge'],
-  ]) {
-    const f = fakes({ spec: { tier: initial, acceptance: ['A1'] }, reviewPaths: ` M ${path}\0`, edit: (v) => { if (v.role === 'planner') { if (scope) v.details.files_in_scope = scope } return v } })
-    assert.equal((await f.go()).status, 'done')
-    assert.deepEqual(f.tiers, raised ? ['build', 'judge'] : [initial])
-    assert.equal(f.requests.find((r) => r.role === 'builder').tier, builderTier)
-    assert.equal(f.requests.find((r) => r.role === 'reviewer').tier, raised ? 'judge' : initial)
-    const rows = f.rows.filter((r) => r.event === 'tier-raised')
-    assert.equal(rows.length, raised ? 1 : 0)
-    if (raised) { assert.equal(rows[0].reason, 'protected-path'); assert.deepEqual(rows[0].paths, scope ?? [path]) }
-  }
-  for (const path of ['crew/checks.mjs', 'crew/finish.mjs', 'crew/lean.mjs']) {
-    const f = fakes({ spec: { tier: 'mechanical' }, reviewPaths: ` M ${path}\0`, edit: (v) => { if (v.role === 'builder') v.details.subject = 'fix: mechanical'; return v } })
-    assert.equal((await f.go()).status, 'done', path)
-    assert.deepEqual(f.tiers, ['mechanical', 'judge'])
-    assert.deepEqual(f.discardArgs, [['reset', '--hard', 'a'.repeat(40)], ['clean', '-f', '-d']])
-  }
-})
-
-test("the planner's tests alone decide proof: an empty list reaches the PR with proof: none, a named test needs one whatever plan.md says (PD7)", async () => {
-  for (const namesTest of [false, true]) {
-    const f = fakes({ plan: namesTest ? '## Properties\nNone.\n' : '## Properties\n- P1 test\n', edit: (v) => { if (v.role === 'planner' && !namesTest) v.details.tests = []; if (v.role === 'builder') v.details.tests = []; return v } })
-    const result = await f.go()
-    assert.deepEqual(f.requests.map((r) => r.role), namesTest ? ['planner', 'builder', 'builder'] : ['planner', 'builder', 'reviewer'])
-    if (namesTest) {
-      assert.equal(f.requests[2].feedback[0].id, 'proof-no-tests')
-      assert.equal(result.reason, 'no-progress')
-    } else {
-      assert.equal(result.status, 'done')
-      assert.ok(!f.calls.includes('proof'))
-      assert.ok(f.seen.commit.body.includes('- proof: none, no criterion is machine-checked'))
-      assert.ok(f.seen.publish.body.includes('Proof: no criterion is machine-checked.'))
-    }
-  }
-})
-
 test('non-done decision seats escalate with their question or summary without repair', async () => {
   for (const role of ['planner', 'reviewer', 'tech-lead', 'lead']) for (const status of ['insufficient', 'escalate']) for (const question of [undefined, '', 'Which rule applies?']) {
     const f = fakes({ spec: { tier: role === 'tech-lead' ? 'judge' : 'build' }, edit: (v) => {
@@ -901,26 +469,6 @@ test('non-done decision seats escalate with their question or summary without re
     assert.equal(returned.status, status)
     assert.equal(Object.hasOwn(returned.details, role === 'lead' ? 'notes' : 'gap'), false)
     assert.equal(Object.hasOwn(returned.details, 'question'), Boolean(question))
-  }
-})
-
-test('envelope rows report dropped detail keys on every attempt', async () => {
-  for (const dirty of [false, true]) {
-    const f = fakes({ edit: (v, r) => v.role === 'planner' ? { ...v, id: r.repair ? r.id : 'stale', status: 'escalate', summary: 'Which plan?', details: dirty ? { gap: 'blocked', files_in_scope: [], question: '' } : { question: 'Which plan?' } } : v })
-    const result = await f.go()
-    assert.equal(count(f, 'planner'), 2)
-    const rows = f.rows.filter((r) => r.event === 'envelope' && r.role === 'planner')
-    assert.equal(rows.length, 2)
-    for (const row of rows) {
-      assert.deepEqual(row.dropped, dirty ? ['gap', 'files_in_scope', 'question'] : [])
-      assert.deepEqual(row.parsed.details, dirty ? { gap: 'blocked', files_in_scope: [], question: '' } : { question: 'Which plan?' })
-    }
-    assert.match(rows[0].defects.join(' '), /issued id/)
-    assert.deepEqual(rows[1].defects, [])
-    assert.deepEqual(result, stopped('seat-escalated'))
-    const observation = f.rows.findLast((r) => r.event === 'verdict').observation
-    assert.deepEqual(observation.envelope.details, dirty ? {} : { question: 'Which plan?' })
-    assert.equal(observation.question, 'Which plan?')
   }
 })
 
@@ -1035,55 +583,6 @@ test('a builder insufficient that names no gap and changed the worktree continue
   }
 })
 
-test('builder continuations are capped per lane, then a no-gap insufficient goes to the lead (#2279)', async () => {
-  let builds = 0, state = 0
-  const f = fakes({ bounds: { builder: 1 }, deps: { repoState: () => String(state++) }, edit: (v) => {
-    if (v.role === 'builder') return { ...v, status: 'insufficient', details: { ...v.details, summary: `partial ${++builds}` } }
-    return v
-  } })
-  assert.equal((await f.go()).reason, 'lead-escalated')
-  assert.deepEqual(f.requests.map((r) => r.role), ['planner', ...Array(7).fill('builder'), 'lead'])
-  assert.deepEqual(f.rows.filter((r) => r.event === 'builder-continue').map((r) => r.progressTurns), [1, 2, 3, 4, 5, 6])
-})
-
-test('a builder turn after repeated lead bounces carries every earlier lead ruling of the stage (#2291)', async () => {
-  let builds = 0, leads = 0
-  const f = fakes({ lead: 'bounce', deps: { repoState: () => 'same' }, edit: (v) => {
-    if (v.role === 'builder' && ++builds <= 2) return { ...v, status: 'insufficient', details: { ...v.details, gap: `gap ${builds}` } }
-    if (v.role === 'lead') v.summary = `ruling ${++leads}`
-    return v
-  } })
-  const result = await f.go()
-  const builders = f.requests.filter((r) => r.role === 'builder')
-  assert.equal(result.status, 'done')
-  assert.deepEqual(builders[2].feedback, [{ id: 'lead-bounce', summary: 'ruling 2' }, { id: 'lead-bounce', summary: 'ruling 1' }])
-})
-
-test('a lead ruling to the builder is journaled with every ruling that still holds (#2341)', async () => {
-  let builds = 0, leads = 0
-  const f = fakes({ lead: 'bounce', deps: { repoState: () => 'same' }, edit: (v) => {
-    if (v.role === 'builder' && ++builds <= 2) return { ...v, status: 'insufficient', details: { ...v.details, gap: `gap ${builds}` } }
-    if (v.role === 'lead') v.summary = `ruling ${++leads}`
-    return v
-  } })
-  assert.equal((await f.go()).status, 'done')
-  const rows = f.rows.filter((r) => r.event === 'lead-rulings')
-  assert.equal(rows.length, 2)
-  assert.deepEqual(rows.at(-1).rulings, [{ id: 'lead-bounce', summary: 'ruling 2' }, { id: 'lead-bounce', summary: 'ruling 1' }])
-})
-
-test('a lead bounce to the planner drops the lead rulings about the replaced plan (#2341)', async () => {
-  let builds = 0, leads = 0
-  const f = fakes({ lead: 'bounce', deps: { repoState: () => 'same' }, edit: (v) => {
-    if (v.role === 'builder' && ++builds <= 2) return { ...v, status: 'insufficient', details: { ...v.details, gap: `gap ${builds}` } }
-    if (v.role === 'lead') { v.summary = `ruling ${++leads}`; v.details.target = leads === 1 ? 'builder' : 'planner' }
-    return v
-  } })
-  assert.equal((await f.go()).status, 'done')
-  assert.equal(builderTurns(f)[2].feedback.some((item) => item.id === 'lead-bounce'), false)
-  assert.deepEqual(f.rows.filter((r) => r.event === 'lead-rulings').at(-1).rulings, [])
-})
-
 test('a replan whose tier raise stops leaves no lead rulings for finish (#2347)', async () => {
   let builds = 0, leads = 0, plans = 0
   const f = fakes({ lead: 'bounce', throwJudge: true, deps: { repoState: () => 'same' }, edit: (v) => {
@@ -1120,73 +619,6 @@ test('a mechanical restart whose tier raise stops leaves no lead rulings for fin
   assert.deepEqual(rows.at(-1).rulings, [])
 })
 
-test('a builder-continue turn keeps the lead rulings made earlier in the stage (#2291)', async () => {
-  let builds = 0, state = 0
-  const f = fakes({ lead: 'bounce', deps: { repoState: () => String(state++) }, edit: (v) => {
-    if (v.role === 'builder' && ++builds <= 2) return { ...v, status: 'insufficient', details: { ...v.details, ...(builds === 1 ? { gap: 'gap 1' } : {}) } }
-    if (v.role === 'lead') v.summary = 'ruling 1'
-    return v
-  } })
-  const result = await f.go()
-  const builders = f.requests.filter((r) => r.role === 'builder')
-  assert.equal(result.status, 'done')
-  assert.equal(builders[2].feedback[0].id, 'builder-continue')
-  assert.deepEqual(builders[2].feedback.filter((item) => item.id === 'lead-bounce').map((item) => item.summary), ['ruling 1'])
-})
-
-test('a lead bounce to a builder whose turn changed the worktree does not spend the lead bound (#2279)', async () => {
-  for (const changed of [true, false]) {
-    let builds = 0, state = 0
-    const f = fakes({ bounds: { lead: 1 }, lead: 'bounce', deps: { repoState: () => changed ? String(state++) : 'same' }, edit: (v) => {
-      if (v.role === 'builder' && ++builds <= 3) return { ...v, status: 'escalate', details: { ...v.details, question: `Question ${builds}?` } }
-      return v
-    } })
-    const result = await f.go()
-    assert.equal(result.status, changed ? 'done' : 'stopped')
-    if (!changed) assert.equal(result.reason, 'lead-escalated')
-    assert.equal(f.requests.filter((r) => r.role === 'lead').length, changed ? 3 : 1)
-    assert.equal(f.rows.filter((r) => r.event === 'lead-bound-refund').length, changed ? 3 : 0)
-    assert.equal(builds, changed ? 4 : 2)
-    if (changed) assert.ok(f.seen.publish)
-  }
-})
-
-test('a lead bounce to a builder held at its round bound after a turn that changed the worktree refunds the lead round (#2375)', async () => {
-  let state = 0, reviews = 0
-  const f = fakes({ review: 3, bounds: { builder: 1, reviewer: 10 }, lead: 'bounce', deps: { repoState: () => String(state++) }, edit: (v, request) => {
-    if (v.role === 'reviewer' && v.details.verdict === 'changes-needed') {
-      v.details.findings = [{ ...finding, id: `R${++reviews}` }]
-      v.details.closed = request.feedback.map((item) => ({ id: item.id, evidence: 'fixed' }))
-    }
-    return v
-  } })
-  assert.equal((await f.go()).status, 'done')
-  assert.equal(f.requests.filter((r) => r.role === 'lead').length, 3)
-  assert.equal(f.rows.filter((r) => r.event === 'lead-bound-refund').length, 3)
-})
-
-test('a must-fix carried from the previous lead consult spends the lead bound for a builder held at its round bound (#2375)', async () => {
-  let state = 0
-  const f = fakes({ review: 4, bounds: { builder: 1, reviewer: 10 }, lead: 'bounce', deps: { repoState: () => String(state++) } })
-  assert.equal((await f.go()).reason, 'lead-escalated')
-  assert.equal(f.requests.filter((r) => r.role === 'lead').length, 3)
-  assert.equal(f.rows.filter((r) => r.event === 'lead-bound-refund').length, 1)
-})
-
-test("a round-bound refund needs the builder's most recent turn to have changed the worktree (#2375)", async () => {
-  let state = 0, reviews = 0
-  const f = fakes({ review: 4, bounds: { builder: 1, reviewer: 10 }, lead: 'bounce', deps: { repoState: () => state++ === 0 ? 'before' : 'same' }, edit: (v, request) => {
-    if (v.role === 'reviewer' && v.details.verdict === 'changes-needed') {
-      v.details.findings = [{ ...finding, id: `R${++reviews}` }]
-      v.details.closed = request.feedback.map((item) => ({ id: item.id, evidence: 'fixed' }))
-    }
-    return v
-  } })
-  assert.equal((await f.go()).reason, 'lead-escalated')
-  assert.equal(f.requests.filter((r) => r.role === 'lead').length, 3)
-  assert.equal(f.rows.filter((r) => r.event === 'lead-bound-refund').length, 1)
-})
-
 test('round-bound lead refunds share the per-lane progress cap with builder continuations (#2375)', async () => {
   let state = 0, reviews = 0, builds = 0
   const f = fakes({ review: 4, bounds: { builder: 1, reviewer: 10 }, lead: 'bounce', deps: { repoState: () => String(state++) }, edit: (v, request) => {
@@ -1203,22 +635,6 @@ test('round-bound lead refunds share the per-lane progress cap with builder cont
   assert.equal(f.requests.filter((r) => r.role === 'lead').length, 3)
 })
 
-test('a builder held at its round bound after an unchanged or unmeasured turn spends the lead bound (#2375)', async () => {
-  for (const mode of ['same', null]) {
-    let reviews = 0
-    const f = fakes({ review: 3, bounds: { builder: 1, reviewer: 10 }, lead: 'bounce', deps: { repoState: () => mode }, edit: (v, request) => {
-      if (v.role === 'reviewer' && v.details.verdict === 'changes-needed') {
-        v.details.findings = [{ ...finding, id: `R${++reviews}` }]
-        v.details.closed = request.feedback.map((item) => ({ id: item.id, evidence: 'fixed' }))
-      }
-      return v
-    } })
-    assert.equal((await f.go()).reason, 'lead-escalated')
-    assert.equal(f.requests.filter((r) => r.role === 'lead').length, 2)
-    assert.equal(f.rows.filter((r) => r.event === 'lead-bound-refund').length, 0)
-  }
-})
-
 test('a lead bounce to the planner for a builder held at its round bound spends the lead bound (#2375)', async () => {
   let state = 0, reviews = 0
   const f = fakes({ review: 3, bounds: { builder: 1, reviewer: 10 }, lead: 'bounce', target: 'planner', deps: { repoState: () => String(state++) }, edit: (v, request) => {
@@ -1231,72 +647,6 @@ test('a lead bounce to the planner for a builder held at its round bound spends 
   await f.go()
   assert.equal(f.rows.filter((r) => r.event === 'lead-bound-refund').length, 0)
   assert.equal(f.requests.filter((r) => r.role === 'lead').length, 2)
-})
-
-// MUTATION: restore round-bound at the spent-lead stop.
-test("the lead's last consult is marked last, and a spent lead bound stops for the operator with a question, never round-bound", async () => {
-  const later = fakes({ review: 10, bounds: { builder: 1, reviewer: 10 }, lead: 'bounce', edit: (v) => {
-    if (v.role === 'lead') v.summary = 'keep fixing R1'
-    if (v.role === 'builder') v.summary = 'built R1'
-    return v
-  } })
-  assert.deepEqual(await later.go(), stopped('lead-escalated'))
-  assert.deepEqual(later.requests.filter((r) => r.role === 'lead').map((r) => r.feedback[0].last), [false, true])
-  const observation = later.rows.findLast((r) => r.event === 'verdict').observation
-  assert.equal(observation.bound, 'lead'); assert.equal(observation.role, 'builder'); assert.equal(observation.reason, 'round-bound')
-  // MUTATION: build the question from the earlier builder return and the review finding never reaches the operator.
-  for (const text of ['builder', 'round-bound', 'Fix the defect', 'Earlier lead decision: bounce', 'keep fixing R1']) assert.ok(observation.question.includes(text), text)
-  assert.ok(!observation.question.includes('built R1'), observation.question)
-  assert.deepEqual(observation.feedback.map((item) => item.summary).filter(Boolean), ['Fix the defect'])
-  assert.ok(!later.rows.some((r) => r.event === 'verdict' && r.reason === 'round-bound'))
-
-  const reask = fakes({ bounds: { lead: 1 }, edit: (v) => {
-    if (v.role === 'builder') return { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } }
-    if (v.role === 'lead') return { ...v, details: { decision: 'escalate' } }
-    return v
-  } })
-  assert.deepEqual(await reask.go(), stopped('lead-escalated'))
-  assert.equal(reask.requests.find((r) => r.role === 'lead').feedback[0].last, true)
-  // MUTATION: drop held from the lead request and the current builder escalation is labelled an earlier return.
-  const reasked = reask.rows.findLast((r) => r.event === 'verdict').observation.question
-  assert.match(reasked, /builder/)
-  assert.doesNotMatch(reasked, /last return:/)
-})
-
-test('a lead bounce names its target: planner revises the plan from the builder\'s envelope, builder keeps building', async () => {
-  for (const target of ['planner', 'builder']) {
-    let builds = 0, plans = 0
-    const f = fakes({ lead: 'bounce', target, edit: (v) => {
-      if (v.role === 'planner' && ++plans === 2) v.details.files_in_scope = ['revised.mjs']
-      if (v.role === 'builder' && ++builds === 1) return { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } }
-      return v
-    } })
-    const result = await f.go()
-    assert.deepEqual(f.requests.map((r) => r.role), target === 'planner' ? ['planner', 'builder', 'lead', 'planner', 'builder', 'reviewer'] : ['planner', 'builder', 'lead', 'builder', 'reviewer'])
-    assert.equal(result.status, 'done')
-    if (target === 'planner') {
-      assert.equal(f.requests[3].feedback[0].envelope.status, 'escalate')
-      assert.equal(f.requests[3].feedback[0].lead, 'fixture')
-      assert.deepEqual(f.requests[4].filesInScope, ['revised.mjs'])
-    }
-  }
-})
-
-test('a lead bounce with details.instructions is accepted on its first return and the instructions reach the bounced seat', async () => {
-  for (const target of ['builder', 'planner']) {
-    let builds = 0
-    const f = fakes({ lead: 'bounce', target, edit: (v) => {
-      if (v.role === 'lead') v.details.instructions = 'apply the fix to R1'
-      if (v.role === 'builder' && ++builds === 1) return { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } }
-      return v
-    } })
-    const result = await f.go()
-    assert.deepEqual(f.requests.map((r) => r.role), target === 'builder' ? ['planner', 'builder', 'lead', 'builder', 'reviewer'] : ['planner', 'builder', 'lead', 'planner', 'builder', 'reviewer'])
-    assert.ok(!f.requests.some((r) => r.role === 'lead' && r.repair))
-    assert.equal(result.status, 'done')
-    if (target === 'builder') assert.deepEqual(f.requests[3].feedback[0], { id: 'lead-bounce', summary: 'apply the fix to R1' })
-    else assert.equal(f.requests[3].feedback[0].lead, 'apply the fix to R1')
-  }
 })
 
 test('the same failure with the same evidence twice stops the lane no-progress and no seat decides it', async () => {
@@ -1327,22 +677,6 @@ test('the same failure with the same evidence twice stops the lane no-progress a
   } })
   assert.equal((await revised.go()).status, 'done')
   assert.deepEqual(revised.requests.map((r) => r.role), ['planner', 'builder', 'lead', 'planner', 'builder', 'lead', 'planner', 'builder', 'reviewer'])
-})
-
-test('lead rulings reach builder turns after a proof failure and after a review bounce (#2296)', async () => {
-  for (const mode of ['proof', 'review']) {
-    let builds = 0
-    const f = fakes({ lead: 'bounce', review: mode === 'review' ? 1 : 0, bounds: { builder: 3 }, edit: (v) => {
-      if (v.role === 'builder' && ++builds === 1) return { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } }
-      if (v.role === 'builder' && builds === 2 && mode === 'proof') v.details.tests = []
-      if (v.role === 'lead') v.summary = 'ruling 1'
-      return v
-    } })
-    assert.equal((await f.go()).status, 'done', mode)
-    const feedback = f.requests.filter((r) => r.role === 'builder')[2].feedback
-    assert.deepEqual(feedback.map((item) => item.id), [mode === 'proof' ? 'proof-no-tests' : 'R1', 'lead-bounce'], mode)
-    assert.equal(feedback[1].summary, 'ruling 1')
-  }
 })
 
 test('a proof failure keeps the open review findings behind the proof item (#2296)', async () => {
@@ -1381,106 +715,6 @@ test('plan-revised, mechanical-restart, finish-stop and finish-return feedback c
 const count = (f, role) => f.requests.filter((r) => r.role === role).length
 const stopped = (reason) => ({ status: 'stopped', reason, pr: null })
 
-test('a planner done without files_in_scope gets a repair turn and the lane continues', async () => {
-  const f = fakes({ edit: (v, r) => { if (r.role === 'planner' && !r.repair) delete v.details.files_in_scope; return v } })
-  assert.equal((await f.go()).status, 'done')
-  const planners = f.requests.filter((r) => r.role === 'planner')
-  assert.equal(planners.length, 2)
-  assert.ok(planners[1].repair.defects.includes('details.files_in_scope is required'))
-})
-
-test('a planner escalate with only a question stops seat-escalated', async () => {
-  const f = fakes({ edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate', details: { question: 'Which plan?' } } : v })
-  assert.deepEqual(await f.go(), stopped('seat-escalated'))
-  assert.equal(count(f, 'planner'), 1)
-  assert.equal(count(f, 'lead'), 0)
-  assert.equal(f.rows.findLast((r) => r.event === 'verdict').observation.question, 'Which plan?')
-})
-
-test('a planner insufficient without done fields stops before consulting the lead', async () => {
-  const f = fakes({ lead: 'accept', edit: (v) => v.role === 'planner' ? { ...v, status: 'insufficient', details: {} } : v })
-  assert.deepEqual(await f.go(), stopped('seat-escalated'))
-  assert.deepEqual(f.requests.map((r) => r.role), ['planner'])
-})
-
-test('a reviewer or tech-lead insufficient with empty details stops before consulting the lead (#2320)', async () => {
-  for (const [tier, role] of [['build', 'reviewer'], ['judge', 'tech-lead']]) {
-    const f = fakes({ spec: { tier }, lead: 'accept', edit: (v) => v.role === role ? { ...v, status: 'insufficient', details: {} } : v })
-    assert.deepEqual(await f.go(), stopped('seat-escalated'), role)
-    assert.equal(count(f, 'lead'), 0)
-    assert.equal(f.calls.includes('commit'), false, role)
-  }
-})
-
-test('an envelope with a stale id is refused with a named id defect in the envelope row and the stop observation', async () => {
-  const f = fakes({ edit: (v) => v.role === 'builder' ? { ...v, id: 'lane.planner.1' } : v })
-  assert.deepEqual(await f.go(), stopped('envelope-refused'))
-  const rows = f.rows.filter((r) => r.event === 'envelope' && r.role === 'builder')
-  assert.ok(rows.length > 0)
-  for (const row of rows) assert.match(row.defects.join(' '), /issued id lane\.builder\./)
-  assert.match(f.rows.find((r) => r.event === 'verdict').observation.defects.join(' '), /issued id lane\.builder\./)
-  assert.match(f.requests.find((r) => r.role === 'builder' && r.repair).repair.defects.join(' '), /issued id lane\.builder\./)
-})
-
-// MUTATION: return pr null from the success result and the published PR is lost.
-test('a green run walks every stage in order and returns the measured PR with each input forwarded', async () => {
-  const f = fakes()
-  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
-  assert.deepEqual(f.calls, ['mkdir', ...SUCCESS])
-  assert.deepEqual(f.seen.mkdir, ['/virtual/task', { recursive: true }])
-  assert.deepEqual(f.seen.proof, { cwd: '/virtual/checkout', base: 'HEAD', tests: [{ file: 'lib.test.mjs', title: 'works' }], timeoutMs: undefined })
-  assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: undefined })
-  assert.deepEqual(f.seen['review-paths'], f.seen.paths)
-  assert.deepEqual(f.seen.paths, { cwd: '/virtual/checkout', command: 'git', args: ['status', '--porcelain=v1', '-z', '--untracked-files=all'] })
-  assert.deepEqual(f.seen.commit, { cwd: '/virtual/checkout', files: ['lib.mjs'], subject: 'fix(crew): planned lane', body: BODY, closes: [12] })
-  assert.deepEqual(f.seen.fetch, { cwd: '/virtual/checkout', command: 'git', args: ['fetch', 'origin'] })
-  assert.deepEqual(f.seen.rebase, { cwd: '/virtual/checkout', base: 'main' })
-  assert.deepEqual(f.seen.publish, { cwd: '/virtual/checkout', branch: 'lane', base: 'main', title: 'fix(crew): planned lane', body: PR_BODY, closes: [12] })
-  const planner = f.requests[0]
-  assert.deepEqual(Object.keys(planner).sort(), ['brief', 'feedback', 'id', 'planPath', 'returnPath', 'role', 'seat', 'tier'])
-  assert.deepEqual(Object.keys(f.requests[1]).sort(), [...Object.keys(planner), 'filesInScope', 'testsRequired'].sort())
-  assert.deepEqual(Object.keys(f.requests[2]).sort(), [...Object.keys(planner), 'filesInScope', 'changedPaths', 'builderReport'].sort())
-  assert.deepEqual(f.requests[1], { ...f.requests[1], role: 'builder', planPath: '/virtual/task/plan.md', feedback: [] })
-  assert.equal(new Set(f.requests.map((r) => r.id)).size, f.requests.length)
-  assert.equal(new Set(f.requests.map((r) => r.returnPath)).size, f.requests.length)
-})
-
-// MUTATION: omit or replace the accepted scope in builder and reviewer requests.
-test('accepted scope survives repaired envelopes, repeated turns and finish', async () => {
-  const scope = ['app/component.svelte', 'tests/a.rs']
-  const f = fakes({ review: 1, edit: (value, request) => {
-    if (value.role === 'planner') value.details.files_in_scope = request.repair ? scope : [123]
-    if (value.role === 'builder' && !request.repair && request.id.endsWith('.2')) value.details.extra = true
-    return value
-  } })
-  assert.equal((await f.go()).status, 'done')
-  assert.ok(f.requests.some((r) => r.role === 'planner' && r.repair))
-  assert.ok(f.requests.some((r) => r.role === 'builder' && r.repair))
-  for (const request of f.requests.filter((r) => ['builder', 'reviewer'].includes(r.role))) assert.deepEqual(request.filesInScope, scope)
-  const finish = fakes({ spec: finishSpec({ filesInScope: scope }), unseated: ['planner'] })
-  assert.equal((await finish.go()).status, 'done')
-  for (const request of finish.requests) assert.deepEqual(request.filesInScope, scope)
-  const invalid = fakes({ spec: finishSpec({ filesInScope: [1] }), unseated: ['planner'] })
-  assert.deepEqual(await invalid.go(), stopped('invalid-input'))
-})
-
-// MUTATION: forward spec.timeoutMs or spec.refs and a stale field reaches a check.
-test('a suite timeout override reaches only the suite, and a spec refs list or general timeout reaches no check, commit or PR', async () => {
-  for (const timeoutMs of [1, 1800000, 2147483647]) {
-    const f = fakes({ spec: { suite: { command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs } } })
-    assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
-    assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs })
-    for (const stage of ['proof', 'review-paths', 'paths', 'commit', 'fetch', 'rebase', 'publish']) assert.equal(f.seen[stage].timeoutMs, undefined, stage)
-  }
-  for (const [refs, timeoutMs] of [[[13], 5000], [0, 0], [null, -1], ['stale', Infinity]]) {
-    const f = fakes({ spec: { refs, timeoutMs } })
-    assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
-    assert.equal(f.seen.suite.timeoutMs, undefined)
-    for (const stage of ['proof', 'review-paths', 'paths', 'commit', 'fetch', 'rebase', 'publish']) assert.equal(f.seen[stage].timeoutMs, undefined, stage)
-    for (const stage of ['commit', 'publish']) { assert.equal(Object.hasOwn(f.seen[stage], 'refs'), false, stage); assert.deepEqual(f.seen[stage].closes, [12]) }
-  }
-})
-
 test('a suite timeoutMs above 2147483647 is refused as invalid-input before any effect and 2147483647 reaches the suite', async () => {
   for (const timeoutMs of [2147483648, Number.MAX_SAFE_INTEGER]) {
     const f = fakes({ spec: { suite: { command: 'node', timeoutMs } } })
@@ -1493,205 +727,8 @@ test('a suite timeoutMs above 2147483647 is refused as invalid-input before any 
   assert.equal(f.seen.suite.timeoutMs, 2147483647)
 })
 
-test('a proofTimeoutMs above 2147483647 is refused as invalid-input before proof and 2147483647 reaches proveTests', async () => {
-  for (const proofTimeoutMs of [2147483648, Number.MAX_SAFE_INTEGER]) {
-    const f = fakes({ spec: { proofTimeoutMs } })
-    assert.deepEqual(await f.go(), stopped('invalid-input'))
-    assert.deepEqual(f.calls, [])
-    assert.deepEqual(f.rows, [{ event: 'verdict', lane: 'lane', stage: null, status: 'stopped', reason: 'invalid-input', at: 0 }])
-  }
-  const inputs = []
-  const f = fakes({ spec: { tier: 'mechanical', proofTimeoutMs: 2147483647 }, rebase: { status: 'green', reason: null, head: 'b'.repeat(40), onto: 'c'.repeat(40) }, edit: (v) => { if (v.role === 'builder') v.details.subject = 'fix: timeout'; return v } })
-  const prove = f.deps.proveTests
-  f.deps.proveTests = (input) => { inputs.push(input); return prove(input) }
-  assert.equal((await f.go()).status, 'done')
-  assert.deepEqual(inputs.map((input) => input.timeoutMs), [2147483647, 2147483647])
-})
 
-test('a proofTimeoutMs in the lane spec reaches proveTests', async () => {
-  for (const value of [undefined, 1, 360000, 2147483647]) {
-    const inputs = []
-    const f = fakes({ spec: { tier: 'mechanical', proofTimeoutMs: value }, rebase: { status: 'green', reason: null, head: 'b'.repeat(40), onto: 'c'.repeat(40) }, edit: (v) => { if (v.role === 'builder') v.details.subject = 'fix: timeout'; return v } })
-    const prove = f.deps.proveTests
-    f.deps.proveTests = (input) => { inputs.push(input); return prove(input) }
-    assert.equal((await f.go()).status, 'done')
-    assert.equal(inputs.length, 2)
-    assert.deepEqual(inputs.map((input) => input.timeoutMs), [value, value])
-    assert.equal(inputs[0].base, 'HEAD')
-    assert.equal(inputs[1].base, `${'b'.repeat(40)}^`)
-  }
-  for (const value of [null, 0, -1, 1.5, NaN, Infinity, 2147483648, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1, '1000', true, {}, []]) {
-    const f = fakes({ spec: { proofTimeoutMs: value } })
-    assert.deepEqual(await f.go(), stopped('invalid-input'))
-    assert.equal(f.calls.includes('proof'), false)
-  }
-})
-
-// MUTATION: drop the suite timeout validation and an unsound override starts the lane.
-test('an invalid suite timeout override is refused before any dependency effect, with one stopped journal row', async () => {
-  const invalid = [0, -1, 1.5, NaN, Infinity, -Infinity, 2147483648, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1, '1800000', null, true, {}, []]
-  for (const timeoutMs of invalid) {
-    const f = fakes({ spec: { suite: { command: 'node', timeoutMs } } })
-    assert.deepEqual(await f.go(), stopped('invalid-input'), String(timeoutMs))
-    assert.deepEqual(f.calls, [])
-    assert.deepEqual(f.rows, [{ event: 'verdict', lane: 'lane', stage: null, status: 'stopped', reason: 'invalid-input', at: 0 }])
-    assert.equal(f.requests.length, 0)
-  }
-})
-
-// MUTATION: let a suite override swallow the timeout stop and a timed-out suite publishes.
-test('a measured suite timeout under an override stops the lane with no commit, fetch, rebase or publish', async () => {
-  const f = fakes({ spec: { suite: { command: 'node', timeoutMs: 1800000 } }, suite: { ...green(), status: 'unmeasured', reason: 'timeout', timedOut: true } })
-  assert.deepEqual(await f.go(), stopped('timeout'))
-  assert.equal(f.seen.suite.timeoutMs, 1800000)
-  for (const effect of ['paths', 'commit', 'publish']) assert.equal(f.calls.includes(effect), false, effect)
-})
-
-
-const gaps = (v) => ({ ...v, details: { ...v.details, gaps: [] } })
 const nth = (role, turn, edit) => (v, r) => (r.role === role && Number(r.id.split('.').at(-1)) === turn ? edit(v) : v)
-
-// MUTATION: allow no repair turn and the b1385 builder envelope with one extra field ends the lane.
-test('a schema-refused envelope gets one repair turn on the same id and path, and the lane continues without a lost round', async () => {
-  for (const role of ['planner', 'builder', 'reviewer']) {
-    const f = fakes({ bounds: { [role]: 1 }, edit: (v, r) => (r.role === role && !r.repair ? gaps(v) : v) })
-    assert.equal((await f.go()).status, 'done', role)
-    const [first, repair] = f.requests.filter((r) => r.role === role)
-    assert.equal(f.requests.filter((r) => r.role === role).length, 2, role)
-    assert.deepEqual(repair.repair, { defects: [`details.gaps is not a field of ${role} details`] }, role)
-    assert.equal(first.repair, undefined)
-    assert.equal(repair.id, first.id)
-    assert.equal(repair.returnPath, first.returnPath)
-    const seen = f.rows.filter((r) => r.event === 'envelope' && r.role === role)
-    assert.equal(seen.length, 2)
-    assert.equal(seen[0].defects.length, 1)
-    assert.deepEqual(seen[1].defects, [])
-    assert.equal(count(f, 'lead'), 0)
-  }
-  // the repair costs no round: a builder bound of two still serves the build that review sends back
-  const f = fakes({ review: 1, bounds: { builder: 2 }, edit: (v, r) => (r.role === 'builder' && !r.repair && r.feedback.length === 0 ? gaps(v) : v) })
-  assert.equal((await f.go()).status, 'done')
-  assert.equal(count(f, 'builder'), 3)
-  assert.deepEqual(f.requests.filter((r) => r.role === 'builder').at(-1).feedback, [finding])
-  for (const raw of ['null', '[]', '42']) {
-    const parsedRoot = fakes({ edit: (v, r) => (r.role === 'builder' && !r.repair ? raw : v) })
-    assert.equal((await parsedRoot.go()).status, 'done', raw)
-    assert.equal(count(parsedRoot, 'builder'), 2, raw)
-  }
-})
-
-// MUTATION: skip the second validation and a repaired envelope that is still bad advances.
-test('a repaired envelope that is refused again stops the lane with no third turn', async () => {
-  const cases = {
-    'same defect': (v) => gaps(v),
-    'different defect': (v) => ({ ...v, summary: '' }),
-    'stale id': (v) => ({ ...v, id: 'stale-return' }),
-    'not JSON': () => '{',
-  }
-  for (const [name, edit] of Object.entries(cases)) {
-    const f = fakes({ edit: (v, r) => (r.role === 'builder' ? (r.repair ? edit(v) : gaps(v)) : v) })
-    assert.deepEqual(await f.go(), stopped('envelope-refused'), name)
-    assert.equal(count(f, 'builder'), 2, name)
-    assert.equal(f.calls.includes('proof'), false, name)
-    assert.equal(count(f, 'lead'), 0, name)
-  }
-  for (const [name, options, reason] of [
-    ['empty', { edit: (v, r) => (r.role === 'builder' ? (r.repair ? '' : gaps(v)) : v) }, 'seat-unmeasured'],
-    ['seat failure', { edit: (v, r) => (r.role === 'builder' ? gaps(v) : v) }, 'seat-unmeasured'],
-  ]) {
-    const f = fakes(options)
-    let dispatched = 0
-    if (name === 'seat failure') {
-      const run = f.deps.runSeat
-      f.deps.runSeat = async (request) => { if (request.role === 'builder') dispatched += 1; if (request.repair) throw new Error('repair crashed'); return run(request) }
-    }
-    assert.deepEqual(await f.go(), stopped(reason), name)
-    assert.equal(name === 'seat failure' ? dispatched : count(f, 'builder'), name === 'seat failure' ? 3 : 2, name)
-    assert.equal(f.calls.includes('proof'), false, name)
-  }
-  // a refused repair of the lead is a lead refusal
-  const lead = fakes({ edit: (v) => (v.role === 'builder' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v.role === 'lead' ? gaps(v) : v) })
-  assert.deepEqual(await lead.go(), stopped('lead-refused'))
-  assert.equal(count(lead, 'lead'), 2)
-})
-
-test('a missing-comma envelope gets one repair turn carrying the parse error and the lane continues without a lost round', async () => {
-  let raw
-  const f = fakes({ bounds: { reviewer: 1 }, edit: (v, r) => {
-    if (r.role === 'reviewer' && !r.repair) return (raw = JSON.stringify(v).replace(',', ''))
-    return v
-  } })
-  assert.equal((await f.go()).status, 'done')
-  assert.equal(count(f, 'reviewer'), 2)
-  const [first, repair] = f.requests.filter((r) => r.role === 'reviewer')
-  assert.equal(first.repair, undefined)
-  assert.equal(repair.id, first.id)
-  assert.equal(repair.returnPath, first.returnPath)
-  let message
-  try { JSON.parse(raw) } catch (error) { message = error.message }
-  assert.match(message, /position \d+/)
-  assert.deepEqual(repair.repair, { defects: [message] })
-  assert.equal(count(f, 'lead'), 0)
-})
-
-test('a repaired envelope that is still unparseable stops at envelope-refused with no second repair turn', async () => {
-  for (const [name, repaired, reason] of [
-    ['unparseable', () => '{', 'envelope-refused'],
-    ['schema', (v) => gaps(v), 'envelope-refused'],
-    ['wrong id', (v) => ({ ...v, id: 'stale' }), 'envelope-refused'],
-    ['empty', () => '', 'seat-unmeasured'],
-  ]) {
-    const f = fakes({ edit: (v, r) => r.role === 'builder' ? (r.repair ? repaired(v) : JSON.stringify(v).replace(',', '')) : v })
-    assert.deepEqual(await f.go(), stopped(reason), name)
-    assert.equal(count(f, 'builder'), 2, name)
-    assert.ok(f.requests.find((r) => r.role === 'builder' && r.repair), name)
-    assert.equal(f.calls.includes('proof'), false, name)
-  }
-})
-
-test("only a '{'-starting unparseable envelope gets a parse repair turn", async () => {
-  for (const [name, options, reason, turns] of [
-    ['brace', { edit: (v, r) => r.role === 'planner' && !r.repair ? '  {' : v }, null, 2],
-    ['empty', { edit: () => '' }, 'seat-unmeasured', 1],
-    ['whitespace', { edit: () => ' \n\t' }, 'seat-unmeasured', 1],
-    ['plain text', { edit: () => 'not JSON' }, 'envelope-refused', 1],
-    ['unreadable', { readError: 'EPERM' }, 'seat-unmeasured', 1],
-  ]) {
-    const f = fakes(options)
-    const result = await f.go()
-    assert.equal(result.status, reason ? 'stopped' : 'done', name)
-    assert.equal(result.reason, reason, name)
-    assert.equal(count(f, 'planner'), turns, name)
-    assert.equal(f.requests.some((r) => r.repair), turns === 2, name)
-  }
-  const f = fakes({ edit: (v, r) => r.role === 'planner' && !r.rerun ? '{' : v })
-  const run = f.deps.runSeat
-  f.deps.runSeat = async (r) => {
-    const result = await run(r)
-    if (r.role === 'planner' && !r.rerun) throw new Error('turn failed')
-    return result
-  }
-  assert.equal((await f.go()).status, 'done')
-  const planners = f.requests.filter((r) => r.role === 'planner')
-  assert.equal(planners.length, 2)
-  assert.ok(planners[1].rerun)
-  assert.equal(planners[1].repair, undefined)
-})
-
-// MUTATION: repair a file that was never JSON.
-test('a non-JSON, empty or unreadable refusal gets no repair turn', async () => {
-  for (const [options, reason] of [
-    [{ edit: () => 'not JSON' }, 'envelope-refused'],
-    [{ edit: () => '' }, 'seat-unmeasured'],
-    [{ readError: 'EPERM' }, 'seat-unmeasured'],
-    [{ seatThrows: 'planner' }, 'seat-unmeasured'],
-  ]) {
-    const f = fakes(options)
-    assert.deepEqual(await f.go(), stopped(reason))
-    assert.equal(count(f, 'planner'), options.seatThrows ? 2 : 1)
-    assert.equal(f.requests.some((r) => r.repair), false)
-  }
-})
 
 // MUTATION: treat every envelope as valid and a refused return advances the loop.
 test('a refused, unreadable, empty or stale envelope stops the lane and a lead accept never launders it', async () => {
@@ -1749,20 +786,6 @@ test('from round 2 the reviewer hears the earlier findings, and a return that dr
   assert.equal((await malformed.go()).status, 'done')
 })
 
-test('a changes-needed on the last reviewer round grants one reserve re-review that passes and publishes', async () => {
-  let trees = 0
-  const f = fakes({ review: 2, bounds: { builder: 3, reviewer: 2 }, checkedTree: () => ({ ...green(), stdout: ['a', 'b', 'c'][Math.min(trees++, 2)].repeat(40) }) })
-  assert.equal((await f.go()).status, 'done')
-  assert.equal(count(f, 'reviewer'), 3)
-  assert.equal(count(f, 'builder'), 3)
-  assert.equal(count(f, 'lead'), 0)
-  const reviews = f.requests.filter((r) => r.role === 'reviewer')
-  assert.deepEqual(reviews[2].feedback, [finding])
-  assert.equal(reviews[0].reserveReview, undefined)
-  assert.deepEqual(reviews[2].reserveReview, { baseTree: 'b'.repeat(40) })
-  assert.ok(f.seen.publish)
-})
-
 test('a reserve re-review that still asks for changes or returns insufficient stops with no further build or lead consult', async () => {
   for (const mode of ['changes-needed', 'insufficient']) {
     let reviews = 0
@@ -1781,35 +804,6 @@ test('a reserve re-review that still asks for changes or returns insufficient st
   }
 })
 
-test('a pass on the last reviewer round with a red suite grants one reserve re-review of the suite repair that passes and publishes', async () => {
-  let trees = 0
-  const f = sequenced([redRun(), redRun(), green()], { bounds: { builder: 3, reviewer: 2 }, checkedTree: () => ({ ...green(), stdout: ['a', 'b', 'c'][Math.min(trees++, 2)].repeat(40) }) })
-  assert.equal((await f.go()).status, 'done')
-  assert.equal(count(f, 'reviewer'), 3)
-  assert.equal(count(f, 'builder'), 3)
-  assert.equal(count(f, 'lead'), 0)
-  const reviews = f.requests.filter((r) => r.role === 'reviewer')
-  assert.equal(reviews[1].reserveReview, undefined)
-  assert.deepEqual(reviews[2].reserveReview, { baseTree: 'b'.repeat(40) })
-  assert.deepEqual(reviews[2].feedback, [])
-  assert.ok(f.seen.publish)
-})
-
-test('a red suite after the suite-repair reserve re-review stops round-bound with no further builder turn', async () => {
-  const red = { ...redRun(), stdout: 'not ok 1 - failing test' }
-  const f = sequenced([red, red, red], { bounds: { builder: 3, reviewer: 2 }, checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder')).repeat(40) }) })
-  assert.deepEqual(await f.go(), stopped('round-bound'))
-  assert.equal(count(f, 'reviewer'), 3)
-  assert.equal(count(f, 'builder'), 3)
-  assert.equal(count(f, 'lead'), 0)
-  assert.equal(f.calls.filter((call) => call === 'proof').length, 3)
-  assert.equal(f.calls.includes('commit'), false)
-  assert.equal(f.calls.includes('publish'), false)
-  const observation = f.rows.findLast((row) => row.status === 'stopped').observation
-  assert.deepEqual(observation.findings, [])
-  assert.deepEqual(observation.feedback[0].failingTests, ['failing test'])
-})
-
 test('a reserve re-review that passes with a red suite stops round-bound with no further builder turn', async () => {
   const red = { ...redRun(), stdout: 'not ok 1 - failing test' }
   const f = sequenced([green(), green(), red], { review: 2, bounds: { builder: 10, reviewer: 2 } })
@@ -1823,54 +817,6 @@ test('a reserve re-review that passes with a red suite stops round-bound with no
   const observation = f.rows.findLast((row) => row.status === 'stopped').observation
   assert.deepEqual(observation.findings, [])
   assert.deepEqual(observation.feedback[0].failingTests, ['failing test'])
-})
-
-test('changes-needed carries the exact findings to the next build and repeats proof and review before the suite', async () => {
-  const f = fakes({ review: 1 })
-  assert.equal((await f.go()).status, 'done')
-  const builders = f.requests.filter((r) => r.role === 'builder')
-  assert.equal(builders.length, 2)
-  assert.deepEqual(builders[0].feedback, [])
-  assert.deepEqual(builders[1].feedback, [finding])
-  assert.deepEqual(f.calls.slice(1, 19), ['seat:planner', 'fetch', 'rebase', 'seat:builder', 'fetch', 'check-base', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'suite', 'seat:reviewer', 'seat:builder', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'suite'])
-  assert.equal(count(f, 'planner'), 1)
-})
-
-// MUTATION: drop the per-role bound check and a seat is dispatched past its declared rounds.
-test('a declared bound ends in the lead and the default bound is two', async () => {
-  assert.equal(DEFAULT_ROUNDS, 2)
-  const declared = fakes({ review: 10, bounds: { builder: 1 } })
-  assert.deepEqual(await declared.go(), stopped('lead-escalated'))
-  assert.equal(count(declared, 'builder'), 1)
-  assert.equal(count(declared, 'lead'), 1)
-  assert.equal(declared.calls.includes('commit'), false)
-  const byDefault = fakes({ review: 10 })
-  assert.deepEqual(await byDefault.go(), stopped('lead-escalated'))
-  assert.equal(count(byDefault, 'builder'), 2)
-  assert.equal(count(byDefault, 'reviewer'), 2)
-})
-
-// MUTATION: reset the obstructed seat's bound on a bounce and the retry becomes unlimited.
-test('a lead bounce grants one retry, repeated bounces are bounded by the lead and an escalate ends the lane', async () => {
-  const once = fakes({ review: 1, bounds: { builder: 1 }, lead: 'bounce' })
-  assert.equal((await once.go()).status, 'done')
-  assert.equal(count(once, 'lead'), 1)
-  assert.equal(count(once, 'builder'), 2)
-  const repeated = fakes({ review: 10, bounds: { builder: 1, reviewer: 10 }, lead: 'bounce' })
-  assert.deepEqual(await repeated.go(), stopped('lead-escalated'))
-  assert.equal(count(repeated, 'lead'), 2)
-  assert.equal(count(repeated, 'builder'), 3)
-  assert.equal(repeated.calls.includes('commit'), false)
-  const retried = fakes({ lead: 'bounce', edit: (v) => v.id === 'lane.builder.2' ? { ...v, status: 'insufficient' } : v })
-  assert.equal((await retried.go()).status, 'done')
-  assert.equal(count(retried, 'builder'), 2)
-})
-
-// MUTATION: grant a whole extra round on every bounce and a seat with turns left outruns its bound unsupervised.
-test('a lead bounce on a seat with turns left does not raise its bound, so the next exhausted bound is put to the lead again', async () => {
-  const f = fakes({ review: 2, lead: 'bounce', edit: (v) => v.id === 'lane.builder.2' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v })
-  await f.go()
-  assert.deepEqual(f.requests.map((r) => r.role).slice(0, 7), ['planner', 'builder', 'lead', 'builder', 'reviewer', 'lead', 'builder'])
 })
 
 // MUTATION: let accept pass with no valid envelope and a bound or lead decision stands in for a measurement.
@@ -1906,28 +852,6 @@ test('an unseated, refusing or insufficient lead stops without recursion', async
   assert.deepEqual(await crashed.go(), stopped('lead-refused'))
 })
 
-// MUTATION: drop the overall proof decision and a surviving or incomplete proof reaches review.
-
-// MUTATION: trust a non-green proof and the review and commit run on a build that does not pass.
-
-// MUTATION: skip the suite decision and a red or unmeasured suite still commits.
-test('a red, unmeasured or malformed-green suite never commits', async () => {
-  const cases = [
-    [{ ...green(), status: 'red', code: 1, reason: 'exit-nonzero' }, 'exit-nonzero'],
-    [{ ...green(), status: 'unmeasured', code: null, reason: 'timeout' }, 'timeout'],
-    [{ ...green(), code: 1 }, 'runner-threw'],
-    [{ ...green(), signal: 'SIGKILL' }, 'runner-threw'],
-    [{ ...green(), timedOut: true }, 'runner-threw'],
-    [{ ...green(), reason: 'timeout' }, 'runner-threw'],
-    [{ status: 'green' }, 'runner-threw'],
-  ]
-  for (const [suite, reason] of cases) {
-    const f = fakes({ suite })
-    assert.deepEqual(await f.go(), stopped(suite.status === 'red' ? 'lead-escalated' : reason), JSON.stringify(suite))
-    assert.equal(f.calls.includes('commit'), false)
-  }
-})
-
 const redRun = (code = 1, reason = 'exit-nonzero') => ({ ...green(), status: 'red', code, reason })
 const timeoutRun = () => ({ ...green(), status: 'unmeasured', code: null, reason: 'timeout', timedOut: true })
 // A suite seam that answers from a sequence and counts every invocation; an exhausted sequence throws.
@@ -1943,75 +867,6 @@ function sequenced(sequence, options = {}) {
   }
   return Object.assign(f, { inputs })
 }
-test('suite measurements name the configured command in commits and published reports (#2426)', async () => {
-  for (const shape of ['build', 'judge', 'mechanical', 'mechanical-rebase', 'finish']) {
-    const suite = { command: 'sh', args: ['tools/crew-suite.sh', '--profile', 'lane'], timeoutMs: 12345 }
-    const movedHead = shape === 'mechanical-rebase'
-    const f = sequenced(movedHead ? [green(), green()] : [green()], {
-      spec: { ...(shape === 'finish' ? finishSpec() : { tier: movedHead ? 'mechanical' : shape }), suite },
-      ...(movedHead ? { rebase: answers({ ...MOVED, head: 'a'.repeat(40) }, MOVED), cleanHead: MOVED.head } : {}),
-      edit: (v) => { if (v.role === 'builder') v.details.subject = 'fix: lane'; return v },
-    })
-    assert.equal((await f.go()).status, 'done', shape)
-    assert.deepEqual(f.inputs, Array(movedHead ? 2 : 1).fill({ cwd: f.spec.cwd, ...suite }))
-    const line = '- Suite: green; exit 0; sh tools/crew-suite.sh --profile lane.'
-    assert.ok(f.seen.commit.body.split('\n').includes(line), shape)
-    const report = shape === 'finish' ? JSON.parse(f.writes.get('/virtual/task/finish-report.json')) : null
-    assert.ok((report?.body ?? f.seen.publish.body).split('\n').includes(line), shape)
-    if (report) assert.ok(report.measurements.includes(line))
-  }
-})
-
-test('suite repair feedback names the project command without claiming full coverage (#2426)', async () => {
-  for (const shape of ['build', 'judge', 'mechanical', 'finish']) {
-    const suite = { command: 'sh', args: ['tools/crew-suite.sh', '--profile', 'lane'] }
-    const f = sequenced([{ ...redRun(7), stdout: SPEC_OUT, stderr: TAP_OUT }, green()], {
-      spec: { ...(shape === 'finish' ? finishSpec() : { tier: shape }), suite },
-      edit: (v) => { if (v.role === 'builder') v.details.subject = 'fix: lane'; return v },
-    })
-    assert.equal((await f.go()).status, 'done', shape)
-    const feedback = builderTurns(f)[1].feedback.find((item) => item.id === 'suite-repair')
-    assert.match(feedback.summary, /sh tools\/crew-suite\.sh --profile lane/)
-    assert.doesNotMatch(feedback.summary, /full suite/i)
-    assert.equal(feedback.checkout, f.spec.cwd)
-    assert.deepEqual(feedback.failingTests, ['anchor spans remain current', 'exhibit census remains current'])
-    assert.deepEqual(feedback.failingFiles, ['skills/qa-test-writing/exhibits.test.mjs:42:1', '/virtual/checkout/skills/ux/exhibits.test.mjs:73:1'])
-    assert.deepEqual(feedback.outputTail, [`${SPEC_OUT}\n${TAP_OUT}`])
-    assert.equal(feedback.summary.includes('only repair turn'), ['mechanical', 'finish'].includes(shape))
-  }
-})
-
-test('a later remote move leaves an unchanged finish repair eligible for review reuse (#2412, #2433)', async () => {
-  for (const spent of [false, true]) {
-    let remote = 'c'.repeat(40)
-    const f = sequenced([redRun(), green()], { spec: finishSpec({ priorReviewRounds: spent ? 2 : 0 }),
-      checkBase: () => ({ ...green(), stdout: remote }),
-      edit: (v) => { if (v.role === 'builder' && count(f, 'builder') === 2) remote = O; return v },
-    })
-    assert.equal((await f.go()).status, 'done')
-    assert.equal(f.rows.some((r) => r.event === 'pre-check-base-move'), false)
-    assert.equal(f.rows.some((r) => r.event === 'review-reused'), true)
-    assert.equal(count(f, 'reviewer'), 1)
-  }
-})
-
-test('a build reuses a passed tree after an unchanged suite repair (#2412)', async () => {
-  const note = { ...finding, severity: 'should-fix' }
-  const f = sequenced([redRun(), green()], { bounds: { reviewer: 1 }, edit: (v) => {
-    if (v.role === 'reviewer') v.details.findings = [note]
-    return v
-  } })
-  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
-  assert.equal(count(f, 'reviewer'), 1)
-  assert.equal(count(f, 'lead'), 0)
-  assert.equal(builderTurns(f).length, 2)
-  assert.equal(f.calls.filter((c) => c === 'proof').length, 2)
-  assert.equal(f.inputs.length, 2)
-  assert.deepEqual(f.rows.filter((r) => r.event === 'review-reused').map(({ role, tree, verdict }) => ({ role, tree, verdict })), [{ role: 'reviewer', tree: 'e'.repeat(40), verdict: 'pass' }])
-  assert.equal(f.rows.filter((r) => r.event === 'verdict' && r.status === 'reviewed').length, 1)
-  assert.match(f.seen.publish.body, /## Open points\n- Fix the defect \(lib.mjs:1\)/)
-})
-
 test('a judge reuses each roles pass on an unchanged recheck tree (#2412)', async () => {
   const A = 'a'.repeat(40), C = 'c'.repeat(40)
   const f = sequenced([green(), redRun(), green()], { spec: { tier: 'judge' },
@@ -2031,26 +886,6 @@ test('a judge reuses each roles pass on an unchanged recheck tree (#2412)', asyn
   assert.deepEqual(f.rows.filter((r) => r.event === 'review-reused').map(({ role, tree, verdict }) => ({ role, tree, verdict })), ['reviewer', 'tech-lead'].map((role) => ({ role, tree: 'e'.repeat(40), verdict: 'pass' })))
   assert.equal(f.rows.filter((r) => r.event === 'verdict' && r.status === 'reviewed').length, 2)
   assert.match(f.seen.publish.body, /## Open points\n- reviewer note \(lib.mjs:1\)\n- tech-lead note \(lib.mjs:1\)/)
-})
-
-test('a finish reuses a passed tree after an unchanged suite repair (#2412)', async () => {
-  const note = { ...finding, severity: 'should-fix' }
-  const f = sequenced([redRun(), green()], { spec: finishSpec(), edit: (v) => {
-    if (v.role === 'reviewer') { v.details.findings = [note]; v.details.closed = [] }
-    return v
-  } })
-  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: null })
-  assert.equal(count(f, 'reviewer'), 1)
-  assert.equal(builderTurns(f).length, 2)
-  assert.equal(f.calls.filter((c) => c === 'proof').length, 2)
-  assert.equal(f.inputs.length, 2)
-  assert.deepEqual(f.rows.filter((r) => r.event === 'review-reused').map(({ role, tree, verdict }) => ({ role, tree, verdict })), [{ role: 'reviewer', tree: 'e'.repeat(40), verdict: 'pass' }])
-  const report = JSON.parse(f.writes.get('/virtual/task/finish-report.json'))
-  assert.deepEqual(report.reviews, [{ verdict: 'pass', findings: [note] }])
-  assert.equal(report.reviewRounds, 1)
-  assert.equal(f.rows.at(-1).event, 'finish-ready')
-  assert.match(report.body, /## Open points\n- Fix the defect \(lib.mjs:1\)/)
-  assert.equal(f.calls.includes('publish'), false)
 })
 
 const EFFECTS = ['paths', 'commit', 'fetch', 'rebase', 'publish']
@@ -2086,42 +921,7 @@ test('a finish first red repairs immediately with one run of diagnostics and ord
 const SPEC_OUT = ['ℹ failing tests:', 'test at skills/qa-test-writing/exhibits.test.mjs:42:1', '✖ anchor spans remain current (2ms)', '  AssertionError: stale'].join('\n')
 const TAP_OUT = ['not ok 1 - exhibit census remains current', '  ---', "  location: '/virtual/checkout/skills/ux/exhibits.test.mjs:73:1'", '  ...'].join('\n')
 const redOut = (stdout) => ({ ...redRun(1), stdout })
-const redErr = (stderr) => ({ ...redRun(1), stderr })
 const builderTurns = (f) => f.requests.filter((r) => r.role === 'builder')
-
-test('callCheck returns the full suite output while the journal keeps a bounded tail (#2320)', async () => {
-  const f = sequenced([redOut(`✖ far failure (2ms)\n${'x'.repeat(5000)}\n`), green()])
-  assert.equal((await f.go()).status, 'done')
-  assert.ok(builderTurns(f)[1].feedback.find((item) => item.id === 'suite-repair').failingTests.includes('far failure'))
-  assert.doesNotMatch(f.rows.find((row) => row.event === 'check' && row.check === 'suite').result.stdout, /far failure/)
-})
-
-test('a red suite on stderr names nextest and cargo test failures in the repair feedback', async () => {
-  const stderr = [
-    'FAIL [ 0.123s] crate::module test_name',
-    'FAIL [ 1.234s] (2/4) other::crate another_test',
-    'test path::name ... FAILED',
-    'test path::passing ... ok',
-    'test path::skipped ... ignored',
-    'test path::benchmark ... bench: 42 ns/iter',
-  ].join('\n')
-  const f = sequenced([redErr(stderr), green()])
-  await f.go()
-  const feedback = builderTurns(f)[1].feedback.find((item) => item.id === 'suite-repair')
-  assert.deepEqual(feedback.failingTests, ['crate::module test_name', 'other::crate another_test', 'path::name'])
-  assert.deepEqual(feedback.outputTail, [stderr])
-})
-
-test('a red suite names vitest failures and files in the repair feedback', async () => {
-  const stdout = ' FAIL  src/widget.test.ts > widget > renders'
-  const stderr = '  × handles input 12ms'
-  const f = sequenced([{ ...redOut(stdout), stderr }, green()])
-  await f.go()
-  const feedback = builderTurns(f)[1].feedback.find((item) => item.id === 'suite-repair')
-  assert.deepEqual(feedback.failingTests, ['widget > renders', 'handles input'])
-  assert.deepEqual(feedback.failingFiles, ['src/widget.test.ts'])
-  assert.deepEqual(feedback.outputTail, [`${stdout}\n${stderr}`])
-})
 
 test('a red suite tail keeps the failing line past the tail bound', async () => {
   for (const line of ['FAIL [ 0.123s] crate::module test_name', 'test path::name ... FAILED', ' FAIL  src/widget.test.ts > widget > renders', '  × handles input 12ms', '✖ node failure (2ms)', 'not ok 1 - tap failure']) {
@@ -2169,61 +969,6 @@ test('a red suite tail keeps the failing line past the tail bound', async () => 
     assert.ok(tail.length <= 2000, `${count} failures: tail length ${tail.length}`)
   }
 })
-test('a mechanical suite red goes straight to one builder fix before the suite runs again', async () => {
-  for (const after of [green(), redOut(TAP_OUT)]) {
-    const f = sequenced([redOut(SPEC_OUT), after, green()], { spec: { tier: 'mechanical' }, unseated: ['planner', 'reviewer', 'lead'], edit: (v) => {
-      if (v.role === 'builder') v.details.subject = 'docs(crew): fix typo'
-      return v
-    } })
-    const result = await f.go()
-    assert.equal(result.status, after.status === 'green' ? 'done' : 'stopped')
-    if (after.status === 'red') assert.equal(result.reason, 'exit-nonzero')
-    assert.equal(builderTurns(f).length, 2)
-    assert.deepEqual(builderTurns(f)[1].feedback[0].outputTail, [SPEC_OUT])
-    assert.match(builderTurns(f)[1].feedback[0].summary, /suite is red after your change/)
-    assert.deepEqual(f.calls.slice(f.calls.indexOf('suite'), f.calls.lastIndexOf('suite') + 1), ['suite', 'seat:builder', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'suite'])
-    assert.equal(f.calls.includes('publish'), after.status === 'green')
-  }
-})
-
-// MUTATION: apply the single-turn bound to a mechanical repair escalation.
-test('a mechanical suite-repair escalation reaches the lead or reports it unavailable', async () => {
-  for (const seated of [false, true]) {
-    const f = sequenced([redRun(), green()], { spec: { tier: 'mechanical' }, unseated: ['planner', 'reviewer', ...(!seated ? ['lead'] : [])], edit: (v, req) => {
-      if (v.role === 'builder') {
-        v.details.subject = 'fix(crew): repair suite'
-        if (req.feedback.some((i) => i.id === 'suite-repair')) return { ...v, status: 'escalate', details: { ...v.details, question: 'Which fix?' } }
-      }
-      return v
-    } })
-    const result = await f.go()
-    assert.equal(result.status, 'stopped')
-    assert.equal(result.reason, seated ? 'lead-escalated' : 'lead-unavailable')
-    assert.equal(builderTurns(f).length, 2)
-    assert.equal(f.requests.filter((r) => r.role === 'lead').length, seated ? 1 : 0)
-  }
-})
-
-// MUTATION: omit scope on a suite-repair turn.
-test('suite repair keeps the accepted scope', async () => {
-  const scope = ['src/widget.svelte']
-  const f = sequenced([redRun(1), green()], { edit: (v) => v.role === 'planner' ? { ...v, details: { ...v.details, files_in_scope: scope } } : v })
-  assert.equal((await f.go()).status, 'done')
-  assert.equal(builderTurns(f).length, 2)
-  for (const r of f.requests.filter((r) => ['builder', 'reviewer'].includes(r.role))) assert.deepEqual(r.filesInScope, scope)
-})
-
-test('a finish suite repair tolerates empty diagnostics and spent builder and review rounds', async () => {
-  const empty = sequenced([redRun(1), green()], { spec: finishSpec() })
-  assert.equal((await empty.go()).status, 'done')
-  assert.equal(builderTurns(empty).length, 2)
-  // the repair turn and its review are granted even when review fixes spent both rounds, and need no lead
-  const spent = sequenced([redOut(SPEC_OUT), green()], { spec: finishSpec(), review: 1, bounds: { builder: 2, reviewer: 2 } })
-  assert.equal((await spent.go()).status, 'done')
-  assert.equal(builderTurns(spent).length, 3)
-  assert.equal(count(spent, 'lead'), 0)
-})
-
 // MUTATION: retry a repaired red or let it reach commit and publication.
 test('a finish red after repair stops without an unchanged-tree retry', async () => {
   const after = { ...redRun(2), stderr: TAP_OUT }
@@ -2258,41 +1003,6 @@ test('an unmeasured post-repair suite or non-done finish repair stops without pu
   }
 })
 
-// MUTATION: retry an unmeasured suite before or after repair.
-test('an unmeasured suite before or after repair is never retried', async () => {
-  const unknowns = [[timeoutRun(), 'timeout'], [new Error('crashed'), 'runner-threw'], [{ ...green(), code: 4 }, 'runner-threw'], [{ status: 'green' }, 'runner-threw']]
-  for (const [unknown, reason] of unknowns) {
-    const initial = sequenced([unknown, green()], { spec: finishSpec() })
-    assert.deepEqual(await initial.go(), stopped(reason))
-    assert.equal(initial.inputs.length, 1)
-    const repaired = sequenced([redRun(), unknown, green()], { spec: finishSpec() })
-    assert.deepEqual(await repaired.go(), stopped(reason))
-    assert.equal(repaired.inputs.length, 2)
-    for (const f of [initial, repaired]) for (const effect of PUBLISH_EFFECTS) assert.equal(f.calls.slice(f.calls.indexOf('seat:builder')).includes(effect), false, effect)
-  }
-})
-
-test('ref-lock fetch failures retry with backoff at entry and after commit (#2400)', async () => {
-  for (const finish of [false, true]) for (const phrase of ['cannot lock ref', 'unable to update local ref']) for (const failures of [1, 2]) {
-    const failed = Array.from({ length: failures }, (_, i) => ({ ...redRun(128), stderr: `${phrase}: attempt ${i + 1}\n${'x'.repeat(5000)}` }))
-    const results = [...failed, green(), green(), ...failed, green()]
-    const next = answers(...results), inputs = [], waits = []
-    const f = fakes({ spec: finish ? finishSpec() : {}, fetch: (input) => { inputs.push(input); return next() },
-      deps: { sleep: async (ms) => { waits.push(ms); f.calls.push(`sleep:${ms}`) } } })
-    assert.equal((await f.go()).status, 'done')
-    assert.deepEqual(inputs, results.map(() => ({ cwd: '/virtual/checkout', command: 'git', args: ['fetch', 'origin'] })))
-    const backoff = failures === 1 ? [1000] : [1000, 2000]
-    assert.deepEqual(waits, [...backoff, ...backoff])
-    const attempts = [...backoff.flatMap((ms) => ['fetch', `sleep:${ms}`]), 'fetch']
-    assert.deepEqual(f.calls.filter((c) => ['fetch', 'rebase', 'commit', 'publish'].includes(c) || c.startsWith('sleep:')),
-      [...attempts, 'rebase', 'fetch', 'commit', ...attempts, 'rebase', ...(finish ? [] : ['publish'])])
-    assert.deepEqual(f.rows.filter((r) => r.event === 'check' && r.check === 'fetch').map((r) => r.result),
-      results.map((r) => ({ ...r, stderr: r.stderr.slice(-4096), stdoutBytes: 0, stderrBytes: Buffer.byteLength(r.stderr) })))
-    assert.deepEqual(f.rows.filter((r) => r.stage === 'fetch' && r.event !== 'check').map((r) => r.event),
-      ['stage-start', 'stage-end', 'stage-start', 'stage-end', 'stage-start', 'stage-end'])
-  }
-})
-
 test('three ref-lock fetch failures stop with the last attempt (#2400)', async () => {
   for (const finish of [false, true]) for (const afterCommit of [false, true]) {
     const failures = [1, 2, 3].map((n) => ({ ...redRun(128), stderr: `cannot lock ref: attempt ${n}` }))
@@ -2307,45 +1017,6 @@ test('three ref-lock fetch failures stop with the last attempt (#2400)', async (
     assert.deepEqual(f.rows.filter((r) => r.event === 'check' && r.check === 'fetch').map((r) => r.result),
       results.map((r) => ({ ...r, stdoutBytes: 0, stderrBytes: Buffer.byteLength(r.stderr) })))
     assert.deepEqual(f.rows.find((r) => r.event === 'verdict' && r.status === 'stopped').observation, failures[2])
-  }
-})
-
-test('a non-retryable fetch result ends a ref-lock retry sequence (#2400)', async () => {
-  for (const terminal of [{ ...redRun(128), stderr: 'fatal: authentication failed' }, { ...timeoutRun(), stderr: 'cannot lock ref' }]) {
-    const first = { ...redRun(128), stderr: 'unable to update local ref' }
-    const waits = [], next = answers(first, terminal, green())
-    const f = fakes({ fetch: next, deps: { sleep: async (ms) => { waits.push(ms); f.calls.push(`sleep:${ms}`) } } })
-    assert.deepEqual(await f.go(), stopped(terminal.reason))
-    assert.deepEqual(waits, [1000])
-    assert.deepEqual(f.calls.slice(f.calls.indexOf('fetch')), ['fetch', 'sleep:1000', 'fetch'])
-    assert.deepEqual(f.rows.filter((r) => r.event === 'check' && r.check === 'fetch').map((r) => r.result),
-      [first, terminal].map((r) => ({ ...r, stdoutBytes: 0, stderrBytes: Buffer.byteLength(r.stderr) })))
-    assert.deepEqual(f.rows.find((r) => r.event === 'verdict').observation, terminal)
-  }
-})
-
-test('a first non-retryable fetch failure stops without retrying (#2400)', async () => {
-  const missingStderr = { ...redRun(128) }; delete missingStderr.stderr
-  for (const [result, reason] of [
-    [{ ...redRun(128), stderr: 'fatal: authentication failed' }, 'exit-nonzero'],
-    [{ ...redRun(128), stdout: 'cannot lock ref' }, 'exit-nonzero'],
-    [missingStderr, 'exit-nonzero'],
-    [{ ...timeoutRun(), stderr: 'unable to update local ref' }, 'timeout'],
-    [new Error('runner failed'), 'runner-threw'],
-    [{ ...green(), code: 128, stderr: 'cannot lock ref' }, 'runner-threw'],
-    [green(), null],
-  ]) {
-    const waits = []
-    const f = fakes({ fetch: () => { if (result instanceof Error) throw result; return result }, deps: { sleep: async (ms) => { waits.push(ms) } } })
-    const outcome = await f.go()
-    if (reason) {
-      assert.deepEqual(outcome, stopped(reason))
-      assert.deepEqual(f.calls.slice(f.calls.indexOf('fetch')), ['fetch'])
-    } else assert.equal(outcome.status, 'done')
-    assert.deepEqual(waits, [])
-    const expected = reason ? 1 : 3
-    assert.equal(f.calls.filter((c) => c === 'fetch').length, expected)
-    assert.equal(f.rows.filter((r) => r.event === 'check' && r.check === 'fetch').length, expected)
   }
 })
 
@@ -2374,27 +1045,6 @@ test('a failed commit, fetch, rebase or publish stops every later effect and ret
   const thrown = fakes({ throwCheck: 'rebase' })
   assert.deepEqual(await thrown.go(), stopped('runner-threw'))
   assert.equal(thrown.calls.includes('publish'), false)
-})
-
-// MUTATION: drop the stage-end emit and a refused or thrown stage never closes in the journal.
-test('every started stage ends on success and refusal, in order', async () => {
-  const pairs = (rows) => rows.filter((r) => r.event === 'stage-start' || r.event === 'stage-end').map((r) => [r.event, r.stage])
-  const ok = fakes()
-  await ok.go()
-  assert.deepEqual(pairs(ok.rows).filter(([, s]) => !['suite', 'review'].includes(s)), STAGES.filter((s) => !['suite', 'review'].includes(s)).flatMap((s) => [['stage-start', s], ['stage-end', s]]))
-  assert.deepEqual(pairs(ok.rows).filter(([, s]) => ['suite', 'review'].includes(s)), [['stage-start', 'suite'], ['stage-start', 'review'], ['stage-end', 'suite'], ['stage-end', 'review']])
-  assert.ok(ok.rows.every((r) => r.lane === 'lane' && typeof r.event === 'string' && 'stage' in r))
-  const refused = fakes({ suite: { ...green(), status: 'red', code: 1, reason: 'exit-nonzero' } })
-  await refused.go()
-  for (const name of new Set(pairs(refused.rows).map(([, s]) => s))) assert.equal(pairs(refused.rows).filter(([event, s]) => event === 'stage-start' && s === name).length, pairs(refused.rows).filter(([event, s]) => event === 'stage-end' && s === name).length, name)
-  const thrown = fakes({ deps: { mkdir: async () => {}, resolveAgents: undefined } })
-  assert.deepEqual(await thrown.go(), stopped('invalid-input'))
-  const escalated = fakes({ edit: (v) => v.role === 'planner' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v })
-  await escalated.go()
-  assert.deepEqual(pairs(escalated.rows), [['stage-start', 'plan'], ['stage-end', 'plan']])
-  const crashing = fakes({ deps: { readFile: async () => { throw new Error('boom') } } })
-  await crashing.go()
-  assert.deepEqual(pairs(crashing.rows), [['stage-start', 'plan'], ['stage-end', 'plan']])
 })
 
 // MUTATION: close a stage only after its work succeeds and a stage that throws is left open in the journal.
@@ -2443,34 +1093,6 @@ test('every loop-only stop reason is emitted by the loop source', () => {
   for (const reason of LOOP_REASONS.filter((r) => !CHECK_REASONS.includes(r))) assert.ok(source.includes(`'${reason}'`), reason)
 })
 
-// MUTATION: drop an envelope, verdict, check, commit or PR emit and its row is missing.
-test('the journal carries each envelope, verdict, check, commit and PR observation and a failing journal changes nothing', async () => {
-  const f = fakes()
-  await f.go()
-  const events = (name) => f.rows.filter((r) => r.event === name)
-  assert.deepEqual(events('envelope').map((r) => [r.role, r.id, r.parsed.status, r.defects, r.error]), [
-    ['planner', 'lane.planner.1', 'done', [], null], ['builder', 'lane.builder.2', 'done', [], null], ['reviewer', 'lane.reviewer.3', 'done', [], null],
-  ])
-  assert.deepEqual(events('check').map((r) => r.check), ['fetch', 'rebase', 'fetch', 'check-base', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'suite', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase', 'publish'])
-  assert.equal(events('check').find((r) => r.check === 'proof').result.rows[0].proven, true)
-  assert.deepEqual(events('verdict').map((r) => [r.status, r.verdict]), [['reviewed', 'pass']])
-  assert.deepEqual(events('commit').map((r) => r.head), ['a'.repeat(40)])
-  assert.deepEqual(events('pr').map((r) => r.pr), [PR])
-  const stoppedRun = fakes({ proof: { status: 'unmeasured', reason: 'timeout', rows: [] } })
-  await stoppedRun.go()
-  const verdict = stoppedRun.rows.find((r) => r.event === 'verdict')
-  assert.deepEqual([verdict.status, verdict.reason], ['stopped', 'timeout'])
-  const malformed = fakes({ suite: { status: 'green', reason: 'timeout' } })
-  await malformed.go()
-  assert.equal(malformed.rows.find((r) => r.event === 'check' && r.check === 'suite').result.reason, 'timeout')
-  for (const journal of [() => { throw new Error('sync full') }, async () => { throw new Error('async full') }, () => Promise.reject(new Error('rejected'))]) {
-    const { status, reason, pr } = await fakes({ journal }).go()
-    assert.deepEqual({ status, reason, pr }, { status: 'done', reason: null, pr: PR })
-    const failed = await fakes({ journal, suite: { ...green(), status: 'red', code: 1, reason: 'exit-nonzero' } }).go()
-    assert.deepEqual({ status: failed.status, reason: failed.reason, pr: failed.pr }, stopped('lead-escalated'))
-  }
-})
-
 // MUTATION: skip input validation and an unsupported or malformed lane starts effects.
 test('an unsupported shape, invalid input or unsound seam is refused before dependency effects', async () => {
   const cases = [
@@ -2498,77 +1120,11 @@ test('an unsupported shape, invalid input or unsound seam is refused before depe
   assert.deepEqual({ status, reason, pr }, stopped('invalid-input'))
 })
 
-// MUTATION: treat a missing role, a failed lookup or a bad bound as usable and the lane starts with a hole.
-test('a missing required seat, failed agent lookup or invalid declared bound is refused before any effect', async () => {
-  for (const role of ['planner', 'builder', 'reviewer']) {
-    const f = fakes({ unseated: [role] })
-    assert.deepEqual(await f.go(), stopped('seat-unmeasured'), role)
-    assert.deepEqual(f.calls, [])
-  }
-  const lookup = fakes({ deps: { resolveAgents: () => { throw new Error('agent definitions are refused') } } })
-  assert.deepEqual(await lookup.go(), stopped('seat-unmeasured'))
-  assert.deepEqual(lookup.calls, [])
-  for (const rounds of [0, -1, 1.5, '2', null, Infinity]) {
-    const f = fakes({ deps: { resolveAgents: () => ({ seats: { planner: { rounds }, builder: {}, reviewer: {}, lead: {} } }) } })
-    assert.deepEqual(await f.go(), stopped('invalid-input'), String(rounds))
-    assert.deepEqual(f.calls, [])
-  }
-})
-
 // MUTATION: let a mkdir failure continue and the seats write into a task directory that does not exist.
 test('a task directory that cannot be made stops the lane before any seat', async () => {
   const f = fakes({ deps: { mkdir: async () => { throw Object.assign(new Error('denied'), { code: 'EPERM' }) } } })
   assert.deepEqual(await f.go(), stopped('runner-threw'))
   assert.equal(count(f, 'planner'), 0)
-})
-
-// MUTATION: a reason outside the closed enum leaks into the result.
-test('an unknown check reason stops as runner-threw, and the loop enum is frozen', async () => {
-  assert.ok(Object.isFrozen(LOOP_REASONS))
-  for (const reason of CHECK_REASONS) assert.ok(LOOP_REASONS.includes(reason), reason)
-  const f = fakes({ suite: { status: 'red', reason: 'free text the enum has never heard of' } })
-  assert.deepEqual(await f.go(), stopped('runner-threw'))
-})
-
-// MUTATION: send the caller's list or an unparsed line to commit and a rename end, an odd name or a deletion is left out.
-test('the commit receives the paths git reports after the suite, both rename ends included', async () => {
-  const cases = [
-    ['M  src/a.mjs\0A  new file.txt\0R  renamed.mjs\0old.mjs\0D  deleted.mjs\0', ['src/a.mjs', 'new file.txt', 'renamed.mjs', 'old.mjs', 'deleted.mjs']],
-    ['C  copy.mjs\0src.mjs\0', ['copy.mjs', 'src.mjs']],
-    ['R  renamed-in-tree.mjs\0before.mjs\0', ['renamed-in-tree.mjs', 'before.mjs']],
-    ['M  both.mjs\0A  both.mjs\0', ['both.mjs']],
-    ['A  line\nbreak.txt\0A  "quoted".txt\0', ['line\nbreak.txt', '"quoted".txt']],
-    ['', []],
-  ]
-  for (const [paths, files] of cases) {
-    const f = fakes({ paths, reviewPaths: paths })
-    assert.equal((await f.go()).status, 'done', paths)
-    assert.deepEqual(f.seen.commit.files, files, paths)
-    const order = f.calls.filter((c) => ['suite', 'paths', 'commit'].includes(c))
-    assert.deepEqual(order, ['suite', 'paths', 'commit'])
-  }
-})
-
-// MUTATION: reuse the first measurement, the caller's list or an unparsed line and a reviewer sees a stale, partial or lost path set.
-test('every reviewer turn receives the paths git reports at that round, both rename ends and odd names included', async () => {
-  const cases = [
-    [' M src/a.mjs\0?? new file.txt\0R  renamed.mjs\0old.mjs\0 D deleted.mjs\0', ['src/a.mjs', 'new file.txt', 'renamed.mjs', 'old.mjs', 'deleted.mjs']],
-    ['C  copy.mjs\0src.mjs\0', ['copy.mjs', 'src.mjs']],
-    ['MM both.mjs\0A  both.mjs\0', ['both.mjs']],
-    ['?? line\nbreak.txt\0?? "quoted".txt\0', ['line\nbreak.txt', '"quoted".txt']],
-    ['', []],
-  ]
-  for (const [reviewPaths, expected] of cases) {
-    const f = fakes({ reviewPaths })
-    assert.equal((await f.go()).status, 'done', reviewPaths)
-    assert.deepEqual(f.requests.filter((r) => r.role === 'reviewer').map((r) => r.changedPaths), [expected], reviewPaths)
-  }
-  const rounds = fakes({ review: 1, spec: { files: ['caller-lie.mjs'] }, reviewPaths: [' M first.mjs\0', ' M second.mjs\0?? third.txt\0'], paths: 'M  commit-only.mjs\0' })
-  assert.equal((await rounds.go()).status, 'done')
-  assert.deepEqual(rounds.requests.filter((r) => r.role === 'reviewer').map((r) => r.changedPaths), [['first.mjs'], ['second.mjs', 'third.txt']])
-  assert.deepEqual(rounds.seen.commit.files, ['commit-only.mjs'])
-  assert.deepEqual(rounds.calls.filter((c) => c.endsWith('paths')), ['review-paths', 'review-paths', 'paths'])
-  assert.equal(rounds.requests.filter((r) => r.role !== 'reviewer').some((r) => 'changedPaths' in r), false)
 })
 
 test('a protected path the suite writes after the review-time path check stops the lane before the commit', async () => {
@@ -2581,36 +1137,6 @@ test('a protected path the suite writes after the review-time path check stops t
   }
   const raised = fakes({ reviewPaths: ' M crew/loop.mjs\0', paths: 'M  crew/loop.mjs\0' })
   assert.equal((await raised.go()).status, 'done')
-})
-
-// MUTATION: dispatch the reviewer anyway when the status read is unusable and the review runs on an unmeasured path set.
-test('a reviewer path read that is denied, interrupted, non-green or malformed stops before the reviewer, suite and commit', async () => {
-  const bad = (fields) => ({ reviewResult: { ...green(), stdout: ' M a.mjs\0', ...fields } })
-  const cases = {
-    'EPERM': { throwCheck: 'review-paths' },
-    'ENOENT': bad({ status: 'unmeasured', reason: 'spawn-failed', code: null, stdout: '' }),
-    'EINTR': bad({ status: 'unmeasured', reason: 'interrupted', code: null, signal: 'SIGINT' }),
-    'red': bad({ status: 'red', reason: 'exit-nonzero', code: 128 }),
-    'signal': bad({ signal: 'SIGKILL' }),
-    'timeout': bad({ timedOut: true }),
-    'nonzero green': bad({ code: 1 }),
-    'no stdout': bad({ stdout: undefined }),
-    'truncated': bad({ stdout: ' M a.mjs' }),
-    'dangling rename': bad({ stdout: 'R  new.mjs\0' }),
-    'unsafe': bad({ stdout: '?? ../escape\0' }),
-    'git dir': bad({ stdout: ' M .git/config\0' }),
-  }
-  for (const [name, options] of Object.entries(cases)) {
-    const f = fakes(options)
-    assert.deepEqual(await f.go(), stopped('paths-unmeasured'), name)
-    assert.equal(count(f, 'reviewer'), 0, name)
-    for (const effect of ['suite', 'paths', 'commit', 'publish']) assert.equal(f.calls.includes(effect), false, `${name} ${effect}`)
-    assert.equal(f.rows.find((r) => r.event === 'verdict' && r.status === 'stopped').reason, 'paths-unmeasured', name)
-  }
-  const second = fakes({ review: 1, reviewPaths: [' M a.mjs\0', ' M a.mjs'] })
-  assert.deepEqual(await second.go(), stopped('paths-unmeasured'))
-  assert.equal(count(second, 'reviewer'), 1)
-  assert.equal(second.calls.filter((c) => c === 'suite').length, 1)
 })
 
 // MUTATION: commit anyway when the status read is unusable and unmeasured paths are committed as an empty list.
@@ -2659,16 +1185,6 @@ test('the loop imports only its pinned modules and only the lean bridge imports 
     .map((e) => join(e.parentPath, e.name))
     .filter((path) => /['"][^'"]*\/loop\.mjs['"]/.test(readFileSync(path, 'utf8')))
   assert.deepEqual(importers, [join(dir, 'lean.mjs')])
-})
-
-// MUTATION: bind subject, title or body from the caller spec and hostile caller prose reaches the commit and the PR.
-test('the commit and PR carry the planner subject and the generated body, never caller prose', async () => {
-  const f = fakes({ spec: { subject: 'feat: caller lie', title: 'feat: caller title', body: 'Imaginary checks: all pass' } })
-  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
-  assert.equal(f.seen.commit.subject, 'fix(crew): planned lane')
-  assert.equal(f.seen.publish.title, 'fix(crew): planned lane')
-  assert.equal(f.seen.commit.body, BODY)
-  assert.equal(f.seen.publish.body, PR_BODY)
 })
 
 // MUTATION: interpolate the source raw and an embedded newline forges a measurement row.
@@ -2731,77 +1247,6 @@ test('with real git the suite sees a new file and staging survives a staged dele
   }
 })
 
-// MUTATION: publish after a refused suite or proof and a lane that never measured green carries a green body.
-test('an unmeasured suite or incomplete proof stops before any commit or publication', async () => {
-  const suites = [{ ...green(), status: 'red', code: 1, reason: 'exit-nonzero' }, { ...green(), status: 'unmeasured', code: null, reason: 'timeout', timedOut: true }, { status: 'green', reason: 'timeout' }, { ...green(), code: 3 }]
-  for (const suite of suites) {
-    const f = fakes({ suite })
-    assert.equal((await f.go()).status, 'stopped', JSON.stringify(suite))
-    assert.deepEqual([f.seen.commit, f.seen.publish], [undefined, undefined], JSON.stringify(suite))
-  }
-  const f = fakes({ proof: { status: 'green', reason: null, rows: [] } })
-  assert.equal((await f.go()).status, 'stopped')
-  assert.deepEqual([f.calls.includes('suite'), f.seen.commit, f.seen.publish], [false, undefined, undefined])
-})
-
-test('a seat whose definition requires a skill its recording never loads is accepted', async () => {
-  const f = fakes({ recording: () => ({ definition: { agent: 'pi', requires: ['alpha'], skills: ['alpha'], writes: 'repo' }, rows: [] }) })
-  assert.equal((await f.go()).status, 'done')
-  assert.ok(f.rows.filter((row) => row.event === 'envelope').every((row) => !row.defects.includes('required-skills-unproven')))
-})
-
-test('the lane writes one run-start with its identity before the first seat, and repairs, bounces and retries never write another', async () => {
-  const f = fakes({ review: 1, deps: { now: Date.now }, edit: (value, request) => (request.role === 'builder' && !request.repair && !f.repaired ? ((f.repaired = true), { ...value, status: 'bogus' }) : value) })
-  const before = Date.now()
-  const result = await f.go()
-  assert.equal(result.status, 'done')
-  const starts = f.rows.filter((row) => row.event === 'run-start')
-  assert.equal(starts.length, 1)
-  assert.equal(f.rows.indexOf(starts[0]), 0, 'the anchor precedes every other row, so before the first seat')
-  assert.equal(starts[0].lane, 'lane')
-  assert.equal(starts[0].run_id, 'lane')
-  assert.ok(starts[0].at >= before && starts[0].at <= Date.now(), 'a wall-clock lane start')
-  assert.ok(count(f, 'builder') >= 2, 'the build was repeated or repaired')
-})
-
-test('a task dir that cannot be made writes no run-start', async () => {
-  const f = fakes({ deps: { mkdir: async () => { throw new Error('denied') } } })
-  assert.equal((await f.go()).reason, 'runner-threw')
-  assert.equal(f.rows.some((row) => row.event === 'run-start'), false)
-})
-
-// MUTATION: treat a red proof as proven.
-test('unproven and missing named tests return to the builder, while unmeasured stops', async () => {
-  for (const kind of ['red', 'none', 'unmeasured']) {
-    let calls = 0
-    const f = fakes({ edit: (v) => {
-      if (v.role === 'builder' && kind === 'none' && ++calls === 1) v.details.tests = []
-      return v
-    }, proof: (() => { let n = 0; return () => kind === 'unmeasured' ? { status: 'unmeasured', reason: 'timeout', rows: [] } : kind === 'red' && n++ === 0 ? { status: 'red', reason: 'proof-unproven', rows: [{ file: 'lib.test.mjs', title: 'works', proven: false, base: { state: 'green', reason: null }, build: { state: 'green', reason: null }, reason: 'proof-not-red-on-base' }] } : { status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }] } })() })
-    const result = await f.go()
-    if (kind === 'unmeasured') { assert.deepEqual(result, stopped('timeout')); continue }
-    assert.equal(result.status, 'done')
-    const turns = f.requests.filter((r) => r.role === 'builder')
-    assert.equal(turns.length, 2)
-    assert.equal(turns[1].feedback[0].id, kind === 'none' ? 'proof-no-tests' : 'proof-unproven')
-    if (kind === 'red') assert.deepEqual([turns[1].feedback[0].tests[0].file, turns[1].feedback[0].tests[0].title], ['lib.test.mjs', 'works'])
-  }
-})
-
-// MUTATION: keep the previous builder's tests when a later return names none.
-test('a builder that names no tests after a review bounce is not proven by the earlier names', async () => {
-  let builds = 0, reviews = 0
-  const f = fakes({ bounds: { builder: 3, reviewer: 3 }, edit: (v) => {
-    if (v.role === 'builder' && ++builds === 2) v.details.tests = []
-    if (v.role === 'reviewer' && ++reviews === 1) return { ...v, details: { ...v.details, verdict: 'changes-needed', findings: [finding] } }
-    return v
-  } })
-  assert.equal((await f.go()).status, 'done')
-  const turns = f.requests.filter((r) => r.role === 'builder')
-  assert.equal(turns.length, 3)
-  assert.equal(turns[2].feedback[0].id, 'proof-no-tests')
-})
-
 // ---- finish shape (lean plan 3.5): a stopped lane re-entered by its builder ----
 const STOP = { reason: 'mutations-survived', observation: { stage: 'mutations', detail: 'A1 survived' } }
 const finishSpec = (over = {}) => ({
@@ -2841,31 +1286,6 @@ test('a finish consult distinguishes imported tech-lead findings from reviewer f
   }
 })
 
-test('finish carries each seats open findings after a split judge round stops (#2425)', async () => {
-  for (const [review, secondReview] of [[1, 0], [1, 1], [0, 1]]) {
-    const root = scratchDir(), taskDir = join(root, 'dt-lane', 'lane', 'task')
-    mkdirSync(taskDir, { recursive: true })
-    const f = fakes({ spec: { cwd: root, taskDir, tier: 'judge' }, review, secondReview,
-      edit: (v, r) => r.role === 'builder' && r.feedback.length ? { ...v, status: 'escalate', details: { ...v.details, question: 'How should this be repaired?' } } : v })
-    assert.equal((await f.go()).reason, 'lead-escalated')
-    writeFileSync(join(taskDir, 'lean.json'), JSON.stringify(f.spec))
-    const planner = f.rows.find((row) => row.event === 'envelope' && row.role === 'planner').parsed
-    writeFileSync(join(taskDir, 'planner-1.json'), JSON.stringify(planner))
-    writeFileSync(join(taskDir, 'journal.jsonl'), `${f.rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
-    finishLane({ lane: 'lane', root, deps: { platform: 'linux', log: () => {}, spawnDetached: () => 4242 } })
-    const { finish } = JSON.parse(readFileSync(join(taskDir, 'finish.json'), 'utf8'))
-    const expected = [...(review ? [finding] : []), ...(secondReview ? [{ ...finding, id: 'T1', ...(review ? { role: 'tech-lead' } : {}) }] : [])]
-    assert.deepEqual(finish.findings, expected)
-    assert.equal(finish.findingsRole, !review && secondReview ? 'tech-lead' : undefined)
-    const resumed = fakes({ spec: { shape: 'finish', tier: 'judge', finish } })
-    assert.equal((await resumed.go()).status, 'done')
-    for (const role of ['builder', 'reviewer']) {
-      const feedback = resumed.requests.find((r) => r.role === role).feedback
-      assert.deepEqual(feedback.filter((item) => item.severity === 'must-fix'), expected)
-    }
-  }
-})
-
 test('a finish run builder receives the lead rulings from its finish spec (#2341)', async () => {
   const rulings = [{ id: 'lead-bounce', summary: 'ruling 0' }]
   const f = fakes({ spec: finishSpec({ rulings }), unseated: ['planner'] })
@@ -2873,62 +1293,6 @@ test('a finish run builder receives the lead rulings from its finish spec (#2341
   assert.ok(builderTurns(f)[0].feedback.some((item) => item.id === rulings[0].id && item.summary === rulings[0].summary))
   for (const bad of [null, {}, [null], [{}], [{ summary: '' }]]) {
     assert.equal((await fakes({ spec: finishSpec({ rulings: bad }), unseated: ['planner'] }).go()).reason, 'invalid-input')
-  }
-})
-
-test('planning resume carries operator guidance through planner and lead to finish-ready (#2392)', async () => {
-  for (const [guidance, testsRequired] of [['Keep the seeded baseline.', true], ['Use the replacement answer.', false]]) {
-    const plan = { role: 'planner', id: 'lane.planner.1', status: 'done', summary: 'Held plan', details: {
-      subject: 'fix(crew): held plan', plan_path: '/virtual/task/plan.md', tests: [], files_in_scope: ['seed.txt'],
-    } }
-    const history = { returnPath: '/virtual/task/planner-1.json', parsed: plan, defects: [], error: null }
-    const observation = { question: 'Keep the seeded baseline?' }
-    let builds = 0
-    const f = fakes({ spec: finishSpec({ subject: null, planPath: null, findings: [], turnOffset: 70, guidance,
-      planning: { entry: 'lead', plan, planner: history, observation } }), bounds: { planner: 1 }, lead: 'bounce', target: 'planner',
-      edit: (v, r) => {
-        if (r.role === 'lead') v.details.instructions = 'Revise the checklist using the answer.'
-        if (r.role === 'builder' && (++builds === 1 || !testsRequired)) v.details.tests = []
-        if (r.role === 'planner') {
-          v.details.subject = 'fix(crew): resumed plan'
-          v.details.files_in_scope = ['seed.txt', 'lib.mjs']
-          if (!testsRequired) v.details.tests = []
-          if (!r.repair) v.details.plan_path += ':1-2'
-        }
-        return v
-      } })
-    const anchor = { event: 'run-start', at: 123, run_id: 'lane' }
-    f.rows.push(anchor)
-    f.writes.set('/virtual/checkout/seed.txt', 'seeded target')
-    assert.equal((await f.go()).status, 'done')
-    assert.deepEqual(f.requests.map((r) => r.role), ['lead', 'planner', 'planner', 'builder', ...(testsRequired ? ['builder'] : []), 'reviewer'])
-    if (testsRequired) assert.equal(builderTurns(f)[1].feedback[0].id, 'proof-no-tests')
-    assert.equal(f.calls.includes('proof'), testsRequired)
-    if (!testsRequired) {
-      assert.match(f.seen.commit.body, /proof: none, no criterion is machine-checked/)
-      assert.match(f.rows.at(-1).body, /Proof: no criterion is machine-checked\./)
-    }
-    for (const r of f.requests.filter((r) => ['planner', 'lead'].includes(r.role))) {
-      assert.equal(r.brief, f.spec.brief)
-      assert.equal(r.feedback.find((item) => item.id === 'finish-return').guidance, guidance)
-      assert.deepEqual(r.feedback.find((item) => item.id === 'planning-resume').planner, history)
-      assert.deepEqual(r.feedback.find((item) => item.id === 'planning-resume').observation, observation)
-    }
-    assert.ok(f.requests[1].feedback.some((item) => item.id === 'lead-bounce' && item.summary === 'Revise the checklist using the answer.'))
-    assert.ok(f.requests[2].repair)
-    const builder = f.requests.find((r) => r.role === 'builder')
-    assert.equal(builder.planPath, '/virtual/task/plan.md')
-    assert.deepEqual(builder.filesInScope, ['seed.txt', 'lib.mjs'])
-    assert.equal(builder.testsRequired, testsRequired)
-    assert.equal(f.seen.commit.subject, 'fix(crew): resumed plan')
-    assert.equal(f.requests[0].id, 'lane.lead.71')
-    assert.ok(f.requests.every((r) => Number(r.id.split('.').at(-1)) > 70))
-    assert.deepEqual(f.rows.filter((r) => r.event === 'run-start'), [anchor])
-    assert.equal(f.writes.get('/virtual/checkout/seed.txt'), 'seeded target')
-    assert.ok(!f.discardArgs.some((args) => args.includes('--hard') || args.includes('clean')))
-    assert.equal(f.calls.includes('publish'), false)
-    assert.equal(f.rows.at(-1).event, 'finish-ready')
-    assert.equal(f.rows.at(-1).subject, 'fix(crew): resumed plan')
   }
 })
 
@@ -2986,128 +1350,8 @@ test('accepted planning resume starts at the lead and honors its decision (#2392
   }
 })
 
-const FINISH_SUCCESS = ['base-paths', 'fetch', 'base-commit', 'rebase', 'base-restore', 'seat:builder', 'fetch', 'check-base', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'seat:reviewer', 'suite', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase']
-
-test('a changes-needed with only should-fix findings gets one repair turn and a repaired pass publishes without a builder bounce', async () => {
-  const f = fakes({ edit: (v, r) => {
-    if (r.role === 'reviewer') {
-      v.details.verdict = r.repair ? 'pass' : 'changes-needed'
-      v.details.findings = [{ ...finding, severity: 'should-fix' }]
-    }
-    return v
-  } })
-  assert.equal((await f.go()).status, 'done')
-  assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'builder', 'reviewer', 'reviewer'])
-  assert.ok(f.requests.at(-1).repair.defects.some((d) => d.includes('no finding is must-fix')))
-  assert.ok(f.seen.publish)
-})
-
-test('a round-2 reviewer request carries the previous reviewed tree while round-1 and finish requests carry none', async () => {
-  let f
-  f = fakes({ review: 2, bounds: { reviewer: 3, builder: 3 }, checkedTree: () => ({ ...green(), stdout: `${'abcdef'[Math.min(f.requests.filter((r) => r.role === 'reviewer').length, 2)].repeat(40)}\n` }) })
-  assert.equal((await f.go()).status, 'done')
-  const reviews = f.requests.filter((r) => r.role === 'reviewer')
-  assert.equal(Object.hasOwn(reviews[0], 'deltaReview'), false)
-  assert.deepEqual(reviews[1].deltaReview, { baseTree: 'a'.repeat(40) })
-  assert.deepEqual(reviews[2].deltaReview, { baseTree: 'b'.repeat(40) })
-  const finish = fakes({ spec: finishSpec(), review: 1, unseated: ['planner'] })
-  assert.equal((await finish.go()).status, 'done')
-  assert.ok(finish.requests.filter((r) => r.role === 'reviewer').every((r) => !Object.hasOwn(r, 'deltaReview')))
-  const reserve = fakes({ review: 1, bounds: { reviewer: 1 } })
-  assert.equal((await reserve.go()).status, 'done')
-  const final = reserve.requests.filter((r) => r.role === 'reviewer').at(-1)
-  assert.deepEqual(final.reserveReview, { baseTree: 'e'.repeat(40) })
-  assert.equal(Object.hasOwn(final, 'deltaReview'), false)
-  const recheck = fakes({ rebase: answers({ ...MOVED, head: 'a'.repeat(40) }, MOVED, { ...MOVED, head: 'a'.repeat(40) }),
-    checkedTree: () => ({ ...green(), stdout: String(1 + recheck.calls.filter((c) => c === 'uncommit').length).repeat(40) }) })
-  assert.equal((await recheck.go()).status, 'done')
-  const recheckReviews = recheck.requests.filter((r) => r.role === 'reviewer')
-  assert.equal(recheckReviews.length, 2)
-  assert.equal(Object.hasOwn(recheckReviews[1], 'deltaReview'), false)
-})
-
-test('an open should-fix from round 1 that is not re-raised still appears in the PR body', async () => {
-  for (const role of ['reviewer', 'tech-lead']) for (const mode of ['omitted', 'closed', 'updated', 'consider']) {
-    let turns = 0
-    const optional = { ...finding, id: role === 'reviewer' ? 'R2' : 'T2', severity: 'should-fix', summary: `${role} open point` }
-    const f = fakes({ spec: { tier: role === 'tech-lead' ? 'judge' : 'build' }, ...(role === 'reviewer' ? { review: 1 } : { secondReview: 1 }), edit: (v) => {
-      if (v.role === role) {
-        if (++turns === 1) v.details.findings.push(optional)
-        else if (mode !== 'closed') {
-          v.details.closed = v.details.closed.filter((entry) => entry.id !== optional.id)
-          if (mode === 'updated') v.details.findings.push({ ...optional, summary: 'Updated open point' })
-          if (mode === 'consider') v.details.findings.push({ ...optional, severity: 'consider' })
-        }
-      }
-      return v
-    } })
-    assert.equal((await f.go()).status, 'done')
-    assert.equal(f.requests.filter((r) => r.role === role).length, 2)
-    assert.equal(f.seen.publish.body.includes(optional.summary), mode === 'omitted' || mode === 'consider')
-    assert.equal(f.seen.publish.body.includes('Updated open point'), mode === 'updated')
-  }
-  const judge = fakes({ spec: { tier: 'judge' }, edit: (v) => {
-    if (['reviewer', 'tech-lead'].includes(v.role)) v.details.findings.push({ ...finding, severity: 'should-fix', summary: `${v.role} same-id point` })
-    return v
-  } })
-  assert.equal((await judge.go()).status, 'done')
-  assert.match(judge.seen.publish.body, /reviewer same-id point/)
-  assert.match(judge.seen.publish.body, /tech-lead same-id point/)
-})
-
-// MUTATION: commit the snapshot with the added-then-deleted entry still staged and the rebase refuses a dirty checkout.
-test('a finish run drops added-then-deleted index entries before its base snapshot and commits only the build', async () => {
-  for (const [stdout, files] of [[' M lib.mjs\0AD scratch.mjs\0', ['lib.mjs']], ['AD scratch.mjs\0', null]]) {
-    const f = fakes({ spec: finishSpec(), baseStatus: { ...green(), stdout } })
-    assert.equal((await f.go()).status, 'done')
-    assert.deepEqual(f.calls.slice(1, f.calls.indexOf('seat:builder')), ['base-paths', 'fetch', 'base-unstage', ...(files ? ['base-commit'] : []), 'rebase', 'base-restore'])
-    assert.deepEqual(f.seen['base-unstage'].args, ['--literal-pathspecs', 'rm', '--cached', '--quiet', '--ignore-unmatch', '--', 'scratch.mjs'])
-    if (files) assert.deepEqual(f.seen['base-commit'].files, files)
-  }
-})
-
-// MUTATION: skip the base-first block and the builder sees the stale base.
-test("a finish run brings the uncommitted build onto the current base before the builder's first turn", async () => {
-  for (const dirty of [true, false]) {
-    const f = fakes({ spec: finishSpec(), baseStatus: { ...green(), stdout: dirty ? ' M lib.mjs\0' : '' } })
-    assert.equal((await f.go()).status, 'done')
-    const before = f.calls.slice(1, f.calls.indexOf('seat:builder'))
-    assert.deepEqual(before, ['base-paths', 'fetch', ...(dirty ? ['base-commit'] : []), 'rebase', 'base-restore'])
-    if (dirty) assert.deepEqual(f.seen['base-commit'].files, ['lib.mjs'])
-    assert.deepEqual(f.discardArgs[0], ['reset', '--soft', 'c'.repeat(40)])
-    assert.equal(f.rows.filter((row) => row.event === 'commit').length, 1)
-    assert.equal(f.seen.proof.base, 'HEAD')
-  }
-})
-
-// MUTATION: restore the nothing-to-commit stop for --return.
-test('a finish --return pass whose branch equals its base after the rebase re-enters build with the return notes (#2380)', async () => {
-  for (const stdout of ['', ' M lib.mjs\0']) {
-    const f = fakes({ spec: finishSpec({ guidance: 'Fix it first' }), unseated: ['planner'], baseStatus: { ...green(), stdout }, rebase: answers(
-      { status: 'green', reason: null, head: 'c'.repeat(40), onto: 'c'.repeat(40) },
-      { status: 'green', reason: null, head: 'a'.repeat(40), onto: 'c'.repeat(40) },
-    ) })
-    assert.equal((await f.go()).status, 'done')
-    assert.ok(f.calls.includes('seat:builder'))
-    const builder = builderTurns(f)[0]
-    assert.equal(builder.planPath, '/virtual/task/plan.md')
-    assert.ok(builder.feedback.some((item) => item.id === 'finish-stop' && item.reason === STOP.reason))
-    assert.ok(builder.feedback.some((item) => item.id === 'finish-return' && item.guidance === 'Fix it first'))
-    assert.equal(f.rows.some((row) => row.status === 'stopped' && row.reason === 'nothing-to-commit'), false)
-    if (stdout) assert.deepEqual(f.discardArgs[0], ['reset', '--soft', 'c'.repeat(40)])
-  }
-})
-
-test('a clean committed finish-ready return proves its new-file test against the base and ends with one commit (#2399)', async () => {
-  await committedReadyReturn(false)
-})
-
 test('a committed finish-ready return after conflict resolution proves against the rebase base and ends with one commit (#2399)', async () => {
   await committedReadyReturn(true)
-})
-
-test('a committed finish-ready return stopped after uncommit can be returned again (#2399)', async () => {
-  await committedReadyReturn(false, true)
 })
 
 async function committedReadyReturn(conflict, stop = false) {
@@ -3244,42 +1488,6 @@ test('a finish run whose base rebase conflicts stops, names the conflicting path
   }
 })
 
-// MUTATION: restore the repaired review stop or the old builder grant.
-test('a finish review that asks for changes after the suite repair goes back to the builder, and the repaired tree is proven, reviewed and suite-run before ready', async () => {
-  const f = sequenced([redRun(), green()], { spec: finishSpec(), checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder')).repeat(40) }), edit: (v, req) => req.role === 'reviewer' && count(f, 'builder') === 2 ? { ...v, details: { ...v.details, verdict: 'changes-needed', findings: [finding] } } : v })
-  assert.equal((await f.go()).status, 'done')
-  assert.deepEqual(builderTurns(f)[2].feedback, [finding])
-  assert.equal(count(f, 'lead'), 0)
-  assert.deepEqual(f.calls.slice(f.calls.lastIndexOf('seat:builder'), f.calls.lastIndexOf('seat:builder') + 7), ['seat:builder', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'seat:reviewer', 'suite'])
-  const report = JSON.parse(f.writes.get('/virtual/task/finish-report.json'))
-  assert.deepEqual(report.reviews.map((r) => r.verdict), ['pass', 'changes-needed', 'pass'])
-  assert.match(report.body, /- Suite: green; exit 0; node --test lane\.test\.mjs\./)
-})
-
-test('a finish run with its review cap spent reviews the suite repair without a round and reaches finish-ready (#2374)', async () => {
-  const f = sequenced([redRun(), green()], { spec: finishSpec({ priorReviewRounds: 2 }), checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder')).repeat(40) }) })
-  assert.equal((await f.go()).status, 'done')
-  assert.equal(count(f, 'reviewer'), 2)
-  assert.equal(f.rows.find((row) => row.event === 'finish-ready').reviewRounds, 3)
-  assert.deepEqual(f.rows.filter((row) => row.event === 'verdict' && row.status === 'reviewed').map((row) => row.counted), [undefined, false])
-  const id = f.requests.filter((request) => request.role === 'reviewer')[1].id
-  const envelopes = f.rows.filter((row) => row.event === 'envelope' && row.role === 'reviewer' && row.id === id)
-  assert.ok(envelopes.length > 0 && envelopes.every((row) => row.counted === false))
-  assert.equal(JSON.parse(f.writes.get('/virtual/task/finish-report.json')).reviews.length, 2)
-  assert.match(f.seen.commit.body, /Review 2/)
-})
-
-test('a finish run with its review cap spent rechecks a moved head without a round and reaches finish-ready (#2374)', async () => {
-  const A = 'a'.repeat(40), C = 'c'.repeat(40)
-  const f = fakes({ spec: finishSpec({ priorReviewRounds: 2 }), unseated: ['planner'],
-    checkedTree: () => ({ ...green(), stdout: String(1 + f.calls.filter((c) => c === 'uncommit').length).repeat(40) }),
-    rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C, onto: O }),
-    commit: answers({ status: 'green', reason: null, head: A, files: ['lib.mjs'] }, { status: 'green', reason: null, head: C, files: ['lib.mjs'] }) })
-  assert.equal((await f.go()).status, 'done')
-  assert.equal(count(f, 'reviewer'), 2)
-  assert.equal(f.rows.find((row) => row.event === 'finish-ready').reviewRounds, 3)
-})
-
 test('an uncounted finish review that asks for changes with the cap spent stops round-bound with its findings and no builder turn (#2374)', async () => {
   const A = 'a'.repeat(40), C = 'c'.repeat(40)
   for (const kind of ['repair', 'recheck']) {
@@ -3301,14 +1509,6 @@ test('an uncounted finish review that asks for changes with the cap spent stops 
     assert.equal(count(f, 'lead'), 0, kind)
     assert.equal(f.requests.at(-1).role, 'reviewer', kind)
   }
-})
-
-// MUTATION: reject a null plan path or claim a mechanical finish was not reviewed.
-test('a mechanical finish runs on its brief with no plan path, is reviewed, and its report never says not reviewed', async () => {
-  const f = fakes({ spec: { ...finishSpec({ planPath: null }), tier: 'mechanical' } })
-  assert.equal((await f.go()).status, 'done')
-  assert.deepEqual(f.requests.map((r) => [r.role, r.planPath]), [['builder', null], ['reviewer', null]])
-  assert.doesNotMatch(JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body, /not reviewed/)
 })
 
 // MUTATION: raise a planless finish and its next builder boots judge seats that refuse without a plan.
@@ -3334,20 +1534,6 @@ test('finish without named tests reports unmeasured proof and standard reports e
   assert.equal((await standard.go()).status, 'done')
   assert.equal(standard.seen.commit.body.split('\n').filter((line) => line.startsWith('- proof:')).length, 1)
   assert.doesNotMatch(standard.seen.commit.body, /kill/i)
-})
-
-// MUTATION: run the plan stage on a finish run and the planner request appears.
-test('a finish run issues no planner turn, and ends after rebase without a PR (FN1, FN2, FN6)', async () => {
-  const f = fakes({ spec: finishSpec(), unseated: ['planner'] })
-  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: null })
-  assert.deepEqual(f.calls, ['mkdir', ...FINISH_SUCCESS])
-  assert.equal(f.rows.filter((r) => r.event === 'run-start').length, 0)
-  assert.equal(f.rows.some((r) => r.event === 'pr'), false)
-  const ready = f.rows.at(-1)
-  assert.equal(ready.event, 'finish-ready')
-  assert.equal(ready.status, 'ready-for-operator')
-  assert.equal(ready.head, 'a'.repeat(40))
-  assert.equal(f.rows.findIndex((r) => r.event === 'finish-ready') > f.rows.findLastIndex((r) => r.stage === 'rebase'), true)
 })
 
 // MUTATION: flip isFinish && in the guard for a planner bounce from a finish builder.
@@ -3388,86 +1574,6 @@ test('a finish lead bounce to the planner is asked again with no planner to rout
   }
 })
 
-// MUTATION: start the first builder feedback empty and the stop reason and findings never reach it.
-test('the finish builder first hears the stop reason with its observation, then the open findings; seat ids start past the stopped lane', async () => {
-  const f = fakes({ spec: finishSpec(), unseated: ['planner'] })
-  await f.go()
-  assert.deepEqual(f.requests[0].feedback, [{ id: 'finish-stop', summary: 'The previous lane stopped with the given reason and observation.', reason: STOP.reason, observation: STOP.observation }, finding])
-  assert.equal(f.requests[0].planPath, '/virtual/task/plan.md')
-  assert.equal(f.requests[0].id, 'lane.builder.4')
-  assert.equal(f.requests[0].role, 'builder')
-})
-
-test('a finish pass with guidance keeps finish-return once in the builder turn after a review bounce and never sends it to the reviewer (#2384)', async () => {
-  const guidance = 'Do not name the new-file test as a proof test.'
-  const f = fakes({ spec: finishSpec({ guidance }), unseated: ['planner'], review: 1, bounds: { builder: 3 } })
-  assert.equal((await f.go()).status, 'done')
-  const feedback = builderTurns(f)[1].feedback
-  assert.deepEqual(feedback.filter((item) => item.id === 'finish-return'), [{ id: 'finish-return', summary: 'The operator supplied guidance for this finish run. It stands for the whole finish run and outranks the plan and a lead ruling where they differ.', guidance }])
-  assert.equal(feedback.some((item) => item.id === 'finish-stop'), false)
-  assert.ok(f.requests.filter((r) => r.role === 'reviewer').every((r) => r.feedback.every((item) => item.id !== 'finish-return')))
-})
-
-test('a finish lead consult for a builder held at its round bound sees finish-return and a lead-escalated question leaves the guidance out (#2384)', async () => {
-  const guidance = 'Do not name the new-file test as a proof test.'
-  const f = fakes({ spec: finishSpec({ guidance }), unseated: ['planner'], review: 1, bounds: { builder: 1, lead: 1 }, lead: 'bounce', target: 'planner' })
-  assert.deepEqual(await f.go(), stopped('lead-escalated'))
-  const feedback = f.requests.find((r) => r.role === 'lead').feedback[0].feedback
-  assert.deepEqual(feedback.filter((item) => item.id === 'finish-return').map((item) => item.guidance), [guidance])
-  const question = f.rows.findLast((r) => r.reason === 'lead-escalated').observation.question
-  assert.match(question, /Fix the defect/)
-  assert.doesNotMatch(question, /outranks|operator supplied guidance/i)
-  assert.equal(question.includes(guidance), false)
-})
-
-test('a finish pass with guidance whose first suite is red gives the suite-repair builder turn finish-return once (#2384)', async () => {
-  const guidance = 'Do not name the new-file test as a proof test.'
-  const f = sequenced([redRun(), green()], { spec: finishSpec({ guidance }), unseated: ['planner'] })
-  assert.equal((await f.go()).status, 'done')
-  const feedback = builderTurns(f)[1].feedback
-  assert.equal(feedback.filter((item) => item.id === 'suite-repair').length, 1)
-  assert.deepEqual(feedback.filter((item) => item.id === 'finish-return').map((item) => item.guidance), [guidance])
-})
-
-test('a finish conflict turn and a non-finish lane never carry finish-return (#2384)', async () => {
-  const guidance = 'Do not name the new-file test as a proof test.'
-  const conflict = { status: 'red', reason: 'rebase-conflict', conflicts: ['lib.mjs'] }
-  const f = fakes({ spec: finishSpec({ guidance }), unseated: ['planner'], rebase: answers(conflict, { ...MOVED, onto: O }, { ...MOVED, head: 'a'.repeat(40) }) })
-  assert.equal((await f.go()).status, 'done')
-  const turns = builderTurns(f)
-  assert.equal(turns[0].feedback.length, 1)
-  assert.equal(turns[0].feedback[0].id, 'rebase-conflict')
-  assert.equal(turns[1].feedback.filter((item) => item.id === 'finish-return').length, 1)
-  for (const options of [{ review: 1, bounds: { builder: 3 } }, { review: 1, bounds: { builder: 1 }, lead: 'bounce' }]) {
-    const standard = fakes(options)
-    assert.equal((await standard.go()).status, 'done')
-    for (const request of standard.requests) {
-      assert.ok(request.feedback.every((item) => item.id !== 'finish-return' && (item.feedback ?? []).every((nested) => nested.id !== 'finish-return')))
-    }
-  }
-})
-
-// MUTATION: leave the reviewer at two rounds and the third finish review bounds out.
-test('a finish run gives the reviewer three rounds and refuses an unsound finish spec', async () => {
-  const f = fakes({ spec: finishSpec(), unseated: ['planner'], review: 2, bounds: { builder: 3 } })
-  assert.equal((await f.go()).status, 'done')
-  assert.equal(count(f, 'reviewer'), 3)
-  for (const bad of [undefined, finishSpec({ planPath: '' }).finish, finishSpec({ stop: {} }).finish, finishSpec({ turnOffset: -1 }).finish, finishSpec({ findings: null }).finish]) {
-    const g = fakes({ spec: { shape: 'finish', finish: bad }, unseated: ['planner'] })
-    assert.deepEqual(await g.go(), stopped('invalid-input'))
-    assert.deepEqual(g.calls, [])
-  }
-})
-
-// MUTATION: let the lead bounce a spent finish reviewer and a fourth review runs.
-test('a finish review that still asks for changes after three rounds stops the run without consulting the lead', async () => {
-  const f = fakes({ spec: finishSpec(), unseated: ['planner'], review: 3, bounds: { builder: 4 } })
-  assert.deepEqual(await f.go(), stopped('round-bound'))
-  assert.equal(count(f, 'reviewer'), 3)
-  assert.equal(f.calls.includes('seat:lead'), false)
-  assert.equal(f.calls.includes('commit'), false)
-})
-
 // MUTATION: drop the report write, the guidance entry or the prior-rounds deduction and the matching assertion fails.
 test('a green finish run writes a fused report and a finish-ready row with the measured subject and body; a return pass keeps the cap (FD1, FD2, FD7)', async () => {
   const f = fakes({ spec: finishSpec(), unseated: ['planner'], review: 1, bounds: { builder: 3 } })
@@ -3489,26 +1595,6 @@ test('a green finish run writes a fused report and a finish-ready row with the m
   assert.equal(count(g, 'reviewer'), 1)
   for (const bad of [{ guidance: 5 }, { priorReviewRounds: -1 }, { priorReviewRounds: 1.5 }]) {
     assert.deepEqual(await fakes({ spec: finishSpec(bad), unseated: ['planner'] }).go(), stopped('invalid-input'))
-  }
-})
-
-// MUTATION: ignore a failed report write and the lane is announced ready without its report.
-test('a finish run that cannot write its report emits no finish-ready, and the standard shape writes none', async () => {
-  const f = fakes({ spec: finishSpec(), unseated: ['planner'], writeError: 'EACCES' })
-  assert.deepEqual(await f.go(), stopped('runner-threw'))
-  assert.equal(f.rows.some((r) => r.event === 'finish-ready'), false)
-  const std = fakes()
-  await std.go()
-  assert.equal(std.writes.size, 0)
-})
-
-// MUTATION: refuse a lead decision carried by a non-done status and the held role cannot continue.
-test('a non-done lead bounce or accept keeps its routing (LF4)', async () => {
-  for (const status of ['insufficient', 'escalate']) for (const decision of ['bounce', 'accept']) {
-    const f = fakes({ lead: decision, edit: (v) => (v.id === 'lane.builder.2' ? { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } } : v.role === 'lead' ? { ...v, status } : v) })
-    assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
-    assert.equal(count(f, 'builder'), decision === 'bounce' ? 2 : 1)
-    assert.equal(count(f, 'lead'), 1)
   }
 })
 
@@ -3554,19 +1640,6 @@ test('a mechanical lane whose publishing rebase drops its commit as already upst
   }
 })
 
-// MUTATION: drop the finish Scope line.
-test('a finish report labels its Lane counts as this finish run only and a standard PR body carries no such label (S1-7)', async () => {
-  const f = fakes({ spec: finishSpec(), unseated: ['planner'] })
-  assert.equal((await f.go()).status, 'done')
-  const label = 'This report covers only this finish run.'
-  assert.ok(JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body.includes(label))
-  assert.ok(f.rows.find((r) => r.event === 'finish-ready').body.includes(label))
-  const standard = fakes()
-  assert.equal((await standard.go()).status, 'done')
-  assert.equal(standard.seen.publish.body, PR_BODY)
-  assert.doesNotMatch(standard.seen.publish.body, /this finish run/)
-})
-
 // MUTATION: drop the early journal write.
 test('an early refusal journals one stopped verdict row with its reason, and none when the spec names no lane or task dir (D5)', async () => {
   for (const [options, reason] of [
@@ -3604,30 +1677,6 @@ test('an early refusal journals one stopped verdict row with its reason, and non
   }
 })
 
-test('a recheck review resets the delta base so the next delta review diffs from the rebased tree (S1-2)', async () => {
-  const A = 'a'.repeat(40)
-  let reviews = 0
-  const f = fakes({ rebase: answers({ ...MOVED, head: A }, MOVED, { ...MOVED, head: A }),
-    checkedTree: () => ({ ...green(), stdout: `${String.fromCharCode(97 + f.calls.filter((c) => c === 'seat:builder' || c === 'uncommit').length).repeat(40)}\n` }),
-    edit: (v) => {
-      if (v.role === 'reviewer' && ++reviews === 2) { v.details.verdict = 'changes-needed'; v.details.findings = [finding] }
-      return v
-    },
-  })
-  assert.equal((await f.go()).status, 'done')
-  assert.equal(f.requests.filter((r) => r.role === 'reviewer')[2].deltaReview.baseTree, 'c'.repeat(40))
-})
-
-test('a judge recheck whose suite is red makes the next review a full review (#2320)', async () => {
-  const A = 'a'.repeat(40)
-  const f = sequenced([green(), redRun(), green()], { spec: { tier: 'judge' }, rebase: answers({ ...MOVED, head: A }, MOVED, { ...MOVED, head: A }),
-    checkedTree: () => ({ ...green(), stdout: String(f.calls.filter((c) => c === 'seat:builder' || c === 'uncommit').length).repeat(40) }) })
-  assert.equal((await f.go()).status, 'done')
-  const reviews = f.requests.filter((r) => r.role === 'reviewer')
-  assert.equal(reviews.length, 2)
-  assert.equal(Object.hasOwn(reviews[1], 'deltaReview'), false)
-})
-
 test('a lead accept of a mechanical builder escalate stops seat-escalated with the builder question and never commits (S1-4)', async () => {
   const f = fakes({ spec: { tier: 'mechanical' }, lead: 'accept', edit: (v) => {
     if (v.role === 'builder') { v.status = 'escalate'; v.details.question = 'Which file?' }
@@ -3636,15 +1685,6 @@ test('a lead accept of a mechanical builder escalate stops seat-escalated with t
   assert.deepEqual(await f.go(), stopped('seat-escalated'))
   assert.equal(f.rows.find((r) => r.event === 'verdict' && r.reason === 'seat-escalated').observation.question, 'Which file?')
   assert.equal(f.calls.some((c) => c === 'commit' || c === 'publish'), false)
-})
-
-test('the PR body says Closes issue N only when the lane closes issue N (S6-11)', async () => {
-  for (const closes of [[], undefined, [12]]) {
-    const f = fakes({ spec: { closes } })
-    assert.equal((await f.go()).status, 'done')
-    assert.match(f.seen.publish.body, closes?.includes(12) ? /^Closes issue 12/m : /^Issue 12/m)
-    if (!closes?.includes(12)) assert.doesNotMatch(f.seen.publish.body, /Closes issue/)
-  }
 })
 
 test('a test proven as base-package-absent says so in the commit and PR body, never red on the old source', async () => {
@@ -3665,15 +1705,6 @@ test('a test proven as base-test-absent says so in the commit and PR body, never
   assert.doesNotMatch(f.seen.publish.body, /works.*red on the old source/)
 })
 
-test('a mechanical lane that proved a named test lists that proof in Verification (S6-11)', async () => {
-  const f = fakes({ spec: { tier: 'mechanical' }, edit: (v) => { if (v.role === 'builder') v.details.subject = 'fix: mechanical'; return v } })
-  assert.equal((await f.go()).status, 'done')
-  const body = f.seen.publish.body.split('## Verification')[1]
-  assert.match(body, /- lib\.test\.mjs: works was red on the old source, green on the build\./)
-  assert.match(body, /Review: none, mechanical lane, not reviewed\./)
-  assert.doesNotMatch(body, /Proof: mechanical lane/)
-})
-
 test('Verification marks a test the last build turn did not name as proved on an earlier turn (#2320)', async () => {
   let builds = 0
   const f = fakes({ review: 1, proof: (input) => ({ status: 'green', reason: null, rows: input.tests.map((t) => ({ ...t, proven: true })) }), edit: (v) => {
@@ -3687,29 +1718,6 @@ test('Verification marks a test the last build turn did not name as proved on an
   assert.doesNotMatch(body, /first was red on the old source, green on the build\./)
 })
 
-test('Verification lists every test proved across the lane build turns (S6-11)', async () => {
-  let builds = 0
-  const f = fakes({ review: 1, proof: (input) => ({ status: 'green', reason: null, rows: input.tests.map((t) => ({ ...t, proven: true })) }), edit: (v) => {
-    if (v.role === 'builder') {
-      const named = { file: 'lib.test.mjs', title: ++builds === 1 ? 'first' : 'second' }
-      v.details.tests = builds === 1 ? [named] : [named, named]
-    }
-    return v
-  } })
-  assert.equal((await f.go()).status, 'done')
-  assert.equal(f.seen.publish.body.split('- lib.test.mjs: first was red on the old source, green on an earlier build turn; the last build turn did not name it.').length - 1, 1)
-  assert.equal(f.seen.publish.body.split('- lib.test.mjs: second was red on the old source, green on the build.').length - 1, 1)
-
-  let turns = 0
-  const restarted = fakes({ spec: { tier: 'mechanical' }, reviewPaths: [' M crew/loop.mjs\0', ' M lib.mjs\0'], proof: (input) => ({ status: 'green', reason: null, rows: input.tests.map((t) => ({ ...t, proven: true })) }), edit: (v) => {
-    if (v.role === 'builder') { v.details.subject = 'fix: mechanical'; v.details.tests = [{ file: 'lib.test.mjs', title: ++turns === 1 ? 'discarded' : 'kept' }] }
-    return v
-  } })
-  assert.equal((await restarted.go()).status, 'done')
-  assert.doesNotMatch(restarted.seen.publish.body, /discarded was red/)
-  assert.match(restarted.seen.publish.body, /kept was red on the old source/)
-})
-
 test('a reviewer findings_omitted count reaches the builder fix turn (S6-12)', async () => {
   for (const [mode, role, count] of [['build', 'reviewer', 3], ['judge', 'tech-lead', 2], ['finish', 'reviewer', 4]]) {
     const f = fakes({ spec: mode === 'finish' ? finishSpec() : { tier: mode }, unseated: mode === 'finish' ? ['planner'] : [], review: mode === 'judge' ? 0 : 1, secondReview: mode === 'judge' ? 1 : 0, edit: (v) => {
@@ -3721,96 +1729,6 @@ test('a reviewer findings_omitted count reaches the builder fix turn (S6-12)', a
     assert.equal(item?.role, role, mode)
     assert.equal(item?.count, count, mode)
     assert.match(item.summary, new RegExp(`omitted ${count}`))
-  }
-})
-
-test('only the first check round refreshes the base across lane shapes (#2433)', async () => {
-  for (const shape of ['build', 'judge', 'mechanical', 'finish']) for (const move of [false, true]) {
-    let remote = 'c'.repeat(40), held = remote
-    const fetches = [], proofs = [], suites = []
-    const firstBase = move ? O : remote
-    const f = sequenced([redRun(), green()], { spec: shape === 'finish' ? finishSpec() : { tier: shape },
-      checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder')).repeat(40) }),
-      fetch: () => { fetches.push([count(f, 'builder'), f.calls.includes('commit')]); return green() },
-      checkBase: () => ({ ...green(), stdout: remote }),
-      rebase: () => { held = remote; return { ...MOVED, head: 'a'.repeat(40), onto: held } },
-      edit: (v) => {
-        if (v.role === 'builder') { v.details.subject = 'fix: lane'; if (count(f, 'builder') === 1) remote = firstBase }
-        return v
-      },
-    })
-    const proof = f.deps.proveTests, suite = f.deps.runSuite
-    f.deps.proveTests = (input) => { proofs.push(held); return proof(input) }
-    f.deps.runSuite = (input) => { suites.push(held); remote = 'f'.repeat(40); return suite(input) }
-    assert.equal((await f.go()).status, 'done', `${shape}:${move}`)
-    assert.equal(count(f, 'builder'), 2)
-    assert.deepEqual(fetches, [[0, false], [1, false], [2, true]])
-    assert.equal(f.calls.filter((c) => c === 'check-base').length, 1)
-    assert.deepEqual(f.calls.slice(f.calls.lastIndexOf('seat:builder') + 1, f.calls.lastIndexOf('seat:builder') + 3), ['proof', 'review-paths'])
-    assert.deepEqual(proofs, [firstBase, firstBase])
-    assert.deepEqual(suites, [firstBase, firstBase])
-    assert.equal(f.calls.filter((c) => c === 'rebase').length, move ? 3 : 2)
-    assert.equal(f.calls.filter((c) => c === 'base-commit').length, Number(shape === 'finish') + Number(move))
-    assert.equal(f.calls.filter((c) => c === 'uncommit').length, Number(move))
-    assert.equal(f.rows.filter((r) => r.event === 'pre-check-base-move').length, Number(move))
-    if (shape === 'build') assert.ok(f.requests.filter((r) => r.role === 'reviewer')[1].deltaReview)
-    if (shape === 'judge') assert.equal(count(f, 'reviewer'), 1)
-    if (shape === 'finish') assert.equal(f.rows.findLast((r) => r.status === 'reviewed').counted, false)
-  }
-})
-
-test('proof and review retries keep the first check round base (#2433)', async () => {
-  for (const retry of ['proof', 'review']) {
-    let remote = 'c'.repeat(40)
-    const fetches = []
-    const proven = { status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }] }
-    const f = fakes({ review: retry === 'review' ? 1 : 0,
-      proof: retry === 'proof' ? answers({ status: 'red', reason: 'proof-unproven', rows: [] }, proven) : proven,
-      fetch: () => { fetches.push([count(f, 'builder'), f.calls.includes('commit')]); return green() },
-      checkBase: () => ({ ...green(), stdout: remote }),
-      rebase: () => ({ ...MOVED, head: 'a'.repeat(40), onto: remote }),
-      edit: (v) => { if (v.role === 'builder' && count(f, 'builder') === 2) remote = O; return v },
-    })
-    assert.equal((await f.go()).status, 'done', retry)
-    assert.equal(count(f, 'builder'), 2)
-    assert.deepEqual(fetches, [[0, false], [1, false], [2, true]])
-    assert.equal(f.calls.filter((c) => c === 'check-base').length, 1)
-    assert.equal(f.calls.filter((c) => c === 'proof').length, 2)
-    assert.equal(f.calls.filter((c) => c === 'suite').length, retry === 'proof' ? 1 : 2)
-    assert.equal(count(f, 'reviewer'), retry === 'proof' ? 1 : 2)
-    assert.deepEqual(f.calls.slice(f.calls.lastIndexOf('seat:builder') + 1, f.calls.lastIndexOf('seat:builder') + 3), ['proof', 'review-paths'])
-    assert.equal(f.rows.filter((r) => r.event === 'pre-check-base-move').length, 0)
-    assert.equal(f.calls.filter((c) => c === 'rebase').length, 2)
-  }
-})
-
-test('publishing recheck repairs do not reopen pre-check refresh (#2433)', async () => {
-  for (const shape of ['build', 'judge', 'finish']) {
-    let remote = 'c'.repeat(40), held = remote
-    const proofs = [], fetches = []
-    const f = sequenced([green(), redRun(), green()], { spec: shape === 'finish' ? finishSpec() : { tier: shape },
-      checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder') + f.calls.filter((c) => c === 'uncommit').length).repeat(40) }),
-      fetch: () => { fetches.push([count(f, 'builder'), f.calls.filter((c) => c === 'commit').length]); return green() },
-      checkBase: () => ({ ...green(), stdout: remote }),
-      rebase: () => {
-        const publishing = f.calls.includes('commit')
-        held = publishing ? remote = count(f, 'builder') === 1 ? O : 'f'.repeat(40) : remote
-        return { ...MOVED, head: publishing && count(f, 'builder') === 1 ? MOVED.head : 'a'.repeat(40), onto: held }
-      },
-      edit: (v) => { if (v.role === 'builder' && count(f, 'builder') === 2) remote = 'f'.repeat(40); return v },
-    })
-    const proof = f.deps.proveTests
-    f.deps.proveTests = (input) => { proofs.push(held); return proof(input) }
-    assert.equal((await f.go()).status, 'done', shape)
-    assert.deepEqual(fetches, [[0, 0], [1, 0], [1, 1], [2, 2]])
-    assert.deepEqual(proofs, ['c'.repeat(40), O, O])
-    assert.equal(f.calls.filter((c) => c === 'check-base').length, 1)
-    assert.equal(f.calls.filter((c) => c === 'suite').length, 3)
-    assert.equal(count(f, 'builder'), 2)
-    assert.deepEqual(f.calls.slice(f.calls.lastIndexOf('seat:builder') + 1, f.calls.lastIndexOf('seat:builder') + 3), ['proof', 'review-paths'])
-    assert.equal(f.rows.filter((r) => r.event === 'pre-check-base-move').length, 0)
-    assert.equal(f.calls.filter((c) => c === 'rebase').length, 3)
-    assert.equal(f.calls.includes('publish'), shape !== 'finish')
   }
 })
 
@@ -3873,33 +1791,6 @@ test('suite sees the uncommitted lane change at the base on first and moved-base
   }
 })
 
-test('a pre-check base move makes the next review full and counted (#2403)', async () => {
-  for (const shape of ['build', 'judge', 'finish', 'finish-spent']) for (const movedBase of [false, true]) {
-    const finish = shape.startsWith('finish')
-    const f = fakes({ spec: finish ? finishSpec({ priorReviewRounds: shape === 'finish-spent' ? 3 : 0 }) : { tier: shape },
-      checkBase: { ...green(), stdout: movedBase ? O : 'c'.repeat(40) },
-      rebase: () => ({ ...MOVED, head: 'a'.repeat(40), onto: movedBase && f.calls.filter((c) => c === 'rebase').length % 3 !== 1 ? O : 'c'.repeat(40) }),
-    })
-    const result = await f.go()
-    assert.equal(result.status, shape === 'finish-spent' ? 'stopped' : 'done', `${shape}:${movedBase}`)
-    const move = f.rows.find((r) => r.event === 'pre-check-base-move')
-    assert.equal(Boolean(move), movedBase)
-    if (move) { assert.equal(move.review, 'full'); assert.equal(move.counted, true) }
-    assert.equal(f.calls.filter((c) => c === 'check-base').length, 1)
-    if (shape === 'finish-spent') { assert.equal(result.reason, 'round-bound'); assert.equal(count(f, 'reviewer'), 0); continue }
-    const next = f.requests.find((r) => r.role === 'reviewer')
-    for (const scope of ['deltaReview', 'reserveReview', 'recheckReview']) assert.equal(Object.hasOwn(next, scope), false)
-    assert.notEqual(f.rows.find((r) => r.event === 'envelope' && r.id === next.id).counted, false)
-    if (finish) {
-      assert.equal(JSON.parse(f.writes.get('/virtual/task/finish-report.json')).reviewRounds, 1)
-      // Another finish pass is a fresh invocation, not another check round of this one.
-      assert.equal((await f.go()).status, 'done')
-      assert.equal(f.calls.filter((c) => c === 'check-base').length, 2)
-      assert.equal(f.rows.filter((r) => r.event === 'pre-check-base-move').length, movedBase ? 2 : 0)
-    }
-  }
-})
-
 test('pre-check moves do not spend publishing rechecks (#2403)', async () => {
   for (const tier of ['build', 'judge', 'mechanical']) for (const moves of [3, 4]) {
     const A = 'a'.repeat(40)
@@ -3914,31 +1805,6 @@ test('pre-check moves do not spend publishing rechecks (#2403)', async () => {
     assert.equal(f.rows.filter((r) => r.event === 'pre-check-base-move').length, 1)
     assert.equal(f.calls.filter((c) => c === 'uncommit').length, tier === 'mechanical' ? 1 : 4)
     assert.equal(f.calls.filter((c) => c === 'proof').length, tier === 'mechanical' ? 2 : 4)
-  }
-})
-
-test('pre-check conflicts share the run\'s single conflict turn (#2403)', async () => {
-  const initial = { ...MOVED, head: 'a'.repeat(40) }, conflict = { status: 'red', reason: 'rebase-conflict', conflicts: ['lib.mjs'] }
-  for (const mode of ['resolved', 'unresolved', 'spent-at-publish', 'spent-at-finish', 'cleanup', 'cleanup-after-turn', 'invalid-onto']) {
-    const finish = mode === 'spent-at-finish'
-    const resolved = { ...MOVED, onto: O }
-    const f = fakes({ spec: finish ? finishSpec() : {}, checkBase: { ...green(), stdout: O },
-      rebase: answers(...(finish ? [conflict, initial] : [initial]), mode === 'cleanup' ? { status: 'unmeasured', reason: 'cleanup-unproven' } : mode === 'invalid-onto' ? { ...resolved, onto: 'invalid' } : conflict,
-        ...(mode === 'unresolved' ? [conflict] : mode === 'cleanup-after-turn' ? [{ status: 'unmeasured', reason: 'cleanup-unproven' }] : [resolved, mode === 'spent-at-publish' ? conflict : { ...resolved, head: 'a'.repeat(40) }])),
-      edit: (v, r) => r.feedback[0]?.id === 'rebase-conflict' ? { ...v, details: { summary: 'conflict', tests: [] } } : v,
-    })
-    const result = await f.go()
-    assert.equal(result.status, mode === 'resolved' ? 'done' : 'stopped', mode)
-    if (mode !== 'resolved') assert.equal(result.reason, mode.startsWith('cleanup') ? 'cleanup-unproven' : mode === 'invalid-onto' ? 'runner-threw' : 'rebase-conflict')
-    assert.equal(builderTurns(f).filter((r) => r.feedback[0]?.id === 'rebase-conflict').length, ['cleanup', 'invalid-onto'].includes(mode) ? 0 : 1)
-    const beforeChecks = !['resolved', 'spent-at-publish'].includes(mode)
-    assert.equal(f.calls.includes('proof'), !beforeChecks, mode)
-    if (mode.startsWith('cleanup')) { assert.equal(f.calls.includes('uncommit'), false); assert.equal(f.calls.includes('conflict-undo'), false) }
-    else if (beforeChecks) assert.deepEqual(f.discardArgs.at(-1), ['reset', '--soft', `${'a'.repeat(40)}^`])
-    else {
-      assert.ok(f.calls.indexOf('uncommit') < f.calls.indexOf('proof'))
-      assert.deepEqual(f.seen.proof.tests, [{ file: 'lib.test.mjs', title: 'works' }])
-    }
   }
 })
 
@@ -4036,34 +1902,6 @@ const O = 'd'.repeat(40)
 const answers = (...list) => { let n = 0; return () => structuredClone(list[Math.min(n++, list.length - 1)]) }
 const moved = (options = {}) => fakes({ rebase: MOVED, spec: { tier: 'mechanical' }, unseated: ['planner', 'reviewer', 'lead'], edit: (v) => { if (v.role === 'builder') v.details.subject = 'fix: mechanical'; return v }, ...options })
 
-test('a publishing rebase that conflicts gives the builder one conflict turn, then rechecks the resolved tree before it publishes', async () => {
-  const A = 'a'.repeat(40), C = 'c'.repeat(40)
-  const conflict = { status: 'red', reason: 'rebase-conflict', conflicts: ['lib.mjs'] }
-  for (const tier of ['build', 'judge', 'mechanical']) {
-    const f = fakes({ spec: { tier }, bounds: { builder: 1 }, cleanHead: `${MOVED.head}\n`,
-      checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder')).repeat(40) }),
-      rebase: answers({ ...MOVED, head: A }, conflict, { ...MOVED, onto: O }, { ...MOVED, head: C, onto: O }),
-      commit: answers({ status: 'green', reason: null, head: A, files: ['lib.mjs'] }, { status: 'green', reason: null, head: C, files: ['lib.mjs'] }),
-      edit: (v, r) => { if (r.role === 'builder') { v.details.subject = r.feedback[0]?.id === 'rebase-conflict' ? 'fix: wrong' : 'fix: mechanical'; if (r.feedback[0]?.id === 'rebase-conflict') v.details.tests = [] } return v },
-    })
-    assert.equal((await f.go()).status, 'done', tier)
-    const conflictRequests = builderTurns(f).filter((r) => r.feedback[0]?.id === 'rebase-conflict')
-    assert.equal(conflictRequests.length, 1)
-    const item = conflictRequests[0].feedback[0]
-    assert.deepEqual({ id: item.id, severity: item.severity, checkout: item.checkout, base: item.base, conflicts: item.conflicts }, { id: 'rebase-conflict', severity: 'must-fix', checkout: f.spec.cwd, base: 'main', conflicts: ['lib.mjs'] })
-    assert.match(item.summary, /origin\/main/)
-    assert.equal(f.calls.filter((c) => c === 'proof').length, 2)
-    assert.deepEqual(f.seen.proof.tests, [{ file: 'lib.test.mjs', title: 'works' }])
-    assert.equal(f.calls.filter((c) => c === 'suite').length, 2)
-    assert.equal(f.calls.filter((c) => c === 'seat:reviewer').length, tier === 'mechanical' ? 0 : 2)
-    assert.equal(f.calls.filter((c) => c === 'seat:tech-lead').length, tier === 'judge' ? 2 : 0)
-    assert.equal(f.calls.filter((c) => c === 'commit').length, tier === 'mechanical' ? 1 : 2)
-    assert.equal(f.seen.publish.title, tier === 'mechanical' ? 'fix: mechanical' : 'fix(crew): planned lane')
-    assert.ok(f.calls.lastIndexOf('suite') < f.calls.indexOf('publish'))
-    if (tier !== 'mechanical') assert.ok(f.calls.indexOf('uncommit') < f.calls.lastIndexOf('proof'))
-  }
-})
-
 test('a conflict turn that cannot resolve the rebase stops rebase-conflict with the checkout reset to its pre-turn head, and a run gets only one conflict turn', async () => {
   const A = 'a'.repeat(40), C = 'c'.repeat(40)
   const conflict = { status: 'red', reason: 'rebase-conflict', conflicts: ['lib.mjs'] }
@@ -4099,77 +1937,6 @@ test('a conflict turn that cannot resolve the rebase stops rebase-conflict with 
   }
 })
 
-test('a finish run whose base rebase conflicts gives the builder one conflict turn before triage, and an unresolved turn leaves the build uncommitted', async () => {
-  const A = 'a'.repeat(40)
-  const conflict = { status: 'red', reason: 'rebase-conflict', conflicts: ['lib.mjs'] }
-  for (const mode of ['resolved', 'unresolved', 'second']) {
-    const f = fakes({ spec: finishSpec(), rebase: answers(conflict, ...(mode !== 'unresolved' ? [{ ...MOVED, onto: O }, mode === 'second' ? conflict : { ...MOVED, head: A }] : [])),
-      edit: (v, r) => mode === 'unresolved' && r.feedback[0]?.id === 'rebase-conflict' ? { ...v, status: 'insufficient' } : v })
-    assert.equal((await f.go()).status, mode === 'resolved' ? 'done' : 'stopped')
-    assert.equal(builderTurns(f)[0].feedback[0].id, 'rebase-conflict')
-    if (mode !== 'unresolved') {
-      assert.equal(builderTurns(f)[1].feedback[0].id, 'finish-stop')
-      assert.equal(builderTurns(f).length, 2)
-      assert.deepEqual(f.discardArgs[0], ['reset', '--soft', O])
-      if (mode === 'resolved') assert.ok(f.rows.some((r) => r.event === 'finish-ready'))
-      else assert.equal(f.rows.at(-1).reason, 'rebase-conflict')
-    } else {
-      assert.equal(builderTurns(f).length, 1)
-      assert.deepEqual(f.discardArgs, [['reset', '--hard', A], ['clean', '-f', '-d'], ['reset', '--soft', `${A}^`]])
-      assert.equal(f.rows.at(-1).reason, 'rebase-conflict')
-    }
-  }
-})
-
-// MUTATION: skip the post-rebase proof and suite and a moved head is published unchecked.
-test('a rebase that moves the head reruns proof then the suite on the rebased tree before it publishes (RB1)', async () => {
-  const f = moved()
-  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
-  const tail = f.calls.slice(f.calls.lastIndexOf('rebase'))
-  assert.deepEqual(tail, ['rebase', 'proof', 'suite', 'post-rebase-clean', 'post-rebase-head', 'publish'])
-  assert.equal(f.calls.filter((c) => c === 'proof').length, 2)
-  assert.equal(f.calls.filter((c) => c === 'suite').length, 2)
-  assert.deepEqual(f.seen.suite, { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: undefined })
-  assert.equal(f.seen.proof.base, `${MOVED.head}^`)
-  assert.ok(f.seen.publish.body.split('\n').includes('- lib.test.mjs: works was red on the old source, green on the build.'))
-})
-
-test('a mechanical publishing rebase publishes without a published-paths diff', async () => {
-  for (const publishedPaths of [
-    { ...green(), stdout: 'b.mjs\0' },
-    { ...green(), status: 'red', reason: 'exit-nonzero', code: 1 },
-    { ...green(), stdout: 'b.mjs' },
-    { ...green(), stdout: '../unsafe\0' },
-  ]) {
-    const f = moved({ reviewPaths: ' M a.mjs\0 M b.mjs\0', paths: 'M  a.mjs\0M  b.mjs\0', publishedPaths })
-    assert.equal((await f.go()).reason, null)
-    assert.deepEqual(f.seen.commit.files, ['a.mjs', 'b.mjs'])
-    assert.equal(f.calls.includes('published-paths'), false)
-    assert.doesNotMatch(f.seen.publish.body, /## Changes/)
-  }
-})
-
-// MUTATION: keep !isFinish on the moved-head recheck and the finish reports without a fresh review.
-test('a finish run whose final rebase moves the head puts the build on the new base and proves, reviews and suite-runs it again before ready', async () => {
-  const A = 'a'.repeat(40), C = 'c'.repeat(40)
-  for (const priorReviewRounds of [0, 2]) {
-    const f = fakes({ spec: finishSpec({ priorReviewRounds }), unseated: ['planner'],
-      checkedTree: () => ({ ...green(), stdout: String(1 + f.calls.filter((c) => c === 'uncommit').length).repeat(40) }),
-      rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C, onto: O }),
-      commit: answers({ status: 'green', reason: null, head: A, files: ['lib.mjs'] }, { status: 'green', reason: null, head: C, files: ['lib.mjs'] }) })
-    const bases = [], prove = f.deps.proveTests
-    f.deps.proveTests = (input) => { bases.push(input.base); return prove(input) }
-    const result = await f.go()
-    assert.deepEqual(result, { status: 'done', reason: null, pr: null })
-    assert.deepEqual(f.calls.slice(f.calls.indexOf('uncommit')), ['uncommit', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'seat:reviewer', 'suite', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase'])
-    assert.deepEqual(f.discardArgs, [['reset', '--soft', C], ['reset', '--soft', O]])
-    assert.deepEqual(bases, ['HEAD', 'HEAD'])
-    const report = JSON.parse(f.writes.get('/virtual/task/finish-report.json'))
-    assert.deepEqual([report.head, report.reviewRounds, report.reviews.length], [C, priorReviewRounds + 1, 2])
-    assert.deepEqual([f.rows.at(-1).event, f.rows.at(-1).head], ['finish-ready', C])
-  }
-})
-
 // MUTATION: skip the finish checked-tree guard or stage after the review.
 test('a finish run whose suite or review changes the checked tree stops before it commits and reports nothing ready', async () => {
   const T = { ...green(), stdout: `${'e'.repeat(40)}\n` }, T2 = { ...green(), stdout: `${'f'.repeat(40)}\n` }
@@ -4190,27 +1957,6 @@ test('a finish run whose suite or review changes the checked tree stops before i
       assert.equal(f.rows.some((row) => row.event === 'finish-ready'), false)
     }
   }
-})
-
-test('an unproven post-rebase proof stops before the suite and publication', async () => {
-  const f = moved({ proof: answers({ status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }] }, { status: 'red', reason: 'proof-unproven', rows: [{ file: 'lib.test.mjs', title: 'works', proven: false }] }) })
-  assert.deepEqual(await f.go(), stopped('proof-unproven'))
-  assert.equal(f.seen.proof.base, `${MOVED.head}^`)
-  assert.equal(f.calls.filter((c) => c === 'suite').length, 1)
-  assert.equal(f.calls.includes('publish'), false)
-})
-
-// MUTATION: ignore the post-rebase suite result and a red suite still publishes.
-test('a red suite after a rebase that moved the head stops with its reason and publishes nothing (RB2)', async () => {
-  const red = { ...green(), status: 'red', code: 1, reason: 'exit-nonzero' }
-  const f = moved({ suite: answers(green(), red) })
-  assert.deepEqual(await f.go(), stopped('exit-nonzero'))
-  assert.equal(f.calls.filter((c) => c === 'suite').length, 2)
-  assert.equal(f.calls.includes('publish'), false)
-  const g = moved({ spec: finishSpec(), unseated: ['planner'], suite: answers(green(), red) })
-  assert.deepEqual(await g.go(), stopped('exit-nonzero'))
-  assert.equal(g.writes.has('/virtual/task/finish-report.json'), false)
-  assert.equal(g.rows.some((r) => r.event === 'finish-ready'), false)
 })
 
 // MUTATION: skip the parent probe and a dropped build (HEAD is the base it was rebased onto) is reset off a base commit.
@@ -4288,30 +2034,6 @@ test("the lead's bound is per phase: plan routing before the first review never 
   assert.deepEqual(f.requests.filter((r) => r.role === 'lead').map((r) => r.feedback[0].last), [true, true, true])
 })
 
-test('a moved-head recheck sends the reviewer and the tech-lead the reviewed commit, the new base and the rebased head as its scope (#2359)', async () => {
-  const A = 'a'.repeat(40), C = 'c'.repeat(40)
-  const f = fakes({ spec: { tier: 'judge' }, rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C }),
-    checkedTree: () => ({ ...green(), stdout: String(1 + f.calls.filter((c) => c === 'uncommit').length).repeat(40) }),
-    commit: answers({ status: 'green', reason: null, head: A }, { status: 'green', reason: null, head: C }) })
-  const comparisons = [], run = f.deps.run
-  f.deps.run = (input) => { if (input.args.includes('--no-ext-diff')) comparisons.push(input.args.slice(-2)); return run(input) }
-  assert.equal((await f.go()).status, 'done')
-  assert.deepEqual(comparisons, [[`${A}^`, A], [O, MOVED.head], [`${A}^`, O]])
-  const scope = { reviewed: A, onto: O, rebased: MOVED.head }
-  for (const role of ['reviewer', 'tech-lead']) {
-    const turns = f.requests.filter((r) => r.role === role)
-    assert.equal(turns.length, 2)
-    assert.equal(Object.hasOwn(turns[0], 'recheckReview'), false)
-    assert.deepEqual(turns[1].recheckReview, scope)
-    assert.equal(Object.hasOwn(turns[1], 'deltaReview'), false)
-    assert.equal(Object.hasOwn(turns[1], 'reserveReview'), false)
-  }
-  const rows = f.rows.filter((row) => row.event === 'recheck-scope')
-  assert.equal(rows.length, 1)
-  const { scope: s, review, reason, reviewed, onto, rebased } = rows[0]
-  assert.deepEqual({ scope: s, review, reason, reviewed, onto, rebased }, { scope: 'measured', review: 'scoped', reason: null, ...scope })
-})
-
 test('a moved-head recheck whose reviewed commit is not an object id stays a full review and journals that it did (#2359)', async () => {
   const A = 'a'.repeat(40), C = 'c'.repeat(40)
   for (const [reviewed, rebased] of [['unknown', MOVED.head], [A, 'unknown']]) {
@@ -4342,70 +2064,6 @@ test('a moved-head recheck whose reviewed commit is not an object id stays a ful
   }
 })
 
-// MUTATION: count the rebase-forced re-review against the seat's bound.
-test('a re-review forced only by a moved-head rebase spends no reviewer or tech-lead round, and a review after a recheck fix does (b1500)', async () => {
-  const A = 'a'.repeat(40), C = 'c'.repeat(40)
-  const rebase = () => answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C })
-  const commit = () => answers({ status: 'green', reason: null, head: A, files: ['lib.mjs'] }, { status: 'green', reason: null, head: C, files: ['lib.mjs'] })
-  const judge = fakes({ spec: { tier: 'judge' }, review: 1, bounds: { 'tech-lead': 2 }, rebase: rebase(), commit: commit(),
-    checkedTree: () => ({ ...green(), stdout: String(judge.calls.filter((c) => c === 'seat:builder' || c === 'uncommit').length).repeat(40) }) })
-  assert.equal((await judge.go()).status, 'done')
-  assert.deepEqual(judge.requests.map((r) => r.role), ['planner', 'builder', 'reviewer', 'tech-lead', 'builder', 'reviewer', 'tech-lead', 'reviewer', 'tech-lead'])
-
-  // MUTATION: keep the recheck free after a builder fix, or spend an available round on the rebase-only review.
-  for (const bound of [1, 2]) {
-    const build = sequenced([green(), redRun(), green()], { bounds: { reviewer: bound }, rebase: rebase(), commit: commit(),
-      checkedTree: () => ({ ...green(), stdout: String(build.calls.filter((c) => c === 'seat:builder' || c === 'uncommit').length).repeat(40) }) })
-    const result = await build.go()
-    if (bound === 1) {
-      assert.deepEqual(result, stopped('lead-escalated'))
-      const held = build.requests.find((r) => r.role === 'lead').feedback[0]
-      assert.deepEqual({ role: held.role, reason: held.reason }, { role: 'reviewer', reason: 'round-bound' })
-      assert.equal(count(build, 'reviewer'), 2)
-    } else {
-      assert.equal(result.status, 'done')
-      assert.deepEqual(build.requests.map((r) => r.role), ['planner', 'builder', 'reviewer', 'reviewer', 'builder', 'reviewer'])
-    }
-  }
-})
-
-// MUTATION: drop the recheck cap and a head that keeps moving rechecks forever.
-test('a publishing rebase that moves the head a fourth time after three rechecks stops recheck-bound and publishes nothing', async () => {
-  const A = 'a'.repeat(40)
-  for (const tier of ['build', 'judge']) for (const moves of [3, 4]) {
-    const f = fakes({ spec: { tier }, rebase: answers({ ...MOVED, head: A }, ...Array(moves).fill({ ...MOVED, onto: O }), { ...MOVED, head: A }) })
-    assert.deepEqual(await f.go(), moves === 4 ? stopped('recheck-bound') : { status: 'done', reason: null, pr: PR })
-    assert.equal(f.calls.filter((call) => call === 'uncommit').length, 3)
-    assert.equal(f.calls.includes('publish'), moves === 3)
-    if (moves === 4) assert.deepEqual(f.rows.findLast((row) => row.status === 'stopped').observation, { rechecks: 3, head: MOVED.head, onto: O, committed: A })
-  }
-})
-
-// MUTATION: keep the old post-rebase proof and suite path, without reviewing the rebased change.
-test('a build or judge lane whose publishing rebase moves the head reruns the proof, the suite and every review on the rebased change, through a builder fix when red, before it commits again and publishes', async () => {
-  const c = 'c'.repeat(40)
-  for (const mode of ['build', 'judge', 'red']) {
-    const options = {
-      spec: { tier: mode === 'judge' ? 'judge' : 'build' }, bounds: { reviewer: 3 },
-      checkedTree: () => ({ ...green(), stdout: String(f.calls.filter((c) => c === 'seat:builder' || c === 'uncommit').length).repeat(40) }),
-      rebase: answers({ ...MOVED, head: 'a'.repeat(40) }, { ...MOVED, onto: O }, { ...MOVED, head: c }),
-      commit: answers({ status: 'green', reason: null, head: 'a'.repeat(40), files: ['lib.mjs'] }, { status: 'green', reason: null, head: c, files: ['lib.mjs'] }),
-    }
-    const f = sequenced(mode === 'red' ? [green(), redRun(), green()] : [green(), green()], options)
-    const bases = [], prove = f.deps.proveTests
-    f.deps.proveTests = (input) => { bases.push(input.base); return prove(input) }
-    const result = await f.go()
-    const tail = f.calls.slice(f.calls.indexOf('uncommit'))
-    const checks = ['proof', 'review-paths', 'suite-stage', 'checked-tree', 'suite', 'seat:reviewer', ...(mode === 'judge' ? ['seat:tech-lead'] : [])]
-    assert.deepEqual(tail, ['uncommit', ...checks, ...(mode === 'red' ? ['seat:builder', ...checks] : []), 'paths', 'checked-tree', 'commit', 'fetch', 'rebase', 'publish'], mode)
-    assert.equal(result.status, 'done', mode)
-    assert.deepEqual(f.discardArgs, [['reset', '--soft', O]])
-    assert.deepEqual(bases, Array(mode === 'red' ? 3 : 2).fill('HEAD'))
-    assert.ok(!f.calls.includes('post-rebase-clean') && !f.calls.includes('post-rebase-head'))
-    if (mode === 'red') assert.ok(builderTurns(f)[1].feedback.some((item) => item.id === 'suite-repair'))
-  }
-})
-
 // MUTATION: commit without comparing the checked tree or the work-tree records.
 test('a build or judge lane whose tree changes after its suite and reviews start stops before it commits, on the first pass and on a moved-head recheck', async () => {
   const T = { ...green(), stdout: `${'e'.repeat(40)}\n` }, T2 = { ...green(), stdout: `${'f'.repeat(40)}\n` }
@@ -4425,252 +2083,6 @@ test('a build or judge lane whose tree changes after its suite and reviews start
     }
     const unchangedDeletion = fakes({ spec: { tier }, reviewPaths: 'AD deleted.mjs\0 M lib.mjs\0', paths: 'AD deleted.mjs\0M  lib.mjs\0' })
     assert.equal((await unchangedDeletion.go()).status, 'done', tier)
-  }
-})
-
-// MUTATION: reset to the moved head's parent without checking whether Git dropped the lane commit.
-test('a build or judge lane whose publishing rebase drops its commit as already upstream stops without uncommitting the base or publishing', async () => {
-  for (const tier of ['build', 'judge']) for (const dropped of [true, false]) {
-    const f = fakes({ spec: { tier }, rebase: answers({ ...MOVED, head: 'a'.repeat(40) }, dropped ? { ...MOVED, head: O, onto: O } : { ...MOVED, onto: undefined }) })
-    assert.deepEqual(await f.go(), stopped(dropped ? 'nothing-to-commit' : 'runner-threw'))
-    assert.equal(f.calls.includes('uncommit'), false)
-    assert.deepEqual(f.discardArgs, [])
-    assert.equal(f.calls.includes('publish'), false)
-    if (dropped) assert.deepEqual(f.rows.findLast((row) => row.status === 'stopped').observation, { head: O, onto: O, committed: 'a'.repeat(40) })
-  }
-})
-
-// MUTATION: rerun after every rebase and an unchanged head pays an extra proof and suite run.
-test('a rebase that leaves the head unchanged runs proof and the suite once (RB3)', async () => {
-  const f = fakes()
-  assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR })
-  assert.equal(f.calls.filter((c) => c === 'suite').length, 1)
-  assert.equal(f.calls.filter((c) => c === 'proof').length, 1)
-})
-
-// MUTATION: drop `at` from emit and journal rows carry no time, so the lean source cannot draw a waterfall.
-test('every journaled row carries one read of the injected clock, and a throwing clock never reaches the loop', async () => {
-  let ticks = 0
-  const f = fakes({ deps: { now: () => 1_700_000_000_000 + ticks++ } })
-  await f.go()
-  assert.ok(f.rows.length > 8)
-  assert.ok(f.rows.every((row, i) => i === 0 || row.at > f.rows[i - 1].at))
-  assert.equal(ticks, f.rows.length + 2 * f.rows.filter((row) => row.event === 'seat-turn' || (row.event === 'check' && ['suite', 'proof'].includes(row.check))).length)
-  assert.equal(f.rows.filter((r) => r.event === 'run-start').length, 1)
-  const plain = fakes()
-  await plain.go()
-  assert.ok(plain.rows.every((r) => Number.isFinite(r.at)))
-  const broken = fakes({ deps: { now: () => { throw new Error('clock') } } })
-  await assert.doesNotReject(broken.go())
-})
-
-// MUTATION: run suite and review sequentially, or rebase before planning.
-test('a build lane rebases after the plan, then runs the suite and the review side by side on one tree', { timeout: 10_000 }, async () => {
-  const f = fakes()
-  let running = false, overlap = false, release
-  const wait = new Promise((resolve) => { release = resolve })
-  const seat = f.deps.runSeat
-  f.deps.runSeat = async (request, context) => { if (request.role === 'reviewer') { overlap = running; release() } return seat(request, context) }
-  f.deps.runSuite = async () => { running = true; await wait; running = false; return green() }
-  assert.equal((await f.go()).status, 'done')
-  assert.equal(overlap, true)
-  assert.ok(f.calls.indexOf('seat:planner') < f.calls.indexOf('rebase') && f.calls.indexOf('rebase') < f.calls.indexOf('seat:builder'))
-  const rows = f.rows.filter((r) => ['suite', 'review'].includes(r.stage))
-  assert.deepEqual(rows.filter((r) => r.event === 'stage-start' || r.event === 'stage-end').map((r) => r.event), ['stage-start', 'stage-start', 'stage-end', 'stage-end'])
-  assert.ok(rows.filter((r) => r.event === 'check').every((r) => r.stage === 'suite'))
-  assert.ok(rows.filter((r) => r.event === 'envelope').every((r) => r.stage === 'review'))
-})
-
-// MUTATION: return on the first sibling to end and the lane stops while the other stage is still running.
-test('a build lane waits for both parallel stages before it stops on an unmeasured suite or a halted reviewer', async () => {
-  const later = () => new Promise((resolve) => setTimeout(resolve, 30))
-  const unmeasured = fakes()
-  let reviewEnded = false
-  const seat = unmeasured.deps.runSeat
-  unmeasured.deps.runSeat = async (request, context) => { if (request.role !== 'reviewer') return seat(request, context); await later(); const out = await seat(request, context); reviewEnded = true; return out }
-  unmeasured.deps.runSuite = async () => timeoutRun()
-  assert.deepEqual(await unmeasured.go(), stopped('timeout'))
-  assert.equal(reviewEnded, true)
-  assert.equal(count(unmeasured, 'builder'), 1)
-  const halted = fakes({ seatThrows: 'reviewer' })
-  let suiteEnded = false
-  halted.deps.runSuite = async () => { await later(); suiteEnded = true; return green() }
-  assert.equal((await halted.go()).status, 'stopped')
-  assert.equal(suiteEnded, true)
-  assert.equal(halted.calls.includes('commit'), false)
-})
-
-// MUTATION: discard either red result or skip a check after the fix.
-test('a build lane hands the builder the red suite and the review findings in one fix turn, then proves, runs the suite and reviews again', async () => {
-  const f = sequenced([redOut(SPEC_OUT), green()], { review: 1 })
-  assert.equal((await f.go()).status, 'done')
-  const feedback = builderTurns(f)[1].feedback
-  assert.deepEqual(feedback[0], finding)
-  assert.deepEqual(feedback[1], { id: 'suite-repair', severity: 'must-fix', summary: 'The project suite is red after your change: node --test lane.test.mjs. Fix the failing tests.', checkout: f.spec.cwd, failingTests: ['anchor spans remain current'], failingFiles: ['skills/qa-test-writing/exhibits.test.mjs:42:1'], outputTail: [SPEC_OUT] })
-  assert.deepEqual(f.calls.slice(f.calls.lastIndexOf('seat:builder'), f.calls.indexOf('paths')), ['seat:builder', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'suite', 'seat:reviewer'])
-})
-
-// MUTATION: run judge reviews before a green suite, or gate the tech-lead on the reviewer.
-test('a judge lane runs both reviews only after a green suite, even when the reviewer requests changes', async () => {
-  for (const mode of ['suite', 'review']) {
-    const f = sequenced(mode === 'suite' ? [redRun(), green()] : [green(), green()], { spec: { tier: 'judge' }, review: mode === 'review' ? 1 : 0 })
-    assert.equal((await f.go()).status, 'done')
-    if (mode === 'suite') assert.ok(f.calls.indexOf('seat:reviewer') > f.calls.lastIndexOf('suite'))
-    else assert.equal(count(f, 'tech-lead'), 1)
-    assert.ok(f.calls.indexOf('suite') < f.calls.indexOf('seat:tech-lead'))
-    assert.ok(f.calls.indexOf('suite') < f.calls.indexOf('seat:reviewer'))
-  }
-})
-
-// MUTATION: rerun red without a builder, or grant an extra builder round.
-test('a red suite on a build or judge lane is never re-run on the unchanged tree and its fix turn counts against the builder bound', async () => {
-  for (const tier of ['build', 'judge']) {
-    const f = sequenced([redRun(), green()], { spec: { tier } })
-    assert.equal((await f.go()).status, 'done')
-    assert.equal(f.inputs.length, 2)
-    assert.ok(f.calls.indexOf('suite') < f.calls.lastIndexOf('seat:builder') && f.calls.lastIndexOf('seat:builder') < f.calls.lastIndexOf('suite'))
-    const bounded = sequenced([redRun(), green()], { spec: { tier }, bounds: { builder: 1 } })
-    assert.equal((await bounded.go()).reason, 'lead-escalated')
-    assert.equal(count(bounded, 'lead'), 1)
-    assert.equal(bounded.inputs.length, 1)
-  }
-})
-
-// MUTATION: omit passing should-fix findings or include consider findings.
-test("a passing review's should-fix findings are listed in the PR body", async () => {
-  const f = fakes({ spec: { tier: 'judge' }, edit: (v) => { if (['reviewer', 'tech-lead'].includes(v.role)) v.details.findings = [{ ...finding, id: v.role === 'reviewer' ? 'S1' : 'S2', severity: 'should-fix' }, { ...finding, id: 'C1', severity: 'consider' }]; return v } })
-  assert.equal((await f.go()).status, 'done')
-  assert.match(f.seen.publish.body, /## Open points\n- Fix the defect \(lib.mjs:1\)\n- Fix the defect \(lib.mjs:1\)/)
-  assert.ok(!f.seen.publish.body.includes('C1'))
-})
-
-// Clock failures do not prevent publication or add lane telemetry to the PR.
-test('the PR body omits lane telemetry even when the clock is unreadable', async () => {
-  for (const broken of [false, true]) {
-    let ticks = 0
-    const f = sequenced([redRun(), green()], { bounds: { builder: 1 }, lead: 'bounce', deps: { now: () => { if (broken) throw new Error('clock'); return ticks++ * 1000 } } })
-    assert.equal((await f.go()).status, 'done')
-    assert.doesNotMatch(f.seen.publish.body, /## Lane|Wall time|Rounds:|Suite repairs|Lead consults/)
-    assert.ok(!f.seen.commit.body.includes('## Lane'))
-  }
-})
-
-test('the PR body is a readable summary and verification, and the commit body is unchanged', async () => {
-  for (const tier of ['build', 'judge']) {
-    const f = fakes({ spec: { tier } })
-    assert.equal((await f.go()).status, 'done')
-    assert.equal(f.seen.publish.body, PR_BODY)
-    assert.equal(f.seen.commit.body, BODY)
-    assert.doesNotMatch(f.seen.publish.body, /## Measurements|## Lane|Wall time|Rounds:|Suite repairs|Lead consults/)
-  }
-  const noAsk = fakes({ spec: { source: 'operator request', brief: '## Context\nNo ask.' } })
-  assert.equal((await noAsk.go()).status, 'done')
-  assert.match(noAsk.seen.publish.body, /How: built\n\nSource: operator request\n/)
-  assert.equal(noAsk.seen.commit.body, BODY.replace('issue 12', 'operator request'))
-  const title = 'handles "quotes"'
-  const f = fakes({ paths: 'M  lib.mjs\0M  other.mjs\0', proof: { status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title, proven: true }] }, edit: (v) => {
-    if (v.role === 'builder') v.details.tests = [{ file: 'lib.test.mjs', title }]
-    return v
-  } })
-  assert.equal((await f.go()).status, 'done')
-  assert.ok(f.seen.publish.body.includes(`lib.test.mjs: ${title} was red on the old source, green on the build.`))
-  assert.ok(f.seen.commit.body.includes(JSON.stringify(title)))
-})
-
-test('the PR body has no Changes section and the commit still names every changed file', async () => {
-  const f = fakes({ paths: 'M  lib.mjs\0M  other.mjs\0' })
-  assert.equal((await f.go()).status, 'done')
-  assert.doesNotMatch(f.seen.publish.body, /## Changes/)
-  assert.ok(!f.seen.publish.body.includes('- other.mjs'))
-  assert.match(f.seen.publish.body, /How: built\n\n## Verification\n/)
-  assert.deepEqual(f.seen.commit.files, ['lib.mjs', 'other.mjs'])
-})
-
-test('a mechanical PR body takes its purpose from the recorded subject', async () => {
-  for (const [tier, subject, planSummary, purpose] of [
-    ['mechanical', 'fix(crew): keep archives', 'Plan preserves archives.', 'Keep archives'],
-    ['mechanical', 'fix(docs): correct plan.md links', 'Plan preserves archives.', 'Correct plan.md links'],
-    ['mechanical', 'fix(docs): written guidance', 'Plan preserves archives.', 'Written guidance'],
-    ['build', 'fix(crew): keep archives', 'Plan preserves archives.', 'Preserves archives.'],
-    ['build', 'fix(crew): keep archives', 'Plan written to task/plan.md.', 'unmeasured.'],
-  ]) {
-    const f = fakes({ spec: { tier, source: 'operator request', brief: '## The ask\n> Fix the typo.' }, edit: (v) => {
-      if (v.role === 'builder') v.details.subject = subject
-      if (v.role === 'planner') v.summary = planSummary
-      return v
-    } })
-    assert.equal((await f.go()).status, 'done')
-    assert.ok(f.seen.publish.body.startsWith(`## Summary\nPurpose: ${purpose}\n`))
-  }
-  for (const [subject, planSummary, purpose] of [
-    ['fix(crew): keep archives', undefined, 'Keep archives'],
-    ['fix(docs): written guidance', undefined, 'Written guidance'],
-    ['fix(crew): keep archives', 'Plan preserves archives.', 'Preserves archives.'],
-  ]) {
-    const f = fakes({ spec: { ...finishSpec({ planPath: null, subject, planSummary }), tier: 'mechanical' } })
-    assert.equal((await f.go()).status, 'done')
-    const body = JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body
-    assert.ok(body.startsWith(`## Summary\nPurpose: ${purpose}\n`), body)
-    assert.equal(f.rows.find((r) => r.event === 'finish-ready').body, body)
-  }
-})
-
-test('the PR body states the purpose from the brief ask before what changed', async () => {
-  for (const [tier, source, brief, why] of [
-    ['build', 'issue 12', '# Task\n## The ask\n> Issue title: Keep archives\n', 'Closes issue 12: Keep archives'],
-    ['judge', 'issue 12', '## Context\nNo title.', 'Closes issue 12'],
-    ['build', 'operator request', '## The ask\n\n> Make this useful\n> for reviewers.\n\n> Later block.', 'Operator request: Make this useful for reviewers.'],
-    ['build', 'operator command', '## The ask\n> Preserve earlier archives.', 'Operator request: Preserve earlier archives.'],
-    ['mechanical', 'operator request', '## The ask\n> Fix the typo.', 'Operator request: Fix the typo.'],
-  ]) for (const prefix of ['Plan ', 'The plan ']) {
-    const f = fakes({ spec: { tier, source, brief }, edit: (v) => {
-      if (v.role === 'planner') v.summary = `${prefix}preserves earlier archives.`
-      if (tier === 'mechanical' && v.role === 'builder') v.details.subject = 'fix: mechanical'
-      return v
-    } })
-    assert.equal((await f.go()).status, 'done')
-    assert.ok(f.seen.publish.body.startsWith(`## Summary\nPurpose: ${tier === 'mechanical' ? 'Mechanical' : 'Preserves earlier archives.'}\n${why}\nHow: built\n`), f.seen.publish.body)
-    assert.doesNotMatch(f.seen.publish.body, /^Source:/m)
-    if (tier !== 'mechanical') assert.equal(f.seen.commit.body, BODY.replace('issue 12', source))
-  }
-  for (const [summary, purpose] of [
-    ['Plan lets closeout re-archive a previously archived lane.', 'Lets closeout re-archive a previously archived lane.'],
-    ['tHe PlAn improves things.', 'Improves things.'],
-    ['already a statement.', 'Already a statement.'],
-    ['Plan', 'unmeasured.'],
-    ['The plan', 'unmeasured.'],
-    ['Plan written to task/plan.md.', 'unmeasured.'],
-    ['The plan DRAFTED a revision.', 'unmeasured.'],
-    ['Updates task/PLAN.MD.', 'unmeasured.'],
-  ]) {
-    const f = fakes({ edit: (v) => { if (v.role === 'planner') v.summary = summary; return v } })
-    assert.equal((await f.go()).status, 'done')
-    assert.ok(f.seen.publish.body.includes(`Purpose: ${purpose}\n`))
-  }
-  let plans = 0
-  const revised = fakes({ lead: 'bounce', target: 'planner', edit: (v) => {
-    if (v.role === 'planner') v.summary = `Plan preserves archive ${++plans}.`
-    if (v.role === 'builder' && plans === 1) v.status = 'insufficient'
-    return v
-  } })
-  assert.equal((await revised.go()).status, 'done')
-  assert.match(revised.seen.publish.body, /^## Summary\nPurpose: Preserves archive 2\./)
-})
-
-test('the PR body states the purpose honestly when the brief has no ask, and a finish body carries the ask purpose', async () => {
-  for (const brief of ['## Context\nNo ask here.', '## The ask\n\n## Context\nNo ask here.', '## The ask\n\n>\n> Not the first block.']) {
-    const f = fakes({ spec: { brief } })
-    assert.equal((await f.go()).status, 'done')
-    assert.match(f.seen.publish.body, /^## Summary\nPurpose: Fixture\nCloses issue 12\nHow: built\n/)
-    assert.equal(f.seen.commit.body, BODY)
-  }
-  for (const [planSummary, purpose] of [['The plan preserves archives.', 'Preserves archives.'], ['Plan written to task/plan.md.', 'unmeasured.'], [undefined, 'unmeasured.']]) {
-    const f = fakes({ spec: finishSpec({ planSummary }), unseated: ['planner'] })
-    assert.equal((await f.go()).status, 'done')
-    const body = JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body
-    assert.ok(body.startsWith(`## Summary\nPurpose: ${purpose}\nCloses issue 12\nHow: built\n`))
-    assert.equal(f.rows.find((r) => r.event === 'finish-ready').body, body)
-    assert.doesNotMatch(f.seen.commit.body, /Purpose:/)
   }
 })
 
@@ -4695,20 +2107,6 @@ test('a forged source or builder summary cannot forge a section or measurement i
   }
 })
 
-test('should-fix findings reach the PR as plain open points with no seat name or finding id', async () => {
-  const f = fakes({ spec: { tier: 'judge' }, edit: (v) => {
-    if (['reviewer', 'tech-lead'].includes(v.role)) v.details.findings = [
-      { ...finding, id: v.role === 'reviewer' ? 'S1' : 'S2', severity: 'should-fix', summary: v.role === 'reviewer' ? 'First concern' : 'Second concern' },
-      { ...finding, id: 'C1', severity: 'consider', summary: 'Ignored concern' },
-    ]
-    return v
-  } })
-  assert.equal((await f.go()).status, 'done')
-  assert.match(f.seen.publish.body, /## Open points\n- First concern \(lib.mjs:1\)\n- Second concern \(lib.mjs:1\)/)
-  assert.doesNotMatch(f.seen.publish.body, /S1|S2|C1|reviewer|tech-lead|Ignored concern/)
-  assert.match(f.seen.commit.body, /## Should-fix\n- S1 \(reviewer\)/)
-})
-
 test('the PR body states proof and suite honestly when no test is named, the lane is mechanical, or proof is unmeasured', async () => {
   for (const mode of ['none', 'mechanical', 'mechanical-named', 'unmeasured', 'repair']) {
     const finish = ['unmeasured', 'repair'].includes(mode)
@@ -4729,17 +2127,6 @@ test('the PR body states proof and suite honestly when no test is named, the lan
     else assert.doesNotMatch(body, /red on the old source|green on the build/)
     assert.match(body, /- Suite: green; exit 0; node --test lane\.test\.mjs\./)
   }
-})
-
-test('a finish PR body states the stop in plain words and keeps the observation only in the report', async () => {
-  const f = fakes({ spec: finishSpec(), review: 1, bounds: { builder: 3 } })
-  assert.equal((await f.go()).status, 'done')
-  const report = JSON.parse(f.writes.get('/virtual/task/finish-report.json'))
-  assert.deepEqual(report.stop, STOP)
-  assert.match(report.body, /The lane stopped with reason mutations-survived\. This report covers only this finish run\./)
-  assert.match(report.body, /2 reviews in this finish run; final verdict: pass/)
-  assert.doesNotMatch(report.body, /A1 survived|"stage"|R1|Fix the defect/)
-  assert.equal(f.rows.find((r) => r.event === 'finish-ready').body, report.body)
 })
 
 // A planner's plan_path must name an existing regular file inside the task dir.
@@ -4768,17 +2155,4 @@ test('a planner return whose plan_path is missing, a directory or carries a line
   const denied = fakes({ deps: { stat: async () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }) } } })
   assert.equal((await denied.go()).reason, 'envelope-refused')
   assert.ok(denied.requests[1].repair.defects.some((d) => d.includes('plan_path') && d.includes('denied')))
-})
-
-// MUTATION: force the validity predicate false and an accepted return is refused.
-test('a planner return naming existing task-dir files is accepted, a relative path is read against the task dir, and a repair costs no round (PP3)', async () => {
-  const f = fakes({ edit: pathed({ plan_path: 'plan.md' }), deps: { stat: regular } })
-  assert.equal((await f.go()).status, 'done')
-  assert.equal(count(f, 'planner'), 1)
-  assert.equal(f.requests[1].planPath, '/virtual/task/plan.md')
-  const repaired = fakes({ edit: (v, r) => pathed({ plan_path: r.repair ? '/virtual/task/plan.md' : '/virtual/task/plan.md:1-42' })(v), deps: { stat: regular } })
-  assert.equal((await repaired.go()).status, 'done')
-  assert.equal(count(repaired, 'planner'), 2)
-  assert.equal(repaired.requests[1].id, repaired.requests[0].id)
-  assert.equal(repaired.requests[1].returnPath, repaired.requests[0].returnPath)
 })

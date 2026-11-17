@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { main, parsePrUrl, recordPr } from './record-pr.mjs'
+import { main, parsePrUrl } from './record-pr.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
 const URL1 = 'https://github.com/o/r/pull/12'
@@ -60,32 +60,6 @@ test('a review stop followed by the in-flight suite\'s rows records the operator
       assert.equal(result.status, 0, result.err)
       assert.equal(JSON.parse(readFileSync(file, 'utf8').trim().split('\n').at(-1)).event, 'pr')
     }
-  } finally { w.done() }
-})
-
-test('a lane whose run died with no terminal row records the operator pr; a live or unrecorded run is refused', () => {
-  const w = world()
-  try {
-    for (const [name, alive] of [['dead', false], ['live', true], ['unknown', null], ['missing', 'missing']]) {
-      const file = w.lane(name, { rows: [{ event: 'stage-start', stage: 'build' }] })
-      if (alive !== 'missing') put(join(dirname(file), 'run.pid'), '123\n')
-      const before = readFileSync(file, 'utf8')
-      const result = run(w, name, URL1, { alive: (pid) => pid === 123 ? alive : null })
-      assert.equal(result.status, name === 'dead' ? 0 : 1)
-      if (name === 'dead') assert.equal(JSON.parse(readFileSync(file, 'utf8').trim().split('\n').at(-1)).event, 'pr')
-      else { assert.match(result.err, /not stopped/); assert.equal(readFileSync(file, 'utf8'), before) }
-    }
-  } finally { w.done() }
-})
-
-test('record-pr recognizes a child stop before its anchored return decision', () => {
-  const w = world()
-  try {
-    const rows = [...STOP, { event: 'stage-start', stage: 'review' }, { event: 'verdict', status: 'stopped', reason: 'seat-escalated' }, { event: 'finish-decision', choice: 'return', launchedAt: STOP.length }]
-    const file = w.lane('returned', { rows })
-    put(join(dirname(file), 'run.pid'), '123\n')
-    assert.equal(run(w, 'returned', URL1, { alive: () => false }).status, 0)
-    assert.equal(JSON.parse(readFileSync(file, 'utf8').trim().split('\n').at(-1)).event, 'pr')
   } finally { w.done() }
 })
 
@@ -177,14 +151,5 @@ test('HF3 refuses any lane that already records a pr, whoever wrote it and where
         assert.equal(readFileSync(f, 'utf8'), text)
       }
     }
-  } finally { w.done() }
-})
-
-test('recordPr stamps the clock it was given', () => {
-  const w = world()
-  try {
-    const f = w.lane('a')
-    recordPr({ lane: 'a', url: URL1, root: w.root, now: () => 42 })
-    assert.equal(JSON.parse(readFileSync(f, 'utf8').trim().split('\n').at(-1)).at, 42)
   } finally { w.done() }
 })

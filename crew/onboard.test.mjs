@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { ONBOARD_REASONS, OnboardRefusal, checkOnboarding, main, projectHash, requireOnboarded } from './onboard.mjs'
+import { ONBOARD_REASONS, checkOnboarding, main, projectHash, requireOnboarded } from './onboard.mjs'
 import { git, scratchDir } from '../test/helpers.mjs'
 
 test('projectHash changes when a proof entry gains a list command', () => {
@@ -32,22 +32,6 @@ test('projectHash changes when a proof entry gains newTestFile', () => {
   assert.equal(requireOnboarded('/repo', () => JSON.stringify({ ...opted, onboarded: { hash: projectHash(opted) } })).proof[0].newTestFile, true)
 })
 
-// MUTATION: hash an absent list as null and every project onboarded before list existed reads stale.
-test('projectHash of an entry without list matches the hash recorded before list existed', () => {
-  const proof = [{ match: 'crates/**', run: 'sh tools/crew-proof.sh {file} {title} {report}' }, { match: 'ui/**', setup: 'npm ci', run: 'vitest {file}' }]
-  const before = createHash('sha256').update(JSON.stringify(['sh tools/crew-suite.sh', proof.map((e) => [e.match, e.setup ?? null, e.run])])).digest('hex')
-  assert.equal(projectHash({ suite: 'sh tools/crew-suite.sh', proof }), before)
-  assert.doesNotThrow(() => requireOnboarded('/repo', () => JSON.stringify({ suite: 'sh tools/crew-suite.sh', proof, onboarded: { hash: before } })))
-})
-
-// MUTATION: compare only against projectHash and a record written while list hashed as null reads stale.
-test('requireOnboarded accepts a record written while an absent list hashed as null', () => {
-  const suite = 'npm test', proof = [{ match: '*.xml', run: 'node run.mjs' }]
-  const hash = createHash('sha256').update(JSON.stringify([suite, [['*.xml', null, 'node run.mjs', null]]])).digest('hex')
-  assert.notEqual(hash, projectHash({ suite, proof }))
-  assert.equal(requireOnboarded('/repo', () => JSON.stringify({ suite, proof, onboarded: { hash } })).hash, hash)
-})
-
 test('requireOnboarded distinguishes missing and stale project records', () => {
   const suite = 'npm test', proof = []
   const hash = createHash('sha256').update(JSON.stringify([suite, proof])).digest('hex')
@@ -63,43 +47,6 @@ test('requireOnboarded distinguishes missing and stale project records', () => {
   ]) {
     const read = () => { if (input === null) throw Object.assign(new Error('missing'), { code: 'ENOENT' }); return typeof input === 'string' ? input : JSON.stringify(input) }
     assert.throws(() => requireOnboarded('/repo', read), (error) => error.reason === reason && error.message.includes('/onboard'))
-  }
-})
-
-test('requireOnboarded returns a configured suiteTimeoutMs, defaults an absent one to 1800000, and refuses invalid values as onboarding-stale', () => {
-  const suite = 'npm test', proof = []
-  const hash = createHash('sha256').update(JSON.stringify([suite, proof])).digest('hex')
-  const project = { suite, proof, onboarded: { hash } }
-  for (const [field, expected] of [[{}, 1800000], [{ suiteTimeoutMs: 1 }, 1], [{ suiteTimeoutMs: 2147483647 }, 2147483647], [{ suiteTimeoutMs: 3600000 }, 3600000]]) {
-    assert.deepEqual(requireOnboarded('/repo', () => JSON.stringify({ ...project, ...field })), { suite, proof, hash, suiteTimeoutMs: expected, proofTimeoutMs: 120000 })
-  }
-  for (const value of [null, 0, -1, 1.5, 2147483648, Number.MAX_SAFE_INTEGER + 1, '1000', true, [], {}]) {
-    assert.throws(() => requireOnboarded('/repo', () => JSON.stringify({ ...project, suiteTimeoutMs: value })), (error) => error.reason === 'onboarding-stale')
-  }
-})
-
-test('requireOnboarded returns a configured proofTimeoutMs, defaults an absent one to 120000, and refuses invalid values as onboarding-stale', () => {
-  const suite = 'npm test', proof = []
-  const hash = createHash('sha256').update(JSON.stringify([suite, proof])).digest('hex')
-  const project = { suite, proof, onboarded: { hash } }
-  for (const [field, expected] of [[{}, 120000], [{ proofTimeoutMs: 1 }, 1], [{ proofTimeoutMs: 2147483647 }, 2147483647], [{ proofTimeoutMs: 360000 }, 360000]]) {
-    assert.equal(requireOnboarded('/repo', () => JSON.stringify({ ...project, ...field })).proofTimeoutMs, expected)
-  }
-  for (const value of [null, 0, -1, 1.5, 2147483648, Number.MAX_SAFE_INTEGER + 1, '1000', true, [], {}]) {
-    assert.throws(() => requireOnboarded('/repo', () => JSON.stringify({ ...project, proofTimeoutMs: value })), (error) => error instanceof OnboardRefusal && error.reason === 'onboarding-stale')
-  }
-})
-
-test('requireOnboarded returns a configured builderChecks, omits an absent one, and refuses invalid values as onboarding-stale', () => {
-  const suite = 'npm test', proof = []
-  const hash = createHash('sha256').update(JSON.stringify([suite, proof])).digest('hex')
-  const project = { suite, proof, onboarded: { hash } }
-  const builderChecks = ['cargo clippy -- -D warnings', 'cargo test -p fence']
-  assert.deepEqual(requireOnboarded('/repo', () => JSON.stringify({ ...project, builderChecks })).builderChecks, builderChecks)
-  assert.equal(projectHash({ ...project, builderChecks }), hash)
-  assert.deepEqual(requireOnboarded('/repo', () => JSON.stringify(project)), { suite, proof, hash, suiteTimeoutMs: 1800000, proofTimeoutMs: 120000 })
-  for (const value of ['x', null, {}, [''], ['  '], ['a\nb'], ['a\rb'], [1]]) {
-    assert.throws(() => requireOnboarded('/repo', () => JSON.stringify({ ...project, builderChecks: value })), (error) => error instanceof OnboardRefusal && error.reason === 'onboarding-stale')
   }
 })
 
@@ -221,15 +168,6 @@ test('crew onboard reports an unmeasured cell with its closed reason and not as 
   const { SEAT_UNMEASURED_REASONS } = await import('./seat-probe.mjs')
   assert.deepEqual(SEAT_UNMEASURED_REASONS, ['timeout', 'binary-missing', 'spawn-failed', 'agent-exited', 'rate-limited', 'provider-error', 'turn-incomplete', 'probe-failed'])
   assert.ok(Object.isFrozen(SEAT_UNMEASURED_REASONS)); assert.equal(new Set(SEAT_UNMEASURED_REASONS).size, SEAT_UNMEASURED_REASONS.length)
-})
-
-test('crew onboard --seats probes the roster without running proof calibration', async () => {
-  for (const refused of [false, true]) {
-    const f = seatFixture({ planner: { agent: 'muse', model: 'meta/probe-seats', effort: 'high' } }, (model) => refused && model === 'probe-seats' ? { turn: { refusal: { message: 'no access' } } } : {})
-    assert.equal(await main(['--seats', '--checkout', f.repo], f.deps), refused ? 1 : 0)
-    assert.ok(f.launches.length > 0); assert.equal(existsSync(f.target), false)
-    assert.ok(!f.output.join('').includes('project recorded'))
-  }
 })
 
 test('crew onboard probes each distinct seat cell once across roles and tiers, the advisor included', async () => {

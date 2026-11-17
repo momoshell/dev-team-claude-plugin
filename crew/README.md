@@ -69,6 +69,27 @@ A brief may choose `mechanical: true` for a change with no behaviour to judge. W
 
 Optional `worktreeSetup` in `.crew/project.json` is a non-blank command split on whitespace without a shell, like a proof entry's `setup`. `crew start` runs it once in the new worktree before launching the lane, with a 10-minute timeout. Failure or timeout is printed and recorded in the journal as red or unmeasured but does not stop the lane. If git reports changed or untracked paths after setup, start names them and refuses to launch; ignored paths are allowed. Changing or adding the command requires onboarding again.
 
+Optional personal `~/.crew/settings.json` key `runEndCommand` names a non-blank,
+NUL-free command. Project settings and lane specs cannot select it. The runtime
+reads it when a run ends, splits it on whitespace without a shell, and appends
+four separate arguments: lane name, ending, payload, and checkout path. It runs
+once in that checkout. Endings and payloads are `stopped` with the stop reason,
+`pr` with the opened PR URL, and `finish-ready` with literal `finish-ready`.
+A finish-ready notification does not mean a PR opened; a later successful
+`crew finish <lane> --accept` sends the `pr` notification after recording acceptance.
+Reporting, return/abandon decisions and refused publication do not notify.
+
+The command uses `runSuite` with a five-second awake-time budget and bounded
+process-group cleanup (up to 150 ms TERM grace plus 1,000 ms reap wait). Output
+is bounded and discarded, not printed or included in the lane result. A separate
+`run-end-command` journal event records the ending, payload, configured command,
+timestamp and execution status, reason, exit code, signal and timeout flag.
+Settings, execution and notification-journal failures never change the lane's
+result. Invalid or unreadable settings get a best-effort unmeasured event;
+unknown measurements are null. An absent file or key does nothing and adds no
+event. No notifier program is supplied. A run whose process dies cannot notify;
+dead-run recovery does not send a notification retroactively.
+
 The lane name is the brief's file name. `crew start` runs the `standard` shape
 only; `finish` (ADR-051) is the second entry path. `crew finish <lane> --return <file>`
 starts a finish pass on any finishable stop, including an escalation or a

@@ -1,5 +1,5 @@
 export function stateless(rows, row, index) {
-  if (typeof row?.event !== 'string' || row.event === 'stage-end') return true
+  if (typeof row?.event !== 'string' || row.event === 'stage-end' || row.event === 'run-end-command') return true
   if (row.event === 'check' && Array.isArray(rows) && Number.isSafeInteger(index)) {
     for (let i = Math.min(index, rows.length) - 1; i >= 0; i--) {
       if (rows[i]?.event === 'stage-start') break

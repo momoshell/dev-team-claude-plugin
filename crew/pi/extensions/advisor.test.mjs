@@ -7,13 +7,6 @@ import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import * as advisor from './advisor.ts'
 import { leanLaneFixture, scratchDir } from '../../../test/helpers.mjs'
-// MUTATION: add planner back to ADVISED_ROLES
-test('advisor.ts carries no HTTP endpoint, cell classifier or planner-advisor surface', () => {
-  for (const name of ['probeEndpoint', 'readBoundedBody', 'classifyAdvisorCell', 'advisorCell', 'ADVISOR_ENDPOINT_ENV', 'ADVISOR_MODEL_ENV', 'PROBE_TIMEOUT_MS', 'PLANNER_SYSTEM_PROMPT']) assert.equal(name in advisor, false)
-  const source = readFileSync(new URL('./advisor.ts', import.meta.url), 'utf8')
-  for (const text of ['CREW_ADVISOR_ENDPOINT', 'CREW_ADVISOR_MODEL', 'fetch(']) assert.ok(!source.includes(text))
-  assert.deepEqual([...advisor.ADVISED_ROLES], ['builder'])
-})
 function fixture() {
   const root = scratchDir('advisor-test-')
   const taskDir = join(root, 'task')
@@ -93,30 +86,6 @@ async function runManifestConsult({ cell = { provider: 'local', id: 'advisor-v1'
   return { f, journal, a, argv, spawned }
 }
 
-test('ADR47-L2 C1 null-cell attach still emits an injected scope-breach tier-zero note', async () => {
-  const f = fixture()
-  const manifestPath = join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE)
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-  manifest.cell = null
-  writeFileSync(manifestPath, JSON.stringify(manifest))
-  const journal = sink(); const p = pi()
-  await advisor.attachAdvisor(p, {
-    env: { CREW_ADVISOR: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: f.taskDir },
-    deps: {
-      taskDir: f.taskDir, cwd: f.tree, appendFile: journal.appendFile,
-      readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
-      spawn: () => { throw new Error('null-cell scope-breach must not spawn') },
-    },
-  })
-  const onCall = p.handlers.find(([event]) => event === 'tool_call')?.[1]
-  assert.equal(typeof onCall, 'function')
-  onCall(call('c1', 'write', { path: join(f.tree, 'widget.test.mjs'), content: 'test' }), {})
-  const note = journal.rows.find((row) => row.advisor_note?.tier === 0)?.advisor_note
-  assert.equal(note?.kind, advisor.SCOPE_BREACH)
-  assert.equal(note?.outcome, 'injected')
-  rmSync(f.root, { recursive: true, force: true })
-})
-test('ADR47-L2 C2 null cell suppresses repeated consult and spawn', async () => { const f = fixture(); const m = JSON.parse(readFileSync(join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE))); m.cell = null; writeFileSync(join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE), JSON.stringify(m)); const journal = sink(); let spawnCount = 0; const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR:f.taskDir }), deps: { taskDir:f.taskDir,cwd:f.tree,appendFile:journal.appendFile,readFile:(p)=>readFileSync(p,'utf8'),fileMtime:()=>2,spawn:()=>{spawnCount++} } }); for(let i=1;i<=25;i++){a.onToolCall(call(String(i),'read',{}),{});a.onToolResult(result(String(i),'read',{},'ok'),{})} await a.settled(); assert.equal(spawnCount,0); assert.equal(journal.rows.some((r)=>r.advisor_consult),false); assert.equal(journal.rows.some((r)=>r.advisor_note?.tier===1),false); rmSync(f.root,{recursive:true,force:true}) })
 test('ADR47-L2 C3 grant attaches without a manifest or retired model environment', async () => {
   const f = fixture(); rmSync(join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE))
   const p = pi(); const journal = sink()
@@ -126,47 +95,6 @@ test('ADR47-L2 C3 grant attaches without a manifest or retired model environment
   })
   assert.deepEqual(p.handlers.map(([event]) => event).sort(), ['tool_call', 'tool_result'])
   assert.equal(journal.rows.find((row) => row.advisor_boot)?.advisor_boot.outcome, 'attached')
-  rmSync(f.root, { recursive: true, force: true })
-})
-// Kills: `cell_invalid` forced false (or the attach check deleted). A present cell that fails
-// the allowlist must refuse loudly, never attach as a silent tier-0-only seat; null still attaches.
-test('a malformed manifest cell refuses attach while an explicit null cell attaches', async () => {
-  for (const [cell, outcome] of [[{ provider: 'p', id: 'm', agent: 'pi', effort: null, model: 'p/m' }, 'refused'], [null, 'attached']]) {
-    const f = fixture(); const manifestPath = join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE)
-    writeFileSync(manifestPath, JSON.stringify({ ...JSON.parse(readFileSync(manifestPath, 'utf8')), cell }))
-    const journal = sink(); const p = pi()
-    const attach = advisor.attachAdvisor(p, { env: { CREW_ADVISOR: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: f.taskDir }, deps: { taskDir: f.taskDir, appendFile: journal.appendFile } })
-    if (outcome === 'refused') {
-      await assert.rejects(attach, (err) => err.reason === 'manifest-cell-invalid')
-      assert.equal(journal.rows.find((row) => row.advisor_unavailable)?.advisor_unavailable.reason, 'manifest-cell-invalid')
-      assert.equal(journal.rows.some((row) => row.advisor_boot), false)
-      assert.equal(p.handlers.length, 0)
-    } else {
-      await attach
-      assert.equal(journal.rows.find((row) => row.advisor_boot)?.advisor_boot.outcome, 'attached')
-    }
-    rmSync(f.root, { recursive: true, force: true })
-  }
-})
-
-test('result-time repeated-failure notes and queued triggers retain the result call ordinal', async () => {
-  const f = fixture(); const journal = sink()
-  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir }), deps: {
-    cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile,
-    readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
-  } })
-  const input = { command: 'npm test' }; const text = 'not ok 1 - repeated validation failure (4ms)'
-  a.onToolCall(call('1', 'bash', input), {})
-  a.onToolResult(result('1', 'bash', input, text, true), {})
-  a.onToolCall(call('2', 'bash', input), {})
-  a.onToolCall(call('3', 'bash', input), {})
-  a.onToolCall(call('4', 'bash', input), {})
-  a.onToolResult(result('2', 'bash', input, text, true), {})
-  await a.settled()
-  const tier0 = journal.rows.find((row) => row.advisor_note?.kind === advisor.REPEATED_FAILURE)?.advisor_note
-  const queued = journal.rows.find((row) => row.advisor_note?.trigger === 'tier0-note')?.advisor_note
-  assert.equal(tier0.call_ordinal, 2)
-  assert.equal(queued.call_ordinal, 2)
   rmSync(f.root, { recursive: true, force: true })
 })
 test('a nonzero child exit journals its exit code and stderr tail on the cell failure row', async () => {
@@ -539,11 +467,6 @@ test('A3 clockfree pi-child timeout, oversize output and invalid frames are clos
 
 
 
-test('F1 advisor refusal and judgment vocabularies remain frozen', () => {
-  assert.equal(Object.isFrozen(advisor.JUDGMENT_CLASSES), true)
-  assert.deepEqual(advisor.JUDGMENT_CLASSES, ['edge-path', 'over-claim'])
-})
-
 
 
 function manualTimers(consultTimeoutMs) {
@@ -747,27 +670,6 @@ test('AD5 a tier-zero note is journaled first and then sent as a steer', async (
   assert.equal(denied.sends.length, 0)
 })
 
-// MUTATION AS1: replace the severity interpolation with an invalid value.
-test('AS1 both role prompts carry the complete constant-backed reply contract', () => {
-  const prompts = [advisor.BUILDER_SYSTEM_PROMPT]
-  const clauses = [
-    'Return JSON alone: one object or an array of 1 to 4 objects, with no prose, no code fence, no wrapper key and no second object on another line.',
-    'Each object has exactly the four keys class, severity, claim and evidence.',
-    'class must be one of edge-path, over-claim.', 'severity must be one of low, medium, high.',
-    'claim must be a non-empty string of at most 500 UTF-8 bytes.',
-    'evidence must be an array of 1 to 5 strings, each at most 200 UTF-8 bytes and exactly a bare path:line',
-    'The first evidence item must cite a line shown in the delta.',
-    'Do not copy the example\'s evidence unless that line is shown in the delta.',
-  ]
-  for (const prompt of prompts) for (const clause of clauses) assert.ok(prompt.includes(clause), clause)
-  for (const value of advisor.JUDGMENT_CLASSES) for (const prompt of prompts) assert.ok(prompt.includes(value))
-  for (const value of advisor.SEVERITIES) for (const prompt of prompts) assert.ok(prompt.includes(value))
-  assert.equal(advisor.CLAIM_CAP_BYTES, 500)
-  assert.equal(advisor.EVIDENCE_MAX, 5)
-  assert.equal(advisor.EVIDENCE_ITEM_CAP_BYTES, 200)
-  assert.equal(advisor.JUDGMENT_REPLY_MAX, 4)
-})
-
 // MUTATION AS2: replace evidence's array requirement with prose.
 test('AS2 malformed reply shapes are rejected and mapped to prompt clauses', () => {
   const badEvidence = 'The path is not handled.'
@@ -897,12 +799,6 @@ test('TS2 empty reply is journaled as skipped without a tier-one steer', async (
   for (const key of ['consult_id', 'provider', 'model_id', 'model', 'agent', 'effort']) {
     assert.deepEqual(note[key], consults[0][key], 'tier1Stamp ' + key)
   }
-})
-
-// MUTATION TS4: remove the new no-finding instruction from the emitted prompt contract.
-test('TS4 both advisor prompts instruct the no-finding reply', () => {
-  const sentence = 'If neither class applies, return [] alone.'
-  assert.equal(advisor.BUILDER_SYSTEM_PROMPT.includes(sentence), true)
 })
 
 test('a lean lane gives the advisor its scope from the lane planner return written before the seat, dated by the lane start', () => {

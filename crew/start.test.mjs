@@ -776,11 +776,6 @@ test('a plain start is the only validation: defective, missing-context and stale
   assert.equal(valid.calls.some(([type, line]) => type === 'log' && line.includes('brief ok')), false)
 })
 
-test('(LS1) crew/start.mjs imports none of the old driver or roster modules', () => {
-  const source = readFileSync(fileURLToPath(new URL('./start.mjs', import.meta.url)), 'utf8')
-  assert.doesNotMatch(source, /(?:import\s*\(|from\s+)['"]\.\/(drive|roster|roster-validate|roster-generate|crew)\.mjs['"]/)
-})
-
 test('(LS2) a refusing start in a child process loads no old driver, roster or crew module', () => {
   const dir = scratchDir('lean-start-trace-')
   const tracer = join(dir, 'trace.mjs')

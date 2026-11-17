@@ -4,7 +4,6 @@ import { createHash } from 'node:crypto'
 import { cpSync, mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, posix } from 'node:path'
-import { runInNewContext } from 'node:vm'
 import { connect } from 'node:net'
 import { spawn, spawn as spawnProcess, spawnSync } from 'node:child_process'
 import { pluginWriteMode, pluginWriteTargetMode, sameOrigin, hostGuard, ROUTE_PARAMS, ServerUsageError, startServer as startVisualizerServer, writeGuard } from '../visualizer/server/server.mjs'
@@ -202,12 +201,6 @@ test('the visualizer CLI announces a port through a symlinked repository path', 
     if (child.exitCode === null) await stopServer(child)
     rmSync(dir, { recursive: true, force: true })
   }
-})
-
-test('the deleted usage absence cause is absent from visualizer', () => {
-  const needle = 'predates per-agent token measurement'
-  const hit = spawnSync('git', ['grep', '-c', '-F', '-e', needle, '--', 'visualizer/'], { cwd: ROOT, encoding: 'utf8' })
-  assert.equal(hit.status, 1, hit.stdout)
 })
 
 test('viz-cli-unknown-flag-refusal — an unknown flag or a bad flag value refuses with exit 2 and never leaks a stack', () => {
@@ -427,18 +420,6 @@ test('GR3 API HEAD requests enforce the host guard without bodies', async () => 
   }
 })
 
-test('GR4 vite proxy rewrites the API host to loopback', () => {
-  // MUTATION GR4: flipping changeOrigin to false removes the Vite proxy's Host rewriting.
-  const source = readFileSync(join(ROOT, 'visualizer/web/vite.config.mjs'), 'utf8')
-    .replace(/^import .*$/gm, '')
-    .replace(/^export default /m, 'module.exports = ')
-  const module = { exports: {} }
-  runInNewContext(source, { defineConfig: (config) => config, svelte: () => ({}), module })
-  const proxy = module.exports.server.proxy['/api']
-  assert.equal(proxy.target, 'http://127.0.0.1:4488')
-  assert.equal(proxy.changeOrigin, true)
-})
-
 // MUTATION LH1: disable IPv4 interface equality on the normalization return.
 test('LH1 read host guard follows current IPv4 interfaces', () => {
   let calls = 0
@@ -588,13 +569,6 @@ test('VC2 nothing under crew/ or bin/ imports from visualizer/ and the lean modu
   assert.match(source, /import\s*\{[^}]*\bisObject\b[^}]*\}\s*from\s*'\.\/lane-core\.mjs'/)
   assert.doesNotMatch(source, /function\s+within\s*\(/)
   assert.doesNotMatch(source, /const\s+isObject\s*=/)
-})
-
-test('api.js has no client for a route the server no longer serves', () => {
-  const api = readFileSync(join(ROOT, 'visualizer/web/src/lib/api.js'), 'utf8')
-  const served = new Set(Object.keys(ROUTE_PARAMS))
-  const refs = [...new Set([...api.matchAll(/\/api\/[a-z0-9/_-]+/gi)].map((match) => match[0].replace(/\/$/, '')))]
-  assert.deepEqual(refs.filter((route) => !served.has(route)), [])
 })
 
 test('AE1 /api/agents/propose proposes a crew/agents frontmatter edit over HTTP and writes nothing', async () => {

@@ -6,4 +6,4 @@
 
 For numeric alignment, the shared theme `.mono` rule includes `font-variant-numeric:tabular-nums`; `visualizer/web/src/lib/LeanWaterfall.svelte` also uses tabular numerals for labels. Monospace alone does not establish tabular numerals.
 
-Source tests such as `test/visualizer-lean-web.test.mjs` pin selected wiring and logic, not rendered theme values or a universal colour-token rule. Check the current tests before describing their coverage; a source assertion is not a browser contrast audit.
+`test/visualizer-lean-web.test.mjs` exercises presentation and status logic, not component wiring, rendered theme values or a universal colour-token rule. Check the current tests before describing their coverage; a source assertion is not a browser contrast audit.

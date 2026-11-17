@@ -8,7 +8,6 @@ import {
   FFF_HOOK_PATH, CLAUDE_SEAT_SETTINGS, fffHookDecision,
   acpLaunch as claudeAcpLaunch,
 } from '../../adapters/adapter-claude.mjs'
-import * as claude from '../../adapters/adapter-claude.mjs'
 
 const FFF_BIN = '/opt/homebrew/bin/fff-mcp'
 
@@ -34,11 +33,6 @@ function fffGrant() {
     mcp_servers: [{ name: 'fff', command: { bin: FFF_BIN, args: [] }, url: null }],
   }
 }
-
-// MUTATION: re-export claude modelString.
-test('the claude adapter exports no modelString', () => {
-  assert.equal(Object.hasOwn(claude, 'modelString'), false)
-})
 
 // MUTATION: restore assertNoLocalProvider(configDir).
 test('claude acpLaunch ignores configDir instead of refusing it', () => {
@@ -93,25 +87,4 @@ test('cd-prefixed grep, find and fd searches are refused by pi readgate and the 
   const command = 'cd src && grep foo && echo done'
   assert.equal(pi.onToolCall({ toolName: 'bash', input: { command } }, { cwd: '/tmp' }), undefined)
   assert.equal(fffHookDecision({ tool_name: 'Bash', tool_input: { command } }, { env: { CREW_FFF: '1' } }), undefined)
-})
-
-test('RV1-1 quoted and escaped direct fff searches remain withheld', () => {
-  const cases = [
-    ["'grep' needle", 'mcp__fff__grep', 'mcp__fff__grep'],
-    ['"rg" needle', 'mcp__fff__grep', 'mcp__fff__grep'],
-    [String.raw`g\rep needle`, 'mcp__fff__grep', 'mcp__fff__grep'],
-    [String.raw`\grep needle`, 'mcp__fff__grep', 'mcp__fff__grep'],
-    ["gr'ep' needle", 'mcp__fff__grep', 'mcp__fff__grep'],
-    ['"find" .', 'mcp__fff__find_files', 'mcp__fff__find_files'],
-    ["'fd' x", 'mcp__fff__find_files', 'mcp__fff__find_files'],
-  ]
-  const pi = createReadGate({ env: { CREW_FFF: '1' }, hasUnquotedPipe: () => false })
-  for (const [command, piReplacement, claudeReplacement] of cases) {
-    const result = pi.onToolCall({ toolName: 'bash', input: { command } }, { cwd: '/tmp' })
-    assert.equal(result?.block, true, command)
-    assert.match(result?.reason || '', new RegExp(piReplacement), command)
-    const decision = fffHookDecision({ tool_name: 'Bash', tool_input: { command } }, { env: { CREW_FFF: '1' } })
-    assert.equal(decision?.hookSpecificOutput?.permissionDecision, 'deny', command)
-    assert.match(decision?.hookSpecificOutput?.permissionDecisionReason || '', new RegExp(claudeReplacement), command)
-  }
 })

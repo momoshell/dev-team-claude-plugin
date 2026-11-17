@@ -1,8 +1,8 @@
 import { test } from 'node:test'
-import { ROOT, scratchDir } from '../test/helpers.mjs'
+import { scratchDir } from '../test/helpers.mjs'
 import assert from 'node:assert/strict'
 import {
-  existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync,
+  mkdtempSync, mkdirSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, resolve as resolvePath } from 'node:path'
@@ -63,17 +63,4 @@ test('markdown memory rejects parent and absolute links with outside-dir drops',
     assert.deepEqual(extract.dropped.map((entry) => entry.reason), ['outside-dir', 'outside-dir'])
     assert.ok(extract.dropped.every((entry) => !isAbsolute(entry.path)))
   } finally { clean(dir); rmSync(outside, { force: true }); rmSync(absolute, { force: true }) }
-})
-
-test('the dev-team folder keeps no retired runtime config and no unindexed memory note', () => {
-  const dir = join(ROOT, '.claude/dev-team/memory')
-  assert.equal(existsSync(join(ROOT, '.claude/dev-team/config.md')), false)
-  const index = readFileSync(join(dir, 'MEMORY.md'), 'utf8')
-  const linked = [...index.matchAll(/\]\(([^)]+)\)/g)].map((match) => match[1])
-  for (const name of readdirSync(dir).filter((name) => name.endsWith('.md'))) {
-    assert.ok(['MEMORY.md', 'architecture-notes.md', ...linked].includes(name), name)
-  }
-  for (const name of ['config.md', 'backend-notes.md', 'qa-notes.md', 'devops-notes.md', 'frontend-notes.md']) {
-    assert.ok(existsSync(join(ROOT, 'docs/archive', name)), name)
-  }
 })

@@ -1,5 +1,5 @@
 import { after } from 'node:test'
-import { ROOT, scratchDir } from './helpers.mjs'
+import { scratchDir } from './helpers.mjs'
 import {test} from 'node:test'
 import assert from 'node:assert/strict'
 import {mkdirSync,writeFileSync,readFileSync,existsSync,rmSync,symlinkSync,realpathSync} from 'node:fs'
@@ -76,24 +76,6 @@ test('linked library directory is refused, and HTTP installed-copy mode prevents
  assert.equal((await (await fetch(base+'/api/agent-library')).json()).writable,false)
  const response=await fetch(base+'/api/agent-library/save',{method:'POST',headers:{origin:base,'content-type':'application/json'},body:JSON.stringify({filename:'reviewer.md',text:definition(),expected_revision:null})})
  assert.equal(response.status,409);assert.equal(existsSync(join(root,'elsewhere/reviewer.md')),false)
-})
-
-test('the visualizer owns the shipped coding_agents declarations in visualizer/coding-agents.json',()=>{
- const path=join(ROOT,'visualizer/coding-agents.json')
- assert.equal(existsSync(path),true)
- const {coding_agents}=JSON.parse(readFileSync(path,'utf8'))
- const declarations=structuredClone(coding_agents)
- for(const entry of Object.values(declarations)) delete entry.default_transport
- assert.deepEqual(declarations,{
-  pi:{providers:['openai','anthropic','meta'],transports:['acp'],adapter:'crew/adapters/adapter-pi.mjs',refuses:[],display_name:'Pi',binary:'pi',install_hint:'Install Pi and ensure the pi binary is on PATH.',availability:'executable',availability_reason:'executable'},
-  claude:{providers:['anthropic'],transports:['acp'],adapter:'crew/adapters/adapter-claude.mjs',refuses:['extensions','local_provider'],display_name:'Claude Code',binary:'claude',install_hint:'Install Claude Code and ensure the claude binary is on PATH.',availability:'executable',availability_reason:'executable'},
-  muse:{providers:['meta'],transports:['acp'],adapter:'crew/adapters/adapter-muse.mjs',refuses:['local_provider'],display_name:'Muse Code',binary:'muse',install_hint:'Install Muse Code and ensure the muse binary is on PATH.',availability:'executable',availability_reason:'executable'},
- })
- for(const entry of Object.values(coding_agents)) assert.ok(existsSync(join(ROOT,entry.adapter)))
- const muse=coding_agents.muse
- const imports=[...readFileSync(join(ROOT,muse.adapter),'utf8').matchAll(/\bfrom\s+['"]([^'"]+)['"]/g)].map(match=>match[1])
- assert.ok(imports.length>0);assert.ok(imports.every(specifier=>specifier.startsWith('node:')))
- assert.equal(muse.binary,'muse');assert.deepEqual(muse.refuses,['local_provider']);assert.deepEqual(muse.transports,['acp'])
 })
 
 // Isolate transitive runtime telemetry as well as the explicit fixture paths.

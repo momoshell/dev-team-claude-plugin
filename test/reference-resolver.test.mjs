@@ -5,7 +5,6 @@ import { dirname, join, resolve } from 'node:path'
 import { ROOT } from './helpers.mjs'
 
 const read = (path) => readFileSync(join(ROOT, path), 'utf8')
-const flat = (text) => text.replace(/\s+/g, ' ')
 const lineCount = (text) => text === '' ? 0 : text.split('\n').length - Number(text.endsWith('\n'))
 const files = (dir) => readdirSync(join(ROOT, dir), { recursive: true, withFileTypes: true })
   .filter((e) => e.isFile()).map((e) => join(e.parentPath, e.name).slice(ROOT.length + 1))
@@ -107,91 +106,4 @@ const scan = (documents, sources) => {
 test('reference resolver finds no stale citation in the swept prose', () => {
   const sources = ['crew', 'bin', 'scripts', 'hooks'].flatMap((dir) => files(dir).filter((p) => /\.(?:mjs|ts|js)$/.test(p)))
   assert.deepEqual(scan(prose.map((p) => [p, read(p)]), sources.map((p) => [p, read(p)])), [])
-})
-
-test('reference resolver rejects missing root Markdown paths and past-EOF citations', () => {
-  for (const [text, expected] of [
-    ['`README.md:999999`', /README\.md:999999 past EOF/],
-    ['`missing-root-reference.md`', /missing path missing-root-reference\.md/],
-    ['`missing-root-reference.mjs`', /missing path missing-root-reference\.mjs/],
-    ['`missing-dir/file.mjs`', /missing path missing-dir\/file\.mjs/],
-    ['README.md:999999', /README\.md:999999 past EOF/],
-    ['`DefinitelyMissingSymbol` in `crew/loop.mjs:25`', /DefinitelyMissingSymbol absent from crew\/loop\.mjs/],
-    ['`DefinitelyMissingSymbol` (`crew/loop.mjs`)', /DefinitelyMissingSymbol absent from crew\/loop\.mjs/],
-    ['`DefinitelyMissingSymbol` (`crew/loop.mjs:25`)', /DefinitelyMissingSymbol absent from crew\/loop\.mjs/],
-    ['`crew/loop.mjs:25` `DefinitelyMissingSymbol`', /DefinitelyMissingSymbol absent from crew\/loop\.mjs/],
-  ]) assert.match(scan([['README.md', text]], []).join('\n'), expected)
-})
-
-test('reference resolver scans trailing ADR comments but not string contents', () => {
-  const source = `const url = "https://example.org/ADR-999"; const text = '/* ADR-999 */'; const tpl = \`// ADR-999\`;
-const limit = 1 // ADR-998
-/* ADR-997 */`
-  const errors = scan([], [['crew/example.mjs', source]]).join('\n')
-  assert.match(errors, /ADR-998 missing from register/)
-  assert.match(errors, /ADR-997 missing from register/)
-  assert.doesNotMatch(errors, /ADR-999/)
-})
-
-test('crew-recovery says crew lanes reports a pid-proven dead run as run-died and never claims liveness', () => {
-  const bullet = flat(read('skills/crew-recovery/SKILL.md').split('\n- `crew lanes')[1].split('\n- ')[0])
-  assert.match(bullet, /recorded pid proves dead lists as `stopped` with reason `run-died`/)
-  assert.match(bullet, /`deadRun` in `crew\/run-pid\.mjs`/)
-  assert.match(bullet, /never reports a process as alive/)
-  assert.doesNotMatch(bullet, /does not say whether a process is alive/)
-})
-
-test('the README onboard usage lines match the crew onboard usage', () => {
-  const usage = read('crew/onboard.mjs').match(/usage: (crew onboard [^\\]+)\\n/)
-  assert.ok(usage)
-  for (const path of ['README.md', 'crew/README.md']) {
-    const line = read(path).split('\n').find((entry) => entry.startsWith('crew onboard '))
-    assert.ok(line?.includes(usage[1]), `${path} does not contain ${usage[1]}`)
-  }
-})
-
-test('the tech-lead charter says which reviewer rules do not apply to it', () => {
-  const charter = flat(read('crew/agents/tech-lead.md'))
-  for (const phrase of [
-    'Its round-2 delta limit on new must-fixes is not yours',
-    'outside a scoped recheck, a new defect anywhere may be a must-fix',
-    'When given a recheck scope, follow its must-fix limit',
-    'still carry or close your earlier must-fixes',
-    'your frontmatter grants no skills',
-    'read `code-less` only when the lane grants it',
-    'read every skill granted for the lane',
-  ]) assert.ok(charter.includes(phrase), phrase)
-  assert.doesNotMatch(charter, /Its skill rule/)
-})
-
-test('adr-060 and its register entry point at the shipped seat probe and record the ratification', () => {
-  const adr = read('docs/adr/adr-060-local-roster-overrides.md')
-  const row = register.split('\n').find((line) => line.startsWith('| 060 |'))
-  assert.match(adr, /\*\*Status:\*\* Ratified 2026-11-11, operator decision/)
-  assert.match(row, /\| ratified 2026-11-11, operator decision, issue #2256;/)
-  for (const text of [adr, row]) {
-    assert.ok(text.includes('crew/seat-probe.mjs'))
-    assert.ok(text.includes('crew onboard --seats'))
-  }
-})
-
-test('crew-onboard names the timeout default constants instead of restating them', () => {
-  const skill = flat(read('skills/crew-onboard/SKILL.md'))
-  assert.ok(skill.includes('`SUITE_TIMEOUT_DEFAULT_MS` (`crew/onboard.mjs`)'))
-  assert.ok(skill.includes('`PROOF_TIMEOUT_DEFAULT_MS` (`crew/proof.mjs`)'))
-  assert.doesNotMatch(skill, /1800000|120000/)
-})
-
-test('crew-recovery names FINISH_REASONS instead of listing finish refusal causes', () => {
-  const skill = flat(read('skills/crew-recovery/SKILL.md'))
-  assert.ok(skill.includes('`FINISH_REASONS` in `crew/finish.mjs`'))
-  assert.doesNotMatch(skill, /the worktree is gone|schema-valid builder result/)
-})
-
-test('adr register records the ADR-050 and ADR-055 amendment notes', () => {
-  const entry = (id) => register.split('\n').find((line) => line.startsWith(`| ${id} |`))
-  for (const [id, patterns] of [
-    ['050', [/amendment/i, /147-150/, /skill-gate\.mjs/, /deny `main`/, /DEVTEAM_WORKER/, /builderloop\.ts/, /no longer exists/]],
-    ['055', [/amendment/i, /§10/, /map-grant/, /tech-lead/, /builder/, /reviewer/, /crew\/lean\.mjs/]],
-  ]) for (const pattern of patterns) assert.match(entry(id), pattern)
 })

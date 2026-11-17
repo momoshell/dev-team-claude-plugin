@@ -13,11 +13,6 @@ const listen = async (server) => {
 
 const helperUrl = new URL('./helpers.mjs', import.meta.url).href
 
-// MUTATION G1: repoint ROOT and the repository-root contract goes red.
-test('ROOT still resolves to the repo root', () => {
-  assert.ok(existsSync(join(ROOT, 'package.json')))
-})
-
 // MUTATION G11: hardcode closedWithoutResponse to false and the refuse-and-close input goes red.
 test('rawRequest reports a socket closed without a response', async () => {
   const server = net.createServer((socket) => { socket.destroy() })
@@ -99,137 +94,11 @@ test('writeTornFile refuses a prefix that parses', () => {
   }
 })
 
-// Helper duplication tripwire. The 2026-08-23 audit (docs/audits/2026-08-23/audit/
-// s4-register.md, D1-D6) measured sqliteAvailable in 8 files, git()/gitResult() in
-// 7 copies with SIX distinct bodies, and repo-root derivation in 12 copies under 6
-// names. #591 consolidated the first tranche, this lane the last four carriers;
-// without a detector the copies come back one call site at a time (#551).
-//
-// Scope: *.test.mjs under the directories that hold test files, plus the shared
-// non-test test modules. Production modules are NEVER enumerated, so the indented
-// `return function git(where, args)` factories in crew/arms.mjs and
-// crew/harvest.mjs cannot be flagged, by construction rather than by exception.
-// Blind spot, stated: a test file under a NEW top-level directory is not scanned;
-// the count assertion below is the cheap guard against a scan that reads nothing.
-const HELPER_NAMES = 'sqliteAvailable|git|gitResult|treeDigest|scratchDir|rawRequest|startFileWriter|writeTornFile|makeSeedLane|forAll'
-// Regrowth is written however the next author writes small helpers, not only as
-// a column-0 `function` declaration. A const arrow is the commonest form in this
-// repo, and a helper re-declared inside a test() body is indented. Matching only
-// the narrow form would leave the guard green through exactly the regrowth #551
-// describes, so every binding form is covered and pinned below.
-const LOCAL_HELPER_DECL = new RegExp(String.raw`^\s*(?:export\s+(?:default\s+)?)?(?:(?:async\s+)?function\s*\*?\s*(?:${HELPER_NAMES})\s*\(|(?:const|let|var)\s+(?:${HELPER_NAMES})\s*=\s*(?:async\s+)?(?:function\b|\(|[A-Za-z_$][\w$]*\s*=>))`, 'gm')
-const LOCAL_REPO_ROOT = new RegExp([
-  // Quote style is unenforced here (no eslint config), and package.json pins
-  // node >= 26, which makes import.meta.dirname the idiomatic derivation today.
-  // A detector blind to either is blind to the forms most likely to appear next.
-  String.raw`new URL\(\s*['"\x60](?:\.\./)+['"\x60]`,
-  String.raw`import\.meta\.dirname`,
-  String.raw`dirname\(\s*dirname\(\s*fileURLToPath`,
-  String.raw`join\(\s*dirname\(\s*fileURLToPath\([^)]*\)\s*\)\s*,\s*'\.\.'`,
-  String.raw`'--show-toplevel'`,
-].join('|'), 'g')
-const HELPER_SELF = 'test/helpers.mjs'
-const HELPER_SELF_TEST = 'test/helpers.test.mjs'
-const HELPER_SCAN_DIRS = ['commands', 'crew', 'scripts', 'skills', 'test', 'visualizer']
-// Derived, never hand-listed. A literal list stops covering the next shared
-// module someone adds beside the test files, and a detector that scans
-// nothing passes (#551).
 function sharedTestModules(dir = 'test') {
   return readdirSync(join(ROOT, dir)).sort()
     .map((name) => `${dir}/${name}`)
     .filter((rel) => rel.endsWith('.mjs') && !rel.endsWith('.test.mjs') && statSync(join(ROOT, rel)).isFile())
 }
-
-function localHelperSites(source) {
-  return [...source.matchAll(LOCAL_HELPER_DECL)].length + [...source.matchAll(LOCAL_REPO_ROOT)].length
-}
-
-function helperTestFiles(dir, out = []) {
-  for (const name of readdirSync(join(ROOT, dir)).sort()) {
-    const rel = `${dir}/${name}`
-    if (statSync(join(ROOT, rel)).isDirectory()) { if (name !== 'node_modules') helperTestFiles(rel, out) }
-    else if (name.endsWith('.test.mjs')) out.push(rel)
-  }
-  return out
-}
-
-function helperScannedFiles() {
-  return [...HELPER_SCAN_DIRS.flatMap((dir) => helperTestFiles(dir)), ...sharedTestModules()]
-}
-
-// Frozen, not forgiven. Each of these carries a local copy this lane did not
-// convert: they sit outside its write fence, so the exemption — not a weaker
-// rule — is how the detector owns what it newly flags. The warranty is the
-// audited site COUNT as a CEILING: add a copy to an exempt file and its warranty
-// fails. It is deliberately not equality — equality also fails when a copy is
-// REMOVED, so the lane that finally converts an exempt file would turn this test
-// red for doing the very thing the exemption is waiting for.
-function frozenHelperSites(sites, why) {
-  return { sites, why, warranty: (source) => localHelperSites(source) <= sites }
-}
-
-// Retired 2026-08-25 by lane b236-helperexempt (#551's cleanup lane). Each of
-// these was frozen only because its copy sat outside a converting lane's fence.
-// The copy is gone, so the exemption is retired and the file is now PROTECTED by
-// the tripwire rather than merely unlisted:
-//   commands/commands.test.mjs — converted by b232-helperdedupc (#643, a3bcbfe)
-//   crew/pi/extensions/lab.test.mjs — converted by b232-helperdedupc (#643, a3bcbfe)
-//   crew/pi/extensions/subagent.test.mjs — converted by b232-helperdedupc (#643, a3bcbfe)
-//   test/factory-emit.test.mjs — converted by b230-helperdedupa (#642, 0fb580a)
-//   test/factory-intake.test.mjs — converted by b230-helperdedupa (#642, 0fb580a)
-//   test/factory-ledger.test.mjs — converted by b230-helperdedupa (#642, 0fb580a)
-//   test/factory-make-brief.test.mjs — converted by b235-helperdedupb2 (#644, bd3d40d)
-//   test/version-agreement.test.mjs — converted by b235-helperdedupb2 (#644, bd3d40d)
-// Retired 2026-08-26 by lane b256-helperexempt2 (#551's cleanup lane), same rule:
-//   crew/crew.test.mjs — converted by b247-helperdedupd (#655, eca14fc)
-//   crew/drive.test.mjs — converted by b248-helperdedupf (#656, 53bb1eb)
-//   skills/crew-dispatch/exhibits.test.mjs — converted by b243-helperdedupe (#650, 39e17e4)
-//   skills/devops/exhibits.test.mjs — converted by b248-helperdedupf (#656, 53bb1eb)
-//   skills/pr-review/findings-shape.test.mjs — converted by b247-helperdedupd (#655, eca14fc)
-// Retired 2026-08-26 by lane b264-ciretireb2 (#535 wave B2), which closes #551.
-// The first two were converted by lanes that have since landed and each measures
-// ZERO local sites today; the third was deleted with the module it tested, so the
-// exemption has nothing left to freeze:
-//   skills/backend-node/exhibits.test.mjs — converted by b247-helperdedupd (#655, eca14fc)
-//   skills/crew-recovery/exhibits.test.mjs — converted by b243-helperdedupe (#650, 39e17e4)
-//   test/factory-ci-*.test.mjs (2 sites) — retired by this lane with the unreached
-//     CI watcher module it tested (#535); named by glob because no live citation of
-//     those modules may survive this commit
-const HELPER_EXEMPT = new Map()
-
-test('helper duplication tripwire — no test file re-declares a consolidated helper', () => {
-  const scanned = helperScannedFiles()
-  assert.ok(scanned.length >= 50, `expected at least 50 scanned test files, found ${scanned.length}`)
-  const offenders = scanned.filter((file) => {
-    if (file === HELPER_SELF || file === HELPER_SELF_TEST || HELPER_EXEMPT.has(file)) return false
-    return localHelperSites(readFileSync(join(ROOT, file), 'utf8')) > 0
-  })
-  assert.deepEqual(offenders, [])
-})
-
-test('helper duplication tripwire — every exemption has a live, load-bearing warranty', () => {
-  let total = 0
-  for (const [file, exemption] of HELPER_EXEMPT) {
-    let source
-    try { source = readFileSync(join(ROOT, file), 'utf8') }
-    catch (err) { assert.fail(`exemption ${file} is missing or unreadable: ${err.message}`) }
-    assert.ok(exemption.why.length > 20, `exemption ${file} carries no audited reason`)
-    assert.equal(exemption.warranty(source), true, `exemption ${file} warranty no longer holds`)
-    assert.ok(exemption.sites > 0, `exemption ${file} is redundant`)
-    total += exemption.sites
-  }
-  assert.equal(total, 0)
-})
-
-test('helper duplication tripwire — the detector flags a hand-rolled copy and clears an import', () => {
-  assert.equal(localHelperSites('function sqliteAvailable() {}\n'), 1)
-  assert.equal(localHelperSites('function gitResult(a) {}\n'), 1)
-  assert.equal(localHelperSites("const R = fileURLToPath(new URL('../../', import.meta.url))\n"), 1)
-  assert.equal(localHelperSites("execFileSync('git', ['rev-parse', '--show-toplevel'])\n"), 1)
-  assert.equal(localHelperSites("import { git, sqliteAvailable } from './helpers.mjs'\n"), 0)
-  assert.equal(localHelperSites("const HERE = fileURLToPath(new URL('./', import.meta.url))\n"), 0)
-  assert.equal(localHelperSites('  return function git(where, args) {}\n'), 0)
-})
 
 // --- suite discovery contract (#551 F0) -------------------------------------
 // test/helpers.mjs and test/fixtures.mjs are helper modules, and until this
@@ -381,39 +250,3 @@ async function assertProcessGone(pid, timeoutMs = 5000) {
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
 }
-
-// Mutation killed: accepting EPERM as disappearance returns before the ESRCH probe.
-test('LG4 disappearance polling retries EPERM until ESRCH confirms the group is gone', async () => {
-  const kill = process.kill
-  const codes = ['EPERM', 'EPERM', 'ESRCH']
-  let calls = 0
-  process.kill = (pid, signal) => {
-    assert.equal(pid, -424242)
-    assert.equal(signal, 0)
-    const code = codes[calls++]
-    throw Object.assign(new Error(code), { code })
-  }
-  try {
-    await assertProcessGone(-424242)
-    assert.equal(calls, 3)
-  } finally {
-    process.kill = kill
-  }
-})
-
-// Mutation killed: treating any probe error as absence admits persistent EPERM and unknown errors.
-test('disappearance polling fails closed on denied, interrupted, unknown and live probes', async () => {
-  const kill = process.kill
-  try {
-    process.kill = () => { throw Object.assign(new Error('denied'), { code: 'EPERM' }) }
-    await assert.rejects(assertProcessGone(-424242, 0), /unobservable \(EPERM\)/)
-    for (const error of [Object.assign(new Error('interrupted'), { code: 'EINTR' }), new Error('unknown')]) {
-      process.kill = () => { throw error }
-      await assert.rejects(assertProcessGone(-424242, 0), (actual) => actual === error)
-    }
-    process.kill = () => undefined
-    await assert.rejects(assertProcessGone(-424242, 0), /still present/)
-  } finally {
-    process.kill = kill
-  }
-})

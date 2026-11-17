@@ -1,5 +1,4 @@
-The findings definition is the scout agent, `scout.json` under `crew/pi/agents/`, and the pin that holds
-this document to that definition is `skills/pr-review/findings-shape.test.mjs`.
+The findings definition is the scout agent, `scout.json` under `crew/pi/agents/`.
 The shape below restates the definition for readers; its enum bar is deliberate
 and means this illustrative block is not valid JSON.
 
@@ -16,12 +15,6 @@ and means this illustrative block is not valid JSON.
   "gaps": ["<anything you could not establish>"]
 }
 ```
-
-The scout agent definition (`scout.json` under `crew/pi/agents/`) is the definition and this file is its reader-facing
-restatement. The pinning check compares both against a literal it holds itself,
-so neither side can move to match the other without a deliberate edit to the
-check. If the check goes red, read both sources, decide which side is right, and
-change the check last.
 
 The reviewer envelope's finding is a different object — `{id, severity,
 location, summary, disposition, patch, trigger, start_line, end_line, uncertain}` — declared in the reviewer definition

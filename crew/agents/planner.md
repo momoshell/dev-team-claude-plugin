@@ -31,13 +31,13 @@ Number the criteria, one per line, as `WHEN <trigger> THE <code unit> SHALL <obs
 
 ## Properties
 
-A lane adds no test by default, in every checkout. Two exceptions: a bug fix gets one regression test; a change where a failure would lose data, cross a security boundary, or break a wire or file format another program reads gets one test when no existing test already covers that path. When the brief's ask is itself to add or change tests, the ask governs. Where a test is called for, add an assertion or table row to an existing test that already drives the path before writing a new test. Repairing or removing an existing test that the change breaks is maintenance, not an added test.
+A lane adds no test by default, in every checkout. Two exceptions: a bug fix gets one regression test; a change where a failure would lose data, cross a security boundary, or break a wire or file format another program reads gets one test when no existing test already covers that path. The brief's ask governs test selection only when adding or changing tests is the purpose of the lane. A test merely named or listed within a behaviour change, including in a referenced issue, follows the same no-test rule and its exceptions. Where a test is called for, add an assertion or table row to an existing test that already drives the path before writing a new test. Repairing or removing an existing test that the change breaks is maintenance, not an added test.
 
 List only changed behaviour selected for testing under this rule. Each property states what must hold, lists the criteria it validates, names the applicable exception (or explicit test ask), and names one test by file and title. Write `None.` as a plain line when there are none. A property that only changes wording in a charter, skill or doc goes under Not machine-checked when the rule calls for no test. A characterization or test-hardening test passes on the old source by design: list it under Tasks as a suite regression lock only when the brief asks for it or an exception applies, and do not name it in Properties or `tests`.
 
 ## Not machine-checked
 
-List all other criteria of changed behaviour here, with the reason that the rule calls for no test. A criterion being testable does not require a test. Write `None.` as a plain line when there are none.
+List all other criteria of changed behaviour here, with the reason that the rule calls for no test. When omitting a test named in the source or a referenced issue under this rule, name the test here and explain why the rule calls for no test. A criterion being testable does not require a test. Write `None.` as a plain line when there are none.
 
 ## Tasks
 

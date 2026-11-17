@@ -12,9 +12,11 @@ A lane adds no test by default, in every checkout. Two exceptions:
   wire or file format another program reads gets one test when no existing test
   already covers that path.
 
-When the brief's ask is itself to add or change tests, the ask governs. Repairing
-or removing an existing test that the change breaks is maintenance, not an added
-test. A mechanical builder applies this rule without a plan.
+The brief's ask governs test selection only when adding or changing tests is the
+purpose of the lane. A test merely named or listed within a behaviour change,
+including in a referenced issue, follows the same no-test rule and its exceptions.
+Repairing or removing an existing test that the change breaks is maintenance, not
+an added test. A mechanical builder applies this rule without a plan.
 
 Make the change first, then write only the tests the plan names. An unplanned
 added test needs an applicable exception in `notes`. Where a test is called for,

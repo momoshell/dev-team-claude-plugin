@@ -159,21 +159,28 @@ After an `acp-seat-deadline` cut, the one rerun receives the original prompt plu
 A lane adds no test by default, in every checkout. A bug fix gets one regression
 test. A change where a failure would lose data, cross a security boundary, or
 break a wire or file format another program reads gets one test when no existing
-test already covers that path. When the brief's ask is itself to add or change
-tests, the ask governs. Add an assertion or table row to an existing test already
-driving the path before writing a new test. Repairing or removing an existing
-test that the change breaks is maintenance, not an added test.
+test already covers that path. The brief's ask governs test selection only when
+adding or changing tests is the purpose of the lane. A test merely named or listed
+within a behaviour change, including in a referenced issue, follows the same
+no-test rule and its exceptions. Add an assertion or table row to an existing test
+already driving the path before writing a new test. Repairing or removing an
+existing test that the change breaks is maintenance, not an added test.
 
 The planner lists only selected changed behaviour in Properties, with the
 applicable exception or explicit test ask and the test's file and title. Other
-changed criteria go under Not machine-checked because the rule calls for no test;
+changed criteria go under Not machine-checked because the rule calls for no test.
+When omitting a test named in the source or a referenced issue under this rule,
+the planner names the test there and explains why the rule calls for no test.
 Properties with none means `tests: []`. Characterization and test-hardening suite
 regression locks need an explicit ask or an applicable exception. The builder
 writes only plan-named tests; a mechanical builder applies the rule without a
 plan. Reviewers (including the tech-lead) require removal as a `must-fix` of a new
 unplanned test whose builder notes justify neither exception, respecting explicit
-test asks and existing-test maintenance. A missing test is a finding only when
-an exception applies and no existing test covers the path.
+test asks for test-purpose lanes and existing-test maintenance. An unmet ask for
+such a lane remains an unmet requirement. A missing test is otherwise a finding
+only when an exception applies and no existing test covers the path. Reviewers do
+not report a test omitted under the rule as an unmet requirement merely because
+the source or a referenced issue names it.
 
 This is a charter rule, not a project setting or engine change. Proof, the suite
 gate, review and the PR's proof lines stay unchanged. After 20 planned lanes per

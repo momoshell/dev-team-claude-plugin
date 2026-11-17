@@ -96,3 +96,34 @@ a lane that turns out to change behaviour is a wrong tier, and the operator rest
 - **The reviewer's model and effort,** and which skills each seat holds.
 
 If ratified, this supersedes ADR-052 §6 for the `standard` shape.
+
+## Amendment 2026-11-18: checkout suite coordination (#2457)
+
+Optional boolean `suiteLock: true` in `.crew/project.json` queues the checkout's
+project suites across lane processes and worktrees, with ownership in the
+shared Git common directory. Separate checkouts remain independent. Absent or
+false leaves suites unlocked; invalid values are refused. Start captures the
+setting for the lane and its finish passes, including publishing-rebase suite
+rechecks. Adding or removing it needs no re-onboarding and does not retrofit
+already-started lanes.
+
+Acquisition waits at most two hours, outside `suiteTimeoutMs`. The suite journal
+result records measured `suite_lock_wait_s`. Exhaustion stops unmeasured with
+`suite-lock-timeout` and `suite_lock_holder` diagnostics; I/O or resolution
+failure stops `suite-lock-unavailable`. Ownership is reclaimed only on proven
+death, never by age. Unreadable or uncertain holders stay unknown and
+unreclaimed. A surviving suite process group prevents reclamation even after
+its launcher dies. Proof, worktree setup, onboarding and builder checks remain
+unlocked; lane concurrency does not change. Section 1's ban on automatic
+unchanged-tree red-suite retries still holds.
+
+Suite, proof (base/build, setup and listing) and `worktreeSetup` commands receive
+`CREW_LANE`, the lane name, overriding any inherited value only in the child
+environment. Scripts can name per-lane databases, ports or containers instead
+of queueing. Onboarding has no lane name. Neither queueing nor service naming
+selects affected packages; the project script owns that choice.
+
+Two measured the-power suites ended 26 seconds apart with Postgres connection
+errors on 2026-11-17. Overlap was measured, but it was not proven to be the
+outage's cause. This amendment makes no claim that queueing alone would have
+prevented it.

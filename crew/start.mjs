@@ -184,7 +184,7 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
   let setup
   if (project.worktreeSetup !== undefined) {
     try {
-      setup = await d.runSuite({ cwd: worktree, ...suiteSpec(project.worktreeSetup, WORKTREE_SETUP_TIMEOUT_MS) })
+      setup = await d.runSuite({ cwd: worktree, lane, ...suiteSpec(project.worktreeSetup, WORKTREE_SETUP_TIMEOUT_MS) })
       if (!setup || !['green', 'red', 'unmeasured'].includes(setup.status) || (setup.status !== 'green' && (typeof setup.reason !== 'string' || !setup.reason))) throw new Error('malformed result')
     } catch { setup = { status: 'unmeasured', reason: 'runner-threw' } }
     const reason = setup.status === 'green' ? null : setup.reason
@@ -232,6 +232,7 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
     id: lane, cwd: worktree, taskDir, tier, shape: fields.shape, brief: run,
     source: fields.source, branch: lane, base, closes: fields.closes === null ? [] : [fields.closes],
     suite: suiteSpec(project.suite, project.suiteTimeoutMs), proofTimeoutMs: project.proofTimeoutMs, onboarded: project.hash,
+    ...(project.suiteLock === undefined ? {} : { suiteLock: project.suiteLock }),
     ...(project.builderChecks === undefined ? {} : { builderChecks: project.builderChecks }),
     ...(fields.generated === undefined ? {} : { generated: { paths: fields.generated, ...suiteSpec(fields.regenerate) } }),
     roster,

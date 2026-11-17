@@ -41,7 +41,8 @@ A rate is never reported without its denominator.
 A shortcut with a known limit gets a comment with the limit and upgrade path:
 `// shortcut: global lock; per-account locks if throughput matters`.
 
-New non-trivial logic needs one small test; trivial changes need none.
+Follow the no-test rule and its exceptions in `skills/test-economy/SKILL.md`,
+not a test mandate for new logic.
 End with what was skipped or not checked and the risk.
 
 Derived from ponytail v5 by Dietrich Gebert (MIT); adapted to this repo's seats.

@@ -1,6 +1,6 @@
 # ADR-055 — The planner defines the work, code checks red and green, the reviewer judges
 
-**Status:** builder (§3) and planner (§2) parts ratified 2026-11-03 by operator decision on `~/.crew/reviews/adr-055-readout-2026-11-03.md`; §1, §7, §8 and §12 ratified 2026-11-04 by operator decision D14 in `~/.crew/reviews/codebase-2026-11-04.md`; §6 pre-check base refresh (#2403), first-round-only refresh (#2433) and concurrent judge reviews (#2425) ratified 2026-11-16 by operator decision; §6 round budgets stay proposed until about 10 lanes run on b1514's round budgets · **Owner:** operator ·
+**Status:** builder (§3) and planner (§2) parts ratified 2026-11-03 by operator decision on `~/.crew/reviews/adr-055-readout-2026-11-03.md`; §1, §7, §8 and §12 ratified 2026-11-04 by operator decision D14 in `~/.crew/reviews/codebase-2026-11-04.md`; §6 pre-check base refresh (#2403), first-round-only refresh (#2433) and concurrent judge reviews (#2425) ratified 2026-11-16 by operator decision; 2026-11-17 amendment (#2437) supersedes §§2–3 test selection and §10's logic mandate and extends §5 review with the no-test default; §6 round budgets stay proposed until about 10 lanes run on b1514's round budgets · **Owner:** operator ·
 **Relates to:** ADR-052 (P1 brief, P3 acceptance gate, §6 the loop), ADR-053 (rejected here), ADR-054 (amended
 here), ADR-038 (superseded here), ADR-030 (superseded here), ADR-051 (finish shape), ADR-048 and ADR-049 (superseded
 here)
@@ -400,3 +400,65 @@ b1489 (PRs 2127 and 2129 to 2132) added 782 test and 490 source lines, a test sh
 If ratified, this record rejects ADR-053; supersedes ADR-030, ADR-038, ADR-048, ADR-049 and the acceptance parts of
 ADR-052 (P1's acceptance field, P3 and §6's proof); and amends ADR-054 §2 (the proof), §3 (the measurement) and §4
 (choosing the tier) and ADR-051 (gate repair and re-aim).
+
+## Amendment 2026-11-17: no test by default
+
+Ratified by the operator in issue #2437. This supersedes the test-selection
+instructions in §§2–3 and §10's non-trivial-logic test mandate, and extends §5's
+review guidance. The original 2026-11-02 decision text above is retained.
+
+A lane adds no test by default, in every checkout. Two exceptions:
+
+1. A bug fix gets one regression test.
+2. A change where a failure would lose data, cross a security boundary, or break
+   a wire or file format another program reads gets one test when no existing
+   test already covers that path.
+
+When the brief's ask is itself to add or change tests, the ask governs. Where a
+test is called for, add an assertion or table row to an existing test that already
+drives the path before writing a new test. Repairing or removing an existing test
+that the change breaks is maintenance, not an added test. This does not authorize
+a test-deletion campaign.
+
+The planner lists only changed behaviour selected for testing in Properties.
+Each property names its exception (or explicit test ask), criteria and one test
+by file and title. All other changed criteria go under Not machine-checked with
+the reason that the rule calls for no test. A testable criterion alone does not
+require a test. When Properties has none, return `tests: []`. A characterization
+or test-hardening test is a suite regression lock only when the brief asks for
+it or an exception applies; it stays outside Properties and proof `tests`.
+
+The builder makes the change first and writes only plan-named tests. An
+unplanned added test needs an applicable exception in `notes`. A mechanical
+builder applies the same rule without a plan. The reviewer and, through its
+charter, the tech-lead require removal as a `must-fix` of a new unplanned test
+whose builder notes justify neither exception. Explicit test asks and necessary
+existing-test maintenance are allowed. A missing-test finding requires an
+applicable exception and no existing test covering the path.
+
+This is one charter rule, not a per-project policy field. The proof, suite gate,
+review and PR proof-line contracts do not change. An empty planner `tests` list
+already permits a planned lane with no proof; this amendment changes when seats
+choose tests, not what code checks.
+
+### Reported baseline and follow-up
+
+Issue #2437 reports these lane-journal counts since 2026-11-04, using the last
+planner return of each lane. They were not re-measured for this amendment:
+
+| Checkout | Lanes with a plan | Tests named | Median per lane | Plans naming none |
+|---|---|---|---|---|
+| the-power | 152 | 583 | 3 | 15 |
+| this repository | 129 | 455 | 3 | 9 |
+
+The issue also reports 6,383 Rust tests in the-power at stable `938e2bc6`, with a
+covering set of 2,072 tests running every product region the full suite runs,
+and 34,217 test-file lines against 23,719 other-code lines in this repository.
+These are reported measurements, not measurements performed by this change.
+
+After 20 planned lanes per checkout on the new charters, repeat the table's
+counts from the last planner return of each lane: planned lanes, total named
+tests, median named tests per lane and plans naming none. Target: a median of 0.
+Also count bug-fix lanes whose defect was introduced by a lane with no test,
+reporting that count against the number of bug-fix lanes inspected. The
+follow-up has not run; no measurement tooling is added here.

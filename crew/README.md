@@ -154,6 +154,35 @@ Sleep does not repair a lost provider connection: that turn fails normally and g
 
 After an `acp-seat-deadline` cut, the one rerun receives the original prompt plus a note with the previous attempt's limit: it was cut without a return, partial changes remain in the worktree, a long-running command may have been killed, and the seat must return before the limit. Other turn errors keep the original prompt unchanged. A second cut stops `seat-unmeasured`.
 
+## Test selection
+
+A lane adds no test by default, in every checkout. A bug fix gets one regression
+test. A change where a failure would lose data, cross a security boundary, or
+break a wire or file format another program reads gets one test when no existing
+test already covers that path. When the brief's ask is itself to add or change
+tests, the ask governs. Add an assertion or table row to an existing test already
+driving the path before writing a new test. Repairing or removing an existing
+test that the change breaks is maintenance, not an added test.
+
+The planner lists only selected changed behaviour in Properties, with the
+applicable exception or explicit test ask and the test's file and title. Other
+changed criteria go under Not machine-checked because the rule calls for no test;
+Properties with none means `tests: []`. Characterization and test-hardening suite
+regression locks need an explicit ask or an applicable exception. The builder
+writes only plan-named tests; a mechanical builder applies the rule without a
+plan. Reviewers (including the tech-lead) require removal as a `must-fix` of a new
+unplanned test whose builder notes justify neither exception, respecting explicit
+test asks and existing-test maintenance. A missing test is a finding only when
+an exception applies and no existing test covers the path.
+
+This is a charter rule, not a project setting or engine change. Proof, the suite
+gate, review and the PR's proof lines stay unchanged. After 20 planned lanes per
+checkout on the new charters, repeat the test counts from issue #2437, targeting
+a median of 0 named tests per lane. Also count bug-fix lanes repairing defects
+introduced by lanes with no test. The reported baseline and measurement recipe
+are in [ADR-055's 2026-11-17 amendment](../docs/adr/adr-055-planner-defines-the-work.md#amendment-2026-11-17-no-test-by-default).
+That follow-up has not run.
+
 ## Checks
 
 `crew/proof.mjs` and `crew/checks.mjs` own what code verifies:

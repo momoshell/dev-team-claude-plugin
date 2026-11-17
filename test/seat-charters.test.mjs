@@ -78,7 +78,7 @@ test('CH2: the planner charter keeps the rules the loop depends on', () => {
 test('CH3: the reviewer charter keeps the rules the loop depends on', () => {
   const charter = body('crew/agents/reviewer.md')
   boilerplate(charter)
-  for (const text of ['Read every skill granted for the lane', 'read every listed untracked file directly', 'no unmet requirement', 'incomplete review is never a pass', 'Read the `## Builder report`', 'Flag a test the plan does not name', 'only changes wording in a charter, skill or doc']) has(charter, text)
+  for (const text of ['Read every skill granted for the lane', 'read every listed untracked file directly', 'no unmet requirement', 'incomplete review is never a pass', 'Read the `## Builder report`', 'A new test in the diff that the plan does not name', 'Raise a missing-test finding only where an exception applies and no existing test covers the path', 'Do not flag a missing or weak test for a property that only changes wording in a charter, skill or doc, unless code reads that text or the wording fixes a measured seat failure.']) has(charter, text)
 })
 
 // MUTATION: restore a reviewer sentence in the tech-lead charter.
@@ -115,7 +115,7 @@ test('CH6: planner and test-economy require named tests to compile on the old so
 // MUTATION: remove the plan-named new test file exception from either document.
 test('CH7: builder and test-economy let a plan-named new test file override the extend-existing rule', () => {
   for (const path of ['crew/agents/builder.md', 'skills/test-economy/SKILL.md']) {
-    has(body(path), 'Extend an existing test file unless the plan names a new one')
+    has(body(path), 'add an assertion or table row to an existing test that already drives the path before writing a new test, unless the plan names a new test or file')
   }
 })
 

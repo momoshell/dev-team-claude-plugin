@@ -71,9 +71,16 @@ export async function runSuite({ cwd, command, args = [], timeoutMs = DEFAULT_TI
     && validTimeout(timeoutMs) && typeof suiteLock === 'boolean' && (lane === undefined || (typeof lane === 'string' && lane !== '' && !lane.includes('\0')))
     && (signal === undefined || signal instanceof AbortSignal)
   if (!valid) return unmeasured('invalid-input')
-  const lock = suiteLock ? await acquireSuiteLock({ cwd, lane }) : null
+  const lock = suiteLock ? await acquireSuiteLock({ cwd, lane, signal }) : null
   const wait = lock ? { suite_lock_wait_s: lock.suite_lock_wait_s } : {}
-  if (lock && !lock.ok) return unmeasured(lock.reason, { ...wait, suite_lock_holder: lock.suite_lock_holder ?? null, ...(lock.error ? { error: lock.error } : {}) })
+  // Cancelled while queued: no suite process was started, so there is nothing to clean up.
+  const unstarted = () => ({ status: 'cancelled', reason: 'cancelled', code: null, signal: null, stdout: '', stderr: '', timedOut: false, pgid: null, cleanup: 'proven', ...wait })
+  if (lock && !lock.ok) return lock.reason === 'cancelled' ? unstarted() : unmeasured(lock.reason, { ...wait, suite_lock_holder: lock.suite_lock_holder ?? null, ...(lock.error ? { error: lock.error } : {}) })
+  if (lock && signal?.aborted) {
+    // Acquired and cancelled in the same instant: give the turn back without launching.
+    try { lock.release() } catch { /* conservative: an unreleased owner is never reclaimed by age */ }
+    return unstarted()
+  }
   const probe = deps.probeKill ?? ((pid, signal) => process.kill(pid, signal))
   const result = await new Promise((resolveRun) => {
     let child

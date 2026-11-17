@@ -62,7 +62,7 @@ function holderState(record, path) {
   }
 }
 
-export async function acquireSuiteLock({ cwd, lane }) {
+export async function acquireSuiteLock({ cwd, lane, signal }) {
   const started = performance.now()
   const fields = (holder) => ({ suite_lock_wait_s: (performance.now() - started) / 1000, ...(holder ? { suite_lock_holder: holder } : {}) })
   let dir, holder
@@ -71,6 +71,8 @@ export async function acquireSuiteLock({ cwd, lane }) {
     dir = join(realpathSync(resolve(cwd, git.stdout.trim())), 'crew-suite-lock')
     mkdirSync(dir, { recursive: true })
     for (;;) {
+      // A cancelled lane leaves the queue before it publishes anything.
+      if (signal?.aborted) return { ok: false, reason: 'cancelled', ...fields(holder) }
       if (performance.now() - started >= WAIT_MS) return { ok: false, reason: 'suite-lock-timeout', ...fields(holder) }
       // Fenced exclusive publication, as in reclaim.mjs. Keep epoch records so a
       // delayed contender can never recreate an old epoch (or delete a successor).

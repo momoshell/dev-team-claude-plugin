@@ -478,6 +478,7 @@ test('the last allowance spawns and the next does not', async () => {
   assert.equal(second.calls.length, 0)
   assert.equal(second.result.details.refused.startsWith('refused: '), true)
   assert.equal(second.result.details.refused.includes('The seat is fine and nothing failed; the budget is spent'), true)
+  assert.equal(JSON.parse(second.journal[first.journal.length]).usage, null)
   assert.equal(readFileSync(counter, 'utf8'), `${JSON.stringify({ spawns: mod.SUBAGENT_SPAWN_BUDGET })}\n`)
 })
 

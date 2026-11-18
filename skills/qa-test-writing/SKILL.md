@@ -28,8 +28,9 @@ input. Keep an example test for the shape.
 
 ## Critical rules
 
-- Never keep a check you have not watched fail. Name the mutation in a comment
-  beside the check, run it, observe red, and restore.
+- A check must be able to fail. The lane's proof (red on the old source, green
+  on the build) normally shows it. When you doubt a check, neutralise the
+  behaviour by hand, observe red and restore; nothing requires it (ADR-055 §9).
 - Never derive the expected value from the implementation. Use an independent
   literal, fixture, or capture.
 - Never assert over input that cannot reach the subject. Change the fixture,

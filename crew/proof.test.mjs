@@ -116,10 +116,18 @@ test('a configured runner proves a TypeScript test from its JUnit report', async
   git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
   writeFileSync(join(cwd, 'lib/add.ts'), 'export const add = () => 1\n')
   writeFileSync(join(cwd, 'lib/add.test.ts'), "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { add } from './add.ts'\ntest('add is a function', () => assert.equal(typeof add, 'function'))\ntest('add returns one', () => assert.equal(add(), 1))\n")
+  writeFileSync(join(cwd, 'lib/hook.test.ts'), "import test, { beforeEach } from 'node:test'\nimport assert from 'node:assert/strict'\nimport { add } from './add.ts'\nbeforeEach(() => assert.equal(add(), 1))\ntest('empty', () => {})\n")
   writeFileSync(join(cwd, '.crew/project.json'), '{"proof":[]}')
-  const result = await proveTests({ cwd, tests: ['add returns one', 'add is a function'].map((title) => ({ file: 'lib/add.test.ts', title })) })
+  const result = await proveTests({ cwd, tests: [
+    ...['add returns one', 'add is a function'].map((title) => ({ file: 'lib/add.test.ts', title })),
+    { file: 'lib/hook.test.ts', title: 'empty' },
+  ] })
   assert.equal(result.status, 'red'); assert.equal(result.rows[0].proven, true)
   assert.equal(result.rows[1].reason, 'proof-not-red-on-base')
+  const hook = result.rows[2]
+  assert.deepEqual(hook.base, { state: null, reason: 'hook-failed' })
+  assert.deepEqual(hook.build, { state: 'green', reason: null })
+  assert.equal(hook.proven, false); assert.equal(hook.reason, 'proof-not-red-on-base')
 })
 
 test('a timed-out runner row is unmeasured on its own and the remaining rows are still proven', { timeout: 20_000 }, async () => {

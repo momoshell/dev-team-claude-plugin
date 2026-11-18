@@ -86,6 +86,71 @@ async function runManifestConsult({ cell = { provider: 'local', id: 'advisor-v1'
   return { f, journal, a, argv, spawned }
 }
 
+test('ADR47-L2 C1 null-cell attach still emits an injected scope-breach tier-zero note', async () => {
+  const f = fixture()
+  const manifestPath = join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE)
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  manifest.cell = null
+  writeFileSync(manifestPath, JSON.stringify(manifest))
+  const journal = sink(); const p = pi()
+  await advisor.attachAdvisor(p, {
+    env: { CREW_ADVISOR: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: f.taskDir },
+    deps: {
+      taskDir: f.taskDir, cwd: f.tree, appendFile: journal.appendFile,
+      readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
+      spawn: () => { throw new Error('null-cell scope-breach must not spawn') },
+    },
+  })
+  const onCall = p.handlers.find(([event]) => event === 'tool_call')?.[1]
+  assert.equal(typeof onCall, 'function')
+  onCall(call('c1', 'write', { path: join(f.tree, 'widget.test.mjs'), content: 'test' }), {})
+  const note = journal.rows.find((row) => row.advisor_note?.tier === 0)?.advisor_note
+  assert.equal(note?.kind, advisor.SCOPE_BREACH)
+  assert.equal(note?.outcome, 'injected')
+  rmSync(f.root, { recursive: true, force: true })
+})
+test('ADR47-L2 C2 null cell suppresses repeated consult and spawn', async () => { const f = fixture(); const m = JSON.parse(readFileSync(join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE))); m.cell = null; writeFileSync(join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE), JSON.stringify(m)); const journal = sink(); let spawnCount = 0; const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR:f.taskDir }), deps: { taskDir:f.taskDir,cwd:f.tree,appendFile:journal.appendFile,readFile:(p)=>readFileSync(p,'utf8'),fileMtime:()=>2,spawn:()=>{spawnCount++} } }); for(let i=1;i<=25;i++){a.onToolCall(call(String(i),'read',{}),{});a.onToolResult(result(String(i),'read',{},'ok'),{})} await a.settled(); assert.equal(spawnCount,0); assert.equal(journal.rows.some((r)=>r.advisor_consult),false); assert.equal(journal.rows.some((r)=>r.advisor_note?.tier===1),false); rmSync(f.root,{recursive:true,force:true}) })
+// Kills: `cell_invalid` forced false (or the attach check deleted). A present cell that fails
+// the allowlist must refuse loudly, never attach as a silent tier-0-only seat; null still attaches.
+test('a malformed manifest cell refuses attach while an explicit null cell attaches', async () => {
+  for (const [cell, outcome] of [[{ provider: 'p', id: 'm', agent: 'pi', effort: null, model: 'p/m' }, 'refused'], [null, 'attached']]) {
+    const f = fixture(); const manifestPath = join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE)
+    writeFileSync(manifestPath, JSON.stringify({ ...JSON.parse(readFileSync(manifestPath, 'utf8')), cell }))
+    const journal = sink(); const p = pi()
+    const attach = advisor.attachAdvisor(p, { env: { CREW_ADVISOR: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: f.taskDir }, deps: { taskDir: f.taskDir, appendFile: journal.appendFile } })
+    if (outcome === 'refused') {
+      await assert.rejects(attach, (err) => err.reason === 'manifest-cell-invalid')
+      assert.equal(journal.rows.find((row) => row.advisor_unavailable)?.advisor_unavailable.reason, 'manifest-cell-invalid')
+      assert.equal(journal.rows.some((row) => row.advisor_boot), false)
+      assert.equal(p.handlers.length, 0)
+    } else {
+      await attach
+      assert.equal(journal.rows.find((row) => row.advisor_boot)?.advisor_boot.outcome, 'attached')
+    }
+    rmSync(f.root, { recursive: true, force: true })
+  }
+})
+
+test('result-time repeated-failure notes and queued triggers retain the result call ordinal', async () => {
+  const f = fixture(); const journal = sink()
+  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir }), deps: {
+    cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile,
+    readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
+  } })
+  const input = { command: 'npm test' }; const text = 'not ok 1 - repeated validation failure (4ms)'
+  a.onToolCall(call('1', 'bash', input), {})
+  a.onToolResult(result('1', 'bash', input, text, true), {})
+  a.onToolCall(call('2', 'bash', input), {})
+  a.onToolCall(call('3', 'bash', input), {})
+  a.onToolCall(call('4', 'bash', input), {})
+  a.onToolResult(result('2', 'bash', input, text, true), {})
+  await a.settled()
+  const tier0 = journal.rows.find((row) => row.advisor_note?.kind === advisor.REPEATED_FAILURE)?.advisor_note
+  const queued = journal.rows.find((row) => row.advisor_note?.trigger === 'tier0-note')?.advisor_note
+  assert.equal(tier0.call_ordinal, 2)
+  assert.equal(queued.call_ordinal, 2)
+  rmSync(f.root, { recursive: true, force: true })
+})
 test('ADR47-L2 C3 grant attaches without a manifest or retired model environment', async () => {
   const f = fixture(); rmSync(join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE))
   const p = pi(); const journal = sink()
@@ -394,6 +459,7 @@ test('every delta source is redacted before it is stored, sent or frozen', async
   const cleanAdvisor = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: cleanFixture.taskDir }), deps: {
     cwd: cleanFixture.tree, taskDir: cleanFixture.taskDir, appendFile: cleanJournal.appendFile,
     readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
+    spawn: () => fakeChild(),
   } })
   try {
     const path = join(cleanFixture.tree, 'outside-clean.mjs'); const content = 'const clean = 1\n'

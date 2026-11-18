@@ -1,7 +1,7 @@
 // Read-only view of lean lanes (ADR-052): ~/.crew/dt-<lane>/<lane>/{crew.json,task/...}.
 // Lanes are found live, then as the newest sibling <lane>.archive-*, then under the separate
 // archive root ordered by the first journal row's time. Nothing here writes, spawns, or trusts a path the lane's own files name.
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { closeSync, openSync, readFileSync, readdirSync, readSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { stateless, supersededReturn } from './lean-journal-order.mjs'
 import { deadRun, probeAlive } from './run-pid.mjs'
@@ -52,6 +52,26 @@ function readJson(path, laneDir) {
   if (!within(laneDir, path)) return null
   try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return null }
 }
+function firstRowTime(path) {
+  try {
+    // An archive's first row can use up to 8 KiB, plus one byte to detect LF or overflow.
+    const bytes = Buffer.alloc(8 * 1024 + 1)
+    const fd = openSync(path, 'r')
+    try {
+      for (let end = 0; end < bytes.length;) {
+        const count = readSync(fd, bytes, end, Math.min(1024, bytes.length - end), null)
+        const lf = bytes.subarray(end, end + count).indexOf(0x0a)
+        if (lf !== -1 || count === 0) {
+          const at = JSON.parse(bytes.toString('utf8', 0, lf === -1 ? end : end + lf))?.at
+          return Number.isFinite(at) ? at : null
+        }
+        end += count
+      }
+    } finally { closeSync(fd) }
+  } catch { /* An unreadable first row has unknown time. */ }
+  return null
+}
+
 export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, now = Date.now } = {}) {
   if (!nonEmpty(crewRoot)) throw new TypeError('crewRoot must be a non-empty path')
   const root = resolve(crewRoot)
@@ -92,10 +112,7 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
               const entry = cacheEntry(path, laneDir)
               if (entry && Object.hasOwn(entry, 'at')) at = entry.at
               else {
-                try {
-                  const value = JSON.parse(readFileSync(path, 'utf8').split('\n')[0]).at
-                  if (Number.isFinite(value)) at = value
-                } catch { /* An unreadable first row has unknown time. */ }
+                at = firstRowTime(path)
                 if (entry) entry.at = at
               }
             }

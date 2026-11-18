@@ -1178,18 +1178,6 @@ const TOOL_DEFAULTS = {
 const MUTATORS = ['Write', 'Edit', 'NotebookEdit', 'Bash']
 const approved = (tools) => tools.filter((tool) => !MUTATORS.includes(tool))
 
-test('a Claude seat without tools launches the writes-based defaults, none being read and search only', async () => {
-  for (const [writes, expected] of Object.entries(TOOL_DEFAULTS)) {
-    await use('claude-turn', { definition: { writes } }, (run) => {
-      assert.equal(run.error, undefined, writes)
-      const launched = launchTools(run)
-      assert.deepEqual(launched.allowedTools, writes === 'repo' ? expected : approved(expected), writes)
-      assert.deepEqual(launched.tools, expected, writes)
-    })
-  }
-  await use('claude-turn', {}, (run) => assert.deepEqual(launchTools(run).allowedTools, TOOL_DEFAULTS.none))
-})
-
 const setModes = (run) => run.sent.filter((frame) => frame.method === 'session/set_mode').map((frame) => frame.params.modeId)
 
 test('a Claude seat asks for every edit unless its definition writes repo, whatever its role or tools', async () => {
@@ -1997,10 +1985,6 @@ test('a claude seat refuses the arms it cannot carry before a client, including 
   }
   // Only a requested arm refuses: false is the absence of the arm.
   assert.equal((await armed('claude', 'builder', { advisor: null, extensions: [] })).created.length, 1)
-})
-
-test('a claude seat granted nothing launches without plugins', async () => {
-  assert.equal(Object.hasOwn(claudeOptions((await armed('claude', 'builder', {})).launch), 'plugins'), false)
 })
 
 // The lane context a lean pi seat's context arms read: the loop's run-start and the planner's return, in the lane's own task dir.

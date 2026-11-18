@@ -564,9 +564,9 @@ test('end to end: acp-client drives the bridge and the real extension through ga
   const recordPath = join(dir, 'record.json')
   const seatRoot = join(dir, 'acp')
   mkdirSync(seatRoot, { recursive: true })
-  // acp-client waits synchronously; a compressed clock bounds a broken run at
-  // about 30s instead of the client's 600s request timeout.
-  const origin = Date.now()
+  // Leave FIFO startup on real time; compress protocol waits only after start
+  // so suite load cannot shrink the 10s startup budget to 500ms.
+  let origin = null
   const chunks = []
   const asked = []
   const api = acpClient({
@@ -574,10 +574,11 @@ test('end to end: acp-client drives the bridge and the real extension through ga
     dir: seatRoot, cwd: dir, role: 'builder',
     sinks: { agent_message_chunk: ({ update }) => chunks.push(update.content.text) },
     onPermission: ({ toolCall, options }) => { asked.push({ toolCallId: toolCall.toolCallId, kinds: options.map((o) => o.kind) }); return asked.length === 1 ? 'reject_once' : 'allow_once' },
-    deps: { now: () => origin + (Date.now() - origin) * 20, seatCommandRoot: join(dir, 'seat-runtime') },
+    deps: { now: () => origin === null ? Date.now() : origin + (Date.now() - origin) * 20, seatCommandRoot: join(dir, 'seat-runtime') },
   })
   try {
     api.start()
+    origin = Date.now()
     assert.equal(api.initialize().protocolVersion, ACP_PROTOCOL_VERSION)
     assert.equal(api.newSession(), 'host-session')
     const prompt = (text) => {

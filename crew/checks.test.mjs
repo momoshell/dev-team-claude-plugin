@@ -156,10 +156,17 @@ test('runSuite serializes opted-in suites across worktrees and processes', { tim
       if (owns) unlinkSync(marker('active'));
     }, 10);
   `
+  const suspensionMs = 3 * 60 * 60 * 1000
   const runner = `
-    import { writeFileSync } from 'node:fs';
+    import { existsSync, writeFileSync } from 'node:fs';
     import { runSuite } from ${JSON.stringify(new URL('./checks.mjs', import.meta.url).href)};
     const [cwd, root, name, source] = process.argv.slice(1);
+    if (name === 'two') {
+      const now = performance.now.bind(performance);
+      Object.defineProperty(performance, 'now', {
+        value: () => now() + (existsSync(root + '/release-one') ? ${suspensionMs} : 0),
+      });
+    }
     writeFileSync(root + '/' + name + '-requested', '');
     const result = await runSuite({ cwd, command: process.execPath, args: ['-e', source, root, name], timeoutMs: 10000, suiteLock: true, lane: name });
     console.log(JSON.stringify(result));
@@ -192,10 +199,15 @@ test('runSuite serializes opted-in suites across worktrees and processes', { tim
     while (!existsSync(marker('two-entered')) && Date.now() < until) await sleep(10)
     const overlapped = existsSync(marker('overlap'))
     writeFileSync(marker('release-one'), '')
-    for (const completed of await Promise.all([first, second])) {
-      assert.equal(completed.code, 0, completed.stderr)
-      assert.equal(JSON.parse(completed.stdout).status, 'green', completed.stdout)
+    const completed = await Promise.all([first, second])
+    for (const run of completed) {
+      assert.equal(run.code, 0, run.stderr)
+      assert.equal(JSON.parse(run.stdout).status, 'green', run.stdout)
     }
+    const contender = JSON.parse(completed[1].stdout)
+    assert.ok(contender.suite_lock_wait_s >= suspensionMs / 1000, 'elapsed queue time includes suspension')
+    assert.ok(Math.abs(contender.suite_lock_sleep_credited_s - suspensionMs / 1000) < 2, 'queue credit accounts for suspension')
+    assert.equal(contender.sleep_credited_s ?? 0, 0, 'queue credit is separate from suite execution credit')
     assert.equal(overlapped || existsSync(marker('overlap')), false, 'suite commands in sibling worktrees overlapped')
     assert.ok(existsSync(marker('two-entered')), 'the waiting suite eventually ran')
   } finally {

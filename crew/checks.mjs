@@ -72,7 +72,10 @@ export async function runSuite({ cwd, command, args = [], timeoutMs = DEFAULT_TI
     && (signal === undefined || signal instanceof AbortSignal)
   if (!valid) return unmeasured('invalid-input')
   const lock = suiteLock ? await acquireSuiteLock({ cwd, lane, signal }) : null
-  const wait = lock ? { suite_lock_wait_s: lock.suite_lock_wait_s } : {}
+  const wait = {}
+  if (lock) for (const key of ['suite_lock_wait_s', 'suite_lock_sleep_credited_s', 'suite_lock_sleep_credit_reason']) {
+    if (key in lock) wait[key] = lock[key]
+  }
   // Cancelled while queued: no suite process was started, so there is nothing to clean up.
   const unstarted = () => ({ status: 'cancelled', reason: 'cancelled', code: null, signal: null, stdout: '', stderr: '', timedOut: false, pgid: null, cleanup: 'proven', ...wait })
   if (lock && !lock.ok) return lock.reason === 'cancelled' ? unstarted() : unmeasured(lock.reason, { ...wait, suite_lock_holder: lock.suite_lock_holder ?? null, ...(lock.error ? { error: lock.error } : {}) })

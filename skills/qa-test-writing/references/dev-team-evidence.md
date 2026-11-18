@@ -199,6 +199,8 @@ measured zero. The contract owners are `createStreamReducer`, the `execute`
 result construction and `usageRow` in `crew/pi/extensions/subagent.ts`; no test
 pins the whole complete-or-absent/journal contract.
 In `crew/pi/extensions/subagent.test.mjs`,
+`the reducer folds what the rule claims` pins the reducer's `usage()` result (null or a
+complete record), and
 `every pre-spawn refusal is bounded, payload-free, spawns nothing and journals nothing`
 and `the child is spawned under a deadline that escalates to SIGKILL` assert
 public-key absence only on their selected refusal and timeout paths. They do not

@@ -10,9 +10,11 @@ measurement. See `skills/qa-test-writing/references/absence.md`.
 In `crew/pi/extensions/subagent.test.mjs`, `every pre-spawn refusal is bounded, payload-free, spawns nothing and journals nothing`
 and `the child is spawned under a deadline that escalates to SIGKILL` assert
 public-key absence with `Object.hasOwn` on their selected refusal and timeout
-paths. They do not pin complete measured public usage or journal nulls.
-`createStreamReducer`, the `execute` result construction and `usageRow` in
-`crew/pi/extensions/subagent.ts` own that unpinned contract. An empty transcript
+paths. `the reducer folds what the rule claims` pins the reducer alone: `usage()` is
+`null` for a frame the rule does not count as the child's own spend and a
+complete record for one it does. No test pins the complete measured public
+result or the journal nulls; the `execute` result construction and `usageRow`
+in `crew/pi/extensions/subagent.ts` own those. An empty transcript
 should follow the absent path, not fabricate billing. Keep the getter and
 constructor together in review; `execute` and advisor.ts drive the reducer
 directly. A partial record risks a TypeError or poisoned aggregate; a fabricated

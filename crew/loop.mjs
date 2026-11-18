@@ -329,7 +329,7 @@ export async function runLoop(spec, deps = {}) {
     }
     for (const entry of details.closed ?? []) open.delete(entry.id)
   }
-  let builderReport = null
+  let builderReport = null, builderNotes
   let filesInScope = isFinish ? fin.filesInScope ?? null : null
   let changedPaths = []
   let stagePaths = []
@@ -487,7 +487,8 @@ export async function runLoop(spec, deps = {}) {
         free = false
         if (role === 'lead') feedback = feedback.map((item) => Object.hasOwn(item, 'last') ? { ...item, last: rounds.lead >= (seats.lead.rounds ?? DEFAULT_ROUNDS) } : item)
         const id = `${spec.id}.${role}.${turn}`
-        const returnPath = join(spec.taskDir, `${role}-${turn}.json`)
+        const returnFile = `${role}-${turn}.json`
+        const returnPath = join(spec.taskDir, returnFile)
         const request = { role, tier, seat: seats[role], id, returnPath, brief: spec.brief, planPath, feedback: role === 'builder' ? [...feedback, ...rulings] : feedback, ...(role === 'builder' ? { testsRequired } : {}), ...(['builder', 'reviewer', 'tech-lead'].includes(role) ? { filesInScope: filesInScope === null ? null : [...filesInScope] } : {}), ...(['reviewer', 'tech-lead'].includes(role) ? { changedPaths, builderReport } : {}), ...(reserveReview ? { reserveReview } : {}), ...(deltaReview ? { deltaReview } : {}), ...(recheckReview ? { recheckReview } : {}) }
         // One attempt: run the seat, then read the issued path back, parse it and validate it in full.
         const attempt = async (asked) => {
@@ -556,7 +557,11 @@ export async function runLoop(spec, deps = {}) {
         if (failure) return hold ? { held: { ...failure, envelope: null } } : { halt: await stop(role === 'lead' && failure.reason !== 'authentication_failed' ? 'lead-refused' : failure.reason, { role, id, ...failure }) }
         last[role] = checked.envelope
         progressed = role === 'builder' && firstBefore !== null && latest.turnAfter !== null && firstBefore !== latest.turnAfter
-        if (role === 'builder') builderMark = { changed: progressed, refunded: false }
+        if (role === 'builder') {
+          builderMark = { changed: progressed, refunded: false }
+          const notes = checked.envelope.details.notes
+          builderNotes = text(notes) ? { text: notes, file: `task/${returnFile}` } : undefined
+        }
         if (hold && checked.envelope.status !== 'done') return { held: { reason: checked.envelope.status, envelope: checked.envelope } }
         // Decision seats may stop with their summary as the operator question.
         if (['planner', 'reviewer', 'tech-lead'].includes(role) && checked.envelope.status !== 'done') return { halt: await stop('seat-escalated', { role, reason: checked.envelope.status, envelope: checked.envelope, question: checked.envelope.details.question ?? checked.envelope.summary }) }
@@ -1195,12 +1200,12 @@ export async function runLoop(spec, deps = {}) {
       const body = laneBody()
       const report = { schema: 'finish-report/1', lane: spec.id, stop: { reason: fin.stop.reason, observation: fin.stop.observation ?? null }, subject, body, head: rebased.head, reviewRounds, reviews: finishReviews, measurements }
       await d.writeFile(join(spec.taskDir, 'finish-report.json'), `${JSON.stringify(report, null, 2)}\n`)
-      await emit('finish-ready', { status: 'ready-for-operator', head: rebased.head, subject, body, reviewRounds })
+      await emit('finish-ready', { status: 'ready-for-operator', head: rebased.head, subject, body, reviewRounds, ...(builderNotes ? { builderNotes } : {}) })
       return { status: 'done', reason: null, pr: null }
     }
 
     const published = await stage('publish', () => callCheck('publish', d.openPullRequest, {
-      cwd, branch: spec.branch, base: spec.base, title: subject, body: laneBody(), closes: spec.closes ?? [],
+      cwd, branch: spec.branch, base: spec.base, title: subject, body: laneBody(), closes: spec.closes ?? [], ...(builderNotes ? { builderNotes } : {}),
     }))
     if (published.status !== 'green' || !published.pr || typeof published.pr !== 'object') return stop(published.reason ?? 'runner-threw', published)
     await emit('pr', { pr: published.pr })

@@ -8,7 +8,7 @@ import { git as repoGit, gitResult, scratchDir } from '../test/helpers.mjs'
 import { decideFinish, FinishRefusal, finishLane } from './finish.mjs'
 import { LOOP_REASONS, runLoop } from './loop.mjs'
 import { resolveAgents } from './agents.mjs'
-import { runSuite } from './checks.mjs'
+import { composeLanePrBody, runSuite } from './checks.mjs'
 import { stateless } from './lean-journal-order.mjs'
 
 const PR = { number: 73, url: 'https://example.test/pr/73', state: 'OPEN', headRefName: 'lane', baseRefName: 'main' }
@@ -1753,16 +1753,49 @@ test('a test proven as base-test-absent says so in the commit and PR body, never
 })
 
 test('Verification marks a test the last build turn did not name as proved on an earlier turn (#2320)', async () => {
-  let builds = 0
-  const f = fakes({ review: 1, proof: (input) => ({ status: 'green', reason: null, rows: input.tests.map((t) => ({ ...t, proven: true })) }), edit: (v) => {
-    if (v.role === 'builder') v.details.tests = [{ file: 'lib.test.mjs', title: ++builds === 1 ? 'first' : 'second' }]
-    return v
-  } })
-  assert.equal((await f.go()).status, 'done')
-  const body = f.seen.publish.body
-  assert.ok(body.split('\n').includes('- lib.test.mjs: first was red on the old source, green on an earlier build turn; the last build turn did not name it.'))
-  assert.ok(body.split('\n').includes('- lib.test.mjs: second was red on the old source, green on the build.'))
-  assert.doesNotMatch(body, /first was red on the old source, green on the build\./)
+  const fitting = '  Fixes #42\nSecond line  \n'
+  const oversized = `Fixes #42\n${'x'.repeat(65_000)}${'😀'.repeat(536)}\nEnd of notes.`
+  const trailers = 'Closes: #12\nRefs: #13'
+  let baseline
+  for (const notes of [undefined, fitting, oversized]) {
+    let builds = 0
+    const f = fakes({ review: 1, proof: (input) => ({ status: 'green', reason: null, rows: input.tests.map((t) => ({ ...t, proven: true })) }), edit: (v) => {
+      if (v.role === 'builder') {
+        const first = ++builds === 1
+        v.details.tests = [{ file: 'lib.test.mjs', title: first ? 'first' : 'second' }]
+        if (first || notes !== undefined) v.details.notes = first ? 'Stale notes' : notes
+      }
+      return v
+    } })
+    assert.equal((await f.go()).status, 'done')
+    const publish = { ...f.seen.publish, refs: [13] }
+    assert.ok(publish.body.split('\n').includes('- lib.test.mjs: first was red on the old source, green on an earlier build turn; the last build turn did not name it.'))
+    assert.ok(publish.body.split('\n').includes('- lib.test.mjs: second was red on the old source, green on the build.'))
+    assert.doesNotMatch(publish.body, /first was red on the old source, green on the build\./)
+    const composed = composeLanePrBody(publish)
+    if (notes === undefined) {
+      baseline = composed
+      assert.equal(baseline, `${publish.body}\n\n${trailers}`)
+      // Null and empty notes are invalid in a seat envelope but also mean no section to the composer.
+      for (const text of [null, '']) assert.equal(composeLanePrBody({ ...publish, builderNotes: { text } }), baseline)
+      continue
+    }
+    const heading = `${baseline.slice(0, -trailers.length)}## Builder notes\n\n`
+    const last = f.requests.filter((r) => r.role === 'builder').at(-1)
+    assert.equal(JSON.parse(await f.deps.readFile(last.returnPath)).details.notes, notes)
+    if (notes === fitting) {
+      assert.equal(composed, `${heading}  Fixes issue 42\nSecond line  \n\n\n${trailers}`)
+    } else {
+      const cut = `\n\nBuilder notes were cut. Full notes: \`task/${last.returnPath.split('/').at(-1)}\`.\n\n${trailers}`
+      assert.equal([...composed].length, 65_536)
+      assert.ok(composed.startsWith(heading))
+      assert.ok(composed.endsWith(cut))
+      const prefix = composed.slice(heading.length, -cut.length)
+      assert.ok(prefix.startsWith('Fixes issue 42\n'))
+      assert.ok(prefix.isWellFormed())
+      assert.ok(oversized.replace('#42', 'issue 42').startsWith(prefix))
+    }
+  }
 })
 
 test('a reviewer findings_omitted count reaches the builder fix turn (S6-12)', async () => {

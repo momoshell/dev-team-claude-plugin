@@ -121,7 +121,7 @@ path or a symbol, not a line.
 
 Recorded so no later sweep re-spends them, these **do** discriminate:
 
-- the billed-money null assertion (`crew/pi/extensions/subagent.test.mjs`, the absent-usage case: omitting the key and keeping usage `null` reddens when the null becomes a zero)
+- the billed-money null assertion (`crew/pi/extensions/subagent.test.mjs`, the absent-usage case). Historical: the 2026-11-17 test cut removed it, and no test reddens now when the `details.usage` null fallback becomes a zero
 - historical transcript and kill-helper checks (no live exhibit)
 
 Note V4/N2 as a pair: that guard genuinely pins `tools` and does **not** pin
@@ -199,8 +199,9 @@ measured zero. The contract owners are `createStreamReducer`, the `execute`
 result construction and `usageRow` in `crew/pi/extensions/subagent.ts`; no test
 pins the whole complete-or-absent/journal contract.
 In `crew/pi/extensions/subagent.test.mjs`,
-`the reducer folds what the rule claims` pins the reducer's `usage()` result (null or a
-complete record), and
+`the reducer folds what the rule claims` builds a fresh reducer for each fixture
+frame and checks `usage()`: `null` for the fixtures the rule excludes, all four
+billed-token fields for the measured assistant fixture. In the same file,
 `every pre-spawn refusal is bounded, payload-free, spawns nothing and journals nothing`
 and `the child is spawned under a deadline that escalates to SIGKILL` assert
 public-key absence only on their selected refusal and timeout paths. They do not

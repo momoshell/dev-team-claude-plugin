@@ -10,6 +10,8 @@ exit 2 for malformed arguments, and returns 0 after a successful start.
 In `crew/start.test.mjs`, `main reports usage, refusals and success as exit codes`
 asserts exit 2 for no argument and two briefs, and exit 1 for a refusal; despite
 its title, it does not assert success or exact usage text.
+`throwing injected loggers do not change start metadata or main status` asserts
+that a valid `--checkout` start returns 0.
 
 Pin the refusal direction and the accepted direction as separate observations,
 and pin usage text beside status. The surviving

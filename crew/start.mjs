@@ -163,6 +163,23 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
     if (error instanceof OnboardRefusal) throw new StartRefusal(`lane base origin/${base}: ${error.message}; commit the approved .crew/project.json to ${base} and push it so the commit reaches origin/${base} before starting`, { cause: error })
     throw error
   }
+  const settingsPath = join(d.crewRoot, 'settings.json')
+  let rawSettings
+  try { rawSettings = d.readFileSync(settingsPath, 'utf8') } catch (cause) {
+    if (cause?.code !== 'ENOENT') throw new StartRefusal(`cannot read ${settingsPath} for suiteLock: ${cause?.code ?? cause?.message}`, { cause })
+  }
+  let suiteLock = project.suiteLock
+  if (rawSettings !== undefined) {
+    let settings
+    try { settings = JSON.parse(rawSettings) } catch (cause) {
+      throw new StartRefusal(`invalid JSON in ${settingsPath} for suiteLock: ${cause.message}`, { cause })
+    }
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) throw new StartRefusal(`${settingsPath} must contain a JSON object for suiteLock`)
+    if (Object.hasOwn(settings, 'suiteLock')) {
+      if (typeof settings.suiteLock !== 'boolean') throw new StartRefusal(`${settingsPath}: suiteLock must be a boolean`)
+      if (settings.suiteLock) suiteLock = true
+    }
+  }
   let ask = null, title = null
   const source = ISSUE_SOURCE.exec(fields.source)?.[1]
   const references = []
@@ -232,7 +249,7 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
     id: lane, cwd: worktree, taskDir, tier, shape: fields.shape, brief: run,
     source: fields.source, branch: lane, base, closes: fields.closes === null ? [] : [fields.closes],
     suite: suiteSpec(project.suite, project.suiteTimeoutMs), proofTimeoutMs: project.proofTimeoutMs, onboarded: project.hash,
-    ...(project.suiteLock === undefined ? {} : { suiteLock: project.suiteLock }),
+    ...(suiteLock === undefined ? {} : { suiteLock }),
     ...(project.builderChecks === undefined ? {} : { builderChecks: project.builderChecks }),
     ...(fields.generated === undefined ? {} : { generated: { paths: fields.generated, ...suiteSpec(fields.regenerate) } }),
     roster,

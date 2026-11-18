@@ -203,6 +203,7 @@ function fakes({ brief = BRIEF, project = projectFile(), overrides = {}, exists 
         if (Object.hasOwn(overrides, path)) { if (overrides[path] instanceof Error) throw overrides[path]; return overrides[path] }
         throw Object.assign(new Error('missing'), { code: 'ENOENT' })
       }
+      if (path === '/home/.crew/settings.json') throw Object.assign(new Error('missing'), { code: 'ENOENT' })
       if (!path.endsWith('/.crew/project.json')) return brief
       if (project === null) throw Object.assign(new Error('missing'), { code: 'ENOENT' })
       return typeof project === 'string' ? project : JSON.stringify(project)
@@ -374,7 +375,7 @@ const invalid = process.argv[1] === 'invalid'
 process.argv[1] = process.execPath
 const { main } = await import(${JSON.stringify(new URL('./start.mjs', import.meta.url).href)})
 const deps = {
-  readFileSync: (path) => path.endsWith('/agents.json') ? (() => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }) })() : path.endsWith('/.crew/project.json') ? ${JSON.stringify(JSON.stringify({suite:'npm test',proof:[],onboarded:{hash:createHash('sha256').update(JSON.stringify(['npm test',[]])).digest('hex')}}))} : invalid ? ${JSON.stringify(BRIEF)}.replace('shape: standard', 'tier: build\\nshape: standard') : ${JSON.stringify(BRIEF)},
+  readFileSync: (path) => (path.endsWith('/agents.json') || path === '/virtual/crew/settings.json') ? (() => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }) })() : path.endsWith('/.crew/project.json') ? ${JSON.stringify(JSON.stringify({suite:'npm test',proof:[],onboarded:{hash:createHash('sha256').update(JSON.stringify(['npm test',[]])).digest('hex')}}))} : invalid ? ${JSON.stringify(BRIEF)}.replace('shape: standard', 'tier: build\\nshape: standard') : ${JSON.stringify(BRIEF)},
   resolveAgents: () => ({ seats: {} }), existsSync: () => false,
   mkdirSync: () => {}, writeFileSync: () => {},
   spawnSync: (file, args) => ({ status: 0, stdout: args.includes('ls-tree') ? (args.at(-1) === '.crew/project.json' ? '100644 blob ' + 'a'.repeat(40) + '\\t.crew/project.json' : (args.at(-1).includes('.') ? '100644 blob ' : '040000 tree ') + 'a'.repeat(40) + '\\t' + args.at(-1) + '\\0') : args.includes('show') ? ${JSON.stringify(JSON.stringify({suite:'npm test',proof:[],onboarded:{hash:createHash('sha256').update(JSON.stringify(['npm test',[]])).digest('hex')}}))} : args.includes('--verify') ? 'a'.repeat(40) : 'origin/main' }),

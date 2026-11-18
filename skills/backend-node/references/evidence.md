@@ -65,11 +65,15 @@ pins EPERM, unknown, interrupted, and empty import-scan outcomes.
 
 ### CLI parser interruption and missing values
 
-No dedicated local test or source exhibit was found for an interrupted flag parse.
-A missing value is measured for `--checkout` in
-`crew/start.test.mjs` (`main reads only --checkout: --loop, an unknown flag, a duplicate or a missing value is usage`); other verbs are unmeasured.
+No dedicated local test was found for an interrupted flag parse, a missing
+`--checkout` value, duplicate flags or unknown flags other than `--check`.
+`main` in `crew/start.mjs` owns the vocabulary, usage and refusal text/status,
+and success status. In `crew/start.test.mjs`, `main reports usage, refusals and success as exit codes`
+asserts no-argument/two-brief usage statuses and a refusal, not success or exact
+usage text. `main refuses --check as usage and starts nothing` asserts the
+status and exact usage text for its `--check` shapes only.
 
-Keep those edge rules in `cli-flags.md` marked unbacked until a test pins them.
+Keep the other edge rules in `cli-flags.md` marked unbacked until a test pins them.
 
 ### TypeScript import interruption and empty source
 
@@ -86,8 +90,12 @@ Keep those edge rules in `erasable-ts.md` marked unbacked until measured.
 No local mutation test separately measures an interrupted child or a malformed
 usage parse after work has started.
 
-The complete-or-absent getter and omitted-key assertion are backed at
-`createStreamReducer` in `crew/pi/extensions/subagent.ts` and the `usage is a complete pi Usage or absent, never partial` test in `crew/pi/extensions/subagent.test.mjs`.
+`createStreamReducer`, the `execute` result construction and `usageRow` in
+`crew/pi/extensions/subagent.ts` own the complete-or-absent and journal-null
+contract; no test pins that whole contract. In `crew/pi/extensions/subagent.test.mjs`,
+`every pre-spawn refusal is bounded, payload-free, spawns nothing and journals nothing`
+and `the child is spawned under a deadline that escalates to SIGKILL` assert
+public-key absence only on their selected refusal and timeout paths.
 
 Keep interrupted-child and failed-parse instructions in `usage-records.md`
 marked unbacked until those paths receive a measured fixture.

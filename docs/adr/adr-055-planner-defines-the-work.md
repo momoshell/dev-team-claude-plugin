@@ -1,6 +1,6 @@
 # ADR-055 — The planner defines the work, code checks red and green, the reviewer judges
 
-**Status:** builder (§3) and planner (§2) parts ratified 2026-11-03 by operator decision on `~/.crew/reviews/adr-055-readout-2026-11-03.md`; §1, §7, §8 and §12 ratified 2026-11-04 by operator decision D14 in `~/.crew/reviews/codebase-2026-11-04.md`; §6 pre-check base refresh (#2403), first-round-only refresh (#2433) and concurrent judge reviews (#2425) ratified 2026-11-16 by operator decision; 2026-11-17 amendment (#2437) supersedes §§2–3 test selection and §10's logic mandate and extends §5 review with the no-test default; §6 round budgets stay proposed until about 10 lanes run on b1514's round budgets · **Owner:** operator ·
+**Status:** builder (§3) and planner (§2) parts ratified 2026-11-03 by operator decision on `~/.crew/reviews/adr-055-readout-2026-11-03.md`; §1, §7, §8 and §12 ratified 2026-11-04 by operator decision D14 in `~/.crew/reviews/codebase-2026-11-04.md`; §6 pre-check base refresh (#2403), first-round-only refresh (#2433) and concurrent judge reviews (#2425) ratified 2026-11-16 by operator decision; 2026-11-17 amendment (#2437) supersedes §§2–3 test selection and §10's logic mandate and extends §5 review with the no-test default; 2026-11-18 amendment (#2459) records §6 pending build-suite cancellation; clarifications 2026-11-17 (#2438, tests named in issues) and 2026-11-16 (#2419, retired brief suite and escalation/review counting) record the current rules; §6 round budgets stay proposed until about 10 lanes run on b1514's round budgets · **Owner:** operator ·
 **Relates to:** ADR-052 (P1 brief, P3 acceptance gate, §6 the loop), ADR-053 (rejected here), ADR-054 (amended
 here), ADR-038 (superseded here), ADR-030 (superseded here), ADR-051 (finish shape), ADR-048 and ADR-049 (superseded
 here)
@@ -235,6 +235,10 @@ The charter carries what a seat always does; it is always delivered. A skill car
 some files; `skills/skill-map.json` grants it by path. Skills are small and whole: the loop strips a `#section` and
 delivers the whole skill (`hooks/skill-gate.mjs`), and only the builder and reviewer receive map grants
 (`crew/lean.mjs`), so the planner gets no skill today.
+
+Clarification 2026-11-18 (prose-drift audit, #2467): `definitionFor` in
+`crew/lean.mjs` grants path-selected skills to builder, reviewer and tech-lead.
+The planner receives no map grants. The original decision text above is retained.
 
 | Seat | Charter | Skills, by path |
 |---|---|---|

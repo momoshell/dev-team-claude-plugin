@@ -19,7 +19,7 @@ place that runs the review flow.
 | Doing… | Read | Rule |
 |---|---|---|
 | Choosing what to attack and how to grade it | `references/rubric.md` | Four axes, ordered by measured yield |
-| Recording a typed scout finding | `references/findings-shape.md` | Keep the scout contract pinned |
+| Recording a typed scout finding | `references/findings-shape.md` | Follow `crew/pi/agents/scout.json`; this restatement is unpinned |
 | Resolving two verdicts on one line | `references/divergence.md` | Treat disagreement as signal |
 | Selecting reviewer posture by tier | `references/posture.md` | One reviewer on build lanes; two independent review seats on judge lanes |
 | Sizing a claim or naming an evidence gap | `references/evidence.md` | Keep denominators and unbacked rules visible |
@@ -79,7 +79,7 @@ When this rubric finds over-building, open the finding's `summary` with one of t
 ## Key references
 
 - `references/rubric.md` — the four review axes and their grading rules.
-- `references/findings-shape.md` — the scout findings contract and its pin.
+- `references/findings-shape.md` — an unpinned restatement of the scout findings contract owned by `crew/pi/agents/scout.json`.
 - `references/divergence.md` — divergence-as-signal and the recording example.
 - `references/posture.md` — tier-scaled reviewer posture and the judge loop's second review.
 - `references/evidence.md` — corpus denominators, limits, and rules with no exhibit.

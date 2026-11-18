@@ -1458,7 +1458,7 @@ test('a seat turn runs the recorded override and keeps the definition\'s other f
   const recorded = JSON.parse(written(lane.calls, '/task/lean.json')[2]).roster
   const changed = leanFixture({ deps: { readFileSync: (path, ...args) => {
     const text = readFileSync(path, ...args)
-    return String(path) === join(AGENTS, 'builder.md') ? text.replace('advisor: {"agent":"pi","model":"openai/gpt-6.1-sol","effort":"medium"}', 'advisor: null').replace('extensions: [fff, readgate, skeletonread]', 'extensions: [fff]') : text
+    return String(path) === join(AGENTS, 'builder.md') ? text.replace('advisor: {"agent":"pi","model":"openai/gpt-6.2-sol","effort":"medium"}', 'advisor: null').replace('extensions: [fff, readgate, skeletonread]', 'extensions: [fff]') : text
   } } })
   changed.spec.roster = recorded
   await changed.go()

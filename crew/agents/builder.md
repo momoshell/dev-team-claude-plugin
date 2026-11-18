@@ -6,7 +6,7 @@ writes: repo
 agent: pi
 model: openai/gpt-6.1-terra
 effort: high
-advisor: {"agent":"pi","model":"openai/gpt-6.1-sol","effort":"medium"}
+advisor: {"agent":"pi","model":"openai/gpt-6.2-sol","effort":"medium"}
 extensions: [fff, readgate, skeletonread]
 skills: [code-less, prose-plain]
 tiers: {"mechanical":{"advisor":null,"extensions":["fff","readgate"]},"judge":{"effort":"xhigh"}}

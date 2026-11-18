@@ -4,7 +4,7 @@ description: Reviews the built diff against the brief and plan.
 role: reviewer
 writes: task-dir
 agent: pi
-model: openai/gpt-6.1-sol
+model: openai/gpt-6.2-sol
 effort: high
 advisor: null
 extensions: [subagent]

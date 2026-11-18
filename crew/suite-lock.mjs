@@ -5,6 +5,7 @@ import { hostname } from 'node:os'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { probeAlive, selfStartedAt } from './run-pid.mjs'
+import { sampledBudget } from './host-sleep.mjs'
 
 const exec = promisify(execFile)
 const WAIT_MS = 2 * 60 * 60 * 1000
@@ -63,17 +64,30 @@ function holderState(record, path) {
 }
 
 export async function acquireSuiteLock({ cwd, lane, signal }) {
-  const started = performance.now()
-  const fields = (holder) => ({ suite_lock_wait_s: (performance.now() - started) / 1000, ...(holder ? { suite_lock_holder: holder } : {}) })
+  const now = () => performance.now()
+  const started = now()
+  const budget = sampledBudget(WAIT_MS, { now })
+  const fields = (holder) => {
+    budget.stop()
+    const credit = budget.fields()
+    return {
+      suite_lock_wait_s: (now() - started) / 1000,
+      ...('sleep_credited_s' in credit ? { suite_lock_sleep_credited_s: credit.sleep_credited_s } : {}),
+      ...(credit.sleep_credit_reason ? { suite_lock_sleep_credit_reason: credit.sleep_credit_reason } : {}),
+      ...(holder ? { suite_lock_holder: holder } : {}),
+    }
+  }
   let dir, holder
   try {
+    // Sample between ownership polls; the queue loop handles expiry and cancellation.
+    budget.watch(() => {})
     const git = await exec('git', ['rev-parse', '--git-common-dir'], { cwd, encoding: 'utf8', timeout: 10_000 })
     dir = join(realpathSync(resolve(cwd, git.stdout.trim())), 'crew-suite-lock')
     mkdirSync(dir, { recursive: true })
     for (;;) {
       // A cancelled lane leaves the queue before it publishes anything.
       if (signal?.aborted) return { ok: false, reason: 'cancelled', ...fields(holder) }
-      if (performance.now() - started >= WAIT_MS) return { ok: false, reason: 'suite-lock-timeout', ...fields(holder) }
+      if (budget.remaining() <= 0) return { ok: false, reason: 'suite-lock-timeout', ...fields(holder) }
       // Fenced exclusive publication, as in reclaim.mjs. Keep epoch records so a
       // delayed contender can never recreate an old epoch (or delete a successor).
       const epochs = readdirSync(dir).filter((name) => /^[1-9]\d*\.json$/.test(name)).map((name) => Number(name.slice(0, -5)))
@@ -114,10 +128,13 @@ export async function acquireSuiteLock({ cwd, lane, signal }) {
           }
         }
       }
-      if (performance.now() - started >= WAIT_MS) return { ok: false, reason: 'suite-lock-timeout', ...fields(holder) }
-      await sleep(Math.min(POLL_MS, WAIT_MS - (performance.now() - started)))
+      const remaining = budget.remaining()
+      if (remaining <= 0) return { ok: false, reason: 'suite-lock-timeout', ...fields(holder) }
+      await sleep(Math.min(POLL_MS, remaining))
     }
   } catch (error) {
     return { ok: false, reason: 'suite-lock-unavailable', ...fields(holder), error: { code: error.code ?? null, message: error.message } }
+  } finally {
+    budget.stop()
   }
 }

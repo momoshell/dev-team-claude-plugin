@@ -78,8 +78,13 @@ the fetch fails; it does not probe seats. The probe is implemented in
    Absent or false disables it; other values are refused. It covers start,
    finish and publishing-rebase suite rechecks, not proof, worktree setup,
    onboarding or builder checks. Lane concurrency does not change. Acquisition
-   has a separate two-hour bound; `suiteTimeoutMs` starts after acquisition.
-   The journal result records `suite_lock_wait_s`; bounded waiting stops
+   has a separate two-hour awake-time bound; `suiteTimeoutMs` starts after acquisition.
+   The journal result's `suite_lock_wait_s` records total measured elapsed
+   acquisition seconds, including suspension. `suite_lock_sleep_credited_s`
+   records acquisition sleep credit separately from subprocess `sleep_credited_s`.
+   Measured zero may be absent. If sampling is unavailable, acquisition credit
+   is `null` with `suite_lock_sleep_credit_reason: 'clock-unavailable'`, and
+   ordinary elapsed-time enforcement remains in effect. Bounded waiting stops
    unmeasured with `suite-lock-timeout` and `suite_lock_holder` diagnostics.
    Lock I/O or resolution failures stop with `suite-lock-unavailable`.
    Only proven-dead ownership is reclaimed, never by age; uncertain/unreadable

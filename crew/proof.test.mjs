@@ -711,7 +711,7 @@ test('proof imports only builtins and its pinned check runner and leaves', () =>
   assert.deepEqual(checks.filter((name) => !name.startsWith('node:')), ['./lane-core.mjs', './host-sleep.mjs', './suite-lock.mjs'])
   const suiteLock = imports('./suite-lock.mjs')
   assert.ok(suiteLock.length > 0)
-  assert.deepEqual(suiteLock.filter((name) => !name.startsWith('node:')), ['./run-pid.mjs'])
+  assert.deepEqual(suiteLock.filter((name) => !name.startsWith('node:')), ['./run-pid.mjs', './host-sleep.mjs'])
   const runPid = imports('./run-pid.mjs')
   assert.ok(runPid.length > 0)
   assert.deepEqual(runPid.filter((name) => !name.startsWith('node:')), ['./lean-journal-order.mjs'])

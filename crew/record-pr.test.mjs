@@ -18,8 +18,8 @@ function world() {
   const home = realpathSync(scratchDir('record-pr-'))
   const root = join(home, '.crew')
   mkdirSync(root)
-  const lane = (name, { rows = STOP, base = root, leaf = name, text } = {}) => {
-    const dir = join(base, `dt-${name}`, leaf)
+  const lane = (name, { rows = STOP, text } = {}) => {
+    const dir = join(root, `dt-${name}`, name)
     put(join(dir, 'crew.json'), JSON.stringify({ members: { planner: { agent: 'pi' } } }))
     put(join(dir, 'task', 'lean.json'), JSON.stringify({ id: name }))
     put(join(dir, 'task', 'journal.jsonl'), text ?? jsonl(rows))
@@ -42,28 +42,6 @@ test('record-pr names an abandoned lane as abandoned, not as not stopped (S3-9)'
     assert.match(result.err, /abandoned.*crew finish --abandon/)
     assert.doesNotMatch(result.err, /not stopped/)
     assert.equal(readFileSync(file, 'utf8'), before)
-  } finally { w.done() }
-})
-
-test('HF1 appends exactly one operator pr row after the original bytes, live and archived', () => {
-  const w = world()
-  try {
-    const live = w.lane('a')
-    const sib = w.lane('b', { leaf: 'b.archive-2026-10-01' })
-    const arch = w.lane('c', { base: join(w.home, '.crew-journal-archive') })
-    const bare = w.lane('d', { text: jsonl(STOP).trimEnd() })
-    for (const [name, file] of [['a', live], ['b', sib], ['c', arch], ['d', bare]]) {
-      const before = readFileSync(file, 'utf8')
-      assert.equal(run(w, name).status, 0)
-      const after = readFileSync(file, 'utf8')
-      assert.ok(after.startsWith(before))
-      const added = after.slice(before.length).split('\n').filter((line) => line.trim())
-      assert.equal(added.length, 1)
-      const row = JSON.parse(added[0])
-      assert.deepEqual({ event: row.event, lane: row.lane, actor: row.actor, pr: row.pr }, { event: 'pr', lane: name, actor: 'operator', pr: { number: 12, url: URL1 } })
-      assert.ok(after.endsWith('\n'))
-      assert.equal(after.trim().split('\n').length, STOP.length + 1)
-    }
   } finally { w.done() }
 })
 

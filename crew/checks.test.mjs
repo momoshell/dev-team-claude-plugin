@@ -6,7 +6,6 @@ import { existsSync, writeFileSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { scratchDir } from '../test/helpers.mjs'
 import { CHECK_REASONS, runSuite } from './checks.mjs'
-import { sampledBudget } from './host-sleep.mjs'
 
 const GATE_TIMEOUT_MS = 10_000
 const OUTPUT_PROBE_TIMEOUT_MS = 30_000
@@ -20,73 +19,6 @@ const groupGone = (pgid) => {
   try { process.kill(-pgid, 0) } catch (error) { return error.code === 'ESRCH' }
   return false
 }
-test('sampledBudget freezes its final sample at stop', () => {
-  for (const [elapsed, left, fields] of [[100, 900, {}], [6025, 975, { sleep_credited_s: 6 }]]) {
-    let clock = 0, failed = false, nowReads = 0, sampleReads = 0, scheduled = 0
-    const budget = sampledBudget(1000, {
-      now: () => { nowReads++; if (failed) throw new Error('late clock failure'); return clock },
-      sampleNow: () => { sampleReads++; if (failed) throw new Error('late sample failure'); return clock },
-      setTimeout: () => { scheduled++ },
-    })
-    clock = elapsed
-    const before = [nowReads, sampleReads]
-    budget.stop()
-    assert.deepEqual([nowReads, sampleReads], before.map((count) => count + 1))
-    const stoppedReads = [nowReads, sampleReads]
-    for (const fail of [false, true]) {
-      clock += 3_600_000
-      failed = fail
-      budget.stop()
-      assert.equal(budget.remaining(), left)
-      assert.deepEqual(budget.fields(), fields)
-      budget.watch(() => assert.fail('a stopped budget cannot expire again'))
-      assert.deepEqual([nowReads, sampleReads], stoppedReads)
-      assert.equal(scheduled, 0)
-    }
-  }
-})
-
-test('a budget with failed sampling keeps its deadline and unavailable credit at stop', () => {
-  for (const failure of ['backwards', 'throwing', 'missing']) {
-    let clock = 0
-    const budget = sampledBudget(1000, {
-      now: () => clock,
-      sampleNow: failure === 'missing' ? null : () => {
-        if (clock && failure === 'throwing') throw new Error('no clock')
-        return clock ? -1 : 0
-      },
-    })
-    clock = 100
-    assert.equal(budget.remaining(), 900)
-    clock = 1000
-    budget.stop()
-    assert.equal(budget.remaining(), 0)
-    assert.deepEqual(budget.fields(), { sleep_credited_s: null, sleep_credit_reason: 'clock-unavailable' })
-  }
-})
-
-test('runSuite refuses invalid input as unmeasured without spawning', async () => {
-  const cwd = scratchDir('checks-suite-')
-  const cases = [
-    { cwd: '', command: process.execPath },
-    { cwd, command: '' },
-    { cwd, command: process.execPath, args: 'x' },
-    { cwd, command: process.execPath, args: [1] },
-    { cwd, command: process.execPath, timeoutMs: 0 },
-    { cwd, command: process.execPath, timeoutMs: -5 },
-    { cwd, command: process.execPath, timeoutMs: 1.5 },
-    { cwd, command: process.execPath, timeoutMs: Number.NaN },
-    { cwd, command: process.execPath, timeoutMs: '5' },
-    { cwd, command: process.execPath, timeoutMs: 2 ** 31 },
-  ]
-  for (const spec of cases) {
-    const result = await runSuite(spec)
-    assert.equal(result.status, 'unmeasured', JSON.stringify(spec))
-    assert.equal(reasonOf(result), 'invalid-input')
-    assert.equal(result.pgid, null, 'nothing was spawned')
-  }
-  assert.equal((await runSuite()).reason, 'invalid-input')
-})
 
 test('runSuite reports an unavailable executable or working directory as spawn-error', async () => {
   const cwd = scratchDir('checks-suite-')

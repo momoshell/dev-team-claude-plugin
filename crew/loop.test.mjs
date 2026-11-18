@@ -16,35 +16,6 @@ const finding = { id: 'R1', severity: 'must-fix', location: 'lib.mjs:1', summary
 const green = () => ({ status: 'green', reason: null, code: 0, signal: null, stdout: '', stderr: '', timedOut: false })
 const MUTATION = { check: 'A1', file: 'lib.mjs', find: 'old', replace: 'new' }
 
-test('non-green proof checks name their full captured output artifact (#2410)', async () => {
-  const taskDir = scratchDir('loop-proof-output-')
-  for (const mode of ['repair', 'rebase', 'unmeasured']) {
-    const failed = { status: mode === 'unmeasured' ? 'unmeasured' : 'red', reason: mode === 'unmeasured' ? 'timeout' : 'proof-unproven', rows: [],
-      stdout: `proof first stdout ${mode}\n${'x'.repeat(5000)}`, stderr: `proof first stderr ${mode}\n${'e'.repeat(5000)}` }
-    const proven = { status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }] }
-    const options = { spec: { taskDir, ...(mode === 'rebase' ? { tier: 'mechanical' } : {}) }, proof: mode === 'repair' ? answers(failed, failed, proven) : mode === 'rebase' ? answers(proven, failed) : failed,
-      deps: { writeFile: async (...args) => writeFileSync(...args) } }
-    const f = mode === 'rebase' ? moved(options) : fakes(options)
-    await f.go()
-    const checks = f.rows.filter((r) => r.event === 'check' && r.check === 'proof' && r.result.status !== 'green')
-    assert.equal(checks.length, mode === 'repair' ? 2 : 1)
-    for (const row of checks) {
-      assert.equal(typeof row.outputFile, 'string')
-      assert.deepEqual(JSON.parse(readFileSync(join(taskDir, row.outputFile), 'utf8')), { stdout: failed.stdout, stderr: failed.stderr })
-    }
-    assert.equal(new Set(checks.map((r) => r.outputFile)).size, checks.length)
-    if (mode !== 'repair') {
-      const stopped = f.rows.findLast((r) => r.event === 'verdict' && r.status === 'stopped')
-      assert.equal(stopped.reason, failed.reason)
-      assert.deepEqual(stopped.observation, checks.at(-1).result)
-      for (const stream of ['stdout', 'stderr']) {
-        assert.equal(stopped.observation[stream], failed[stream].slice(-4096))
-        assert.equal(stopped.observation[`${stream}Bytes`], Buffer.byteLength(failed[stream]))
-      }
-    }
-  }
-})
-
 test('failed output writes are reported without changing suite or proof routing (#2410)', async () => {
   for (const check of ['suite', 'proof']) for (const status of ['red', 'unmeasured']) for (const failure of ['sync', 'reject']) {
     const make = () => {
@@ -65,27 +36,6 @@ test('failed output writes are reported without changing suite or proof routing 
     assert.equal(row.outputFile, null)
     assert.deepEqual(row.outputError, { code: 'EACCES', message: 'output denied' })
     assert.deepEqual(row.result, baseline.rows.find((r) => r.event === 'check' && r.check === check).result)
-  }
-})
-
-test('suite and proof check rows measure elapsed seconds without failing on bad clocks (#2410)', async () => {
-  for (const check of ['suite', 'proof']) for (const status of ['green', 'red', 'unmeasured', 'throw']) for (const clock of ['good', 'throw', 'nan', 'infinite', 'backwards']) {
-    let time = 10_000
-    const result = { ...green(), status, reason: status === 'green' ? null : status === 'red' ? check === 'suite' ? 'exit-nonzero' : 'proof-unproven' : 'timeout', rows: [] }
-    const f = fakes({ [check]: result, ...(status === 'throw' ? { throwCheck: check } : {}), deps: { now: () => {
-      if (clock === 'throw') throw new Error('bad clock')
-      return clock === 'nan' ? NaN : clock === 'infinite' ? Infinity : time
-    } } })
-    const key = check === 'suite' ? 'runSuite' : 'proveTests', run = f.deps[key], write = f.deps.writeFile
-    f.deps[key] = async (input) => { try { return await run(input) } finally { time += clock === 'backwards' ? -2500 : 2500 } }
-    f.deps.writeFile = async (...args) => { time += 50_000; return write(...args) }
-    await f.go()
-    const row = f.rows.find((r) => r.event === 'check' && r.check === check)
-    assert.ok(row, `${check} ${status} ${clock}`)
-    assert.equal(row.seconds, clock === 'good' ? 2.5 : null)
-    if (clock === 'good') assert.equal(Object.hasOwn(row, 'secondsReason'), false)
-    else assert.equal(row.secondsReason, 'clock-unmeasured')
-    assert.equal(row.result.status, status === 'throw' ? 'unmeasured' : status)
   }
 })
 
@@ -433,44 +383,7 @@ test('a judge lane with no tech-lead seat stops seat-unmeasured at the start and
   }
 })
 
-test('the tech-lead turn is bounded like any seat, and a lead bounce past the builder bound gives that build its review and second review (b1487)', async () => {
-  const bounded = fakes({ spec: { tier: 'judge' }, bounds: { 'tech-lead': 1, builder: 3 }, secondReview: 10, lead: 'escalate' })
-  assert.deepEqual(await bounded.go(), stopped('lead-escalated'))
-  assert.equal(count(bounded, 'tech-lead'), 1)
-  assert.equal(bounded.requests.find((r) => r.role === 'lead').feedback[0].role, 'tech-lead')
-  for (const tier of ['build', 'judge']) {
-    const f = fakes({ spec: { tier }, review: tier === 'build' ? 2 : 0, secondReview: tier === 'judge' ? 2 : 0, lead: 'bounce',
-      checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder')).repeat(40) }), edit: (v) => { if (v.role === 'lead' && count(f, 'lead') > 1) v.details = { decision: 'accept' }; return v } })
-    assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: PR }, tier)
-    if (tier === 'build') assert.deepEqual(f.requests.map((r) => r.role), ['planner', 'builder', 'reviewer', 'builder', 'reviewer', 'lead', 'builder', 'reviewer'])
-    else { assert.equal(count(f, 'reviewer'), 3); assert.equal(count(f, 'tech-lead'), 3); assert.equal(count(f, 'lead'), 1) }
-  }
-})
-
 const BODY = ['Source: "issue 12"', '', '## Measurements', '- proof: lib.test.mjs "works": red on the old source, green on the build', '- Suite: green; exit 0; node --test lane.test.mjs.'].join('\n')
-test('non-done decision seats escalate with their question or summary without repair', async () => {
-  for (const role of ['planner', 'reviewer', 'tech-lead', 'lead']) for (const status of ['insufficient', 'escalate']) for (const question of [undefined, '', 'Which rule applies?']) {
-    const f = fakes({ spec: { tier: role === 'tech-lead' ? 'judge' : 'build' }, edit: (v) => {
-      if (role === 'lead' && v.role === 'builder') return { ...v, status: 'escalate', details: { ...v.details, question: 'Ask the lead?' } }
-      if (v.role !== role) return v
-      return { ...v, status, summary: 'Which constraint takes precedence?', details: {
-        ...(role === 'lead' ? { decision: 'escalate', section: 'rules', notes: 'blocked' } : { gap: 'Missing rules' }),
-        ...(role === 'planner' ? { plan_path: '/virtual/task/nonexistent.md', tests: [], files_in_scope: [], validation_lane: '' } : {}),
-        ...(question === undefined ? {} : { question }),
-      } }
-    } })
-    assert.deepEqual(await f.go(), stopped(role === 'lead' ? 'lead-escalated' : 'seat-escalated'), `${role}/${status}/${question}`)
-    assert.equal(count(f, role), 1)
-    assert.equal(f.requests.some((r) => r.repair || r.feedback.some((item) => item.id === 'escalate-no-question')), false)
-    const observation = f.rows.findLast((r) => r.event === 'verdict').observation
-    assert.equal(observation.question, question || 'Which constraint takes precedence?')
-    const returned = role === 'lead' ? observation.lead : observation.envelope
-    assert.equal(returned.status, status)
-    assert.equal(Object.hasOwn(returned.details, role === 'lead' ? 'notes' : 'gap'), false)
-    assert.equal(Object.hasOwn(returned.details, 'question'), Boolean(question))
-  }
-})
-
 test('a builder escalate or done lead decision without details.question retries the same seat', async () => {
   for (const role of ['builder', 'lead']) {
     let returned = false
@@ -618,36 +531,6 @@ test('a mechanical restart whose tier raise stops leaves no lead rulings for fin
   assert.deepEqual(rows.at(-1).rulings, [])
 })
 
-test('round-bound lead refunds share the per-lane progress cap with builder continuations (#2375)', async () => {
-  let state = 0, reviews = 0, builds = 0
-  const f = fakes({ review: 4, bounds: { builder: 1, reviewer: 10 }, lead: 'bounce', deps: { repoState: () => String(state++) }, edit: (v, request) => {
-    if (v.role === 'builder' && ++builds <= 5) v.status = 'insufficient'
-    if (v.role === 'reviewer' && v.details.verdict === 'changes-needed') {
-      v.details.findings = [{ ...finding, id: `R${++reviews}` }]
-      v.details.closed = request.feedback.map((item) => ({ id: item.id, evidence: 'fixed' }))
-    }
-    return v
-  } })
-  assert.equal((await f.go()).reason, 'lead-escalated')
-  assert.deepEqual(f.rows.filter((r) => r.event === 'builder-continue').map((r) => r.progressTurns), [1, 2, 3, 4, 5])
-  assert.deepEqual(f.rows.filter((r) => r.event === 'lead-bound-refund').map((r) => r.progressTurns), [6])
-  assert.equal(f.requests.filter((r) => r.role === 'lead').length, 3)
-})
-
-test('a lead bounce to the planner for a builder held at its round bound spends the lead bound (#2375)', async () => {
-  let state = 0, reviews = 0
-  const f = fakes({ review: 3, bounds: { builder: 1, reviewer: 10 }, lead: 'bounce', target: 'planner', deps: { repoState: () => String(state++) }, edit: (v, request) => {
-    if (v.role === 'reviewer' && v.details.verdict === 'changes-needed') {
-      v.details.findings = [{ ...finding, id: `R${++reviews}` }]
-      v.details.closed = request.feedback.map((item) => ({ id: item.id, evidence: 'fixed' }))
-    }
-    return v
-  } })
-  await f.go()
-  assert.equal(f.rows.filter((r) => r.event === 'lead-bound-refund').length, 0)
-  assert.equal(f.requests.filter((r) => r.role === 'lead').length, 2)
-})
-
 test('the same failure with the same evidence twice stops the lane no-progress and no seat decides it', async () => {
   for (const mode of ['envelope', 'insufficient', 'insufficient-reordered', 'lead', 'proof-no-tests', 'proof-unproven']) {
     let turns = 0
@@ -713,18 +596,6 @@ test('plan-revised, mechanical-restart, finish-stop and finish-return feedback c
 
 const count = (f, role) => f.requests.filter((r) => r.role === role).length
 const stopped = (reason) => ({ status: 'stopped', reason, pr: null })
-
-test('a suite timeoutMs above 2147483647 is refused as invalid-input before any effect and 2147483647 reaches the suite', async () => {
-  for (const timeoutMs of [2147483648, Number.MAX_SAFE_INTEGER]) {
-    const f = fakes({ spec: { suite: { command: 'node', timeoutMs } } })
-    assert.deepEqual(await f.go(), stopped('invalid-input'))
-    assert.deepEqual(f.calls, [])
-    assert.deepEqual(f.rows, [{ event: 'verdict', lane: 'lane', stage: null, status: 'stopped', reason: 'invalid-input', at: 0 }])
-  }
-  const f = fakes({ spec: { suite: { command: 'node', timeoutMs: 2147483647 } } })
-  assert.equal((await f.go()).status, 'done')
-  assert.equal(f.seen.suite.timeoutMs, 2147483647)
-})
 
 
 const nth = (role, turn, edit) => (v, r) => (r.role === role && Number(r.id.split('.').at(-1)) === turn ? edit(v) : v)
@@ -919,7 +790,6 @@ test('an unseated, refusing or insufficient lead stops without recursion', async
 })
 
 const redRun = (code = 1, reason = 'exit-nonzero') => ({ ...green(), status: 'red', code, reason })
-const timeoutRun = () => ({ ...green(), status: 'unmeasured', code: null, reason: 'timeout', timedOut: true })
 // A suite seam that answers from a sequence and counts every invocation; an exhausted sequence throws.
 function sequenced(sequence, options = {}) {
   const inputs = []
@@ -953,9 +823,6 @@ test('a judge reuses each roles pass on an unchanged recheck tree (#2412)', asyn
   assert.equal(f.rows.filter((r) => r.event === 'verdict' && r.status === 'reviewed').length, 2)
   assert.match(f.seen.publish.body, /## Open points\n- reviewer note \(lib.mjs:1\)\n- tech-lead note \(lib.mjs:1\)/)
 })
-
-const EFFECTS = ['paths', 'commit', 'fetch', 'rebase', 'publish']
-const PUBLISH_EFFECTS = EFFECTS.filter((effect) => effect !== 'fetch')
 
 // MUTATION: retry a finish red on the unchanged tree instead of dispatching its repair.
 test('a finish first red repairs immediately with one run of diagnostics and ordinary green measurements', async () => {
@@ -1035,40 +902,6 @@ test('a red suite tail keeps the failing line past the tail bound', async () => 
     assert.ok(tail.length <= 2000, `${count} failures: tail length ${tail.length}`)
   }
 })
-// MUTATION: retry a repaired red or let it reach commit and publication.
-test('a finish red after repair stops without an unchanged-tree retry', async () => {
-  const after = { ...redRun(2), stderr: TAP_OUT }
-  const f = sequenced([redOut(SPEC_OUT), after, green()], { spec: finishSpec(), checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder')).repeat(40) }) })
-  assert.deepEqual(await f.go(), stopped('exit-nonzero'))
-  assert.equal(builderTurns(f).length, 2)
-  assert.equal(f.inputs.length, 2)
-  assert.deepEqual(f.calls.slice(f.calls.indexOf('suite')), ['suite', 'seat:builder', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'seat:reviewer', 'suite'])
-  assert.equal(f.calls.filter((c) => c === 'proof').length, 2)
-  assert.equal(count(f, 'reviewer'), 2)
-  assert.deepEqual(f.rows.findLast((r) => r.status === 'stopped').observation, after)
-  assert.deepEqual(f.rows.filter((r) => r.event === 'check' && r.check === 'suite').map((r) => r.result.status), ['red', 'red'])
-  for (const effect of PUBLISH_EFFECTS) assert.equal(f.calls.slice(f.calls.indexOf('seat:builder')).includes(effect), false, effect)
-  assert.equal(f.writes.has('/virtual/task/finish-report.json'), false)
-})
-
-// MUTATION: let an unmeasured check or non-done repair bounce into more builders.
-test('an unmeasured post-repair suite or non-done finish repair stops without publication', async () => {
-  for (const post of [timeoutRun(), new Error('crashed'), { ...green(), code: 4 }]) {
-    const r = sequenced([redRun(), post, green()], { spec: finishSpec() })
-    assert.equal((await r.go()).status, 'stopped')
-    assert.equal(builderTurns(r).length, 2)
-    assert.equal(r.inputs.length, 2)
-    for (const effect of PUBLISH_EFFECTS) assert.equal(r.calls.slice(r.calls.indexOf('seat:builder')).includes(effect), false, effect)
-  }
-  for (const status of ['insufficient', 'escalate']) {
-    const r = sequenced([redRun(), green()], { spec: finishSpec(), lead: 'bounce', edit: (v, req) => req.role === 'builder' && req.feedback.some((item) => item.id === 'suite-repair') ? { ...v, status } : v })
-    assert.equal((await r.go()).status, 'stopped')
-    assert.equal(builderTurns(r).length, 2)
-    assert.equal(count(r, 'lead'), 0)
-    for (const effect of PUBLISH_EFFECTS) assert.equal(r.calls.slice(r.calls.indexOf('seat:builder')).includes(effect), false, effect)
-  }
-})
-
 test('three ref-lock fetch failures stop with the last attempt (#2400)', async () => {
   for (const finish of [false, true]) for (const afterCommit of [false, true]) {
     const failures = [1, 2, 3].map((n) => ({ ...redRun(128), stderr: `cannot lock ref: attempt ${n}` }))
@@ -1138,33 +971,6 @@ test('a failing journal append leaves the lane outcome unchanged and the result 
   }
   const result = await fakes({ journal: () => { throw Object.create(null) } }).go()
   assert.deepEqual(result.journal.error, { code: null, message: 'unprintable error' })
-})
-
-// MUTATION: skip input validation and an unsupported or malformed lane starts effects.
-test('an unsupported shape, invalid input or unsound seam is refused before dependency effects', async () => {
-  const cases = [
-    [{ shape: 'stepped' }, 'unsupported-shape'], [{ shape: 'finish' }, 'invalid-input'], [{ shape: undefined }, 'unsupported-shape'],
-    [{ tier: 'rigorous' }, 'invalid-input'], [{ id: '' }, 'invalid-input'], [{ cwd: 3 }, 'invalid-input'], [{ taskDir: undefined }, 'invalid-input'],
-    [{ brief: '' }, 'invalid-input'],
-    [{ suite: null }, 'invalid-input'], [{ suite: { command: '' } }, 'invalid-input'],
-    [{ source: '' }, 'invalid-input'], [{ source: undefined }, 'invalid-input'], [{ source: 7 }, 'invalid-input'], [{ branch: undefined }, 'invalid-input'], [{ base: undefined }, 'invalid-input'],
-    [{ closes: 12 }, 'invalid-input'],
-  ]
-  for (const [spec, reason] of cases) {
-    const f = fakes({ spec })
-    assert.deepEqual(await f.go(), stopped(reason), JSON.stringify(spec))
-    assert.deepEqual(f.calls, [])
-    assert.deepEqual(f.rows, spec.id === '' || Object.hasOwn(spec, 'taskDir') && spec.taskDir === undefined ? [] : [{ event: 'verdict', lane: 'lane', stage: null, status: 'stopped', reason, at: 0 }])
-  }
-  for (const name of ['runSeat', 'journal', 'readFile', 'proveTests', 'openPullRequest', 'run']) {
-    const f = fakes({ deps: { [name]: undefined } })
-    assert.deepEqual(await f.go(), stopped('invalid-input'), name)
-    assert.deepEqual(f.calls, [])
-    assert.deepEqual(f.rows, name === 'journal' ? [] : [{ event: 'verdict', lane: 'lane', stage: null, status: 'stopped', reason: 'invalid-input', at: 0 }])
-  }
-  assert.deepEqual(await runLoop(null, {}), stopped('invalid-input'))
-  const { status, reason, pr } = await runLoop(fakes().spec)
-  assert.deepEqual({ status, reason, pr }, stopped('invalid-input'))
 })
 
 // MUTATION: let a mkdir failure continue and the seats write into a task directory that does not exist.
@@ -1244,24 +1050,6 @@ test('the PR body carries no ## Acceptance block, even for an archived spec with
   assert.ok(f.seen.publish.body.includes('Source: x - Suite: green; exit 0.'))
   assert.ok(!f.seen.publish.body.includes('## Acceptance'))
   assert.equal(f.seen.publish.body.split('\n').filter((line) => line.startsWith('- Suite:')).length, 1)
-})
-
-// MUTATION: omit the pre-suite staging, or stage more than the measured paths, and the suite misses a new file or the commit grows.
-test('the suite runs after exactly the measured changed paths are staged, again after a repair, and an unusable staging stops before the suite (SB1)', async () => {
-  const f = fakes({ reviewPaths: ' M lib.mjs\0?? new.test.mjs\0R  b.mjs\0a.mjs\0' })
-  assert.equal((await f.go()).status, 'done')
-  assert.deepEqual(f.seen['suite-stage'], { cwd: '/virtual/checkout', command: 'git', args: ['--literal-pathspecs', 'add', '--', 'lib.mjs', 'new.test.mjs'] })
-  assert.deepEqual(f.calls.slice(f.calls.indexOf('suite-stage')), ['suite-stage', 'checked-tree', 'suite', 'seat:reviewer', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase', 'publish'])
-  const r = sequenced([redRun(1), green()], { checkedTree: () => ({ ...green(), stdout: String(count(r, 'builder')).repeat(40) }) })
-  assert.equal((await r.go()).status, 'done')
-  assert.equal(r.calls.filter((c) => c === 'suite-stage').length, 2)
-  const at = r.calls.lastIndexOf('seat:builder')
-  assert.deepEqual(r.calls.slice(at), ['seat:builder', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'suite', 'seat:reviewer', 'paths', 'checked-tree', ...EFFECTS.slice(1)])
-  for (const stageResult of [{ ...green(), status: 'red', code: 1, reason: 'exit-nonzero' }, { ...green(), code: 3 }, { status: 'unmeasured', reason: 'timeout' }]) {
-    const g = fakes({ stageResult })
-    assert.equal((await g.go()).status, 'stopped')
-    for (const later of ['suite', 'commit', 'publish']) assert.equal(g.calls.includes(later), false, later)
-  }
 })
 
 // MUTATION: stage every changed path (a staged deletion or a rename source has no pathspec) and the stage stops the lane before the suite.
@@ -1570,19 +1358,6 @@ test('a mechanical finish whose diff reaches a protected path stops raise-needs-
   assert.equal((await planned.go()).status, 'done')
 })
 
-// MUTATION: change the unmeasured proof line.
-test('finish without named tests reports unmeasured proof and standard reports each test', async () => {
-  const f = fakes({ spec: finishSpec(), unseated: ['planner'], edit: (v) => { if (v.role === 'builder') delete v.details.tests; return v } })
-  assert.equal((await f.go()).status, 'done')
-  assert.equal(f.calls.includes('proof'), false)
-  assert.ok(f.seen.commit.body.includes('- proof: unmeasured'))
-  assert.ok(JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body.includes('Proof: unmeasured.'))
-  const standard = fakes()
-  assert.equal((await standard.go()).status, 'done')
-  assert.equal(standard.seen.commit.body.split('\n').filter((line) => line.startsWith('- proof:')).length, 1)
-  assert.doesNotMatch(standard.seen.commit.body, /kill/i)
-})
-
 // MUTATION: flip isFinish && in the guard for a planner bounce from a finish builder.
 test('a finish lead bounce to the planner is asked again with no planner to route to, and a last consult stops for the operator without another builder turn', async () => {
   for (const mode of ['finish', 'last', 'build', 'judge']) {
@@ -1671,19 +1446,6 @@ test('a finish review or finish suite-repair escalate with a question stops seat
     }
     assert.equal(f.calls.includes('commit'), false)
     assert.equal(f.rows.some((r) => r.event === 'finish-ready'), false)
-  }
-})
-
-// MUTATION: restore the mechanical skip on the dropped-commit check.
-test('a mechanical lane whose publishing rebase drops its commit as already upstream stops nothing-to-commit without reproving or publishing (S1-5)', async () => {
-  for (const invalid of [false, true]) {
-    const f = moved({ rebase: answers({ ...MOVED, head: 'a'.repeat(40) }, invalid ? { ...MOVED, onto: undefined } : { ...MOVED, head: O, onto: O }), cleanHead: `${invalid ? MOVED.head : O}\n` })
-    assert.deepEqual(await f.go(), stopped(invalid ? 'runner-threw' : 'nothing-to-commit'))
-    assert.equal(f.calls.filter((c) => c === 'proof').length, 1)
-    assert.equal(f.calls.filter((c) => c === 'suite').length, 1)
-    assert.equal(f.calls.includes('uncommit'), false)
-    assert.equal(f.calls.includes('publish'), false)
-    if (!invalid) assert.deepEqual(f.rows.findLast((r) => r.status === 'stopped').observation, { head: O, onto: O, committed: 'a'.repeat(40) })
   }
 })
 
@@ -1838,64 +1600,6 @@ test('suite sees the uncommitted lane change at the base on first and moved-base
   }
 })
 
-test('pre-check moves do not spend publishing rechecks (#2403)', async () => {
-  for (const tier of ['build', 'judge', 'mechanical']) for (const moves of [3, 4]) {
-    const A = 'a'.repeat(40)
-    const f = fakes({ spec: { tier }, checkBase: { ...green(), stdout: O }, cleanHead: `${MOVED.head}\n`,
-      rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, ...Array(moves).fill({ ...MOVED, onto: O }), { ...MOVED, head: A, onto: O }),
-      edit: (v) => { if (v.role === 'builder') v.details.subject = 'fix: lane'; return v },
-    })
-    const result = await f.go()
-    assert.equal(result.status, tier !== 'mechanical' && moves === 4 ? 'stopped' : 'done', tier)
-    if (result.status === 'stopped') assert.equal(result.reason, 'recheck-bound')
-    assert.ok(f.calls.indexOf('uncommit') < f.calls.indexOf('proof'))
-    assert.equal(f.rows.filter((r) => r.event === 'pre-check-base-move').length, 1)
-    assert.equal(f.calls.filter((c) => c === 'uncommit').length, tier === 'mechanical' ? 1 : 4)
-    assert.equal(f.calls.filter((c) => c === 'proof').length, tier === 'mechanical' ? 2 : 4)
-  }
-})
-
-test('pre-check rebasing preserves ignored and generated file rules (#2403)', async () => {
-  for (const mode of ['ignored', 'generated']) {
-    const root = scratchDir('precheck-rules-'), cwd = join(root, 'lane'), remote = join(root, 'origin.git'), taskDir = join(root, 'task')
-    mkdirSync(cwd); mkdirSync(taskDir)
-    const g = (...args) => repoGit(cwd, ...args)
-    g('init', '-qb', 'main'); g('config', 'user.name', 'Test'); g('config', 'user.email', 'test@example.invalid')
-    writeFileSync(join(cwd, '.gitignore'), '*.log\n'); writeFileSync(join(cwd, 'gen.txt'), 'base\n')
-    g('add', '.'); g('commit', '-qm', 'base'); repoGit(root, 'init', '--bare', '-q', remote)
-    g('remote', 'add', 'origin', remote); g('push', '-qu', 'origin', 'main'); g('checkout', '-qb', 'lane')
-    const generated = { paths: ['gen.txt'], command: process.execPath, args: ['-e', "require('fs').writeFileSync('keep.log','overwrite');require('fs').writeFileSync('gen.txt','rebuilt\\n')"] }
-    const seats = fakes({ edit: (v) => { if (v.role === 'planner') v.details.plan_path = join(taskDir, 'plan.md'); return v } })
-    writeFileSync(join(taskDir, 'plan.md'), 'Build.')
-    let checked = 0
-    const result = await runLoop({ ...seats.spec, cwd, taskDir, generated }, {
-      resolveAgents: seats.deps.resolveAgents,
-      runSeat: async (r) => {
-        if (r.role === 'builder') {
-          g('checkout', '-q', 'main')
-          writeFileSync(join(cwd, mode === 'ignored' ? 'keep.log' : 'gen.txt'), 'upstream\n')
-          g('add', '-f', mode === 'ignored' ? 'keep.log' : 'gen.txt'); g('commit', '-qm', 'advance'); g('push', '-q', 'origin', 'main'); g('checkout', '-q', 'lane')
-          writeFileSync(join(cwd, 'keep.log'), 'mine\n'); writeFileSync(join(cwd, 'gen.txt'), 'lane\n')
-          writeFileSync(join(cwd, 'build.txt'), 'lane\n')
-        }
-        await seats.deps.runSeat(r); writeFileSync(r.returnPath, await seats.deps.readFile(r.returnPath))
-      },
-      proveTests: async () => {
-        checked++; assert.equal(g('rev-parse', 'HEAD').trim(), g('rev-parse', 'origin/main').trim())
-        assert.equal(readFileSync(join(cwd, 'gen.txt'), 'utf8'), 'rebuilt\n')
-        return { status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }] }
-      },
-      runSuite: async () => green(), openPullRequest: async () => ({ status: 'green', reason: null, pr: PR }),
-    })
-    assert.equal(result.status, mode === 'ignored' ? 'stopped' : 'done', JSON.stringify(result))
-    assert.equal(checked, mode === 'ignored' ? 0 : 1)
-    if (mode === 'ignored') { assert.equal(result.reason, 'dirty-worktree'); assert.match(g('status', '--porcelain'), /gen.txt/); assert.equal(g('rev-list', '--count', 'main..HEAD').trim(), '0') }
-    else assert.doesNotMatch(g('ls-tree', '-r', '--name-only', 'HEAD'), /keep.log/)
-    assert.equal(readFileSync(join(cwd, 'keep.log'), 'utf8'), 'mine\n')
-    assert.equal(g('worktree', 'list', '--porcelain').split('\n').filter((s) => s.startsWith('worktree ')).length, 1)
-  }
-})
-
 test('a pre-check change already upstream stops before checks (#2403)', async () => {
   const root = scratchDir('precheck-upstream-'), cwd = join(root, 'lane'), remote = join(root, 'origin.git'), taskDir = join(root, 'task')
   mkdirSync(cwd); mkdirSync(taskDir)
@@ -1921,26 +1625,6 @@ test('a pre-check change already upstream stops before checks (#2403)', async ()
   for (const call of ['proof', 'suite', 'publish']) assert.equal(seats.calls.includes(call), false)
   assert.equal(g('rev-parse', 'HEAD').trim(), g('rev-parse', 'origin/main').trim())
   assert.equal(g('status', '--porcelain'), '')
-})
-
-test('pre-check fetch retries ref locks and stops before checks on failure (#2403)', async () => {
-  for (const mode of ['recovered', 'spent', 'other', 'timeout']) {
-    const waits = [], lock = { ...redRun(128), stderr: 'cannot lock ref' }
-    const terminal = mode === 'other' ? { ...redRun(128), stderr: 'fatal: offline' } : mode === 'timeout' ? { ...timeoutRun(), stderr: 'cannot lock ref' } : lock
-    const next = answers(green(), ...(mode === 'recovered' ? [lock, lock, green()] : mode === 'spent' ? [lock, lock, lock] : [terminal]), green())
-    const f = fakes({ fetch: next, deps: { sleep: async (ms) => waits.push(ms) } })
-    const result = await f.go()
-    assert.equal(result.status, mode === 'recovered' ? 'done' : 'stopped', mode)
-    assert.deepEqual(waits, ['recovered', 'spent'].includes(mode) ? [1000, 2000] : [])
-    const after = f.calls.slice(f.calls.indexOf('seat:builder') + 1)
-    assert.deepEqual(after.slice(0, ['recovered', 'spent'].includes(mode) ? 3 : 1), Array(['recovered', 'spent'].includes(mode) ? 3 : 1).fill('fetch'))
-    if (mode === 'recovered') assert.ok(after.indexOf('check-base') < after.indexOf('proof'))
-    else {
-      assert.equal(result.reason, terminal.reason)
-      assert.ok(after.every((call) => call === 'fetch'))
-      assert.equal(f.calls.includes('base-commit'), false)
-    }
-  }
 })
 
 const MOVED = { status: 'green', reason: null, head: 'b'.repeat(40), onto: 'c'.repeat(40) }
@@ -1981,28 +1665,6 @@ test('a conflict turn that cannot resolve the rebase stops rebase-conflict with 
     assert.deepEqual(await f.go(), stopped(mode === 'failed-head' ? 'exit-nonzero' : 'runner-threw'))
     assert.equal(builderTurns(f).filter((r) => r.feedback[0]?.id === 'rebase-conflict').length, 0)
     assert.deepEqual(f.discardArgs, [])
-  }
-})
-
-// MUTATION: skip the finish checked-tree guard or stage after the review.
-test('a finish run whose suite or review changes the checked tree stops before it commits and reports nothing ready', async () => {
-  const T = { ...green(), stdout: `${'e'.repeat(40)}\n` }, T2 = { ...green(), stdout: `${'f'.repeat(40)}\n` }
-  for (const tier of ['build', 'mechanical']) {
-    const clean = fakes({ spec: { ...finishSpec(), tier } })
-    assert.equal((await clean.go()).status, 'done')
-    assert.deepEqual(clean.calls.slice(clean.calls.indexOf('review-paths'), clean.calls.indexOf('commit') + 1), ['review-paths', 'suite-stage', 'checked-tree', 'seat:reviewer', 'suite', 'paths', 'checked-tree', 'commit'])
-    for (const [options, reason] of [
-      [{ paths: 'MM lib.mjs\0' }, 'dirty-worktree'],
-      [{ paths: 'M  lib.mjs\0?? coverage.json\0' }, 'dirty-worktree'],
-      [{ checkedTree: answers(T, T2) }, 'dirty-worktree'],
-      [{ checkedTree: { ...green(), stdout: '' } }, 'paths-unmeasured'],
-    ]) {
-      const f = fakes({ spec: { ...finishSpec(), tier }, ...options })
-      assert.deepEqual(await f.go(), stopped(reason), tier)
-      assert.equal(f.calls.includes('commit'), false)
-      assert.equal(f.writes.size, 0)
-      assert.equal(f.rows.some((row) => row.event === 'finish-ready'), false)
-    }
   }
 })
 

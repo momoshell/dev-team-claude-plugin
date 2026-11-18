@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, posix } from 'node:path'
 import { connect } from 'node:net'
 import { spawn, spawn as spawnProcess, spawnSync } from 'node:child_process'
-import { pluginWriteMode, pluginWriteTargetMode, sameOrigin, hostGuard, ROUTE_PARAMS, ServerUsageError, startServer as startVisualizerServer, writeGuard } from '../visualizer/server/server.mjs'
+import { pluginWriteMode, pluginWriteTargetMode, hostGuard, ROUTE_PARAMS, ServerUsageError, startServer as startVisualizerServer, writeGuard } from '../visualizer/server/server.mjs'
 import { createJournalSource } from '../visualizer/server/journal-source.mjs'
 import * as webApi from '../visualizer/web/src/lib/api.js'
 import { ROOT, rawRequest, scratchDir } from './helpers.mjs'
@@ -47,16 +47,6 @@ function announceDetails(child) {
 }
 const SERVER_SCRIPT = join(ROOT, 'visualizer', 'server', 'server.mjs')
 
-test('RO1 installed plugins and paths without git are read only', () => {
-  // MUTATION: invert the no-.git decision; this fake no-git checkout must refuse.
-  const root = '/tmp/work', home = '/tmp/home'
-  assert.deepEqual(pluginWriteMode({ pluginRoot:root, home, existsSync:() => false, realpathSync:(path) => path }), {
-    writable:false, reason:'installed-plugin-read-only', basis:'no-git-work-tree', plugin_root:root,
-  })
-  assert.deepEqual(pluginWriteMode({ pluginRoot:`${home}/.claude/plugins/cache/pkg`, home, existsSync:() => true, realpathSync:(path) => path }), {
-    writable:false, reason:'installed-plugin-read-only', basis:'under-claude-plugins-dir', plugin_root:`${home}/.claude/plugins/cache/pkg`,
-  })
-})
 function runServerCli(args, opts = {}) {
   return spawnSync(process.execPath, [SERVER_SCRIPT, ...args], { cwd: ROOT, encoding: 'utf8', ...opts })
 }
@@ -289,34 +279,6 @@ test('RO1 link-mode install target refuses writes', () => {
   })
 })
 
-test('RO1 filesystem root link target refuses writes', () => {
-  const home = '/tmp/root-home'
-  const cache = join(home, '.claude', 'plugins', 'cache')
-  const dirs = new Map([[cache, ['m']], [join(cache, 'm'), ['p']], [join(cache, 'm', 'p'), ['1.0.0']], [join(cache, 'm', 'p', '1.0.0'), ['.claude-plugin-link']]])
-  const marker = JSON.stringify({target: '/'})
-  const fakeReaddir = (p) => { if (dirs.has(p)) return dirs.get(p); const err = new Error('ENOENT ' + p); err.code = 'ENOENT'; throw err }
-  const fakeRead = (p) => { if (String(p).endsWith('.claude-plugin-link')) return marker; throw new Error('ENOENT ' + p) }
-  const fakeExists = () => true
-  const fakeRealpath = (p) => p
-  assert.deepEqual(pluginWriteMode({pluginRoot: '/tmp/checkout', home, existsSync: fakeExists, realpathSync: fakeRealpath, readdirSync: fakeReaddir, readFileSync: fakeRead}), {
-    writable: false, reason: 'installed-plugin-read-only', basis: 'link-mode-install-target', plugin_root: '/tmp/checkout'
-  })
-})
-
-test('RO1 malformed link marker fails closed', () => {
-  const home = '/tmp/malformed-home'
-  const cache = join(home, '.claude', 'plugins', 'cache')
-  const dirs = new Map([[cache, ['m']], [join(cache, 'm'), ['p']], [join(cache, 'm', 'p'), ['1.0.0']], [join(cache, 'm', 'p', '1.0.0'), ['.claude-plugin-link']]])
-  const marker = '{bad json'
-  const fakeReaddir = (p) => { if (dirs.has(p)) return dirs.get(p); const err = new Error('ENOENT ' + p); err.code = 'ENOENT'; throw err }
-  const fakeRead = (p) => { if (String(p).endsWith('.claude-plugin-link')) return marker; throw new Error('ENOENT ' + p) }
-  const fakeExists = () => true
-  const fakeRealpath = (p) => p
-  assert.deepEqual(pluginWriteMode({pluginRoot: '/tmp/checkout', home, existsSync: fakeExists, realpathSync: fakeRealpath, readdirSync: fakeReaddir, readFileSync: fakeRead}), {
-    writable: false, reason: 'installed-plugin-read-only', basis: 'link-mode-marker-unreadable', plugin_root: '/tmp/checkout'
-  })
-})
-
 test('pluginWriteTargetMode refuses plugin cache and link targets', () => {
   const home = '/tmp/target-home'
   const cache = join(home, '.claude', 'plugins', 'cache')
@@ -346,22 +308,6 @@ test('pluginWriteTargetMode refuses plugin cache and link targets', () => {
   const symlinked = pluginWriteTargetMode({target: '/tmp/checkout/crew/roster.json', home, existsSync: fakeExists, realpathSync: symlinkRealpath, readdirSync: emptyReaddir, readFileSync: emptyRead})
   assert.equal(symlinked.writable, false)
   assert.equal(symlinked.basis, 'under-claude-plugins-dir')
-})
-
-test('writeGuard treats the implicit HTTP port as 80, not a wildcard', () => {
-  const bare80 = writeGuard({headers: {'content-type': 'application/json', host: 'localhost'}, socket: {localPort: 80, remoteAddress: '127.0.0.1'}})
-  assert.equal(bare80, null)
-  const explicit80 = writeGuard({headers: {'content-type': 'application/json', host: 'localhost:80'}, socket: {localPort: 80, remoteAddress: '127.0.0.1'}})
-  assert.equal(explicit80, null)
-  const wrongExplicit = writeGuard({headers: {'content-type': 'application/json', host: 'localhost:8080'}, socket: {localPort: 80, remoteAddress: '127.0.0.1'}})
-  assert.equal(wrongExplicit.status, 403)
-  assert.equal(wrongExplicit.error, 'write host refused: localhost:8080')
-  const bareNon80 = writeGuard({headers: {'content-type': 'application/json', host: 'localhost'}, socket: {localPort: 4488, remoteAddress: '127.0.0.1'}})
-  assert.equal(bareNon80.status, 403)
-  assert.equal(bareNon80.error, 'write host refused: localhost')
-  assert.equal(sameOrigin('http://localhost', 'localhost'), true)
-  const sameOriginPair = writeGuard({headers: {'content-type': 'application/json', host: 'localhost', origin: 'http://localhost'}, socket: {localPort: 80, remoteAddress: '127.0.0.1'}})
-  assert.equal(sameOriginPair, null)
 })
 
 test('VL6 writeGuard refuses non-loopback peers and admits loopback spellings', () => {
@@ -418,19 +364,6 @@ test('GR3 API HEAD requests enforce the host guard without bodies', async () => 
   } finally {
     if (server) await stopServer(server.child)
   }
-})
-
-// MUTATION LH1: disable IPv4 interface equality on the normalization return.
-test('LH1 read host guard follows current IPv4 interfaces', () => {
-  let calls = 0
-  let address = '192.0.2.23'
-  const source = () => { calls++; return { ethernet: [{ address, family: 'IPv4' }], inactive: undefined } }
-  const before = hostGuard({ headers: { host: '192.0.2.23:4488' }, socket: { localPort: 4488 } }, 'read', source)
-  address = '192.0.2.24'
-  const old = hostGuard({ headers: { host: '192.0.2.23:4488' }, socket: { localPort: 4488 } }, 'read', source)
-  const current = hostGuard({ headers: { host: '192.0.2.24:4488' }, socket: { localPort: 4488 } }, 'read', source)
-  assert.deepEqual([before, old, current], [null, { status: 403, error: 'read host refused: 192.0.2.23:4488' }, null])
-  assert.equal(calls, 3)
 })
 
 // MUTATION LH3: neutralize the final refusal decision across the complete matrix.

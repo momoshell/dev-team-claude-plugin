@@ -199,13 +199,10 @@ measured zero. The contract owners are `createStreamReducer`, the `execute`
 result construction and `usageRow` in `crew/pi/extensions/subagent.ts`; no test
 pins the whole complete-or-absent/journal contract.
 In `crew/pi/extensions/subagent.test.mjs`,
-`the reducer folds what the rule claims` builds a fresh reducer for each fixture
-frame and checks `usage()`: `null` for the fixtures the rule excludes, all four
-billed-token fields for the measured assistant fixture. In the same file,
 `every pre-spawn refusal is bounded, payload-free, spawns nothing and journals nothing`
 and `the child is spawned under a deadline that escalates to SIGKILL` assert
 public-key absence only on their selected refusal and timeout paths. They do not
-pin complete measured public usage, journal nulls or budget-refusal journaling.
+pin reducer usage, complete measured public usage or budget-refusal journaling.
 
 ### Complete-or-absent and pinning
 

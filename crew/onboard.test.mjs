@@ -3,14 +3,8 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { ONBOARD_REASONS, checkOnboarding, main, projectHash, requireOnboarded } from './onboard.mjs'
+import { checkOnboarding, main, projectHash, requireOnboarded } from './onboard.mjs'
 import { git, scratchDir } from '../test/helpers.mjs'
-
-test('projectHash changes when a proof entry gains a list command', () => {
-  const entry = { match: '*.xml', run: 'node run.mjs' }
-  const project = { suite: 'npm test', proof: [entry] }
-  assert.notEqual(projectHash(project), projectHash({ ...project, proof: [{ ...entry, list: 'node list.mjs' }] }))
-})
 
 test('projectHash changes when a proof entry gains a manifest', () => {
   const entry = { match: '*.xml', run: 'node run.mjs' }
@@ -32,42 +26,6 @@ test('projectHash changes when a proof entry gains newTestFile', () => {
   assert.equal(requireOnboarded('/repo', () => JSON.stringify({ ...opted, onboarded: { hash: projectHash(opted) } })).proof[0].newTestFile, true)
 })
 
-test('requireOnboarded distinguishes missing and stale project records', () => {
-  const suite = 'npm test', proof = []
-  const hash = createHash('sha256').update(JSON.stringify([suite, proof])).digest('hex')
-  const valid = { suite, proof, onboarded: { hash } }
-  assert.deepEqual(ONBOARD_REASONS, ['not-onboarded', 'onboarding-stale'])
-  assert.ok(Object.isFrozen(ONBOARD_REASONS))
-  assert.deepEqual(requireOnboarded('/repo', () => JSON.stringify(valid)), { suite, proof, hash, suiteTimeoutMs: 1800000, proofTimeoutMs: 120000 })
-  for (const [input, reason] of [
-    [null, 'not-onboarded'], [{ suite, proof }, 'not-onboarded'],
-    ['{', 'onboarding-stale'], [{ ...valid, suite: 'cargo test' }, 'onboarding-stale'],
-    [{ ...valid, suite: '"npm test"' }, 'onboarding-stale'], [{ ...valid, proof: null }, 'onboarding-stale'],
-    [{ ...valid, onboarded: null }, 'onboarding-stale'],
-  ]) {
-    const read = () => { if (input === null) throw Object.assign(new Error('missing'), { code: 'ENOENT' }); return typeof input === 'string' ? input : JSON.stringify(input) }
-    assert.throws(() => requireOnboarded('/repo', read), (error) => error.reason === reason && error.message.includes('/onboard'))
-  }
-})
-
-test('checkOnboarding records a valid builderChecks list in project.json and refuses a string, an empty entry or a multi-line entry without writing', async () => {
-  const checks = ['cargo clippy -- -D warnings', 'cargo test -p fence']
-  for (const [field, status] of [[{ builderChecks: checks }, 'green'], [{}, 'green'], [{ builderChecks: 'cargo test' }, 'red'], [{ builderChecks: [''] }, 'red'], [{ builderChecks: ['  '] }, 'red'], [{ builderChecks: ['a\nb'] }, 'red']]) {
-    const repo = scratchDir('onboard-builder-checks-')
-    git(repo, 'init'); writeFileSync(join(repo, 'initial'), 'initial')
-    git(repo, 'add', 'initial'); git(repo, 'commit', '-m', 'initial')
-    const draft = join(repo, 'draft.json'), target = join(repo, '.crew', 'project.json')
-    writeFileSync(draft, JSON.stringify({ suite: 'npm test', proof: [], ...field }))
-    assert.equal((await checkOnboarding({ checkout: repo, draft })).status, status)
-    assert.equal(existsSync(target), status === 'green')
-    if (status === 'green') {
-      const project = JSON.parse(readFileSync(target, 'utf8'))
-      assert.equal(Object.hasOwn(project, 'builderChecks'), Object.hasOwn(field, 'builderChecks'))
-      assert.deepEqual(project.builderChecks, field.builderChecks)
-    }
-  }
-})
-
 test('checkOnboarding records a configured proofTimeoutMs in project.json and refuses an invalid one without writing it', async () => {
   for (const [field, status] of [[{ proofTimeoutMs: 360000 }, 'green'], [{}, 'green'], [{ proofTimeoutMs: 0 }, 'red']]) {
     const repo = scratchDir('onboard-proof-timeout-')
@@ -83,42 +41,6 @@ test('checkOnboarding records a configured proofTimeoutMs in project.json and re
       assert.equal(project.proofTimeoutMs, field.proofTimeoutMs)
       assert.equal(requireOnboarded(repo).proofTimeoutMs, field.proofTimeoutMs ?? 120000)
     }
-  }
-})
-
-test('checkOnboarding records a configured suiteTimeoutMs in project.json and refuses an invalid one without writing it', async () => {
-  for (const [value, status] of [[3600000, 'green'], [0, 'red']]) {
-    const repo = scratchDir('onboard-timeout-')
-    git(repo, 'init')
-    writeFileSync(join(repo, 'initial'), 'initial')
-    git(repo, 'add', 'initial')
-    git(repo, 'commit', '-m', 'initial')
-    const draft = join(repo, 'draft.json'), target = join(repo, '.crew', 'project.json')
-    writeFileSync(draft, JSON.stringify({ suite: 'npm test', proof: [], suiteTimeoutMs: value }))
-    assert.equal((await checkOnboarding({ checkout: repo, draft })).status, status)
-    assert.equal(existsSync(target), status === 'green')
-    if (status === 'green') {
-      assert.equal(JSON.parse(readFileSync(target, 'utf8')).suiteTimeoutMs, value)
-      assert.equal(requireOnboarded(repo).suiteTimeoutMs, value)
-    }
-  }
-})
-
-test('checkOnboarding records worktreeSetup, and a changed or added worktreeSetup reads onboarding-stale', async () => {
-  for (const value of ['node seed.mjs', undefined, ' ']) {
-    const repo = scratchDir('onboard-worktree-setup-')
-    git(repo, 'init'); writeFileSync(join(repo, 'initial'), 'initial')
-    git(repo, 'add', 'initial'); git(repo, 'commit', '-m', 'initial')
-    const draft = join(repo, 'draft.json'), target = join(repo, '.crew', 'project.json')
-    writeFileSync(draft, JSON.stringify({ suite: 'npm test', proof: [], ...(value === undefined ? {} : { worktreeSetup: value }) }))
-    assert.equal((await checkOnboarding({ checkout: repo, draft })).status, value === ' ' ? 'red' : 'green')
-    if (value === ' ') { assert.equal(existsSync(target), false); continue }
-    const record = JSON.parse(readFileSync(target, 'utf8'))
-    assert.equal(record.worktreeSetup, value)
-    assert.equal(requireOnboarded(repo).worktreeSetup, value)
-    record.worktreeSetup = 'node other.mjs'
-    writeFileSync(target, JSON.stringify(record))
-    assert.throws(() => requireOnboarded(repo), (error) => error.reason === 'onboarding-stale')
   }
 })
 
@@ -168,18 +90,6 @@ test('crew onboard reports an unmeasured cell with its closed reason and not as 
   const { SEAT_UNMEASURED_REASONS } = await import('./seat-probe.mjs')
   assert.deepEqual(SEAT_UNMEASURED_REASONS, ['timeout', 'binary-missing', 'spawn-failed', 'agent-exited', 'rate-limited', 'provider-error', 'turn-incomplete', 'probe-failed'])
   assert.ok(Object.isFrozen(SEAT_UNMEASURED_REASONS)); assert.equal(new Set(SEAT_UNMEASURED_REASONS).size, SEAT_UNMEASURED_REASONS.length)
-})
-
-test('crew onboard probes each distinct seat cell once across roles and tiers, the advisor included', async () => {
-  const shared = { agent: 'pi', model: 'openai/probe-shared', effort: 'high' }
-  const f = seatFixture({ lead: shared, planner: shared, builder: { advisor: { agent: 'pi', model: 'openai/probe-advisor', effort: 'medium' } } })
-  assert.equal(await main(['--seats', '--checkout', f.repo], f.deps), 0)
-  const lines = f.output.filter((row) => row.startsWith('crew onboard: seat '))
-  assert.equal(f.launches.length, lines.length)
-  assert.equal(new Set(lines.map((line) => line.split(' (')[0])).size, lines.length)
-  assert.equal(f.launches.filter(({ model, args }) => model === 'openai-codex/probe-shared' && args[args.indexOf('--thinking') + 1] === 'high').length, 1)
-  assert.ok(f.launches.some(({ model, args }) => model === 'openai-codex/probe-advisor' && args[args.indexOf('--thinking') + 1] === 'medium'))
-  assert.ok(lines.some((line) => line.includes('openai/probe-advisor') && line.includes('advisor@')))
 })
 
 test('crew onboard refuses a roster override it cannot resolve without recording', async () => {

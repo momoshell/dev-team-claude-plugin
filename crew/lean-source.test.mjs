@@ -56,7 +56,7 @@ test('a lane listing reads each journal once and a warm listing rereads no uncha
     syncBuiltinESMExports()
     const source = createLeanSource({ crewRoot, archiveRoot })
     source.listRuns()
-    assert.equal(counts.get(paths[0]), 1)
+    assert.deepEqual(paths.map((path) => counts.get(path)), [1, 1, 1, 1])
     for (const path of paths) counts.set(path, 0)
     const runs = source.listRuns()
     assert.deepEqual(paths.map((path) => counts.get(path)), [1, 0, 0, 0])

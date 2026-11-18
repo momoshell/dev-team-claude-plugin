@@ -12,6 +12,7 @@ import { recordPr } from './record-pr.mjs'
 import { projectHash, SUITE_TIMEOUT_DEFAULT_MS } from './onboard.mjs'
 import { PROOF_TIMEOUT_DEFAULT_MS } from './proof.mjs'
 import { laneRows } from './lanes.mjs'
+import { probeAlive } from './run-pid.mjs'
 
 const FINDING = { id: 'R1', severity: 'must-fix', location: 'lib.mjs:1', summary: 'Fix the defect' }
 const STOP = { reason: 'round-bound', observation: { stage: 'review', detail: 'three review rounds spent' } }
@@ -73,6 +74,30 @@ test('bare crew finish reports a published lane as published and an abandoned la
       try { assert.equal(await main(['lane9'], { crewRoot: f.root, log: (line) => logs.push(line) }), 0, kind) } finally { process.stderr.write = stderr }
       assert.ok(logs.includes(kind === 'published' ? `crew finish: lane=lane9 published ${PR.url}` : 'crew finish: lane=lane9 abandoned'))
       assert.doesNotMatch(errors.join(''), /finish-running/)
+    } finally { cleanup(f) }
+  }
+})
+
+test('idle assertion failures never refuse a crew finish', () => {
+  for (const kind of ['linux', 'missing', 'helper']) {
+    const f = fixture()
+    try {
+      const deps = { platform: kind === 'linux' ? 'linux' : 'darwin', spawn: () => { if (kind === 'linux') assert.fail('Linux must not spawn'); throw Object.assign(new Error('missing'), { code: 'ENOENT' }) } }
+      if (kind === 'helper') deps.holdIdleSleep = () => { throw new Error('helper failed') }
+      assert.doesNotThrow(run(f, deps).go)
+      for (const name of ['run.pid', 'finish-5.claim']) assert.match(readFileSync(join(f.taskDir, name), 'utf8'), /^4242 /)
+    } finally { cleanup(f) }
+  }
+})
+
+test('a claim whose pid now names a later process is taken over (S3-4)', () => {
+  for (const [startedAt, dead] of [[Date.now() - 86_400_000, true], [Math.round(performance.timeOrigin), false]]) {
+    const f = fixture()
+    try {
+      writeFileSync(join(f.taskDir, 'finish-5.claim'), `${process.pid} ${startedAt}\n`)
+      const attempt = run(f, { alive: probeAlive })
+      if (dead) { assert.doesNotThrow(attempt.go); assert.equal(attempt.spawned.length, 1) }
+      else { assert.throws(attempt.go, { reason: 'finish-running' }); assert.equal(attempt.spawned.length, 0) }
     } finally { cleanup(f) }
   }
 })
@@ -148,6 +173,28 @@ test('--abandon refuses finish-running, appends nothing and releases the claim w
       assert.equal(readFileSync(journal, 'utf8'), before + (change === 'journal' ? added : ''), change)
       assert.ok(!readdirSync(f.taskDir).some((name) => /^finish-decision-.*\.claim$/.test(name)), change)
       assert.deepEqual(signals, [], change)
+    } finally { cleanup(f) }
+  }
+})
+
+test('a dead open tail remains recoverable after finish spawning fails', () => {
+  for (const recovery of ['finish', 'record-pr']) for (const failure of ['throw', 'no-pid']) {
+    const f = fixture({ rows: [{ event: 'stage-start', stage: 'build' }, builderRow, { event: 'verdict', status: 'reviewed' }] })
+    try {
+      const path = join(f.taskDir, 'run.pid')
+      const alive = (pid) => pid !== 123
+      writeFileSync(path, '123\n')
+      assert.throws(run(f, { alive, spawnDetached: () => { if (failure === 'throw') throw new Error('EAGAIN'); return undefined } }).go, failure === 'throw' ? /EAGAIN/ : /no valid pid/)
+      assert.equal(existsSync(path), true)
+      assert.equal(readFileSync(path, 'utf8'), '123\n')
+      if (recovery === 'finish') {
+        run(f, { alive }).go()
+        assert.deepEqual(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.stop, { reason: 'run-died', observation: { pid: 123 } })
+      } else {
+        writeFileSync(join(f.root, 'dt-lane9', 'lane9', 'crew.json'), JSON.stringify({ members: { planner: { agent: 'pi' } } }))
+        recordPr({ lane: 'lane9', root: f.root, url: 'https://github.com/owner/repo/pull/1', alive })
+        assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'journal.jsonl'), 'utf8').trim().split('\n').at(-1)).event, 'pr')
+      }
     } finally { cleanup(f) }
   }
 })
@@ -232,6 +279,69 @@ test('a lane whose worktree is missing is refused as finish-worktree before any 
   } finally { cleanup(f) }
 })
 
+test('a finish spec carries the lead rulings journaled before the stop (#2341)', () => {
+  const rulings = [{ id: 'lead-bounce', summary: 'ruling 1' }]
+  const f = fixture({ rows: [
+    { event: 'run-start' }, builderRow,
+    { event: 'lead-rulings', rulings },
+    { event: 'verdict', stage: 'review', status: 'stopped', ...STOP },
+    { event: 'lead-rulings', rulings: [{ id: 'lead-bounce', summary: 'later' }] },
+  ] })
+  try {
+    run(f).go()
+    assert.deepEqual(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.rulings, rulings)
+  } finally { cleanup(f) }
+})
+
+// MUTATION: pass any env in the spawn options.
+test('a finish run inherits the caller environment and passes no env of its own', () => {
+  const f = fixture({ rows: [
+    { event: 'run-start', stage: null },
+    { event: 'envelope', role: 'planner', parsed: PLANNER, defects: [] },
+    ...['build', 'proof', 'review'].map((stage) => ({ event: 'stage-start', stage })),
+    builderRow,
+    { event: 'envelope', role: 'reviewer', parsed: { status: 'done' }, defects: [] },
+    { event: 'verdict', stage: 'review', status: 'reviewed', verdict: 'changes-needed', findings: [FINDING] },
+    { event: 'verdict', stage: 'review', status: 'stopped', ...STOP },
+  ] })
+  try {
+    const r = run(f)
+    r.go()
+    assert.equal(r.spawned.length, 1)
+    assert.equal(r.spawned[0].opts.env, undefined)
+  } finally { cleanup(f) }
+})
+
+// A replan the journal records as accepted (planner 3) or refused (planner 5).
+const replanRows = (accepted3) => {
+  const p3 = { ...PLANNER, id: 'lane9.planner.3', details: { ...PLANNER.details, plan_path: '/t/plan-3.md', tests: [] } }
+  const p5 = { ...PLANNER, id: 'lane9.planner.5', status: 'insufficient' }
+  return { p3, p5, rows: [
+    { event: 'run-start', stage: null },
+    { event: 'envelope', role: 'planner', id: 'lane9.planner.1', parsed: PLANNER, defects: [], error: null },
+    builderRow,
+    { event: 'envelope', role: 'planner', id: p3.id, parsed: p3, defects: accepted3 ? [] : ['details.tests is required'], error: null },
+    { event: 'envelope', role: 'planner', id: p5.id, parsed: p5, defects: [], error: null },
+    { event: 'verdict', stage: 'review', status: 'reviewed', verdict: 'changes-needed', findings: [FINDING] },
+    { event: 'verdict', stage: 'review', status: 'stopped', reason: STOP.reason, observation: STOP.observation },
+  ] }
+}
+
+test('a re-planned lane finishes on its latest accepted plan', () => {
+  for (const revised of [false, true]) {
+    const replan = replanRows(true)
+    const f = revised ? fixture({ rows: replan.rows }) : fixture()
+    try {
+      if (revised) {
+        writeFileSync(join(f.taskDir, 'planner-3.json'), JSON.stringify(replan.p3))
+        writeFileSync(join(f.taskDir, 'planner-5.json'), JSON.stringify(replan.p5))
+      }
+      assert.doesNotThrow(() => run(f).go())
+      assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.planPath, revised ? '/t/plan-3.md' : '/t/plan.md')
+    } finally { cleanup(f) }
+  }
+})
+
 // MUTATION: pass over an unrecorded newer plan for an older accepted one.
 test('a valid newer plan the journal does not mention refuses finish rather than resuming an older plan', () => {
   for (const recorded of [true, false]) {
@@ -249,6 +359,37 @@ test('a lane with a recorded PR or a committed build is refused', () => {
   for (const [row, reason] of [[{ event: 'pr', stage: 'operator', pr: { number: 1 } }, 'finish-published'], [{ event: 'commit', stage: 'commit', head: 'a'.repeat(40) }, 'finish-committed']]) {
     const f = fixture({ rows: [{ event: 'run-start', stage: null }, { event: 'stage-start', stage: 'build' }, builderRow, row, stop] })
     try { assert.throws(run(f, { git: () => ({ status: 'green', stdout: 'different' }) }).go, { reason }) } finally { cleanup(f) }
+  }
+})
+
+// MUTATION: drop the outcome status check and a red undo finishes.
+test('a commit the loop undid before its recheck stopped does not block a finish; a standing or failed undo is still refused', () => {
+  const head = 'a'.repeat(40)
+  const commit = { event: 'commit', stage: 'commit', head }
+  const greenUndo = { event: 'stage-end', stage: 'uncommit', outcome: { status: 'green', code: 0, reason: null } }
+  const review = { event: 'stage-start', stage: 'review' }
+  const stop = { event: 'verdict', stage: null, status: 'stopped', reason: 'round-bound' }
+  const base = [
+    { event: 'run-start', stage: null }, { event: 'stage-start', stage: 'build' }, builderRow,
+    { event: 'stage-end', stage: 'build' }, { event: 'stage-start', stage: 'commit' },
+    { event: 'stage-end', stage: 'commit', outcome: { status: 'green', head } }, commit,
+    { event: 'stage-start', stage: 'fetch' }, { event: 'stage-end', stage: 'fetch' },
+    { event: 'stage-start', stage: 'rebase' }, { event: 'stage-end', stage: 'rebase' },
+    { event: 'stage-start', stage: 'uncommit' },
+  ]
+  for (const [name, tail, allowed] of [
+    ['undone', [greenUndo, review], true],
+    ['failed undo', [{ ...greenUndo, outcome: { status: 'red', reason: 'command-failed' } }], false],
+    ['thrown undo', [{ ...greenUndo, outcome: { threw: 'error' } }], false],
+    ['never ended', [], false],
+    ['re-committed', [greenUndo, review, commit], false],
+  ]) {
+    const f = fixture({ rows: [...base, ...tail, stop] })
+    try {
+      const attempt = run(f, { git: () => ({ status: 'green', stdout: 'different' }) })
+      if (allowed) { assert.doesNotThrow(() => attempt.go(), name); assert.equal(attempt.spawned.length, 1, name) }
+      else { assert.throws(() => attempt.go(), (e) => e instanceof FinishRefusal && e.reason === 'finish-committed', name); assert.equal(attempt.spawned.length, 0, name) }
+    } finally { cleanup(f) }
   }
 })
 
@@ -344,6 +485,31 @@ test('--return on an escalated lane with no schema-valid builder envelope is ref
       assert.equal(await reasonOf(decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps: { platform: 'linux', log: () => {}, spawnDetached: () => { spawned.push(true); return 4242 } } })), 'finish-no-build')
       assert.deepEqual(Object.fromEntries(readdirSync(f.taskDir).map((name) => [name, readFileSync(join(f.taskDir, name), 'utf8')])), before)
       assert.deepEqual(spawned, [])
+    } finally { cleanup(f) }
+  }
+})
+
+test('a returned finish pass that escalates carries its spent reviews into the next --return', async () => {
+  const review = [{ event: 'envelope', role: 'reviewer' }, { event: 'verdict', status: 'reviewed' }]
+  const stop = { event: 'verdict', stage: 'review', status: 'stopped', reason: 'seat-escalated' }
+  for (const [history, recovered] of [
+    [[{ event: 'finish-ready', reviewRounds: 1 }, { event: 'finish-decision', choice: 'return' }, ...review], false],
+    [[...review, stop, { event: 'finish-decision', choice: 'return' }, ...review], false],
+    [[{ event: 'envelope', role: 'reviewer' }, stop, { event: 'finish-decision', choice: 'return' }, ...review], false],
+    [[...review, ...review], true],
+  ]) {
+    const original = [{ event: 'run-start' }, builderRow, ...review, ...review, ...review]
+    const f = fixture({ rows: [...original, ...(recovered ? [] : [stop]), { event: 'finish-decision', choice: 'return' }, ...history, stop] })
+    try {
+      if (recovered) writeFileSync(join(f.taskDir, 'finish.json'), JSON.stringify({ finish: { stop: { reason: 'run-died' }, recoveredStopAt: original.length + 1 } }))
+      const file = join(f.base, 'guidance')
+      writeFileSync(file, 'answer')
+      const spawned = []
+      assert.equal(await reasonOf(decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps: { platform: 'linux', log: () => {}, spawnDetached: () => { spawned.push(true); return 4242 } } })), null)
+      const finish = JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish
+      assert.equal(finish.priorReviewRounds, 2)
+      if (recovered) assert.equal(finish.recoveredStopAt, original.length + 1)
+      assert.equal(spawned.length, 1)
     } finally { cleanup(f) }
   }
 })
@@ -461,15 +627,18 @@ test('a return decision recorded after its child ends belongs to the original st
 
 // ---- decisions on a ready lane ----
 const PR = { number: 73, url: 'https://github.com/o/r/pull/73' }
-function ready(extra = [], { spec = {} } = {}) {
+function ready(extra = [], { before = [], legacy = false, spec = {} } = {}) {
   const f = fixture({ rows: [
     { event: 'run-start', stage: null },
     { event: 'envelope', role: 'planner', id: 'lane9.planner.1', parsed: PLANNER, defects: [], error: null },
     builderRow,
     { event: 'verdict', stage: 'review', status: 'stopped', reason: STOP.reason, observation: STOP.observation },
     { event: 'commit', stage: 'commit', head: 'a'.repeat(40) },
+    ...before,
     ...(Object.hasOwn(spec, 'onboarded') ? [{ event: 'stage-end', stage: 'rebase', outcome: { status: 'green', head: 'b'.repeat(40), onto: 'c'.repeat(40) } }] : []),
-    { event: 'finish-ready', stage: null, status: 'ready-for-operator', head: 'b'.repeat(40), subject: 'fix(crew): planned lane', body: 'MEASURED BODY', reviewRounds: 2 },
+    legacy
+      ? { event: 'finish-ready', stage: null, status: 'ready-for-operator', head: 'b'.repeat(40) }
+      : { event: 'finish-ready', stage: null, status: 'ready-for-operator', head: 'b'.repeat(40), subject: 'fix(crew): planned lane', body: 'MEASURED BODY', reviewRounds: 2 },
     ...extra,
   ] })
   const specPath = join(f.taskDir, 'lean.json')
@@ -515,6 +684,21 @@ test('--accept refuses a recalibrated project file with an unreadable base and p
       if (reason) assert.deepEqual(r.rowsOf(), before)
     } finally { cleanup(r.f) }
   }
+})
+
+test('--accept publishes a lane rebased onto a recalibrated onboarding that is the base\'s file with the lane\'s suite, recording both hashes (#2373)', async () => {
+  const spec = { onboarded: 'a'.repeat(64), suite: { command: 'npm', args: ['test'], timeoutMs: SUITE_TIMEOUT_DEFAULT_MS }, proofTimeoutMs: PROOF_TIMEOUT_DEFAULT_MS }
+  const r = ready([], { spec })
+  try {
+    const project = { suite: 'npm test', proof: [{ match: '*.xml', run: 'node run.mjs' }], builderChecks: ['npm test'], worktreeSetup: 'npm install' }
+    const hash = projectHash(project), text = JSON.stringify({ ...project, onboarded: { hash } })
+    mkdirSync(join(r.f.cwd, '.crew'), { recursive: true })
+    writeFileSync(join(r.f.cwd, '.crew', 'project.json'), text)
+    r.deps.git = (_cwd, args) => args[0] === 'show' && args[1] === `${'c'.repeat(40)}:.crew/project.json` ? { status: 'green', stdout: text } : { status: 'red', stdout: '' }
+    assert.equal(await reasonOf(r.decide('accept')), null)
+    assert.equal(r.published.length, 1)
+    assert.deepEqual(r.rowsOf().at(-1).onboarding, { start: spec.onboarded, finish: hash })
+  } finally { cleanup(r.f) }
 })
 
 test('--accept refuses a recalibrated onboarding whose suite or timeouts differ from the lane\'s, naming the field (#2373)', async () => {
@@ -661,6 +845,24 @@ test('--return spawns a finish run whose spec carries the guidance and the spent
   } finally { cleanup(failed.f) }
 })
 
+// MUTATION: skip the ready test and a decision publishes a lane that never finished.
+test('a decision on a lane whose last run did not end finish-ready is refused as finish-not-ready (FD8)', async () => {
+  const stoppedAfter = { event: 'verdict', stage: null, status: 'stopped', reason: 'round-bound' }
+  const none = fixture()
+  try {
+    const published = []
+    assert.equal(await reasonOf(decideFinish({ lane: 'lane9', root: none.root, choice: 'accept', deps: { openPullRequest: async (i) => { published.push(i) }, log: () => {} } })), 'finish-not-ready')
+    assert.equal(published.length, 0)
+  } finally { cleanup(none) }
+  for (const [choice, extra] of [['accept', [stoppedAfter]], ['accept', [{ event: 'stage-start', stage: 'build' }]], ['abandon', [{ event: 'stage-start', stage: 'build' }]]]) {
+    const r = ready(extra)
+    try {
+      assert.equal(await reasonOf(r.decide(choice)), 'finish-not-ready')
+      assert.deepEqual([r.published.length, r.spawned.length], [0, 0])
+    } finally { cleanup(r.f) }
+  }
+})
+
 // MUTATION: claim only --return and an accept in flight is raced by an abandon (or the reverse) that also records a decision.
 test('overlapping decisions on one ready lane: the first claims it, the others are refused as finish-decided, and a failure releases the claim', async () => {
   for (const [first, second] of [['accept', 'abandon'], ['accept', 'return'], ['accept', 'accept'], ['abandon', 'accept']]) {
@@ -786,6 +988,19 @@ test('--accept refuses a checkout that moved off the finish run head, publishing
   } finally { cleanup(r.f) }
 })
 
+// MUTATION: default a missing reviewRounds to zero and a legacy ready row regains three review rounds.
+test('--return on a legacy ready row counts the finish reviews already in the journal', async () => {
+  const review = (n) => [{ event: 'envelope', role: 'reviewer', id: `lane9.reviewer.${n}`, parsed: {}, defects: [], error: null }, { event: 'verdict', status: 'reviewed', verdict: 'changes-needed', findings: [] }]
+  const r = ready([], { legacy: true, before: [1, 2].flatMap(review) })
+  try {
+    const file = join(r.f.base, 'return.md')
+    writeFileSync(file, 'More')
+    await r.decide('return', file)
+    const spec = JSON.parse(readFileSync(join(r.f.taskDir, 'finish.json'), 'utf8'))
+    assert.equal(spec.finish.priorReviewRounds, 2)
+  } finally { cleanup(r.f) }
+})
+
 // MUTATION: drop the constructor's FINISH_REASONS check and an unlisted reason constructs.
 test('FinishRefusal accepts only a reason in the frozen FINISH_REASONS list', () => {
   const reasons = finishModule.FINISH_REASONS
@@ -797,6 +1012,30 @@ test('FinishRefusal accepts only a reason in the frozen FINISH_REASONS list', ()
   assert.throws(() => new FinishRefusal('finish-bogus', 'x'), TypeError)
   const source = readFileSync(new URL('./finish.mjs', import.meta.url), 'utf8')
   for (const [, reason] of source.matchAll(/new FinishRefusal\('([^']+)'/g)) assert.ok(reasons.includes(reason), reason)
+})
+
+// MUTATION: treat an unknown liveness (null) as gone and an EPERM claim is taken over.
+test('a claim whose run is provably gone does not block a retry; a live, unknown or locked claim is still finish-running', () => {
+  for (const mode of ['dead', 'live', 'unknown', 'invalid', 'locked']) {
+    const f = fixture()
+    try {
+      run(f).go()
+      const claim = join(f.taskDir, 'finish-5.claim')
+      assert.match(readFileSync(claim, 'utf8'), /^4242 \d+\n$/)
+      if (mode === 'invalid') writeFileSync(claim, 'not a pid\n')
+      if (mode === 'locked') writeFileSync(join(f.taskDir, 'finish-5.reclaim'), 'locked')
+      const seen = []
+      const attempt = run(f, { alive: (pid) => { seen.push(pid); return mode === 'live' ? true : mode === 'unknown' ? null : false } })
+      if (mode === 'dead') {
+        attempt.go()
+        assert.equal(attempt.spawned.length, 1)
+        assert.ok(seen.includes(4242))
+      } else {
+        assert.throws(attempt.go, { reason: 'finish-running' }, mode)
+        assert.equal(attempt.spawned.length, 0, mode)
+      }
+    } finally { cleanup(f) }
+  }
 })
 
 // MUTATION: skip the HEAD equality check and a moved checkout is reset off its own build.

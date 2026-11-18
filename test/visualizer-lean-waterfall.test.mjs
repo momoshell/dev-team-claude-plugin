@@ -65,6 +65,23 @@ test('a build stage with a lead turn inside it shows the builder turn seconds ap
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+test('WP2 scales recorded phases with a minimum visible width', () => {
+  // MUTATION: remove the Math.max minimum-width floor.
+  const run = { source: 'lean', phases: [phase(1, 0, 1000000), phase(2, 0, 1), phase(3, 200000, 200123), phase(4, 500000, 500000), phase(5, 999999, 1000000)] }
+  const original = structuredClone(run), result = layoutTimeline(run)
+  assert.equal(result.origin_at, new Date(base).toISOString()); assert.equal(result.span_ms, 1000000)
+  assert.equal(result.blocks.length, 5)
+  for (const [i, block] of result.blocks.entries()) {
+    const p = run.phases[i], duration = p.ended_at - p.started_at
+    assert.equal(block.id, p.id); assert.equal(block.width, Math.max(0.02, duration / 1000000))
+    assert.equal(block.duration_ms, duration); assert.equal(block.x, (p.started_at - base) / 1000000)
+  }
+  assert.deepEqual(run, original)
+  const zero = layoutTimeline({ source: 'lean', phases: [phase(10, 500, 500)] })
+  assert.equal(zero.span_ms, 0); assert.equal(zero.blocks[0].width, 0.02); assert.equal(zero.blocks[0].duration_ms, 0); assert.equal(zero.blocks[0].x, 0)
+  assert.match(source('LeanWaterfall.svelte'), /block\.width \* 100/)
+})
+
 test('WP3 formats valid durations and rejects invalid values', () => {
   // MUTATION: replace the seconds conversion with raw milliseconds.
   for (const [ms, expected] of [[0, '0s'], [1, '0.001s'], [123, '0.123s'], [1500, '1.5s'], [60000, '1m 0s'], [165213, '2m 45.213s'], [664000, '11m 4s']]) assert.equal(formatLeanDuration(ms), expected)

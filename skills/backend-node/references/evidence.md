@@ -66,13 +66,13 @@ pins EPERM, unknown, interrupted, and empty import-scan outcomes.
 ### CLI parser interruption and missing values
 
 No dedicated local test was found for an interrupted flag parse, a missing
-`--checkout` value, duplicate flags or unknown flags.
+`--checkout` value, duplicate flags or unknown flags other than `--check`.
 `main` in `crew/start.mjs` owns the vocabulary, usage and refusal text/status,
 and success status. In `crew/start.test.mjs`, `main reports usage, refusals and success as exit codes`
 asserts no-argument/two-brief usage statuses and a refusal, not success or exact
 usage text. `throwing injected loggers do not change start metadata or main status`
-asserts that a valid `--checkout` start returns 0. The `--check` refusal and exact
-usage text are no longer pinned by a test.
+asserts that a valid `--checkout` start returns 0. `main refuses --check as usage and starts nothing` asserts the
+status and exact usage text for its `--check` shapes only.
 
 Keep the other edge rules in `cli-flags.md` marked unbacked until a test pins them.
 
@@ -94,10 +94,12 @@ usage parse after work has started.
 `createStreamReducer`, the `execute` result construction and `usageRow` in
 `crew/pi/extensions/subagent.ts` own the complete-or-absent and journal-null
 contract; no test pins that whole contract. In `crew/pi/extensions/subagent.test.mjs`,
+`the reducer folds what the rule claims` builds a fresh reducer for each fixture
+frame and checks `usage()`: `null` for the fixtures the rule excludes, all four
+billed-token fields for the measured assistant fixture. In the same file,
 `every pre-spawn refusal is bounded, payload-free, spawns nothing and journals nothing`
 and `the child is spawned under a deadline that escalates to SIGKILL` assert
-public-key absence only on their selected refusal and timeout paths. They do not
-assert reducer usage or `usage: null` in a budget-refusal journal row.
+public-key absence only on their selected refusal and timeout paths.
 
 Keep interrupted-child and failed-parse instructions in `usage-records.md`
 marked unbacked until those paths receive a measured fixture.

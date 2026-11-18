@@ -151,6 +151,17 @@ test('result-time repeated-failure notes and queued triggers retain the result c
   assert.equal(queued.call_ordinal, 2)
   rmSync(f.root, { recursive: true, force: true })
 })
+test('ADR47-L2 C3 grant attaches without a manifest or retired model environment', async () => {
+  const f = fixture(); rmSync(join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE))
+  const p = pi(); const journal = sink()
+  await advisor.attachAdvisor(p, {
+    env: { CREW_ADVISOR: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: f.taskDir },
+    deps: { taskDir: f.taskDir, appendFile: journal.appendFile },
+  })
+  assert.deepEqual(p.handlers.map(([event]) => event).sort(), ['tool_call', 'tool_result'])
+  assert.equal(journal.rows.find((row) => row.advisor_boot)?.advisor_boot.outcome, 'attached')
+  rmSync(f.root, { recursive: true, force: true })
+})
 test('a nonzero child exit journals its exit code and stderr tail on the cell failure row', async () => {
   const r = await runManifestConsult({ childOptions: { exitCode: 1, stderr: 'pi: provider refused the request\n' } })
   try {
@@ -197,6 +208,38 @@ test('an epoch-aborted consult writes no cell failure and never prices its parti
   assert.equal(usage.usage_reason, 'usage-incomplete')
   assert.equal(journal.rows.filter((row) => row.advisor_cell_failure).length, 0)
   rmSync(f.root, { recursive: true, force: true })
+})
+// Kills: the `!settled && !failure` guard dropped from the abort or the timeout callback. A
+// stdout failure is the consult's cause; an epoch abort or a timeout that lands while the child
+// is still closing must neither clear that cell failure nor relabel it as a timeout.
+test('a later epoch abort or timeout never clears or relabels an earlier stream failure', async () => {
+  for (const late of ['abort', 'timeout']) {
+    const callbacks = []; const f = fixture(); const journal = sink()
+    const manifestPath = join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE)
+    const m = JSON.parse(readFileSync(manifestPath, 'utf8')); m.cell = { provider: 'local', id: 'advisor-v1', agent: 'pi', effort: 'high', model: 'local/advisor-v1' }
+    writeFileSync(manifestPath, JSON.stringify(m))
+    const child = () => {
+      const c = new EventEmitter(); c.stdout = new PassThrough(); c.stderr = new PassThrough(); c.kill = () => true
+      c.stdin = { end() { setImmediate(() => c.stdout.emit('error', new Error('broken pipe'))) } }
+      return c
+    }
+    const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir }), deps: { cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile, readFile: (p) => readFileSync(p, 'utf8'), fileMtime: () => 2, resolveBinary: () => ({ command: '/fake/pi' }), spawn: child, setTimeout(fn) { callbacks.push(fn); return callbacks.length }, clearTimeout() {}, consultTimeoutMs: 5, childKillGraceMs: 1 } })
+    const source = join(f.tree, 'lib/widget.mjs'); const path = join(f.tree, 'widget.test.mjs')
+    a.onToolResult(result('g', 'read', { path: source }, 'lib/widget.mjs:2: grounded'), {})
+    a.onToolCall(call('f', 'write', { path, content: 'x' }), {}); a.onToolResult(result('f', 'write', { path, content: 'x' }, 'ok'), {})
+    for (let i = 0; i < 4; i++) await new Promise((r) => setImmediate(r))
+    // callbacks[0] is the consult timeout; the stream failure has already scheduled the kill timers.
+    if (late === 'abort') {
+      writeFileSync(manifestPath, JSON.stringify({ ...m, run_started_at: 2 }))
+      a.onToolResult(result('g2', 'read', { path: source }, 'lib/widget.mjs:2: grounded'), {})
+    } else callbacks.shift()()
+    for (let i = 0; i < 8; i++) { callbacks.splice(late === 'abort' ? 1 : 0, 1)[0]?.(); await new Promise((r) => setImmediate(r)) }
+    await a.settled()
+    const failures = journal.rows.filter((row) => row.advisor_cell_failure).map((row) => row.advisor_cell_failure)
+    assert.equal(failures.length, 1, late)
+    assert.equal(failures[0].kind, 'transport-error', late)
+    rmSync(f.root, { recursive: true, force: true })
+  }
 })
 
 test('the default export IS attachAdvisor: inert without the grant, and it refuses an unsupported role by name', async () => {
@@ -268,6 +311,28 @@ test('validation and failure helpers are closed and payload-free', () => {
   const verdict = advisor.validateJudgment({ class: 'bad', severity: 'high', claim: '', evidence: ['x.mjs:1'], marker: 'secret' }, { anchors: new Set(['x.mjs:1']) })
   assert.ok(verdict.codes.every((code) => advisor.JUDGMENT_ERROR_CODES.includes(code)))
   assert.ok(verdict.codes.every((code) => !code.includes('secret')))
+})
+
+test('AD5 tier-zero notes are deterministic and tier one is journal-first', async () => {
+  const f = fixture(); const journal = sink(); const sends = []
+  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir }), deps: {
+    cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile,
+    readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
+    spawn: () => fakeChild(), send: (message, options) => sends.push({ message, options }),
+  } })
+  const outside = join(f.tree, 'outside.mjs'); writeFileSync(outside, 'a\n')
+  const input = { path: outside, edits: [{ oldText: 'a', newText: 'aa' }] }
+  a.onToolCall(call('1', 'edit', input), {}); a.onToolResult(result('1', 'edit', input, 'ok'), {})
+  await a.settled()
+  const notes = journal.rows.filter((row) => row.advisor_note).map((row) => row.advisor_note)
+  assert.ok(notes.some((note) => note.tier === 0 && note.kind === advisor.SCOPE_BREACH))
+  assert.ok(notes.some((note) => note.tier === 1 && note.outcome === 'injected'))
+  assert.equal(sends.length, 2)
+  assert.ok(sends.every((send) => send.options.deliverAs === 'steer'))
+  assert.ok(sends.every((send) => send.options.triggerTurn === undefined))
+  assert.ok(sends.some((send) => send.message.details.tier === 0))
+  assert.ok(sends.some((send) => send.message.details.tier === 1))
+  rmSync(f.root, { recursive: true, force: true })
 })
 
 test('delta redaction names each kind it removes and leaves ordinary source alone', () => {
@@ -411,6 +476,32 @@ test('every delta source is redacted before it is stored, sent or frozen', async
 })
 
 
+test('RV1-3 journals stale child consult usage before suppressing stale notes', async () => {
+  const f = fixture(); const journal = sink(); let finish
+  const spawn = () => {
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
+    child.stdin = { end() { finish = () => { child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: JSON.stringify({ class: 'edge-path', severity: 'low', claim: 'stale finding', evidence: ['lib/widget.mjs:2'] }), usage: { input: 4, output: 2 } } }) + '\n'); child.emit('close', 0) } } }
+    child.kill = () => true; return child
+  }
+  const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir, CREW_ADVISOR_MODEL: 'provider/model' }), deps: {
+    cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile, readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2,
+    resolveBinary: () => ({ command: '/stub/pi', args: [] }), spawn,
+  } })
+  const readPath = join(f.tree, 'lib', 'widget.mjs')
+  a.onToolResult(result('stale-read', 'read', { path: readPath, offset: 1 }, 'lib/widget.mjs:2: evidence'), {})
+  const change = { path: join(f.tree, 'stale.mjs'), edits: [{ newText: 'x' }] }
+  a.onToolCall(call('stale', 'edit', change), {}); a.onToolResult(result('stale', 'edit', change, 'ok'), {})
+  await new Promise((resolve) => setImmediate(resolve))
+  writeFileSync(join(f.taskDir, advisor.ADVISOR_MANIFEST_FILE), JSON.stringify({ schema_version: 1, run_started_at: 2, tripwires: [] }))
+  finish()
+  await a.settled()
+  const consults = journal.rows.filter((row) => row.advisor_consult).map((row) => row.advisor_consult)
+  assert.equal(consults.length, 1)
+  assert.deepEqual(consults[0].usage, { billed_input_tokens: 4, billed_output_tokens: 2, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 })
+  assert.equal(a.notes().some((note) => note.claim === 'stale finding'), false)
+  rmSync(f.root, { recursive: true, force: true })
+})
+
 test('A3 clockfree pi-child timeout, oversize output and invalid frames are closed failures', async () => {
   for (const mode of ['timeout', 'oversize', 'invalid']) {
     const f = fixture(); const journal = sink(); const timers = manualTimers(5)
@@ -508,6 +599,25 @@ test('spend class (e): zero own-spend frames keep usage-unavailable, and a compl
   assert.equal(measured.usage_reason, null)
 })
 
+for (const stream of ['stderr']) {
+  test(`E${stream === 'stdout' ? 1 : 2} advisor ${stream} stream error`, async () => {
+    const signals = []
+    const childSpawn = () => {
+      const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
+      child.stdin = { end() { setImmediate(() => child[stream].emit('error', new Error('read failed'))) } }
+      child.kill = (signal) => { signals.push(signal); setImmediate(() => child.emit('close', null)); return true }
+      return child
+    }
+    const c = childConsult({ childSpawn, extraDeps: { childKillGraceMs: 5 } })
+    try {
+      await c.run()
+      assert.deepEqual(signals, ['SIGTERM'])
+      const rejected = c.journal.rows.find((row) => row.advisor_note?.tier === 1 && row.advisor_note?.outcome === 'rejected')?.advisor_note
+      assert.ok(rejected?.codes.includes('transport-failed'))
+    } finally { c.cleanup() }
+  })
+}
+
 test('an asynchronous EPIPE on the child stdin fails the consult as transport-failed instead of crashing the seat', async () => {
   const signals = []
   const childSpawn = () => {
@@ -527,25 +637,60 @@ test('an asynchronous EPIPE on the child stdin fails the consult as transport-fa
   } finally { c.cleanup() }
 })
 
+function framesChild(frames, { chunked = false } = {}) {
+  return () => {
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough()
+    child.stdin = { end() { setImmediate(() => {
+      if (chunked) for (const frame of frames) child.stdout.write(frame)
+      else child.stdout.write(frames.join(''))
+      setImmediate(() => child.emit('close', 0))
+    }) } }
+    child.kill = () => { setImmediate(() => child.emit('close', null)); return true }
+    return child
+  }
+}
+const judgmentFrame = (claim) => JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: JSON.stringify({ class: 'edge-path', severity: 'low', claim, evidence: ['lib/widget.mjs:2'] }) } }) + '\n'
+
+test('many small frames whose TOTAL exceeds the stream cap are rejected body-too-large', async () => {
+  const { STREAM_CAP_BYTES } = await import('./subagent.ts')
+  const filler = JSON.stringify({ type: 'turn_start', pad: 'x'.repeat(1000) }) + '\n'
+  const count = Math.ceil(STREAM_CAP_BYTES / Buffer.byteLength(filler)) + 1
+  const frames = [...Array.from({ length: count }, () => filler), judgmentFrame('Guard at lib/widget.mjs:2 misses the null path.')]
+  assert.ok(frames.every((frame) => Buffer.byteLength(frame) < advisor.RESPONSE_CAP_BYTES))
+  const c = childConsult({ childSpawn: framesChild(frames, { chunked: true }), extraDeps: { childKillGraceMs: 5 } })
+  try {
+    await c.run()
+    const notes = c.journal.rows.filter((row) => row.advisor_note).map((row) => row.advisor_note)
+    assert.ok(notes.find((note) => note.outcome === 'rejected')?.codes.includes('body-too-large'))
+    assert.equal(JSON.stringify(notes).includes('misses the null path'), false)
+  } finally { c.cleanup() }
+})
+
 // Consult-path guards for the delivery fix (lane b1147). They drive createAdvisor end to end:
 // a fake judgment child returns `reply`, and the journal rows and steers are observed.
 const adGood = (claim) => ({ class: 'edge-path', severity: 'medium', claim, evidence: ['lib/widget.mjs:1'] })
-async function adDrive(reply) {
+async function adDrive(reply, { noCell = false, denyAppend = false } = {}) {
   const root = scratchDir('advisor-ad-')
   const taskDir = join(root, 'task'), tree = join(root, 'tree'), rows = [], sends = []
   mkdirSync(taskDir); mkdirSync(join(root, 'returns')); mkdirSync(join(tree, 'lib'), { recursive: true })
   writeFileSync(join(tree, 'lib/widget.mjs'), 'const widget = null\n')
   writeFileSync(join(taskDir, advisor.ADVISOR_MANIFEST_FILE), JSON.stringify({
     schema_version: 1, run_started_at: 1, tripwires: [],
-    cell: { provider: 'local', id: 'advisor', agent: 'pi', effort: 'medium', model: 'local/advisor' },
+    ...(noCell ? {} : { cell: { provider: 'local', id: 'advisor', agent: 'pi', effort: 'medium', model: 'local/advisor' } }),
   }))
   writeFileSync(join(taskDir, 'plan.md'), '# plan\n'); writeFileSync(join(taskDir, 'planner-1.json'), JSON.stringify({ role: 'planner', id: 'lane.planner.1', status: 'done', summary: 'fixture', details: { subject: 'fix(crew): advisor fixture', plan_path: 'plan.md', tests: [], files_in_scope: ['lib/'], validation_lane: 'npm test' } }))
+  let spawned = 0
   const seat = advisor.createAdvisor({ env: { CREW_ADVISOR: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: taskDir }, deps: {
     taskDir, cwd: tree, fileMtime: () => 2, readFile: (p) => readFileSync(p, 'utf8'), diffSize: () => null,
     resolveBinary: () => ({ command: '/fake/pi', args: [] }),
-    appendFile: (_p, text) => { rows.push(...String(text).trim().split('\n').map(JSON.parse)) },
-    send: (message, options) => sends.push({ message, options }),
+    appendFile: (_p, text) => {
+      const parsed = String(text).trim().split('\n').map((line) => JSON.parse(line))
+      if (denyAppend && parsed.some((row) => row.advisor_note?.tier === 0)) throw Object.assign(new Error('denied'), { code: 'EPERM' })
+      rows.push(...parsed)
+    },
+    send: (message, options) => sends.push({ message, options, journalFirst: rows.some((row) => JSON.stringify(row.advisor_note) === JSON.stringify(message.details)) }),
     spawn: () => {
+      spawned++
       const child = new EventEmitter()
       child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => true
       child.stdin = { end() { setImmediate(() => {
@@ -561,7 +706,7 @@ async function adDrive(reply) {
     seat.onToolCall({ toolCallId: 'write', toolName: 'write', input }, {})
     seat.onToolResult({ toolCallId: 'write', toolName: 'write', input, content: [{ type: 'text', text: 'ok' }] }, {})
     await seat.settled()
-    return { rows, sends }
+    return { rows, sends, spawned }
   } finally { rmSync(root, { recursive: true, force: true }) }
 }
 const adTier1 = (r) => r.rows.filter((row) => row.advisor_note?.tier === 1).map((row) => row.advisor_note)
@@ -581,8 +726,42 @@ test('AD4 a rejected reply journals a bounded redacted excerpt', async () => {
   assert.equal(results.reduce((n, r) => n + adSent1(r).length, 0), 0)
 })
 
+// MUTATION AD5: neutralise the emitTier0 send — a scope breach is journaled injected but never reaches the builder.
+test('AD5 a tier-zero note is journaled first and then sent as a steer', async () => {
+  const [r, denied] = await Promise.all([adDrive('', { noCell: true }), adDrive('', { noCell: true, denyAppend: true })])
+  assert.deepEqual(r.rows.filter((row) => row.advisor_note).map((row) => row.advisor_note.outcome), ['injected'])
+  assert.deepEqual(r.sends.map((s) => ({ type: s.message.customType, content: s.message.content, delivery: s.options.deliverAs, display: s.message.display, noTriggerTurn: s.options.triggerTurn === undefined, journalFirst: s.journalFirst })),
+    [{ type: 'crew-advisor', content: 'The builder seat touched outside.mjs outside the declared scope.', delivery: 'steer', display: true, noTriggerTurn: true, journalFirst: true }])
+  assert.equal(r.spawned, 0)
+  assert.equal(denied.sends.length, 0)
+})
+
+// MUTATION AS2: replace evidence's array requirement with prose.
+test('AS2 malformed reply shapes are rejected and mapped to prompt clauses', () => {
+  const badEvidence = 'The path is not handled.'
+  const shapes = [
+    [{ class: 'edge-path', severity: 'unassessed', claim: 'The empty input path is not handled.', evidence: [badEvidence] }, ['evidence-invalid', 'severity-invalid']],
+    [{ class: 'edge-path', severity: 'low', claim: 'The empty input path is not handled.', evidence: badEvidence }, ['evidence-invalid']],
+    [{ judgments: [{ class: 'edge-path', severity: 'low', claim: 'The empty input path is not handled.', evidence: ['src/widget.mjs:12'] }] }, ['claim-invalid', 'class-invalid', 'evidence-invalid', 'severity-invalid', 'unknown-key']],
+  ]
+  for (const [shape, expected] of shapes) {
+    const verdict = advisor.validateReply(shape, { anchors: new Set(['src/widget.mjs:12']) })
+    assert.equal('judgment' in verdict, false)
+    assert.deepEqual([...verdict.codes].sort(), expected)
+  }
+  const required = {
+    'unknown-key': 'exactly the four keys class, severity, claim and evidence',
+    'class-invalid': 'class must be one of edge-path, over-claim',
+    'severity-invalid': 'severity must be one of low, medium, high',
+    'claim-invalid': 'claim must be a non-empty string of at most 500 UTF-8 bytes',
+    'evidence-invalid': 'evidence must be an array of 1 to 5 strings',
+  }
+  for (const clause of new Set(shapes.flatMap(([, codes]) => codes).map((code) => required[code]))) assert.ok(advisor.BUILDER_SYSTEM_PROMPT.includes(clause), clause)
+  assert.ok(advisor.BUILDER_SYSTEM_PROMPT.includes('exactly a bare path:line'))
+})
+
 // Shared consult harness follows gate.mjs's fake child and never resolves a real pi.
-async function rjDrive(reply, { mode = 'reply', digest } = {}) {
+async function rjDrive(reply, { mode = 'reply', digest, repeated = false } = {}) {
   const root = scratchDir('advisor-rj-')
   const taskDir = join(root, 'task'), tree = join(root, 'tree'), rows = [], sends = []
   mkdirSync(taskDir); mkdirSync(join(root, 'returns')); mkdirSync(join(tree, 'lib'), { recursive: true })
@@ -592,7 +771,7 @@ async function rjDrive(reply, { mode = 'reply', digest } = {}) {
     cell: { provider: 'local', id: 'advisor', agent: 'pi', effort: 'medium', model: 'local/advisor' },
   }))
   writeFileSync(join(taskDir, 'plan.md'), '# plan\n'); writeFileSync(join(taskDir, 'planner-1.json'), JSON.stringify({ role: 'planner', id: 'lane.planner.1', status: 'done', summary: 'fixture', details: { subject: 'fix(crew): advisor fixture', plan_path: 'plan.md', tests: [], files_in_scope: ['lib/'], validation_lane: 'npm test' } }))
-  let timeoutFn
+  let timeoutFn, childIndex = 0
   const deps = {
     taskDir, cwd: tree, fileMtime: () => 2, readFile: p => readFileSync(p, 'utf8'), diffSize: () => null,
     resolveBinary: () => ({ command: '/fake/pi', args: [] }),
@@ -608,9 +787,10 @@ async function rjDrive(reply, { mode = 'reply', digest } = {}) {
       child.stdin = { end() {
         if (mode === 'timeout') { setImmediate(() => timeoutFn()); return }
         setImmediate(() => {
+          const current = childIndex++
           if (mode === 'bad-frame') child.stdout.write('not-json\n')
           else if (mode === 'oversize') child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: 'x'.repeat(66000) } }) + '\n')
-          else child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: reply, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } } }) + '\n')
+          else child.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: Array.isArray(reply) ? reply[current] : reply, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } } }) + '\n')
           child.emit('close', mode === 'exit' ? 1 : 0)
         })
       } }
@@ -620,14 +800,42 @@ async function rjDrive(reply, { mode = 'reply', digest } = {}) {
   const seat = advisor.createAdvisor({ env: { CREW_ADVISOR: '1', CREW_ROLE: 'builder', CREW_TASK_DIR: taskDir }, deps })
   try {
     seat.onToolResult({ toolCallId: 'read', toolName: 'read', input: { path: join(tree, 'lib/widget.mjs') }, content: [{ type: 'text', text: 'const widget = null' }] }, {})
-    const input = { path: join(tree, 'outside-0.mjs'), content: 'const outside = null\n' }
-    const id = 'write-0'
-    seat.onToolCall({ toolCallId: id, toolName: 'write', input }, {})
-    seat.onToolResult({ toolCallId: id, toolName: 'write', input, content: [{ type: 'text', text: 'ok' }] }, {})
+    const count = repeated ? 2 : 1
+    for (let i = 0; i < count; i++) {
+      const input = { path: join(tree, `outside-${i}.mjs`), content: 'const outside = null\n' }
+      const id = 'write-' + i
+      seat.onToolCall({ toolCallId: id, toolName: 'write', input }, {})
+      seat.onToolResult({ toolCallId: id, toolName: 'write', input, content: [{ type: 'text', text: 'ok' }] }, {})
+      if (repeated && i === 0) await seat.settled()
+    }
     await seat.settled()
     return { rows, sends, consults: rows.filter(r => r.advisor_consult).map(r => r.advisor_consult) }
   } finally { rmSync(root, { recursive: true, force: true }) }
 }
+
+// MUTATION RJ5: hash altered delivered content; journal identity must match each steer.
+test('RJ5 delivered notes match exact content and each consult, including suppression', async () => {
+  const { createHash } = await import('node:crypto')
+  const r = await rjDrive(JSON.stringify(adGood('auditable delivered claim')))
+  assert.deepEqual(r.sends.map(s => s.message.details.tier), [0, 1])
+  for (const sent of r.sends) {
+    const note = r.rows.find(row => row.advisor_note?.tier === sent.message.details.tier)?.advisor_note
+    assert.equal(note.content_sha256, createHash('sha256').update(sent.message.content).digest('hex'))
+    assert.equal(note.content_excerpt, advisor.boundText(sent.message.content, 512))
+    if (note.tier === 1) assert.equal(note.consult_id, r.consults[0].consult_id)
+  }
+  const suppressed = await rjDrive(JSON.stringify(adGood('ok')))
+  const suppressedNote = suppressed.rows.find(row => row.advisor_note?.outcome === 'suppressed')?.advisor_note
+  assert.equal(typeof suppressedNote?.consult_id, 'string')
+  assert.equal(suppressedNote.consult_id, suppressed.consults[0].consult_id)
+  const twice = await rjDrive([JSON.stringify(adGood('same claim')), JSON.stringify(adGood('same claim'))], { repeated: true })
+  assert.equal(twice.consults.length, 2)
+  assert.notEqual(twice.consults[0].consult_id, twice.consults[1].consult_id)
+  for (const row of twice.rows.filter(item => item.advisor_note?.tier === 1)) {
+    const consult = twice.consults.find(item => item.consult_id === row.advisor_note.consult_id)
+    assert.ok(consult)
+  }
+})
 
 // MUTATION RJ6: ignore the injected throwing digest; delivery and settlement remain independent.
 test('RJ6 digest failure preserves consult and both note-tier deliveries', async () => {
@@ -639,6 +847,23 @@ test('RJ6 digest failure preserves consult and both note-tier deliveries', async
   for (const sent of r.sends) {
     const note = injected.find(n => n.tier === sent.message.details.tier)
     assert.equal(note.content_excerpt, advisor.boundText(sent.message.content, 512))
+  }
+})
+
+
+// MUTATION TS2: restore the unconditional rejected outcome in the non-judgment branch.
+test('TS2 empty reply is journaled as skipped without a tier-one steer', async () => {
+  const r = await adDrive('[]')
+  assert.deepEqual(adTier1(r).map((note) => ({ outcome: note.outcome, codes: note.codes })),
+    [{ outcome: 'skipped', codes: ['no-finding'] }])
+  assert.equal(adSent1(r).length, 0)
+  const consults = r.rows.filter((row) => row.advisor_consult).map((row) => row.advisor_consult)
+  assert.equal(consults.length, 1)
+  assert.equal(consults[0].reply.excerpt, '[]')
+  const note = adTier1(r)[0]
+  assert.equal(Number.isSafeInteger(note.call_ordinal) && note.call_ordinal > 0, true)
+  for (const key of ['consult_id', 'provider', 'model_id', 'model', 'agent', 'effort']) {
+    assert.deepEqual(note[key], consults[0][key], 'tier1Stamp ' + key)
   }
 })
 
@@ -776,6 +1001,20 @@ test('GD1 a growth-divergence note names the measured, baseline and threshold by
   }
 })
 
+// MUTATION: consult on every maybe and twenty of them use up the cap before the sure return.
+test('only one maybe-return per turn is consulted on, so the sure return still gets its consult under the cap', async () => {
+  const s = triggerSeat({ severity: 'medium' })
+  try {
+    s.ground()
+    const maybes = Array.from({ length: advisor.TIER1_MAX_CONSULTS }, (_, i) => s.a.onToolCall(call(`m${i}`, 'bash', { command: "printf '(no)' > lib/builder-1.json" }), {}))
+    await Promise.all(maybes)
+    assert.equal(s.spawned(), 1, 'one maybe consult per turn, even when the calls run in parallel')
+    assert.equal(s.a.exportState().pre_return_maybe_spent, true)
+    await s.a.onToolCall(call('r', 'write', { path: s.ret, content: '{}' }), {})
+    assert.equal(s.spawned(), 2, 'the sure return is still consulted')
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
 // MUTATION: keep the maybe slot when its consult never ran and a later maybe-return goes unreviewed.
 test('a maybe-return whose consult never ran gives the maybe slot back', async () => {
   const s = triggerSeat()
@@ -806,6 +1045,31 @@ test('a bash command names the return file by its absolute path, or by its bare 
       assert.equal(s.spawned(), 0, command)
     } finally { rmSync(s.f.root, { recursive: true, force: true }) }
   }
+})
+
+test('a pre-return consult stays inside TIER1_MAX_CONSULTS and lets the write through at the cap', async () => {
+  const s = triggerSeat()
+  try {
+    s.ground()
+    const state = s.a.exportState(); state.consults = advisor.TIER1_MAX_CONSULTS
+    s.a.importState(state)
+    assert.equal(await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}' }), {}), undefined)
+    assert.equal(s.spawned(), 0)
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
+// MUTATION: ground only added lines and a deletion-only diff has nothing to consult on.
+test('a deletion-only diff is grounded at its old path and lines, and a removed line starting "-- " is content', () => {
+  const diff = ['diff --git a/lib/gone.mjs b/lib/gone.mjs', 'deleted file mode 100644', '--- a/lib/gone.mjs', '+++ /dev/null', '@@ -1,3 +0,0 @@', '-alpha', '-beta', '-gamma',
+    'diff --git a/a.txt b/a.txt', '--- a/a.txt', '+++ b/a.txt', '@@ -1,2 +0,0 @@', '--- important', '-BUG: severe', ''].join('\n')
+  const exec = (_bin, args) => Buffer.from(args.includes('diff') ? diff : '')
+  const measured = advisor.gitDiffLines({ cwd: '/repo', deps: { execFileSync: exec } })
+  assert.equal(measured.lines, 5)
+  assert.match(measured.text, /^lib\/gone\.mjs:1: \(removed\) alpha$/m)
+  assert.match(measured.text, /^lib\/gone\.mjs:3: \(removed\) gamma$/m)
+  assert.match(measured.text, /^a\.txt:1: \(removed\) -- important$/m)
+  assert.match(measured.text, /^a\.txt:2: \(removed\) BUG: severe$/m)
+  assert.doesNotMatch(measured.text, /^important:/m)
 })
 
 // MUTATION: count an untracked file past the read cap as zero lines and a lane that only adds it never consults.
@@ -895,6 +1159,42 @@ test('gitDiffLines counts added plus removed lines against HEAD, untracked files
 const deltaOf = (payload) => payload.delta.map((entry) => entry.text).join('\n')
 const consultRow = (s) => s.journal.rows.find((row) => row.advisor_consult?.trigger === 'pre-return').advisor_consult
 
+test('PW1 a pre-return consult carries a change on line 200 of a committed file, with no prior grounding', async () => {
+  const s = triggerSeat({ severity: 'medium', extraDeps: { diffLines: (cwd) => advisor.gitDiffLines({ cwd }) } })
+  try {
+    const repo = s.f.tree; const git = (...args) => execFileSync('git', ['-c', 'user.email=t@e.invalid', '-c', 'user.name=t', ...args], { cwd: repo, stdio: 'ignore' })
+    const lines = Array.from({ length: 250 }, (_, i) => `const v${i + 1} = ${i + 1}`)
+    writeFileSync(join(repo, 'lib/big.mjs'), lines.join('\n') + '\n'); git('init', '-q'); git('add', '.'); git('commit', '-qm', 'base')
+    lines[199] = 'const v200 = "changed"'; writeFileSync(join(repo, 'lib/big.mjs'), lines.join('\n') + '\n')
+    await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
+    assert.equal(s.payloads.length, 1)
+    assert.equal(s.payloads[0].trigger, 'pre-return')
+    assert.ok(deltaOf(s.payloads[0]).includes('lib/big.mjs:200: const v200 = "changed"'))
+    assert.ok(!deltaOf(s.payloads[0]).includes('lib/big.mjs:1:'), 'only changed lines are grounded')
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
+// MUTATION: send acceptance_items instead of criteria
+test('PW2 a pre-return consult carries the accepted plan criteria and named tests and asks for a check against them', async () => {
+  const items = ['1. WHEN a THE b SHALL c']
+  const tests = [{ file: 'a.test.mjs', title: 'T' }]
+  const s = triggerSeat({ manifest: { criteria: [...items, ' '], tests } })
+  try {
+    s.ground()
+    await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
+    assert.deepEqual(s.payloads[0].criteria, items)
+    assert.deepEqual(s.payloads[0].tests, tests)
+    assert.match(s.prompts[0], /criteria/)
+    assert.ok(!s.prompts[0].includes(advisor.PRE_RETURN_NO_BASIS))
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+  const bad = triggerSeat({ manifest: { criteria: [1] } })
+  try {
+    bad.ground()
+    await bad.a.onToolCall(call('r1', 'write', { path: bad.ret, content: '{}\n' }), {})
+    assert.deepEqual(bad.payloads[0].criteria, [])
+  } finally { rmSync(bad.f.root, { recursive: true, force: true }) }
+})
+
 test('PW3 the byte budget holds after redaction expands the packed text', async () => {
   const files = [{ path: 'big.txt', lines: Array.from({ length: 3000 }, (_, i) => `big.txt:${i + 1}: Authorization: x`) }]
   const s = triggerSeat({ extraDeps: { diffLines: () => ({ lines: 3000, entries: [files[0].lines.slice(0, 12).join('\n')], files }) } })
@@ -920,5 +1220,28 @@ test('PW3 git output over the cap is stated as an incomplete window and names th
     await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
     assert.deepEqual(s.payloads[0].omitted_files, packed.omitted_files)
     assert.deepEqual(consultRow(s).omitted_files, packed.omitted_files)
+  } finally { rmSync(s.f.root, { recursive: true, force: true }) }
+})
+
+test('PS1 PS2 a pre-return consult drops an injected advisor note from the working diff and keeps grounded evidence', async () => {
+  const phrase = 'guard misses the null path entirely'
+  const grounded = 'lib/copied.mjs:4: const grounded = keepThisLine()'
+  const files = [
+    { path: 'lib/copied.mjs', lines: [`lib/copied.mjs:3: ${phrase}`, grounded] },
+    { path: 'lib/noteonly.mjs', lines: [phrase] },
+  ]
+  const s = triggerSeat({ severity: 'medium', evidence: ['lib/copied.mjs:4'], extraDeps: { diffLines: () => ({ lines: 3, entries: files.map((file) => file.lines.join('\n')), files }) } })
+  try {
+    const state = s.a.exportState(); state.injected = [advisor.normalizeNote(phrase)]
+    s.a.importState(state)
+    await s.a.onToolCall(call('r1', 'write', { path: s.ret, content: '{}\n' }), {})
+    const payload = s.payloads[0]
+    assert.equal(payload.trigger, 'pre-return')
+    assert.ok(!deltaOf(payload).includes(phrase), 'the injected note is not handed back')
+    assert.ok(payload.delta.every((entry) => entry.text.trim()), 'a note-only entry is dropped, not sent empty')
+    assert.equal(payload.delta.length, 1)
+    assert.ok(deltaOf(payload).includes(grounded), 'grounded non-note evidence keeps its anchor')
+    const note = s.journal.rows.find((row) => row.advisor_note?.trigger === 'pre-return' && row.advisor_note.outcome === 'injected')
+    assert.ok(note, 'a finding citing the kept line is accepted')
   } finally { rmSync(s.f.root, { recursive: true, force: true }) }
 })

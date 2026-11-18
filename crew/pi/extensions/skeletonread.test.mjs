@@ -99,12 +99,23 @@ test('RS1 retrieves each symbol without its sibling body', async () => {
   assert.doesNotMatch(other, /FIRST_BODY/)
 })
 
+test('UE1 leaves reads at the threshold unchanged', () => {
+  const f = fixture({ source: 'one\ntwo\nthree\n', maxLines: '3' })
+  assert.equal(skeleton(f).onToolResult(readEvent('src/target.mjs'), { cwd: f.root }), undefined)
+})
+
 test('a skeleton-read failure row carries a numeric at by default', () => {
   const f = fixture({ source: 'one\ntwo\nthree\nfour\n', maxLines: '2' }), failures = []
   skeleton(f, { loadContext: () => { throw new Error('injected failure') }, recordFailure: (row) => failures.push(row) })
     .onToolResult(readEvent('src/target.mjs'), { cwd: f.root })
   assert.equal(failures.length, 1)
   assert.ok(Number.isFinite(failures[0].at))
+})
+
+test('TC1 reports the configured line threshold', () => {
+  const f = fixture({ source: 'one\ntwo\nthree\nfour\n', maxLines: '2' })
+  const text = skeleton(f).onToolResult(readEvent('src/target.mjs'), { cwd: f.root }).content[0].text
+  assert.match(text, /Threshold: 2 lines/)
 })
 
 test('skeletonread helpers reject malformed ranges and invalid fences', () => {

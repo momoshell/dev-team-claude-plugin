@@ -69,6 +69,18 @@ test('harness HTTP saves only closed preference fields and refuses foreign origi
  assert.equal((await post(input)).status,409)
  assert.equal((await fetch(base+'/api/harness-settings')).status,405)
 })
+test('installed-plugin HTTP mode cannot change harness defaults even with a valid revision',async t=>{
+ const {root,path,library}=fixture(t),pluginRoot=join(root,'home/.claude/plugins/cache/example/1')
+ mkdirSync(pluginRoot,{recursive:true})
+ const before=readFileSync(path,'utf8')
+ const {server}=startServer({port:0,host:'127.0.0.1',checkout:root,codingAgentsPath:path,pluginRoot,home:join(root,'home'),env:{PATH:''},feed:{}})
+ await new Promise((resolve,reject)=>{server.once('listening',resolve);server.once('error',reject)})
+ t.after(()=>new Promise(resolve=>{server.closeAllConnections();server.close(resolve)}))
+ const base=`http://127.0.0.1:${server.address().port}`
+ const response=await fetch(base+'/api/harness-settings',{method:'POST',headers:{origin:base,'content-type':'application/json'},body:JSON.stringify({name:'claude',default_transport:'acp',expected_revision:library.read().config_revision})})
+ assert.equal(response.status,409);assert.equal(readFileSync(path,'utf8'),before)
+})
+
 // Isolate transitive runtime telemetry as well as the explicit fixture paths.
 const previousLedgerDirectory = process.env.DEVTEAM_LEDGER_DIR
 process.env.DEVTEAM_LEDGER_DIR = scratchDir('viz-ledger-', { parent: tmpdir() })

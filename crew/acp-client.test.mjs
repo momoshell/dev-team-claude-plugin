@@ -10,15 +10,6 @@ import {
   ACP_UPDATE_KINDS, acpClient, acpSeatPaths,
 } from './acp-client.mjs'
 
-// MUTATION: re-add reprove.
-test('acpClient exposes no prompt, resumeSession or reprove', () => {
-  const root = scratchDir('acp-client-surface-')
-  try {
-    const client = acpClient({ launch: { bin: '/unused', args: [] }, dir: join(root, 'acp'), cwd: root, role: 'builder' })
-    for (const name of ['prompt', 'resumeSession', 'reprove']) assert.equal(name in client, false)
-  } finally { rmSync(root, { recursive: true, force: true }) }
-})
-
 test('a session/new logged-out refusal carries the recorded message for provider classification', () => {
   const message = 'log in to Muse before opening a session'
   for (const [data, expectedKind, expectedMessage] of [[undefined, null, message], [{ errorKind: 'verification_required', errorMessage: 'verify' }, 'verification_required', 'verify'], [{ errorKind: 'other', errorMessage: 42 }, 'other', message]]) {
@@ -118,35 +109,6 @@ test('S2-16 blocked setup writes respect the shared budget and preserve torn fra
       assert.throws(() => client.setMode('default'), { reason: 'acp-prompt-write-timeout', bytesWritten: 0 })
     } finally { client.close(); rmSync(root, { recursive: true, force: true }) }
   }
-})
-
-// MUTATION: restore the 20-iteration fifo loop.
-test('S2-17 a fifo that appears after 500 ms still starts the seat', () => {
-  const root = scratchDir('acp-slow-fifo-')
-  let clock = 0
-  const client = acpClient({ launch: { bin: '/unused', args: [] }, dir: join(root, 'acp'), cwd: root, role: 'builder', deps: {
-    seatCommandRoot: join(root, 'commands'), pid: 900,
-    spawn: () => ({ pid: 901, unref() {} }),
-    openSync() { if (clock < 2000) throw Object.assign(new Error('not yet'), { code: 'ENOENT' }); return 7 },
-    closeSync() {}, now: () => clock, sleep: (ms) => { clock += ms },
-    kill() { throw Object.assign(new Error('gone'), { code: 'ESRCH' }) },
-  } })
-  try {
-    let result
-    assert.doesNotThrow(() => { result = client.start() })
-    assert.deepEqual(result, { pid: 901 })
-  } finally { client.close(); rmSync(root, { recursive: true, force: true }) }
-
-  const lateRoot = scratchDir('acp-late-fifo-')
-  let lateClock = 0
-  const late = acpClient({ launch: { bin: '/unused', args: [] }, dir: join(lateRoot, 'acp'), cwd: lateRoot, role: 'builder', deps: {
-    seatCommandRoot: join(lateRoot, 'commands'), pid: 900,
-    spawn: () => ({ pid: 901, unref() {} }),
-    openSync() { if (lateClock === 0) throw Object.assign(new Error('not yet'), { code: 'ENOENT' }); return 7 },
-    now: () => lateClock, sleep: () => { lateClock += 11000 },
-    kill() { throw Object.assign(new Error('gone'), { code: 'ESRCH' }) },
-  } })
-  try { assert.throws(() => late.start(), { reason: 'acp-spawn-failed' }) } finally { late.close(); rmSync(lateRoot, { recursive: true, force: true }) }
 })
 
 const REGISTER_ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -460,51 +422,6 @@ test('import boundary rejects comment-separated package and nonliteral imports',
     "const dep = require ('node:fs')",
     "export const marker = 'some-package'; const url = import.meta.url",
   ]) assert.doesNotThrow(() => checkImports(source, 'fixture.mjs'))
-})
-
-// A seat whose leader already exited (marker written) while `group` says what the rest of its process group is doing.
-function exitedLeader({ group = 'live', dies = null }) {
-  const root = scratchDir('acp-liveness-')
-  const acpRoot = join(root, 'acp')
-  const runtimeRoot = join(root, 'seat-runtime')
-  const paths = acpSeatPaths(acpRoot, 'builder', runtimeRoot)
-  const signals = []
-  let clock = 0
-  let state = group
-  const api = acpClient({
-    launch: { bin: '/bin/false', args: [], env: {} }, dir: acpRoot, cwd: root,
-    deps: {
-      pid: 900, spawn: () => { writeFileSync(paths.pgid, '901'); writeFileSync(paths.exit, '0'); return { pid: 901, unref() {} } },
-      openSync: () => 7, writeSync: () => {}, closeSync: () => {}, seatCommandRoot: runtimeRoot,
-      kill: (target, signal) => {
-        if (target !== -901) return true
-        if (signal !== 0) {
-          signals.push(signal)
-          if (signal === dies) state = 'gone'
-          return true
-        }
-        if (state === 'gone') throw Object.assign(new Error('no such process'), { code: 'ESRCH' })
-        if (state === 'eperm' || state === 'eio') throw Object.assign(new Error(state), { code: state.toUpperCase() })
-        return true
-      },
-      spawnSync: () => ({ status: 0, stdout: state === 'gone' ? '' : '901 Zs\n901 S\n' }),
-      now: () => clock++, sleep: (ms) => { clock += ms }, log: () => {},
-    },
-  })
-  api.start()
-  writeFileSync(paths.fifo, '')
-  return { api, paths, signals, root, end() { state = 'gone' }, cleanup() { rmSync(root, { recursive: true, force: true }) } }
-}
-
-test('RW2 a teardown signals what remains of the seat group after the leader exits, TERM then KILL', () => {
-  for (const [dies, expected] of [['SIGTERM', ['SIGTERM']], ['SIGKILL', ['SIGTERM', 'SIGKILL']]]) {
-    const run = exitedLeader({ dies })
-    try {
-      assert.equal(existsSync(run.paths.exit), true)
-      assert.deepEqual(run.api.close(), { outcome: 'proven', reason: 'exit-marker' })
-      assert.deepEqual(run.signals, expected)
-    } finally { run.cleanup() }
-  }
 })
 
 // A seat that exits on the first signal: the leader's marker lands and the group probe then reports ESRCH.

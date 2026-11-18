@@ -6,8 +6,12 @@ One brief goes in; a lean lane comes out. `crew start <brief.md>` makes a
 worktree and a journal, then plays five seats over ACP: a **planner** explores
 the code and writes the plan, a **builder** edits the repo, a **reviewer** gives
 a verdict, a **lead** answers escalations with one closed decision, and a
-**tech-lead** gives judge lanes a second review. Code only checks the result: each named test is red on the
-old source and green on the build, and the project suite is green. Commit, rebase
+**tech-lead** gives judge lanes a second review. Code only checks the result: each named test normally is red on the
+old source and green on the build. Configured green-only exceptions are
+`base-package-absent` (a new package's manifest is absent on the old source) and
+`base-test-absent` (a test file is absent there with `newTestFile: true`); see
+[crew/README.md](crew/README.md) for their proof conditions. The project suite
+must be green. Commit, rebase
 and PR happen only on green (ADR-052, ADR-055). A stopped
 finishable lane, including an escalated or provably dead run, can be picked up
 with `crew finish <lane> --return <file>`. The same flag starts another pass on a ready lane. Every seat's full session is

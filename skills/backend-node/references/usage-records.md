@@ -7,12 +7,16 @@ internal getter returns `null`. The `execute` result constructor omits the publi
 partial record is unsafe. Do not fill unknown fields with zero: zero is a
 measurement. See `skills/qa-test-writing/references/absence.md`.
 
-The `usage is a complete pi Usage or absent, never partial` test in
-`crew/pi/extensions/subagent.test.mjs` pins measured usage and omitted key
-absence with `Object.hasOwn`. An empty transcript should follow the absent path,
-not fabricate billing. Keep the getter, constructor and test together in review;
-`execute` and advisor.ts drive the reducer directly. A partial record risks a TypeError
-or poisoned aggregate; a fabricated zero makes a false accounting claim.
+In `crew/pi/extensions/subagent.test.mjs`, `every pre-spawn refusal is bounded, payload-free, spawns nothing and journals nothing`
+and `the child is spawned under a deadline that escalates to SIGKILL` assert
+public-key absence with `Object.hasOwn` on their selected refusal and timeout
+paths. They do not pin complete measured public usage or journal nulls.
+`createStreamReducer`, the `execute` result construction and `usageRow` in
+`crew/pi/extensions/subagent.ts` own that unpinned contract. An empty transcript
+should follow the absent path, not fabricate billing. Keep the getter and
+constructor together in review; `execute` and advisor.ts drive the reducer
+directly. A partial record risks a TypeError or poisoned aggregate; a fabricated
+zero makes a false accounting claim.
 
 An interrupted child and a failed usage parse after work starts remain unbacked
 in this checkout; see `evidence.md`. Neither should produce partial usage or be

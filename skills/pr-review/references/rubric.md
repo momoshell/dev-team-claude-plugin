@@ -31,9 +31,9 @@ find nothing (F5), so a finding quota would optimise against the measurement.
 
 Look for two callers of one rule disagreeing, a document restating a contract it
 does not read, and a literal key serving as the only guard. A worked instance is
-this skill's own coupling to the scout agent definition (`scout.json` under `crew/pi/agents/`); the reader-facing
-restatement is `references/findings-shape.md`, and the pinning check keeps both
-sides against an independent literal.
+this skill's own coupling to the scout agent definition, owned by
+`crew/pi/agents/scout.json`. The reader-facing restatement is
+`references/findings-shape.md`; no test pins that copy to the definition.
 
 The register has no `contract-drift` category. Its nearest instrument is
 `contract-literal`, with **4 must-fix of 7** (F9), which is too small to order

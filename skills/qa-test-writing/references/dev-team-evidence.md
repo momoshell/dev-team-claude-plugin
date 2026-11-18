@@ -195,9 +195,14 @@ In `crew/pi/extensions/subagent.ts`, `createStreamReducer` exposes complete
 usage or null when unmeasured. Internal details may contain `usage: null`;
 the public result omits the `usage` key when unmeasured. The pre-spawn budget
 refusal writes a journal row with `usage: null` via `usageRow`. It is not a
-measured zero. See `crew/pi/extensions/subagent.test.mjs`, especially `usage is
-a complete pi Usage or absent, never partial` and `the journal records exactly
-one row per spawn`.
+measured zero. The contract owners are `createStreamReducer`, the `execute`
+result construction and `usageRow` in `crew/pi/extensions/subagent.ts`; no test
+pins the whole complete-or-absent/journal contract.
+In `crew/pi/extensions/subagent.test.mjs`,
+`every pre-spawn refusal is bounded, payload-free, spawns nothing and journals nothing`
+and `the child is spawned under a deadline that escalates to SIGKILL` assert
+public-key absence only on their selected refusal and timeout paths. They do not
+pin complete measured public usage, journal nulls or budget-refusal journaling.
 
 ### Complete-or-absent and pinning
 

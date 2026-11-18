@@ -1,6 +1,6 @@
 # ADR-054 — Each tier runs its own loop, and every stage earns its place
 
-**Status:** *proposed* 2026-11-01, operator direction ("each lane type should have its loop") · **Owner:** operator ·
+**Status:** *proposed* 2026-11-01, operator direction ("each lane type should have its loop"); §2–§4 amended by ADR-055; checkout suite coordination amendment 2026-11-18 (#2457); §2 pending build-suite cancellation amendment 2026-11-18 (#2459) · **Owner:** operator ·
 **Relates to:** ADR-052 (§6 the loop), ADR-053 (build first, prove after), ADR-038 (the judge floor forces proof),
 ADR-051 (finish shape)
 
@@ -91,6 +91,13 @@ defer red-suite diagnostics by one round; how many of those 4 red results added
 information beyond review was not measured. Judge, mechanical and finish runs,
 proof and setup commands are unchanged. Section 1's prohibition on automatically
 rerunning a red suite on an unchanged tree still holds.
+
+Clarification 2026-11-18 (prose-drift audit, #2467): Pending includes suites
+queued for the checkout lock, not only running suites. `crew/loop.mjs` supplies
+the abort signal; `acquireSuiteLock` in `crew/suite-lock.mjs` returns cancelled
+before publishing ownership. `crew/checks.mjs` reports proven cleanup without
+launching a suite process when cancelled before launch, so no process teardown
+is needed. Running suites still require the proven group and pipe cleanup above.
 
 ### 3. Measurement before each loop is adopted
 

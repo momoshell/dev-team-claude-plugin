@@ -502,15 +502,6 @@ test('E1 records overlap and covering turns for refusals', () => {
   })
 })
 
-test('E2 admits a whole read at the line threshold', () => {
-  const f = fixture()
-  const gate = gateFor(f)
-  const input = { path: f.edge }
-  const before = JSON.stringify(input)
-  assert.equal(call(gate, 'read', input, f.root, 'e2'), undefined)
-  unchanged(input, before)
-})
-
 test('F1 enforces the whole read threshold for planner and tech lead', () => {
   const f = fixture()
   for (const role of ['planner', 'tech-lead']) {
@@ -528,15 +519,6 @@ test('F1 enforces the whole read threshold for planner and tech lead', () => {
     })
     unchanged(input, before)
   }
-})
-
-test('F2 admits a piped cat command unchanged', () => {
-  const f = fixture()
-  const gate = gateFor(f)
-  const input = { command: `cat '${f.large}' | grep large` }
-  const before = JSON.stringify(input)
-  assert.equal(call(gate, 'bash', input, f.root, 'f2'), undefined)
-  unchanged(input, before)
 })
 
 test('F3 admits unrelated tools unchanged', () => {

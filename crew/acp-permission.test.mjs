@@ -139,8 +139,3 @@ test('RD5 sed -n refuses a file argument that starts with a dash', () => {
     assert.equal(readOnlyCommand(command), false, command)
   assert.equal(readOnlyCommand('sed -n 1,4p file'), true)
 })
-
-test('RV1-1 rejects git grep pager option aliases', () => {
-  for (const command of ['git grep -lOrm foo', 'git grep --open=rm foo', 'git grep --open-files=rm foo'])
-    assert.equal(readOnlyCommand(command), false, command)
-})

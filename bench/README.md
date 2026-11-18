@@ -28,7 +28,7 @@ hard-coded in the scripts.
 
 ```json
 { "agent": "claude", "model": "anthropic/claude-sonnet-5-5", "effort": "high",
-  "advisor": { "agent": "pi", "model": "openai/gpt-6.1-sol", "effort": "medium" },
+  "advisor": { "agent": "pi", "model": "openai/gpt-6.2-sol", "effort": "medium" },
   "wait_s": 3600, "settle_s": 120, "skills": ["code-less"] }
 ```
 

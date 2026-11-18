@@ -90,9 +90,20 @@ export function junitEvents(xml) {
         body.push(next)
       }
     }
-    const has = (name) => body.some((part) => new RegExp(`^<${name}(?:\\s|/?>)`).test(part))
-    const outcome = has('skipped') ? { skip: true } : has('error') ? { type: 'test:fail', failureType: 'error' } : has('failure') ? { type: 'test:fail', failureType: 'testCodeFailure' } : { type: 'test:pass' }
-    return [{ name: attrs.name ?? '', classname: attrs.classname ?? '', ...outcome }]
+    const find = (name) => body.find((part) => new RegExp(`^<${name}(?:\\s|/?>)`).test(part))
+    const event = { name: attrs.name ?? '', classname: attrs.classname ?? '' }
+    if (find('skipped')) return [{ ...event, skip: true }]
+    const error = find('error'), failed = error ?? find('failure')
+    if (!failed) return [{ ...event, type: 'test:pass' }]
+    attr.lastIndex = error ? '<error'.length : '<failure'.length
+    let failureType = error ? 'error' : 'testCodeFailure'
+    while ((match = attr.exec(failed))) {
+      if (match[1] !== 'type') continue
+      const type = decode(match[2] ?? match[3])
+      if (type === 'hookFailed' || type === 'cancelledByParent') failureType = type
+      break
+    }
+    return [{ ...event, type: 'test:fail', failureType }]
   })
 }
 

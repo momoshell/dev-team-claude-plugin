@@ -5,7 +5,7 @@ import childProcess, { spawn, spawnSync } from 'node:child_process'
 import fs, { appendFileSync as appendFileSyncReal, cpSync, existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { laneName, main, runBrief, startLane, StartRefusal } from './start.mjs'
 import { projectHash } from './onboard.mjs'
 import { holdIdleSleep } from './host-sleep.mjs'
@@ -14,6 +14,7 @@ import { runAcpSeat } from './acp/seat.mjs'
 import { readOnlyCommand } from './acp-permission.mjs'
 import { parseAgent, TIERS, validateEnvelope } from './protocols.mjs'
 import { resolveAgents, snapshotRoster } from './agents.mjs'
+import { PROVIDER_RETRY_TOTAL_WAIT_MS } from './acp/provider.mjs'
 import { git, scratchDir } from '../test/helpers.mjs'
 
 test('start freezes effective wait_s for later lean turns and finish passes', async () => {
@@ -100,6 +101,26 @@ test('a failed detached launch is a StartRefusal that names the left worktree', 
   }
 })
 
+test('crew start never launches real caffeinate in a test worker', async () => {
+  const f = fakes(), calls = []
+  const originalSpawn = childProcess.spawn, platform = Object.getOwnPropertyDescriptor(process, 'platform')
+  delete f.deps.platform
+  delete f.deps.spawn
+  try {
+    assert.notEqual(process.env.NODE_TEST_CONTEXT, undefined)
+    Object.defineProperty(process, 'platform', { ...platform, value: 'darwin' })
+    childProcess.spawn = (...args) => { calls.push(args); return { on() {}, unref() {} } }
+    syncBuiltinESMExports()
+    const result = await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps })
+    assert.equal(result.pid, 4242)
+    assert.deepEqual(calls, [])
+  } finally {
+    Object.defineProperty(process, 'platform', platform)
+    childProcess.spawn = originalSpawn
+    syncBuiltinESMExports()
+  }
+})
+
 test('idle sleep retains its default spawn outside a test worker', () => {
   const calls = [], events = []
   const originalSpawn = childProcess.spawn, context = process.env.NODE_TEST_CONTEXT
@@ -116,6 +137,23 @@ test('idle sleep retains its default spawn outside a test worker', () => {
     childProcess.spawn = originalSpawn
     syncBuiltinESMExports()
   }
+})
+
+test('crew start binds an idle sleep assertion to the detached run pid', async () => {
+  const f = fakes(), assertions = [], events = []
+  Object.assign(f.deps, {
+    platform: 'darwin',
+    spawn: (...args) => {
+      assertions.push(args)
+      return { on: (name, handler) => events.push([name, handler]), unref: () => events.push(['unref']) }
+    },
+  })
+  const result = await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps })
+  assert.deepEqual(assertions, [['caffeinate', ['-i', '-w', String(result.pid)], { detached: true, stdio: 'ignore' }]])
+  assert.equal(events[0][0], 'error')
+  assert.doesNotThrow(() => events[0][1](Object.assign(new Error('missing'), { code: 'ENOENT' })))
+  assert.equal(events[1][0], 'unref')
+  assert.match(written(f.calls, '/task/run.pid')[2], /^4242 /)
 })
 
 test('idle assertion failures never refuse a crew start', async () => {
@@ -240,6 +278,41 @@ test('crew start refuses ask lines the operator never typed: seat prompts, paste
   await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', deps: pass.deps }))
 })
 
+test('crew start accepts queued operator messages as provenance and refuses words no queued or typed message contains (ADR-056)', async () => {
+  const root = scratchDir('provenance-queued-')
+  const dir = join(root, 'proj')
+  mkdirSync(dir)
+  const row = (content, promptSource = 'queued', kind = 'human') => ({ type: 'user', origin: { kind }, promptSource, message: { content } })
+  const path = join(dir, 'a.jsonl')
+  writeFileSync(path, [
+    row('whole queued message'), row('sdk message', 'sdk'), row('system message', 'system'),
+    row('non-human message', 'queued', 'task-notification'), row(['array message']),
+    { ...row('non-user message'), type: 'assistant' },
+  ].map(JSON.stringify).join('\n'))
+  const old = join(dir, 'old.jsonl')
+  writeFileSync(old, JSON.stringify(row('stale queued message')))
+  const then = new Date(Date.now() - 40 * 86400000)
+  utimesSync(old, then, then)
+  const makeBrief = (ask) => BRIEF.replace('source: issue 1961', 'source: operator request').replace('## Context', `## The ask\n\n${ask}\n\n## Context`)
+  const excluded = ['unrelated words', 'queued message', 'sdk message', 'system message', 'non-human message', 'array message', 'non-user message', 'stale queued message']
+  {
+    let resolutions = 0
+    const fail = fakes({ brief: makeBrief(excluded.map((text) => `> ${text}`).join('\n\n')), resolve: () => { resolutions++; return { seats: {} } } })
+    fail.deps.transcriptRoot = root
+    await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: fail.deps }), (error) => error instanceof StartRefusal && excluded.every((text) => error.message.includes(JSON.stringify(text))))
+    assert.equal(resolutions, 0)
+    assert.deepEqual(effects(fail.calls), [])
+    const pass = fakes({ brief: makeBrief('> whole queued message') })
+    pass.deps.transcriptRoot = root
+    await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: pass.deps }))
+    assert.equal(pass.calls.some(([kind, line]) => kind === 'log' && line.includes('ask provenance unmeasured')), false)
+  }
+  appendFileSyncReal(path, `\n${JSON.stringify(row('whole typed message', 'typed'))}`)
+  const both = fakes({ brief: makeBrief('> whole queued message\n\n> whole typed message') })
+  both.deps.transcriptRoot = root
+  await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', deps: both.deps }))
+})
+
 test('crew start reports ask provenance unmeasured with no transcript and starts; an issue brief reads none (ADR-056)', async () => {
   const brief = BRIEF.replace('source: issue 1961', 'source: operator request').replace('## Context', '## The ask\n\n> Do this.\n\n## Context')
   const empty = scratchDir('provenance-empty-')
@@ -362,6 +435,18 @@ test('the lane name is the brief file name and must be a slug', () => {
   assert.throws(() => laneName('/drafts/My Brief.md'), StartRefusal)
 })
 
+test('a brief with mechanical: true starts a mechanical lane and a brief without it starts a build lane', async () => {
+  for (const tier of ['mechanical', 'build']) {
+    const brief = tier === 'mechanical' ? BRIEF.replace('shape: standard', 'mechanical: true\nshape: standard') : BRIEF
+    const resolved = []
+    const f = fakes({ brief, resolve: (t) => { resolved.push(t); return resolveAgents(t) } })
+    await assert.doesNotReject(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps }))
+    assert.deepEqual(resolved, [tier])
+    assert.ok(f.calls.some(([kind, line]) => kind === 'log' && line.includes(`loop=lean tier=${tier}`)))
+    assert.equal(JSON.parse(written(f.calls, '/task/lean.json')[2]).tier, tier)
+  }
+})
+
 test('without a readable origin/HEAD the start is refused before any worktree is made', async () => {
   const { deps, calls } = fakes({ originHead: null })
   await assert.rejects(startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps }), /origin\/HEAD.*git remote set-head origin --auto/)
@@ -465,6 +550,27 @@ test('crew start snapshots distinct referenced issues as quoted context for both
     assert.ok(f.calls.indexOf(gh.at(-1)) < f.calls.indexOf(spawned(f.calls, 'worktree')))
   }
 })
+
+test('crew start includes titles and empty body markers for referenced issues', async () => {
+  const f = fakes({ brief: BRIEF + '- issue 12 issue 34 issue 56\n', issues: {
+    12: { title: 'Empty issue', body: '' },
+    34: { title: 'Whitespace issue', body: ' \n\t' },
+    56: { title: 'Nonempty issue', body: '---\n' },
+  } })
+  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: f.deps })
+  const snapshot = written(f.calls, '/briefs/started/b1.md')[2]
+  for (const [number, title, body] of [[12, 'Empty issue', 'empty body'], [34, 'Whitespace issue', 'empty body'], [56, 'Nonempty issue', '---']]) {
+    assert.ok(snapshot.includes(`### issue ${number}: ${title}\n\n> ${body}`))
+  }
+})
+
+// stderr of main, captured; the exit code is returned beside it.
+async function mainWithStderr(argv, deps) {
+  let stderr = ''
+  const write = process.stderr.write
+  process.stderr.write = (text) => { stderr += String(text); return true }
+  try { return { code: await main(argv, deps), stderr } } finally { process.stderr.write = write }
+}
 
 const LEAN = fileURLToPath(new URL('./lean.mjs', import.meta.url))
 const leanLaunch = (calls) => calls.find(([kind, , args]) => kind === 'detached' && args[0] === LEAN)
@@ -604,6 +710,16 @@ test('crew start refuses a worktreeSetup that leaves changed or untracked paths,
   }
 })
 
+test('crew start refuses when the origin fetch fails and does not fall back to the local branch', async () => {
+  const f = originBaseFixture((seed) => writeFileSync(join(seed, 'origin-only'), 'origin'))
+  writeFileSync(f.briefPath, BRIEF.replace('`crew/agents.mjs`', '`.crew/project.json`'))
+  git(f.checkout, 'remote', 'set-url', 'origin', join(f.root, 'gone.git'))
+  await assert.rejects(startLane({ briefPath: f.briefPath, checkout: f.checkout, deps: f.deps }), (error) => error instanceof StartRefusal && error.message.includes('fetch') && error.message.includes('gone.git'))
+  assert.equal(existsSync(join(f.root, 'dt-b1')), false)
+  assert.equal(f.calls.some(([file]) => file === 'launch'), false)
+  assert.notEqual(spawnSync('git', ['-C', f.checkout, 'show-ref', '--verify', '--quiet', 'refs/heads/b1']).status, 0)
+})
+
 test('crew start names the signal when the origin fetch is interrupted', async () => {
   for (const stderr of ['', 'fetch interrupted']) {
     const f = fakes()
@@ -624,6 +740,14 @@ test('crew start writes the brief generated paths and regenerate command into th
     const spec = JSON.parse(written(f.calls, '/task/lean.json')[2])
     assert.equal(Object.hasOwn(spec, 'generated'), declared)
     if (declared) assert.deepEqual(spec.generated, { paths: ['gen.txt', 'dist/'], command: 'npm', args: ['run', 'generate'], timeoutMs: 1800000 })
+  }
+})
+
+test('main refuses --check as usage and starts nothing', async () => {
+  for (const argv of [['/d/b1.md', '--check'], ['--check', '/d/b1.md'], ['/d/b1.md', '--check', '--check'], ['/d/b1.md', '--checkout', '--check']]) {
+    const { deps, calls } = fakes()
+    assert.deepEqual(await mainWithStderr(argv, deps), { code: 2, stderr: 'usage: crew start <brief.md> [--checkout <dir>]\n' })
+    assert.deepEqual(effects(calls), [])
   }
 })
 
@@ -651,6 +775,22 @@ test('a plain start is the only validation: defective, missing-context and stale
   assert.ok(spawned(valid.calls, 'worktree'))
   assert.ok(leanLaunch(valid.calls))
   assert.equal(valid.calls.some(([type, line]) => type === 'log' && line.includes('brief ok')), false)
+})
+
+test('(LS2) a refusing start in a child process loads no old driver, roster or crew module', () => {
+  const dir = scratchDir('lean-start-trace-')
+  const tracer = join(dir, 'trace.mjs')
+  const trace = join(dir, 'trace.log')
+  const brief = join(dir, 'b1.md')
+  writeFileSync(brief, BRIEF.replace('shape: standard', 'shape: stepped'))
+  writeFileSync(tracer, `import { registerHooks } from 'node:module'\nimport { appendFileSync } from 'node:fs'\nregisterHooks({ load(url, context, next) { appendFileSync(${JSON.stringify(trace)}, url + '\\n'); return next(url, context) } })\n`)
+  const start = fileURLToPath(new URL('./start.mjs', import.meta.url))
+  const child = spawnSync(process.execPath, ['--import', tracer, start, brief], { encoding: 'utf8' })
+  assert.equal(child.status, 1, child.stderr)
+  assert.match(child.stderr, /not a P1 brief/)
+  const loaded = readFileSync(trace, 'utf8')
+  assert.match(loaded, /crew\/start\.mjs/)
+  for (const name of ['drive', 'roster', 'roster-validate', 'roster-generate', 'crew']) assert.equal(loaded.includes(`/crew/${name}.mjs`), false, name)
 })
 
 test('a lean start refuses before any effect when the agent definitions do not resolve or the brief is not P1', async () => {
@@ -1050,6 +1190,26 @@ const memoryDefinition = (line) => (path, ...args) => {
   // The shipped definition's own memory field is removed first, so each case states the whole effective value.
   return path === join(AGENTS, 'planner.md') ? text.replace(/^memory: .*\n/m, '').replace(/tiers: .*/, line) : text
 }
+const populateMemory = (dir, body) => {
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'MEMORY.md'), '- [entry](entry.md)\n')
+  writeFileSync(join(dir, 'entry.md'), body)
+}
+
+// MUTATION: drop `memory: true` from crew/agents/planner.md and the shipped planner boots without team memory.
+test('the shipped planner definition injects the lane checkout memory', async () => {
+  const previous = process.env.CREW_MEMORY_DIR
+  try {
+    delete process.env.CREW_MEMORY_DIR
+    const f = leanFixture()
+    populateMemory(join(f.spec.cwd, '.claude/dev-team/memory'), 'shipped judgment')
+    assert.equal((await f.go()).status, 'done')
+    assert.match(f.requests[0].prompt, /## Team memory[\s\S]*shipped judgment/)
+  } finally {
+    if (previous === undefined) delete process.env.CREW_MEMORY_DIR
+    else process.env.CREW_MEMORY_DIR = previous
+  }
+})
 
 test('a memory-empty row lists at most ten dropped entries and counts the rest (#2341)', async () => {
   const previous = process.env.CREW_MEMORY_DIR
@@ -1219,7 +1379,7 @@ test('an ACP turn with no stop reason (null, empty, absent, no turn at all) is r
 })
 
 // A planner whose first `refusals.length` turns are refused, then accepted; the clock and the wait are virtual.
-async function retryRun(refusals) {
+async function retryRun(refusals, { oversleep = 0 } = {}) {
   const sleeps = [], sessions = []
   let clock = Date.parse('2026-10-26T00:00:00Z'), turns = 0
   const f = leanFixture({
@@ -1227,7 +1387,8 @@ async function retryRun(refusals) {
       sessions.push(input.sessionFile)
       const path = /^Return path: (.+)$/m.exec(input.prompt)[1]
       const id = /^Envelope id: (.+)$/m.exec(input.prompt)[1]
-      const refusal = input.definition.role === 'planner' ? refusals[turns++] : undefined
+      const wanted = input.definition.role === 'planner' ? refusals[turns++] : undefined
+      const refusal = typeof wanted === 'function' ? wanted(clock) : wanted
       if (refusal) return { stopReason: null, usage: null, refusal }
       mkdirSync(f.spec.taskDir, { recursive: true })
       if (input.definition.role === 'planner') for (const name of ['plan.md', 'gate.mjs']) writeFileSync(join(f.spec.taskDir, name), '')
@@ -1236,10 +1397,15 @@ async function retryRun(refusals) {
       writeFileSync(path, JSON.stringify({ role: input.definition.role, id, status: 'done', summary: 'x', details }))
       return { stopReason: 'end_turn', usage: { input_tokens: 1 }, refusal: null }
     },
-    deps: { now: () => clock, sleep: async (ms) => { sleeps.push(ms); clock += ms } },
+    deps: { now: () => clock, sleep: async (ms) => { sleeps.push(ms); clock += ms + oversleep } },
   })
   const result = await f.go()
   return { f, result, sleeps, sessions }
+}
+const rateLimit = (at, hours) => {
+  const d = new Date(at + hours * 3600000)
+  const h = d.getUTCHours()
+  return { code: -32000, errorKind: 'rate_limit', message: `resets ${h % 12 || 12}:${String(d.getUTCMinutes()).padStart(2, '0')}${h < 12 ? 'am' : 'pm'} (UTC)` }
 }
 
 test('pi overload and WebSocket failures retry in a fresh session; unknown and resetless usage limit do not retry', async () => {
@@ -1257,6 +1423,49 @@ test('pi overload and WebSocket failures retry in a fresh session; unknown and r
     assert.equal(stopped.result.status, message.includes('usage limit') ? 'stopped' : 'done')
     assert.deepEqual([stopped.sleeps.length, stopped.sessions.length], [0, message.includes('usage limit') ? 1 : 4])
   }
+})
+
+test('a retry never runs past the total wait: a reset beyond it, repeated resets, and an oversleep stop the lane', async () => {
+  const at = Date.parse('2026-10-26T00:00:00Z')
+  const far = await retryRun([rateLimit(at, 6)])
+  assert.equal(far.result.reason, 'seat-unmeasured')
+  assert.deepEqual([far.sleeps.length, far.sessions.length], [0, 1])
+  const repeated = await retryRun(Array(4).fill((now) => rateLimit(now, 2)))
+  assert.equal(repeated.result.reason, 'seat-unmeasured')
+  assert.equal(repeated.sleeps.length, 2)
+  assert.ok(repeated.sleeps.reduce((a, b) => a + b, 0) <= PROVIDER_RETRY_TOTAL_WAIT_MS)
+  const overslept = await retryRun([{ code: -32000, errorKind: 'server_error', message: 'boom' }], { oversleep: PROVIDER_RETRY_TOTAL_WAIT_MS })
+  assert.equal(overslept.result.reason, 'seat-unmeasured')
+  assert.deepEqual([overslept.sleeps.length, overslept.sessions.length], [1, 1])
+})
+
+// MUTATION: take the effort from the file's base fields and a tier override never reaches the seat.
+test('a seat turn runs the recorded override and keeps the definition\'s other fields', async () => {
+  const advisor = { agent: 'pi', model: 'local/advisor', effort: 'low' }
+  const f = leanFixture({ tier: 'mechanical', answers: { 'builder.1': 'escalate' } })
+  f.spec.roster = { overrides: { builder: { tiers: { mechanical: { advisor } } }, lead: { tiers: { mechanical: {} } } }, files: [] }
+  await f.go()
+  const builder = f.requests.find((r) => r.definition.role === 'builder').definition
+  const parsed = parseAgent(readFileSync(join(AGENTS, 'builder.md'), 'utf8'))
+  assert.deepEqual(builder.advisor, advisor)
+  assert.deepEqual(builder.extensions, parsed.fields.tiers.mechanical.extensions)
+  assert.equal(builder.writes, parsed.fields.writes)
+  assert.equal(builder.body, parsed.body)
+  assert.ok(parsed.fields.skills.every((skill) => builder.skills.includes(skill)))
+  assert.ok(f.requests.some((r) => r.definition.role === 'lead'))
+
+  const lane = fakes()
+  await startLane({ briefPath: '/d/b1.md', checkout: '/repo/checkout', deps: lane.deps })
+  const recorded = JSON.parse(written(lane.calls, '/task/lean.json')[2]).roster
+  const changed = leanFixture({ deps: { readFileSync: (path, ...args) => {
+    const text = readFileSync(path, ...args)
+    return String(path) === join(AGENTS, 'builder.md') ? text.replace('advisor: {"agent":"pi","model":"openai/gpt-6.2-sol","effort":"medium"}', 'advisor: null').replace('extensions: [fff, readgate, skeletonread]', 'extensions: [fff]') : text
+  } } })
+  changed.spec.roster = recorded
+  await changed.go()
+  const definition = changed.requests.find((r) => r.definition.role === 'builder').definition
+  assert.deepEqual(definition.advisor, recorded.snapshot.builder.tiers.build.advisor)
+  assert.deepEqual(definition.extensions, ['fff'])
 })
 
 test('a tier override applies and an unseating override refuses the turn', async () => {
@@ -1307,4 +1516,10 @@ test('the bridge entry reads one spec file; a malformed or unreadable spec is on
   writeFileSync(failingPath, JSON.stringify(failing.spec))
   assert.equal(await leanMain([failingPath], { ...failing.options, log: (line) => stoppedRows.push(line) }), 1)
   assert.equal(JSON.parse(stoppedRows.at(-1)).reason, 'paths-unmeasured')
+})
+
+test('importing the bridge launches nothing', () => {
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(pathToFileURL(LEAN).href)})`], { encoding: 'utf8', timeout: 20000 })
+  assert.equal(run.status, 0, run.stderr)
+  assert.equal(run.stdout, '')
 })

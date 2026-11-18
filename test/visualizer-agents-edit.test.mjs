@@ -48,6 +48,22 @@ test('parser-refused values return the defect text and a null diff', () => {
   }
 })
 
+test('clearing an unknown tier is refused with the parser defect, with or without a tiers line', () => {
+  const noTiers = text.split('\n').filter((l) => !l.startsWith('tiers:')).join('\n')
+  assert.equal(parseAgent(noTiers).fields.tiers, undefined)
+  for (const agentText of [text, noTiers]) {
+    for (const field of ['effort', 'model']) {
+      const r = proposeAgentEdit({ agentText, role: 'planner', tier: 'ultra', field, value: null })
+      assert.equal(r.ok, false)
+      assert.equal(r.diff, null)
+      assert.match(r.refusals.map((x) => x.message).join(' '), /tiers\.ultra is not a tier/)
+    }
+  }
+  const known = proposeAgentEdit({ agentText: noTiers, role: 'planner', tier: 'build', field: 'effort', value: null })
+  assert.equal(known.ok, true)
+  assert.equal(known.diff, '')
+})
+
 test('an unreadable agent file is a named null, not an empty diff', () => {
   const r = proposeAgentEdit({ agentText: null, readError: 'unable to read agent definition: ENOENT, at crew/agents/planner.md', role: 'planner', field: 'model', value: 'a/b' })
   assert.equal(r.ok, false)

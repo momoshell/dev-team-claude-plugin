@@ -12,6 +12,7 @@ const FINDINGS = {
   summary: 'one sentence',
   findings: [{ claim: 'a fact', evidence: ['crew/crew.mjs:1'], confidence: 'verified' }],
 }
+const MULTIBYTE = 'orbit 🛰 relay → done'
 const USAGE = {
   input: 100, output: 20, cacheRead: 5, cacheWrite: 7, totalTokens: 132,
   cost: { input: 0.001, output: 0.002, cacheRead: 0.0001, cacheWrite: 0.0002, total: 0.0033 },
@@ -231,6 +232,20 @@ test('extractFindings classifies every malformed reply payload-free', () => {
   assert.equal(mod.extractFindings('```json\n{"marker":\n```').error, "the child's fenced JSON did not parse")
 })
 
+test('parseAgentAllowlist treats every malformed allowlist as no capability', () => {
+  for (const raw of [undefined, null, '', '   ', '{', '{}', '[]', 'null', '42']) {
+    assert.deepEqual(mod.parseAgentAllowlist(raw), [], String(raw))
+  }
+  const parsed = mod.parseAgentAllowlist(JSON.stringify([
+    { name: 'scout', def: '/tmp/scout.json' },
+    null,
+    { name: 'missing-def' },
+    { def: '/tmp/missing-name.json' },
+    { name: 4, def: '/tmp/wrong-name.json' },
+  ]))
+  assert.deepEqual(parsed, [{ name: 'scout', def: '/tmp/scout.json' }])
+})
+
 test('loadAgentDefinition mirrors the register four refusal classes', () => {
   const unreadable = mod.loadAgentDefinition({ name: 'scout', def: '/missing' }, { readFile: () => { throw new Error('EPERM') } })
   assert.match(unreadable.error, /unreadable/)
@@ -329,6 +344,23 @@ test('the child is spawned into a validated cwd from an absolutely resolved exec
   assert.equal(valid.calls[0].options.cwd, valid.context.cwd)
   assert.equal(valid.calls[0].options.shell, false)
   assert.deepEqual(valid.calls[0].options.stdio, ['ignore', 'pipe', 'pipe'])
+})
+
+test('the ndjson reader is byte-incremental across a split utf-8 sequence', async () => {
+  const payload = { summary: MULTIBYTE, findings: [{ claim: MULTIBYTE, evidence: [MULTIBYTE], confidence: 'verified' }] }
+  const raw = Buffer.from(`${childLines(payload, null).join('\n')}\n`, 'utf8')
+  let cut = -1
+  for (let i = 1; i < raw.length; i += 1) {
+    if ((raw[i] & 0xC0) === 0x80) { cut = i; break }
+  }
+  assert.ok(cut > 0, 'fixture must contain a UTF-8 continuation byte')
+  assert.equal((raw[cut] & 0xC0) === 0x80, true, 'split must be inside a multibyte sequence')
+  const split = await driven(mod, { chunks: [raw.subarray(0, cut), raw.subarray(cut)] })
+  assert.equal(split.result.details.refused, undefined)
+  assert.equal(JSON.stringify(split.result).includes('�'), false)
+  assert.deepEqual(split.result.details.findings, payload)
+  const tail = await driven(mod, { chunks: [Buffer.from(childLines(FINDINGS, null).join('\n'), 'utf8')] })
+  assert.equal(tail.result.details.refused, undefined)
 })
 
 test('the stream cap counts raw bytes, not decoded characters', async () => {
@@ -433,6 +465,23 @@ test('an absent spawn counter starts at zero while other read errors refuse', ()
   }
 })
 
+test('the last allowance spawns and the next does not', async () => {
+  const root = scratchDir('subagent-budget-last-')
+  const taskDir = join(root, 'task')
+  mkdirSync(taskDir, { recursive: true })
+  const counter = join(taskDir, 'subagent-spawns.json')
+  writeFileSync(counter, `${JSON.stringify({ spawns: mod.SUBAGENT_SPAWN_BUDGET - 1 })}\n`)
+  const first = await driven(mod, { root })
+  assert.equal(first.calls.length, 1)
+  assert.equal(first.result.details.refused, undefined)
+  const second = await driven(mod, { root })
+  assert.equal(second.calls.length, 0)
+  assert.equal(second.result.details.refused.startsWith('refused: '), true)
+  assert.equal(second.result.details.refused.includes('The seat is fine and nothing failed; the budget is spent'), true)
+  assert.equal(JSON.parse(second.journal[first.journal.length]).usage, null)
+  assert.equal(readFileSync(counter, 'utf8'), `${JSON.stringify({ spawns: mod.SUBAGENT_SPAWN_BUDGET })}\n`)
+})
+
 test('a corrupt spawn counter refuses rather than resetting', async () => {
   for (const bytes of ['not json', '{"spawns":"3"}', '{"spawns":-1}', '{"spawns":1.5}', '{}']) {
     const root = scratchDir('subagent-budget-corrupt-')
@@ -467,6 +516,21 @@ test('a counter that cannot be written refuses', async () => {
   assert.equal(refusedOf(run.result).includes('counter could not be recorded'), true)
 })
 
+test('toolResultPatch flags a refusal and only a refusal', () => {
+  assert.deepEqual(mod.toolResultPatch({ toolName: 'agent', details: { refused: 'refused: nope' } }), { isError: true })
+  assert.equal(mod.toolResultPatch({ toolName: 'agent', details: { findings: FINDINGS } }), undefined)
+  assert.equal(mod.toolResultPatch({ toolName: 'bash', details: { refused: 'x' } }), undefined)
+  assert.equal(mod.toolResultPatch(null), undefined)
+})
+
+test('the committed scout definition runs the child on gpt-6-luna at medium', () => {
+  const loaded = mod.loadAgentDefinition({ name: 'scout', def: join(ROOT, 'crew/pi/agents/scout.json') })
+  assert.equal(loaded.error, undefined)
+  const args = mod.childArgs({ def: loaded.definition, task: 'probe', promptFile: '/tmp/probe', model: loaded.definition.model, thinking: loaded.definition.thinking })
+  assert.equal(args[args.indexOf('--model') + 1], 'openai-codex/gpt-6-luna')
+  assert.equal(args[args.indexOf('--thinking') + 1], 'medium')
+})
+
 test('ctx supplies the child model, thinking level and cwd', async () => {
   const run = await driven(mod, { defBody: JSON.stringify({ name: 'scout', prompt: 'p', tools: ['read'] }) })
   const args = run.calls[0].args
@@ -490,6 +554,38 @@ test('ctx supplies the child model, thinking level and cwd', async () => {
   assert.match(`${textOf(unresolved.result)} ${refusedOf(unresolved.result)}`, /refusing a guessed passthrough/)
 })
 
+// Which pi frame carries a seat's own spend: every row is asserted against the
+// exported rule and against what the reducer actually folds.
+//
+// Usage values are plain non-negative integers on purpose: the rule under test
+// is which frame is admitted, not how each reducer coerces a scalar.
+const OWN_SPEND_TABLE = [
+  { name: "an assistant message_end is the seat's own spend", frame: { type: 'message_end', message: { role: 'assistant', usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 } } }, own: true },
+  { name: 'a nested tool result message_end is not', frame: { type: 'message_end', message: { role: 'toolResult', toolName: 'agent', usage: { input: 500, output: 400, cacheRead: 300, cacheWrite: 200 } } }, own: false },
+  { name: 'a user message_end is not', frame: { type: 'message_end', message: { role: 'user' } }, own: false },
+  { name: 'a message_end stating no role is not', frame: { type: 'message_end', message: { usage: { input: 5, output: 6 } } }, own: false },
+  { name: 'a message_end with no message is not', frame: { type: 'message_end' }, own: false },
+  { name: 'a turn_end replay is not', frame: { type: 'turn_end', message: { role: 'assistant', usage: { input: 7, output: 8 } } }, own: false },
+  { name: 'an agent_end replay is not', frame: { type: 'agent_end', message: { role: 'assistant', usage: { input: 9, output: 10 } } }, own: false },
+  { name: 'a non-frame is not', frame: null, own: false },
+]
+
+test('the reducer folds what the rule claims', () => {
+  for (const row of OWN_SPEND_TABLE) {
+    const usage = row.frame?.message?.usage
+    const want = row.own && usage
+      ? {
+        billed_input_tokens: usage.input ?? 0, billed_output_tokens: usage.output ?? 0,
+        billed_cache_write_tokens: usage.cacheWrite ?? 0, billed_cache_read_tokens: usage.cacheRead ?? 0,
+      }
+      : null
+    const reducer = mod.createStreamReducer()
+    reducer.push(row.frame)
+    assert.deepEqual(reducer.usage(), want, `subagent.ts folded: ${row.name}`)
+  }
+})
+
+
 // --- scout nudge ---------------------------------------------------------
 function nudgeFixture(overrides = {}) {
   const taskDir = join(scratchDir('scout-nudge-'), 'task')
@@ -502,11 +598,22 @@ function nudgeFixture(overrides = {}) {
   return { nudge, sends, rows, journal }
 }
 const DIRS = ['a', 'b', 'c']
-function readRun(nudge, n) {
+function readRun(nudge, n, dirs = DIRS) {
   for (let i = 0; i < n; i += 1) {
-    assert.equal(nudge.onToolCall({ toolName: 'read', input: { path: `${DIRS[i % DIRS.length]}/f${i}.mjs` } }), undefined)
+    assert.equal(nudge.onToolCall({ toolName: 'read', input: { path: `${dirs[i % dirs.length]}/f${i}.mjs` } }), undefined)
   }
 }
+
+test('SN3: reads confined to one or two directories send nothing; grep/find/ls count', () => {
+  const narrow = nudgeFixture()
+  readRun(narrow.nudge, 12, ['x', 'y'])
+  assert.equal(narrow.sends.length, 0)
+  const mixed = nudgeFixture()
+  for (const [toolName, path] of [['grep', 'a'], ['find', 'b'], ['ls', 'c'], ['grep'], ['read', 'a/x'], ['read', 'b/x'], ['find', 'c'], ['ls', 'a']]) {
+    assert.equal(mixed.nudge.onToolCall({ toolName, input: { path } }), undefined)
+  }
+  assert.equal(mixed.sends.length, 1)
+})
 
 test('the scout nudge never throws into the seat: a failing journal or send still behaves', () => {
   const journalFails = nudgeFixture({ appendFile: () => { throw new Error('disk full') } })

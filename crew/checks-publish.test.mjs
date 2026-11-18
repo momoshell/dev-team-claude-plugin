@@ -117,6 +117,29 @@ test('commitChanges refuses a checkout with a merge, lock or unmerged state in p
   assert.equal(reasonOf(result), 'dirty-worktree')
 })
 
+test('commitChanges restores HEAD, index and tree when staging or the commit fails after taking effect', async () => {
+  for (const word of ['add', 'commit']) {
+    const cwd = laneRepo()
+    writeFileSync(join(cwd, 'a.txt'), 'change\n')
+    writeFileSync(join(cwd, 'outside.txt'), 'staged\n')
+    writeFileSync(join(cwd, 'fresh.txt'), 'new\n')
+    git(cwd, 'add', 'outside.txt')
+    const before = snapshot(cwd)
+    let attempted = 0
+    const run = through(async (spec) => {
+      if (!has(spec, word)) return undefined
+      attempted++
+      await runSuite(spec)
+      return FAKE_BAD
+    })
+    const result = await commitChanges({ cwd, files: ['a.txt', 'fresh.txt'], subject: 'feat: fails' }, { run })
+    assert.equal(attempted, 1, word)
+    assert.equal(result.status, 'red', word)
+    assert.equal(reasonOf(result), 'commit-failed')
+    assert.deepEqual(snapshot(cwd), before, word)
+  }
+})
+
 test('commitChanges never claims a restore it could not prove', async () => {
   const cwd = laneRepo()
   writeFileSync(join(cwd, 'a.txt'), 'change\n')
@@ -309,6 +332,37 @@ test('rebaseBranch reports an ordinary rebase failure as red rebase-failed with 
   assert.deepEqual(snapshot(cwd), before)
 })
 
+test('rebaseBranch rejects bases that could be read as options or are not ref names', async () => {
+  const cwd = laneRepo()
+  const calls = []
+  const run = through((spec) => { calls.push(spec) })
+  for (const base of ['', '-x', '--onto', 'a b', 'a..b', 'a\nb', 5, undefined]) {
+    const result = await rebaseBranch({ cwd, base }, { run })
+    assert.equal(result.status, 'unmeasured', String(base))
+    assert.equal(reasonOf(result), 'invalid-input')
+  }
+  assert.ok(!calls.some((spec) => has(spec, 'rebase')))
+})
+
+test('rebaseBranch cleans up before reporting a stopped or interrupted rebase as unmeasured', async () => {
+  for (const reason of ['signal', 'timeout']) {
+    const cwd = conflictLane()
+    const before = snapshot(cwd)
+    const run = through(async (spec) => {
+      if (!has(spec, 'rebase') || has(spec, '--abort')) return undefined
+      await runSuite(spec)
+      return FAKE_UNMEASURED(reason)
+    })
+    const result = await rebaseBranch({ cwd, base: 'main' }, { run })
+    assert.equal(result.status, 'unmeasured', reason)
+    assert.equal(reasonOf(result), reason)
+    assert.deepEqual(snapshot(cwd), before)
+  }
+  const cwd = laneRepo()
+  const thrown = await rebaseBranch({ cwd, base: 'main' }, { run: through((spec) => { if (has(spec, 'rebase')) throw new Error('boom') }) })
+  assert.equal(reasonOf(thrown), 'runner-threw')
+})
+
 test('rebaseBranch never credits a cleanup whose abort or restoration probe failed', async () => {
   const aborted = conflictLane()
   const abortFails = through((spec) => (has(spec, '--abort') ? FAKE_BAD : undefined))
@@ -442,6 +496,22 @@ test('openPullRequest treats an unreadable, ambiguous or foreign PR list as unkn
   }
 })
 
+test('openPullRequest reports a create it cannot confirm as unmeasured pr-unmeasured', async () => {
+  const cases = {
+    unrecorded: fakeRemote({ create: 'drops' }),
+    okButAbsent: fakeRemote({ create: 'ok' }),
+    readbackFailed: fakeRemote({ list: (n) => (n === 1 ? undefined : FAKE_BAD) }),
+    readbackMalformed: fakeRemote({ list: (n) => (n === 1 ? undefined : FAKE_OK('not json')) }),
+    readbackTwo: fakeRemote({ list: (n) => (n === 1 ? undefined : FAKE_OK(JSON.stringify([prRecord(18), prRecord(19)]))) }),
+  }
+  for (const [name, f] of Object.entries(cases)) {
+    const result = await openPullRequest(publishSpec, { run: f.run })
+    assert.equal(result.status, 'unmeasured', name)
+    assert.equal(reasonOf(result), 'pr-unmeasured', name)
+    assert.equal(f.count('gh', 'create'), 1, name)
+  }
+})
+
 test('openPullRequest refuses invalid input and a branch that is not checked out without publishing anything', async () => {
   const cases = [
     { cwd: '' }, { branch: '' }, { branch: '-x' }, { branch: 'a b' }, { branch: 5 }, { base: '--head' }, { base: undefined }, { title: '' }, { title: 'a\nb' }, { body: 5 },
@@ -458,6 +528,24 @@ test('openPullRequest refuses invalid input and a branch that is not checked out
   assert.equal((await openPullRequest(publishSpec, { run: elsewhere.run })).reason, 'invalid-input')
   assert.equal(elsewhere.count('git', 'push'), 0)
   assert.equal((await openPullRequest()).reason, 'invalid-input')
+})
+
+test('openPullRequest turns runner failures and empty readbacks into unmeasured results, never a PR', async () => {
+  const runners = {
+    eperm: ['runner-threw', async () => { throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' }) }],
+    enoent: ['spawn-error', async () => ({ ...FAKE_UNMEASURED('spawn-error'), error: { code: 'ENOENT', message: 'spawn gh ENOENT' } })],
+    interrupted: ['signal', async () => FAKE_UNMEASURED('signal')],
+    undefinedResult: ['runner-threw', async () => undefined],
+  }
+  for (const [name, [reason, run]] of Object.entries(runners)) {
+    const result = await openPullRequest(publishSpec, { run })
+    assert.equal(result.status, 'unmeasured', name)
+    assert.notEqual(result.status, 'green')
+    assert.equal(reasonOf(result), reason, name)
+  }
+  const emptyHead = fakeRemote({ head: '' })
+  assert.equal((await openPullRequest(publishSpec, { run: emptyHead.run })).reason, 'invalid-remote-data')
+  assert.equal(emptyHead.count('gh', 'create'), 0)
 })
 
 // MUTATION: drop the detached refusal and a rebase moves HEAD while the lane branch stays behind.

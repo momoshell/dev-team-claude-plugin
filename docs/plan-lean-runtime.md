@@ -215,7 +215,7 @@ Sol review, because the current factory is what is being replaced. From phase 4,
 
 - [x] 4.1 Lanes in this repo start with `--loop lean`; failures are fixed in the new path, not the old one.
       Every lane in this repo since b1395 started with `--loop lean`.
-- [x] 4.2 P4 journal writer, never throws. Built into `crew/loop.mjs`, not taken from `emit.mjs`.
+- [x] 4.2 P4 journal writer, never throws. Built into the lean loop (`emit` in `crew/loop.mjs`), not taken from `emit.mjs`.
       `crew/loop.test.mjs` checks this in `a failing journal append leaves the lane outcome unchanged and the result carries the unwritten count and the described error`.
 - [x] 4.3 One `closeout.mjs` and one `status.mjs` for the new path. Shipped as `crew closeout` (PR 2016) and `crew lanes` (PR 2017; `status` stays the old driver's verb until the switch).
 - [x] 4.4 Visualizer reads journals and session files instead of the ledger; its roster editor edits

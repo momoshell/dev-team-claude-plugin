@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { ARMS, CHECKOUT, CORPUS_DIR, createOutDir, parseCli, validateArms, writeDiff } from './replay-common.mjs'
+import { ARMS, CHECKOUT, CORPUS_DIR, addedLines, createOutDir, parseCli, validateArms, writeDiff } from './replay-common.mjs'
 import { openMemory, renderSection } from '../crew/memory.mjs'
 import { parseAgent } from '../crew/protocols.mjs'
 import { runBuilder } from './replay-builder.mjs'
@@ -229,6 +229,23 @@ test('builder replay: prompt rewrite, backfills, checks, diff with additions and
   assert.deepEqual(json(join(out, 'result.json')).arms, ['fff', 'readgate'])
 })
 
+test('builder replay: seat, check and cleanup failures are recorded and the worktree goes', async () => {
+  const fx = fixture('b1402')
+  const out = fresh('fail')
+  const result = await runBuilder({ lane: 'b1402', cell: CELL, arms: [], out }, {
+    ...fx.deps,
+    runAcpSeat: () => { throw Object.assign(new Error('seat down'), { code: 'ACP_X' }) },
+    runGate: async () => { throw new Error('gate exploded') },
+    proveMutations: async () => { throw new Error('unreachable') },
+  })
+  assert.match(result.error, /seat: ACP_X seat down/)
+  assert.match(json(join(out, 'result.json')).error, /seat down/)
+  assert(existsSync(join(out, 'session.jsonl')) && existsSync(join(out, 'diff.patch')))
+  assert.equal(worktrees(fx.repo), 1)
+  const ret = json(join(out, 'task', 'planner-1.json'))
+  assert.equal(ret.details.files_in_scope, undefined)
+})
+
 test('a returned refusal or a turn with no stop reason is a recorded failure', async () => {
   for (const [turn, expect] of [[{ refusal: { code: 'auth', message: 'not logged in' }, stopReason: null }, /seat refused auth: not logged in/], [{}, /no stop reason/], [null, /no stop reason/]]) {
     for (const [name, run] of [['builder', runBuilder], ['planner', runPlanner]]) {
@@ -401,6 +418,37 @@ test('memory CLI option is planner-only and requires a value', () => {
   assert.match(builder.stderr, /unknown argument --memory/)
 })
 
+test('a turn that ends without its required artifacts is a recorded failure', async () => {
+  const good = { status: 'done', summary: 'ok' }
+  const builderCases = [
+    ['missing envelope', () => {}, /envelope: builder-2\.json not written/],
+    ['malformed envelope', (c) => writeFileSync(join(c.taskDir, 'builder-2.json'), '{nope'), /builder-2\.json is not valid JSON/],
+    ['non-object envelope', (c) => writeFileSync(join(c.taskDir, 'builder-2.json'), '[1]'), /not a JSON object/],
+    ['envelope without summary', (c) => writeFileSync(join(c.taskDir, 'builder-2.json'), JSON.stringify({ status: 'done' })), /lacks a status and summary/],
+  ]
+  for (const [label, write, expect] of builderCases) {
+    const fx = fixture()
+    const out = fresh('art')
+    const result = await runBuilder({ lane: 'b1380', cell: CELL, arms: [], out }, { ...fx.deps, runAcpSeat: (c) => { write(c); return { stopReason: 'end_turn' } }, runGate: async () => ({ status: 'red', failingIds: [] }) })
+    assert.match(result.error, expect, label)
+    assert.match(json(join(out, 'result.json')).error, expect, label)
+    assert.equal(result.envelope, null)
+  }
+  const plannerCases = [
+    ['missing envelope', (c) => { writeFileSync(join(c.taskDir, 'plan.md'), '# p\n'); writeFileSync(join(c.taskDir, 'gate.mjs'), 'x\n') }, /envelope: planner-1\.json not written/],
+    ['malformed envelope', (c) => { writeFileSync(join(c.taskDir, 'plan.md'), '# p\n'); writeFileSync(join(c.taskDir, 'gate.mjs'), 'x\n'); writeFileSync(join(c.taskDir, 'planner-1.json'), 'oops') }, /not valid JSON/],
+    ['missing plan', (c) => { writeFileSync(join(c.taskDir, 'gate.mjs'), 'x\n'); writeFileSync(join(c.taskDir, 'planner-1.json'), JSON.stringify(good)) }, /planner: plan\.md not written/],
+  ]
+  for (const [label, write, expect] of plannerCases) {
+    const fx = fixture()
+    const out = fresh('art')
+    const result = await runPlanner({ lane: 'b1380', cell: CELL, arms: [], out }, { ...fx.deps, runAcpSeat: (c) => { write(c); return { stopReason: 'end_turn' } }, runGate: async () => ({ status: 'red', failingIds: [] }) })
+    assert.match(result.error, expect, label)
+    assert.match(json(join(out, 'result.json')).error, expect, label)
+    assert.equal(worktrees(fx.repo), 1)
+  }
+})
+
 test('writeDiff captures staged edits, staged additions and unstaged edits, and fails loudly outside a repo', () => {
   const repo = fresh('diffrepo')
   mkdirSync(repo, { recursive: true })
@@ -420,4 +468,20 @@ test('writeDiff captures staged edits, staged additions and unstaged edits, and 
   const patch = readFileSync(file, 'utf8')
   for (const needle of ['a-staged', 'staged-new', 'b-unstaged', 'untracked']) assert(patch.includes(needle), needle)
   assert.throws(() => writeDiff(scratch, join(scratch, 'never.patch')), /git .* failed/)
+})
+
+// MUTATION: count test additions as source additions.
+test('added lines distinguish source, tests and binary', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'added-'))
+  const git = (...args) => { const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr) }
+  try {
+    git('init', '-q'); git('-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '--allow-empty', '-qm', 'base')
+    mkdirSync(join(dir, 'test'))
+    writeFileSync(join(dir, 'source.mjs'), 'one\ntwo\n')
+    writeFileSync(join(dir, 'test', 'x.test.mjs'), 'one\n')
+    writeFileSync(join(dir, 'binary'), Buffer.from([0, 1]))
+    // MUTATION: truncate the filename at its first tab when parsing numstat.
+    writeFileSync(join(dir, 'prefix\tcase.test.mjs'), 'one\ntwo\nthree\n')
+    assert.deepEqual(addedLines(dir), { source: 2, test: 4, binary: 1 })
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })

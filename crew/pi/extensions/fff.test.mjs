@@ -14,6 +14,7 @@ const FFF_BIN = '/opt/homebrew/bin/fff-mcp'
 // Explicit builder seat fixtures: the register resolver that used to supply these is gone.
 const BUILDER_TOOLS = 'Read,Edit,Write,Glob,Grep,Bash'
 const BUILDER_DENY = 'Task,Agent,Workflow'
+const NO_GRANT = { tools: [], extensions: [], agents: [], skills: [], advisor: false, mcp_servers: [] }
 
 function hookCommand() {
   const settings = JSON.parse(readFileSync(CLAUDE_SEAT_SETTINGS, 'utf8'))
@@ -32,6 +33,14 @@ function fffGrant() {
     mcp_servers: [{ name: 'fff', command: { bin: FFF_BIN, args: [] }, url: null }],
   }
 }
+
+// MUTATION: restore assertNoLocalProvider(configDir).
+test('claude acpLaunch ignores configDir instead of refusing it', () => {
+  const spec = { bin: '/abs/acp', claudeBin: '/abs/claude', cwd: '/tmp', role: 'builder', model: 'sonnet', promptFile: '/tmp/p', taskDir: '/tmp/task', grants: NO_GRANT }
+  let launch
+  assert.doesNotThrow(() => { launch = claudeAcpLaunch({ ...spec, configDir: '/legacy' }) })
+  assert.deepEqual(launch, claudeAcpLaunch(spec))
+})
 
 test('A1 granted claude Bash search is refused with the fff replacement', () => {
   const { env } = claudeAcpLaunch({

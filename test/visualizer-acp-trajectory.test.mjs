@@ -5,6 +5,75 @@ import { projectRecording, filterTrace, traceOverview, prettyTraceValue } from '
 const recording = rows => ({file:'task/lean/builder/demo.builder.1.jsonl',raw:rows.map(row=>JSON.stringify(row)).join('\n')})
 const frame = (kind, values = {}, sessionId = 's1', extra = {}) => ({sessionId,update:{sessionUpdate:kind,...values},...extra})
 
+test('tool call lifecycle retains sparse payload/result and line identity without fabricating timing', () => {
+  // MUTATION: remove call-ID aggregation or overwrite absent fields with null.
+  const input=recording([
+    {type:'prompt',text:'Repair the failing test'},
+    frame('tool_call',{toolCallId:'c1',name:'Bash',status:'pending',rawInput:{}}),
+    frame('tool_call_update',{toolCallId:'c1',rawInput:{command:'npm test'}}),
+    frame('agent_message_chunk',{messageId:'m1',content:{type:'text',text:'Checking '}}),
+    frame('tool_call_update',{toolCallId:'c1',status:'completed',rawOutput:{stdout:'hidden-output-needle',exit:0}}),
+    frame('agent_message_chunk',{messageId:'m1',content:{type:'text',text:'the result.'}}),
+    {type:'turn',stopReason:'end_turn',usage:{inputTokens:10,outputTokens:2},refusal:null},
+  ])
+  const copy=structuredClone(input), result=projectRecording(input), tool=result.records[1]
+  assert.equal(result.tool_count,1); assert.equal(result.records.length,4)
+  assert.deepEqual(tool.input,{command:'npm test'});assert.deepEqual(tool.output,{stdout:'hidden-output-needle',exit:0})
+  assert.equal(tool.status,'completed');assert.equal(tool.incomplete,false);assert.deepEqual(tool.raw.map(r=>r.line),[2,3,5])
+  assert.deepEqual([tool.started_at,tool.ended_at,tool.duration_ms],[null,null,null])
+  assert.equal(result.records[2].output,'Checking the result.');assert.deepEqual(result.records[2].raw.map(r=>r.line),[4,6])
+  assert.deepEqual(result.usage,{inputTokens:10,outputTokens:2});assert.deepEqual(result.records[3].usage,result.usage)
+  assert.deepEqual(filterTrace(result.records,{query:'HIDDEN-OUTPUT-NEEDLE'}).map(r=>r.id),[tool.id])
+  assert.deepEqual(input,copy)
+})
+
+test('call identity is isolated by recording and session; unidentified updates never coalesce', () => {
+  // MUTATION: use callId alone as the map key.
+  const input=recording([
+    frame('tool_call_update',{toolCallId:'same',rawInput:{path:'first'}}),
+    frame('tool_call',{toolCallId:'same',name:'read'}),
+    frame('tool_call',{toolCallId:'same',name:'write'},'other-session'),
+    frame('tool_call_update',{toolCallId:'same',rawOutput:'second output'},'other-session'),
+    frame('tool_call_update',{rawOutput:'orphan one'}),frame('tool_call_update',{rawOutput:'orphan two'}),
+  ])
+  const result=projectRecording(input)
+  assert.equal(result.tool_count,4);assert.equal(new Set(result.records.map(r=>r.id)).size,4)
+  assert.deepEqual(result.records[0].input,{path:'first'});assert.equal(result.records[0].output,undefined)
+  assert.equal(result.records[1].output,'second output');assert.equal(result.records[2].call_id,null)
+  const retry=projectRecording({...input,file:'task/lean/builder/demo.builder.1.retry-1.jsonl'})
+  assert.notEqual(retry.records[0].id,result.records[0].id)
+  const appended=projectRecording({...input,raw:input.raw+'\n'+JSON.stringify(frame('tool_call_update',{toolCallId:'same',status:'failed'}))})
+  assert.deepEqual(appended.records.map(r=>r.id),result.records.map(r=>r.id))
+})
+
+test('consecutive unkeyed chunks join only within the same stream, and source content stays inert text', () => {
+  const input=recording([
+    frame('agent_message_chunk',{content:{type:'text',text:'<script>alert(1)</script>'}}),
+    frame('agent_message_chunk',{content:{type:'text',text:'literal'}}),
+    frame('agent_thought_chunk',{content:{type:'text',text:'recorded reasoning'}}),
+    frame('agent_message_chunk',{content:{type:'text',text:'new message'}}),
+    frame('agent_message_chunk',{content:{type:'text',text:'other session'}},'s2'),
+    frame('user_message_chunk',{content:{type:'text',text:'user input'}}),
+  ])
+  const result=projectRecording(input)
+  assert.equal(result.records.length,5);assert.equal(result.records[0].output,'<script>alert(1)</script>literal')
+  assert.equal(result.records[1].name,'Reasoning');assert.equal(result.records[4].kind,'input')
+})
+
+test('recorded terminal output wins over content; Claude and generic ACP result shapes remain inspectable', () => {
+  const input=recording([
+    frame('tool_call',{toolCallId:'c',kind:'execute',status:'in_progress'}),
+    frame('tool_call_update',{toolCallId:'c',_meta:{claudeCode:{toolName:'Bash',toolResponse:{stdout:'claude output'}}}}),
+    frame('tool_call_update',{toolCallId:'c',status:'completed'}),
+    frame('tool_call',{toolCallId:'d',content:[{type:'content',content:{type:'text',text:'generic result'}}],status:'completed'}),
+    frame('tool_call',{toolCallId:'e',rawOutput:null,content:[{text:'not the raw output'}]}),
+  ])
+  const result=projectRecording(input)
+  assert.equal(result.records[0].name,'Bash');assert.deepEqual(result.records[0].output,{stdout:'claude output'})
+  assert.match(result.records[1].preview,/generic result/);assert.equal(result.records[2].output,null)
+  assert.equal(result.records[2].incomplete,true);assert.equal(prettyTraceValue(undefined),'Not recorded');assert.equal(prettyTraceValue(''),'')
+})
+
 test('broken rows and unsupported updates stay visible, usage snapshots never become turn totals', () => {
   const input=recording([
     null,[],42,{update:{sessionUpdate:'plan',entries:{broken:true}}},

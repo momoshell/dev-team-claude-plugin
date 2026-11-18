@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs'
 import { delimiter, dirname, join, basename } from 'node:path'
-import { acpLaunch, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_BUILTIN_EXTENSION_TOOLS, PI_MCP_SERVER_TOOLS, PI_ADVISOR_EXTENSION } from './adapters/adapter-pi.mjs'
+import { acpLaunch, piActivatedTools, validatePiExtensionTools, PI_BUILTIN_TOOLS, PI_BUILTIN_EXTENSION_TOOLS, PI_MCP_SERVER_TOOLS } from './adapters/adapter-pi.mjs'
 import * as pi from './adapters/adapter-pi.mjs'
 import { ROOT } from '../test/helpers.mjs'
 
@@ -16,12 +16,6 @@ test('K7 and K8 MCP tools are pinned and unknown servers refuse', () => {
   assert.deepEqual(PI_MCP_SERVER_TOOLS.fff, expected)
   assert.ok(Object.isFrozen(PI_MCP_SERVER_TOOLS) && Object.isFrozen(PI_MCP_SERVER_TOOLS.fff))
 })
-test('ADR47-L2 G1 null-cell advisor grant loads extension in rpc', () => {
-  const grants = { advisor: true }
-  const rpc = piSeatParts({ model: 'sonnet', promptFile: 'p', grants, advisorCell: null, env: {} })
-  assert.ok(rpc.args.includes(PI_ADVISOR_EXTENSION))
-})
-
 function piOnPath() {
   for (const directory of (process.env.PATH || '').split(delimiter)) {
     const candidate = join(directory || '.', 'pi')

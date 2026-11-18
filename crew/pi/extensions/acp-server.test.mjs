@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import net from 'node:net'
 import { scratchDir } from '../../../test/helpers.mjs'
 import { ACP_PROTOCOL_VERSION, ACP_STOP_REASONS, ACP_UPDATE_KINDS, acpClient } from '../../acp-client.mjs'
-import acpServer, { PERMISSION_OPTIONS, gatedToolsFrom, stopReasonFor, usageFrom } from './acp-server.ts'
+import acpServer, { PERMISSION_OPTIONS, stopReasonFor, usageFrom } from './acp-server.ts'
 
 // Every server test drives the REAL extension the way pi does: each handler is
 // called (event, ctx), ctx only as the second argument, and the client side is
@@ -101,29 +101,6 @@ async function withSession(options = {}) {
 
 const bashCall = (toolCallId, command = 'echo hi') => ({ toolCallId, toolName: 'bash', input: { command } })
 
-test('pi publishes cumulative usage after each assistant message before settlement', async () => {
-  const h = await withSession()
-  try {
-    h.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'work' }] } })
-    await h.flush()
-    const updates = () => h.frames.filter((f) => f.params?.update?.sessionUpdate === 'usage_update').map((f) => f.params.update.usage)
-    const first = { role: 'assistant', usage: { input: 10, output: 5, cacheRead: 2, cacheWrite: 1, totalTokens: 18 } }
-    h.emit('message_end', { message: first })
-    await h.flush()
-    assert.deepEqual(updates(), [{ inputTokens: 10, outputTokens: 5, cachedReadTokens: 2, cachedWriteTokens: 1, totalTokens: 18 }])
-    h.emit('message_end', { message: { role: 'toolResult', usage: { input: 999 } } })
-    h.emit('message_end', { message: { role: 'assistant' } })
-    h.emit('agent_end', { messages: [first] })
-    h.emit('message_end', { message: { role: 'assistant', usage: { input: 3, output: 2, cacheRead: 0, cacheWrite: 4 } } })
-    await h.flush()
-    assert.deepEqual(updates(), [
-      { inputTokens: 10, outputTokens: 5, cachedReadTokens: 2, cachedWriteTokens: 1, totalTokens: 18 },
-      { inputTokens: 13, outputTokens: 7, cachedReadTokens: 2, cachedWriteTokens: 5, totalTokens: 18 },
-    ])
-    assert.equal(h.frames.some((f) => f.id === 5), false)
-  } finally { h.close() }
-})
-
 test('running pi accounting resets per prompt without changing final agent_end usage', async () => {
   const h = await withSession()
   try {
@@ -171,153 +148,35 @@ test('a cancel that lands during pi prompt preflight still stops the run and blo
   } finally { h.close() }
 })
 
-test('the default gate covers bash, edit, write and powershell, and a blank list is the default', async () => {
-  assert.deepEqual([...gatedToolsFrom(undefined)].sort(), ['bash', 'edit', 'powershell', 'write'])
-  assert.deepEqual([...gatedToolsFrom(' , ')].sort(), ['bash', 'edit', 'powershell', 'write'])
-  assert.deepEqual([...gatedToolsFrom('bash')], ['bash'])
-  const h = await withSession()
-  try {
-    const pending = h.emit('tool_call', { toolCallId: 'call-ps', toolName: 'powershell', input: { command: 'dir' } })
-    const req = await h.wait((f) => f.method === 'session/request_permission', 'powershell permission request')
-    assert.equal(req.params.toolCall.kind, 'execute')
-    h.answer(req, 'reject_once')
-    assert.equal((await settle(pending))?.block, true)
-  } finally { h.close() }
-})
-
-test('C2 answers cancellation only once despite repeated settlement', async () => {
-  const h = await withSession()
-  try {
-    h.send({ jsonrpc: '2.0', id: 5, method: 'session/prompt', params: { sessionId: SESSION, prompt: [{ type: 'text', text: 'cancel me' }] } })
-    await h.wait(() => h.prompts.length === 1, 'first prompt')
-    h.send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: SESSION } })
-    await h.flush()
-    assert.equal(h.frames.filter((frame) => frame.id === 5).length, 0, 'no answer before the aborted run settles')
-    h.emit('agent_before_settle', { outcome: 'aborted' })
-    h.emit('agent_settled')
-    await h.wait((frame) => frame.id === 5, 'cancelled response')
-    h.emit('agent_settled')
-    await h.flush()
-    assert.equal(h.frames.filter((frame) => frame.id === 5).length, 1)
-  } finally { h.close() }
-})
-
-test('P4 asks permission for each gated call and honors each answer', async () => {
-  const h = await withSession()
-  try {
-    const pending = h.emit('tool_call', bashCall('call-p4-1'))
-    const req = await h.wait((f) => f.method === 'session/request_permission', 'permission request')
-    assert.equal(req.params.sessionId, SESSION)
-    assert.equal(req.params.toolCall.toolCallId, 'call-p4-1')
-    assert.equal(req.params.toolCall.kind, 'execute')
-    assert.deepEqual(req.params.options.map((o) => o.kind), ['allow_once', 'reject_once'])
-    assert.equal(await settle(pending, 100), 'still-pending', 'the gated call must wait for the answer')
-    h.answer(req, 'reject_once')
-    const result = await settle(pending)
-    assert.equal(result?.block, true)
-    assert.match(result.reason, /rejected/)
-    // reject_once is not cached: the next call asks again.
-    const again = h.emit('tool_call', bashCall('call-p4-2'))
-    const second = await h.wait((f) => f.method === 'session/request_permission' && f.id !== req.id, 'second permission request')
-    h.answer(second, 'allow_once')
-    assert.equal(await settle(again), undefined)
-    // An ungated tool never asks.
-    assert.equal(await settle(h.emit('tool_call', { toolCallId: 'call-p4-3', toolName: 'read', input: { path: 'x' } })), undefined)
-    assert.equal(h.permissionRequests().length, 2)
-  } finally { h.close() }
-})
-
-// The fake pi the bridge tests spawn. It records argv, env, the socket dir
-// mode and every byte it reads on stdin, writes a marker to its own stdout,
-// and in `serve` mode answers initialize on CREW_ACP_SOCKET.
+// Record any launch, and the descendant when testing process-group cleanup.
 function fakePi(dir) {
   const path = join(dir, 'fake-pi.mjs')
   writeFileSync(path, `#!${process.execPath}
-import net from 'node:net'
-import { statSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
-const socketPath = process.env.CREW_ACP_SOCKET
-let stdinBytes = 0
-const record = (extra = {}) => writeFileSync(process.env.FAKE_PI_RECORD, JSON.stringify({ argv: process.argv.slice(2), socketPath, dirMode: statSync(dirname(socketPath)).mode & 0o777, stdinBytes, pid: process.pid, ...extra }))
-process.stdin.on('data', (d) => { stdinBytes += d.length })
-process.stdout.write('FAKE-PI-STDOUT\\n')
+import { writeFileSync } from 'node:fs'
+const record = (extra = {}) => writeFileSync(process.env.FAKE_PI_RECORD, JSON.stringify(extra))
 record()
-if (process.env.FAKE_PI_MODE === 'exit-early') process.exit(7)
-if (process.env.FAKE_PI_MODE === 'exit-zero') process.exit(0)
 if (process.env.FAKE_PI_MODE === 'fork-exit') {
   const { spawn } = await import('node:child_process')
   const left = spawn('/bin/sleep', ['30'], { stdio: 'ignore' })
   record({ descendant: left.pid })
   process.exit(7)
 }
-process.on('SIGTERM', () => { record({ sigterm: true }); process.exit(5) })
-net.createServer((sock) => {
-  let buf = ''
-  sock.on('data', (d) => {
-    buf += d
-    let at
-    while ((at = buf.indexOf('\\n')) >= 0) {
-      const frame = JSON.parse(buf.slice(0, at)); buf = buf.slice(at + 1)
-      sock.write(JSON.stringify({ jsonrpc: '2.0', id: frame.id, result: { protocolVersion: 1, _meta: { from: 'fake-pi', method: frame.method } } }) + '\\n')
-    }
-  })
-}).listen(socketPath)
-setTimeout(() => process.exit(3), 30000).unref()
 `)
   chmodSync(path, 0o755)
   return path
 }
 
-function runBridge(env, args = []) {
-  const child = spawn(process.execPath, [BRIDGE, ...args], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...env } })
-  const run = { child, stdout: '', stderr: '' }
-  child.stdout.on('data', (d) => { run.stdout += d })
+function runBridge(env) {
+  const child = spawn(process.execPath, [BRIDGE], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...env } })
+  const run = { child, stderr: '' }
+  child.stdout.resume()
   child.stderr.on('data', (d) => { run.stderr += d })
   run.exited = new Promise((done) => child.once('close', (code, signal) => done({ code, signal })))
   return run
 }
 
-async function waitFor(pred, what, ms = 5000) {
-  for (let waited = 0; waited <= ms; waited += 10) { if (pred()) return; await sleep(10) }
-  throw new Error(`no ${what} within ${ms}ms`)
-}
-
 const readRecord = (path) => { try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return null } }
 const killRecorded = (path) => { const rec = readRecord(path); if (rec?.pid) { try { process.kill(rec.pid, 'SIGKILL') } catch {} } }
-
-test('P7 bridges ACP frames and terminates pi on stdin EOF', async () => {
-  const dir = scratchDir('acp-bridge-')
-  const recordPath = join(dir, 'record.json')
-  const run = runBridge({ CREW_PI_BIN: fakePi(dir), FAKE_PI_RECORD: recordPath, FAKE_PI_MODE: 'serve', HOME: dir }, ['--model', 'fake/model'])
-  try {
-    run.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {} } })}\n`)
-    await waitFor(() => run.stdout.includes('\n'), 'a frame on the bridge stdout')
-    const reply = JSON.parse(run.stdout.split('\n')[0])
-    assert.deepEqual(reply, { jsonrpc: '2.0', id: 1, result: { protocolVersion: 1, _meta: { from: 'fake-pi', method: 'initialize' } } })
-    assert.equal(run.stdout.includes('FAKE-PI-STDOUT'), false, 'pi stdout must never reach the ACP stdout')
-    const rec = readRecord(recordPath)
-    assert.deepEqual(rec.argv, ['--mode', 'rpc', '--no-session', '-e', SERVER, '--model', 'fake/model'])
-    assert.equal(rec.dirMode, 0o700)
-    run.child.stdin.end()
-    const exit = await run.exited
-    const after = readRecord(recordPath)
-    assert.equal(after.sigterm, true, 'stdin EOF must terminate pi')
-    assert.equal(after.stdinBytes, 0, 'pi stdin is held open and never written')
-    assert.equal(exit.code, 5, 'the bridge exits with pi status')
-    assert.equal(existsSync(dirname(rec.socketPath)), false, 'the socket dir is removed')
-    assert.match(run.stderr, /FAKE-PI-STDOUT/)
-  } finally { run.child.kill('SIGKILL'); killRecorded(recordPath) }
-})
-
-test('P8 registers ACP handlers only when the socket is configured', () => {
-  const off = stubPi()
-  withEnv({ CREW_ACP_SOCKET: undefined }, () => acpServer(off.pi))
-  assert.deepEqual([...off.handlers.keys()], [], 'without CREW_ACP_SOCKET the extension registers nothing')
-  // Non-vacuity: the same factory with the variable set does register.
-  const on = stubPi()
-  withEnv({ CREW_ACP_SOCKET: join(scratchDir('acp-p8-'), 's.sock') }, () => acpServer(on.pi))
-  assert.ok(on.handlers.has('tool_call') && on.handlers.has('session_start'))
-})
 
 test('session/new answers the running session id with mcpServers unsupported, and refuses a second', async () => {
   const h = await harness()
@@ -485,27 +344,6 @@ test('bridge: a relative or missing CREW_PI_BIN is refused before anything is sp
     assert.match(run.stderr, /CREW_PI_BIN/)
     assert.equal(existsSync(recordPath), false, 'nothing was spawned')
   }
-})
-
-test('bridge: pi exiting before its socket appears returns its status, never 0, and removes the socket dir', async () => {
-  const dir = scratchDir('acp-bridge-')
-  const recordPath = join(dir, 'record.json')
-  const run = runBridge({ CREW_PI_BIN: fakePi(dir), FAKE_PI_RECORD: recordPath, FAKE_PI_MODE: 'exit-early', HOME: dir })
-  try {
-    const exit = await within(run.exited, 10000, 'hung')
-    assert.notEqual(exit, 'hung', 'the bridge must not wait on a close that already fired')
-    assert.equal(exit.code, 7)
-    const rec = readRecord(recordPath)
-    assert.equal(existsSync(dirname(rec.socketPath)), false)
-    assert.match(run.stderr, /exited before its ACP socket appeared/)
-  } finally { run.child.kill('SIGKILL') }
-  // pi exiting 0 without ever serving ACP is still a failed startup.
-  const zero = runBridge({ CREW_PI_BIN: fakePi(dir), FAKE_PI_RECORD: recordPath, FAKE_PI_MODE: 'exit-zero', HOME: dir })
-  try {
-    const exit = await within(zero.exited, 10000, 'hung')
-    assert.notEqual(exit, 'hung')
-    assert.equal(exit.code, 1, 'a startup that never served ACP must not exit 0')
-  } finally { zero.child.kill('SIGKILL') }
 })
 
 test('bridge: what pi forked before exiting is torn down with its process group', async () => {

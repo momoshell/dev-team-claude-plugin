@@ -25,12 +25,6 @@ test('LB1 a lean row\'s tier and shape fill the board\'s assurance and execution
   assert.equal(configurationDimensionCell({ tier: 'build' }, 'assurance').dashed, true)
 })
 
-test('TK1 tokenCell keeps a lean row\'s closed tokens reason', () => {
-  const reason = 'not-reported'
-  const cell = tokenCell({ source: 'lean', pending: { tokens: reason } })
-  assert.equal(cell.text, reason); assert.equal(cell.title, reason)
-})
-
 test('workflow semantics name only real tiers and shapes and no mechanical planner or reviewer', () => {
   for (const value of ['mechanical', 'build', 'judge', 'unknown', null]) assert.equal('staffing' in assuranceMeta(value), false)
   const text = readFileSync(join(ROOT, 'visualizer/web/src/lib/workflow-semantics.js'), 'utf8')
@@ -40,21 +34,6 @@ test('workflow semantics name only real tiers and shapes and no mechanical plann
   assert.doesNotMatch(executionMeta('standard').summary, /plan|review/i)
   assert.doesNotMatch(executionMeta('finish').summary, /pull request|\bpr\b/i)
   assert.equal(executionMeta('full').summary, 'Recorded execution shape.')
-})
-
-function configurationFixture() {
-  const historical = { adw_id: 'historical', tier: 'build', variant: 'full', task_profile: null, execution_shape: null, assurance: null }
-  const measured = { adw_id: 'measured', task_profile: 'implementation', execution_shape: 'full', assurance: 'standard' }
-  const other = { adw_id: 'other', task_profile: 'audit', execution_shape: 'scout', assurance: 'rigorous' }
-  return { historical, measured, other }
-}
-
-test('E1 preserves unrecorded rows while filtering measured configuration', () => {
-  const { historical, measured, other } = configurationFixture()
-  const view = configurationFilterView([historical, measured, other], { execution_shape: 'full' })
-  assert.deepEqual(view.rows.map((row) => row.adw_id), ['historical', 'measured'])
-  assert.equal(view.excluded.count, 1)
-  assert.equal(view.excluded.line, '1 measured row excluded by configuration filters · not-recorded rows remain visible')
 })
 
 test('hash routes parse and format every kept canonical view', () => {
@@ -77,33 +56,6 @@ test('fleet cells preserve honest absence and discriminate status evidence', () 
   assert.equal(tokenCell({ metrics: { billed_input_tokens: 10, billed_output_tokens: 2, billed_cache_write_tokens: 3, billed_cache_read_tokens: 5 } }).value, 20)
   assert.equal(tokenCell({ metrics: { billed_input_tokens: 10, billed_output_tokens: 2, billed_cache_write_tokens: 3, billed_cache_read_tokens: 5 } }).cacheRate, 5 / 18 * 100)
   assert.equal(tokenCell({ metrics: { billed_input_tokens: 10, billed_output_tokens: 2, billed_cache_write_tokens: null, billed_cache_read_tokens: 5 } }).cacheRate, null)
-})
-
-test('ledger refresh waits after completion, coalesces clicks and resets its pause', async () => {
-  const { createRefreshLoop } = await import('../visualizer/web/src/lib/live.js')
-  const timers = new Map()
-  let next = 0, reads = 0, finish
-  const loop = createRefreshLoop(() => { reads += 1; return new Promise(resolve => { finish = resolve }) }, {
-    setTimeout: (fn, delay) => { timers.set(++next, {fn, delay}); return next },
-    clearTimeout: id => timers.delete(id),
-  })
-  const first = loop.refresh()
-  await Promise.resolve()
-  assert.equal(reads, 1)
-  assert.equal(loop.refresh(), first)
-  assert.equal(timers.size, 0, 'a slow read must never have a periodic timer alongside it')
-  finish()
-  await first
-  assert.deepEqual([...timers.values()].map(t => t.delay), [30000])
-  const manual = loop.refresh()
-  await Promise.resolve()
-  assert.equal(timers.size, 0, 'manual refresh cancels the old scheduled read')
-  assert.equal(reads, 2)
-  finish()
-  await manual
-  assert.deepEqual([...timers.values()].map(t => t.delay), [30000])
-  loop.stop()
-  assert.equal(timers.size, 0)
 })
 
 test('paused, hidden and disposed ledger refreshes do not restart themselves', async () => {

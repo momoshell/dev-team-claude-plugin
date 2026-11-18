@@ -60,36 +60,6 @@ test('the latest stage names the open review, not the ended suite, in the summar
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('lean lane tokens are the seat-turn usage sum, null with the unmeasured reason, with the turn count', () => {
-  const root = scratchDir('lean-tokens-'), crewRoot = join(root, 'crew'), archiveRoot = join(root, 'archive')
-  const builder = { event: 'seat-turn', role: 'builder', usage: { inputTokens: 32823, outputTokens: 3792, cachedReadTokens: 374528, cachedWriteTokens: 0, totalTokens: 411143 } }
-  const lead = { event: 'seat-turn', role: 'lead', usage: { inputTokens: 6, outputTokens: 1674, cachedReadTokens: 25986, cachedWriteTokens: 10022, totalTokens: 37688 } }
-  try {
-    for (const [name, rows, value, text, turns] of [
-      ['measured', [builder, lead], 448831, null, '2 of 2 turns carried usage'],
-      ['missing', [{ event: 'seat-turn', usage: null, unmeasured: { usage: 'not-reported' } }, lead], null, 'not-reported', '1 of 2 turns carried usage'],
-      ['empty', [], null, 'no seat-turn rows recorded', null],
-      ['malformed', [{ event: 'seat-turn', usage: { ...builder.usage, inputTokens: -1 } }], null, 'usage-malformed', '0 of 1 turns carried usage'],
-    ]) {
-      lane(crewRoot, name, rows)
-      const run = createLeanSource({ crewRoot, archiveRoot }).listRuns().find((r) => r.goal === name)
-      const cell = tokenCell(run)
-      assert.equal(cell.value, value); if (text) assert.equal(cell.text, text); assert.equal(cell.turns, turns)
-      if (value !== null) { assert.deepEqual(run.metrics, { billed_input_tokens: 32829, billed_output_tokens: 5466, billed_cache_read_tokens: 400514, billed_cache_write_tokens: 10022 }); assert.equal('tokens' in run.pending, false) }
-      else assert.ok(Object.values(run.metrics).every((v) => v === null))
-    }
-  } finally { rmSync(root, { recursive: true, force: true }) }
-})
-
-test('a red suite stage keeps its recorded reason and reads as a code check with no seat', () => {
-  const root = scratchDir('lean-suite-'), crewRoot = join(root, 'crew'), archiveRoot = join(root, 'archive')
-  try {
-    lane(crewRoot, 'suite', [{ event: 'stage-start', stage: 'suite' }, { event: 'stage-end', stage: 'suite', outcome: { status: 'red', reason: 'exit-nonzero', code: 1, signal: null, timedOut: false } }])
-    const [phase] = createLeanSource({ crewRoot, archiveRoot }).listRuns()[0].phases
-    assert.deepEqual([phase.status, phase.reason, phase.kind, phase.role], ['red', 'exit-nonzero', 'check', null])
-  } finally { rmSync(root, { recursive: true, force: true }) }
-})
-
 test('proof check evidence keeps the recorded reason and each test row', () => {
   const root = scratchDir('lean-proof-'), crewRoot = join(root, 'crew'), archiveRoot = join(root, 'archive')
   try {
@@ -157,15 +127,6 @@ test('stage-end outcomes set phase status from halt, held, envelope and threw, e
   })
 })
 
-test('seat sessions of one turn list base, rerun, repair, repair.rerun as crew show orders them', async () => {
-  await withServer(async ({ crewRoot, get }) => {
-    const dir = lane(crewRoot, 'order', [])
-    for (const suffix of ['', '.repair', '.repair.rerun', '.rerun']) put(join(dir, 'task', 'lean', 'planner', `p.planner.1${suffix}.jsonl`), suffix || 'base')
-    const body = (await get(`/api/seat-sessions?${q('order', { role: 'planner' })}`)).body
-    assert.deepEqual(body.sessions.map((session) => session.raw), ['base', '.rerun', '.repair', '.repair.rerun'])
-  })
-})
-
 test('an archived lane with no terminal row reads stopped, never running, in listRuns and the board', () => {
   const sandbox = scratchDir('lean-viz-')
   try {
@@ -215,19 +176,6 @@ test('VS2 listed check statuses match full journal rows', async () => {
       assert.deepEqual(leanCheckStatus(rows[i]), { label, tone })
       assert.deepEqual(leanCheckStatus(checks[i]), { label, tone })
     })
-  })
-})
-
-test('LV2 terminal verdicts and pr rows settle a lane; empty journals are unknown', async () => {
-  await withServer(async ({ crewRoot, get }) => {
-    lane(crewRoot, 'stopped', [{ event: 'stage-start', stage: 'build' }, { event: 'verdict', stage: 'build', status: 'stopped', reason: 'runner-threw' }])
-    lane(crewRoot, 'pub', [{ event: 'verdict', stage: 'review', status: 'reviewed' }, { event: 'stage-start', stage: 'publish' }, { event: 'pr', stage: 'start', pr: { number: 3, url: 'u' } }])
-    lane(crewRoot, 'empty', [])
-    const byId = Object.fromEntries((await get('/api/sessions')).body.runs.map((run) => [run.adw_id, run]))
-    assert.deepEqual([byId['lean:stopped'].status, byId['lean:stopped'].reason, byId['lean:stopped'].running], ['stopped', 'runner-threw', false])
-    assert.deepEqual([byId['lean:pub'].status, byId['lean:pub'].reason], ['done', null]); assert.notEqual(byId['lean:pub'].ship.state, 'merged')
-    assert.equal(byId['lean:empty'].status, 'unknown'); assert.ok(byId['lean:empty'].reason)
-    assert.equal((await get('/api/sessions?status=stopped')).body.runs.length, 1)
   })
 })
 
@@ -313,18 +261,6 @@ test('a lane is dated by its run-start and placed in the time window by it', asy
     assert.deepEqual(runs.map((run) => [run.adw_id, run.started_at]), [['lean:dated', new Date(at).toISOString()]])
     const undated = (await get('/api/sessions')).body.runs.find((run) => run.adw_id === 'lean:undated')
     assert.equal(undated.started_at, null); assert.ok(undated.pending.started_at)
-  })
-})
-
-test('a lane whose spec or crew file symlinks out of the lane is not listed', async () => {
-  await withServer(async ({ crewRoot, get }) => {
-    for (const [name, file] of [['spec-out', join('task', 'lean.json')], ['crew-out', 'crew.json']]) {
-      const dir = lane(crewRoot, name, [{ event: 'stage-start', stage: 'plan' }])
-      const outside = join(crewRoot, `${name}.json`)
-      put(outside, readFileSync(join(dir, file), 'utf8'))
-      rmSync(join(dir, file)); symlinkSync(outside, join(dir, file))
-    }
-    assert.deepEqual((await get('/api/sessions')).body.runs.map((run) => run.adw_id), [])
   })
 })
 

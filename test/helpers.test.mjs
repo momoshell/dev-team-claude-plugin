@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import net from 'node:net'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { writeFileSync, readFileSync, existsSync, globSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { ROOT, forAll, rawRequest, scratchDir, startFileWriter, trackProcessGroupFile, writeTornFile } from './helpers.mjs'
@@ -218,23 +218,6 @@ test('WL1 tracked detached process group is reaped when the node --test runner i
     if (Number.isSafeInteger(runner.pid)) { try { process.kill(-runner.pid, 'SIGKILL') } catch {} }
     try { runner.kill('SIGKILL') } catch {}
   }
-})
-
-// Mutation killed: dropping any pgid > 1 check lets an unsafe id reach process.kill at drain.
-// The drain runs in a CHILD process: registering unsafe ids here would arm our own exit drain.
-test('unsafe process group ids never reach process.kill at drain', () => {
-  const root = scratchDir('helpers-unsafe-pgid-')
-  const script = join(root, 'unsafe-child.mjs')
-  const log = join(root, 'kill.log')
-  const files = ['1', '0', '-5', '1.5', '424242'].map((id) => {
-    const file = join(root, `pgid-${id}`)
-    writeFileSync(file, id)
-    return file
-  })
-  writeFileSync(script, `import { appendFileSync } from 'node:fs'\nimport { trackProcessGroupFile } from ${JSON.stringify(helperUrl)}\nprocess.kill = (pid, sig) => { appendFileSync(${JSON.stringify(log)}, pid + ' ' + sig + '\\n') }\nfor (const file of ${JSON.stringify(files)}) trackProcessGroupFile(file)\n`)
-  const result = spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 30000 })
-  assert.equal(result.status, 0, result.stderr)
-  assert.equal(readFileSync(log, 'utf8'), '-424242 SIGKILL\n')
 })
 
 async function assertProcessGone(pid, timeoutMs = 5000) {

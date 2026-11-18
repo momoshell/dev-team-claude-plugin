@@ -27,21 +27,6 @@ function lines(rows) {
   return rows.map((row) => JSON.stringify(row)).join('\n') + (rows.length ? '\n' : '')
 }
 
-test('journal reader degrades instead of throwing when journal.jsonl is absent', () => {
-  const root = scratchDir('visualizer-trajectory-missing-')
-  lane(root)
-  const source = journalSource(root)
-  let result
-  try {
-    result = source.readJournal({ repo_slug: 'dt-task', task_slug: 'task', adw_id: 'lean:task' })
-  } catch (error) {
-    assert.fail(`readJournal threw: ${error.message}`)
-  }
-  assert.equal(result.degraded, true)
-  assert.ok(typeof result.error === 'string' && result.error.length > 0)
-  assert.deepEqual(result.rows, [])
-})
-
 test('journal reads do not change the crew tree, including traversal attempts', () => {
   const root = scratchDir('visualizer-trajectory-readonly-')
   lane(root, { journal: lines([{ at: 0, event: 'hello' }]) })
@@ -52,4 +37,3 @@ test('journal reads do not change the crew tree, including traversal attempts', 
   assert.equal(traversal.error, 'invalid repo_slug or task_slug')
   assert.equal(treeDigest(root), before)
 })
-

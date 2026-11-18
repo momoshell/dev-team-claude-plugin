@@ -14,9 +14,8 @@ its title, it does not assert success or exact usage text.
 that a valid `--checkout` start returns 0.
 
 Pin the refusal direction and the accepted direction as separate observations,
-and pin usage text beside status. The surviving
-`main refuses --check as usage and starts nothing` test asserts exact usage text
-and exit 2 for its `--check` shapes only.
+and pin usage text beside status. `main` still refuses `--check` with exit 2,
+but no surviving test asserts the `--check` refusal or exact usage text.
 
 Do not let an unknown option become an omitted bound or a null filter. The cost
 of ignoring one flag is an apparently successful command that did something
@@ -25,13 +24,12 @@ other than what was asked.
 An empty vocabulary means a verb accepts no flags; it is not an open parser.
 
 An unknown flag (`--loop`) must refuse before it can acquire accidental meaning.
-Owner: `main` in `crew/start.mjs`; no surviving test pins `--loop` or other
-unknown flags beyond the `--check` shapes above, or duplicate accepted flags.
+Owner: `main` in `crew/start.mjs`; no surviving test pins unknown flags or
+duplicate accepted flags.
 
 If a value is missing, report usage rather than reading the next option as data.
 Status: `main` in `crew/start.mjs` refuses a missing `--checkout` value, but
-no surviving test pins that edge independently of `--check`; other verbs are
-unmeasured. See `evidence.md`.
+no surviving test pins that edge. Other verbs are unmeasured. See `evidence.md`.
 
 If parsing is interrupted, do not resume with a default.
 Status: this interrupted-parser edge is unbacked in this checkout; see

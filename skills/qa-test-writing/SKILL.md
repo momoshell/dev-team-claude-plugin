@@ -29,8 +29,9 @@ input. Keep an example test for the shape.
 ## Critical rules
 
 - A check must be able to fail. A lane's proof (red on the old source, green on
-  the build) is evidence, not a kill proof: the old-source run can fail for
-  another reason, and the green-only proofs (`base-package-absent`,
+  the build) is evidence, not a kill proof. A failure outside the test body,
+  such as an import error, does not count as red, but an unrelated assertion in
+  the body does; and the green-only proofs (`base-package-absent`,
   `base-test-absent`) have no red side. When you doubt a check, neutralise the
   behaviour by hand, observe red and restore; nothing requires it (ADR-055 §9).
 - Never derive the expected value from the implementation. Use an independent

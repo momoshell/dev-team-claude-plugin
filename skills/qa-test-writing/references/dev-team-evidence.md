@@ -119,9 +119,9 @@ path or a symbol, not a line.
 
 ### The three verified negatives
 
-Recorded so no later sweep re-spends them, these **do** discriminate:
+Recorded so no later sweep re-spends them, these checks discriminated when recorded:
 
-- the billed-money null assertion (`crew/pi/extensions/subagent.test.mjs`, the absent-usage case). Historical: the 2026-11-17 test cut removed it, and no test reddens now when the `details.usage` null fallback becomes a zero
+- the `details.usage` null assertion (`crew/pi/extensions/subagent.test.mjs`, the absent-usage case; it checked the whole usage record). Historical: the 2026-11-17 test cut removed it, and no test reddens now when the `details.usage` null fallback becomes a zero
 - historical transcript and kill-helper checks (no live exhibit)
 
 Note V4/N2 as a pair: that guard genuinely pins `tools` and does **not** pin

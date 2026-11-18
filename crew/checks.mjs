@@ -257,9 +257,21 @@ function composeLaneMessage({ subject, body, closes, refs }) {
   return joinBlocks([withoutIssueTokens(subject), withoutIssueTokens(body), issueLines(closes, refs).join('\n')])
 }
 
-export function composeLanePrBody({ body, closes, refs }) {
+export function composeLanePrBody({ body, closes, refs, builderNotes }) {
   const prose = withoutIssueTokens(body)
-  return joinBlocks([prose, issueLines(closes, refs).join('\n')])
+  const trailers = issueLines(closes, refs).join('\n')
+  if (typeof builderNotes?.text !== 'string' || builderNotes.text === '') return joinBlocks([prose, trailers])
+
+  const heading = '## Builder notes'
+  const notes = withoutIssueTokens(builderNotes.text)
+  // Count code points after rewriting. Reserve the separator between the heading and notes.
+  const room = 65_536 - [...joinBlocks([prose, heading, trailers])].length - 2
+  const characters = [...notes]
+  if (characters.length <= room) return joinBlocks([prose, joinBlocks([heading, notes]), trailers])
+
+  const cut = withoutIssueTokens(`Builder notes were cut. Full notes: \`${builderNotes.file}\`.`)
+  const prefix = characters.slice(0, Math.max(0, room - [...cut].length - 2)).join('')
+  return joinBlocks([prose, joinBlocks([heading, prefix, cut]), trailers])
 }
 
 const singleLine = (text) => typeof text === 'string' && text.trim() !== '' && !/[\r\n\0]/.test(text)
@@ -620,7 +632,7 @@ function validPr(record, branch, base) {
 // Pushes the lane branch (never forced) and opens its PR, or returns the PR already open. Every claim is read back.
 export async function openPullRequest(spec = {}, deps = {}) {
   return guarded(async () => {
-    const { cwd, branch, base, title, body = '', closes = [], refs = [], remote = 'origin', timeoutMs = DEFAULT_TIMEOUT_MS } = spec ?? {}
+    const { cwd, branch, base, title, body = '', closes = [], refs = [], builderNotes, remote = 'origin', timeoutMs = DEFAULT_TIMEOUT_MS } = spec ?? {}
     deps ??= {}
     const closing = issueList(closes)
     const referenced = issueList(refs)
@@ -669,7 +681,7 @@ export async function openPullRequest(spec = {}, deps = {}) {
       remoteOid = await remoteHead()
     }
     if (remoteOid !== head) return unmeasured('push-unmeasured')
-    const composedBody = composeLanePrBody({ body, closes: closing, refs: referenced })
+    const composedBody = composeLanePrBody({ body, closes: closing, refs: referenced, builderNotes })
     if (existing.length === 1) {
       const edited = await gh(['pr', 'edit', String(existing[0].number), '--body', composedBody])
       if (edited.status !== 'green') return notGreen(edited, 'pr-unmeasured')

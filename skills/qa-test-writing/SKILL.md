@@ -8,7 +8,7 @@ description: >-
 # Test writing
 
 Use measurement, not reasoning alone, to establish that a check discriminates.
-A check nobody has seen fail is not trustworthy. See the [dev-team repository evidence](references/dev-team-evidence.md) for the defects behind these rules.
+A check nobody has seen fail for the right reason is weak evidence. See the [dev-team repository evidence](references/dev-team-evidence.md) for the defects behind these rules.
 
 ## Routing
 
@@ -28,8 +28,13 @@ input. Keep an example test for the shape.
 
 ## Critical rules
 
-- Never keep a check you have not watched fail. Name the mutation in a comment
-  beside the check, run it, observe red, and restore.
+- A check must be able to fail. A lane's proof (red on the old source, green on
+  the build) is evidence, not a kill proof. It needs the named test to fail in
+  its own body, yet an unrelated assertion there passes it, and some runners
+  report a failing hook as red; read the old-source failure to see that it is
+  the intended one. The green-only proofs (`base-package-absent`,
+  `base-test-absent`) have no red side. When you doubt a check, neutralise the
+  behaviour by hand, observe red and restore; nothing requires it (ADR-055 §9).
 - Never derive the expected value from the implementation. Use an independent
   literal, fixture, or capture.
 - Never assert over input that cannot reach the subject. Change the fixture,

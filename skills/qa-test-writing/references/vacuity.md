@@ -5,8 +5,9 @@ is worse than no check because it is trusted. Assert against an authoritative
 stream or mutable data, not merely the presence of a service, method, key or
 symbol.
 
-Neutralise the behaviour in a disposable scratch tree, confirm green before
-mutating, run the named check and observe red, then restore and confirm green.
+To test a check you doubt, neutralise the behaviour in a disposable scratch
+tree, confirm green before mutating, run the named check and observe red, then
+restore and confirm green.
 Pair the mutation with a direct probe showing the behaviour is really gone.
 Independent repetitions strengthen a measurement. Select a scratch strategy
 that reproduces the target baseline; remove any worktree properly. See the

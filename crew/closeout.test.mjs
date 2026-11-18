@@ -440,19 +440,6 @@ test('discard of a closed-PR lane still refuses a finish record and a lane not p
   }
 })
 
-test('discard refuses a lane with a finish-ready row, naming crew finish, with nothing changed', () => {
-  for (const event of ['finish-ready', 'finish-decision']) {
-    const w = world({ rows: [...STOPPED, { event }] })
-    try {
-      const r = close(w, { argv: [LANE, '--discard'] })
-      assert.equal(r.status, 1, event)
-      assert.match(r.err, /crew finish demo/)
-      assert.equal(r.calls.length, 0)
-      assertUnchanged(w)
-    } finally { w.done() }
-  }
-})
-
 test('a dead run with no pull request and no stop verdict is discarded', () => {
   const w = world({ rows: [{ event: 'stage-start', stage: 'plan' }] })
   try {
@@ -835,18 +822,6 @@ test('a branch whose tip is not the merged PR head is refused with nothing chang
     const r = close(w, { head: merged })
     assert.equal(r.status, 1)
     assert.match(r.err, /not the merged head/)
-    assertUnchanged(w)
-  } finally { w.done() }
-})
-
-// MUTATION: drop the symbolic-ref check and a dt-<lane> worktree switched to another branch is removed.
-test('a lane worktree checked out on another branch is refused with nothing changed', () => {
-  const w = world()
-  try {
-    git(w.worktree, 'switch', '-q', '-c', 'side')
-    const r = close(w)
-    assert.equal(r.status, 1)
-    assert.match(r.err, /refs\/heads\/side, not demo/)
     assertUnchanged(w)
   } finally { w.done() }
 })

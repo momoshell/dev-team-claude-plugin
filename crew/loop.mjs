@@ -7,9 +7,9 @@
 // Initial finish, pre-check and publishing conflicts share one builder conflict turn per run.
 // An unresolved or spent turn stops rebase-conflict, restoring uncommitted work only when cleanup is proven.
 // A mechanical finish uses its brief and publishes nothing.
-// Mechanical: rebase -> build -> refresh base -> proof -> suite -> PR. A fix turn repeats checks; build, judge and mechanical
-// never automatically rerun a red suite (ADR-054 §1). Finish also repairs the first red immediately, then stops on another red.
-// A finish suite that is neither green nor red stops without a repair.
+// Mechanical: rebase -> build -> refresh base -> proof -> suite -> PR. A fix turn repeats checks.
+// Only a red suite or proof with measured host sleep gets one unchanged-tree re-run (ADR-054 §1).
+// Otherwise finish repairs its first red suite and stops on a second red or an unmeasured suite.
 // Only the checked tree is committed. The post-suite publishing rebase still repeats checks at most three times.
 // Git dropping the change as upstream stops nothing-to-commit at either move.
 // Import-only: every effect (seat turn, filesystem, check, git, journal) crosses an injected seam.
@@ -35,7 +35,7 @@ const WORKTREE_SYMLINK = 'worktree-symlink'
 const PROOF_UNMEASURED = '- proof: unmeasured'
 export const LOOP_REASONS = Object.freeze([
   ...CHECK_REASONS, 'unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'authentication_failed', 'lead-escalated', 'lead-unavailable',
-  'lead-refused', 'seat-escalated', 'round-bound', 'paths-unmeasured', 'no-progress', 'raise-needs-plan', 'recheck-bound',
+  'lead-refused', 'seat-escalated', 'round-bound', 'paths-unmeasured', 'no-progress', 'raise-needs-plan', 'recheck-bound', 'red-after-sleep-rerun',
 ])
 
 const REQUIRED_ROLES = ['planner', 'builder', 'reviewer']
@@ -803,8 +803,19 @@ export async function runLoop(spec, deps = {}) {
     }
     return { rebased }
   }
+  const withSleepRerun = async (name, check) => {
+    const attempt = () => stage(name, check)
+    let result = await attempt()
+    if (result.status === 'red' && Number.isFinite(result.sleep_credited_s) && result.sleep_credited_s > 0) {
+      result = await attempt()
+      // Let the caller join any parallel review before journaling the stop.
+      if (result.status === 'red') return { result, stopAfterSleepRerun: () => stop('red-after-sleep-rerun', { stage: name, result: journaled(result) }) }
+    }
+    return { result }
+  }
   const suiteCommand = oneLine([spec.suite.command, ...(spec.suite.args ?? [])].join(' '))
-  const suiteRun = (signal) => stage('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs, suiteLock: spec.suiteLock, lane: spec.id, ...(signal ? { signal } : {}) }, { command: true, cancellable: !!signal }))
+  const suiteRun = (signal) => withSleepRerun('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs, suiteLock: spec.suiteLock, lane: spec.id, ...(signal ? { signal } : {}) }, { command: true, cancellable: !!signal }))
+  const proofRun = (base) => withSleepRerun('proof', () => callCheck('proof', d.proveTests, { cwd, base, tests: namedTests, timeoutMs: spec.proofTimeoutMs, lane: spec.id }))
   const result = await (async () => {
   try {
     try { await d.mkdir(spec.taskDir, { recursive: true }) } catch (error) { return await stop('runner-threw', { mkdir: describe(error) }) }
@@ -946,7 +957,8 @@ export async function runLoop(spec, deps = {}) {
         recheck = false
         if (!namedTests.length && (!isFinish || planning) && !testsRequired) proofLines = [tier === 'mechanical' ? '- proof: none, mechanical lane, not reviewed' : '- proof: none, no criterion is machine-checked']
         if (namedTests.length) {
-          const proof = await stage('proof', () => callCheck('proof', d.proveTests, { cwd, base: 'HEAD', tests: namedTests, timeoutMs: spec.proofTimeoutMs, lane: spec.id }))
+          const { result: proof, stopAfterSleepRerun } = await proofRun('HEAD')
+          if (stopAfterSleepRerun) return stopAfterSleepRerun()
           const rows = Array.isArray(proof.rows) ? proof.rows : []
           const proofOK = proof.status === 'green' && proof.reason === null && rows.length === namedTests.length && rows.every((row) => row?.proven === true)
           if (!proofOK && proof.status === 'red') {
@@ -1003,7 +1015,7 @@ export async function runLoop(spec, deps = {}) {
             if (failed) throw failed.reason
             return results.map((result) => result.value)
           }
-          let suite, reviews = []
+          let suiteCheck, reviews = []
           if (tier === 'build') {
             const cancellation = new AbortController()
             const pair = await Promise.allSettled([suiteRun(cancellation.signal), runReviews().then((results) => {
@@ -1013,15 +1025,17 @@ export async function runLoop(spec, deps = {}) {
             })])
             const failed = pair.find((result) => result.status === 'rejected')
             if (failed) throw failed.reason
-            ;[suite, reviews] = pair.map((result) => result.value)
+            ;[suiteCheck, reviews] = pair.map((result) => result.value)
           }
           else {
-            suite = await suiteRun()
-            if (suite.status === 'green') reviews = await runReviews()
+            suiteCheck = await suiteRun()
+            if (suiteCheck.result.status === 'green') reviews = await runReviews()
           }
           const [reviewed, second] = reviews
           const reviewHalt = reviews.find((result) => result.halt)?.halt
           if (reviewHalt) return reviewHalt
+          const { result: suite, stopAfterSleepRerun } = suiteCheck
+          if (stopAfterSleepRerun) return stopAfterSleepRerun()
           const cancelled = tier === 'build' && suite.status === 'cancelled'
             && reviews.some((result) => !result.reused && result.envelope?.details.verdict === 'changes-needed')
           if (suite.status !== 'green' && suite.status !== 'red' && !cancelled) return stop(suite.reason, suite)
@@ -1090,7 +1104,8 @@ export async function runLoop(spec, deps = {}) {
         const halt = await stageChecked()
         if (halt) return halt
       }
-      const suite = await suiteRun()
+      const { result: suite, stopAfterSleepRerun } = await suiteRun()
+      if (stopAfterSleepRerun) return stopAfterSleepRerun()
       if (suite.status === 'red') {
         if (repaired) return stop(suite.reason, suite)
         // Give the builder one repair turn, then repeat this lane's checks.
@@ -1199,7 +1214,8 @@ export async function runLoop(spec, deps = {}) {
 
     if (rebased.head !== committed.head) {
       if (namedTests.length) {
-        const reproven = await stage('proof', () => callCheck('proof', d.proveTests, { cwd, base: `${rebased.head}^`, tests: namedTests, timeoutMs: spec.proofTimeoutMs, lane: spec.id }))
+        const { result: reproven, stopAfterSleepRerun } = await proofRun(`${rebased.head}^`)
+        if (stopAfterSleepRerun) return stopAfterSleepRerun()
         if (reproven.status !== 'green' || reproven.reason !== null || !Array.isArray(reproven.rows) || reproven.rows.length !== namedTests.length || !reproven.rows.every((row) => row?.proven === true)) return stop(reproven.reason ?? 'runner-threw', journaled(reproven))
         lastProved.clear()
         for (const row of reproven.rows) {
@@ -1208,7 +1224,8 @@ export async function runLoop(spec, deps = {}) {
           lastProved.add(key)
         }
       }
-      const postSuite = await suiteRun()
+      const { result: postSuite, stopAfterSleepRerun } = await suiteRun()
+      if (stopAfterSleepRerun) return stopAfterSleepRerun()
       if (postSuite.status !== 'green') return stop(postSuite.reason, postSuite)
       suiteLine = `- Suite: green; exit ${postSuite.code}; ${suiteCommand}.`
       // The tree the checks passed on must be the commit that is published or reported ready.

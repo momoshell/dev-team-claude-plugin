@@ -93,11 +93,12 @@ whose diff reaches a protected path stops `raise-needs-plan`, and you restart it
 from its brief as a build lane.
 Only the checked tree is committed; the post-suite rebase still repeats proof,
 review and suite on the new base. It publishes nothing (`crew/finish.mjs`).
-The first red suite gives the builder its one repair turn immediately, even for
-a flaky failure. There is no unchanged-tree retry. The repair repeats proof and the
-suite, and repeats review unless the reviewer already passed the same tree in this
-finish run. A red suite after repair, or a suite that is neither green
-nor red, stops the lane.
+A red suite or proof with measured host sleep runs once more on the unchanged tree
+(ADR-054 §1). A second red stops with `red-after-sleep-rerun`. Outside that exception,
+the first red suite gives the builder its one repair turn immediately, even for a flaky
+failure. The repair repeats proof and the suite, and repeats review unless the reviewer
+already passed the same tree in this finish run. An unmeasured suite, or a red suite
+after repair that does not qualify for a sleep re-run, stops the lane.
 When that run is ready, decide once:
 
 - `crew finish <lane> --accept [--notes <file>]` publishes the PR the run

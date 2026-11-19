@@ -1,6 +1,6 @@
 # ADR-054 — Each tier runs its own loop, and every stage earns its place
 
-**Status:** *proposed* 2026-11-01, operator direction ("each lane type should have its loop"); §2–§4 amended by ADR-055; checkout suite coordination amendment 2026-11-18 (#2457); §2 pending build-suite cancellation amendment 2026-11-18 (#2459) · **Owner:** operator ·
+**Status:** *proposed* 2026-11-01, operator direction ("each lane type should have its loop"); §2–§4 amended by ADR-055; checkout suite coordination amendment 2026-11-18 (#2457); §2 pending build-suite cancellation amendment 2026-11-18 (#2459); §1 host-sleep re-run amendment 2026-11-19 (#2493) · **Owner:** operator ·
 **Relates to:** ADR-052 (§6 the loop), ADR-053 (build first, prove after), ADR-038 (the judge floor forces proof),
 ADR-051 (finish shape)
 
@@ -42,12 +42,17 @@ every guarantee the loop can prove.
 
 A fix turn is not a retry. After any fix turn the loop runs the proof, the suite and every review of that loop again on
 the changed tree, within the role's round bound; a lane never publishes a tree that has not passed all of its tier's
-checks. What this record drops is the automatic re-run of an unchanged tree after a red suite.
+checks.
+
+A red suite or proof runs once more on the unchanged tree only if the red attempt recorded a numeric
+`sleep_credited_s` greater than zero. Absent, zero or `null` credit and suite-lock wait credit do not qualify.
+The journal records both attempts. A green re-run takes the normal green path; a second red stops the lane
+with `red-after-sleep-rerun`, even if that attempt also recorded sleep. All other checks follow their ordinary paths.
 
 ### 2. The loops
 
 Every loop rebases onto `main` before the build, runs the ADR-053 proof (each acceptance id red on base, green on the
-build, red under its kill-mutation), runs the suite once with no automatic re-run, and puts a passing review's
+build, red under its kill-mutation), runs the suite (subject to §1's sleep exception), and puts a passing review's
 `should-fix` findings into the PR body.
 
 ```
@@ -55,7 +60,7 @@ mechanical:  brief -> rebase -> build -> prove -> suite -> PR
 build:       brief -> plan -> rebase -> build -> prove -> (suite || review) -> PR
 judge:       brief -> plan -> rebase -> build -> prove -> suite -> review -> second review -> PR
 
-any red check -> one builder fix turn with every red result -> back to prove (bounded by rounds)
+red check outside §1's sleep exception -> one builder fix turn with every red result -> back to prove (bounded by rounds)
 ```
 
 - **Mechanical** is for changes with no behaviour to judge: a rename, docs, a version bump, or a config value no code reads. A config value the loop or a seat reads
@@ -89,8 +94,8 @@ Measured in the-power lanes since 2026-11-12, read 2026-11-18: 12 build rounds h
 after review ended. Of those 12 suites, 8 were green and 4 red. Cancelling can
 defer red-suite diagnostics by one round; how many of those 4 red results added
 information beyond review was not measured. Judge, mechanical and finish runs,
-proof and setup commands are unchanged. Section 1's prohibition on automatically
-rerunning a red suite on an unchanged tree still holds.
+proof and setup commands are unchanged by this cancellation rule. The host-sleep
+exception in §1 still uses the same cancellation signal for both suite attempts.
 
 Clarification 2026-11-18 (prose-drift audit, #2467): Pending includes suites
 queued for the checkout lock, not only running suites. `crew/loop.mjs` supplies
@@ -144,8 +149,8 @@ failure stops `suite-lock-unavailable`. Ownership is reclaimed only on proven
 death, never by age. Unreadable or uncertain holders stay unknown and
 unreclaimed. A surviving suite process group prevents reclamation even after
 its launcher dies. Proof, worktree setup, onboarding and builder checks remain
-unlocked; lane concurrency does not change. Section 1's ban on automatic
-unchanged-tree red-suite retries still holds.
+unlocked; lane concurrency does not change. Each suite attempt uses the same lock
+setting. Sleep credited while waiting for the lock does not trigger §1's re-run.
 
 Suite, proof (base/build, setup and listing) and `worktreeSetup` commands receive
 `CREW_LANE`, the lane name, overriding any inherited value only in the child

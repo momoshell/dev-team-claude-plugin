@@ -16,7 +16,7 @@
 // A seat's return is never trusted from the callback: the envelope is read back from the path
 // the loop issued, parsed and validated as P2, and must carry the id the loop issued.
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { appendFile, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
+import { appendFile, lstat, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { resolveAgents } from './agents.mjs'
@@ -31,6 +31,7 @@ export const DEFAULT_ROUNDS = 2
 const MAX_ENVELOPE_REPAIRS = 1
 const MAX_RECHECKS = 3
 const MAX_PROGRESS_TURNS = 6
+const WORKTREE_SYMLINK = 'worktree-symlink'
 const PROOF_UNMEASURED = '- proof: unmeasured'
 export const LOOP_REASONS = Object.freeze([
   ...CHECK_REASONS, 'unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'authentication_failed', 'lead-escalated', 'lead-unavailable',
@@ -260,7 +261,7 @@ export async function runLoop(spec, deps = {}) {
     && (fin.rulings === undefined || (Array.isArray(fin.rulings) && fin.rulings.every((r) => plainObject(r) && text(r.summary))))
     && (fin.priorReviewRounds === undefined || (Number.isSafeInteger(fin.priorReviewRounds) && fin.priorReviewRounds >= 0)))) return early('invalid-input')
   const d = {
-    resolveAgents, mkdir, readFile, stat, realpath, writeFile, proveTests, runSuite, commitChanges, rebaseBranch, openPullRequest,
+    resolveAgents, mkdir, readFile, stat, lstat, realpath, writeFile, proveTests, runSuite, commitChanges, rebaseBranch, openPullRequest,
     run: runSuite,
     now: Date.now,
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -268,7 +269,7 @@ export async function runLoop(spec, deps = {}) {
     journal: async (row) => appendFile(join(spec.taskDir, 'journal.jsonl'), `${JSON.stringify(row)}\n`),
     ...deps,
   }
-  const seams = ['runSeat', 'resolveAgents', 'mkdir', 'readFile', 'stat', 'realpath', 'writeFile', 'journal', 'proveTests', 'runSuite', 'commitChanges', 'rebaseBranch', 'openPullRequest', 'run', 'now', 'sleep', 'repoState']
+  const seams = ['runSeat', 'resolveAgents', 'mkdir', 'readFile', 'stat', 'lstat', 'realpath', 'writeFile', 'journal', 'proveTests', 'runSuite', 'commitChanges', 'rebaseBranch', 'openPullRequest', 'run', 'now', 'sleep', 'repoState']
   if (!seams.every((name) => typeof d[name] === 'function')) return early('invalid-input')
   let resolved
   try { resolved = d.resolveAgents(spec.tier, undefined, spec.roster?.snapshot ?? spec.roster?.overrides) } catch { return early('seat-unmeasured') }
@@ -465,6 +466,23 @@ export async function runLoop(spec, deps = {}) {
   }
 
   const readStatus = (name) => stage(name, () => callCheck(name, d.run, { cwd, command: 'git', args: [...GIT_STATUS_ARGS] }, { command: true }))
+  const checkBuildPaths = async (name, feedback) => {
+    const status = await readStatus(name)
+    if (status.status !== 'green' || typeof status.stdout !== 'string' || parseChangedPaths(status.stdout) === null) return { halt: await stop('paths-unmeasured', status) }
+    const links = new Set()
+    for (const { x, y, path } of parseStatus(status.stdout)) {
+      // A modified or renamed entry alone may already have been a symlink.
+      if (y === 'D' || !/[TA?]/.test(x + y)) continue
+      try { if ((await d.lstat(join(cwd, path))).isSymbolicLink()) links.add(path) } catch {}
+    }
+    const id = WORKTREE_SYMLINK
+    const remaining = feedback.filter((item) => item?.id !== id)
+    if (!links.size) return { status, feedback: remaining }
+    const paths = [...links].sort()
+    const failure = { role: 'builder', failure: id, paths }
+    if (repeatsFailure(failure)) return { halt: await stop('no-progress', failure) }
+    return { feedback: withGuidance([{ id, severity: 'must-fix', summary: `Remove symlinks from these changed worktree paths before checks: ${JSON.stringify(paths)}.`, paths }, ...remaining]) }
+  }
 
   // One role's turn: issue, await, read back, validate (an envelope attempt gets one repair turn that
   // costs no round). Returns { envelope } for a done envelope or { halt }.
@@ -822,13 +840,18 @@ export async function runLoop(spec, deps = {}) {
       }
     }
 
+    let feedback = isFinish ? [{ id: 'finish-stop', summary: 'The previous lane stopped with the given reason and observation.', reason: fin.stop.reason, observation: fin.stop.observation }, ...(guidanceItem ? [guidanceItem] : []), ...fin.findings] : []
     if (isFinish) {
-      const status = await readStatus('base-paths')
-      const files = status.status === 'green' && typeof status.stdout === 'string' ? parseChangedPaths(status.stdout) : null
-      if (files === null) return stop('paths-unmeasured', status)
+      let worktree = await checkBuildPaths('base-paths', feedback)
+      while (!worktree.halt && !worktree.status) {
+        const built = await stage('build', () => seatTurn('builder', worktree.feedback))
+        if (built.halt) return built.halt
+        worktree = await checkBuildPaths('base-paths', worktree.feedback)
+      }
+      if (worktree.halt) return worktree.halt
       const fetched = await fetchOrigin()
       if (fetched.status !== 'green') return stop(fetched.reason, fetched)
-      const moved = await moveBuild(status)
+      const moved = await moveBuild(worktree.status)
       if (moved.halt) return moved.halt
       rebasedHead = currentBase = moved.rebased.onto
     }
@@ -846,7 +869,6 @@ export async function runLoop(spec, deps = {}) {
     let suiteLine = `- Suite: unmeasured; ${suiteCommand}.`
     let builderSummary = ''
     const finishReviews = []
-    let feedback = isFinish ? [{ id: 'finish-stop', summary: 'The previous lane stopped with the given reason and observation.', reason: fin.stop.reason, observation: fin.stop.observation }, ...(guidanceItem ? [guidanceItem] : []), ...fin.findings] : []
     let firstCheck = true
     let repairing = false, recheck = false, rechecks = 0, uncountedReview = false
     let committed, rebased, measurements, laneBody, reviewStatus, checkedTree
@@ -878,7 +900,8 @@ export async function runLoop(spec, deps = {}) {
         if (!recheck) {
           if (reserveSpent && rounds.reviewer >= (seats.reviewer.rounds ?? DEFAULT_ROUNDS)) return stop('round-bound', { role: 'reviewer', reason: 'round-bound', findings: priorFindings, feedback })
           const built = await stage(repairing ? 'suite-repair' : 'build', () => seatTurn('builder', feedback, { singleTurn: repairing && (isFinish || tier === 'mechanical') }))
-          uncountedReview = isFinish && repairing
+          // A symlink retry must not spend a finish suite repair's uncounted review.
+          if (repairing || !feedback.some((item) => item?.id === WORKTREE_SYMLINK)) uncountedReview = isFinish && repairing
           repairing = false
           if (built.halt) return built.halt
           if (!isFinish && tier === 'mechanical') subject = built.envelope.details.subject
@@ -887,6 +910,10 @@ export async function runLoop(spec, deps = {}) {
           namedTests = Array.isArray(built.envelope.details.tests) ? built.envelope.details.tests : []
           lastProved.clear()
           builderReport = { tests: namedTests, notes: built.envelope.details.notes ?? null }
+          const worktree = await checkBuildPaths('build-paths', feedback)
+          if (worktree.halt) return worktree.halt
+          feedback = worktree.feedback
+          if (!worktree.status) continue
           if (!namedTests.length && (!isFinish || planning) && testsRequired) {
             const failure = { role: 'builder', failure: 'proof-no-tests' }
             if (repeatsFailure(failure)) return stop('no-progress', failure)
@@ -902,7 +929,7 @@ export async function runLoop(spec, deps = {}) {
             const freshBase = typeof measured.stdout === 'string' ? measured.stdout.trim() : ''
             if (!HEX_OID.test(freshBase) || typeof currentBase !== 'string' || !HEX_OID.test(currentBase)) return stop('runner-threw', measured)
             if (freshBase !== currentBase) {
-              const moved = await moveBuild(await readStatus('base-paths'), true)
+              const moved = await moveBuild(worktree.status, true)
               if (moved.halt) return moved.halt
               await emit('pre-check-base-move', { from: currentBase, onto: moved.rebased.onto, review: !isFinish && tier === 'mechanical' ? 'none' : 'full', counted: isFinish || tier !== 'mechanical' })
               rebasedHead = currentBase = moved.rebased.onto

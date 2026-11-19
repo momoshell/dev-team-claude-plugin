@@ -87,8 +87,10 @@ ignored/generated-file rules and soft-resets onto the fresh base, leaving the bu
 uncommitted. Proof measures old source there. That move requires a full, counted review,
 with earlier findings retained; the journal records the move and full scope.
 It spends no publishing recheck and grants no rounds. Initial finish, pre-check and
-publishing conflicts share one builder conflict turn. An unresolved or spent turn stops
-`rebase-conflict`; failed moves restore uncommitted work only when cleanup is proven. A mechanical lane is finished on its brief; one
+publishing rebases share up to three builder conflict turns per run. After the first
+turn, the attempted base must differ from the previous turn's base. A conflict that
+gets no turn or remains unresolved stops `rebase-conflict`. Failed moves restore
+uncommitted work only when cleanup is proven. A mechanical lane is finished on its brief; one
 whose diff reaches a protected path stops `raise-needs-plan`, and you restart it
 from its brief as a build lane.
 Only the checked tree is committed; the post-suite rebase still repeats proof,

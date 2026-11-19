@@ -459,7 +459,7 @@ export async function rebaseBranch(spec = {}, deps = {}) {
         const paths = listed.stdout.split('\0').filter(Boolean)
         if (!paths.length) break
         for (const path of paths) conflicts.add(path)
-        if (!paths.every(declared)) { failure = red('rebase-conflict', { conflicts: paths, regenerate: 'undeclared-path' }); break }
+        if (!paths.every(declared)) { failure = red('rebase-conflict', { onto, conflicts: paths, regenerate: 'undeclared-path' }); break }
         for (const path of paths) {
           const stages = await git(['--literal-pathspecs', 'ls-files', '--unmerged', '-z', '--', path])
           if (stages.status !== 'green') { failure = notGreen(stages, 'rebase-failed'); break }
@@ -493,14 +493,14 @@ export async function rebaseBranch(spec = {}, deps = {}) {
             else {
               const regenerated = await runCommand({ cwd: tree, command: generated.command, args: generated.args, timeoutMs: generated.timeoutMs ?? DEFAULT_TIMEOUT_MS }, deps)
               if (regenerated.status !== 'green') failure = regenerated.status === 'red'
-                ? red('rebase-conflict', { conflicts: [...conflicts], regenerate: 'regenerate-failed', cause: regenerated.reason })
+                ? red('rebase-conflict', { onto, conflicts: [...conflicts], regenerate: 'regenerate-failed', cause: regenerated.reason })
                 : { ...regenerated, conflicts: [...conflicts] }
               else {
                 const afterCommand = await readCheckout(scratchGit, tree)
                 let entries = !afterCommand.problem && afterCommand.head === rebased.head && afterCommand.branch === 'HEAD' && afterCommand.busy.length === 0 ? parseStatus(afterCommand.status) : null
                 let changed = entries?.flatMap((entry) => entry.from === null ? [entry.path] : [entry.path, entry.from])
                 if (!changed) failure = unmeasured('rebase-failed', { detail: 'regenerated paths could not be listed' })
-                else if (!changed.every(declared)) failure = red('rebase-conflict', { conflicts: [...conflicts], regenerate: 'undeclared-path' })
+                else if (!changed.every(declared)) failure = red('rebase-conflict', { onto, conflicts: [...conflicts], regenerate: 'undeclared-path' })
                 else {
                   // A command may have force-staged ignored output; leave it in the disposable tree.
                   for (const entry of entries.filter((item) => 'ARC'.includes(item.x))) {
@@ -520,7 +520,7 @@ export async function rebaseBranch(spec = {}, deps = {}) {
                     for (const path of new Set([...conflicts, ...changed])) {
                       try {
                         if (lstatSync(join(tree, path)).isFile() && /^(?:<<<<<<<|>>>>>>>)/m.test(readFileSync(join(tree, path), 'utf8'))) {
-                          failure = red('rebase-conflict', { conflicts: [...conflicts], regenerate: 'conflict-markers' }); break
+                          failure = red('rebase-conflict', { onto, conflicts: [...conflicts], regenerate: 'conflict-markers' }); break
                         }
                       } catch (error) { if (error?.code !== 'ENOENT') { failure = unmeasured('rebase-failed', { detail: `cannot read ${path}` }); break } }
                     }
@@ -618,7 +618,7 @@ export async function rebaseBranch(spec = {}, deps = {}) {
     if (outcome.status !== 'red') return outcome
     if (listed.status !== 'green') return unmeasured('rebase-failed', { detail: 'the conflict list could not be read' })
     const conflicts = listed.stdout.split('\0').filter((path) => path !== '')
-    if (conflicts.length > 0) return { status: 'red', reason: 'rebase-conflict', conflicts }
+    if (conflicts.length > 0) return red('rebase-conflict', { onto, conflicts })
     return red('rebase-failed', { detail: outcome.stderr.trim() || null })
   })
 }

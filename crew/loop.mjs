@@ -4,8 +4,9 @@
 // Only the first check round fetches the base; later repairs hold it until publishing.
 // A moved base snapshots, rebases and uncommits the build;
 // its next review is full and counted, not a publishing recheck, and spends none of MAX_RECHECKS.
-// Initial finish, pre-check and publishing conflicts share one builder conflict turn per run.
-// An unresolved or spent turn stops rebase-conflict, restoring uncommitted work only when cleanup is proven.
+// Initial finish, pre-check and publishing rebases share up to three builder conflict turns per run.
+// After the first turn, the attempted base must differ from the previous turn's base.
+// An unresolved conflict stops rebase-conflict, restoring uncommitted work only when cleanup is proven.
 // A mechanical finish uses its brief and publishes nothing.
 // Mechanical: rebase -> build -> refresh base -> proof -> suite -> PR. A fix turn repeats checks.
 // Only a red suite or proof with measured host sleep gets one unchanged-tree re-run (ADR-054 §1).
@@ -30,6 +31,7 @@ import { TIERS, AGENT_ROLES, runOverrideDefects, validateEnvelope } from './prot
 export const DEFAULT_ROUNDS = 2
 const MAX_ENVELOPE_REPAIRS = 1
 const MAX_RECHECKS = 3
+const MAX_CONFLICT_TURNS = 3
 const MAX_PROGRESS_TURNS = 6
 const WORKTREE_SYMLINK = 'worktree-symlink'
 const PROOF_UNMEASURED = '- proof: unmeasured'
@@ -746,15 +748,23 @@ export async function runLoop(spec, deps = {}) {
     }
   })
   const rebaseOnBase = () => stage('rebase', () => callCheck('rebase', d.rebaseBranch, { cwd, base: spec.base, ...(spec.generated ? { generated: spec.generated } : {}) }))
-  let conflictTurn = true
+  let conflictTurns = 0, lastConflictBase = null
   const resolveConflict = async (rebased) => {
-    if (rebased.status !== 'red' || rebased.reason !== 'rebase-conflict' || !conflictTurn) return rebased
-    conflictTurn = false
+    if (rebased.status !== 'red' || rebased.reason !== 'rebase-conflict' || conflictTurns >= MAX_CONFLICT_TURNS) return rebased
+    const onto = typeof rebased.onto === 'string' && HEX_OID.test(rebased.onto) ? rebased.onto : null
+    if (conflictTurns > 0 && (onto === null || lastConflictBase === null || onto === lastConflictBase)) return rebased
     const head = await stage('conflict-head', () => callCheck('conflict-head', d.run, { cwd, command: 'git', args: ['rev-parse', 'HEAD'] }, { command: true }))
     if (head.status !== 'green') return head
     const before = typeof head.stdout === 'string' ? head.stdout.trim() : ''
     if (!HEX_OID.test(before)) return { status: 'unmeasured', reason: 'runner-threw', head }
-    const item = { id: 'rebase-conflict', severity: 'must-fix', summary: `Rebase ${cwd} onto origin/${spec.base}, resolve conflicts in ${JSON.stringify(rebased.conflicts)}, complete the rebase, leave a clean tree. This is your only conflict turn.`, checkout: cwd, base: spec.base, conflicts: rebased.conflicts }
+    const item = {
+      id: 'rebase-conflict', severity: 'must-fix', checkout: cwd, base: spec.base, onto, conflicts: rebased.conflicts,
+      summary: `Rebase ${cwd} onto ${onto ?? `origin/${spec.base}`} and resolve conflicts in ${JSON.stringify(rebased.conflicts)}. `
+        + (onto ? `Inspect the base-side commits with \`git log HEAD..${onto}\` before rebasing. ` : '')
+        + 'Keep both sides unless they contradict. Complete the rebase, leave a clean tree, and record what you resolved in details.notes.',
+    }
+    conflictTurns++
+    lastConflictBase = onto
     const turn = await stage('conflict', () => seatTurn('builder', [item], { free: true, hold: true }))
     let outcome = turn.held
     if (turn.envelope?.status === 'done') {

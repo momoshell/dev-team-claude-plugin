@@ -955,9 +955,10 @@ test('a judge reuses each roles pass on an unchanged recheck tree (#2412)', asyn
 const EFFECTS = ['paths', 'commit', 'fetch', 'rebase', 'publish']
 const PUBLISH_EFFECTS = EFFECTS.filter((effect) => effect !== 'fetch')
 
-// MUTATION: retry a finish red on the unchanged tree instead of dispatching its repair.
-test('a finish first red repairs immediately with one run of diagnostics and ordinary green measurements', async () => {
-  const f = sequenced([{ ...redRun(7), stdout: SPEC_OUT, stderr: TAP_OUT }, green()], { spec: { ...finishSpec(), suite: { command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 1800000 } }, checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder')).repeat(40) }) })
+// MUTATION: invert which finish red gets an unchanged-tree re-run.
+test('a finish first red repairs immediately unless a sleep-credited re-run passes', async () => {
+  const spec = { ...finishSpec(), suite: { command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 1800000 } }
+  const f = sequenced([{ ...redRun(7), stdout: SPEC_OUT, stderr: TAP_OUT }, green()], { spec, checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder')).repeat(40) }) })
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: null })
   assert.equal(builderTurns(f).length, 2)
   assert.deepEqual(f.calls.slice(f.calls.indexOf('suite'), f.calls.lastIndexOf('suite') + 1), ['suite', 'seat:builder', 'build-paths', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'seat:reviewer', 'suite'])
@@ -980,6 +981,22 @@ test('a finish first red repairs immediately with one run of diagnostics and ord
   assert.match(report.body, /- Suite: green; exit 0; node --test lane\.test\.mjs\./)
   assert.doesNotMatch(f.seen.commit.body + JSON.stringify(report), /redCode|re-run after red|re-run after a red/)
   assert.equal(f.calls.includes('publish'), false)
+
+  const slept = sequenced([{ ...redRun(), sleep_credited_s: 28336 }, green()], { spec: { ...spec, suiteLock: true } })
+  assert.deepEqual(await slept.go(), { status: 'done', reason: null, pr: null })
+  assert.deepEqual(slept.calls.slice(slept.calls.indexOf('suite'), slept.calls.lastIndexOf('suite') + 1), ['suite', 'suite'])
+  const input = { ...f.inputs[0], suiteLock: true }
+  assert.deepEqual(slept.inputs, [input, input])
+  assert.equal(builderTurns(slept).length, 1)
+  assert.equal(count(slept, 'reviewer'), 1)
+  const attempts = slept.rows.filter((r) => r.stage === 'suite')
+  assert.deepEqual(attempts.map(({ event, result, outcome }) => [event, (result ?? outcome)?.status]), [
+    ['stage-start', undefined], ['check', 'red'], ['stage-end', 'red'],
+    ['stage-start', undefined], ['check', 'green'], ['stage-end', 'green'],
+  ])
+  assert.equal(attempts[1].result.reason, 'exit-nonzero')
+  assert.equal(attempts[2].outcome.sleep_credited_s, 28336)
+  assert.ok(slept.rows.some((r) => r.event === 'finish-ready' && r.status === 'ready-for-operator'))
 })
 
 const SPEC_OUT = ['ℹ failing tests:', 'test at skills/qa-test-writing/exhibits.test.mjs:42:1', '✖ anchor spans remain current (2ms)', '  AssertionError: stale'].join('\n')

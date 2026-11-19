@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { cpSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, readdirSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { git as repoGit, gitResult, scratchDir } from '../test/helpers.mjs'
@@ -106,7 +106,7 @@ test('a lead accept on a spent bound with nothing to accept is a bounce to that 
 // A seat "returns" by writing its envelope into a virtual file the loop then reads back.
 function fakes(options = {}) {
   const calls = [], rows = [], requests = [], tiers = [], seen = {}, returns = new Map(), writes = new Map()
-  let reviewTurns = 0, secondTurns = 0, reviewReads = 0, baseOid = 'c'.repeat(40), movingBase = false
+  let reviewTurns = 0, secondTurns = 0, reviewReads = 0, baseOid = 'c'.repeat(40)
   const discardArgs = []
   const spec = {
     id: 'lane', cwd: '/virtual/checkout', taskDir: '/virtual/task', tier: 'build', shape: 'standard', brief: '## The ask\nBuild the lane.',
@@ -143,6 +143,7 @@ function fakes(options = {}) {
       if (path !== join(spec.taskDir, 'plan.md')) throw Object.assign(new Error(`no ${path}`), { code: 'ENOENT' })
       return { isFile: () => true }
     },
+    lstat: async () => ({ isSymbolicLink: () => false }),
     realpath: async (path) => path,
     writeFile: async (path, content) => { if (options.writeError) throw Object.assign(new Error('denied'), { code: options.writeError }); writes.set(path, String(content)) },
     journal: options.journal ?? (async (row) => { rows.push(structuredClone(row)) }),
@@ -164,20 +165,17 @@ function fakes(options = {}) {
     commitChanges: (input) => ['wip: crew finish base', 'wip: crew pre-check base'].includes(input.subject)
       ? measured('base-commit', { status: 'green', reason: null, head: 'a'.repeat(40), files: input.files })(input)
       : measured('commit', options.commit ?? { status: 'green', reason: null, head: 'a'.repeat(40), files: ['lib.mjs'] })(input),
-    // the status probe right after a suite measures the commit's paths, any other measures the reviewer's
+    // Keep the pre-proof status probes separate from the scripted review and commit paths.
     run: (input) => input.args.includes('reset') && input.args.includes('--soft') ? (discardArgs.push(input.args), measured(spec.shape === 'finish' && !calls.includes('seat:builder') ? 'base-restore' : 'uncommit', green())(input))
       : input.args.includes('reset') || input.args.includes('clean') ? (discardArgs.push(input.args), measured('discard', options.discard ?? green())(input))
       : input.args.includes('add') ? measured('suite-stage', options.stageResult ?? green())(input)
       : input.args.includes('write-tree') ? measured('checked-tree', options.checkedTree ?? { ...green(), stdout: `${'e'.repeat(40)}\n` })(input)
       : input.args.includes('--no-ext-diff') ? Promise.resolve(green())
       : input.args.includes('diff') ? measured('published-paths', options.publishedPaths ?? { ...green(), stdout: 'lib.mjs\0' })(input)
-      : input.args.includes('rev-parse') && input.args.at(-1) === `refs/remotes/origin/${spec.base}` ? measured('check-base', async () => {
-        const result = typeof options.checkBase === 'function' ? await options.checkBase(input) : options.checkBase ?? { ...green(), stdout: `${baseOid}\n` }
-        movingBase = result.stdout?.trim() !== baseOid
-        return result
-      })(input)
+      : input.args.includes('rev-parse') && input.args.at(-1) === `refs/remotes/origin/${spec.base}` ? measured('check-base', options.checkBase ?? { ...green(), stdout: `${baseOid}\n` })(input)
       : input.args.includes('rev-parse') ? measured('post-rebase-head', () => ({ ...green(), stdout: options.cleanHead ?? `${(options.rebase ?? {}).head ?? 'a'.repeat(40)}\n` }))(input)
-      : input.args.includes('status') && (movingBase || spec.shape === 'finish' && !calls.includes('seat:builder')) ? measured('base-paths', options.baseStatus ?? { ...green(), stdout: ' M lib.mjs\0' })(input)
+      : input.args.includes('status') && spec.shape === 'finish' && !calls.includes('rebase') ? measured('base-paths', { ...green(), stdout: ' M lib.mjs\0' })(input)
+      : input.args.includes('status') && calls.at(-1) === 'seat:builder' ? measured('build-paths', { ...green(), stdout: ' M lib.mjs\0' })(input)
       : input.args.includes('status') && calls.includes('commit') && calls.lastIndexOf('rebase') > calls.lastIndexOf('uncommit') ? measured('post-rebase-clean', () => ({ ...green(), stdout: options.cleanStatus ?? '' }))(input)
       : input.args.includes('status')
       ? (['suite', 'seat:reviewer', 'seat:tech-lead'].includes(calls.at(-1))
@@ -189,7 +187,7 @@ function fakes(options = {}) {
       : Promise.reject(new Error(`unexpected git command: ${input.args}`)),
     rebaseBranch: async (input) => {
       const result = await measured('rebase', options.rebase ?? { status: 'green', reason: null, head: 'a'.repeat(40), onto: 'c'.repeat(40) })(input)
-      if (result.status === 'green') { baseOid = result.onto; movingBase = false }
+      if (result.status === 'green') baseOid = result.onto
       return result
     },
     openPullRequest: measured('publish', options.publish ?? { status: 'green', reason: null, pr: PR }),
@@ -962,7 +960,7 @@ test('a finish first red repairs immediately with one run of diagnostics and ord
   const f = sequenced([{ ...redRun(7), stdout: SPEC_OUT, stderr: TAP_OUT }, green()], { spec: { ...finishSpec(), suite: { command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 1800000 } }, checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder')).repeat(40) }) })
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: null })
   assert.equal(builderTurns(f).length, 2)
-  assert.deepEqual(f.calls.slice(f.calls.indexOf('suite'), f.calls.lastIndexOf('suite') + 1), ['suite', 'seat:builder', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'seat:reviewer', 'suite'])
+  assert.deepEqual(f.calls.slice(f.calls.indexOf('suite'), f.calls.lastIndexOf('suite') + 1), ['suite', 'seat:builder', 'build-paths', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'seat:reviewer', 'suite'])
   const feedback = builderTurns(f)[1].feedback.find((item) => item.id === 'suite-repair')
   assert.equal(feedback.summary, 'The project suite is red after your change: node --test lane.test.mjs. Fix the failing tests. This is your only repair turn.')
   assert.equal(feedback.checkout, f.spec.cwd)
@@ -1042,7 +1040,7 @@ test('a finish red after repair stops without an unchanged-tree retry', async ()
   assert.deepEqual(await f.go(), stopped('exit-nonzero'))
   assert.equal(builderTurns(f).length, 2)
   assert.equal(f.inputs.length, 2)
-  assert.deepEqual(f.calls.slice(f.calls.indexOf('suite')), ['suite', 'seat:builder', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'seat:reviewer', 'suite'])
+  assert.deepEqual(f.calls.slice(f.calls.indexOf('suite')), ['suite', 'seat:builder', 'build-paths', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'seat:reviewer', 'suite'])
   assert.equal(f.calls.filter((c) => c === 'proof').length, 2)
   assert.equal(count(f, 'reviewer'), 2)
   assert.deepEqual(f.rows.findLast((r) => r.status === 'stopped').observation, after)
@@ -1256,7 +1254,7 @@ test('the suite runs after exactly the measured changed paths are staged, again 
   assert.equal((await r.go()).status, 'done')
   assert.equal(r.calls.filter((c) => c === 'suite-stage').length, 2)
   const at = r.calls.lastIndexOf('seat:builder')
-  assert.deepEqual(r.calls.slice(at), ['seat:builder', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'suite', 'seat:reviewer', 'paths', 'checked-tree', ...EFFECTS.slice(1)])
+  assert.deepEqual(r.calls.slice(at), ['seat:builder', 'build-paths', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'suite', 'seat:reviewer', 'paths', 'checked-tree', ...EFFECTS.slice(1)])
   for (const stageResult of [{ ...green(), status: 'red', code: 1, reason: 'exit-nonzero' }, { ...green(), code: 3 }, { status: 'unmeasured', reason: 'timeout' }]) {
     const g = fakes({ stageResult })
     assert.equal((await g.go()).status, 'stopped')
@@ -1820,6 +1818,13 @@ test('suite sees the uncommitted lane change at the base on first and moved-base
     const g = (...args) => repoGit(cwd, ...args)
     g('init', '-qb', 'main'); g('config', 'user.name', 'Test'); g('config', 'user.email', 'test@example.invalid')
     writeFileSync(join(cwd, 'lib.mjs'), 'old\n'); writeFileSync(join(cwd, 'deleted.txt'), 'delete me\n')
+    const linkPaths = !finish && move === 'precheck' ? ['fixtures', 'tracked.txt'] : []
+    if (linkPaths.length) {
+      g('config', 'core.symlinks', 'true')
+      mkdirSync(join(cwd, 'fixtures')); writeFileSync(join(cwd, 'fixtures', 'README.md'), 'fixture\n')
+      writeFileSync(join(cwd, 'tracked.txt'), 'tracked\n')
+      symlinkSync('lib.mjs', join(cwd, 'existing-link'))
+    }
     g('add', '.'); g('commit', '-qm', 'base')
     repoGit(root, 'init', '--bare', '-q', remote); g('remote', 'add', 'origin', remote); g('push', '-qu', 'origin', 'main')
     repoGit(root, 'clone', '-qb', 'main', remote, upstream)
@@ -1838,10 +1843,25 @@ test('suite sees the uncommitted lane change at the base on first and moved-base
       assert.match(g('diff', '--name-status', 'HEAD'), /D\s+deleted.txt/)
       assert.doesNotMatch(g('ls-files'), /scratch.txt/)
     }
+    let linkFeedback
     const result = await runLoop({ ...seats.spec, cwd, taskDir, ...(finish ? { finish: { ...seats.spec.finish, planPath: join(taskDir, 'plan.md') } } : {}) }, {
       resolveAgents: seats.deps.resolveAgents,
+      journal: seats.deps.journal,
       runSeat: async (request) => {
-        if (request.role === 'builder') {
+        if (request.role === 'builder' && seats.requests.some((r) => r.role === 'builder')) {
+          linkFeedback = request.feedback.find((item) => item.id === 'worktree-symlink')
+          for (const path of linkPaths) {
+            unlinkSync(join(cwd, path)); renameSync(join(taskDir, path), join(cwd, path))
+          }
+          if (linkPaths.length) g('restore', '--staged', '--worktree', '--', 'tracked.txt', 'existing-link')
+        } else if (request.role === 'builder') {
+          for (const path of linkPaths) {
+            renameSync(join(cwd, path), join(taskDir, path)); symlinkSync(join(taskDir, path), join(cwd, path))
+          }
+          if (linkPaths.length) {
+            g('add', '--', 'tracked.txt')
+            unlinkSync(join(cwd, 'existing-link')); symlinkSync('new.txt', join(cwd, 'existing-link'))
+          }
           writeFileSync(join(cwd, 'lib.mjs'), 'lane\n'); unlinkSync(join(cwd, 'deleted.txt'))
           writeFileSync(join(cwd, 'new.txt'), 'new\n')
           if (move === 'precheck') {
@@ -1863,6 +1883,15 @@ test('suite sees the uncommitted lane change at the base on first and moved-base
       },
       openPullRequest: async () => { published++; return { status: 'green', reason: null, pr: PR } },
     })
+    if (linkPaths.length) {
+      assert.equal(linkFeedback?.id, 'worktree-symlink', 'the next builder request must name the symlink reason')
+      assert.equal(linkFeedback.severity, 'must-fix')
+      assert.deepEqual(linkFeedback.paths, linkPaths)
+      for (const path of linkPaths) assert.ok(linkFeedback.summary.includes(path))
+      const repair = seats.rows.findLastIndex((r) => r.event === 'envelope' && r.role === 'builder')
+      for (const check of ['check-base', 'base-commit', 'proof']) assert.ok(seats.rows.findIndex((r) => r.event === 'check' && r.check === check) > repair, check)
+      assert.equal(readFileSync(join(cwd, 'base.txt'), 'utf8'), 'advanced\n')
+    }
     assert.equal(result.status, 'done', JSON.stringify(result))
     const checks = move === 'publishing' ? 2 : 1
     assert.deepEqual([proofs, reviews, suites, published], [checks, checks, checks, finish ? 0 : 1])
@@ -1965,7 +1994,7 @@ test('pre-check fetch retries ref locks and stops before checks on failure (#240
     const result = await f.go()
     assert.equal(result.status, mode === 'recovered' ? 'done' : 'stopped', mode)
     assert.deepEqual(waits, ['recovered', 'spent'].includes(mode) ? [1000, 2000] : [])
-    const after = f.calls.slice(f.calls.indexOf('seat:builder') + 1)
+    const after = f.calls.slice(f.calls.indexOf('build-paths') + 1)
     assert.deepEqual(after.slice(0, ['recovered', 'spent'].includes(mode) ? 3 : 1), Array(['recovered', 'spent'].includes(mode) ? 3 : 1).fill('fetch'))
     if (mode === 'recovered') assert.ok(after.indexOf('check-base') < after.indexOf('proof'))
     else {

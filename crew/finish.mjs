@@ -5,8 +5,9 @@
 // Only the first check round of each invocation fetches before checks; a moved base snapshots, rebases and uncommits the build.
 // That move requires a full, counted review without spending a publishing recheck.
 // A needed review after finish suite repair is uncounted.
-// Initial, pre-check and publishing conflicts share one builder conflict turn; an unresolved or spent turn stops
-// rebase-conflict. A failed move restores uncommitted work only when cleanup is proven.
+// Initial, pre-check and publishing rebases share up to three builder conflict turns per pass.
+// After the first turn, the attempted base must differ from the previous turn's base.
+// An unresolved conflict stops rebase-conflict. A failed move restores uncommitted work only when cleanup is proven.
 // A mechanical lane is finished on its brief. Only the checked tree is committed; the post-suite rebase
 // still repeats proof, review and suite when it moves the head. Post-build passes never re-plan; a pre-build planning
 // stop can resume its planner or lead first. Neither entry re-runs the baseline or publishes; the operator decides:

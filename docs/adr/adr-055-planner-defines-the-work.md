@@ -490,3 +490,13 @@ lane whose purpose is adding or changing tests still apply.
 
 Issue #2438 identifies an interpretation risk, not a measured planner failure.
 The exceptions, proof and suite contracts are unchanged.
+
+## Amendment 2026-11-19: conflict turns on a moved base (#2498)
+
+The operator supersedes the one-turn limit. Initial finish, pre-check and
+publishing rebases share at most three builder conflict turns per run. The first
+conflict gets a turn. A later conflict gets one only if its attempted base commit
+differs from the previous turn's target. An unchanged or unmeasured target, a
+conflict after the third turn, or an unresolved turn stops `rebase-conflict` with
+the existing cleanup. The moved-head recheck and review and suite bounds are
+unchanged.

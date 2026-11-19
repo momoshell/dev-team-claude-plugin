@@ -75,8 +75,9 @@ keeps the plan and recorded roster; it cannot return work to the planner.
 If a post-build stop's lead names a plan gap or asks to reopen planning, end the lane with
 `crew finish <lane> --abandon` and `crew closeout <lane> --discard`, then start
 it again from its brief so the planner writes a new plan.
-On an escalation, the file answers the operator question. The pass re-enters the
-lane in its own worktree and rebases onto the current base,
+On an escalation, answer the operator question in the file. State the answer for
+the whole class of defects it covers, not just the reported instance. The pass
+re-enters the lane in its own worktree and rebases onto the current base,
 then runs builder triage, refreshes the base, proves the builder's named
 tests, reviews, runs the suite, commits and rebases. Each new finish pass gets one
 pre-check refresh, on its first check round. Later proof retries, review fixes and suite

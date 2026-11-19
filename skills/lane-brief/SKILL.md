@@ -28,6 +28,14 @@ in `crew/checks.mjs` (`rebase-conflict` and its `regenerate` detail).
    base that those inputs can produce that result, by arithmetic, code-path inspection or a quick run.
    If they cannot, correct the issue before dispatch; if the check was not performed, mark that premise
    unmeasured in the issue rather than omitting it.
+   For each acceptance line that tightens a shared rule, find every affected caller on the base and
+   check that this lane's diff alone can satisfy the line. If it needs a later lane's work, move the
+   line to that lane and record the move in both issues.
+   When a key or constraint changes, check readers as well as writers. Search for joins, `GROUP BY`
+   clauses and lookups that use the changed key.
+   When the operator approves a proposed Measured section, rewrite each approved “Recommend …” as
+   `Decided (operator, <date>)` and remove any wording that says the decision is still open or tells
+   readers to wait for the owner. Do this before folding the section into the issue.
 3. Write the brief to `~/.crew/briefs/<lane>.md`. Use `<project>-<issue>-<slug>` for the lane name (for example,
    `devteam-1962-lane-names`); see `LANE` in `crew/lane-core.mjs` for the allowed characters. Choose `source`, the issue bound by `closes`, whether the
    work is `mechanical`, and what is `out_of_scope`. Use Context pointers to the files and symbols the planner

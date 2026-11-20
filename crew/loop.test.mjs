@@ -693,9 +693,11 @@ test('a proof failure keeps the open review findings behind the proof item (#229
 })
 
 test('plan-revised, mechanical-restart, finish-stop and finish-return feedback carry a summary (#2296)', async () => {
+  const stderr = `FAIL lib.test.mjs > works\n${'passing output\n'.repeat(1000)}final diagnostic\n`
+  const stop = { reason: 'exit-nonzero', observation: { ...redRun(), stderr } }
   for (const mode of ['plan-revised', 'mechanical-restart', 'finish']) {
     let builds = 0
-    const f = fakes({ spec: mode === 'finish' ? finishSpec({ guidance: 'Fix it' }) : { tier: mode === 'mechanical-restart' ? 'mechanical' : 'build' }, lead: 'bounce', target: 'planner', edit: (v) => {
+    const f = fakes({ spec: mode === 'finish' ? finishSpec({ guidance: 'Fix it', stop }) : { tier: mode === 'mechanical-restart' ? 'mechanical' : 'build' }, lead: 'bounce', target: 'planner', edit: (v) => {
       if (mode !== 'finish' && v.role === 'builder' && ++builds === 1) return { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } }
       return v
     } })
@@ -705,6 +707,15 @@ test('plan-revised, mechanical-restart, finish-stop and finish-return feedback c
       const item = f.requests.flatMap((r) => r.feedback).find((entry) => entry.id === id)
       assert.equal(typeof item?.summary, 'string', id)
       assert.match(item.summary, /^[^\r\n]*\S[^\r\n]*$/, id)
+    }
+    if (mode === 'finish') {
+      const { observation } = builderTurns(f)[0].feedback.find((item) => item.id === 'finish-stop')
+      assert.ok(!Object.hasOwn(observation, 'stdout') && !Object.hasOwn(observation, 'stderr'), 'raw streams must not reach the builder')
+      assert.deepEqual(observation.failingTests, ['works'])
+      assert.deepEqual(observation.failingFiles, ['lib.test.mjs'])
+      assert.equal(observation.outputTail.length, 1)
+      assert.ok(observation.outputTail[0].length <= 2000)
+      assert.ok(observation.outputTail[0].endsWith('final diagnostic\n'))
     }
   }
 })

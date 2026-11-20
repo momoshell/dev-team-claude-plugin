@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { main, parsePrUrl } from './record-pr.mjs'
+import { laneRows } from './lanes.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
 const URL1 = 'https://github.com/o/r/pull/12'
@@ -52,9 +53,23 @@ test('HF1 appends exactly one operator pr row after the original bytes, live and
     const sib = w.lane('b', { leaf: 'b.archive-2026-10-01' })
     const arch = w.lane('c', { base: join(w.home, '.crew-journal-archive') })
     const bare = w.lane('d', { text: jsonl(STOP).trimEnd() })
-    for (const [name, file] of [['a', live], ['b', sib], ['c', arch], ['d', bare]]) {
+    const ready = w.lane('ready', { rows: [
+      ...STOP,
+      { event: 'finish-decision', choice: 'return', launchedAt: STOP.length },
+      { event: 'run-start', lane: 'ready' },
+      { event: 'finish-ready', lane: 'ready', stage: null, at: 2, status: 'ready-for-operator', head: 'a'.repeat(40), subject: 'fix(crew): record a PR', body: 'PR body', reviewRounds: 1 },
+      { event: 'run-end-command', lane: 'ready' },
+    ] })
+    put(join(dirname(ready), 'run.pid'), '123 1000\n')
+    for (const [name, file] of [['a', live], ['b', sib], ['c', arch], ['d', bare], ['ready', ready]]) {
       const before = readFileSync(file, 'utf8')
-      assert.equal(run(w, name).status, 0)
+      if (file === ready) {
+        for (const liveness of [true, null]) {
+          assert.equal(run(w, name, URL1, { alive: () => liveness }).status, 1)
+          assert.equal(readFileSync(file, 'utf8'), before)
+        }
+      }
+      assert.equal(run(w, name, URL1, { alive: () => false }).status, 0, name)
       const after = readFileSync(file, 'utf8')
       assert.ok(after.startsWith(before))
       const added = after.slice(before.length).split('\n').filter((line) => line.trim())
@@ -62,8 +77,11 @@ test('HF1 appends exactly one operator pr row after the original bytes, live and
       const row = JSON.parse(added[0])
       assert.deepEqual({ event: row.event, lane: row.lane, actor: row.actor, pr: row.pr }, { event: 'pr', lane: name, actor: 'operator', pr: { number: 12, url: URL1 } })
       assert.ok(after.endsWith('\n'))
-      assert.equal(after.trim().split('\n').length, STOP.length + 1)
+      assert.equal(after.trim().split('\n').length, before.trim().split('\n').length + 1)
     }
+    const listed = laneRows({ root: w.root }).find((row) => row.lane === 'ready')
+    assert.equal(listed?.status, 'done')
+    assert.equal(listed.pr, URL1)
   } finally { w.done() }
 })
 

@@ -12,7 +12,7 @@ crew lanes [--all] [--json]                          # list lanes from their jou
 crew show <lane> [<role>] [--json]                   # read a lane's recorded seat sessions
 crew finish <lane>                                   # report a stopped or ready lane, read-only
 crew finish <lane> --accept [--notes <file>] | --return <file> | --abandon
-crew record-pr <lane> --pr <url>                     # record the PR a stopped lane was hand-finished in
+crew record-pr <lane> --pr <url>                     # record a hand-opened PR for a stopped or quiet ready-for-operator lane
 crew closeout <lane>                                 # remove a merged lane's worktree and branch, archive its directory
 crew closeout <lane> --discard                       # archive a stopped lane with no PR or a CLOSED PR
 crew viz                                             # serve the visualizer from the crew home

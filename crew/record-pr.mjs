@@ -1,17 +1,16 @@
-// crew record-pr <lane> --pr <url> — record the PR an operator hand-finished a stopped lean lane in.
+// crew record-pr <lane> --pr <url> — record the PR an operator opened by hand.
 //
-// The loop writes a `pr` row when it publishes; a hand-finish never does, so the visualizer reads the lane
-// as stopped forever. This appends ONE `pr` row, marked as written by the operator, to the lane's journal.
-// It never rewrites a byte already there, never creates a journal, and refuses a lane that records a PR.
-// The lane must already be stopped and quiet: there is no arbitration against a concurrent writer.
-import { appendFileSync, readFileSync, realpathSync } from 'node:fs'
+// This appends one operator-marked `pr` row without rewriting or creating the journal.
+// The lane must be stopped or quiet and ready-for-operator, with no recorded PR.
+// There is no arbitration against a concurrent writer.
+import { appendFileSync, lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLeanSource } from './lean-source.mjs'
 import { stateless, supersededReturn } from './lean-journal-order.mjs'
 import { LANE, parseJournalRows, within } from './lane-core.mjs'
-import { deadRun, probeAlive } from './run-pid.mjs'
+import { deadRun, parsePidRecord, probeAlive } from './run-pid.mjs'
 
 class RecordPrRefusal extends Error {}
 
@@ -32,12 +31,25 @@ function parseRows(text) {
   return rows
 }
 
+function quietReady(dir, taskDir, alive) {
+  try {
+    if (!within(dir, taskDir)) return false
+    const path = join(taskDir, 'run.pid')
+    const entry = lstatSync(path, { throwIfNoEntry: false })
+    if (!entry) return true
+    if (!entry.isFile()) return false
+    const record = parsePidRecord(readFileSync(path, 'utf8'))
+    return !!record && alive(record.pid, record.startedAt) === false
+  } catch { return false }
+}
+
 export function recordPr({ lane, url, root = join(homedir(), '.crew'), append = appendFileSync, now = Date.now, alive = probeAlive } = {}) {
   if (typeof lane !== 'string' || !LANE.test(lane)) refuse('lane must be a lean lane slug')
   const pr = parsePrUrl(url)
   const found = createLeanSource({ crewRoot: root }).resolveLane(lane)
   if (!found) refuse(`no lean lane ${lane}`)
-  const journal = join(found.dir, 'task', 'journal.jsonl')
+  const taskDir = join(found.dir, 'task')
+  const journal = join(taskDir, 'journal.jsonl')
   if (!within(found.dir, journal)) refuse('task journal is missing or resolves outside the lane')
   let text
   try { text = readFileSync(journal, 'utf8') } catch (error) { refuse(`task journal unreadable: ${error?.code ?? error?.message}`) }
@@ -45,7 +57,11 @@ export function recordPr({ lane, url, root = join(homedir(), '.crew'), append = 
   if (rows.some((row) => row.event === 'pr')) refuse(`lane ${lane} already records a pull request`)
   const last = rows.findLast((row, index) => !stateless(rows, row, index) && !supersededReturn(rows, row, index))
   if (last?.event === 'finish-decision' && last.choice === 'abandon') refuse(`lane ${lane} was abandoned with crew finish --abandon and ended unpublished; record-pr does not record a pull request for it`)
-  if ((last?.event !== 'verdict' || last.status !== 'stopped') && !deadRun({ rows, taskDir: join(found.dir, 'task'), alive })) refuse(`lane ${lane} is not stopped; stop it and let it go quiet first`)
+  if (last?.event === 'finish-ready') {
+    if (!quietReady(found.dir, taskDir, alive)) refuse(`lane ${lane} is ready-for-operator but not proven quiet; wait for its run to exit`)
+  } else if ((last?.event !== 'verdict' || last.status !== 'stopped') && !deadRun({ rows, taskDir, alive })) {
+    refuse(`lane ${lane} is not stopped; stop it and let it go quiet first`)
+  }
   const row = { event: 'pr', lane, stage: 'operator', actor: 'operator', at: now(), pr }
   try {
     append(realpathSync(journal), `${text.endsWith('\n') ? '' : '\n'}${JSON.stringify(row)}\n`)

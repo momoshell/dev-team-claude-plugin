@@ -169,6 +169,8 @@ async function packageAbsent(cwd, base, file, manifest, timeoutMs, runCommand) {
 }
 
 export const PROOF_TIMEOUT_DEFAULT_MS = 120_000
+export const WORKTREE_SETUP_TIMEOUT_MS = 600_000
+export const validWorktreeSetup = (config) => !Object.hasOwn(config, 'worktreeSetup') || (typeof config.worktreeSetup === 'string' && config.worktreeSetup.trim() && !config.worktreeSetup.includes('\0'))
 
 export async function proveTests(input = {}, deps = {}) {
   const credit = {}
@@ -204,7 +206,7 @@ export async function proveTests(input = {}, deps = {}) {
     if (addRun.status !== 'green') result = unmeasured(addRun.reason, rows)
     else {
       added = { cwd, root, timeoutMs }
-      let entries = []
+      let entries = [], worktreeSetup
       try {
         const configPath = '.crew/project.json'
         if (!safePath(root, configPath, false)) throw new Error('unsafe config')
@@ -212,9 +214,21 @@ export async function proveTests(input = {}, deps = {}) {
           const config = JSON.parse(readFileSync(join(root, configPath), 'utf8'))
           if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('invalid config')
           entries = config.proof ?? (Object.hasOwn(config, 'proof') ? null : [])
-          if (!Array.isArray(entries) || !entries.every(validProofEntry)) throw new Error('invalid proof')
+          if (!Array.isArray(entries) || !entries.every(validProofEntry) || !validWorktreeSetup(config)) throw new Error('invalid proof config')
+          if (Object.hasOwn(config, 'worktreeSetup')) worktreeSetup = config.worktreeSetup
         }
       } catch { result = unmeasured('invalid-project-config', rows) }
+      if (!result && worktreeSetup !== undefined) {
+        const [command, ...args] = worktreeSetup.trim().split(/\s+/)
+        let setup
+        try {
+          setup = await runCommand({ cwd: root, command, args, timeoutMs: WORKTREE_SETUP_TIMEOUT_MS })
+          if (!setup || !['green', 'red', 'unmeasured'].includes(setup.status) || (setup.status !== 'green' && (typeof setup.reason !== 'string' || !setup.reason))) throw new Error('malformed result')
+        } catch { setup = { status: 'unmeasured', reason: 'runner-threw' } }
+        const reason = setup.status === 'green' ? null : setup.reason
+        try { await deps.onWorktreeSetup?.({ command: worktreeSetup, status: setup.status, reason }) } catch { /* Instrumentation must not affect proof. */ }
+        if (setup.status !== 'green') result = unmeasured(setup.status === 'red' ? 'setup-failed' : reason, rows)
+      }
       const runners = new Map()
       for (const [i, row] of (result ? [] : rows).entries()) {
         const paths = [row.file, ...(tests[i].support ?? [])]

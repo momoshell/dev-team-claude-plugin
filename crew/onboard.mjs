@@ -5,10 +5,10 @@ import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, extname, join, matchesGlob, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { literalRelative, runSuite, validTimeout } from './checks.mjs'
-import { entryCommand, junitEvents, PROOF_TIMEOUT_DEFAULT_MS, testState, validProofEntry } from './proof.mjs'
+import { entryCommand, junitEvents, PROOF_TIMEOUT_DEFAULT_MS, testState, validProofEntry, validWorktreeSetup, WORKTREE_SETUP_TIMEOUT_MS } from './proof.mjs'
 
 export const SUITE_TIMEOUT_DEFAULT_MS = 1800000
-export const WORKTREE_SETUP_TIMEOUT_MS = 600_000
+export { WORKTREE_SETUP_TIMEOUT_MS }
 export const ONBOARD_REASONS = Object.freeze(['not-onboarded', 'onboarding-stale'])
 export class OnboardRefusal extends Error {
   constructor(reason) {
@@ -23,7 +23,7 @@ export const projectHash = ({ suite, proof, worktreeSetup }) => createHash('sha2
 // PR 2243 briefly wrote an absent list as null; records onboarded then stay readable.
 const nullListHash = ({ suite, proof }) => createHash('sha256').update(JSON.stringify([suite, proof.map((e) => e.newTestFile !== undefined ? [e.match, e.setup ?? null, e.run, e.list ?? null, e.manifest ?? null, e.newTestFile] : e.manifest === undefined ? [e.match, e.setup ?? null, e.run, e.list ?? null] : [e.match, e.setup ?? null, e.run, e.list ?? null, e.manifest])])).digest('hex')
 const validBuilderChecks = (v) => Array.isArray(v) && v.every((s) => typeof s === 'string' && s.trim() !== '' && !/[\r\n]/.test(s))
-const validProject = (p) => p && typeof p === 'object' && !Array.isArray(p) && typeof p.suite === 'string' && p.suite.trim() && !/["'\\\0]/.test(p.suite) && Array.isArray(p.proof) && p.proof.every(validProofEntry) && (p.suiteLock === undefined || typeof p.suiteLock === 'boolean') && (p.suiteTimeoutMs === undefined || validTimeout(p.suiteTimeoutMs)) && (p.proofTimeoutMs === undefined || validTimeout(p.proofTimeoutMs)) && (p.builderChecks === undefined || validBuilderChecks(p.builderChecks)) && (!Object.hasOwn(p, 'worktreeSetup') || (typeof p.worktreeSetup === 'string' && p.worktreeSetup.trim() && !p.worktreeSetup.includes('\0')))
+const validProject = (p) => p && typeof p === 'object' && !Array.isArray(p) && typeof p.suite === 'string' && p.suite.trim() && !/["'\\\0]/.test(p.suite) && Array.isArray(p.proof) && p.proof.every(validProofEntry) && (p.suiteLock === undefined || typeof p.suiteLock === 'boolean') && (p.suiteTimeoutMs === undefined || validTimeout(p.suiteTimeoutMs)) && (p.proofTimeoutMs === undefined || validTimeout(p.proofTimeoutMs)) && (p.builderChecks === undefined || validBuilderChecks(p.builderChecks)) && validWorktreeSetup(p)
 
 export function requireOnboarded(checkout, read = readFileSync) {
   let p

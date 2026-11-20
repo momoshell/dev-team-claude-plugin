@@ -10,8 +10,9 @@
 // An unresolved conflict stops rebase-conflict, restoring uncommitted work only when cleanup is proven.
 // A mechanical finish uses its brief and publishes nothing.
 // Mechanical: rebase -> build -> refresh base -> proof -> suite -> PR. A fix turn repeats checks.
-// Only a red suite or proof with measured host sleep gets one unchanged-tree re-run (ADR-054 §1).
-// Otherwise finish repairs its first red suite and stops on a second red or an unmeasured suite.
+// A red suite or proof with measured host sleep gets one unchanged-tree re-run (ADR-054 §1).
+// Otherwise a red suite can re-run once on a project-declared environment signature.
+// Finish repairs its first ordinary suite red and stops on a second red or an unmeasured suite.
 // Only the checked tree is committed. The post-suite publishing rebase still repeats checks at most three times.
 // Git dropping the change as upstream stops nothing-to-commit at either move.
 // Import-only: every effect (seat turn, filesystem, check, git, journal) crosses an injected seam.
@@ -27,7 +28,7 @@ import {
   CHECK_REASONS, FINISH_REVIEW_ROUNDS, commitChanges, openPullRequest, parseStatus, rebaseBranch, runSuite, validFastChecks, validGenerated, validTimeout,
 } from './checks.mjs'
 import { HEX_OID, describeError as describe, GIT_STATUS_ARGS, gitRepoState } from './lane-core.mjs'
-import { OnboardRefusal, readRegular, requireOnboarded, SUITE_TIMEOUT_DEFAULT_MS } from './onboard.mjs'
+import { OnboardRefusal, readRegular, requireOnboarded, SUITE_TIMEOUT_DEFAULT_MS, validEnvironmentSignatures } from './onboard.mjs'
 import { PROOF_TIMEOUT_DEFAULT_MS, proveTests } from './proof.mjs'
 import { TIERS, AGENT_ROLES, runOverrideDefects, validateEnvelope } from './protocols.mjs'
 
@@ -41,7 +42,7 @@ const FAST_CHECK = 'fast-check'
 const PROOF_UNMEASURED = '- proof: unmeasured'
 export const LOOP_REASONS = Object.freeze([
   ...CHECK_REASONS, 'unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'authentication_failed', 'lead-escalated', 'lead-unavailable',
-  'lead-refused', 'seat-escalated', 'round-bound', 'paths-unmeasured', 'no-progress', 'raise-needs-plan', 'recheck-bound', 'red-after-sleep-rerun',
+  'lead-refused', 'seat-escalated', 'round-bound', 'paths-unmeasured', 'no-progress', 'raise-needs-plan', 'recheck-bound', 'red-after-sleep-rerun', 'red-after-environment-rerun',
 ])
 
 const REQUIRED_ROLES = ['planner', 'builder', 'reviewer']
@@ -269,6 +270,7 @@ export async function runLoop(spec, deps = {}) {
     && (spec.proofTimeoutMs === undefined || validTimeout(spec.proofTimeoutMs))
     && (spec.fastChecks === undefined || validFastChecks(spec.fastChecks))
     && (spec.fastChecksTimeoutMs === undefined || validTimeout(spec.fastChecksTimeoutMs))
+    && (spec.environmentSignatures === undefined || validEnvironmentSignatures(spec.environmentSignatures))
     && (spec.suiteLock === undefined || typeof spec.suiteLock === 'boolean')
     && (!Object.hasOwn(spec, 'generated') || validGenerated(spec.generated))
     && (spec.closes === undefined || Array.isArray(spec.closes))
@@ -847,13 +849,24 @@ export async function runLoop(spec, deps = {}) {
     }
     return { rebased }
   }
-  const withSleepRerun = async (name, check) => {
-    const attempt = () => stage(name, check)
+  const environmentMatch = (result) => result.status === 'red' && result.reason === 'exit-nonzero'
+    ? spec.environmentSignatures?.find((signature) => [result.stdout, result.stderr].some((out) => typeof out === 'string' && out.includes(signature))) : undefined
+  const withCheckRerun = async (name, check) => {
+    const attempt = (row) => stage(name, () => check(row))
+    // Let the caller join any parallel review before journaling the stop.
+    const stopped = (reason, result, detail) => ({ result, stopAfterRerun: () => stop(reason, { stage: name, result: journaled(result), ...detail }) })
     let result = await attempt()
     if (result.status === 'red' && Number.isFinite(result.sleep_credited_s) && result.sleep_credited_s > 0) {
       result = await attempt()
-      // Let the caller join any parallel review before journaling the stop.
-      if (result.status === 'red') return { result, stopAfterSleepRerun: () => stop('red-after-sleep-rerun', { stage: name, result: journaled(result) }) }
+      if (result.status === 'red') return stopped('red-after-sleep-rerun', result)
+    } else if (name === 'suite') {
+      const environmentSignature = environmentMatch(result)
+      if (environmentSignature !== undefined) {
+        result = await attempt({ environmentSignature })
+        const repeated = environmentMatch(result)
+        if (repeated !== undefined) return stopped('red-after-environment-rerun', result, { environmentSignature: repeated })
+        if (result.status === 'green') return { result, environmentSignature }
+      }
     }
     return { result }
   }
@@ -887,9 +900,9 @@ export async function runLoop(spec, deps = {}) {
   const withBudget = (started, field, floor, run) => finishEntry && Object.hasOwn(spec, 'onboarded')
     ? budget(started, field, floor).then(run) : run({ timeoutMs: started, row: {} })
   const suiteCommand = oneLine([spec.suite.command, ...(spec.suite.args ?? [])].join(' '))
-  const suiteRun = (signal) => withSleepRerun('suite', () => withBudget(spec.suite.timeoutMs, 'suiteTimeoutMs', SUITE_TIMEOUT_DEFAULT_MS, ({ timeoutMs, row }) =>
-    callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs, suiteLock: spec.suiteLock, lane: spec.id, ...(signal ? { signal } : {}) }, { command: true, cancellable: !!signal, row })))
-  const proofRun = (base) => withSleepRerun('proof', () => withBudget(spec.proofTimeoutMs, 'proofTimeoutMs', PROOF_TIMEOUT_DEFAULT_MS, ({ timeoutMs, row }) =>
+  const suiteRun = (signal) => withCheckRerun('suite', (retryRow) => withBudget(spec.suite.timeoutMs, 'suiteTimeoutMs', SUITE_TIMEOUT_DEFAULT_MS, ({ timeoutMs, row }) =>
+    callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs, suiteLock: spec.suiteLock, lane: spec.id, ...(signal ? { signal } : {}) }, { command: true, cancellable: !!signal, row: { ...row, ...retryRow } })))
+  const proofRun = (base) => withCheckRerun('proof', () => withBudget(spec.proofTimeoutMs, 'proofTimeoutMs', PROOF_TIMEOUT_DEFAULT_MS, ({ timeoutMs, row }) =>
     callCheck('proof', async (input) => {
       const result = await d.proveTests(input, { onWorktreeSetup: (setup) => emit('worktree-setup', setup) })
       if (!object(result) || result.status !== 'red' || result.reason !== 'proof-unproven' || !Array.isArray(result.rows)) return result
@@ -959,12 +972,20 @@ export async function runLoop(spec, deps = {}) {
     }
 
     let proofLines = [PROOF_UNMEASURED]
-    let suiteLine = `- Suite: unmeasured; ${suiteCommand}.`
+    let suiteLine, suiteRerun
+    const earlierSuiteReruns = []
+    const recordSuitePass = ({ result, environmentSignature }, revision) => {
+      if (suiteRerun) earlierSuiteReruns.push(`- Earlier suite pass after a re-run ${suiteRerun}`)
+      suiteRerun = environmentSignature === undefined ? null : `on ${revision}, triggered by environment signature ${JSON.stringify(environmentSignature)}.`
+      suiteLine = `- Suite: green; exit ${result.code}; ${suiteCommand}.${suiteRerun ? ` Passed after a re-run ${suiteRerun}` : ''}`
+    }
+    const suiteMeasurements = () => [suiteLine, ...earlierSuiteReruns]
+    const checkMeasurements = () => [...proofLines, ...suiteMeasurements(), ...(!isFinish && tier === 'mechanical' && namedTests.length ? ['- Review: none, mechanical lane, not reviewed.'] : [])]
     let builderSummary = ''
     const finishReviews = []
     let firstCheck = true
     let repairing = false, recheck = false, rechecks = 0, uncountedReview = false
-    let committed, rebased, measurements, laneBody, reviewStatus, checkedTree
+    let committed, rebased, laneBody, reviewStatus, checkedTree
     const readTree = () => stage('checked-tree', () => callCheck('checked-tree', d.run, { cwd, command: 'git', args: ['write-tree'] }, { command: true }))
     const latestReviews = {}
     const reviewTurn = async (role, findings, options) => {
@@ -1054,8 +1075,8 @@ export async function runLoop(spec, deps = {}) {
         recheck = false
         if (!namedTests.length && !isFinish && !testsRequired) proofLines = [tier === 'mechanical' ? '- proof: none, mechanical lane, not reviewed' : '- proof: none, no criterion is machine-checked']
         if (namedTests.length) {
-          const { result: proof, stopAfterSleepRerun } = await proofRun('HEAD')
-          if (stopAfterSleepRerun) return stopAfterSleepRerun()
+          const { result: proof, stopAfterRerun } = await proofRun('HEAD')
+          if (stopAfterRerun) return stopAfterRerun()
           const rows = Array.isArray(proof.rows) ? proof.rows : []
           const proofOK = proof.status === 'green' && proof.reason === null && rows.length === namedTests.length && rows.every((row) => row?.proven === true)
           if (!proofOK && proof.status === 'red') {
@@ -1131,8 +1152,9 @@ export async function runLoop(spec, deps = {}) {
           const [reviewed, second] = reviews
           const reviewHalt = reviews.find((result) => result.halt)?.halt
           if (reviewHalt) return reviewHalt
-          const { result: suite, stopAfterSleepRerun } = suiteCheck
-          if (stopAfterSleepRerun) return stopAfterSleepRerun()
+          const { result: suite, stopAfterRerun } = suiteCheck
+          if (stopAfterRerun) return stopAfterRerun()
+          if (suite.status === 'green') recordSuitePass(suiteCheck, `tree ${checkedTree}`)
           const cancelled = tier === 'build' && suite.status === 'cancelled'
             && reviews.some((result) => !result.reused && result.envelope?.details.verdict === 'changes-needed')
           if (suite.status !== 'green' && suite.status !== 'red' && !cancelled) return stop(suite.reason, suite)
@@ -1170,7 +1192,6 @@ export async function runLoop(spec, deps = {}) {
             feedback = withGuidance(feedback)
             continue
           }
-          suiteLine = `- Suite: green; exit ${suite.code}; ${suiteCommand}.`
           break
         }
 
@@ -1202,8 +1223,9 @@ export async function runLoop(spec, deps = {}) {
         const halt = await stageChecked()
         if (halt) return halt
       }
-      const { result: suite, stopAfterSleepRerun } = await suiteRun()
-      if (stopAfterSleepRerun) return stopAfterSleepRerun()
+      const suiteCheck = await suiteRun()
+      const { result: suite, stopAfterRerun } = suiteCheck
+      if (stopAfterRerun) return stopAfterRerun()
       if (suite.status === 'red') {
         if (repaired) return stop(suite.reason, suite)
         // Give the builder one repair turn, then repeat this lane's checks.
@@ -1223,11 +1245,10 @@ export async function runLoop(spec, deps = {}) {
         continue
       }
       if (suite.status !== 'green') return stop(suite.reason, suite)
-      suiteLine = `- Suite: green; exit ${suite.code}; ${suiteCommand}.`
+      recordSuitePass(suiteCheck, `tree ${checkedTree}`)
       break
     }
-    measurements = [...proofLines, suiteLine, ...(!isFinish && tier === 'mechanical' && namedTests.length ? ['- Review: none, mechanical lane, not reviewed.'] : [])]
-    const body = commitBody({ source: spec.source, isFinish, tier, stop: isFinish ? fin.stop : null, finishReviews, measurements, priorFindings, secondFindings })
+    const body = commitBody({ source: spec.source, isFinish, tier, stop: isFinish ? fin.stop : null, finishReviews, measurements: checkMeasurements(), priorFindings, secondFindings })
     // The commit names what git reports changed now, never a list the caller wrote before the build.
     const status = await readStatus('paths')
     const files = status.status === 'green' && typeof status.stdout === 'string' ? parseChangedPaths(status.stdout) : null
@@ -1254,7 +1275,7 @@ export async function runLoop(spec, deps = {}) {
         ...(proved.length ? [...proved.map(({ file, title, base }) => `- ${oneLine(file)}: ${oneLine(title)} ${base?.reason === 'base-package-absent' ? 'had its package absent on the old source (base-package-absent)' : base?.reason === 'base-test-absent' ? 'had its test file absent on the old source (base-test-absent)' : 'was red on the old source'}, green on ${lastProved.has(`${file}\0${title}`) ? 'the build.' : 'an earlier build turn; the last build turn did not name it.'}`), ...(!isFinish && tier === 'mechanical' ? ['Review: none, mechanical lane, not reviewed.'] : [])]
           : !isFinish && tier === 'mechanical' ? ['Proof: mechanical lane, not reviewed.']
             : !isFinish && !testsRequired ? ['Proof: no criterion is machine-checked.'] : ['Proof: unmeasured.']),
-        suiteLine,
+        ...suiteMeasurements(),
         ...(open.length ? ['', '## Open points', ...open.map((f) => `- ${oneLine(f.summary)} (${oneLine(f.location)})`)] : []),
       ].join('\n')
     }
@@ -1312,8 +1333,8 @@ export async function runLoop(spec, deps = {}) {
 
     if (rebased.head !== committed.head) {
       if (namedTests.length) {
-        const { result: reproven, stopAfterSleepRerun } = await proofRun(`${rebased.head}^`)
-        if (stopAfterSleepRerun) return stopAfterSleepRerun()
+        const { result: reproven, stopAfterRerun } = await proofRun(`${rebased.head}^`)
+        if (stopAfterRerun) return stopAfterRerun()
         if (reproven.status !== 'green' || reproven.reason !== null || !Array.isArray(reproven.rows) || reproven.rows.length !== namedTests.length || !reproven.rows.every((row) => row?.proven === true)) return stop(reproven.reason ?? 'runner-threw', journaled(reproven))
         lastProved.clear()
         for (const row of reproven.rows) {
@@ -1322,10 +1343,11 @@ export async function runLoop(spec, deps = {}) {
           lastProved.add(key)
         }
       }
-      const { result: postSuite, stopAfterSleepRerun } = await suiteRun()
-      if (stopAfterSleepRerun) return stopAfterSleepRerun()
+      const postCheck = await suiteRun()
+      const { result: postSuite, stopAfterRerun } = postCheck
+      if (stopAfterRerun) return stopAfterRerun()
       if (postSuite.status !== 'green') return stop(postSuite.reason, postSuite)
-      suiteLine = `- Suite: green; exit ${postSuite.code}; ${suiteCommand}.`
+      recordSuitePass(postCheck, `commit ${rebased.head}`)
       // The tree the checks passed on must be the commit that is published or reported ready.
       const cleanStatus = await readStatus('post-rebase-clean')
       const cleanPaths = cleanStatus.status === 'green' && typeof cleanStatus.stdout === 'string' ? parseChangedPaths(cleanStatus.stdout) : null
@@ -1340,7 +1362,7 @@ export async function runLoop(spec, deps = {}) {
       // The fused report the deciding session reads instead of the journal; a run that cannot write it is not ready.
       const reviewRounds = (fin.priorReviewRounds ?? 0) + rounds.reviewer
       const body = laneBody()
-      const report = { schema: 'finish-report/1', lane: spec.id, stop: { reason: fin.stop.reason, observation: fin.stop.observation ?? null }, subject, body, head: rebased.head, reviewRounds, reviews: finishReviews, measurements }
+      const report = { schema: 'finish-report/1', lane: spec.id, stop: { reason: fin.stop.reason, observation: fin.stop.observation ?? null }, subject, body, head: rebased.head, reviewRounds, reviews: finishReviews, measurements: checkMeasurements() }
       await d.writeFile(join(spec.taskDir, 'finish-report.json'), `${JSON.stringify(report, null, 2)}\n`)
       await emit('finish-ready', { status: 'ready-for-operator', head: rebased.head, subject, body, reviewRounds, ...(Object.hasOwn(spec, 'onboarded') ? { proofChecked: namedTests.length > 0 } : {}), ...(builderNotes ? { builderNotes } : {}) })
       return { status: 'done', reason: null, pr: null }

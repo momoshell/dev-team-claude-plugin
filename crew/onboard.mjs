@@ -22,9 +22,11 @@ export class OnboardRefusal extends Error {
 export const projectHash = ({ suite, proof, worktreeSetup }) => createHash('sha256').update(JSON.stringify([suite, proof.map((e) => e.newTestFile !== undefined ? [e.match, e.setup ?? null, e.run, e.list ?? null, e.manifest ?? null, e.newTestFile] : e.manifest !== undefined ? [e.match, e.setup ?? null, e.run, e.list ?? null, e.manifest] : e.list === undefined ? [e.match, e.setup ?? null, e.run] : [e.match, e.setup ?? null, e.run, e.list]), ...(worktreeSetup === undefined ? [] : [worktreeSetup])])).digest('hex')
 // PR 2243 briefly wrote an absent list as null; records onboarded then stay readable.
 const nullListHash = ({ suite, proof }) => createHash('sha256').update(JSON.stringify([suite, proof.map((e) => e.newTestFile !== undefined ? [e.match, e.setup ?? null, e.run, e.list ?? null, e.manifest ?? null, e.newTestFile] : e.manifest === undefined ? [e.match, e.setup ?? null, e.run, e.list ?? null] : [e.match, e.setup ?? null, e.run, e.list ?? null, e.manifest])])).digest('hex')
+export const validEnvironmentSignatures = (v) => Array.isArray(v) && [...v].every((s) => typeof s === 'string' && s.trim() !== '')
 const validBuilderChecks = (v) => Array.isArray(v) && v.every((s) => typeof s === 'string' && s.trim() !== '' && !/[\r\n]/.test(s))
 const validProject = (p) => p && typeof p === 'object' && !Array.isArray(p) && typeof p.suite === 'string' && p.suite.trim() && !/["'\\\0]/.test(p.suite) && Array.isArray(p.proof) && p.proof.every(validProofEntry) && (p.suiteLock === undefined || typeof p.suiteLock === 'boolean') && (p.suiteTimeoutMs === undefined || validTimeout(p.suiteTimeoutMs)) && (p.proofTimeoutMs === undefined || validTimeout(p.proofTimeoutMs)) && (p.builderChecks === undefined || validBuilderChecks(p.builderChecks)) && validWorktreeSetup(p)
   && (p.fastChecks === undefined || validFastChecks(p.fastChecks)) && (p.fastChecksTimeoutMs === undefined || validTimeout(p.fastChecksTimeoutMs))
+  && (p.environmentSignatures === undefined || validEnvironmentSignatures(p.environmentSignatures))
 
 // Only a regular file is read: a project.json that is a symlink to a FIFO would block the caller.
 export const readRegular = (path, encoding) => { if (!statSync(path).isFile()) throw new Error('not a regular file'); return readFileSync(path, encoding) }
@@ -38,7 +40,8 @@ export function requireOnboarded(checkout, read = readRegular) {
   if (!Object.hasOwn(p, 'onboarded')) throw new OnboardRefusal('not-onboarded')
   if (!validProject(p) || !p.onboarded || typeof p.onboarded !== 'object' || (p.onboarded.hash !== projectHash(p) && (Object.hasOwn(p, 'worktreeSetup') || p.onboarded.hash !== nullListHash(p)))) throw new OnboardRefusal('onboarding-stale')
   return { suite: p.suite, proof: p.proof, hash: p.onboarded.hash, suiteTimeoutMs: p.suiteTimeoutMs ?? SUITE_TIMEOUT_DEFAULT_MS, proofTimeoutMs: p.proofTimeoutMs ?? PROOF_TIMEOUT_DEFAULT_MS, ...(p.suiteLock === undefined ? {} : { suiteLock: p.suiteLock }), ...(p.builderChecks === undefined ? {} : { builderChecks: p.builderChecks }), ...(p.worktreeSetup === undefined ? {} : { worktreeSetup: p.worktreeSetup }),
-    ...(p.fastChecks === undefined ? {} : { fastChecks: p.fastChecks }), ...(p.fastChecksTimeoutMs === undefined ? {} : { fastChecksTimeoutMs: p.fastChecksTimeoutMs }) }
+    ...(p.fastChecks === undefined ? {} : { fastChecks: p.fastChecks }), ...(p.fastChecksTimeoutMs === undefined ? {} : { fastChecksTimeoutMs: p.fastChecksTimeoutMs }),
+    ...(p.environmentSignatures === undefined ? {} : { environmentSignatures: p.environmentSignatures }) }
 }
 
 export async function checkOnboarding({ checkout, draft, timeoutMs = 120_000 }) {
@@ -96,7 +99,8 @@ export async function checkOnboarding({ checkout, draft, timeoutMs = 120_000 }) 
     }
     rmSync(tmp, { recursive: true, force: true }); tmp = null
     const project = { suite: p.suite, proof, ...(p.suiteLock === undefined ? {} : { suiteLock: p.suiteLock }), ...(p.suiteTimeoutMs === undefined ? {} : { suiteTimeoutMs: p.suiteTimeoutMs }), ...(p.proofTimeoutMs === undefined ? {} : { proofTimeoutMs: p.proofTimeoutMs }), ...(p.builderChecks === undefined ? {} : { builderChecks: p.builderChecks }), ...(p.worktreeSetup === undefined ? {} : { worktreeSetup: p.worktreeSetup }),
-      ...(p.fastChecks === undefined ? {} : { fastChecks: p.fastChecks }), ...(p.fastChecksTimeoutMs === undefined ? {} : { fastChecksTimeoutMs: p.fastChecksTimeoutMs }) }
+      ...(p.fastChecks === undefined ? {} : { fastChecks: p.fastChecks }), ...(p.fastChecksTimeoutMs === undefined ? {} : { fastChecksTimeoutMs: p.fastChecksTimeoutMs }),
+      ...(p.environmentSignatures === undefined ? {} : { environmentSignatures: p.environmentSignatures }) }
     const dir = join(checkout, '.crew'), target = join(dir, 'project.json')
     const dirStat = lstatSync(dir, { throwIfNoEntry: false })
     const fileStat = dirStat?.isDirectory() ? lstatSync(target, { throwIfNoEntry: false }) : null

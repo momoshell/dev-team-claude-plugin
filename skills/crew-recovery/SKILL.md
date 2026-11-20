@@ -104,11 +104,22 @@ from its brief as a build lane.
 Only the checked tree is committed; the post-suite rebase still repeats proof,
 review and suite on the new base. It publishes nothing (`crew/finish.mjs`).
 A red suite or proof with measured host sleep runs once more on the unchanged tree
-(ADR-054 §1). A second red stops with `red-after-sleep-rerun`. Outside that exception,
-the first red suite gives the builder its one repair turn immediately, even for a flaky
-failure. The repair repeats proof and the suite, and repeats review unless the reviewer
-already passed the same tree in this finish run. An unmeasured suite, or a red suite
-after repair that does not qualify for a sleep re-run, stops the lane.
+(ADR-054 §1). A second red stops with `red-after-sleep-rerun`. If the sleep rule
+does not apply, an `exit-nonzero` suite red matching a project-declared environment
+signature also gets one re-run. The second check row names the triggering
+`environmentSignature`. If the second attempt also ends red with `exit-nonzero`
+and matches any declared signature, the lane stops with
+`red-after-environment-rerun` instead of giving the builder a repair turn.
+Inspect both suite check rows. First check whether the red is a code failure
+that printed the signature; if it is, return it to the builder as a code
+failure. Otherwise address the environment failure before resuming with
+`crew finish <lane> --return <file>`.
+
+The first repairable suite red gives the finish builder its one repair turn.
+The repair repeats proof and the suite, and repeats review unless the reviewer
+already passed the same tree in this finish run. An unmeasured suite stops without
+repair. After repair the suite must pass, either on its first attempt or on a
+permitted re-run.
 When that run is ready, decide once:
 
 - `crew finish <lane> --accept [--notes <file>]` publishes the PR the run

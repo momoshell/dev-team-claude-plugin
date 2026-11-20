@@ -1072,6 +1072,18 @@ test('a finish first red repairs immediately unless a sleep-credited re-run pass
   assert.equal(attempts[1].result.reason, 'exit-nonzero')
   assert.equal(attempts[2].outcome.sleep_credited_s, 28336)
   assert.ok(slept.rows.some((r) => r.event === 'finish-ready' && r.status === 'ready-for-operator'))
+
+  // #2520: a red that prints a declared environment signature is re-run once, with no builder turn.
+  const envSpec = { ...spec, environmentSignatures: ['PoolTimedOut'] }
+  const envRed = { ...redRun(), stderr: 'open test store: Database(PoolTimedOut)' }
+  const env = sequenced([envRed, green()], { spec: envSpec })
+  assert.deepEqual(await env.go(), { status: 'done', reason: null, pr: null })
+  assert.deepEqual(env.calls.slice(env.calls.indexOf('suite'), env.calls.lastIndexOf('suite') + 1), ['suite', 'suite'])
+  assert.equal(builderTurns(env).length, 1)
+  assert.equal(env.rows.filter((r) => r.event === 'check' && r.check === 'suite').at(-1).environmentSignature, 'PoolTimedOut')
+  const broken = sequenced([envRed, envRed], { spec: envSpec })
+  assert.equal((await broken.go()).reason, 'red-after-environment-rerun')
+  assert.equal(builderTurns(broken).length, 1)
 })
 
 const SPEC_OUT = ['ℹ failing tests:', 'test at skills/qa-test-writing/exhibits.test.mjs:42:1', '✖ anchor spans remain current (2ms)', '  AssertionError: stale'].join('\n')

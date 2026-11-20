@@ -246,7 +246,7 @@ export async function runLoop(spec, deps = {}) {
     return result
   }
   if (spec.shape !== 'standard' && spec.shape !== 'finish') return early('unsupported-shape')
-  const isFinish = spec.shape === 'finish'
+  const finishEntry = spec.shape === 'finish'
   const sound = [spec.id, spec.cwd, spec.taskDir, spec.brief, spec.source, spec.branch, spec.base].every(text) && TIERS.includes(spec.tier)
     && text(spec.suite?.command) && (spec.suite.args === undefined || Array.isArray(spec.suite.args))
     && (spec.suite.timeoutMs === undefined || validTimeout(spec.suite.timeoutMs))
@@ -259,12 +259,12 @@ export async function runLoop(spec, deps = {}) {
     && (!Object.hasOwn(spec, 'roster') || rosterSound(spec.roster))
   if (!sound) return early('invalid-input')
   const fin = spec.finish
-  const planning = isFinish ? fin?.planning : null
+  const planning = finishEntry ? fin?.planning : null
   if (planning != null && !(plainObject(planning) && ['planner', 'lead'].includes(planning.entry)
     && plainObject(planning.planner) && typeof fin.guidance === 'string'
     && (planning.entry !== 'lead' || (validateEnvelope('planner', planning.plan, { archived: true }).defects.length === 0 && planning.plan?.status === 'done')))) return early('invalid-input')
   // Only a pre-build planning resume may enter without a subject or plan.
-  if (isFinish && !(fin && typeof fin === 'object' && (planning || text(fin.subject)) && (fin.planPath === null || text(fin.planPath))
+  if (finishEntry && !(fin && typeof fin === 'object' && (planning || text(fin.subject)) && (fin.planPath === null || text(fin.planPath))
     && Array.isArray(fin.findings) && text(fin.stop?.reason)
     && (fin.findingsRole === undefined || fin.findingsRole === 'tech-lead')
     && Number.isSafeInteger(fin.turnOffset) && fin.turnOffset >= 0
@@ -273,6 +273,7 @@ export async function runLoop(spec, deps = {}) {
     && (fin.guidance === undefined || typeof fin.guidance === 'string')
     && (fin.rulings === undefined || (Array.isArray(fin.rulings) && fin.rulings.every((r) => plainObject(r) && text(r.summary))))
     && (fin.priorReviewRounds === undefined || (Number.isSafeInteger(fin.priorReviewRounds) && fin.priorReviewRounds >= 0)))) return early('invalid-input')
+  const isFinish = finishEntry && !planning
   const d = {
     resolveAgents, mkdir, readFile, stat, lstat, realpath, writeFile, proveTests, runSuite, commitChanges, rebaseBranch, openPullRequest,
     run: runSuite,
@@ -287,7 +288,7 @@ export async function runLoop(spec, deps = {}) {
   let resolved
   try { resolved = d.resolveAgents(spec.tier, undefined, spec.roster?.snapshot ?? spec.roster?.overrides) } catch { return early('seat-unmeasured') }
   const seats = { ...resolved?.seats }
-  const requiredRoles = (tier) => isFinish ? (planning ? REQUIRED_ROLES : FINISH_ROLES) : tier === 'mechanical' ? ['builder'] : tier === 'judge' ? [...REQUIRED_ROLES, 'tech-lead'] : REQUIRED_ROLES
+  const requiredRoles = (tier) => isFinish ? FINISH_ROLES : tier === 'mechanical' && !planning ? ['builder'] : tier === 'judge' ? [...REQUIRED_ROLES, 'tech-lead'] : REQUIRED_ROLES
   if (!requiredRoles(spec.tier).every((role) => seats[role] && typeof seats[role] === 'object')) return early('seat-unmeasured')
   const bounded = (cell) => cell.rounds === undefined || (Number.isSafeInteger(cell.rounds) && cell.rounds > 0)
   if (!Object.values(seats).every(bounded)) return early('invalid-input')
@@ -304,7 +305,7 @@ export async function runLoop(spec, deps = {}) {
   }
   const last = {}
   const context = new AsyncLocalStorage()
-  let turn = isFinish ? fin.turnOffset : 0
+  let turn = finishEntry ? fin.turnOffset : 0
   let planningEntry = Boolean(planning)
   let progressTurns = 0
   let builderMark = null, consultMustFix = null
@@ -312,12 +313,13 @@ export async function runLoop(spec, deps = {}) {
   let testsRequired = isFinish ? fin.testsRequired ?? fin.planPath !== null : tier !== 'mechanical'
   let rebasedHead = null, currentBase = null
   let repaired = false
-  let planPath = isFinish ? fin.planPath : null
+  let planPath = finishEntry ? fin.planPath : null
   let subject = isFinish ? fin.subject : null
   let planSummary = isFinish ? fin.planSummary : null
   const failures = []
-  const rulings = isFinish && Array.isArray(fin.rulings) ? fin.rulings.map((r) => ({ id: 'lead-bounce', summary: r.summary })) : []
-  const guidanceItem = isFinish && typeof fin?.guidance === 'string' ? { id: 'finish-return', summary: 'The operator supplied guidance for this finish run. It stands for the whole finish run and outranks the plan and a lead ruling where they differ.', guidance: fin.guidance } : null
+  const rulings = finishEntry && Array.isArray(fin.rulings) ? fin.rulings.map((r) => ({ id: 'lead-bounce', summary: r.summary })) : []
+  const runKind = planning ? 'resumed lane' : 'finish run'
+  const guidanceItem = finishEntry && typeof fin.guidance === 'string' ? { id: 'finish-return', summary: `The operator supplied guidance for this ${runKind}. It stands for the whole ${runKind} and outranks the plan and a lead ruling where they differ.`, guidance: fin.guidance } : null
   const withGuidance = (items) => guidanceItem ? [guidanceItem, ...items.filter((item) => item?.id !== 'finish-return')] : items
   const planningHistory = planning ? { id: 'planning-resume', summary: 'Resume the stopped planning attempt in this lane. The operator guidance answers the previous stop; the brief is unchanged. Previous planner evidence and the stopped lead question follow.', planner: planning.planner, observation: planning.observation } : null
   const repeatsFailure = (failure) => {
@@ -698,12 +700,13 @@ export async function runLoop(spec, deps = {}) {
   // accept releases only a schema-valid envelope the seat itself returned, except a builder insufficient that needs routing.
   const consultLead = async (role, held, feedback, progressed) => {
     if (!seats.lead) return { halt: await stop('lead-unavailable', { role, ...held }) }
+    if (planning && !planningEntry) feedback = withGuidance(feedback)
     const mustFix = new Set(feedback.filter((item) => item.severity === 'must-fix').map((item) => `${importedTechFindings.has(item) || secondFindings.includes(item) ? 'tech-lead' : priorFindings.includes(item) ? 'reviewer' : 'loop'}\0${item.id}`))
     const carried = [...mustFix].some((key) => consultMustFix?.has(key))
     consultMustFix = mustFix
     for (;;) {
       const lastConsult = rounds.lead + 1 >= (seats.lead.rounds ?? DEFAULT_ROUNDS)
-      const asked = await stage('lead', () => seatTurn('lead', [{ role, reason: held.reason, envelope: held.envelope ?? last[role] ?? null, held: held.envelope ?? null, feedback, last: lastConsult, targets: isFinish && !planningEntry ? ['builder'] : ['builder', 'planner'] }]))
+      const asked = await stage('lead', () => seatTurn('lead', [{ role, reason: held.reason, envelope: held.envelope ?? last[role] ?? null, held: held.envelope ?? null, feedback, last: lastConsult, targets: isFinish ? ['builder'] : ['builder', 'planner'] }]))
       if (asked.halt) return asked
       const { decision, target, question, instructions } = asked.envelope.details
       if (decision === 'escalate') return { halt: await stop('lead-escalated', { role, ...held, lead: asked.envelope, question: question ?? asked.envelope.summary }) }
@@ -728,7 +731,7 @@ export async function runLoop(spec, deps = {}) {
     }
   }
   const replan = async (envelope, lead) => {
-    const planned = await stage('replan', () => seatTurn('planner', [{ id: 'plan-gap', role: 'builder', envelope, ...(lead ? { lead } : {}) }]))
+    const planned = await stage('replan', () => seatTurn('planner', withGuidance([{ id: 'plan-gap', role: 'builder', envelope, ...(lead ? { lead } : {}) }])))
     if (planned.halt) return planned
     if (rulings.length) { rulings.length = 0; await emit('lead-rulings', { rulings: [] }) }
     const halt = await acceptPlan(planned.envelope)
@@ -847,8 +850,8 @@ export async function runLoop(spec, deps = {}) {
   try {
     try { await d.mkdir(spec.taskDir, { recursive: true }) } catch (error) { return await stop('runner-threw', { mkdir: describe(error) }) }
     // The lane's own start, written once: the arms of every seat (and every retry) date the planner's return against it.
-    // A finish run appends none: the original row stays the anchor the arms date the accepted plan against.
-    if (!isFinish) {
+    // A finish entry appends none: the original row stays the anchor the arms date the accepted plan against.
+    if (!finishEntry) {
       await emit('run-start', { run_id: spec.id })
       await emit('roster', { tier, seats: rosterCells(seats), files: spec.roster?.files ?? [] })
     }
@@ -878,7 +881,7 @@ export async function runLoop(spec, deps = {}) {
       }
     }
 
-    let feedback = isFinish ? [{ id: 'finish-stop', summary: 'The previous lane stopped with the given reason and observation.', reason: fin.stop.reason, observation: finishPromptObservation(fin.stop.observation) }, ...(guidanceItem ? [guidanceItem] : []), ...fin.findings] : []
+    let feedback = finishEntry ? [{ id: 'finish-stop', summary: 'The previous lane stopped with the given reason and observation.', reason: fin.stop.reason, observation: finishPromptObservation(fin.stop.observation) }, ...(guidanceItem ? [guidanceItem] : []), ...fin.findings] : []
     if (isFinish) {
       let worktree = await checkBuildPaths('base-paths', feedback)
       while (!worktree.halt && !worktree.status) {
@@ -952,7 +955,7 @@ export async function runLoop(spec, deps = {}) {
           if (worktree.halt) return worktree.halt
           feedback = worktree.feedback
           if (!worktree.status) continue
-          if (!namedTests.length && (!isFinish || planning) && testsRequired) {
+          if (!namedTests.length && !isFinish && testsRequired) {
             const failure = { role: 'builder', failure: 'proof-no-tests' }
             if (repeatsFailure(failure)) return stop('no-progress', failure)
             feedback = [{ id: 'proof-no-tests', severity: 'must-fix', summary: 'Name at least one test in details.tests ({file, title}); the loop proves each red on the old source and green on the build, or green with base-package-absent or base-test-absent.' }, ...feedback.filter((item) => item?.id !== 'proof-no-tests' && item?.id !== 'proof-unproven')]
@@ -997,7 +1000,7 @@ export async function runLoop(spec, deps = {}) {
         const recheckReview = rebaseOnly ? recheckScope : null
         recheckScope = null
         recheck = false
-        if (!namedTests.length && (!isFinish || planning) && !testsRequired) proofLines = [tier === 'mechanical' ? '- proof: none, mechanical lane, not reviewed' : '- proof: none, no criterion is machine-checked']
+        if (!namedTests.length && !isFinish && !testsRequired) proofLines = [tier === 'mechanical' ? '- proof: none, mechanical lane, not reviewed' : '- proof: none, no criterion is machine-checked']
         if (namedTests.length) {
           const { result: proof, stopAfterSleepRerun } = await proofRun('HEAD')
           if (stopAfterSleepRerun) return stopAfterSleepRerun()
@@ -1112,6 +1115,7 @@ export async function runLoop(spec, deps = {}) {
               feedback.push({ id: 'suite-repair', severity: 'must-fix', summary: `The project suite is red after your change: ${suiteCommand}. Fix the failing tests.`, checkout: cwd, failingTests: failures.tests, failingFiles: failures.files, ...(failures.tail.length ? { outputTail: failures.tail } : {}) })
               repairing = true
             }
+            feedback = withGuidance(feedback)
             continue
           }
           suiteLine = `- Suite: green; exit ${suite.code}; ${suiteCommand}.`
@@ -1197,7 +1201,7 @@ export async function runLoop(spec, deps = {}) {
         '', '## Verification',
         ...(proved.length ? [...proved.map(({ file, title, base }) => `- ${oneLine(file)}: ${oneLine(title)} ${base?.reason === 'base-package-absent' ? 'had its package absent on the old source (base-package-absent)' : base?.reason === 'base-test-absent' ? 'had its test file absent on the old source (base-test-absent)' : 'was red on the old source'}, green on ${lastProved.has(`${file}\0${title}`) ? 'the build.' : 'an earlier build turn; the last build turn did not name it.'}`), ...(!isFinish && tier === 'mechanical' ? ['Review: none, mechanical lane, not reviewed.'] : [])]
           : !isFinish && tier === 'mechanical' ? ['Proof: mechanical lane, not reviewed.']
-            : (!isFinish || planning) && !testsRequired ? ['Proof: no criterion is machine-checked.'] : ['Proof: unmeasured.']),
+            : !isFinish && !testsRequired ? ['Proof: no criterion is machine-checked.'] : ['Proof: unmeasured.']),
         suiteLine,
         ...(open.length ? ['', '## Open points', ...open.map((f) => `- ${oneLine(f.summary)} (${oneLine(f.location)})`)] : []),
       ].join('\n')

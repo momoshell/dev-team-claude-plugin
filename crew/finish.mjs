@@ -1,4 +1,4 @@
-// crew finish <lane> reports a stopped lane; --return <file> starts a finish pass (ADR-051).
+// crew finish <lane> reports a stopped lane; --return <file> resumes planning or starts a finish pass (ADR-051).
 //
 // A finish pass re-enters the lane in its own worktree: rebase onto the current base ->
 // builder triage -> refresh base -> proof -> review -> suite -> commit -> rebase.
@@ -9,11 +9,12 @@
 // After the first turn, the attempted base must differ from the previous turn's base.
 // An unresolved conflict stops rebase-conflict. A failed move restores uncommitted work only when cleanup is proven.
 // A mechanical lane is finished on its brief. Only the checked tree is committed; the post-suite rebase
-// still repeats proof, review and suite when it moves the head. Post-build passes never re-plan; a pre-build planning
-// stop can resume its planner or lead first. Neither entry re-runs the baseline or publishes; the operator decides:
-// `--accept [--notes <file>]` publishes the PR the finish run measured (merging stays the operator's),
-// `--return <file>` runs a finish pass on a finishable stop, dead run or ready lane with the file as guidance
-// (counted reviews across passes share three rounds) and
+// still repeats proof, review and suite when it moves the head. Post-build passes never re-plan or publish.
+// Neither entry re-runs the baseline. A pre-build planning stop can resume its planner or lead, then run its
+// normal tier checks and publish its PR without `--accept`. Merging stays the operator's.
+// `--accept [--notes <file>]` publishes the PR a ready finish pass measured.
+// `--return <file>` uses the file as guidance for the whole run: it resumes planning or runs a post-build
+// finish pass on a finishable stop, dead run or ready lane (counted reviews across passes share three rounds).
 // `--abandon` ends a stopped, dead run or ready lane unpublished. Each appends a `finish-decision` row; a lane takes one decision per stop or ready.
 // Refused, with nothing written: `finish-worktree` (the worktree is gone), `finish-premise` (the lane never reached
 // a build), `finish-running` (a run re-entered or claimed the lane after its stop), `finish-published` and
@@ -146,16 +147,25 @@ function planFor(d, lane, taskDir, recordedTier, rows) {
   return loadPlan(d, lane, taskDir, rows)
 }
 
+const buildEvidence = (row) => row.role === 'builder' || (row.event === 'stage-start' && ['build', 'conflict', 'review', 'suite', 'commit'].includes(row.stage))
+
+// Planning stops do not start the finish review budget or combine the two judge seats' findings.
+function finishReviewStart(rows, before, recoveredStopAt = before) {
+  const build = rows.findIndex(buildEvidence)
+  const boundary = rows.findIndex((row, index) => (index > build && row.event === 'verdict' && row.status === 'stopped')
+    || (row.event === 'stage-start' && row.stage === 'base-paths'))
+  return Math.min(before, recoveredStopAt, boundary < 0 ? before : boundary)
+}
+
 // The finish spec for a stop: the stop, the findings still open at that point of the journal, and the turn offset.
-function finishFor(d, taskDir, rows, stopped, before, plan, judge = false) {
+function finishFor(d, taskDir, rows, stopped, before, plan, judge, reviewStart) {
   const { subject, plan_path: planPath } = plan
   const latest = new Map()
-  let finishing = false
-  for (const row of rows.slice(0, before)) {
-    if ((row.event === 'verdict' && row.status === 'stopped') || (row.event === 'finish-decision' && row.choice === 'return')) finishing = true
+  for (let index = 0; index < before; index++) {
+    const row = rows[index]
     if (row.event !== 'verdict' || row.status !== 'reviewed') continue
     // A finish reviewer carries both seats' imported findings, so its return replaces both.
-    if (!judge || finishing) latest.clear()
+    if (!judge || index >= reviewStart) latest.clear()
     latest.set(row.role ?? 'reviewer', row)
   }
   const open = [...latest.values()].filter((row) => row.verdict === 'changes-needed' && Array.isArray(row.findings) && row.findings.length)
@@ -258,13 +268,18 @@ function issuedTurns(d, taskDir, rows) {
 // Only a planning attempt with no build evidence can reopen planning.
 function planningReturn(d, taskDir, rows, stopped, stopAt) {
   const before = rows.slice(0, stopAt)
-  if (before.some((row) => row.role === 'builder' || (row.event === 'stage-start' && ['build', 'conflict', 'review', 'suite', 'commit'].includes(row.stage)))) return null
+  if (before.some(buildEvidence)) return null
   if (d.readdirSync(taskDir).some((name) => /^builder-\d+\.json$/.test(name))
     || (d.existsSync(join(taskDir, 'lean', 'builder')) && d.readdirSync(join(taskDir, 'lean', 'builder')).length)) return null
   const planAt = before.findLastIndex((row) => row.event === 'stage-start' && ['plan', 'replan'].includes(row.stage))
   if (planAt < 0 && stopped.stage !== 'plan') return null
   const lastStage = before.findLast((row) => row.event === 'stage-start')?.stage
-  if (!['plan', 'replan', 'lead'].includes(stopped.stage ?? lastStage)) return null
+  const stoppedIn = stopped.stage ?? lastStage
+  if (!['plan', 'replan', 'lead'].includes(stoppedIn)) {
+    // A planning continuation can stop on its initial fetch or rebase before it has a build.
+    if (!['fetch', 'rebase'].includes(stoppedIn)) return null
+    try { if (!JSON.parse(d.readFileSync(join(taskDir, 'finish.json'), 'utf8'))?.finish?.planning) return null } catch { return null }
+  }
   const { turnOffset, plannerTurn } = issuedTurns(d, taskDir, rows)
   const recorded = before.findLast((row) => row.event === 'envelope' && row.role === 'planner' && String(row.id).endsWith(`.planner.${plannerTurn}`))
   const returnPath = plannerTurn ? join(taskDir, `planner-${plannerTurn}.json`) : null
@@ -361,11 +376,11 @@ export function finishLane({ lane, root, deps = {}, guidance, priorReviewRounds 
   if (!planning && !rows.some((row) => row.event === 'envelope' && row.role === 'builder' && Array.isArray(row.defects) && row.defects.length === 0 && !row.error && (guidance === undefined ? ['done', 'insufficient'] : ['done', 'insufficient', 'escalate']).includes(row.parsed?.status) && row.parsed.id === row.id && (guidance === undefined || validateEnvelope('builder', row.parsed, { archived: true }).defects.length === 0))) throw new FinishRefusal('finish-no-build', `lane ${lane} has no schema-valid builder envelope in its journal`)
 
   const plan = planning ? planning.planning.plan : null
-  const finish = finishFor(d, taskDir, rows, stopped, stopAt, planning ? (plan ? { ...plan.details, planSummary: plan.summary } : { subject: null, plan_path: null }) : planFor(d, lane, taskDir, recordedTier, rows), spec.tier === 'judge')
+  const reviewStart = finishReviewStart(rows, stopAt, recoveredStopAt)
+  const finish = finishFor(d, taskDir, rows, stopped, stopAt, planning ? (plan ? { ...plan.details, planSummary: plan.summary } : { subject: null, plan_path: null }) : planFor(d, lane, taskDir, recordedTier, rows), spec.tier === 'judge', reviewStart)
   if (planning) Object.assign(finish, planning)
   if (guidance !== undefined) Object.assign(finish, { guidance, priorReviewRounds })
-  if (died) finish.recoveredStopAt = Math.min(recoveredStopAt ?? stopAt, stopAt)
-  else if (recoveredStopAt !== undefined) finish.recoveredStopAt = recoveredStopAt
+  if (!planning && (died || recoveredStopAt !== undefined)) finish.recoveredStopAt = Math.min(recoveredStopAt ?? stopAt, stopAt)
   const claim = claimStop(d, lane, taskDir, stopAt)
   try {
     // A previous claimant may have finished while this call was probing the remote.
@@ -428,21 +443,15 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
     if (rows.slice(stopAt + 1).some((row) => decidedAt(row, stopAt))) throw new FinishRefusal('finish-decided', `lane ${lane} already has a decision on this stop`)
     if (typeof file !== 'string') throw new FinishRefusal('finish-unreadable', '--return needs a guidance file')
     const notes = readText(d, file, 'the guidance file')
-    // Finish reviews start after the original stop, not among the original run's reviews.
-    const firstStop = rows.findIndex((row) => row.event === 'verdict' && row.status === 'stopped')
-    let finishStart = firstStop < 0 ? stopAt : firstStop + 1, recoveredStopAt
-    let previous, hasPrevious = false
+    let recoveredStopAt, previous, hasPrevious = false
     try { previous = JSON.parse(d.readFileSync(join(taskDir, 'finish.json'), 'utf8'))?.finish; hasPrevious = true } catch (error) {
       if (error?.code !== 'ENOENT') throw new FinishRefusal('finish-unreadable', `cannot read the previous finish spec: ${error?.code ?? error?.message}`)
     }
     if (hasPrevious) {
       if (!isObject(previous) || (Object.hasOwn(previous, 'recoveredStopAt') && (!Number.isSafeInteger(previous.recoveredStopAt) || previous.recoveredStopAt < 0 || previous.recoveredStopAt > stopAt))) throw new FinishRefusal('finish-unreadable', `lane ${lane} has invalid recovery metadata`)
-      if (previous.recoveredStopAt !== undefined) {
-        recoveredStopAt = previous.recoveredStopAt
-        finishStart = Math.min(finishStart, recoveredStopAt)
-      }
+      if (!previous.planning) recoveredStopAt = previous.recoveredStopAt
     }
-    const finishRows = rows.slice(finishStart, stopAt)
+    const finishRows = rows.slice(finishReviewStart(rows, stopAt, recoveredStopAt), stopAt)
     let priorReviewRounds = reviewCount(finishRows)
     for (let i = 0; i < finishRows.length; i++) {
       const ready = finishRows[i]
@@ -487,7 +496,7 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
   if (rows.slice(readyAt + 1).some((row) => decidedAt(row, readyAt))) throw new FinishRefusal('finish-decided', `lane ${lane} already has a decision on this finish run`)
   const ready = rows[readyAt]
   if (choice === 'return' && typeof file !== 'string') throw new FinishRefusal('finish-unreadable', '--return needs a guidance file')
-  let stopped, priorReviewRounds, recoveredStopAt
+  let stopped, priorReviewRounds, recoveredStopAt, reviewStart
   if (choice === 'return') {
     stopped = rows.slice(0, readyAt).findLast((row) => row.event === 'verdict' && row.status === 'stopped')
     let previous
@@ -498,10 +507,8 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
       stopped = { reason: 'run-died', observation: previous.stop.observation }
     }
     if (!stopped) throw new FinishRefusal('finish-premise', `lane ${lane} has no stop before its finish-ready row`)
-    // Count from the earlier historical stop when present, never discarding reviews on recovery.
-    const historicalStop = rows.slice(0, readyAt).findLastIndex((row) => row.event === 'verdict' && row.status === 'stopped')
-    const sinceStop = rows.slice(Math.min(historicalStop >= 0 ? historicalStop + 1 : readyAt, recoveredStopAt ?? readyAt), readyAt)
-    const journalReviews = reviewCount(sinceStop)
+    reviewStart = finishReviewStart(rows, readyAt, recoveredStopAt)
+    const journalReviews = reviewCount(rows.slice(reviewStart, readyAt))
     priorReviewRounds = Math.max(journalReviews, Number.isSafeInteger(ready.reviewRounds) && ready.reviewRounds >= 0 ? ready.reviewRounds : 0)
     if (priorReviewRounds >= FINISH_REVIEW_ROUNDS) throw new FinishRefusal('finish-rounds-spent', `lane ${lane} has spent its finish review rounds`)
   }
@@ -567,7 +574,7 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
     // return: the same finish spec the first pass had, plus the guidance, with the review rounds already spent.
     const plan = planFor(d, lane, taskDir, recordedTier, rows)
     const finish = {
-      ...finishFor(d, taskDir, rows, stopped, readyAt, plan, spec.tier === 'judge'),
+      ...finishFor(d, taskDir, rows, stopped, readyAt, plan, spec.tier === 'judge', reviewStart),
       ...(recoveredStopAt === undefined ? {} : { recoveredStopAt }),
       guidance: notes,
       priorReviewRounds,

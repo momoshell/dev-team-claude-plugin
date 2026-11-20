@@ -5,7 +5,8 @@
 //   2. git branch -D <lane>             (local only)
 //   3. move ~/.crew/dt-<lane> to ~/.crew-journal-archive/dt-<lane> (or a free .archive-<n> suffix on re-archive)
 // Plain closeout requires a MERGED PR in the worktree's origin repository, with the lane branch's tip as its head.
-// Discard permits stopped, abandoned or accepted lanes with a CLOSED PR, and quiet lanes without a journal.
+// Discard permits stopped or abandoned lanes and quiet lanes without a journal.
+// A recorded PR must be CLOSED, including after accept or a planning return.
 // It refuses tips on neither a remote-tracking ref nor the base. Discard skips git for an absent worktree.
 // Checks precede removal; a failed archive move leaves the lane directory for a retry.
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -14,7 +15,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLeanSource } from './lean-source.mjs'
-import { stateless } from './lean-journal-order.mjs'
+import { stateless, supersededReturn } from './lean-journal-order.mjs'
 import { LANE, isObject, parseJournalRows, within } from './lane-core.mjs'
 import { reapLaneSeats } from './seat-reap.mjs'
 import { parsePrUrl } from './record-pr.mjs'
@@ -82,19 +83,22 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
   }
   try {
   if (discard) {
-    const lastFinish = rows.findLast((row) => row.event === 'finish-ready' || row.event === 'finish-decision')
+    const finishAt = rows.findLastIndex((row) => row.event === 'finish-ready' || row.event === 'finish-decision')
+    const lastFinish = rows[finishAt]
+    const prAt = rows.findLastIndex((row) => row.event === 'pr')
     const abandoned = lastFinish?.event === 'finish-decision' && lastFinish.choice === 'abandon'
     const accepted = lastFinish?.event === 'finish-decision' && lastFinish.choice === 'accept'
-    if (lastFinish && !abandoned && !accepted) refuse(`lane has a finish record; use crew finish ${lane}`)
-    if (accepted && !rows.some((row) => row.event === 'pr')) refuse(`lane has a finish record; use crew finish ${lane}`)
-    if (rows.some((row) => row.event === 'pr')) {
+    const publishedAfterReturn = lastFinish?.event === 'finish-decision' && lastFinish.choice === 'return'
+      && (prAt > finishAt || (prAt >= lastFinish.launchedAt && supersededReturn(rows, lastFinish, finishAt)))
+    if (lastFinish && !abandoned && !(accepted && prAt >= 0) && !publishedAfterReturn) refuse(`lane has a finish record; use crew finish ${lane}`)
+    if (prAt >= 0) {
       pr = lastPr(rows, lane, taskDir, alive)
       const viewText = must(run, 'gh pr view', 'gh', ['pr', 'view', pr.url, '--json', 'state'])
       let view
       try { view = JSON.parse(viewText) } catch { refuse('gh pr view returned unparseable output') }
       if (view?.state !== 'CLOSED') refuse(`lane recorded a pull request; use crew closeout ${lane}`)
     }
-    const tail = rows.findLast((row, index) => !stateless(rows, row, index))
+    const tail = rows.findLast((row, index) => !stateless(rows, row, index) && !(publishedAfterReturn && index === finishAt))
     const stopRows = tail?.event === 'pr' ? rows.slice(0, rows.lastIndexOf(tail)) : rows
     const last = stopRows.findLast((row, index) => !stateless(rows, row, index))
     const died = deadRun({ rows: stopRows, taskDir, alive })

@@ -129,20 +129,22 @@ dead-run recovery does not send a notification retroactively.
 
 The lane name is the brief's file name. `crew start` runs the `standard` shape
 only; `finish` (ADR-051) is the second entry path. `crew finish <lane> --return <file>`
-starts a finish pass on any finishable stop, including an escalation or a
-provably dead run, or another pass on a ready lane. `<file>` is a notes file, not inline text;
-its guidance stands for the whole pass and a new return replaces it.
+resumes a planning stop before any build, or starts a finish pass on a finishable
+post-build stop, provably dead run or ready lane. `<file>` is a notes file, not
+inline text; its guidance stands for the whole run and a new return replaces it.
 A pre-build planning stop resumes in the same lane, branch and worktree, preserving
 seeded files and previous returns and sessions. An accepted current planner done
 return with an unresolved lead decision resumes at the lead; otherwise the planner
 reruns with the previous evidence. Planner and lead receive labelled operator guidance
-and the stopped lead's question. A lead bounce can revise the plan. An accepted plan
-then enters the finish build/check path, ending at `finish-ready`, not publication;
-use `--accept` to publish. A judge lane resumed by `--return` from a plan stop gets
-reviewer review but no tech-lead second review. To get that second review, abandon
-and restart the lane. Baseline-only stops still refuse. Post-build finish passes
-cannot reopen planning: abandon, close out with `--discard` and restart from the brief
-when the build needs a new plan (ADR-051).
+and the stopped lead's question. A lead bounce can revise the plan. Once the plan
+is accepted, the lane runs its normal tier checks with fresh round budgets: build
+runs review and suite together, and judge gets reviewer and tech-lead review
+after a green suite.
+The lane opens and records the PR without `--accept`. Merging stays with the
+operator. Another planning stop before any build can resume the same way.
+Baseline-only stops still refuse. Post-build passes stop at `finish-ready` for
+`--accept` and cannot reopen planning: abandon, close out with `--discard` and
+restart from the brief when the build needs a new plan (ADR-051).
 A `--return` pass whose branch equals its base after the initial rebase still runs the build; a later pre-check move that drops the change, or the commit stage, can stop `nothing-to-commit`.
 In a finish pass, the first red suite outside ADR-054 §1's sleep exception gives the builder its one repair turn immediately, even for a flaky failure. The repair repeats proof and the suite, and repeats review unless the reviewer already passed the same tree in this finish run. The finish report lists only reviews actually performed. A red suite after repair stops the lane unless it qualifies for the sleep re-run. An unmeasured suite stops without repair.
 Bare `crew finish <lane>` reports without writing.

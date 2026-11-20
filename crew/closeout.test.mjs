@@ -364,10 +364,15 @@ test('discard holds the finish stop claim throughout teardown', () => {
 })
 
 test('discard tears down a stopped lane whose recorded PR is closed unmerged', () => {
-  for (const rows of [[PR_ROW, ...STOPPED], [...STOPPED, PR_ROW], [{ event: 'run-start', lane: LANE }, PR_ROW]]) {
+  const returned = { event: 'finish-decision', choice: 'return', launchedAt: STOPPED.length }
+  const publish = { event: 'stage-start', stage: 'publish' }
+  for (const rows of [
+    [PR_ROW, ...STOPPED], [...STOPPED, PR_ROW], [{ event: 'run-start', lane: LANE }, PR_ROW],
+    [...STOPPED, returned, publish, PR_ROW], [...STOPPED, publish, PR_ROW, returned],
+  ]) {
     const w = world({ rows })
     try {
-      if (rows.length === 2) writeFileSync(join(w.leaf, 'task', 'run.pid'), '123\n')
+      if (rows.length === 2 || rows.includes(returned)) writeFileSync(join(w.leaf, 'task', 'run.pid'), '123\n')
       const r = close(w, { state: 'CLOSED', argv: [LANE, '--discard'], alive: () => false, renameSync: (from, to) => {
         assert.ok(!existsSync(w.worktree))
         assert.ok(!branchExists(w))

@@ -125,6 +125,13 @@ function suiteFailures(results) {
   return { tests: [...tests].slice(0, SUITE_LIST_MAX), files: [...files].slice(0, SUITE_LIST_MAX), tail: tails.filter((t) => t !== '') }
 }
 
+function finishPromptObservation(observation) {
+  if (![observation?.stdout, observation?.stderr].some((stream) => typeof stream === 'string' && stream.length > SUITE_TAIL_MAX)) return observation
+  const { tests, files, tail } = suiteFailures([observation])
+  const { stdout, stderr, ...rest } = observation
+  return { ...rest, failingTests: tests, failingFiles: files, outputTail: tail }
+}
+
 // `git status --porcelain=v1 -z`: `XY path` records, a rename or copy (in either column) followed by its
 // source. Returns every path named, or null when the output is truncated, mis-framed or names an unsafe path.
 // With `unstaged`, only the primary path of a record whose work-tree column differs from the index (and which is not
@@ -863,7 +870,7 @@ export async function runLoop(spec, deps = {}) {
       }
     }
 
-    let feedback = isFinish ? [{ id: 'finish-stop', summary: 'The previous lane stopped with the given reason and observation.', reason: fin.stop.reason, observation: fin.stop.observation }, ...(guidanceItem ? [guidanceItem] : []), ...fin.findings] : []
+    let feedback = isFinish ? [{ id: 'finish-stop', summary: 'The previous lane stopped with the given reason and observation.', reason: fin.stop.reason, observation: finishPromptObservation(fin.stop.observation) }, ...(guidanceItem ? [guidanceItem] : []), ...fin.findings] : []
     if (isFinish) {
       let worktree = await checkBuildPaths('base-paths', feedback)
       while (!worktree.halt && !worktree.status) {

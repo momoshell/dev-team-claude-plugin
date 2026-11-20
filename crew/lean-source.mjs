@@ -321,6 +321,7 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
     if (error || !rows.length) {
       reason = error ?? (skipped_malformed ? 'task journal has no readable rows' : 'task journal is empty')
     } else if (terminal?.event === 'finish-ready' && !(last.event === VERDICT_EVENT && last.status === 'stopped' && last.index > terminalIndex)
+      && !(last.event === 'pr' && isObject(last.pr) && last.actor === 'operator' && last.index > terminalIndex)
       && !rows.some((row, index) => index > terminalIndex && row.launchedAt > terminalIndex && supersededReturn(rows, row, index))) {
       status = 'ready-for-operator'
     } else if (terminal?.choice === 'abandon') {

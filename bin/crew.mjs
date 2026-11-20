@@ -4,7 +4,7 @@
 //   crew onboard --check <draft.json>  calibrate project proof runners (ADR-057)
 //   crew start <brief.md>        run crew/start.mjs: start a lane from a P1 brief (ADR-052)
 //   crew show <lane> [<role>] [--json]  read a lane's recorded sessions (crew/show.mjs)
-//   crew record-pr <lane> --pr <url>  record the PR a stopped lean lane was hand-finished in (crew/record-pr.mjs)
+//   crew record-pr <lane> --pr <url>  record a hand-opened PR for a stopped or quiet ready-for-operator lane (crew/record-pr.mjs)
 //   crew finish <lane>           report a stopped or ready lane, read-only (crew/finish.mjs)
 //   crew finish <lane> --return <file>  start a pass with guidance on a finishable stop, dead run or ready lane
 //   crew finish <lane> --accept [--notes <file>]  publish a ready finish run

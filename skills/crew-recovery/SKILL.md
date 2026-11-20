@@ -142,9 +142,9 @@ Closeout and discard stop proven seat groups and report unproven ones
   that rebased tree, run the builder's named tests against old source and build, run the suite,
   and push only if both pass.
   Then open the PR and run `crew record-pr <lane> --pr <url>`, which appends one
-  operator-marked `pr` row so the lane stops reading as stopped. `record-pr`
-  checks only that the lane is quiet and records no PR yet, not that the PR holds
-  the build (`crew/record-pr.mjs`).
+  operator-marked `pr` row so the lane lists as `done` with the PR URL.
+  `record-pr` accepts a stopped or quiet `ready-for-operator` lane with no
+  recorded PR. It does not check that the PR holds the build (`crew/record-pr.mjs`).
 - After the PR merges: `crew closeout <lane>` removes the worktree (never
   forced), deletes the lane branch and moves the lane directory to
   `~/.crew-journal-archive/` (`crew/closeout.mjs`). It refuses unless the

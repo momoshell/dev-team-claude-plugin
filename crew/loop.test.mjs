@@ -1084,6 +1084,15 @@ test('a finish first red repairs immediately unless a sleep-credited re-run pass
   const broken = sequenced([envRed, envRed], { spec: envSpec })
   assert.equal((await broken.go()).reason, 'red-after-environment-rerun')
   assert.equal(builderTurns(broken).length, 1)
+  // A red without the signature, first or after a matching red, is an ordinary red: the builder repairs it.
+  const otherRed = { ...redRun(), stderr: 'AssertionError: stale' }
+  for (const sequence of [[otherRed, green()], [envRed, otherRed, green()]]) {
+    const repaired = sequenced(sequence, { spec: envSpec, checkedTree: () => ({ ...green(), stdout: String(count(repaired, 'builder')).repeat(40) }) })
+    assert.deepEqual(await repaired.go(), { status: 'done', reason: null, pr: null })
+    assert.equal(builderTurns(repaired).length, 2)
+    assert.ok(builderTurns(repaired)[1].feedback.some((item) => item.id === 'suite-repair'))
+    assert.equal(repaired.calls.filter((c) => c === 'suite').length, sequence.length)
+  }
 })
 
 const SPEC_OUT = ['ℹ failing tests:', 'test at skills/qa-test-writing/exhibits.test.mjs:42:1', '✖ anchor spans remain current (2ms)', '  AssertionError: stale'].join('\n')

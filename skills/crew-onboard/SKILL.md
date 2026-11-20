@@ -104,7 +104,8 @@ the fetch fails; it does not probe seats. The probe is implemented in
    in either stdout or stderr of an `exit-nonzero` red suite. A match allows one
    unchanged-tree re-run unless the host-sleep rule takes precedence. Pick a
    string that only an environment failure prints: a code failure that prints
-   it is re-run and then stopped, and never reaches the builder. Omit the
+   a declared signature on both attempts stops the lane and never reaches the
+   builder. Omit the
    list or use `[]` to leave suite behavior unchanged. Onboarding validates and
    keeps the list without hashing it. Start snapshots it for the lane and its
    finish passes.

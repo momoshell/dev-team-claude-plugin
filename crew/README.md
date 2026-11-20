@@ -9,6 +9,7 @@ plan, superseded by this README.
 crew onboard (--check <draft.json> | --seats) [--checkout <dir>] # calibrate the checkout or probe its seats
 crew start <brief.md> [--checkout <dir>]             # worktree + journal + a detached lane
 crew lanes [--all] [--json]                          # list lanes from their journals
+crew steps [--since <ISO date>] [--json]             # count lane steps and repeat builder triggers
 crew show <lane> [<role>] [--json]                   # read a lane's recorded seat sessions
 crew finish <lane>                                   # report a stopped or ready lane, read-only
 crew finish <lane> --accept [--notes <file>] | --return <file> | --abandon
@@ -23,6 +24,26 @@ crew update [--force]                                # fast-forward the crew hom
 `crew` is `bin/crew.mjs`. The crew home is the checkout it lives in (symlinks
 resolved), or `CREW_HOME` when set. State lives under `~/.crew/dt-<lane>/<lane>/`:
 the brief, the task directory, the lane journal and every seat's session file.
+
+`crew steps` uses the live and archived lanes found by `crew lanes --all`.
+It includes lanes whose first journal row is at or after `--since` (for example,
+`2026-11-20`), or within the last seven days by default. `--json` prints the same
+report as one object. Unreadable journals and journals with no usable first-row
+time are listed with a reason and excluded from the totals.
+
+Each lane shows seat turns by role, suite runs and red suites, proof runs, and
+hand decisions by choice. A minimal lane has one builder turn, one suite run,
+no hand decision and no extra seat turns. Build and judge lanes allow at most
+one planner turn and require one reviewer turn; judge also requires one tech-lead
+turn. Mechanical lanes have no planner or reviewer turn. The per-lane flag does
+not require a PR.
+
+After the first builder turn, the report lists each repeat and its journaled
+trigger: `suite-red`, `proof-unproven`, `rebase-conflict`, `review-changes`,
+`finish-triage`, `replan` or `unclassified` when the journal does not establish
+one. Totals show minimal lanes out of lanes with a PR, repeats by trigger out of
+all builder turns, red suites out of suite runs, and the number of excluded lanes.
+The command writes nothing and starts no child processes.
 
 `crew closeout <lane> --discard` archives a stopped lane with no PR or a PR
 GitHub reports CLOSED, clearing it from the default visualizer list. It also
@@ -311,7 +332,7 @@ Everything durable is a file; session chat is never the record.
 - `checks.mjs` — suite, commit, rebase, PR.
 - `agents.mjs`, `protocols.mjs` — agent definitions, tiers, and the closed protocols.
 - `acp/`, `acp-client.mjs`, `acp-permission.mjs`, `acp-signal.mjs` — the ACP seat transport, grants and permission handling.
-- `show.mjs`, `lanes.mjs`, `finish.mjs`, `record-pr.mjs`, `closeout.mjs` — the other verbs.
+- `show.mjs`, `lanes.mjs`, `steps.mjs`, `finish.mjs`, `record-pr.mjs`, `closeout.mjs`: the other verbs.
 - `reclaim.mjs` — token-fenced locks and the per-seat reservation markers the ACP client takes (`reserve`, `advance`, `clear`, `probeEvidence`).
 - `adapters/adapter-*.mjs` — per-agent launch shapes for `claude`, `pi` and `muse`.
 - `pi/extensions/` — the kept pi arms (readgate, skeletonread, subagent, advisor).

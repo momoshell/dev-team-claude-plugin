@@ -15,6 +15,7 @@
 //                                a quiet lane without a journal can be discarded; unpushed tips are refused
 //                                an absent worktree is skipped on retry; use crew finish for other finish records
 //   crew lanes [--all] [--json]  list lean lanes from their journals (crew/lanes.mjs)
+//   crew steps [--since <ISO date>] [--json]  count lane steps and repeat builder triggers (crew/steps.mjs)
 //   crew viz                     serve the visualizer from the crew home
 //   crew where                   print the crew home, its branch and its commit
 //   crew update [--force]        fast-forward the crew home to origin/main and rebuild what changed
@@ -24,13 +25,13 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync, realpathSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 export function crewHome(env = process.env, self = fileURLToPath(import.meta.url)) {
   return env.CREW_HOME ? resolve(env.CREW_HOME) : dirname(dirname(realpathSync(self)))
 }
 
-const ENTRY = { onboard: 'crew/onboard.mjs', start: 'crew/start.mjs', show: 'crew/show.mjs', 'record-pr': 'crew/record-pr.mjs', closeout: 'crew/closeout.mjs', finish: 'crew/finish.mjs', lanes: 'crew/lanes.mjs' }
+const ENTRY = { onboard: 'crew/onboard.mjs', start: 'crew/start.mjs', show: 'crew/show.mjs', 'record-pr': 'crew/record-pr.mjs', closeout: 'crew/closeout.mjs', finish: 'crew/finish.mjs', lanes: 'crew/lanes.mjs', steps: 'crew/steps.mjs' }
 const MAX_BUFFER = 16 * 1024 * 1024
 const GIT_TIMEOUT_MS = 300_000
 const PGREP_TIMEOUT_MS = 10_000
@@ -112,7 +113,7 @@ function update(home, args) {
   return 0
 }
 
-function main(argv = process.argv.slice(2), env = process.env) {
+async function main(argv = process.argv.slice(2), env = process.env) {
   const home = crewHome(env)
   const [verb, ...rest] = argv
   if (verb === 'where' || verb === 'update') {
@@ -127,11 +128,12 @@ function main(argv = process.argv.slice(2), env = process.env) {
   }
   if (verb === 'viz') { const vizEnv = env.DEVTEAM_VIZ_CHECKOUT ? env : { ...env, DEVTEAM_VIZ_CHECKOUT: process.cwd() }; return run(process.execPath, ['--env-file-if-exists=.env.local', 'visualizer/server/server.mjs', ...rest], { cwd: home, env: vizEnv }) }
   const entry = Object.hasOwn(ENTRY, verb) ? ENTRY[verb] : null
+  if (verb === 'steps') return (await import(pathToFileURL(join(home, entry)).href)).main(rest)
   if (entry) return run(process.execPath, [join(home, entry), ...rest])
-  process.stderr.write(`crew: unknown verb ${JSON.stringify(verb ?? '')}; expected onboard, start, show, record-pr, closeout, finish, lanes, viz, where or update\n`)
+  process.stderr.write(`crew: unknown verb ${JSON.stringify(verb ?? '')}; expected onboard, start, show, record-pr, closeout, finish, lanes, steps, viz, where or update\n`)
   return 2
 }
 
 if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
-  process.exitCode = main()
+  process.exitCode = await main()
 }

@@ -403,5 +403,5 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
     }).filter((run) => !filters.mode && (!filters.status || filters.status === run.status) && inWindow(run))
   }
 
-  return { listRuns, identify, readJournalRows, readSeatSessions, resolveLane }
+  return { lanes, listRuns, identify, readJournalRows, readSeatSessions, resolveLane }
 }

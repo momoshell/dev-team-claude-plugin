@@ -102,7 +102,7 @@ test('an unknown or missing verb is refused with exit 2 and runs nothing', () =>
       const out = crew(args, { cwd: root, env: { CREW_HOME: home } })
       assert.equal(out.status, 2)
       assert.equal(out.stdout, '')
-      assert.match(out.stderr, /^crew: unknown verb ".*"; expected onboard, start, show, record-pr, closeout, finish, lanes, viz, where or update$/m)
+      assert.match(out.stderr, /^crew: unknown verb ".*"; expected onboard, start, show, record-pr, closeout, finish, lanes, steps, viz, where or update$/m)
     }
   } finally { rmSync(root, { recursive: true, force: true }) }
 })

@@ -29,6 +29,7 @@ and where each piece lives.
 crew onboard (--check <draft.json> | --seats) [--checkout <dir>] # calibrate the checkout or probe its seats
 crew start /abs/path/brief.md          # worktree + journal + a detached lane
 crew lanes                              # list lanes from their journals
+crew steps                              # count lane steps and repeat builder triggers
 crew show <lane> [<role>]               # read a seat's recorded session
 crew finish <lane>                      # report a stopped or ready lane, read-only
 crew finish <lane> --accept | --return <file> | --abandon
@@ -84,7 +85,7 @@ before its first lane.
   `loop.mjs` (the loop), `proof.mjs` (per-test proof), `checks.mjs` (suite, commit, rebase,
   PR), `agents.mjs` and `protocols.mjs` (seat definitions and the closed
   protocols), `acp/` and `acp-client.mjs` (the ACP seat transport), and the
-  verbs `show`, `finish`, `record-pr`, `closeout` and `lanes`. Seat definitions
+  verbs `show`, `finish`, `record-pr`, `closeout`, `lanes` and `steps`. Seat definitions
   and instructions are delivered from `crew/agents/*.md`.
 - **`skills/`, `commands/`** — the operating knowledge as Claude Code surfaces.
   The knowledge skills (`pr-review`, `qa-test-writing`, `test-economy`, `test-strength`, `backend-node`,
@@ -95,7 +96,7 @@ before its first lane.
   procedure. Commands are thin entry points that name the skill owning each
   procedure: `/dispatch`, `/close-out`, `/status`, `/onboard`, `/review`.
 - **`bin/crew.mjs`** — the crew launcher: start, show, record-pr, finish,
-  closeout, lanes, viz, where, update, onboard.
+  closeout, lanes, steps, viz, where, update, onboard.
 - **`hooks/`** — the skill-map selector (`hooks/skill-gate.mjs`) and the
   crew gate hooks (`hooks/crew-gates.mjs`, ADR-059).
 - **`visualizer/`** — the local visualizer over lane journals (see Visualizer

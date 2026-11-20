@@ -789,9 +789,9 @@ test('a refused, unreadable, empty or stale envelope stops the lane and a lead a
 test('from round 2 the reviewer hears the earlier findings, and a return that drops one is refused', async () => {
   for (const cleanup of ['proven', 'delayed', 'unknown']) {
     const cwd = scratchDir('loop-cancel-suite-'), ready = join(cwd, 'ready.json')
-    const descendant = `console.log('suite ready'); require('node:fs').writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ pgid: process.ppid, pid: process.pid })); setTimeout(() => process.exit(0), 3000)`
-    // The detached child holds the pipes beyond the cancellation proof window, then closes them naturally.
-    const source = `const child = require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], { stdio: 'inherit', detached: ${cleanup === 'delayed'} }); process.on('SIGTERM', () => ${cleanup === 'delayed' ? 'process.exit(0)' : "child.kill('SIGTERM')"}); child.on('exit', () => process.exit(0)); setTimeout(() => { child.kill('SIGKILL'); process.exit(0) }, 5000)`
+    // Start the detached child's pipe-close delay at cancellation, not at startup.
+    const descendant = `process.on('SIGUSR2', () => setTimeout(() => process.exit(0), 3000)); console.log('suite ready'); require('node:fs').writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ pgid: process.ppid, pid: process.pid })); setTimeout(() => process.exit(0), 10_000)`
+    const source = `const child = require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], { stdio: 'inherit', detached: ${cleanup === 'delayed'} }); process.on('SIGTERM', () => ${cleanup === 'delayed' ? "{ child.kill('SIGUSR2'); process.exit(0) }" : "child.kill('SIGTERM')"}); child.on('exit', () => process.exit(0)); setTimeout(() => { child.kill('SIGKILL'); process.exit(0) }, 5000)`
     const f = fakes({ review: 1, deps: { now: Date.now } })
     const suite = f.deps.runSuite, seat = f.deps.runSeat
     let first = true, group, running, cancelled = false
@@ -1411,6 +1411,33 @@ const finishSpec = (over = {}) => ({
   shape: 'finish',
   finish: { planPath: '/virtual/task/plan.md', subject: 'fix(crew): planned lane', mutations: [MUTATION], stop: STOP, findings: [finding], turnOffset: 3, ...over },
 })
+test('a build suite re-run stop preserves the review finding for the returned builder', async () => {
+  const root = scratchDir(), taskDir = join(root, 'dt-lane', 'lane', 'task')
+  mkdirSync(taskDir, { recursive: true })
+  const plan = 'Preserve the review finding.\n'
+  const red = { ...redRun(), stderr: 'open test store: Database(PoolTimedOut)' }
+  const f = sequenced([red, red], { review: 1, plan, spec: { cwd: root, taskDir, environmentSignatures: ['PoolTimedOut'] } })
+  assert.deepEqual(await f.go(), stopped('red-after-environment-rerun'))
+
+  writeFileSync(join(taskDir, 'lean.json'), JSON.stringify(f.spec))
+  writeFileSync(join(taskDir, 'plan.md'), plan)
+  writeFileSync(join(taskDir, 'planner-1.json'), await f.deps.readFile(f.requests[0].returnPath))
+  writeFileSync(join(taskDir, 'journal.jsonl'), f.rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
+  const guidance = join(root, 'guidance.txt')
+  writeFileSync(guidance, 'Fix the review finding.')
+  const launched = await decideFinish({ lane: 'lane', root, choice: 'return', file: guidance, deps: {
+    spawnDetached: () => 4242, holdIdleSleep: () => {}, log: () => {},
+  } })
+  const returned = fakes({ spec: JSON.parse(readFileSync(launched.specPath, 'utf8')) })
+  assert.deepEqual(await returned.go(), { status: 'done', reason: null, pr: null })
+  assert.deepEqual(builderTurns(returned)[0].feedback.filter((item) => item.id === finding.id), [finding])
+
+  const verdicts = f.rows.filter((row) => row.event === 'verdict')
+  assert.deepEqual(verdicts.map((row) => row.status), ['reviewed', 'stopped'])
+  assert.equal(verdicts[0].verdict, 'changes-needed')
+  assert.deepEqual(verdicts[0].findings, [finding])
+})
+
 test('a finish consult distinguishes imported tech-lead findings from reviewer findings with the same id (#2375)', async () => {
   for (const role of ['reviewer', 'tech-lead', 'mixed']) {
     const root = scratchDir(), task = join(root, 'dt-lane', 'lane', 'task')

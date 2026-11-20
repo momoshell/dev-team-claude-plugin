@@ -987,6 +987,7 @@ export async function runLoop(spec, deps = {}) {
     let repairing = false, recheck = false, rechecks = 0, uncountedReview = false
     let committed, rebased, laneBody, reviewStatus, checkedTree
     const readTree = () => stage('checked-tree', () => callCheck('checked-tree', d.run, { cwd, command: 'git', args: ['write-tree'] }, { command: true }))
+    const recordReviewed = ({ verdict, findings }, role) => emit('verdict', { status: 'reviewed', ...(role ? { role } : {}), verdict, findings })
     const latestReviews = {}
     const reviewTurn = async (role, findings, options) => {
       const previous = latestReviews[role]
@@ -1153,18 +1154,23 @@ export async function runLoop(spec, deps = {}) {
           const reviewHalt = reviews.find((result) => result.halt)?.halt
           if (reviewHalt) return reviewHalt
           const { result: suite, stopAfterRerun } = suiteCheck
-          if (stopAfterRerun) return stopAfterRerun()
+          const review = reviewed?.reused ? null : reviewed?.envelope
+          const secondReview = second?.reused ? null : second?.envelope
+          if (stopAfterRerun) {
+            if (review) await recordReviewed(review.details)
+            if (secondReview) await recordReviewed(secondReview.details, 'tech-lead')
+            return stopAfterRerun()
+          }
           if (suite.status === 'green') recordSuitePass(suiteCheck, `tree ${checkedTree}`)
           const cancelled = tier === 'build' && suite.status === 'cancelled'
             && reviews.some((result) => !result.reused && result.envelope?.details.verdict === 'changes-needed')
           if (suite.status !== 'green' && suite.status !== 'red' && !cancelled) return stop(suite.reason, suite)
           let redFindings = [], reviewRed = false
-          if (reviewed?.envelope && !reviewed.reused) {
-            const review = reviewed.envelope
+          if (review) {
             priorFindings = review.details.findings
             rememberFindings('reviewer', review.details)
             if (rebaseOnly || !reservePending) reviewedTree = checkedTree
-            await emit('verdict', { status: 'reviewed', verdict: review.details.verdict, findings: priorFindings })
+            await recordReviewed(review.details)
             if (!rebaseOnly && reservePending) {
               reservePending = false
               if (review.details.verdict === 'changes-needed') return stop('round-bound', { role: 'reviewer', reason: 'round-bound', envelope: review, findings: priorFindings })
@@ -1176,11 +1182,11 @@ export async function runLoop(spec, deps = {}) {
             }
             if (review.details.verdict === 'changes-needed') { reviewRed = true; redFindings = [...priorFindings, ...omitted('reviewer', review.details)] }
           }
-          if (second?.envelope && !second.reused) {
-            secondFindings = second.envelope.details.findings
-            rememberFindings('tech-lead', second.envelope.details)
-            await emit('verdict', { status: 'reviewed', role: 'tech-lead', verdict: second.envelope.details.verdict, findings: secondFindings })
-            if (second.envelope.details.verdict === 'changes-needed') reviewRed = true
+          if (secondReview) {
+            secondFindings = secondReview.details.findings
+            rememberFindings('tech-lead', secondReview.details)
+            await recordReviewed(secondReview.details, 'tech-lead')
+            if (secondReview.details.verdict === 'changes-needed') reviewRed = true
           }
           if (suite.status === 'red' || reviewRed) {
             feedback = tier === 'judge' ? reviews.flatMap((result, index) => [...result.envelope.details.findings, ...omitted(index === 0 ? 'reviewer' : 'tech-lead', result.envelope.details)]) : redFindings

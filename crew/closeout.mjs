@@ -45,8 +45,8 @@ function lastPr(rows, lane, taskDir, alive) {
 const repoOf = (remote) => /^(?:https:\/\/(?:[^@/\s]+@)?github\.com\/|(?:ssh:\/\/)?git@github\.com[:/])([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/.exec(remote)?.slice(1, 3).join('/').toLowerCase() ?? null
 
 // Run a command and refuse unless it exits 0.
-function must(run, what, cmd, args) {
-  const result = run(cmd, args)
+function must(run, what, cmd, args, options) {
+  const result = run(cmd, args, options)
   if (!result || result.error || result.status !== 0) refuse(`${what} failed: ${String(result?.stderr || result?.error?.message || '').trim()}`)
   return String(result.stdout ?? '')
 }
@@ -156,7 +156,7 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
     const refs = ['refs/remotes/', ...(typeof base === 'string' ? [`refs/heads/${base}`] : [])]
     if (!must(run, 'git for-each-ref', 'git', ['-C', mainCheckout, 'for-each-ref', '--contains', tip, '--format=%(refname)', ...refs]).trim()) refuse(`branch ${lane} tip ${tip} is on neither a remote-tracking ref nor ${base}; push it or delete the branch by hand`)
   }
-  must(run, 'git worktree remove', 'git', ['-C', mainCheckout, 'worktree', 'remove', worktree])
+  must(run, 'git worktree remove', 'git', ['-C', mainCheckout, 'worktree', 'remove', worktree], { timeout: 0 })
   must(run, 'git branch -D', 'git', ['-C', mainCheckout, 'branch', '-D', lane])
   branch = 'deleted'
   } else if (!discard) {
@@ -187,7 +187,7 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
     if (holder) {
       if (typeof view.headRefOid !== 'string' || tip !== view.headRefOid) refuse(`branch ${lane} is at ${tip}, not the merged head ${String(view.headRefOid)}`)
       const worktrees = must(run, 'git worktree list', 'git', ['-C', holder, 'worktree', 'list', '--porcelain'])
-      if (worktrees.split('\n').includes(`worktree ${worktree}`)) must(run, 'git worktree remove', 'git', ['-C', holder, 'worktree', 'remove', worktree])
+      if (worktrees.split('\n').includes(`worktree ${worktree}`)) must(run, 'git worktree remove', 'git', ['-C', holder, 'worktree', 'remove', worktree], { timeout: 0 })
       must(run, 'git branch -D', 'git', ['-C', holder, 'branch', '-D', lane])
       branch = 'deleted'
     } else branch = 'absent'

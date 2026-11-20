@@ -632,15 +632,22 @@ test('a dead run with no pull request is refused as run-died naming crew record-
 test('CL1-CL3 a merged clean lane loses worktree and branch and moves to the archive, in order', () => {
   const w = world()
   try {
-    const r = close(w)
+    const calls = [], run = runner('MERGED', tipOf(w), calls)
+    const r = close(w, { run: (cmd, args, options) => {
+      const timeout = options?.timeout ?? 60_000
+      if (cmd === 'git' && args[2] === 'worktree' && args[3] === 'remove' && timeout !== 0 && timeout < 61_000) {
+        return { error: new Error('spawnSync git ETIMEDOUT') }
+      }
+      return run(cmd, args)
+    } })
     assert.equal(r.status, 0, r.err)
     assert.ok(!existsSync(w.worktree))
     assert.ok(!branchExists(w))
     assert.ok(!existsSync(w.laneDir))
     assert.equal(readFileSync(join(w.archiveRoot, `dt-${LANE}`, LANE, 'task', 'journal.jsonl'), 'utf8'), w.journalText)
-    const effects = r.calls.filter((c) => c[0] === 'git' && (c.includes('remove') || c.includes('-D'))).map((c) => c.slice(3, 5).join(' '))
+    const effects = calls.filter((c) => c[0] === 'git' && (c.includes('remove') || c.includes('-D'))).map((c) => c.slice(3, 5).join(' '))
     assert.deepEqual(effects, ['worktree remove', 'branch -D'])
-    assert.deepEqual(r.calls.find((c) => c[0] === 'gh'), ['gh', 'pr', 'view', PR_ROW.pr.url, '--json', 'state,headRefOid'])
+    assert.deepEqual(calls.find((c) => c[0] === 'gh'), ['gh', 'pr', 'view', PR_ROW.pr.url, '--json', 'state,headRefOid'])
   } finally { w.done() }
 })
 

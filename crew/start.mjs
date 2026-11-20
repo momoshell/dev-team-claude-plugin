@@ -251,6 +251,8 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
     suite: suiteSpec(project.suite, project.suiteTimeoutMs), proofTimeoutMs: project.proofTimeoutMs, onboarded: project.hash,
     ...(suiteLock === undefined ? {} : { suiteLock }),
     ...(project.builderChecks === undefined ? {} : { builderChecks: project.builderChecks }),
+    ...(project.fastChecks === undefined ? {} : { fastChecks: project.fastChecks }),
+    ...(project.fastChecksTimeoutMs === undefined ? {} : { fastChecksTimeoutMs: project.fastChecksTimeoutMs }),
     ...(fields.generated === undefined ? {} : { generated: { paths: fields.generated, ...suiteSpec(fields.regenerate) } }),
     roster,
   }

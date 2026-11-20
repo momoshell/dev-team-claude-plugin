@@ -4,7 +4,7 @@ import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSy
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, extname, join, matchesGlob, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { literalRelative, runSuite, validTimeout } from './checks.mjs'
+import { literalRelative, runSuite, validFastChecks, validTimeout } from './checks.mjs'
 import { entryCommand, junitEvents, PROOF_TIMEOUT_DEFAULT_MS, testState, validProofEntry, validWorktreeSetup, WORKTREE_SETUP_TIMEOUT_MS } from './proof.mjs'
 
 export const SUITE_TIMEOUT_DEFAULT_MS = 1800000
@@ -24,6 +24,7 @@ export const projectHash = ({ suite, proof, worktreeSetup }) => createHash('sha2
 const nullListHash = ({ suite, proof }) => createHash('sha256').update(JSON.stringify([suite, proof.map((e) => e.newTestFile !== undefined ? [e.match, e.setup ?? null, e.run, e.list ?? null, e.manifest ?? null, e.newTestFile] : e.manifest === undefined ? [e.match, e.setup ?? null, e.run, e.list ?? null] : [e.match, e.setup ?? null, e.run, e.list ?? null, e.manifest])])).digest('hex')
 const validBuilderChecks = (v) => Array.isArray(v) && v.every((s) => typeof s === 'string' && s.trim() !== '' && !/[\r\n]/.test(s))
 const validProject = (p) => p && typeof p === 'object' && !Array.isArray(p) && typeof p.suite === 'string' && p.suite.trim() && !/["'\\\0]/.test(p.suite) && Array.isArray(p.proof) && p.proof.every(validProofEntry) && (p.suiteLock === undefined || typeof p.suiteLock === 'boolean') && (p.suiteTimeoutMs === undefined || validTimeout(p.suiteTimeoutMs)) && (p.proofTimeoutMs === undefined || validTimeout(p.proofTimeoutMs)) && (p.builderChecks === undefined || validBuilderChecks(p.builderChecks)) && validWorktreeSetup(p)
+  && (p.fastChecks === undefined || validFastChecks(p.fastChecks)) && (p.fastChecksTimeoutMs === undefined || validTimeout(p.fastChecksTimeoutMs))
 
 export function requireOnboarded(checkout, read = readFileSync) {
   let p
@@ -33,7 +34,8 @@ export function requireOnboarded(checkout, read = readFileSync) {
   if (!p || typeof p !== 'object' || Array.isArray(p)) throw new OnboardRefusal('onboarding-stale')
   if (!Object.hasOwn(p, 'onboarded')) throw new OnboardRefusal('not-onboarded')
   if (!validProject(p) || !p.onboarded || typeof p.onboarded !== 'object' || (p.onboarded.hash !== projectHash(p) && (Object.hasOwn(p, 'worktreeSetup') || p.onboarded.hash !== nullListHash(p)))) throw new OnboardRefusal('onboarding-stale')
-  return { suite: p.suite, proof: p.proof, hash: p.onboarded.hash, suiteTimeoutMs: p.suiteTimeoutMs ?? SUITE_TIMEOUT_DEFAULT_MS, proofTimeoutMs: p.proofTimeoutMs ?? PROOF_TIMEOUT_DEFAULT_MS, ...(p.suiteLock === undefined ? {} : { suiteLock: p.suiteLock }), ...(p.builderChecks === undefined ? {} : { builderChecks: p.builderChecks }), ...(p.worktreeSetup === undefined ? {} : { worktreeSetup: p.worktreeSetup }) }
+  return { suite: p.suite, proof: p.proof, hash: p.onboarded.hash, suiteTimeoutMs: p.suiteTimeoutMs ?? SUITE_TIMEOUT_DEFAULT_MS, proofTimeoutMs: p.proofTimeoutMs ?? PROOF_TIMEOUT_DEFAULT_MS, ...(p.suiteLock === undefined ? {} : { suiteLock: p.suiteLock }), ...(p.builderChecks === undefined ? {} : { builderChecks: p.builderChecks }), ...(p.worktreeSetup === undefined ? {} : { worktreeSetup: p.worktreeSetup }),
+    ...(p.fastChecks === undefined ? {} : { fastChecks: p.fastChecks }), ...(p.fastChecksTimeoutMs === undefined ? {} : { fastChecksTimeoutMs: p.fastChecksTimeoutMs }) }
 }
 
 export async function checkOnboarding({ checkout, draft, timeoutMs = 120_000 }) {
@@ -90,7 +92,8 @@ export async function checkOnboarding({ checkout, draft, timeoutMs = 120_000 }) 
       added = false
     }
     rmSync(tmp, { recursive: true, force: true }); tmp = null
-    const project = { suite: p.suite, proof, ...(p.suiteLock === undefined ? {} : { suiteLock: p.suiteLock }), ...(p.suiteTimeoutMs === undefined ? {} : { suiteTimeoutMs: p.suiteTimeoutMs }), ...(p.proofTimeoutMs === undefined ? {} : { proofTimeoutMs: p.proofTimeoutMs }), ...(p.builderChecks === undefined ? {} : { builderChecks: p.builderChecks }), ...(p.worktreeSetup === undefined ? {} : { worktreeSetup: p.worktreeSetup }) }
+    const project = { suite: p.suite, proof, ...(p.suiteLock === undefined ? {} : { suiteLock: p.suiteLock }), ...(p.suiteTimeoutMs === undefined ? {} : { suiteTimeoutMs: p.suiteTimeoutMs }), ...(p.proofTimeoutMs === undefined ? {} : { proofTimeoutMs: p.proofTimeoutMs }), ...(p.builderChecks === undefined ? {} : { builderChecks: p.builderChecks }), ...(p.worktreeSetup === undefined ? {} : { worktreeSetup: p.worktreeSetup }),
+      ...(p.fastChecks === undefined ? {} : { fastChecks: p.fastChecks }), ...(p.fastChecksTimeoutMs === undefined ? {} : { fastChecksTimeoutMs: p.fastChecksTimeoutMs }) }
     const dir = join(checkout, '.crew'), target = join(dir, 'project.json')
     const dirStat = lstatSync(dir, { throwIfNoEntry: false })
     const fileStat = dirStat?.isDirectory() ? lstatSync(target, { throwIfNoEntry: false }) : null

@@ -1,6 +1,6 @@
 # ADR-054 — Each tier runs its own loop, and every stage earns its place
 
-**Status:** *proposed* 2026-11-01, operator direction ("each lane type should have its loop"); §2–§4 amended by ADR-055; checkout suite coordination amendment 2026-11-18 (#2457); §2 pending build-suite cancellation amendment 2026-11-18 (#2459); §1 host-sleep re-run amendment 2026-11-19 (#2493) · **Owner:** operator ·
+**Status:** *proposed* 2026-11-01, operator direction ("each lane type should have its loop"); §2–§4 amended by ADR-055; checkout suite coordination amendment 2026-11-18 (#2457); §2 pending build-suite cancellation amendment 2026-11-18 (#2459); §1 host-sleep re-run amendment 2026-11-19 (#2493); §1 fast-check amendment 2026-11-20 (#2509) · **Owner:** operator ·
 **Relates to:** ADR-052 (§6 the loop), ADR-053 (build first, prove after), ADR-038 (the judge floor forces proof),
 ADR-051 (finish shape)
 
@@ -48,6 +48,36 @@ A red suite or proof runs once more on the unchanged tree only if the red attemp
 `sleep_credited_s` greater than zero. Absent, zero or `null` credit and suite-lock wait credit do not qualify.
 The journal records both attempts. A green re-run takes the normal green path; a second red stops the lane
 with `red-after-sleep-rerun`, even if that attempt also recorded sleep. All other checks follow their ordinary paths.
+
+#### Amendment 2026-11-20: run cheap checks before proof (#2509)
+
+Measured on 2026-11-20 across 57 the-power lanes started since 2026-11-18:
+29 of 102 suite runs were red, with a median red run of 589 seconds. Of those
+29 red runs, 15 failed on subsecond source scanners (13 `power-acceptance`,
+2 `power-spawn`). Red suites triggered 27 of 75 repeat builder turns. In
+`power-1907`, test 22 of 1,515 failed in 0.5 seconds; the lane learned of the
+failure 14 minutes later and repeated proof, review and suite. Run the cheap
+checks earlier so a failure need not wait for the suite.
+
+Build, judge, mechanical and finish runs can opt in with `fastChecks` in
+`.crew/project.json`. The loop runs the commands in order after a builder turn,
+the worktree path and symlink check, and any first-round base refresh. This
+precedes proof, including lanes that require no proof tests, and does not run on
+publishing-only checks or unchanged-tree proof re-runs. An absent or empty
+list leaves the loop unchanged. Commands split on whitespace without a
+shell, receive `CREW_LANE` and run in the lane worktree without the suite lock.
+`fastChecksTimeoutMs` sets the deadline per command, 120 seconds by default.
+Onboarding validates and keeps both settings without hashing them; start
+snapshots them for the lane and its finish passes. `builderChecks` remain
+instructions for the builder, not commands the loop runs.
+
+Each attempt journals the command, status, reason and elapsed seconds as a
+`fast-check` check row. A green list continues to proof. The first nonzero exit
+skips remaining commands, proof, review and suite on that tree. It returns one
+must-fix item with bounded output and spends rounds like red proof. A timeout
+or unavailable measurement skips any remaining commands and continues to
+proof without a repair finding. Fast checks can return work early, not pass a
+lane; the suite stays the gate.
 
 ### 2. The loops
 

@@ -94,7 +94,7 @@ the fetch fails; it does not probe seats. The probe is implemented in
    Resolve the common directory with `git rev-parse --git-common-dir`.
    Start captures the setting for the lane and its finish passes; editing it
    does not retrofit running lanes or require re-onboarding.
-   Suite, proof (both sides, setup and listing) and `worktreeSetup` commands
+   Suite, proof (both sides, setup and listing), `fastChecks` and `worktreeSetup` commands
    receive `CREW_LANE`, the lane name, overriding an inherited value only in
    the child environment. A script can name per-lane services instead of
    queueing. This is separate from affected-package selection. Onboarding
@@ -112,6 +112,24 @@ the fetch fails; it does not probe seats. The probe is implemented in
    Optionally set `builderChecks` to a list of non-empty, one-line commands,
    such as a lint or one package's tests. The builder runs them before returning
    and reports each result in `notes`; the loop does not run them or read results.
+   Use `fastChecks` instead for cheap checks the loop should run itself. Set it
+   to a list of nonblank, NUL-free commands; omit it or use an empty list to
+   skip the stage. Onboarding validates and keeps the fields. Start snapshots
+   them for the lane and its finish passes. The loop runs the commands in order
+   in the lane worktree after a builder turn, the path and symlink check, and
+   any first-round base refresh, before per-test proof. This includes lanes
+   that require no proof tests, not publishing-only checks or unchanged-tree
+   proof re-runs. Commands split on whitespace without a shell and do not take
+   the suite lock. Each gets 120 seconds by default. Set `fastChecksTimeoutMs`
+   to a safe integer from 1 to `2**31-1` to override the deadline in milliseconds.
+   Each attempt writes a `fast-check` check row with the command, status, reason
+   and elapsed seconds. A green list continues to proof. A nonzero exit skips
+   the rest of the list, proof, review and suite on that tree, and returns the
+   command and bounded output to the builder as one must-fix item, spending
+   rounds like a red proof. A timeout or other unmeasured command skips the
+   rest of the list but continues to proof. The suite stays the gate. See
+   [ADR-054 §1](../../docs/adr/adr-054-each-tier-runs-its-own-loop.md#1-the-rule)
+   for the measured cost of finding cheap failures in the suite.
 3. For each other runner, add `match` (a file glob), optional `setup`, `run`, and
    `calibrate`. The latter holds `file` (a literal relative path matched first
    by this entry), `text` (the throwaway test source), and distinct `pass` and
@@ -153,8 +171,8 @@ the fetch fails; it does not probe seats. The probe is implemented in
    have matching onboarding; proof reads runner entries from the lane's
    old-source worktree. Re-run
    onboarding after changing the suite, proof entries or `worktreeSetup`. Changing only
-   `suiteLock`, `suiteTimeoutMs`, `proofTimeoutMs` or `builderChecks` in `.crew/project.json` does not require
-   re-onboarding.
+   `suiteLock`, `suiteTimeoutMs`, `proofTimeoutMs`, `builderChecks`, `fastChecks`
+   or `fastChecksTimeoutMs` in `.crew/project.json` does not require re-onboarding.
    Write a brief with
    `skills/lane-brief/SKILL.md`, then run `crew start <brief>` in the checkout.
    The start checks the base.

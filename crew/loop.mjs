@@ -1,6 +1,7 @@
 // Build: plan -> rebase -> build -> refresh base -> proof -> (suite || review) -> PR.
 // Judge: plan -> rebase -> build -> refresh base -> proof -> suite -> (review || second review) -> PR.
 // Finish: rebase -> builder triage -> refresh base -> proof -> review -> suite -> commit -> rebase.
+// All tiers run configured fast checks after the builder and first-round base refresh, before proof.
 // Only the first check round fetches the base; later repairs hold it until publishing.
 // A moved base snapshots, rebases and uncommits the build;
 // its next review is full and counted, not a publishing recheck, and spends none of MAX_RECHECKS.
@@ -22,7 +23,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { resolveAgents } from './agents.mjs'
 import {
-  CHECK_REASONS, FINISH_REVIEW_ROUNDS, commitChanges, openPullRequest, parseStatus, rebaseBranch, runSuite, validGenerated, validTimeout,
+  CHECK_REASONS, FINISH_REVIEW_ROUNDS, commitChanges, openPullRequest, parseStatus, rebaseBranch, runSuite, validFastChecks, validGenerated, validTimeout,
 } from './checks.mjs'
 import { HEX_OID, describeError as describe, GIT_STATUS_ARGS, gitRepoState } from './lane-core.mjs'
 import { proveTests } from './proof.mjs'
@@ -34,6 +35,7 @@ const MAX_RECHECKS = 3
 const MAX_CONFLICT_TURNS = 3
 const MAX_PROGRESS_TURNS = 6
 const WORKTREE_SYMLINK = 'worktree-symlink'
+const FAST_CHECK = 'fast-check'
 const PROOF_UNMEASURED = '- proof: unmeasured'
 export const LOOP_REASONS = Object.freeze([
   ...CHECK_REASONS, 'unsupported-shape', 'envelope-refused', 'seat-unmeasured', 'authentication_failed', 'lead-escalated', 'lead-unavailable',
@@ -249,6 +251,8 @@ export async function runLoop(spec, deps = {}) {
     && text(spec.suite?.command) && (spec.suite.args === undefined || Array.isArray(spec.suite.args))
     && (spec.suite.timeoutMs === undefined || validTimeout(spec.suite.timeoutMs))
     && (spec.proofTimeoutMs === undefined || validTimeout(spec.proofTimeoutMs))
+    && (spec.fastChecks === undefined || validFastChecks(spec.fastChecks))
+    && (spec.fastChecksTimeoutMs === undefined || validTimeout(spec.fastChecksTimeoutMs))
     && (spec.suiteLock === undefined || typeof spec.suiteLock === 'boolean')
     && (!Object.hasOwn(spec, 'generated') || validGenerated(spec.generated))
     && (spec.closes === undefined || Array.isArray(spec.closes))
@@ -431,19 +435,21 @@ export async function runLoop(spec, deps = {}) {
   }
   // Runs one check seam; a throw or a result that contradicts its own status is unmeasured, never trusted.
   let outputNumber = 0
-  const callCheck = async (name, fn, input, { command = false, cancellable = false } = {}) => {
+  const callCheck = async (name, fn, input, { command = false, cancellable = false, configuredCommand } = {}) => {
     const retained = name === 'suite' || name === 'proof'
+    const fast = name === FAST_CHECK
+    const timed = retained || fast
     let result, started, ended
-    if (retained) try { started = d.now() } catch {}
+    if (timed) try { started = d.now() } catch {}
     try { result = await fn(input) } catch (error) { result = { status: 'unmeasured', reason: 'runner-threw', error: describe(error) } } finally {
-      if (retained) try { ended = d.now() } catch {}
+      if (timed) try { ended = d.now() } catch {}
     }
-    const metadata = {}
-    if (retained) {
+    const metadata = fast ? { command: configuredCommand } : {}
+    if (timed) {
       const elapsed = Number.isFinite(started) && Number.isFinite(ended) ? ended - started : NaN
       metadata.seconds = Number.isFinite(elapsed) && elapsed >= 0 ? elapsed / 1000 : null
       if (metadata.seconds === null) metadata.secondsReason = 'clock-unmeasured'
-      if (result?.status !== 'green') {
+      if (retained && result?.status !== 'green') {
         try {
           // A runner that threw or returned no streams captured nothing: an empty file would claim two empty streams.
           const streams = { stdout: typeof result?.stdout === 'string' ? result.stdout : null, stderr: typeof result?.stderr === 'string' ? result.stderr : null }
@@ -464,14 +470,16 @@ export async function runLoop(spec, deps = {}) {
         }
       }
     }
-    await emit('check', { check: name, result: journaled(result), ...metadata })
     const sound = result !== null && typeof result === 'object' && !Array.isArray(result)
       && (result.reason === null || CHECK_REASONS.includes(result.reason))
       && (['green', 'red', 'unmeasured'].includes(result.status)
         || (cancellable && name === 'suite' && result.status === 'cancelled' && result.reason === 'cancelled' && result.cleanup === 'proven' && result.timedOut === false))
       && (result.status === 'green') === (result.reason === null)
       && (!command || result.status !== 'green' || (result.code === 0 && !result.signal && result.timedOut === false))
-    return sound ? result : { status: 'unmeasured', reason: 'runner-threw' }
+      && (!fast || result.status !== 'red' || (result.reason === 'exit-nonzero' && Number.isInteger(result.code) && result.code !== 0 && !result.signal && result.timedOut === false))
+    const measured = sound ? result : { status: 'unmeasured', reason: 'runner-threw' }
+    await emit('check', { check: name, result: journaled(fast ? measured : result), ...metadata })
+    return measured
   }
 
   const readStatus = (name) => stage(name, () => callCheck(name, d.run, { cwd, command: 'git', args: [...GIT_STATUS_ARGS] }, { command: true }))
@@ -925,7 +933,7 @@ export async function runLoop(spec, deps = {}) {
     }
     for (;;) {
     for (;;) {
-      for (;;) {
+      buildRound: for (;;) {
         proofLines = [PROOF_UNMEASURED]
         if (!recheck) {
           if (reserveSpent && rounds.reviewer >= (seats.reviewer.rounds ?? DEFAULT_ROUNDS)) return stop('round-bound', { role: 'reviewer', reason: 'round-bound', findings: priorFindings, feedback })
@@ -967,6 +975,21 @@ export async function runLoop(spec, deps = {}) {
               // A moved base needs a full counted review even when the lane's tree id is unchanged, so no earlier pass is reused.
               for (const role of Object.keys(latestReviews)) delete latestReviews[role]
               uncountedReview = false
+            }
+          }
+          if (spec.fastChecks?.length) {
+            feedback = feedback.filter((item) => item?.id !== FAST_CHECK)
+            for (const configuredCommand of spec.fastChecks) {
+              const [command, ...args] = configuredCommand.trim().split(/\s+/)
+              const check = await stage(FAST_CHECK, () => callCheck(FAST_CHECK, d.run, { cwd, command, args, lane: spec.id, timeoutMs: spec.fastChecksTimeoutMs }, { command: true, configuredCommand }))
+              if (check.status === 'green') continue
+              if (check.status === 'unmeasured') break
+              const { tests: failingTests, files: failingFiles, tail: outputTail } = suiteFailures([check])
+              const diagnostics = { command: configuredCommand, failingTests, failingFiles, ...(outputTail.length ? { outputTail } : {}) }
+              const failure = { role: 'builder', failure: FAST_CHECK, ...diagnostics }
+              if (repeatsFailure(failure)) return stop('no-progress', failure)
+              feedback = [{ id: FAST_CHECK, severity: 'must-fix', summary: `Fast check failed: ${oneLine(configuredCommand)}.`, checkout: cwd, ...diagnostics }, ...feedback]
+              continue buildRound
             }
           }
         } else uncountedReview = isFinish

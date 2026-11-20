@@ -26,6 +26,7 @@ const INHERITED_ENV = ['FORCE_COLOR', 'CLICOLOR_FORCE', 'NODE_TEST_CONTEXT', 'NO
 const sleep = (ms) => new Promise((wake) => setTimeout(wake, ms))
 const unmeasured = (reason, extra = {}) => ({ status: 'unmeasured', reason, code: null, signal: null, stdout: '', stderr: '', timedOut: false, pgid: null, ...extra })
 export const validTimeout = (ms) => Number.isSafeInteger(ms) && ms > 0 && ms <= MAX_TIMEOUT_MS
+export const validFastChecks = (v) => Array.isArray(v) && [...v].every((s) => typeof s === 'string' && s.trim() !== '' && !s.includes('\0'))
 
 function cleanEnv() {
   const env = { ...process.env, NO_COLOR: '1' }

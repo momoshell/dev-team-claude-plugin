@@ -5,7 +5,7 @@ import { createLeanSource } from './lean-source.mjs'
 import { TIERS } from './protocols.mjs'
 
 const REPAIR = Object.freeze({ 'suite-repair': 'suite-red', conflict: 'rebase-conflict' })
-const TRIGGERS = Object.freeze([...Object.values(REPAIR), 'proof-unproven', 'review-changes', 'finish-triage', 'replan', 'unclassified'])
+const TRIGGERS = Object.freeze([...Object.values(REPAIR), 'fast-check-red', 'proof-unproven', 'review-changes', 'finish-triage', 'replan', 'unclassified'])
 
 function isoTime(value) {
   const date = /^(\d{4}-\d{2}-\d{2})(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/.exec(value)?.[1]
@@ -46,6 +46,7 @@ function summarize(rows, spec) {
       proof_runs++
       reason('proof', result?.status === 'red' ? 'proof-unproven' : null)
     }
+    if (event === 'check' && row.check === 'fast-check') reason(row.check, result?.status === 'red' ? 'fast-check-red' : null)
     if ((event === 'verdict' && row.status === 'reviewed') || event === 'review-reused') {
       reason(role ?? 'reviewer', row.verdict === 'changes-needed' ? 'review-changes' : null)
     }

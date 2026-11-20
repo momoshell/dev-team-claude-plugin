@@ -18,6 +18,7 @@
 // A seat's return is never trusted from the callback: the envelope is read back from the path
 // the loop issued, parsed and validated as P2, and must carry the id the loop issued.
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { createHash } from 'node:crypto'
 import { appendFile, lstat, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
@@ -26,7 +27,7 @@ import {
   CHECK_REASONS, FINISH_REVIEW_ROUNDS, commitChanges, openPullRequest, parseStatus, rebaseBranch, runSuite, validFastChecks, validGenerated, validTimeout,
 } from './checks.mjs'
 import { HEX_OID, describeError as describe, GIT_STATUS_ARGS, gitRepoState } from './lane-core.mjs'
-import { OnboardRefusal, requireOnboarded, SUITE_TIMEOUT_DEFAULT_MS } from './onboard.mjs'
+import { OnboardRefusal, readRegular, requireOnboarded, SUITE_TIMEOUT_DEFAULT_MS } from './onboard.mjs'
 import { PROOF_TIMEOUT_DEFAULT_MS, proveTests } from './proof.mjs'
 import { TIERS, AGENT_ROLES, runOverrideDefects, validateEnvelope } from './protocols.mjs'
 
@@ -856,25 +857,40 @@ export async function runLoop(spec, deps = {}) {
     }
     return { result }
   }
-  // A timeout is a budget: a finish pass runs a check under the larger of the lane's and the checked-out tree's onboarding
-  // (read at the check, so it follows the pass's own rebases and base moves). The check row carries the budget used, and
-  // 'onboarding-unreadable' when the tree's onboarding could not be read and the lane's value stood.
-  // Other runs and lanes with no onboarding keep the spec's value.
-  const budget = (started, field, floor) => {
-    if (!finishEntry || !Object.hasOwn(spec, 'onboarded')) return { timeoutMs: started, row: {} }
+  // Read at each attempt so the budget follows rebases, but not edits hidden from Git's index.
+  const budget = async (started, field, floor) => {
+    const lane = started ?? floor
+    const fallback = (reason) => ({ timeoutMs: lane, row: { timeoutMs: lane, timeoutFallback: reason } })
+    let bytes, project
     try {
-      const timeoutMs = Math.max(started ?? floor, requireOnboarded(cwd)[field])
-      return { timeoutMs, row: { timeoutMs } }
+      project = requireOnboarded(cwd, (path) => (bytes = readRegular(path)).toString('utf8'))
     } catch (error) {
       if (!(error instanceof OnboardRefusal)) throw error
-      return { timeoutMs: started, row: { timeoutMs: started ?? floor, timeoutFallback: 'onboarding-unreadable' } }
+      return fallback('onboarding-unreadable')
     }
+    const path = '.crew/project.json'
+    const git = (args) => callCheck('budget-tree', d.run, { cwd, command: 'git', args: [...args, '--', path] }, { command: true })
+    const index = await git(['ls-files', '--stage'])
+    if (index.status !== 'green' || typeof index.stdout !== 'string') return fallback('onboarding-tree-mismatch')
+    const oid = /^100(?:644|755) ([0-9a-f]{40}|[0-9a-f]{64}) 0\t\.crew\/project\.json\n$/.exec(index.stdout)?.[1]
+    const matches = oid && createHash(oid.length === 40 ? 'sha1' : 'sha256').update(`blob ${bytes.length}\0`).update(bytes).digest('hex') === oid
+    if (!matches) {
+      // Proof precedes staging. Only an unstaged path that the loop will add can stand in for the index.
+      if (field !== 'proofTimeoutMs') return fallback('onboarding-tree-mismatch')
+      const status = await git(GIT_STATUS_ARGS)
+      if (status.status !== 'green' || typeof status.stdout !== 'string' || !parseChangedPaths(status.stdout, true)?.includes(path)) return fallback('onboarding-tree-mismatch')
+    }
+    const timeoutMs = Math.max(lane, project[field])
+    return { timeoutMs, row: { timeoutMs } }
   }
+  // Only onboarded finish checks wait on Git. Standard build starts the suite before dispatching review.
+  const withBudget = (started, field, floor, run) => finishEntry && Object.hasOwn(spec, 'onboarded')
+    ? budget(started, field, floor).then(run) : run({ timeoutMs: started, row: {} })
   const suiteCommand = oneLine([spec.suite.command, ...(spec.suite.args ?? [])].join(' '))
-  const suiteRun = (signal) => withSleepRerun('suite', () => { const b = budget(spec.suite.timeoutMs, 'suiteTimeoutMs', SUITE_TIMEOUT_DEFAULT_MS); return callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: b.timeoutMs, suiteLock: spec.suiteLock, lane: spec.id, ...(signal ? { signal } : {}) }, { command: true, cancellable: !!signal, row: b.row }) })
-  const proofRun = (base) => withSleepRerun('proof', () => { const b = budget(spec.proofTimeoutMs, 'proofTimeoutMs', PROOF_TIMEOUT_DEFAULT_MS); return callCheck('proof', (input) => d.proveTests(input, {
-    onWorktreeSetup: (setup) => emit('worktree-setup', setup),
-  }), { cwd, base, tests: namedTests, timeoutMs: b.timeoutMs, lane: spec.id }, { row: b.row }) })
+  const suiteRun = (signal) => withSleepRerun('suite', () => withBudget(spec.suite.timeoutMs, 'suiteTimeoutMs', SUITE_TIMEOUT_DEFAULT_MS, ({ timeoutMs, row }) =>
+    callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs, suiteLock: spec.suiteLock, lane: spec.id, ...(signal ? { signal } : {}) }, { command: true, cancellable: !!signal, row })))
+  const proofRun = (base) => withSleepRerun('proof', () => withBudget(spec.proofTimeoutMs, 'proofTimeoutMs', PROOF_TIMEOUT_DEFAULT_MS, ({ timeoutMs, row }) =>
+    callCheck('proof', (input) => d.proveTests(input, { onWorktreeSetup: (setup) => emit('worktree-setup', setup) }), { cwd, base, tests: namedTests, timeoutMs, lane: spec.id }, { row })))
   const result = await (async () => {
   try {
     try { await d.mkdir(spec.taskDir, { recursive: true }) } catch (error) { return await stop('runner-threw', { mkdir: describe(error) }) }
@@ -1319,7 +1335,7 @@ export async function runLoop(spec, deps = {}) {
       const body = laneBody()
       const report = { schema: 'finish-report/1', lane: spec.id, stop: { reason: fin.stop.reason, observation: fin.stop.observation ?? null }, subject, body, head: rebased.head, reviewRounds, reviews: finishReviews, measurements }
       await d.writeFile(join(spec.taskDir, 'finish-report.json'), `${JSON.stringify(report, null, 2)}\n`)
-      await emit('finish-ready', { status: 'ready-for-operator', head: rebased.head, subject, body, reviewRounds, ...(builderNotes ? { builderNotes } : {}) })
+      await emit('finish-ready', { status: 'ready-for-operator', head: rebased.head, subject, body, reviewRounds, ...(Object.hasOwn(spec, 'onboarded') ? { proofChecked: namedTests.length > 0 } : {}), ...(builderNotes ? { builderNotes } : {}) })
       return { status: 'done', reason: null, pr: null }
     }
 

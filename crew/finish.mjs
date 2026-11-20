@@ -28,14 +28,14 @@
 // has one), `finish-head-moved` (accept: the checkout is no longer the head the run measured) or `finish-publish`
 // (the PR did not open; nothing is recorded, so it can be retried), or `finish-rounds-spent` (return has no review
 // rounds left). Gated accept compares the calibrated worktree and rebase base onboarding hashes when the base is
-// readable, and requires the suite to match the lane's and each timeout to be at least the lane's, in the worktree and in the measured commit; decisions record both onboarding hashes.
+// readable, and requires the suite to match the lane's and the measured commit to carry the budgets used by the checks.
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { FINISH_REVIEW_ROUNDS, composeLanePrBody, openPullRequest, runSuite, withoutIssueTokens } from './checks.mjs'
+import { FINISH_REVIEW_ROUNDS, composeLanePrBody, openPullRequest, runSuite, validTimeout, withoutIssueTokens } from './checks.mjs'
 import { HEX_OID, LANE, isObject, parseJournalRows } from './lane-core.mjs'
 import { AGENT_ROLES, TIERS, validateEnvelope } from './protocols.mjs'
 import { deadRun, parsePidRecord, pidRecord, probeAlive, selfStartedAt, writeRunPid } from './run-pid.mjs'
@@ -516,7 +516,7 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
   let project
   if (choice === 'accept' && Object.hasOwn(spec, 'onboarded')) {
     requireWorktree(d, spec)
-    try { project = requireOnboarded(spec.cwd, d.readFileSync) } catch (error) {
+    try { project = requireOnboarded(spec.cwd) } catch (error) {
       if (error instanceof OnboardRefusal) throw new FinishRefusal(error.reason, error.message)
       throw error
     }
@@ -541,6 +541,20 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
     const committed = d.git(spec.cwd, ['show', `${ready.head}:.crew/project.json`])
     let measured = {}
     if (committed?.status === 'green') try { measured = requireOnboarded(spec.cwd, () => committed.stdout) } catch (error) { if (!(error instanceof OnboardRefusal)) throw error }
+    // A new build or a soft reset for a recheck supersedes the previous checks, as does a new finish pass.
+    const beforeReady = rows.slice(0, readyAt)
+    const roundStart = beforeReady.findLastIndex((row) => row.event === 'finish-ready' || (row.event === 'verdict' && row.status === 'stopped')
+      || (row.event === 'stage-start' && ['base-paths', 'build', 'suite-repair', 'uncommit'].includes(row.stage)))
+    const round = beforeReady.slice(roundStart + 1)
+    const checks = ['suite', 'proof'].map((name) => [name, round.findLast((row) => row.event === 'check' && row.check === name)])
+    // New ready rows declare whether proof ran so missing budget rows do not look like a legacy pass.
+    if (Object.hasOwn(ready, 'proofChecked') || checks.some(([, row]) => row && Object.hasOwn(row, 'timeoutMs'))) {
+      for (const [name, row] of checks) {
+        if (name === 'proof' && !row && !ready.proofChecked && !round.some((r) => r.event === 'stage-start' && r.stage === 'proof')) continue
+        const field = `${name}TimeoutMs`
+        if (row?.result?.status !== 'green' || !validTimeout(row.timeoutMs) || !(measured[field] >= row.timeoutMs)) throw new FinishRefusal('onboarding-stale', `lane ${lane}'s measured commit does not verify the ${field} budget used by the finish checks: run /onboard and start the lane again`)
+      }
+    }
     const raised = (field, current, started) => field.endsWith('TimeoutMs') && typeof started === 'number' && current >= started && measured.hash === project.hash && measured[field] === current
       && measured.suiteTimeoutMs >= spec.suite?.timeoutMs && measured.proofTimeoutMs >= spec.proofTimeoutMs
     for (const [field, current, started] of fields) if (current !== started && !raised(field, current, started)) throw new FinishRefusal('onboarding-stale', `lane ${lane} started under onboarding ${spec.onboarded}; the worktree's .crew/project.json ${project.hash} differs from the lane's ${field}: run /onboard and start the lane again`)

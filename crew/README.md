@@ -155,7 +155,11 @@ its journal-recorded one-commit rebase. The latter is reset onto the rebase base
 the journal records `finish-uncommit`. `--return` refuses with `finish-rounds-spent`
 once the review rounds in `FINISH_REVIEW_ROUNDS` in `crew/checks.mjs` are spent. When not eligible for reuse, the review after the one suite-repair turn is free; the repair does not fetch or move the base before checks. A first-round pre-check move still requires a full, counted review, so a spent cap stops it. A post-suite moved-head recheck review remains free and runs even when the cap is spent. On `--accept`, issue tokens in the measured
 text and notes are rewritten; issue numbers appear only on trailer lines.
-A gated lane can accept a calibrated `.crew/project.json` if its hash matches the calibrated journal-recorded rebase base and its suite and timeouts match the lane's. If the base file cannot be read, accept requires the worktree hash to match the start hash. A hash or calibration mismatch refuses `onboarding-stale`; a suite mismatch or a lowered timeout also refuses and names the field. A proof or suite timeout at or above the lane's matches when the commit the finish run measured carries the same raise. The decision row records the start and finish onboarding hashes, even when equal.
+
+A finish pass uses the larger of the lane's timeout and the timeout in the Git tree under check, including raises brought in by rebase. If worktree onboarding is unreadable or differs from what Git will include, the check keeps the lane budget and records the effective timeout and fallback reason.
+
+`--accept` reads worktree onboarding only from a regular file. For a gated lane, its hash must match the calibrated rebase base recorded in the journal, or the start hash if the base file cannot be read. A hash or calibration mismatch refuses `onboarding-stale`; a suite mismatch or a lowered timeout also refuses and names the field. A raise matches when the measured commit carries the same value as the worktree. The measured commit must also carry at least the budgets recorded for the checks that qualified it, even if the worktree timeouts match the lane's. The decision row records the start and finish onboarding hashes, even when equal.
+
 Every loop is bounded, every envelope is
 validated against a closed protocol (P2) and refused if it does not parse, and
 the loop adds no other gate: no host-load gate, no dispatch-time baseline, no

@@ -40,6 +40,12 @@ Read first, decide second, remove last.
   After closeout, use the archived journal and resolve the filename beside it in
   the archived task directory; closeout keeps the output files with the journal.
 
+A `proof-timeout` stop means every unproven named test timed out on the old
+source or the build. No builder or lead turn follows. The verdict observation
+names the tests, the side that timed out and the `proofTimeoutMs` used. The
+usual recovery is to raise `proofTimeoutMs` in `.crew/project.json` and run
+`crew finish <lane> --return <file>`.
+
 A `seat-unmeasured` stop means the seat failed to produce a usable turn after
 its existing single rerun. Inspect both sessions and their `seat-turn` rows
 before choosing recovery. `sleep_credited_s` records seconds excluded from the

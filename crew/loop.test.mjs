@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { cpSync, mkdirSync, readdirSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
+import { projectHash } from './onboard.mjs'
 import { git as repoGit, gitResult, scratchDir } from '../test/helpers.mjs'
 import { decideFinish, FinishRefusal, finishLane } from './finish.mjs'
 import { LOOP_REASONS, runLoop } from './loop.mjs'
@@ -966,6 +967,33 @@ test('a judge reuses each roles pass on an unchanged recheck tree (#2412)', asyn
 const EFFECTS = ['paths', 'commit', 'fetch', 'rebase', 'publish']
 const PUBLISH_EFFECTS = EFFECTS.filter((effect) => effect !== 'fetch')
 
+// MUTATION: pass the lane's own timeouts to the checks, or read the onboarding once at loop entry, and a raise that arrives
+// with the pass's rebase never reaches the proof or suite (#2514).
+test('a finish pass runs its proof and suite under the larger of the lane\'s and the rebased tree\'s onboarding timeouts and journals each; a lowered onboarding keeps the lane\'s and a legacy lane is untouched (#2514)', async () => {
+  const write = (cwd, project) => {
+    const body = { suite: 'node --test lane.test.mjs', proof: [], ...project }
+    mkdirSync(join(cwd, '.crew'), { recursive: true })
+    writeFileSync(join(cwd, '.crew', 'project.json'), JSON.stringify({ ...body, onboarded: { hash: projectHash(body) } }))
+  }
+  for (const [name, project, onboarded, expected] of [
+    ['raised by the rebase', { proofTimeoutMs: 900_000, suiteTimeoutMs: 1_800_000 }, true, [900_000, 1_800_000]],
+    ['lowered', { proofTimeoutMs: 1_000, suiteTimeoutMs: 1_000 }, true, [120_000, 600_000]],
+    ['unreadable', null, true, [120_000, 600_000]],
+    ['legacy lane', { proofTimeoutMs: 900_000, suiteTimeoutMs: 1_800_000 }, false, [120_000, 600_000]],
+    ['standard lane', { proofTimeoutMs: 900_000, suiteTimeoutMs: 1_800_000 }, 'standard', [120_000, 600_000]],
+  ]) {
+    const cwd = scratchDir('finish-timeouts-')
+    const f = fakes({ spec: { ...(onboarded === 'standard' ? {} : finishSpec()), cwd, ...(onboarded ? { onboarded: 'a'.repeat(64) } : {}), proofTimeoutMs: 120_000, suite: { command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 600_000 } } })
+    const rebase = f.deps.rebaseBranch
+    f.deps.rebaseBranch = (input) => { if (project) write(cwd, project); return rebase(input) }
+    await f.go()
+    assert.deepEqual([f.seen.proof.timeoutMs, f.seen.suite.timeoutMs], expected, name)
+    const rows = f.rows.filter((r) => r.event === 'check' && (r.check === 'proof' || r.check === 'suite')).map((r) => [r.check, r.timeoutMs, r.timeoutFallback])
+    assert.deepEqual(rows, !onboarded || onboarded === 'standard' ? [['proof', undefined, undefined], ['suite', undefined, undefined]]
+      : project ? [['proof', expected[0], undefined], ['suite', expected[1], undefined]] : [['proof', 120_000, 'onboarding-unreadable'], ['suite', 600_000, 'onboarding-unreadable']], name)
+  }
+})
+
 // MUTATION: invert which finish red gets an unchanged-tree re-run.
 test('a finish first red repairs immediately unless a sleep-credited re-run passes', async () => {
   const spec = { ...finishSpec(), suite: { command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 1800000 } }
@@ -1249,7 +1277,7 @@ test('the loop imports only its pinned modules and only the lean bridge imports 
   const dir = fileURLToPath(new URL('.', import.meta.url))
   const source = readFileSync(join(dir, 'loop.mjs'), 'utf8')
   const specifiers = [...source.matchAll(/^(?:import|} from|export [^\n]* from)[^'\n]*'([^']+)'/gm)].map((m) => m[1]).sort()
-  assert.deepEqual(specifiers, ['./agents.mjs', './checks.mjs', './lane-core.mjs', './proof.mjs', './protocols.mjs', 'node:async_hooks', 'node:fs/promises', 'node:path', 'node:util'])
+  assert.deepEqual(specifiers, ['./agents.mjs', './checks.mjs', './lane-core.mjs', './onboard.mjs', './proof.mjs', './protocols.mjs', 'node:async_hooks', 'node:fs/promises', 'node:path', 'node:util'])
   const laneCore = readFileSync(join(dir, 'lane-core.mjs'), 'utf8')
   const laneCoreImports = [...laneCore.matchAll(/from ['"]([^'"]+)['"]/g)].map((m) => m[1])
   assert.ok(laneCoreImports.length > 0 && laneCoreImports.every((name) => name.startsWith('node:')))

@@ -26,7 +26,8 @@ import {
   CHECK_REASONS, FINISH_REVIEW_ROUNDS, commitChanges, openPullRequest, parseStatus, rebaseBranch, runSuite, validFastChecks, validGenerated, validTimeout,
 } from './checks.mjs'
 import { HEX_OID, describeError as describe, GIT_STATUS_ARGS, gitRepoState } from './lane-core.mjs'
-import { proveTests } from './proof.mjs'
+import { OnboardRefusal, requireOnboarded, SUITE_TIMEOUT_DEFAULT_MS } from './onboard.mjs'
+import { PROOF_TIMEOUT_DEFAULT_MS, proveTests } from './proof.mjs'
 import { TIERS, AGENT_ROLES, runOverrideDefects, validateEnvelope } from './protocols.mjs'
 
 export const DEFAULT_ROUNDS = 2
@@ -437,7 +438,7 @@ export async function runLoop(spec, deps = {}) {
   }
   // Runs one check seam; a throw or a result that contradicts its own status is unmeasured, never trusted.
   let outputNumber = 0
-  const callCheck = async (name, fn, input, { command = false, cancellable = false, configuredCommand } = {}) => {
+  const callCheck = async (name, fn, input, { command = false, cancellable = false, configuredCommand, row = {} } = {}) => {
     const retained = name === 'suite' || name === 'proof'
     const fast = name === FAST_CHECK
     const timed = retained || fast
@@ -480,7 +481,7 @@ export async function runLoop(spec, deps = {}) {
       && (!command || result.status !== 'green' || (result.code === 0 && !result.signal && result.timedOut === false))
       && (!fast || result.status !== 'red' || (result.reason === 'exit-nonzero' && Number.isInteger(result.code) && result.code !== 0 && !result.signal && result.timedOut === false))
     const measured = sound ? result : { status: 'unmeasured', reason: 'runner-threw' }
-    await emit('check', { check: name, result: journaled(fast ? measured : result), ...metadata })
+    await emit('check', { check: name, result: journaled(fast ? measured : result), ...metadata, ...row })
     return measured
   }
 
@@ -841,11 +842,25 @@ export async function runLoop(spec, deps = {}) {
     }
     return { result }
   }
+  // A timeout is a budget: a finish pass runs a check under the larger of the lane's and the checked-out tree's onboarding
+  // (read at the check, so it follows the pass's own rebases and base moves). The check row carries the budget used, and
+  // 'onboarding-unreadable' when the tree's onboarding could not be read and the lane's value stood.
+  // Other runs and lanes with no onboarding keep the spec's value.
+  const budget = (started, field, floor) => {
+    if (!finishEntry || !Object.hasOwn(spec, 'onboarded')) return { timeoutMs: started, row: {} }
+    try {
+      const timeoutMs = Math.max(started ?? floor, requireOnboarded(cwd)[field])
+      return { timeoutMs, row: { timeoutMs } }
+    } catch (error) {
+      if (!(error instanceof OnboardRefusal)) throw error
+      return { timeoutMs: started, row: { timeoutMs: started ?? floor, timeoutFallback: 'onboarding-unreadable' } }
+    }
+  }
   const suiteCommand = oneLine([spec.suite.command, ...(spec.suite.args ?? [])].join(' '))
-  const suiteRun = (signal) => withSleepRerun('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs, suiteLock: spec.suiteLock, lane: spec.id, ...(signal ? { signal } : {}) }, { command: true, cancellable: !!signal }))
-  const proofRun = (base) => withSleepRerun('proof', () => callCheck('proof', (input) => d.proveTests(input, {
+  const suiteRun = (signal) => withSleepRerun('suite', () => { const b = budget(spec.suite.timeoutMs, 'suiteTimeoutMs', SUITE_TIMEOUT_DEFAULT_MS); return callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: b.timeoutMs, suiteLock: spec.suiteLock, lane: spec.id, ...(signal ? { signal } : {}) }, { command: true, cancellable: !!signal, row: b.row }) })
+  const proofRun = (base) => withSleepRerun('proof', () => { const b = budget(spec.proofTimeoutMs, 'proofTimeoutMs', PROOF_TIMEOUT_DEFAULT_MS); return callCheck('proof', (input) => d.proveTests(input, {
     onWorktreeSetup: (setup) => emit('worktree-setup', setup),
-  }), { cwd, base, tests: namedTests, timeoutMs: spec.proofTimeoutMs, lane: spec.id }))
+  }), { cwd, base, tests: namedTests, timeoutMs: b.timeoutMs, lane: spec.id }, { row: b.row }) })
   const result = await (async () => {
   try {
     try { await d.mkdir(spec.taskDir, { recursive: true }) } catch (error) { return await stop('runner-threw', { mkdir: describe(error) }) }

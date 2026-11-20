@@ -28,7 +28,7 @@
 // has one), `finish-head-moved` (accept: the checkout is no longer the head the run measured) or `finish-publish`
 // (the PR did not open; nothing is recorded, so it can be retried), or `finish-rounds-spent` (return has no review
 // rounds left). Gated accept compares the calibrated worktree and rebase base onboarding hashes when the base is
-// readable, and requires the suite and timeouts to match the lane's; decisions record both onboarding hashes.
+// readable, and requires the suite to match the lane's and each timeout to be at least the lane's, in the worktree and in the measured commit; decisions record both onboarding hashes.
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -536,7 +536,14 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
       ['suiteTimeoutMs', project.suiteTimeoutMs, spec.suite?.timeoutMs],
       ['proofTimeoutMs', project.proofTimeoutMs, spec.proofTimeoutMs],
     ]
-    for (const [field, current, started] of fields) if (current !== started) throw new FinishRefusal('onboarding-stale', `lane ${lane} started under onboarding ${spec.onboarded}; the worktree's .crew/project.json ${project.hash} differs from the lane's ${field}: run /onboard and start the lane again`)
+    // A timeout is a budget: a raise matches only when the commit the run measured carries the same onboarding and value as the worktree,
+    // so an uncommitted edit cannot publish a commit whose own suite or timeout differs. A lowered timeout is stale.
+    const committed = d.git(spec.cwd, ['show', `${ready.head}:.crew/project.json`])
+    let measured = {}
+    if (committed?.status === 'green') try { measured = requireOnboarded(spec.cwd, () => committed.stdout) } catch (error) { if (!(error instanceof OnboardRefusal)) throw error }
+    const raised = (field, current, started) => field.endsWith('TimeoutMs') && typeof started === 'number' && current >= started && measured.hash === project.hash && measured[field] === current
+      && measured.suiteTimeoutMs >= spec.suite?.timeoutMs && measured.proofTimeoutMs >= spec.proofTimeoutMs
+    for (const [field, current, started] of fields) if (current !== started && !raised(field, current, started)) throw new FinishRefusal('onboarding-stale', `lane ${lane} started under onboarding ${spec.onboarded}; the worktree's .crew/project.json ${project.hash} differs from the lane's ${field}: run /onboard and start the lane again`)
   }
   const claim = claimDecision(d, lane, taskDir, readyAt)
   try {

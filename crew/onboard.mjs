@@ -1,6 +1,6 @@
 // Calibrate project proof runners in a disposable worktree (ADR-057).
 import { createHash, randomUUID } from 'node:crypto'
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, extname, join, matchesGlob, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -26,7 +26,10 @@ const validBuilderChecks = (v) => Array.isArray(v) && v.every((s) => typeof s ==
 const validProject = (p) => p && typeof p === 'object' && !Array.isArray(p) && typeof p.suite === 'string' && p.suite.trim() && !/["'\\\0]/.test(p.suite) && Array.isArray(p.proof) && p.proof.every(validProofEntry) && (p.suiteLock === undefined || typeof p.suiteLock === 'boolean') && (p.suiteTimeoutMs === undefined || validTimeout(p.suiteTimeoutMs)) && (p.proofTimeoutMs === undefined || validTimeout(p.proofTimeoutMs)) && (p.builderChecks === undefined || validBuilderChecks(p.builderChecks)) && validWorktreeSetup(p)
   && (p.fastChecks === undefined || validFastChecks(p.fastChecks)) && (p.fastChecksTimeoutMs === undefined || validTimeout(p.fastChecksTimeoutMs))
 
-export function requireOnboarded(checkout, read = readFileSync) {
+// Only a regular file is read: a project.json that is a symlink to a FIFO would block the caller.
+const readRegular = (path, encoding) => { if (!statSync(path).isFile()) throw new Error('not a regular file'); return readFileSync(path, encoding) }
+
+export function requireOnboarded(checkout, read = readRegular) {
   let p
   try { p = JSON.parse(read(join(checkout, '.crew', 'project.json'), 'utf8')) } catch (error) {
     throw new OnboardRefusal(error?.code === 'ENOENT' ? 'not-onboarded' : 'onboarding-stale')

@@ -106,7 +106,9 @@ the fetch fails; it does not probe seats. The probe is implemented in
    without a shell like proof `setup`. `crew start` runs it once in the new
    worktree before launch, with a 10-minute timeout. Failure or timeout is
    printed and journaled but does not stop the lane. Changed or untracked paths
-   reported by git cause start to refuse; ignored paths are allowed.
+   reported by git cause start to refuse; ignored paths are allowed. The proof
+   also runs it once in its base worktree before any entry; a red setup there
+   makes the proof unmeasured with `setup-failed`.
    Optionally set `builderChecks` to a list of non-empty, one-line commands,
    such as a lint or one package's tests. The builder runs them before returning
    and reports each result in `notes`; the loop does not run them or read results.

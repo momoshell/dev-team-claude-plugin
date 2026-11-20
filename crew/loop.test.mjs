@@ -981,22 +981,40 @@ test('a finish pass runs its proof and suite under the larger of the lane\'s and
     mkdirSync(join(cwd, '.crew'), { recursive: true })
     writeFileSync(join(cwd, '.crew', 'project.json'), JSON.stringify({ ...body, onboarded: { hash: projectHash(body) } }))
   }
-  for (const [name, project, onboarded, expected] of [
-    ['raised by the rebase', { proofTimeoutMs: 900_000, suiteTimeoutMs: 1_800_000 }, true, [900_000, 1_800_000]],
+  const path = '.crew/project.json'
+  const raised = { proofTimeoutMs: 900_000, suiteTimeoutMs: 1_800_000 }
+  for (const [name, project, onboarded, expected, fallback] of [
+    ['raised by the rebase', { ...raised, builderChecks: ['echo —'] }, true, [900_000, 1_800_000]],
+    ['hidden by skip-worktree', raised, true, [120_000, 600_000], 'onboarding-tree-mismatch'],
     ['lowered', { proofTimeoutMs: 1_000, suiteTimeoutMs: 1_000 }, true, [120_000, 600_000]],
-    ['unreadable', null, true, [120_000, 600_000]],
-    ['legacy lane', { proofTimeoutMs: 900_000, suiteTimeoutMs: 1_800_000 }, false, [120_000, 600_000]],
-    ['standard lane', { proofTimeoutMs: 900_000, suiteTimeoutMs: 1_800_000 }, 'standard', [120_000, 600_000]],
+    ['unreadable', null, true, [120_000, 600_000], 'onboarding-unreadable'],
+    ['legacy lane', raised, false, [120_000, 600_000]],
+    ['standard lane', raised, 'standard', [120_000, 600_000]],
   ]) {
     const cwd = scratchDir('finish-timeouts-')
+    repoGit(cwd, 'init', '-q')
+    const hidden = name === 'hidden by skip-worktree'
+    if (hidden) {
+      write(cwd, { proofTimeoutMs: 120_000, suiteTimeoutMs: 600_000 })
+      repoGit(cwd, 'add', '-f', '--', path)
+      repoGit(cwd, 'commit', '-qm', 'lane budgets')
+      repoGit(cwd, 'update-index', '--skip-worktree', '--', path)
+      write(cwd, project)
+      assert.equal(repoGit(cwd, 'status', '--porcelain=v1', '--', path), '')
+    }
     const f = fakes({ spec: { ...(onboarded === 'standard' ? {} : finishSpec()), cwd, ...(onboarded ? { onboarded: 'a'.repeat(64) } : {}), proofTimeoutMs: 120_000, suite: { command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 600_000 } } })
+    const run = f.deps.run
+    f.deps.run = (input) => input.args.at(-1) === path ? { ...green(), stdout: repoGit(cwd, ...input.args) } : run(input)
     const rebase = f.deps.rebaseBranch
-    f.deps.rebaseBranch = (input) => { if (project) write(cwd, project); return rebase(input) }
-    await f.go()
+    f.deps.rebaseBranch = (input) => {
+      if (project && !hidden) { write(cwd, project); repoGit(cwd, 'add', '-f', '--', path) }
+      return rebase(input)
+    }
+    assert.equal((await f.go()).status, 'done', name)
     assert.deepEqual([f.seen.proof.timeoutMs, f.seen.suite.timeoutMs], expected, name)
     const rows = f.rows.filter((r) => r.event === 'check' && (r.check === 'proof' || r.check === 'suite')).map((r) => [r.check, r.timeoutMs, r.timeoutFallback])
     assert.deepEqual(rows, !onboarded || onboarded === 'standard' ? [['proof', undefined, undefined], ['suite', undefined, undefined]]
-      : project ? [['proof', expected[0], undefined], ['suite', expected[1], undefined]] : [['proof', 120_000, 'onboarding-unreadable'], ['suite', 600_000, 'onboarding-unreadable']], name)
+      : [['proof', expected[0], fallback], ['suite', expected[1], fallback]], name)
   }
 })
 
@@ -1283,7 +1301,7 @@ test('the loop imports only its pinned modules and only the lean bridge imports 
   const dir = fileURLToPath(new URL('.', import.meta.url))
   const source = readFileSync(join(dir, 'loop.mjs'), 'utf8')
   const specifiers = [...source.matchAll(/^(?:import|} from|export [^\n]* from)[^'\n]*'([^']+)'/gm)].map((m) => m[1]).sort()
-  assert.deepEqual(specifiers, ['./agents.mjs', './checks.mjs', './lane-core.mjs', './onboard.mjs', './proof.mjs', './protocols.mjs', 'node:async_hooks', 'node:fs/promises', 'node:path', 'node:util'])
+  assert.deepEqual(specifiers, ['./agents.mjs', './checks.mjs', './lane-core.mjs', './onboard.mjs', './proof.mjs', './protocols.mjs', 'node:async_hooks', 'node:crypto', 'node:fs/promises', 'node:path', 'node:util'])
   const laneCore = readFileSync(join(dir, 'lane-core.mjs'), 'utf8')
   const laneCoreImports = [...laneCore.matchAll(/from ['"]([^'"]+)['"]/g)].map((m) => m[1])
   assert.ok(laneCoreImports.length > 0 && laneCoreImports.every((name) => name.startsWith('node:')))

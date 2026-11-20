@@ -27,7 +27,7 @@ const validProject = (p) => p && typeof p === 'object' && !Array.isArray(p) && t
   && (p.fastChecks === undefined || validFastChecks(p.fastChecks)) && (p.fastChecksTimeoutMs === undefined || validTimeout(p.fastChecksTimeoutMs))
 
 // Only a regular file is read: a project.json that is a symlink to a FIFO would block the caller.
-const readRegular = (path, encoding) => { if (!statSync(path).isFile()) throw new Error('not a regular file'); return readFileSync(path, encoding) }
+export const readRegular = (path, encoding) => { if (!statSync(path).isFile()) throw new Error('not a regular file'); return readFileSync(path, encoding) }
 
 export function requireOnboarded(checkout, read = readRegular) {
   let p

@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { git, scratchDir, trackProcessGroupFile } from '../test/helpers.mjs'
 import { createHash } from 'node:crypto'
@@ -848,6 +848,7 @@ test('--return spawns a finish run whose spec carries the guidance and the spent
 // MUTATION: compare timeouts for equality only and a raised project timeout refuses an accept as stale (#2514).
 // MUTATION: compare the worktree alone and an uncommitted raise publishes a commit whose own timeout is lowered (#2514).
 test('--accept is not refused for a raised proof or suite timeout in the worktree and the measured commit; a lowered one, an uncommitted raise or a changed suite still is (#2514)', async () => {
+  const spec = { suite: { command: 'npm', args: ['test'], timeoutMs: SUITE_TIMEOUT_DEFAULT_MS }, proofTimeoutMs: PROOF_TIMEOUT_DEFAULT_MS }
   const text = (change) => { const p = { suite: 'npm test', proof: [], ...change }; return [projectHash(p), JSON.stringify({ ...p, onboarded: { hash: projectHash(p) } })] }
   for (const [worktree, committed, reason] of [
     [{ proofTimeoutMs: 900_000 }, { proofTimeoutMs: 900_000 }, null],
@@ -860,7 +861,7 @@ test('--accept is not refused for a raised proof or suite timeout in the worktre
     [{ proofTimeoutMs: 900_000 }, { suite: 'npm run ci', proofTimeoutMs: 900_000 }, 'onboarding-stale'],
   ]) {
     const [hash, current] = text(worktree), [, measured] = text(committed)
-    const r = ready([], { spec: { onboarded: hash, suite: { command: 'npm', args: ['test'], timeoutMs: SUITE_TIMEOUT_DEFAULT_MS }, proofTimeoutMs: PROOF_TIMEOUT_DEFAULT_MS } })
+    const r = ready([], { spec: { ...spec, onboarded: hash } })
     try {
       mkdirSync(join(r.f.cwd, '.crew'), { recursive: true })
       writeFileSync(join(r.f.cwd, '.crew', 'project.json'), current)
@@ -869,6 +870,25 @@ test('--accept is not refused for a raised proof or suite timeout in the worktre
       assert.equal(r.published.length, reason === null ? 1 : 0)
     } finally { cleanup(r.f) }
   }
+
+  const r = ready([], { spec: { ...spec, onboarded: text({})[0] } })
+  try {
+    const fifo = join(r.f.base, 'onboarding-fifo')
+    assert.equal(spawnSync('mkfifo', [fifo]).status, 0)
+    mkdirSync(join(r.f.cwd, '.crew'))
+    symlinkSync(fifo, join(r.f.cwd, '.crew', 'project.json'))
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      import { decideFinish } from ${JSON.stringify(new URL('./finish.mjs', import.meta.url).href)}
+      let published = 0
+      const reason = await decideFinish({ lane: 'lane9', root: process.argv[1], choice: 'accept', deps: {
+        openPullRequest: async () => { published++; return { status: 'red' } },
+        run: async () => ({ status: 'green', stdout: 'b'.repeat(40) }),
+      } }).then(() => null, (error) => error.reason)
+      console.log(JSON.stringify({ reason, published }))
+    `, r.f.root], { encoding: 'utf8', timeout: 5000, killSignal: 'SIGKILL' })
+    assert.equal(child.status, 0, child.error?.message ?? child.stderr)
+    assert.deepEqual(JSON.parse(child.stdout), { reason: 'onboarding-stale', published: 0 })
+  } finally { cleanup(r.f) }
 })
 
 // MUTATION: skip the ready test and a decision publishes a lane that never finished.

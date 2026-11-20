@@ -1369,20 +1369,23 @@ test('a finish run builder receives the lead rulings from its finish spec (#2341
   }
 })
 
-test('accepted planning resume starts at the lead and honors its decision (#2392)', async () => {
+test('a pre-build planning return resumes planning and publishes without accept', async () => {
   const plan = { role: 'planner', id: 'lane.planner.1', status: 'done', summary: 'Held plan', details: {
     subject: 'fix(crew): held plan', plan_path: '/virtual/task/plan.md', tests: [], files_in_scope: ['held.mjs'],
   } }
-  for (const [decision, archived] of [['accept', false], ['accept', true], ['bounce', false], ['escalate', false]]) {
-    const held = structuredClone(plan)
+  for (const [decision, archived] of [['plan', false], ['accept', false], ['accept', true], ['bounce', false], ['escalate', false]]) {
+    const plannerEntry = decision === 'plan'
+    const held = plannerEntry ? { role: 'planner', id: plan.id, status: 'escalate', summary: 'Baseline unresolved', details: { question: 'Approve the baseline?' } } : structuredClone(plan)
     if (archived) delete held.details.tests
     const guidance = 'The baseline is approved.'
     const testsRequired = decision !== 'accept' || archived
+    const retryProof = testsRequired && !plannerEntry
     let builds = 0
     const f = fakes({ spec: finishSpec({ subject: null, planPath: null, findings: [], turnOffset: 80, guidance,
-      planning: { entry: 'lead', plan: held, planner: { returnPath: '/virtual/task/planner-1.json', parsed: held, defects: [], error: null }, observation: { question: 'Approve the baseline?' } } }),
+      ...(plannerEntry ? { stop: { reason: 'seat-escalated', observation: { stderr: 'x'.repeat(5000) } } } : {}),
+      planning: { entry: plannerEntry ? 'planner' : 'lead', plan: plannerEntry ? null : held, planner: { returnPath: '/virtual/task/planner-1.json', parsed: held, defects: [], error: null }, observation: { question: 'Approve the baseline?' } } }),
       lead: decision, target: 'planner', edit: (v) => {
-        if (v.role === 'builder' && (++builds === 1 || !testsRequired)) v.details.tests = []
+        if (v.role === 'builder' && (!testsRequired || (retryProof && ++builds === 1))) v.details.tests = []
         if (v.role === 'lead') {
           if (decision === 'bounce') v.details.instructions = 'Revise the plan with the approved baseline.'
           if (decision === 'escalate') v.details.question = 'Which new checklist should I use?'
@@ -1390,9 +1393,10 @@ test('accepted planning resume starts at the lead and honors its decision (#2392
         return v
       } })
     const result = await f.go()
-    assert.deepEqual(f.requests.map((r) => r.role), ['lead', ...(decision === 'escalate' ? [] : [...(decision === 'bounce' ? ['planner'] : []), 'builder', ...(testsRequired ? ['builder'] : []), 'reviewer'])], decision)
-    assert.equal(f.requests[0].id, 'lane.lead.81')
-    assert.deepEqual(f.requests[0].feedback[0].envelope, held)
+    const entry = plannerEntry ? 'planner' : 'lead'
+    assert.deepEqual(f.requests.map((r) => r.role), [entry, ...(decision === 'escalate' ? [] : [...(decision === 'bounce' ? ['planner'] : []), 'builder', ...(retryProof ? ['builder'] : []), 'reviewer'])], decision)
+    assert.equal(f.requests[0].id, `lane.${entry}.81`)
+    if (!plannerEntry) assert.deepEqual(f.requests[0].feedback[0].envelope, held)
     for (const r of f.requests.filter((r) => ['lead', 'planner'].includes(r.role))) {
       assert.equal(r.feedback.find((item) => item.id === 'finish-return').guidance, guidance)
       assert.equal(r.feedback.find((item) => item.id === 'planning-resume').observation.question, 'Approve the baseline?')
@@ -1402,23 +1406,30 @@ test('accepted planning resume starts at the lead and honors its decision (#2392
       assert.equal(f.rows.at(-1).observation.question, 'Which new checklist should I use?')
       assert.equal(f.rows.some((r) => r.event === 'finish-ready'), false)
       assert.equal(f.calls.includes('fetch'), false)
+      assert.equal(f.calls.includes('publish'), false)
     } else {
-      assert.equal(result.status, 'done')
+      assert.deepEqual(result, { status: 'done', reason: null, pr: PR }, decision)
+      assert.deepEqual(f.rows.find((r) => r.event === 'pr')?.pr, PR)
+      assert.equal(f.rows.some((r) => r.event === 'finish-ready'), false)
       const builder = f.requests.find((r) => r.role === 'builder')
       assert.equal(builder.planPath, plan.details.plan_path)
+      // The first builder turn after a planning return still gets the stop, clipped, and the operator guidance.
+      const stopItem = builder.feedback.find((item) => item.id === 'finish-stop')
+      assert.ok(stopItem, decision)
+      if (plannerEntry) assert.ok(stopItem.observation.stderr === undefined && Array.isArray(stopItem.observation.outputTail))
+      assert.equal(builder.feedback.find((item) => item.id === 'finish-return')?.guidance, guidance)
       assert.deepEqual(builder.filesInScope, decision === 'accept' ? ['held.mjs'] : ['lib.mjs'])
       assert.equal(builder.testsRequired, testsRequired)
-      if (testsRequired) assert.equal(builderTurns(f)[1].feedback[0].id, 'proof-no-tests')
+      if (retryProof) assert.equal(builderTurns(f)[1].feedback[0].id, 'proof-no-tests')
       assert.equal(f.calls.includes('proof'), testsRequired)
       if (!testsRequired) {
         assert.match(f.seen.commit.body, /proof: none, no criterion is machine-checked/)
-        assert.match(f.rows.at(-1).body, /Proof: no criterion is machine-checked\./)
+        assert.match(f.seen.publish.body, /Proof: no criterion is machine-checked\./)
       }
+      assert.equal(f.seen.publish.title, f.seen.commit.subject)
       assert.equal(f.seen.commit.subject, decision === 'accept' ? plan.details.subject : 'fix(crew): planned lane')
-      assert.equal(f.rows.at(-1).event, 'finish-ready')
       if (decision === 'bounce') assert.ok(f.requests[1].feedback.some((item) => item.id === 'lead-bounce' && item.summary === 'Revise the plan with the approved baseline.'))
     }
-    assert.equal(f.calls.includes('publish'), false)
     assert.ok(!f.discardArgs.some((args) => args.includes('--hard') || args.includes('clean')))
   }
 })
@@ -1838,95 +1849,97 @@ test('a reviewer findings_omitted count reaches the builder fix turn (S6-12)', a
   }
 })
 
-test('suite sees the uncommitted lane change at the base on first and moved-base checks (#2426)', async () => {
-  for (const shape of ['build', 'finish']) for (const move of ['none', 'precheck', 'publishing']) {
-    const finish = shape === 'finish'
-    const root = scratchDir('precheck-tree-'), cwd = join(root, 'lane'), upstream = join(root, 'upstream'), remote = join(root, 'origin.git'), taskDir = join(root, 'task')
-    mkdirSync(cwd); mkdirSync(taskDir)
-    const g = (...args) => repoGit(cwd, ...args)
-    g('init', '-qb', 'main'); g('config', 'user.name', 'Test'); g('config', 'user.email', 'test@example.invalid')
-    writeFileSync(join(cwd, 'lib.mjs'), 'old\n'); writeFileSync(join(cwd, 'deleted.txt'), 'delete me\n')
-    const linkPaths = !finish && move === 'precheck' ? ['fixtures', 'tracked.txt'] : []
-    if (linkPaths.length) {
-      g('config', 'core.symlinks', 'true')
-      mkdirSync(join(cwd, 'fixtures')); writeFileSync(join(cwd, 'fixtures', 'README.md'), 'fixture\n')
-      writeFileSync(join(cwd, 'tracked.txt'), 'tracked\n')
-      symlinkSync('lib.mjs', join(cwd, 'existing-link'))
-    }
-    g('add', '.'); g('commit', '-qm', 'base')
-    repoGit(root, 'init', '--bare', '-q', remote); g('remote', 'add', 'origin', remote); g('push', '-qu', 'origin', 'main')
-    repoGit(root, 'clone', '-qb', 'main', remote, upstream)
-    repoGit(upstream, 'config', 'user.name', 'Test'); repoGit(upstream, 'config', 'user.email', 'test@example.invalid')
-    g('checkout', '-qb', 'lane')
-    const seats = fakes({ spec: finish ? finishSpec() : { tier: shape }, edit: (v) => { if (v.role === 'planner') v.details.plan_path = join(taskDir, 'plan.md'); return v } })
-    writeFileSync(join(taskDir, 'plan.md'), 'Build the lane.')
-    let proofs = 0, reviews = 0, suites = 0, published = 0
-    const checkTree = () => {
-      assert.equal(g('rev-parse', 'HEAD').trim(), g('rev-parse', 'origin/main').trim())
-      assert.equal(g('rev-list', '--count', 'origin/main..HEAD').trim(), '0')
-      assert.equal(readFileSync(join(cwd, 'lib.mjs'), 'utf8'), 'lane\n')
-      assert.equal(readFileSync(join(cwd, 'new.txt'), 'utf8'), 'new\n')
-      const paths = g('diff', '--name-only', '-z', 'HEAD') + g('ls-files', '--others', '--exclude-standard', '-z')
-      assert.deepEqual([...new Set(paths.split('\0').filter(Boolean))].sort(), ['deleted.txt', 'lib.mjs', 'new.txt'])
-      assert.match(g('diff', '--name-status', 'HEAD'), /D\s+deleted.txt/)
-      assert.doesNotMatch(g('ls-files'), /scratch.txt/)
-    }
-    let linkFeedback
-    const result = await runLoop({ ...seats.spec, cwd, taskDir, ...(finish ? { finish: { ...seats.spec.finish, planPath: join(taskDir, 'plan.md') } } : {}) }, {
-      resolveAgents: seats.deps.resolveAgents,
-      journal: seats.deps.journal,
-      runSeat: async (request) => {
-        if (request.role === 'builder' && seats.requests.some((r) => r.role === 'builder')) {
-          linkFeedback = request.feedback.find((item) => item.id === 'worktree-symlink')
-          for (const path of linkPaths) {
-            unlinkSync(join(cwd, path)); renameSync(join(taskDir, path), join(cwd, path))
-          }
-          if (linkPaths.length) g('restore', '--staged', '--worktree', '--', 'tracked.txt', 'existing-link')
-        } else if (request.role === 'builder') {
-          for (const path of linkPaths) {
-            renameSync(join(cwd, path), join(taskDir, path)); symlinkSync(join(taskDir, path), join(cwd, path))
-          }
-          if (linkPaths.length) {
-            g('add', '--', 'tracked.txt')
-            unlinkSync(join(cwd, 'existing-link')); symlinkSync('new.txt', join(cwd, 'existing-link'))
-          }
-          writeFileSync(join(cwd, 'lib.mjs'), 'lane\n'); unlinkSync(join(cwd, 'deleted.txt'))
-          writeFileSync(join(cwd, 'new.txt'), 'new\n')
-          if (move === 'precheck') {
-            writeFileSync(join(cwd, 'scratch.txt'), 'scratch\n'); g('add', 'scratch.txt'); unlinkSync(join(cwd, 'scratch.txt'))
-            writeFileSync(join(upstream, 'base.txt'), 'advanced\n'); repoGit(upstream, 'add', '.'); repoGit(upstream, 'commit', '-qm', 'advance'); repoGit(upstream, 'push', '-q', 'origin', 'main')
-          }
+for (const shape of ['build', 'finish']) for (const move of ['none', 'precheck', 'publishing']) {
+  test(`suite sees the uncommitted lane change at the base on first and moved-base checks (#2426) [${shape}/${move}]`, () => uncommittedLaneAtBase(shape, move))
+}
+
+async function uncommittedLaneAtBase(shape, move) {
+  const finish = shape === 'finish'
+  const root = scratchDir('precheck-tree-'), cwd = join(root, 'lane'), upstream = join(root, 'upstream'), remote = join(root, 'origin.git'), taskDir = join(root, 'task')
+  mkdirSync(cwd); mkdirSync(taskDir)
+  const g = (...args) => repoGit(cwd, ...args)
+  g('init', '-qb', 'main'); g('config', 'user.name', 'Test'); g('config', 'user.email', 'test@example.invalid')
+  writeFileSync(join(cwd, 'lib.mjs'), 'old\n'); writeFileSync(join(cwd, 'deleted.txt'), 'delete me\n')
+  const linkPaths = !finish && move === 'precheck' ? ['fixtures', 'tracked.txt'] : []
+  if (linkPaths.length) {
+    g('config', 'core.symlinks', 'true')
+    mkdirSync(join(cwd, 'fixtures')); writeFileSync(join(cwd, 'fixtures', 'README.md'), 'fixture\n')
+    writeFileSync(join(cwd, 'tracked.txt'), 'tracked\n')
+    symlinkSync('lib.mjs', join(cwd, 'existing-link'))
+  }
+  g('add', '.'); g('commit', '-qm', 'base')
+  repoGit(root, 'init', '--bare', '-q', remote); g('remote', 'add', 'origin', remote); g('push', '-qu', 'origin', 'main')
+  repoGit(root, 'clone', '-qb', 'main', remote, upstream)
+  repoGit(upstream, 'config', 'user.name', 'Test'); repoGit(upstream, 'config', 'user.email', 'test@example.invalid')
+  g('checkout', '-qb', 'lane')
+  const seats = fakes({ spec: finish ? finishSpec() : { tier: shape }, edit: (v) => { if (v.role === 'planner') v.details.plan_path = join(taskDir, 'plan.md'); return v } })
+  writeFileSync(join(taskDir, 'plan.md'), 'Build the lane.')
+  let proofs = 0, reviews = 0, suites = 0, published = 0
+  const checkTree = () => {
+    assert.equal(g('rev-parse', 'HEAD').trim(), g('rev-parse', 'origin/main').trim())
+    assert.equal(g('rev-list', '--count', 'origin/main..HEAD').trim(), '0')
+    assert.equal(readFileSync(join(cwd, 'lib.mjs'), 'utf8'), 'lane\n')
+    assert.equal(readFileSync(join(cwd, 'new.txt'), 'utf8'), 'new\n')
+    const paths = g('diff', '--name-only', '-z', 'HEAD') + g('ls-files', '--others', '--exclude-standard', '-z')
+    assert.deepEqual([...new Set(paths.split('\0').filter(Boolean))].sort(), ['deleted.txt', 'lib.mjs', 'new.txt'])
+    assert.match(g('diff', '--name-status', 'HEAD'), /D\s+deleted.txt/)
+    assert.doesNotMatch(g('ls-files'), /scratch.txt/)
+  }
+  let linkFeedback
+  const result = await runLoop({ ...seats.spec, cwd, taskDir, ...(finish ? { finish: { ...seats.spec.finish, planPath: join(taskDir, 'plan.md') } } : {}) }, {
+    resolveAgents: seats.deps.resolveAgents,
+    journal: seats.deps.journal,
+    runSeat: async (request) => {
+      if (request.role === 'builder' && seats.requests.some((r) => r.role === 'builder')) {
+        linkFeedback = request.feedback.find((item) => item.id === 'worktree-symlink')
+        for (const path of linkPaths) {
+          unlinkSync(join(cwd, path)); renameSync(join(taskDir, path), join(cwd, path))
         }
-        if (request.role === 'reviewer') { checkTree(); reviews++ }
-        await seats.deps.runSeat(request); writeFileSync(request.returnPath, await seats.deps.readFile(request.returnPath))
-      },
-      proveTests: async (input) => { checkTree(); proofs++; assert.equal(input.base, 'HEAD'); return { status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }] } },
-      runSuite: async () => {
-        suites++; checkTree()
-        assert.deepEqual(g('diff', '--name-only', 'HEAD').trim().split('\n').sort(), ['deleted.txt', 'lib.mjs', 'new.txt'])
-        if (move === 'publishing' && suites === 1) {
+        if (linkPaths.length) g('restore', '--staged', '--worktree', '--', 'tracked.txt', 'existing-link')
+      } else if (request.role === 'builder') {
+        for (const path of linkPaths) {
+          renameSync(join(cwd, path), join(taskDir, path)); symlinkSync(join(taskDir, path), join(cwd, path))
+        }
+        if (linkPaths.length) {
+          g('add', '--', 'tracked.txt')
+          unlinkSync(join(cwd, 'existing-link')); symlinkSync('new.txt', join(cwd, 'existing-link'))
+        }
+        writeFileSync(join(cwd, 'lib.mjs'), 'lane\n'); unlinkSync(join(cwd, 'deleted.txt'))
+        writeFileSync(join(cwd, 'new.txt'), 'new\n')
+        if (move === 'precheck') {
+          writeFileSync(join(cwd, 'scratch.txt'), 'scratch\n'); g('add', 'scratch.txt'); unlinkSync(join(cwd, 'scratch.txt'))
           writeFileSync(join(upstream, 'base.txt'), 'advanced\n'); repoGit(upstream, 'add', '.'); repoGit(upstream, 'commit', '-qm', 'advance'); repoGit(upstream, 'push', '-q', 'origin', 'main')
         }
-        return green()
-      },
-      openPullRequest: async () => { published++; return { status: 'green', reason: null, pr: PR } },
-    })
-    if (linkPaths.length) {
-      assert.equal(linkFeedback?.id, 'worktree-symlink', 'the next builder request must name the symlink reason')
-      assert.equal(linkFeedback.severity, 'must-fix')
-      assert.deepEqual(linkFeedback.paths, linkPaths)
-      for (const path of linkPaths) assert.ok(linkFeedback.summary.includes(path))
-      const repair = seats.rows.findLastIndex((r) => r.event === 'envelope' && r.role === 'builder')
-      for (const check of ['check-base', 'base-commit', 'proof']) assert.ok(seats.rows.findIndex((r) => r.event === 'check' && r.check === check) > repair, check)
-      assert.equal(readFileSync(join(cwd, 'base.txt'), 'utf8'), 'advanced\n')
-    }
-    assert.equal(result.status, 'done', JSON.stringify(result))
-    const checks = move === 'publishing' ? 2 : 1
-    assert.deepEqual([proofs, reviews, suites, published], [checks, checks, checks, finish ? 0 : 1])
-    assert.equal(g('rev-list', '--count', 'origin/main..HEAD').trim(), '1')
-    assert.equal(g('status', '--porcelain'), '')
+      }
+      if (request.role === 'reviewer') { checkTree(); reviews++ }
+      await seats.deps.runSeat(request); writeFileSync(request.returnPath, await seats.deps.readFile(request.returnPath))
+    },
+    proveTests: async (input) => { checkTree(); proofs++; assert.equal(input.base, 'HEAD'); return { status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }] } },
+    runSuite: async () => {
+      suites++; checkTree()
+      assert.deepEqual(g('diff', '--name-only', 'HEAD').trim().split('\n').sort(), ['deleted.txt', 'lib.mjs', 'new.txt'])
+      if (move === 'publishing' && suites === 1) {
+        writeFileSync(join(upstream, 'base.txt'), 'advanced\n'); repoGit(upstream, 'add', '.'); repoGit(upstream, 'commit', '-qm', 'advance'); repoGit(upstream, 'push', '-q', 'origin', 'main')
+      }
+      return green()
+    },
+    openPullRequest: async () => { published++; return { status: 'green', reason: null, pr: PR } },
+  })
+  if (linkPaths.length) {
+    assert.equal(linkFeedback?.id, 'worktree-symlink', 'the next builder request must name the symlink reason')
+    assert.equal(linkFeedback.severity, 'must-fix')
+    assert.deepEqual(linkFeedback.paths, linkPaths)
+    for (const path of linkPaths) assert.ok(linkFeedback.summary.includes(path))
+    const repair = seats.rows.findLastIndex((r) => r.event === 'envelope' && r.role === 'builder')
+    for (const check of ['check-base', 'base-commit', 'proof']) assert.ok(seats.rows.findIndex((r) => r.event === 'check' && r.check === check) > repair, check)
+    assert.equal(readFileSync(join(cwd, 'base.txt'), 'utf8'), 'advanced\n')
   }
-})
+  assert.equal(result.status, 'done', JSON.stringify(result))
+  const checks = move === 'publishing' ? 2 : 1
+  assert.deepEqual([proofs, reviews, suites, published], [checks, checks, checks, finish ? 0 : 1])
+  assert.equal(g('rev-list', '--count', 'origin/main..HEAD').trim(), '1')
+  assert.equal(g('status', '--porcelain'), '')
+}
 
 test('pre-check moves do not spend publishing rechecks (#2403)', async () => {
   for (const tier of ['build', 'judge', 'mechanical']) for (const moves of [3, 4]) {

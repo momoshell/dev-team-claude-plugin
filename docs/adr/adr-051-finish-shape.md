@@ -179,10 +179,13 @@ brief, with the previous planner evidence and the stopped lead's question. Lead
 bounces may revise the plan during this entry. Another escalation stops for an
 answer; a new return replaces the guidance.
 
-After accepting a plan, use its subject, scope and proof requirement in the finish
-build/check path. Keep the original run-start anchor and issue fresh turn IDs.
-The run still ends at `finish-ready`; only the operator's `--accept` publishes.
-A judge lane resumed by `--return` from a plan stop gets reviewer review but no
-tech-lead second review. To get that second review, abandon and restart the lane.
+After accepting a plan, continue as `crew start` would, with the accepted plan
+and fresh round budgets. Keep the original run-start anchor and issue fresh turn
+IDs. A build lane runs review and suite together; a judge lane runs both reviewer
+and tech-lead review after a green suite. The guidance stays in force for the
+whole run. If checks pass, the lane records its own PR without `--accept`.
+Merging stays with the operator. Another planning stop before any build can resume
+this way again. After a build, `--return` starts a post-build finish pass with
+its own review cap and check order; it stops at `finish-ready` for `--accept`.
 Post-build finish passes still cannot reopen planning. A post-build plan gap needs
 abandon, discard and restart from the brief.

@@ -58,18 +58,20 @@ below, not a journal edit or an assumed automatic restart.
 ## Finish it
 
 `crew finish <lane>` reports the stop or ready state without changing the lane.
-`crew finish <lane> --return <file>` starts a finish pass on any finishable stop,
-including an escalation or a provably dead run. `<file>` is a notes file, not inline text.
+`crew finish <lane> --return <file>` resumes a pre-build planning stop or starts
+a finish pass on a finishable post-build stop, including an escalation or a
+provably dead run. `<file>` is a notes file, not inline text.
 Before any build, a planning stop resumes in the same lane, worktree and branch,
 keeping seeded files and prior returns and sessions. If the current planner done
 return was accepted and only the lead is unresolved, the lead sees the answer
 first. Otherwise the planner reruns with the previous evidence. Both receive
 labelled operator guidance and the stopped lead's question; a lead bounce can
-revise the plan. A new `--return` replaces the guidance. Once planning succeeds,
-the lane runs the finish checks below and stops ready for your decision, without
-publishing (ADR-051's pre-build exception). A judge lane resumed by `--return`
-from a plan stop gets reviewer review but no tech-lead second review. To get that
-second review, abandon and restart the lane. Baseline-only stops still refuse.
+revise the plan. Guidance stays in force for the whole run; a new `--return`
+replaces it. Once planning succeeds, the lane uses fresh round budgets and runs
+its normal tier checks. Build runs review and suite together; judge gets reviewer
+and tech-lead review after a green suite. The lane opens and records the PR without `--accept`.
+Merging stays with you. Another planning stop before any build can resume the
+same way. Baseline-only stops still refuse.
 After a build, use `--return` when the existing plan still fits. That finish pass
 keeps the plan and recorded roster; it cannot return work to the planner.
 If a post-build stop's lead names a plan gap or asks to reopen planning, end the lane with

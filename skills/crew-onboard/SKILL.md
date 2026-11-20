@@ -98,7 +98,16 @@ the fetch fails; it does not probe seats. The probe is implemented in
    receive `CREW_LANE`, the lane name, overriding an inherited value only in
    the child environment. A script can name per-lane services instead of
    queueing. This is separate from affected-package selection. Onboarding
-   has no lane name to supply. No unchanged-tree red-suite retry is added.
+   has no lane name to supply.
+   Optionally set `environmentSignatures` to a list of non-blank strings such as
+   `PoolTimedOut`. The loop matches each string verbatim as a literal substring
+   in either stdout or stderr of an `exit-nonzero` red suite. A match allows one
+   unchanged-tree re-run unless the host-sleep rule takes precedence. Pick a
+   string that only an environment failure prints: a code failure that prints
+   it is re-run and then stopped, and never reaches the builder. Omit the
+   list or use `[]` to leave suite behavior unchanged. Onboarding validates and
+   keeps the list without hashing it. Start snapshots it for the lane and its
+   finish passes.
    Optionally set top-level `proofTimeoutMs` to a safe integer from 1 to
    `2**31-1` ms for every proof run; if absent, it defaults to
    `PROOF_TIMEOUT_DEFAULT_MS` (`crew/proof.mjs`). It is not set per runner entry.
@@ -171,8 +180,9 @@ the fetch fails; it does not probe seats. The probe is implemented in
    have matching onboarding; proof reads runner entries from the lane's
    old-source worktree. Re-run
    onboarding after changing the suite, proof entries or `worktreeSetup`. Changing only
-   `suiteLock`, `suiteTimeoutMs`, `proofTimeoutMs`, `builderChecks`, `fastChecks`
-   or `fastChecksTimeoutMs` in `.crew/project.json` does not require re-onboarding.
+   `suiteLock`, `suiteTimeoutMs`, `proofTimeoutMs`, `builderChecks`, `fastChecks`,
+   `fastChecksTimeoutMs` or `environmentSignatures` in `.crew/project.json` does
+   not require re-onboarding.
    Write a brief with
    `skills/lane-brief/SKILL.md`, then run `crew start <brief>` in the checkout.
    The start checks the base.

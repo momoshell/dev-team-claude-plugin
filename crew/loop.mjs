@@ -127,11 +127,25 @@ function suiteFailures(results) {
   return { tests: [...tests].slice(0, SUITE_LIST_MAX), files: [...files].slice(0, SUITE_LIST_MAX), tail: tails.filter((t) => t !== '') }
 }
 
-function finishPromptObservation(observation) {
-  if (![observation?.stdout, observation?.stderr].some((stream) => typeof stream === 'string' && stream.length > SUITE_TAIL_MAX)) return observation
+function promptObservation(observation) {
+  if (Array.isArray(observation)) {
+    const items = observation.map(promptObservation)
+    return items.some((item, i) => !Object.is(item, observation[i])) ? items : observation
+  }
+  if (!plainObject(observation)) return observation
+  const clip = [observation.stdout, observation.stderr].some((stream) => typeof stream === 'string' && stream.length > SUITE_TAIL_MAX)
+  let changed = clip
+  const entries = Object.entries(observation).flatMap(([key, value]) => {
+    if (clip && (key === 'stdout' || key === 'stderr') && typeof value === 'string') return []
+    const next = promptObservation(value)
+    changed ||= !Object.is(next, value)
+    return [[key, next]]
+  })
+  if (!changed) return observation
+  const fields = Object.fromEntries(entries)
+  if (!clip) return fields
   const { tests, files, tail } = suiteFailures([observation])
-  const { stdout, stderr, ...rest } = observation
-  return { ...rest, failingTests: tests, failingFiles: files, outputTail: tail }
+  return { ...fields, failingTests: tests, failingFiles: files, outputTail: tail }
 }
 
 // `git status --porcelain=v1 -z`: `XY path` records, a rename or copy (in either column) followed by its
@@ -321,7 +335,7 @@ export async function runLoop(spec, deps = {}) {
   const runKind = planning ? 'resumed lane' : 'finish run'
   const guidanceItem = finishEntry && typeof fin.guidance === 'string' ? { id: 'finish-return', summary: `The operator supplied guidance for this ${runKind}. It stands for the whole ${runKind} and outranks the plan and a lead ruling where they differ.`, guidance: fin.guidance } : null
   const withGuidance = (items) => guidanceItem ? [guidanceItem, ...items.filter((item) => item?.id !== 'finish-return')] : items
-  const planningHistory = planning ? { id: 'planning-resume', summary: 'Resume the stopped planning attempt in this lane. The operator guidance answers the previous stop; the brief is unchanged. Previous planner evidence and the stopped lead question follow.', planner: planning.planner, observation: planning.observation } : null
+  const planningHistory = planning ? { id: 'planning-resume', summary: 'Resume the stopped planning attempt in this lane. The operator guidance answers the previous stop; the brief is unchanged. Previous planner evidence and the stopped lead question follow.', planner: planning.planner, observation: promptObservation(planning.observation) } : null
   const repeatsFailure = (failure) => {
     if (failures.some((previous) => isDeepStrictEqual(previous, failure))) return true
     failures.push(failure)
@@ -881,7 +895,7 @@ export async function runLoop(spec, deps = {}) {
       }
     }
 
-    let feedback = finishEntry ? [{ id: 'finish-stop', summary: 'The previous lane stopped with the given reason and observation.', reason: fin.stop.reason, observation: finishPromptObservation(fin.stop.observation) }, ...(guidanceItem ? [guidanceItem] : []), ...fin.findings] : []
+    let feedback = finishEntry ? [{ id: 'finish-stop', summary: 'The previous lane stopped with the given reason and observation.', reason: fin.stop.reason, observation: promptObservation(fin.stop.observation) }, ...(guidanceItem ? [guidanceItem] : []), ...fin.findings] : []
     if (isFinish) {
       let worktree = await checkBuildPaths('base-paths', feedback)
       while (!worktree.halt && !worktree.status) {

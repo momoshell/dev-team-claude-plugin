@@ -693,9 +693,12 @@ test('a proof failure keeps the open review findings behind the proof item (#229
 })
 
 test('plan-revised, mechanical-restart, finish-stop and finish-return feedback carry a summary (#2296)', async () => {
-  const stderr = `FAIL lib.test.mjs > works\n${'passing output\n'.repeat(1000)}final diagnostic\n`
-  const stop = { reason: 'exit-nonzero', observation: { ...redRun(), stderr } }
-  for (const mode of ['plan-revised', 'mechanical-restart', 'finish']) {
+  const result = (lines) => ({ ...redRun(), stderr: `FAIL lib.test.mjs > works\n${'passing output\n'.repeat(lines)}final diagnostic\n` })
+  for (const [mode, stop] of [
+    ['plan-revised'], ['mechanical-restart'],
+    ['finish', { reason: 'exit-nonzero', observation: result(1000) }],
+    ['finish', { reason: 'red-after-sleep-rerun', observation: { stage: 'suite', result: result(250) } }],
+  ]) {
     let builds = 0
     const f = fakes({ spec: mode === 'finish' ? finishSpec({ guidance: 'Fix it', stop }) : { tier: mode === 'mechanical-restart' ? 'mechanical' : 'build' }, lead: 'bounce', target: 'planner', edit: (v) => {
       if (mode !== 'finish' && v.role === 'builder' && ++builds === 1) return { ...v, status: 'escalate', details: { ...v.details, question: 'What next?' } }
@@ -710,12 +713,15 @@ test('plan-revised, mechanical-restart, finish-stop and finish-return feedback c
     }
     if (mode === 'finish') {
       const { observation } = builderTurns(f)[0].feedback.find((item) => item.id === 'finish-stop')
-      assert.ok(!Object.hasOwn(observation, 'stdout') && !Object.hasOwn(observation, 'stderr'), 'raw streams must not reach the builder')
-      assert.deepEqual(observation.failingTests, ['works'])
-      assert.deepEqual(observation.failingFiles, ['lib.test.mjs'])
-      assert.equal(observation.outputTail.length, 1)
-      assert.ok(observation.outputTail[0].length <= 2000)
-      assert.ok(observation.outputTail[0].endsWith('final diagnostic\n'))
+      const rerun = stop.reason === 'red-after-sleep-rerun'
+      if (rerun) assert.equal(observation.stage, 'suite')
+      const diagnostics = rerun ? observation.result : observation
+      assert.ok(!Object.hasOwn(diagnostics, 'stdout') && !Object.hasOwn(diagnostics, 'stderr'), 'raw streams must not reach the builder')
+      assert.deepEqual(diagnostics.failingTests, ['works'])
+      assert.deepEqual(diagnostics.failingFiles, ['lib.test.mjs'])
+      assert.equal(diagnostics.outputTail.length, 1)
+      assert.ok(diagnostics.outputTail[0].length <= 2000)
+      assert.ok(diagnostics.outputTail[0].endsWith('final diagnostic\n'))
     }
   }
 })
@@ -1381,9 +1387,10 @@ test('a pre-build planning return resumes planning and publishes without accept'
     const testsRequired = decision !== 'accept' || archived
     const retryProof = testsRequired && !plannerEntry
     let builds = 0
+    const observation = { question: 'Approve the baseline?', stderr: `${'x'.repeat(5000)}final diagnostic\n` }
     const f = fakes({ spec: finishSpec({ subject: null, planPath: null, findings: [], turnOffset: 80, guidance,
-      ...(plannerEntry ? { stop: { reason: 'seat-escalated', observation: { stderr: 'x'.repeat(5000) } } } : {}),
-      planning: { entry: plannerEntry ? 'planner' : 'lead', plan: plannerEntry ? null : held, planner: { returnPath: '/virtual/task/planner-1.json', parsed: held, defects: [], error: null }, observation: { question: 'Approve the baseline?' } } }),
+      stop: { reason: plannerEntry ? 'seat-escalated' : STOP.reason, observation },
+      planning: { entry: plannerEntry ? 'planner' : 'lead', plan: plannerEntry ? null : held, planner: { returnPath: '/virtual/task/planner-1.json', parsed: held, defects: [], error: null }, observation } }),
       lead: decision, target: 'planner', edit: (v) => {
         if (v.role === 'builder' && (!testsRequired || (retryProof && ++builds === 1))) v.details.tests = []
         if (v.role === 'lead') {
@@ -1399,7 +1406,12 @@ test('a pre-build planning return resumes planning and publishes without accept'
     if (!plannerEntry) assert.deepEqual(f.requests[0].feedback[0].envelope, held)
     for (const r of f.requests.filter((r) => ['lead', 'planner'].includes(r.role))) {
       assert.equal(r.feedback.find((item) => item.id === 'finish-return').guidance, guidance)
-      assert.equal(r.feedback.find((item) => item.id === 'planning-resume').observation.question, 'Approve the baseline?')
+      const { observation: resumed } = r.feedback.find((item) => item.id === 'planning-resume')
+      assert.equal(resumed.question, observation.question)
+      assert.ok(!Object.hasOwn(resumed, 'stderr'), 'raw stderr must not reach the planning seat')
+      assert.equal(resumed.outputTail.length, 1)
+      assert.ok(resumed.outputTail[0].length <= 2000)
+      assert.ok(resumed.outputTail[0].endsWith('final diagnostic\n'))
     }
     if (decision === 'escalate') {
       assert.equal(result.reason, 'lead-escalated')

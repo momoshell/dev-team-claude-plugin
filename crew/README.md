@@ -39,9 +39,10 @@ turn. Mechanical lanes have no planner or reviewer turn. The per-lane flag does
 not require a PR.
 
 After the first builder turn, the report lists each repeat and its journaled
-trigger: `suite-red`, `proof-unproven`, `rebase-conflict`, `review-changes`,
-`finish-triage`, `replan` or `unclassified` when the journal does not establish
-one. Totals show minimal lanes out of lanes with a PR, repeats by trigger out of
+trigger: `suite-red`, `fast-check-red` (a measured red fast check),
+`proof-unproven`, `rebase-conflict`, `review-changes`, `finish-triage`, `replan`
+or `unclassified` when the journal does not establish one.
+Totals show minimal lanes out of lanes with a PR, repeats by trigger out of
 all builder turns, red suites out of suite runs, and the number of excluded lanes.
 The command writes nothing and starts no child processes.
 

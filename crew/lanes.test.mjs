@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { laneRows, main } from './lanes.mjs'
+import { main as steps } from './steps.mjs'
 import { scratchDir, trackProcessGroupFile } from '../test/helpers.mjs'
 
 const PR = 'https://github.com/o/r/pull/7'
@@ -32,6 +33,32 @@ function world() {
   return { root, archiveRoot, run, lane: (name, rows) => lane(root, name, rows), done: () => rmSync(home, { recursive: true, force: true }) }
 }
 const lines = (text) => text.trim().split('\n')
+
+test('steps counts a red fast check as a builder repeat but not an unmeasured one', () => {
+  const w = world(), at = '2026-11-20T00:00:00.000Z'
+  const builder = { event: 'seat-turn', stage: 'build', role: 'builder', at }
+  try {
+    w.lane('fast-checks', [
+      builder, { event: 'check', check: 'fast-check', result: { status: 'red', reason: 'exit-nonzero' } },
+      builder, { event: 'check', check: 'fast-check', result: { status: 'unmeasured', reason: 'timeout' } }, builder,
+    ])
+    const run = (flags) => {
+      let out = '', err = ''
+      const status = steps(['--since', at, ...flags], { root: w.root, archiveRoot: w.archiveRoot, stdout: (t) => { out += t }, stderr: (t) => { err += t } })
+      assert.equal(status, 0, err)
+      return out
+    }
+    const { lanes, totals } = JSON.parse(run(['--json']))
+    assert.deepEqual(lanes.find((lane) => lane.lane === 'fast-checks').repeat_builders, [
+      { turn: 2, trigger: 'fast-check-red' }, { turn: 3, trigger: 'unclassified' },
+    ])
+    assert.equal(totals.repeat_builders.by_trigger['fast-check-red'], 1)
+    assert.equal(totals.repeat_builders.builder_turns, 3)
+    const text = run([])
+    assert.match(text, /builder repeats: #2 fast-check-red, #3 unclassified/)
+    assert.match(text, /fast-check-red: 1 of 3/)
+  } finally { w.done() }
+})
 
 function seat(w, n) {
   const file = join(w.root, 'dt-deadplan', 'deadplan', 'seat-runtime', `acp-seat-${n}`, 'acp', 'planner', 'pgid')

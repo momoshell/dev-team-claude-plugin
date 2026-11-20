@@ -825,7 +825,9 @@ export async function runLoop(spec, deps = {}) {
   }
   const suiteCommand = oneLine([spec.suite.command, ...(spec.suite.args ?? [])].join(' '))
   const suiteRun = (signal) => withSleepRerun('suite', () => callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs: spec.suite.timeoutMs, suiteLock: spec.suiteLock, lane: spec.id, ...(signal ? { signal } : {}) }, { command: true, cancellable: !!signal }))
-  const proofRun = (base) => withSleepRerun('proof', () => callCheck('proof', d.proveTests, { cwd, base, tests: namedTests, timeoutMs: spec.proofTimeoutMs, lane: spec.id }))
+  const proofRun = (base) => withSleepRerun('proof', () => callCheck('proof', (input) => d.proveTests(input, {
+    onWorktreeSetup: (setup) => emit('worktree-setup', setup),
+  }), { cwd, base, tests: namedTests, timeoutMs: spec.proofTimeoutMs, lane: spec.id }))
   const result = await (async () => {
   try {
     try { await d.mkdir(spec.taskDir, { recursive: true }) } catch (error) { return await stop('runner-threw', { mkdir: describe(error) }) }

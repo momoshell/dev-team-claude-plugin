@@ -472,23 +472,39 @@ test('an absent package whose build side is red or has no report stays unproven'
 test('setup runs in the old-source worktree before the runner and a failing setup is unmeasured', async () => {
   const cwd = scratchDir('proof-setup-')
   git(cwd, 'init', '-q'); mkdirSync(join(cwd, '.crew')); mkdirSync(join(cwd, 'tests'))
-  writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ proof: [{ match: '**/*.xml', setup: 'node setup.mjs', run: 'node run.mjs {file} {report}' }] }))
-  writeFileSync(join(cwd, 'setup.mjs'), "import { appendFileSync } from 'node:fs'; appendFileSync('ready', 'yes')\n")
+  writeFileSync(join(cwd, '.crew/project.json'), JSON.stringify({ worktreeSetup: '  node\tworktree-setup.mjs  {cwd}  ', proof: [{ match: '**/*.xml', setup: 'node setup.mjs', run: 'node run.mjs {file} {report}' }] }))
+  writeFileSync(join(cwd, 'worktree-setup.mjs'), "import { appendFileSync, existsSync } from 'node:fs'; if (existsSync('tests/report.xml')) process.exit(1); appendFileSync('prepared', process.argv[2])\n")
+  writeFileSync(join(cwd, 'setup.mjs'), "import { appendFileSync, readFileSync } from 'node:fs'; if (readFileSync('prepared', 'utf8') !== '{cwd}') process.exit(1); appendFileSync('ready', 'yes')\n")
   writeFileSync(join(cwd, 'run.mjs'), "import { readFileSync, copyFileSync } from 'node:fs'; if (!['yes', 'build'].includes(readFileSync('ready', 'utf8'))) process.exit(1); copyFileSync(process.argv[2], process.argv[3])\n")
   git(cwd, 'add', '.'); git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
   writeFileSync(join(cwd, 'ready'), 'build')
   writeFileSync(join(cwd, 'tests/report.xml'), '<testsuite><testcase name="works"/><testcase name="also works"/></testsuite>')
   const tests = ['works', 'also works'].map((title) => ({ file: 'tests/report.xml', title }))
-  const result = await proveTests({ cwd, tests })
-  assert.deepEqual(result.rows.map((row) => row.base.state), ['green', 'green']); assert.equal(readFileSync(join(cwd, 'ready'), 'utf8'), 'build')
-  const failing = scratchDir('proof-setup-fail-')
-  git(failing, 'init', '-q'); mkdirSync(join(failing, '.crew'))
-  writeFileSync(join(failing, '.crew/project.json'), JSON.stringify({ proof: [{ match: '**/*.xml', setup: 'node missing.mjs', run: 'cp {file} {report}' }] }))
-  git(failing, 'add', '.'); git(failing, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
-  mkdirSync(join(failing, 'tests')); writeFileSync(join(failing, 'tests/report.xml'), '<testsuite/>')
-  const failed = await proveTests({ cwd: failing, tests })
-  assert.equal(failed.status, 'unmeasured'); assert.equal(failed.reason, 'setup-failed')
-  assert.equal(git(failing, 'worktree', 'list').trim().split('\n').length, 1)
+  const calls = []
+  const result = await proveTests({ cwd, tests, timeoutMs: 10_000 }, { runSuite: (spec) => { calls.push(spec); return runSuite(spec) } })
+  assert.deepEqual(calls.filter(({ args }) => args[0] === 'worktree-setup.mjs'), [
+    { cwd: calls[0].args[4], command: 'node', args: ['worktree-setup.mjs', '{cwd}'], timeoutMs: 600_000 },
+  ])
+  assert.deepEqual(result.rows.map((row) => row.base.state), ['green', 'green'])
+  assert.deepEqual(result.rows.map((row) => row.build.state), ['green', 'green'])
+  assert.equal(readFileSync(join(cwd, 'ready'), 'utf8'), 'build')
+  assert.equal(existsSync(join(cwd, 'prepared')), false)
+  for (const worktreeSetup of [undefined, 'node -e process.exit(1)']) {
+    const failing = scratchDir('proof-setup-fail-')
+    git(failing, 'init', '-q'); mkdirSync(join(failing, '.crew'))
+    const setup = worktreeSetup ? 'node -e 0' : 'node missing.mjs'
+    writeFileSync(join(failing, '.crew/project.json'), JSON.stringify({ worktreeSetup, proof: [{ match: '**/*.xml', setup, run: 'cp {file} {report}' }] }))
+    git(failing, 'add', '.'); git(failing, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'base')
+    mkdirSync(join(failing, 'tests')); writeFileSync(join(failing, 'tests/report.xml'), readFileSync(join(cwd, 'tests/report.xml')))
+    const commands = []
+    const failed = await proveTests({ cwd: failing, tests }, { runSuite: (spec) => {
+      commands.push([spec.command, ...spec.args.slice(0, 2)].join(' '))
+      return runSuite(spec)
+    } })
+    assert.equal(failed.status, 'unmeasured'); assert.equal(failed.reason, 'setup-failed')
+    if (worktreeSetup) assert.deepEqual(commands, ['git worktree add', worktreeSetup, 'git worktree remove'])
+    assert.equal(git(failing, 'worktree', 'list').trim().split('\n').length, 1)
+  }
 })
 
 test('an invalid project config is unmeasured invalid-project-config', async () => {

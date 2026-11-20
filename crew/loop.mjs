@@ -890,7 +890,14 @@ export async function runLoop(spec, deps = {}) {
   const suiteRun = (signal) => withSleepRerun('suite', () => withBudget(spec.suite.timeoutMs, 'suiteTimeoutMs', SUITE_TIMEOUT_DEFAULT_MS, ({ timeoutMs, row }) =>
     callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs, suiteLock: spec.suiteLock, lane: spec.id, ...(signal ? { signal } : {}) }, { command: true, cancellable: !!signal, row })))
   const proofRun = (base) => withSleepRerun('proof', () => withBudget(spec.proofTimeoutMs, 'proofTimeoutMs', PROOF_TIMEOUT_DEFAULT_MS, ({ timeoutMs, row }) =>
-    callCheck('proof', (input) => d.proveTests(input, { onWorktreeSetup: (setup) => emit('worktree-setup', setup) }), { cwd, base, tests: namedTests, timeoutMs, lane: spec.id }, { row })))
+    callCheck('proof', async (input) => {
+      const result = await d.proveTests(input, { onWorktreeSetup: (setup) => emit('worktree-setup', setup) })
+      if (!object(result) || result.status !== 'red' || result.reason !== 'proof-unproven' || !Array.isArray(result.rows)) return result
+      const unproven = result.rows.filter((test) => test?.proven !== true)
+      if (!unproven.length || !unproven.every((test) => test?.reason === 'timeout'
+        && [test.base, test.build].some((side) => side?.reason === 'timeout' && side.state === null))) return result
+      return { ...result, status: 'unmeasured', reason: 'proof-timeout', proofTimeoutMs: timeoutMs ?? PROOF_TIMEOUT_DEFAULT_MS }
+    }, { cwd, base, tests: namedTests, timeoutMs, lane: spec.id }, { row })))
   const result = await (async () => {
   try {
     try { await d.mkdir(spec.taskDir, { recursive: true }) } catch (error) { return await stop('runner-threw', { mkdir: describe(error) }) }

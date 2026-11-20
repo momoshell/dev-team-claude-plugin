@@ -19,14 +19,19 @@ const MUTATION = { check: 'A1', file: 'lib.mjs', find: 'old', replace: 'new' }
 
 test('non-green proof checks name their full captured output artifact (#2410)', async () => {
   const taskDir = scratchDir('loop-proof-output-')
-  for (const mode of ['repair', 'rebase', 'unmeasured']) {
-    const failed = { status: mode === 'unmeasured' ? 'unmeasured' : 'red', reason: mode === 'unmeasured' ? 'timeout' : 'proof-unproven', rows: [],
+  const proofTimeoutMs = 5_000
+  for (const mode of ['repair', 'rebase', 'unmeasured', 'all-timeout']) {
+    const allTimeout = mode === 'all-timeout'
+    const rows = allTimeout ? [{ file: 'lib.test.mjs', title: 'works', proven: false, reason: 'timeout',
+      base: { state: null, reason: 'timeout' }, build: { state: null, reason: 'not-run' } }] : []
+    const failed = { status: mode === 'unmeasured' ? 'unmeasured' : 'red', reason: mode === 'unmeasured' ? 'timeout' : 'proof-unproven', rows,
       stdout: `proof first stdout ${mode}\n${'x'.repeat(5000)}`, stderr: `proof first stderr ${mode}\n${'e'.repeat(5000)}` }
     const proven = { status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }] }
-    const options = { spec: { taskDir, ...(mode === 'rebase' ? { tier: 'mechanical' } : {}) }, proof: mode === 'repair' ? answers(failed, failed, proven) : mode === 'rebase' ? answers(proven, failed) : failed,
+    const options = { spec: { taskDir, ...(allTimeout ? { proofTimeoutMs } : {}), ...(mode === 'rebase' ? { tier: 'mechanical' } : {}) }, proof: mode === 'repair' ? answers(failed, failed, proven) : mode === 'rebase' ? answers(proven, failed) : failed,
       deps: { writeFile: async (...args) => writeFileSync(...args) } }
     const f = mode === 'rebase' ? moved(options) : fakes(options)
-    await f.go()
+    const outcome = await f.go()
+    if (allTimeout) assert.deepEqual(outcome, stopped('proof-timeout'))
     const checks = f.rows.filter((r) => r.event === 'check' && r.check === 'proof' && r.result.status !== 'green')
     assert.equal(checks.length, mode === 'repair' ? 2 : 1)
     for (const row of checks) {
@@ -36,8 +41,15 @@ test('non-green proof checks name their full captured output artifact (#2410)', 
     assert.equal(new Set(checks.map((r) => r.outputFile)).size, checks.length)
     if (mode !== 'repair') {
       const stopped = f.rows.findLast((r) => r.event === 'verdict' && r.status === 'stopped')
-      assert.equal(stopped.reason, failed.reason)
+      assert.equal(stopped.reason, allTimeout ? 'proof-timeout' : failed.reason)
       assert.deepEqual(stopped.observation, checks.at(-1).result)
+      if (allTimeout) {
+        assert.equal(stopped.observation.status, 'unmeasured')
+        assert.deepEqual(stopped.observation.rows, rows)
+        assert.equal(stopped.observation.proofTimeoutMs, proofTimeoutMs)
+        assert.equal(f.seen.proof.timeoutMs, proofTimeoutMs)
+        assert.deepEqual(f.calls.slice(f.calls.indexOf('proof') + 1).filter((call) => call === 'seat:builder' || call === 'seat:lead'), [])
+      }
       for (const stream of ['stdout', 'stderr']) {
         assert.equal(stopped.observation[stream], failed[stream].slice(-4096))
         assert.equal(stopped.observation[`${stream}Bytes`], Buffer.byteLength(failed[stream]))

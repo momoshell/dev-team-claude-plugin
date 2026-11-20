@@ -845,6 +845,32 @@ test('--return spawns a finish run whose spec carries the guidance and the spent
   } finally { cleanup(failed.f) }
 })
 
+// MUTATION: compare timeouts for equality only and a raised project timeout refuses an accept as stale (#2514).
+// MUTATION: compare the worktree alone and an uncommitted raise publishes a commit whose own timeout is lowered (#2514).
+test('--accept is not refused for a raised proof or suite timeout in the worktree and the measured commit; a lowered one, an uncommitted raise or a changed suite still is (#2514)', async () => {
+  const text = (change) => { const p = { suite: 'npm test', proof: [], ...change }; return [projectHash(p), JSON.stringify({ ...p, onboarded: { hash: projectHash(p) } })] }
+  for (const [worktree, committed, reason] of [
+    [{ proofTimeoutMs: 900_000 }, { proofTimeoutMs: 900_000 }, null],
+    [{ suiteTimeoutMs: SUITE_TIMEOUT_DEFAULT_MS + 1 }, { suiteTimeoutMs: SUITE_TIMEOUT_DEFAULT_MS + 1 }, null],
+    [{ proofTimeoutMs: PROOF_TIMEOUT_DEFAULT_MS - 1 }, { proofTimeoutMs: PROOF_TIMEOUT_DEFAULT_MS - 1 }, 'onboarding-stale'],
+    [{ proofTimeoutMs: 900_000 }, { proofTimeoutMs: PROOF_TIMEOUT_DEFAULT_MS - 1 }, 'onboarding-stale'],
+    [{ proofTimeoutMs: 900_000 }, {}, 'onboarding-stale'],
+    [{ suiteTimeoutMs: SUITE_TIMEOUT_DEFAULT_MS + 1 }, { suiteTimeoutMs: SUITE_TIMEOUT_DEFAULT_MS + 1, proofTimeoutMs: 1_000 }, 'onboarding-stale'],
+    [{ suite: 'npm run ci', proofTimeoutMs: 900_000 }, { suite: 'npm run ci', proofTimeoutMs: 900_000 }, 'onboarding-stale'],
+    [{ proofTimeoutMs: 900_000 }, { suite: 'npm run ci', proofTimeoutMs: 900_000 }, 'onboarding-stale'],
+  ]) {
+    const [hash, current] = text(worktree), [, measured] = text(committed)
+    const r = ready([], { spec: { onboarded: hash, suite: { command: 'npm', args: ['test'], timeoutMs: SUITE_TIMEOUT_DEFAULT_MS }, proofTimeoutMs: PROOF_TIMEOUT_DEFAULT_MS } })
+    try {
+      mkdirSync(join(r.f.cwd, '.crew'), { recursive: true })
+      writeFileSync(join(r.f.cwd, '.crew', 'project.json'), current)
+      r.deps.git = (_cwd, args) => args[0] === 'show' && args[1] === `${'b'.repeat(40)}:.crew/project.json` ? { status: 'green', stdout: measured } : { status: 'red', stdout: '' }
+      assert.equal(await reasonOf(r.decide('accept')), reason, JSON.stringify([worktree, committed]))
+      assert.equal(r.published.length, reason === null ? 1 : 0)
+    } finally { cleanup(r.f) }
+  }
+})
+
 // MUTATION: skip the ready test and a decision publishes a lane that never finished.
 test('a decision on a lane whose last run did not end finish-ready is refused as finish-not-ready (FD8)', async () => {
   const stoppedAfter = { event: 'verdict', stage: null, status: 'stopped', reason: 'round-bound' }

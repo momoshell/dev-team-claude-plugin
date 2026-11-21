@@ -109,6 +109,13 @@ the fetch fails; it does not probe seats. The probe is implemented in
    list or use `[]` to leave suite behavior unchanged. Onboarding validates and
    keeps the list without hashing it. Start snapshots it for the lane and its
    finish passes.
+   Optionally set `protectedPaths` to add to the built-in paths that require
+   judge review. Use literal repo-relative entries, not globs. For example,
+   `["migrations/", "config/billing.toml"]` protects the entire migrations
+   directory and only the billing file under config.
+   An absent or empty list adds nothing. Onboarding validates and keeps the
+   list without hashing it. Start snapshots it for the lane and its finish
+   passes and planning resumes.
    Optionally set top-level `proofTimeoutMs` to a safe integer from 1 to
    `2**31-1` ms for every proof run; if absent, it defaults to
    `PROOF_TIMEOUT_DEFAULT_MS` (`crew/proof.mjs`). It is not set per runner entry.
@@ -182,7 +189,7 @@ the fetch fails; it does not probe seats. The probe is implemented in
    old-source worktree. Re-run
    onboarding after changing the suite, proof entries or `worktreeSetup`. Changing only
    `suiteLock`, `suiteTimeoutMs`, `proofTimeoutMs`, `builderChecks`, `fastChecks`,
-   `fastChecksTimeoutMs` or `environmentSignatures` in `.crew/project.json` does
+   `fastChecksTimeoutMs`, `environmentSignatures` or `protectedPaths` in `.crew/project.json` does
    not require re-onboarding.
    Write a brief with
    `skills/lane-brief/SKILL.md`, then run `crew start <brief>` in the checkout.

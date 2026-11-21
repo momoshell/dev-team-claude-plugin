@@ -331,10 +331,12 @@ test('every rebase the loop runs carries the spec generated declaration, none wh
 })
 
 test('a mechanical lane discards its build and restarts from planning: as judge on a protected path, as build on a builder insufficient', async () => {
-  for (const mode of ['path', 'insufficient', 'discard-reset', 'discard-clean']) {
+  for (const mode of ['path', 'project-path', 'insufficient', 'discard-reset', 'discard-clean']) {
     let builds = 0
-    const f = fakes({ spec: { tier: 'mechanical' }, unseated: ['planner', 'reviewer', 'lead'], bounds: { builder: 1 },
-      reviewPaths: mode === 'path' || mode.startsWith('discard-') ? [' M crew/loop.mjs\0', ' M lib.mjs\0'] : undefined,
+    const project = mode === 'project-path'
+    const paths = project ? ['migrations/0007.sql', 'config/billing.toml'] : mode === 'insufficient' ? null : ['crew/loop.mjs']
+    const f = fakes({ spec: { tier: 'mechanical', ...(project ? { protectedPaths: ['migrations/', 'config/billing.toml'] } : {}) }, unseated: ['planner', 'reviewer', 'lead'], bounds: { builder: 1 },
+      reviewPaths: paths ? [paths.map((path) => ` M ${path}\0`).join('') + (project ? ' M config/billing.toml.bak\0' : ''), ' M lib.mjs\0'] : undefined,
       discard: mode.startsWith('discard-') ? (input) => input.args.includes(mode.slice(8)) ? { ...green(), status: 'red', reason: 'exit-nonzero', code: 1 } : green() : undefined,
       edit: (v) => {
         if (v.role === 'builder') { builds++; if (builds === 1 && mode === 'insufficient') v.status = 'insufficient'; else if (builds === 1) v.details.subject = 'docs(crew): fix typo' }
@@ -343,17 +345,20 @@ test('a mechanical lane discards its build and restarts from planning: as judge 
     })
     const result = await f.go()
     if (mode.startsWith('discard-')) { assert.equal(result.reason, 'exit-nonzero'); assert.equal(f.requests.some((r) => r.role === 'planner'), false); continue }
+    const row = f.rows.find((r) => r.event === 'tier-raised')
+    assert.ok(row, `${mode}: expected mechanical restart`)
     assert.equal(result.status, 'done', mode)
     assert.deepEqual(f.discardArgs, [['reset', '--hard', 'a'.repeat(40)], ['clean', '-f', '-d']])
     assert.ok(f.calls.lastIndexOf('discard') < f.calls.indexOf('seat:planner'))
-    assert.deepEqual(f.requests.map((r) => r.role), mode === 'path' ? ['builder', 'planner', 'builder', 'reviewer', 'tech-lead'] : ['builder', 'planner', 'builder', 'reviewer'])
-    const row = f.rows.find((r) => r.event === 'tier-raised')
-    assert.deepEqual([row.from, row.to, row.reason], ['mechanical', mode === 'path' ? 'judge' : 'build', mode === 'path' ? 'protected-path' : 'builder-insufficient'])
+    assert.deepEqual(f.requests.map((r) => r.role), paths ? ['builder', 'planner', 'builder', 'reviewer', 'tech-lead'] : ['builder', 'planner', 'builder', 'reviewer'])
+    assert.deepEqual([row.from, row.to, row.reason], ['mechanical', paths ? 'judge' : 'build', paths ? 'protected-path' : 'builder-insufficient'])
     const planner = f.requests.find((r) => r.role === 'planner')
     assert.equal(planner.feedback[0].id, 'mechanical-restart')
     assert.equal(planner.feedback[0].reason, row.reason)
-    if (mode === 'path') assert.deepEqual(planner.feedback[0].paths, ['crew/loop.mjs'])
-    else assert.equal(planner.feedback[0].envelope.status, 'insufficient')
+    if (paths) {
+      assert.deepEqual(row.paths, paths)
+      assert.deepEqual(planner.feedback[0].paths, paths)
+    } else assert.equal(planner.feedback[0].envelope.status, 'insufficient')
     assert.deepEqual(f.requests.filter((r) => r.role === 'builder')[1].feedback, [])
     assert.equal(f.requests.filter((r) => r.role === 'builder')[1].tier, row.to)
   }

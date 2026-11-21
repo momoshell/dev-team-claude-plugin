@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
-import { existsSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { scratchDir } from '../test/helpers.mjs'
 import { CHECK_REASONS, runSuite } from './checks.mjs'
@@ -139,19 +139,26 @@ test('runSuite serializes opted-in suites across worktrees and processes', { tim
   git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', '-c', 'commit.gpgSign=false', 'commit', '--quiet', '--allow-empty', '-m', 'base')
   const trees = [join(root, 'one'), join(root, 'two')]
   for (const tree of trees) git('worktree', 'add', '--detach', '--quiet', tree, 'HEAD')
-  const marker = (name) => join(root, name)
+  const cases = [[join(root, 'parallel'), 2], [join(root, 'mixed'), 1]]
+  for (const [dir] of cases) mkdirSync(dir)
+  const marker = (name, dir = root) => join(dir, name)
   const command = `
     const { existsSync, writeFileSync, openSync, closeSync, unlinkSync } = require('node:fs');
     const { join } = require('node:path');
-    const [root, name] = process.argv.slice(1);
+    const [root, name, slots] = process.argv.slice(1);
     const marker = name => join(root, name);
     let owns = false;
-    try { closeSync(openSync(marker('active'), 'wx')); owns = true }
-    catch (error) { if (error.code !== 'EEXIST') throw error; writeFileSync(marker('overlap'), name) }
+    if (slots === undefined) {
+      try { closeSync(openSync(marker('active'), 'wx')); owns = true }
+      catch (error) { if (error.code !== 'EEXIST') throw error; writeFileSync(marker('overlap'), name) }
+    }
     writeFileSync(marker(name + '-entered'), '');
     const deadline = Date.now() + 8000;
     const timer = setInterval(() => {
-      if (name === 'one' && !existsSync(marker('release-one')) && Date.now() < deadline) return;
+      if ((name === 'one' || (slots !== undefined && name === 'two')) && !existsSync(marker('release-' + name))) {
+        if (Date.now() < deadline) return;
+        process.exitCode = 1;
+      }
       clearInterval(timer);
       if (owns) unlinkSync(marker('active'));
     }, 10);
@@ -160,20 +167,23 @@ test('runSuite serializes opted-in suites across worktrees and processes', { tim
   const runner = `
     import { existsSync, writeFileSync } from 'node:fs';
     import { runSuite } from ${JSON.stringify(new URL('./checks.mjs', import.meta.url).href)};
-    const [cwd, root, name, source] = process.argv.slice(1);
-    if (name === 'two') {
+    const [cwd, root, name, source, slots] = process.argv.slice(1);
+    if (name === 'two' && slots === undefined) {
       const now = performance.now.bind(performance);
       Object.defineProperty(performance, 'now', {
         value: () => now() + (existsSync(root + '/release-one') ? ${suspensionMs} : 0),
       });
     }
     writeFileSync(root + '/' + name + '-requested', '');
-    const result = await runSuite({ cwd, command: process.execPath, args: ['-e', source, root, name], timeoutMs: 10000, suiteLock: true, lane: name });
+    const result = await runSuite({ cwd, command: process.execPath, args: ['-e', source, root, name, ...(slots === undefined ? [] : [slots])],
+      timeoutMs: 10000, suiteLock: true, lane: name, ...(slots === undefined ? {} : { suiteSlots: Number(slots) }) });
     console.log(JSON.stringify(result));
   `
   const runners = []
-  const launch = (i) => {
-    const child = spawn(process.execPath, ['--input-type=module', '-e', runner, trees[i], root, ['one', 'two'][i], command], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const launch = (i, dir = root, slots) => {
+    const args = ['--input-type=module', '-e', runner, trees[i % trees.length], dir, ['one', 'two', 'three'][i], command]
+    if (slots !== undefined) args.push(String(slots))
+    const child = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = '', stderr = ''
     child.stdout.on('data', (chunk) => { stdout += chunk })
     child.stderr.on('data', (chunk) => { stderr += chunk })
@@ -184,11 +194,18 @@ test('runSuite serializes opted-in suites across worktrees and processes', { tim
     runners.push({ child, done })
     return done
   }
-  const waitFor = async (name) => {
-    const deadline = Date.now() + GATE_TIMEOUT_MS
-    while (!existsSync(marker(name)) && Date.now() < deadline) await sleep(10)
-    assert.ok(existsSync(marker(name)), `${name} was not reached`)
+  const waitFor = async (name, dir = root, ms = GATE_TIMEOUT_MS) => {
+    const path = marker(name, dir)
+    const deadline = Date.now() + ms
+    while (!existsSync(path) && Date.now() < deadline) await sleep(10)
+    assert.ok(existsSync(path), `${name} was not reached`)
   }
+  const greenResults = async (...runs) => (await Promise.all(runs)).map((run) => {
+    assert.equal(run.code, 0, run.stderr)
+    const result = JSON.parse(run.stdout)
+    assert.equal(result.status, 'green', run.stdout)
+    return result
+  })
   try {
     const first = launch(0)
     await waitFor('one-entered')
@@ -199,19 +216,41 @@ test('runSuite serializes opted-in suites across worktrees and processes', { tim
     while (!existsSync(marker('two-entered')) && Date.now() < until) await sleep(10)
     const overlapped = existsSync(marker('overlap'))
     writeFileSync(marker('release-one'), '')
-    const completed = await Promise.all([first, second])
-    for (const run of completed) {
-      assert.equal(run.code, 0, run.stderr)
-      assert.equal(JSON.parse(run.stdout).status, 'green', run.stdout)
-    }
-    const contender = JSON.parse(completed[1].stdout)
+    const [, contender] = await greenResults(first, second)
     assert.ok(contender.suite_lock_wait_s >= suspensionMs / 1000, 'elapsed queue time includes suspension')
     assert.ok(Math.abs(contender.suite_lock_sleep_credited_s - suspensionMs / 1000) < 2, 'queue credit accounts for suspension')
     assert.equal(contender.sleep_credited_s ?? 0, 0, 'queue credit is separate from suite execution credit')
     assert.equal(overlapped || existsSync(marker('overlap')), false, 'suite commands in sibling worktrees overlapped')
     assert.ok(existsSync(marker('two-entered')), 'the waiting suite eventually ran')
+
+    const legacy = join(root, '.git', 'crew-suite-lock')
+    for (const [dir, firstCount] of cases) {
+      const one = launch(0, dir, firstCount)
+      const pid = runners.at(-1).child.pid
+      await waitFor('one-entered', dir)
+      const two = launch(1, dir, 2)
+      // Fail while the first suite is still gated if the second slot is unusable.
+      await waitFor('two-entered', dir, 5000)
+      const epochs = readdirSync(legacy).filter((name) => /^[1-9]\d*\.json$/.test(name))
+      const record = JSON.parse(readFileSync(join(legacy, `${Math.max(...epochs.map((name) => parseInt(name, 10)))}.json`), 'utf8'))
+      assert.equal(record.pid, pid, 'the first runner owns the legacy epoch')
+      assert.equal(record.lane, 'one')
+
+      const three = launch(2, dir, 2)
+      await waitFor('three-requested', dir)
+      await sleep(1000)
+      assert.equal(existsSync(marker('three-entered', dir)), false, 'a third suite entered before either holder released')
+      writeFileSync(marker('release-one', dir), '')
+      await waitFor('three-entered', dir, 5000)
+      const [third] = await greenResults(three)
+      writeFileSync(marker('release-two', dir), '')
+      const holders = await greenResults(one, two)
+      assert.deepEqual([...holders, third].map((run) => run.suite_lock_slot), [1, 2, 1])
+    }
   } finally {
-    writeFileSync(marker('release-one'), '')
+    for (const dir of [root, ...cases.map(([dir]) => dir)]) {
+      for (const name of ['one', 'two']) writeFileSync(marker(`release-${name}`, dir), '')
+    }
     await Promise.race([Promise.allSettled(runners.map(({ done }) => done)), sleep(12_000, undefined, { ref: false })])
     for (const { child } of runners) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
     for (const tree of trees) git('worktree', 'remove', '--force', tree)

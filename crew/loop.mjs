@@ -26,7 +26,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { resolveAgents } from './agents.mjs'
 import {
-  CHECK_REASONS, FINISH_REVIEW_ROUNDS, commitChanges, openPullRequest, parseStatus, rebaseBranch, runSuite, validFastChecks, validGenerated, validTimeout,
+  CHECK_REASONS, FINISH_REVIEW_ROUNDS, commitChanges, openPullRequest, parseStatus, rebaseBranch, runSuite, validFastChecks, validGenerated, validSuiteSlots, validTimeout,
 } from './checks.mjs'
 import { HEX_OID, describeError as describe, GIT_STATUS_ARGS, gitRepoState } from './lane-core.mjs'
 import { OnboardRefusal, readRegular, requireOnboarded, SUITE_TIMEOUT_DEFAULT_MS, validEnvironmentSignatures, validProtectedPaths } from './onboard.mjs'
@@ -273,6 +273,7 @@ export async function runLoop(spec, deps = {}) {
     && (spec.environmentSignatures === undefined || validEnvironmentSignatures(spec.environmentSignatures))
     && (spec.protectedPaths === undefined || validProtectedPaths(spec.protectedPaths))
     && (spec.suiteLock === undefined || typeof spec.suiteLock === 'boolean')
+    && (spec.suiteSlots === undefined || validSuiteSlots(spec.suiteSlots))
     && (!Object.hasOwn(spec, 'generated') || validGenerated(spec.generated))
     && (spec.closes === undefined || Array.isArray(spec.closes))
     && (!Object.hasOwn(spec, 'roster') || rosterSound(spec.roster))
@@ -904,7 +905,8 @@ export async function runLoop(spec, deps = {}) {
     ? budget(started, field, floor).then(run) : run({ timeoutMs: started, row: {} })
   const suiteCommand = oneLine([spec.suite.command, ...(spec.suite.args ?? [])].join(' '))
   const suiteRun = (signal) => withCheckRerun('suite', (retryRow) => withBudget(spec.suite.timeoutMs, 'suiteTimeoutMs', SUITE_TIMEOUT_DEFAULT_MS, ({ timeoutMs, row }) =>
-    callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs, suiteLock: spec.suiteLock, lane: spec.id, ...(signal ? { signal } : {}) }, { command: true, cancellable: !!signal, row: { ...row, ...retryRow } })))
+    callCheck('suite', d.runSuite, { cwd, command: spec.suite.command, args: spec.suite.args, timeoutMs, suiteLock: spec.suiteLock, lane: spec.id,
+      ...(spec.suiteSlots === undefined ? {} : { suiteSlots: spec.suiteSlots }), ...(signal ? { signal } : {}) }, { command: true, cancellable: !!signal, row: { ...row, ...retryRow } })))
   const proofRun = (base) => withCheckRerun('proof', () => withBudget(spec.proofTimeoutMs, 'proofTimeoutMs', PROOF_TIMEOUT_DEFAULT_MS, ({ timeoutMs, row }) =>
     callCheck('proof', async (input) => {
       const result = await d.proveTests(input, { onWorktreeSetup: (setup) => emit('worktree-setup', setup) })

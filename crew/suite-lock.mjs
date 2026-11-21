@@ -63,7 +63,15 @@ function holderState(record, path) {
   }
 }
 
-export async function acquireSuiteLock({ cwd, lane, signal }) {
+function observe(dir) {
+  const epochs = readdirSync(dir).filter((name) => /^[1-9]\d*\.json$/.test(name)).map((name) => Number(name.slice(0, -5)))
+  const fence = epochs.reduce((max, epoch) => Math.max(max, epoch), 0)
+  if (!Number.isSafeInteger(fence + 1)) throw new Error('suite lock epoch exhausted')
+  const current = fence ? join(dir, `${fence}.json`) : null
+  return { fence, holder: current ? holderState(read(current).value, current) : null }
+}
+
+export async function acquireSuiteLock({ cwd, lane, signal, suiteSlots = 1 }) {
   const now = () => performance.now()
   const started = now()
   const budget = sampledBudget(WAIT_MS, { now })
@@ -77,25 +85,25 @@ export async function acquireSuiteLock({ cwd, lane, signal }) {
       ...(holder ? { suite_lock_holder: holder } : {}),
     }
   }
-  let dir, holder
+  const holders = Array(suiteSlots).fill(null)
   try {
     // Sample between ownership polls; the queue loop handles expiry and cancellation.
     budget.watch(() => {})
     const git = await exec('git', ['rev-parse', '--git-common-dir'], { cwd, encoding: 'utf8', timeout: 10_000 })
-    dir = join(realpathSync(resolve(cwd, git.stdout.trim())), 'crew-suite-lock')
-    mkdirSync(dir, { recursive: true })
+    const root = join(realpathSync(resolve(cwd, git.stdout.trim())), 'crew-suite-lock')
+    // Slot 1 uses the legacy directory. Older runners ignore the numbered subdirectories.
+    const dirs = holders.map((_, i) => i === 0 ? root : join(root, String(i + 1)))
+    for (const dir of dirs) mkdirSync(dir, { recursive: true })
     for (;;) {
       // A cancelled lane leaves the queue before it publishes anything.
-      if (signal?.aborted) return { ok: false, reason: 'cancelled', ...fields(holder) }
-      if (budget.remaining() <= 0) return { ok: false, reason: 'suite-lock-timeout', ...fields(holder) }
-      // Fenced exclusive publication, as in reclaim.mjs. Keep epoch records so a
-      // delayed contender can never recreate an old epoch (or delete a successor).
-      const epochs = readdirSync(dir).filter((name) => /^[1-9]\d*\.json$/.test(name)).map((name) => Number(name.slice(0, -5)))
-      const fence = epochs.reduce((max, epoch) => Math.max(max, epoch), 0)
-      if (!Number.isSafeInteger(fence + 1)) throw new Error('suite lock epoch exhausted')
-      const current = fence ? join(dir, `${fence}.json`) : null
-      holder = current ? holderState(read(current).value, current) : null
-      if (!holder || holder.state === 'dead') {
+      if (signal?.aborted) return { ok: false, reason: 'cancelled', ...fields(holders[0]) }
+      for (let i = 0; i < dirs.length && budget.remaining() > 0; i++) {
+        const dir = dirs[i]
+        const { fence, holder } = observe(dir)
+        holders[i] = holder
+        if (holder && holder.state !== 'dead') continue
+        // Fenced exclusive publication, as in reclaim.mjs. Keep epoch records so a
+        // delayed contender can never recreate an old epoch (or delete a successor).
         const token = randomUUID()
         const record = { token, pid: process.pid, startedAt: selfStartedAt(), host, lane: lane ?? null }
         const path = join(dir, `${fence + 1}.json`)
@@ -111,7 +119,7 @@ export async function acquireSuiteLock({ cwd, lane, signal }) {
         if (published) {
           // Group publication is atomic and precedes permission to execute.
           return {
-            ok: true, ...fields(),
+            ok: true, suite_lock_slot: i + 1, ...fields(),
             command: (command, args) => ({ command: process.execPath, args: ['-e', GATE, JSON.stringify([command, args])] }),
             start(child) {
               const tmpGroup = `${path}.${token}.tmp`
@@ -127,13 +135,20 @@ export async function acquireSuiteLock({ cwd, lane, signal }) {
             },
           }
         }
+        // A contender won this epoch. Observe the new owner before trying the next slot.
+        holders[i] = { state: 'unknown' }
+        const winner = observe(dir)
+        if (winner.fence > fence) holders[i] = winner.holder
       }
       const remaining = budget.remaining()
-      if (remaining <= 0) return { ok: false, reason: 'suite-lock-timeout', ...fields(holder) }
+      if (remaining <= 0) return {
+        ok: false, reason: 'suite-lock-timeout', ...fields(holders[0]),
+        suite_lock_holders: holders.map((holder, i) => ({ ...(holder ?? { state: 'unknown' }), slot: i + 1 })),
+      }
       await sleep(Math.min(POLL_MS, remaining))
     }
   } catch (error) {
-    return { ok: false, reason: 'suite-lock-unavailable', ...fields(holder), error: { code: error.code ?? null, message: error.message } }
+    return { ok: false, reason: 'suite-lock-unavailable', ...fields(holders[0]), error: { code: error.code ?? null, message: error.message } }
   } finally {
     budget.stop()
   }

@@ -26,6 +26,7 @@ const INHERITED_ENV = ['FORCE_COLOR', 'CLICOLOR_FORCE', 'NODE_TEST_CONTEXT', 'NO
 const sleep = (ms) => new Promise((wake) => setTimeout(wake, ms))
 const unmeasured = (reason, extra = {}) => ({ status: 'unmeasured', reason, code: null, signal: null, stdout: '', stderr: '', timedOut: false, pgid: null, ...extra })
 export const validTimeout = (ms) => Number.isSafeInteger(ms) && ms > 0 && ms <= MAX_TIMEOUT_MS
+export const validSuiteSlots = (v) => Number.isInteger(v) && v >= 1 && v <= 8
 export const validFastChecks = (v) => Array.isArray(v) && [...v].every((s) => typeof s === 'string' && s.trim() !== '' && !s.includes('\0'))
 
 function cleanEnv() {
@@ -65,16 +66,17 @@ async function reapGroup(child, probe, isClosed) {
   return until(REAP_SETTLE_MS)
 }
 
-export async function runSuite({ cwd, command, args = [], timeoutMs = DEFAULT_TIMEOUT_MS, suiteLock = false, lane, signal } = {}, deps = {}) {
+export async function runSuite({ cwd, command, args = [], timeoutMs = DEFAULT_TIMEOUT_MS, suiteLock = false, suiteSlots = 1, lane, signal } = {}, deps = {}) {
   if (process.platform === 'win32') return Promise.resolve(unmeasured('unsupported-platform'))
   const valid = typeof cwd === 'string' && cwd !== '' && typeof command === 'string' && command !== ''
     && Array.isArray(args) && args.every((arg) => typeof arg === 'string')
-    && validTimeout(timeoutMs) && typeof suiteLock === 'boolean' && (lane === undefined || (typeof lane === 'string' && lane !== '' && !lane.includes('\0')))
+    && validTimeout(timeoutMs) && typeof suiteLock === 'boolean' && validSuiteSlots(suiteSlots)
+    && (lane === undefined || (typeof lane === 'string' && lane !== '' && !lane.includes('\0')))
     && (signal === undefined || signal instanceof AbortSignal)
   if (!valid) return unmeasured('invalid-input')
-  const lock = suiteLock ? await acquireSuiteLock({ cwd, lane, signal }) : null
+  const lock = suiteLock ? await acquireSuiteLock({ cwd, lane, signal, suiteSlots }) : null
   const wait = {}
-  if (lock) for (const key of ['suite_lock_wait_s', 'suite_lock_sleep_credited_s', 'suite_lock_sleep_credit_reason']) {
+  if (lock) for (const key of ['suite_lock_wait_s', 'suite_lock_sleep_credited_s', 'suite_lock_sleep_credit_reason', 'suite_lock_slot', 'suite_lock_holders']) {
     if (key in lock) wait[key] = lock[key]
   }
   // Cancelled while queued: no suite process was started, so there is nothing to clean up.

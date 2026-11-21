@@ -250,6 +250,7 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
     source: fields.source, branch: lane, base, closes: fields.closes === null ? [] : [fields.closes],
     suite: suiteSpec(project.suite, project.suiteTimeoutMs), proofTimeoutMs: project.proofTimeoutMs, onboarded: project.hash,
     ...(suiteLock === undefined ? {} : { suiteLock }),
+    ...(project.suiteSlots === undefined ? {} : { suiteSlots: project.suiteSlots }),
     ...(project.builderChecks === undefined ? {} : { builderChecks: project.builderChecks }),
     ...(project.fastChecks === undefined ? {} : { fastChecks: project.fastChecks }),
     ...(project.fastChecksTimeoutMs === undefined ? {} : { fastChecksTimeoutMs: project.fastChecksTimeoutMs }),

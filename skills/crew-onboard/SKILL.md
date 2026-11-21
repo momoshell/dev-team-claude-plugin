@@ -75,25 +75,33 @@ the fetch fails; it does not probe seats. The probe is implemented in
    if absent, the suite timeout is `SUITE_TIMEOUT_DEFAULT_MS` (`crew/onboard.mjs`).
    Optionally set boolean `suiteLock: true` to queue project suites across this
    checkout's lane processes and worktrees using its shared Git common directory.
-   Absent or false disables it; other values are refused. It covers start,
-   finish and publishing-rebase suite rechecks, not proof, worktree setup,
-   onboarding or builder checks. Lane concurrency does not change. Acquisition
-   has a separate two-hour awake-time bound; `suiteTimeoutMs` starts after acquisition.
+   Absent or false leaves the lock off unless the personal `suiteLock` is true.
+   Non-boolean lock values are refused. Optionally set the project-only
+   `suiteSlots` to an integer from 1 to 8 (default 1). It is
+   validated even with the lock off, where it has no effect. A locked lane
+   takes any free slot up to its count. Slot 1 keeps the old directory and
+   records, so older runners still share it and cannot take higher slots.
+   The lock covers only project suites, not proof, worktree setup, onboarding
+   or builder checks. Lane concurrency does not change. Acquisition has a
+   separate two-hour awake-time bound; `suiteTimeoutMs` starts after acquisition.
    The journal result's `suite_lock_wait_s` records total measured elapsed
    acquisition seconds, including suspension. `suite_lock_sleep_credited_s`
    records acquisition sleep credit separately from subprocess `sleep_credited_s`.
    Measured zero may be absent. If sampling is unavailable, acquisition credit
    is `null` with `suite_lock_sleep_credit_reason: 'clock-unavailable'`, and
-   ordinary elapsed-time enforcement remains in effect. Bounded waiting stops
-   unmeasured with `suite-lock-timeout` and `suite_lock_holder` diagnostics.
-   Lock I/O or resolution failures stop with `suite-lock-unavailable`.
+   ordinary elapsed-time enforcement remains in effect. `suite_lock_slot` names
+   the acquired slot. Bounded waiting stops unmeasured with `suite-lock-timeout`
+   and `suite_lock_holders`, an observation for each eligible slot.
+   `suite_lock_holder` still reports slot 1 on lock failures. Lock I/O or
+   resolution failures stop with `suite-lock-unavailable`.
    Only proven-dead ownership is reclaimed, never by age; uncertain/unreadable
    holders stay unknown, and a surviving suite group prevents reclamation.
-   To clear an unknown or wrongly live-judged holder, ensure no suite of the
-   checkout is running or waiting, then remove `<git-common-dir>/crew-suite-lock/`.
-   Resolve the common directory with `git rev-parse --git-common-dir`.
-   Start captures the setting for the lane and its finish passes; editing it
-   does not retrofit running lanes or require re-onboarding.
+   To clear an unknown or wrongly live-judged holder, ensure no suite in any
+   worktree is running or waiting, then remove `<git-common-dir>/crew-suite-lock/`
+   to clear all slots. Resolve the common directory with `git rev-parse --git-common-dir`.
+   Start snapshots the effective lock and project count for planning resumes,
+   finish passes and publishing-rebase rechecks. Edits do not affect running
+   lanes or require re-onboarding.
    Suite, proof (both sides, setup and listing), `fastChecks` and `worktreeSetup` commands
    receive `CREW_LANE`, the lane name, overriding an inherited value only in
    the child environment. A script can name per-lane services instead of
@@ -188,9 +196,9 @@ the fetch fails; it does not probe seats. The probe is implemented in
    have matching onboarding; proof reads runner entries from the lane's
    old-source worktree. Re-run
    onboarding after changing the suite, proof entries or `worktreeSetup`. Changing only
-   `suiteLock`, `suiteTimeoutMs`, `proofTimeoutMs`, `builderChecks`, `fastChecks`,
-   `fastChecksTimeoutMs`, `environmentSignatures` or `protectedPaths` in `.crew/project.json` does
-   not require re-onboarding.
+   `suiteLock`, `suiteSlots`, `suiteTimeoutMs`, `proofTimeoutMs`, `builderChecks`,
+   `fastChecks`, `fastChecksTimeoutMs`, `environmentSignatures` or `protectedPaths`
+   in `.crew/project.json` does not require re-onboarding.
    Write a brief with
    `skills/lane-brief/SKILL.md`, then run `crew start <brief>` in the checkout.
    The start checks the base.

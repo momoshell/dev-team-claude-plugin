@@ -1,6 +1,6 @@
 # ADR-054 — Each tier runs its own loop, and every stage earns its place
 
-**Status:** *proposed* 2026-11-01, operator direction ("each lane type should have its loop"); §2–§4 amended by ADR-055; checkout suite coordination amendment 2026-11-18 (#2457); §2 pending build-suite cancellation amendment 2026-11-18 (#2459); §1 host-sleep re-run amendment 2026-11-19 (#2493); §1 fast-check amendment 2026-11-20 (#2509); §1 environment-signature re-run amendment 2026-11-20 (#2520) · **Owner:** operator ·
+**Status:** *proposed* 2026-11-01, operator direction ("each lane type should have its loop"); §2–§4 amended by ADR-055; checkout suite coordination amendment 2026-11-18 (#2457), amended 2026-11-21 for suite slots (#2534); §2 pending build-suite cancellation amendment 2026-11-18 (#2459); §1 host-sleep re-run amendment 2026-11-19 (#2493); §1 fast-check amendment 2026-11-20 (#2509); §1 environment-signature re-run amendment 2026-11-20 (#2520) · **Owner:** operator ·
 **Relates to:** ADR-052 (§6 the loop), ADR-053 (build first, prove after), ADR-038 (the judge floor forces proof),
 ADR-051 (finish shape)
 
@@ -213,3 +213,26 @@ Two measured the-power suites ended 26 seconds apart with Postgres connection
 errors on 2026-11-17. Overlap was measured, but it was not proven to be the
 outage's cause. This amendment makes no claim that queueing alone would have
 prevented it.
+
+## Amendment 2026-11-21: project suite slots (#2534)
+
+This extends the [checkout suite coordination amendment](#amendment-2026-11-18-checkout-suite-coordination-2457).
+Optional `suiteSlots` in `.crew/project.json` is an integer from 1 to 8 and
+defaults to 1. Onboarding validates and retains it without hashing it. It has
+no effect when the lock is off and is not a personal settings key. Start
+snapshots the count for the lane, its planning resumes and its finish passes,
+including publishing-rebase rechecks. A valid count edit affects only new lanes
+and does not make finish acceptance stale.
+
+With the lock on, a lane takes any free slot up to its count, without waiter
+ordering. Slot 1 keeps the original `crew-suite-lock/` directory and epoch
+format; slots 2 through 8 use numbered subdirectories. Older runners use only
+slot 1 and still exclude new runners there. The largest participating count
+bounds the number of locked suites running at once.
+
+All slots share one two-hour sleep-credited acquisition budget, outside the
+suite budget. The suite check result adds `suite_lock_slot` on acquisition or
+`suite_lock_holders` on `suite-lock-timeout`, with the last observation for each
+eligible slot. `suite_lock_holder` remains the slot 1 diagnostic. Recovery clears
+all slots: ensure no suite in any worktree is running or waiting before removing
+`<git-common-dir>/crew-suite-lock/`.

@@ -1,7 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { once } from 'node:events'
+import { setTimeout as delay } from 'node:timers/promises'
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { main } from './closeout.mjs'
 import { decideFinish } from './finish.mjs'
@@ -634,9 +636,56 @@ test('a dead run with no pull request is refused as run-died naming crew record-
   } finally { w.done() }
 })
 
-test('CL1-CL3 a merged clean lane loses worktree and branch and moves to the archive, in order', () => {
+test('CL1-CL3 a merged clean lane loses worktree and branch and moves to the archive, in order', async () => {
   const w = world()
+  let supervisor, exited
   try {
+    const executable = join(w.worktree, 'target', 'debug', 'test binary')
+    mkdirSync(join(executable, '..'), { recursive: true })
+    copyFileSync('/bin/bash', executable)
+    chmodSync(executable, 0o755)
+    if (process.platform === 'darwin') {
+      // macOS rejects a copy with the system binary's original signature.
+      const signed = spawnSync('/usr/bin/codesign', ['--force', '--sign', '-', executable], { encoding: 'utf8' })
+      assert.equal(signed.status, 0, signed.stderr)
+    }
+    git(w.worktree, 'add', '-f', executable)
+    git(w.worktree, 'commit', '-qm', 'add executable')
+
+    const ready = [join(w.home, 'executable-pid'), join(w.home, 'cwd-pid')]
+    // A separate parent reaps both children while main is running synchronously.
+    supervisor = spawn(process.execPath, ['-e', `
+      const { spawn } = require('node:child_process')
+      const [executable, home, worktree, execReady, cwdReady] = process.argv.slice(1)
+      const children = [
+        [executable, home, execReady, "trap '' TERM; "],
+        ['/bin/bash', worktree, cwdReady, ''],
+      ].map(([exe, cwd, file, trap]) => spawn(exe,
+        ['-c', trap + 'printf "%s" "$$" > "$1"; read -r done', 'fixture', file],
+        { cwd, detached: true, stdio: ['pipe', 'ignore', 'inherit'] }))
+      const release = () => {
+        clearTimeout(timer)
+        process.stdin.pause()
+        for (const child of children) child.stdin.end()
+      }
+      const timer = setTimeout(release, 30_000)
+      process.stdin.resume().once('end', release)
+    `, executable, w.home, w.worktree, ...ready], { stdio: ['pipe', 'ignore', 'inherit'] })
+    exited = once(supervisor, 'close')
+    const deadline = Date.now() + 5000
+    let pids
+    while (Date.now() < deadline) {
+      if (ready.every(existsSync)) {
+        pids = ready.map((path) => Number(readFileSync(path, 'utf8').trim()))
+        if (pids.every((pid) => Number.isSafeInteger(pid) && pid > 1)) break
+      }
+      await delay(25)
+    }
+    assert.ok(pids?.every((pid) => pid > 1), 'both children are ready')
+    const [execPid, cwdPid] = pids
+    assert.equal(probeAlive(execPid), true)
+    assert.equal(probeAlive(cwdPid), true)
+
     const calls = [], run = runner('MERGED', tipOf(w), calls)
     const r = close(w, { run: (cmd, args, options) => {
       const timeout = options?.timeout ?? 60_000
@@ -653,7 +702,15 @@ test('CL1-CL3 a merged clean lane loses worktree and branch and moves to the arc
     const effects = calls.filter((c) => c[0] === 'git' && (c.includes('remove') || c.includes('-D'))).map((c) => c.slice(3, 5).join(' '))
     assert.deepEqual(effects, ['worktree remove', 'branch -D'])
     assert.deepEqual(calls.find((c) => c[0] === 'gh'), ['gh', 'pr', 'view', PR_ROW.pr.url, '--json', 'state,headRefOid'])
-  } finally { w.done() }
+    assert.equal(probeAlive(execPid), false, 'the detached executable is gone')
+    assert.equal(probeAlive(cwdPid), true, 'the cwd-only process is still alive')
+    assert.ok(r.out.includes(`stopped process PID ${execPid}: ${executable}\n`), r.out)
+    assert.ok(r.out.includes(`process PID ${cwdPid}: cwd only, left running: ${w.worktree}\n`), r.out)
+  } finally {
+    supervisor?.stdin.end()
+    if (exited) await exited
+    w.done()
+  }
 })
 
 test('a lane archived before is closed out to the next free archive destination, keeping the previous archive', () => {

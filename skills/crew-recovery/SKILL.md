@@ -156,7 +156,14 @@ forced. An absent worktree is skipped on retry and its branch is not checked.
 Inspect the lane first: discard removes its worktree.
 
 Closeout and discard stop proven seat groups and report unproven ones
-(`reapLaneSeats` in `crew/seat-reap.mjs`).
+(`reapLaneSeats` in `crew/seat-reap.mjs`). Before removing a present worktree,
+both commands also send SIGTERM to individual processes whose executable resolves
+inside it, then SIGKILL to those still running after five seconds. They print
+each PID and executable and whether the process was proven stopped. A process
+whose only link is its working directory is reported and left running. If working
+directories cannot be checked, closeout says so. Neither unavailable checks nor
+unproven stops block removal. Both process checks are skipped if the worktree is
+already absent.
 
 - Finished by hand: in the lane worktree, commit every change the build made
   (`git status --short` shows nothing left), fetch, and rebase onto the base the

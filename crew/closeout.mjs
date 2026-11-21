@@ -18,6 +18,7 @@ import { createLeanSource } from './lean-source.mjs'
 import { stateless, supersededReturn } from './lean-journal-order.mjs'
 import { LANE, isObject, parseJournalRows, within } from './lane-core.mjs'
 import { reapLaneSeats } from './seat-reap.mjs'
+import { reapWorktreeProcesses } from './worktree-processes.mjs'
 import { parsePrUrl } from './record-pr.mjs'
 import { deadRun, parsePidRecord, probeAlive } from './run-pid.mjs'
 import { claimStop } from './finish.mjs'
@@ -52,7 +53,7 @@ function must(run, what, cmd, args, options) {
   return String(result.stdout ?? '')
 }
 
-function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), archiveRoot, run = defaultRun, renameSync: rename = renameSync, mkdirSync: mkdir = mkdirSync, alive = probeAlive, kill = process.kill, sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms), now = Date.now } = {}) {
+function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), archiveRoot, stdout, run = defaultRun, renameSync: rename = renameSync, mkdirSync: mkdir = mkdirSync, alive = probeAlive, kill = process.kill, sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms), now = Date.now } = {}) {
   if (typeof lane !== 'string' || !LANE.test(lane)) refuse('lane must be a lean lane slug')
   const archive = archiveRoot ?? join(dirname(root), '.crew-journal-archive')
   const found = createLeanSource({ crewRoot: root, archiveRoot: archive }).resolveLane(lane)
@@ -160,6 +161,12 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
     const refs = ['refs/remotes/', ...(typeof base === 'string' ? [`refs/heads/${base}`] : [])]
     if (!must(run, 'git for-each-ref', 'git', ['-C', mainCheckout, 'for-each-ref', '--contains', tip, '--format=%(refname)', ...refs]).trim()) refuse(`branch ${lane} tip ${tip} is on neither a remote-tracking ref nor ${base}; push it or delete the branch by hand`)
   }
+  const processes = reapWorktreeProcesses(worktree, { alive: probeAlive, sleep, now })
+  const printable = (path) => path.replace(/\p{Cc}+/gu, ' ')
+  for (const { pid, executable } of processes.stopped) stdout(`stopped process PID ${pid}: ${printable(executable)}\n`)
+  for (const { pid, executable } of processes.unproven) stdout(`process PID ${pid}: ${printable(executable)}: not proven stopped\n`)
+  for (const { pid, cwd } of processes.cwdOnly) stdout(`process PID ${pid}: cwd only, left running: ${printable(cwd)}\n`)
+  if (!processes.cwdsChecked) stdout('working directories not checked\n')
   must(run, 'git worktree remove', 'git', ['-C', mainCheckout, 'worktree', 'remove', worktree], { timeout: 0 })
   must(run, 'git branch -D', 'git', ['-C', mainCheckout, 'branch', '-D', lane])
   branch = 'deleted'
@@ -219,7 +226,7 @@ export function main(argv = process.argv.slice(2), deps = {}) {
     return 2
   }
   try {
-    const done = closeoutLane({ lane, discard: extra.length === 1, root: d.root, archiveRoot: d.archiveRoot, run: d.run, renameSync: d.renameSync, mkdirSync: d.mkdirSync, alive: d.alive, kill: d.kill, sleep: d.sleep, now: d.now })
+    const done = closeoutLane({ lane, discard: extra.length === 1, root: d.root, archiveRoot: d.archiveRoot, stdout: d.stdout, run: d.run, renameSync: d.renameSync, mkdirSync: d.mkdirSync, alive: d.alive, kill: d.kill, sleep: d.sleep, now: d.now })
     const removal = !done.absent ? `removed ${done.worktree}, deleted branch ${lane} (was ${done.tip})`
       : done.branch === 'deleted' ? `worktree ${done.worktree} already absent; deleted branch ${lane} (was ${done.tip})`
       : done.branch === 'absent' ? `worktree ${done.worktree} and branch ${lane} already absent`

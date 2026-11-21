@@ -57,7 +57,13 @@ branch is not checked. It
 removes the worktree without force before deleting only the local branch and
 archiving the journal; the remote branch and visualizer are unchanged. Closeout
 and discard stop proven seat groups and report unproven ones (`reapLaneSeats` in
-`crew/seat-reap.mjs`).
+`crew/seat-reap.mjs`). Before removing a present worktree, both commands also
+send SIGTERM to individual processes whose executable resolves inside it, then
+SIGKILL to those still running after five seconds. They report the PID,
+executable, and whether the process was proven stopped. They report but do not
+signal processes whose only link is their working directory, and say when working
+directories could not be checked. Unproven stops and unavailable checks do not
+block removal. If the worktree is already absent, both process checks are skipped.
 
 `crew update` refuses unless the crew home is on branch `stable` with no tracked changes; `--force` only overrides the refusal when processes still run from the home.
 

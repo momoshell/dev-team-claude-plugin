@@ -28,7 +28,7 @@ import {
   CHECK_REASONS, FINISH_REVIEW_ROUNDS, commitChanges, openPullRequest, parseStatus, rebaseBranch, runSuite, validFastChecks, validGenerated, validTimeout,
 } from './checks.mjs'
 import { HEX_OID, describeError as describe, GIT_STATUS_ARGS, gitRepoState } from './lane-core.mjs'
-import { OnboardRefusal, readRegular, requireOnboarded, SUITE_TIMEOUT_DEFAULT_MS, validEnvironmentSignatures } from './onboard.mjs'
+import { OnboardRefusal, readRegular, requireOnboarded, SUITE_TIMEOUT_DEFAULT_MS, validEnvironmentSignatures, validProtectedPaths } from './onboard.mjs'
 import { PROOF_TIMEOUT_DEFAULT_MS, proveTests } from './proof.mjs'
 import { TIERS, AGENT_ROLES, runOverrideDefects, validateEnvelope } from './protocols.mjs'
 
@@ -180,7 +180,6 @@ function worktreeRecords(stdout) {
 
 // ADR-055 §7: exact files and directory trees that require judge review.
 const PROTECTED = ['crew/loop.mjs', 'crew/checks.mjs', 'crew/finish.mjs', 'crew/lean.mjs', 'crew/proof.mjs', 'crew/proof-reporter.mjs', 'crew/protocols.mjs', 'crew/acp/grants.mjs', 'hooks/', 'crew/agents/', '.github/workflows/', 'docs/adr/']
-const protectedPaths = (paths) => (paths ?? []).map((path) => path.replace(/^(\.\/)+/, '')).filter((path) => PROTECTED.some((entry) => entry.endsWith('/') ? path === entry.slice(0, -1) || path.startsWith(entry) : path === entry))
 
 const oneLine = (v) => String(v ?? '').replace(/\s*[\r\n]+\s*/g, ' ').trim()
 
@@ -271,11 +270,14 @@ export async function runLoop(spec, deps = {}) {
     && (spec.fastChecks === undefined || validFastChecks(spec.fastChecks))
     && (spec.fastChecksTimeoutMs === undefined || validTimeout(spec.fastChecksTimeoutMs))
     && (spec.environmentSignatures === undefined || validEnvironmentSignatures(spec.environmentSignatures))
+    && (spec.protectedPaths === undefined || validProtectedPaths(spec.protectedPaths))
     && (spec.suiteLock === undefined || typeof spec.suiteLock === 'boolean')
     && (!Object.hasOwn(spec, 'generated') || validGenerated(spec.generated))
     && (spec.closes === undefined || Array.isArray(spec.closes))
     && (!Object.hasOwn(spec, 'roster') || rosterSound(spec.roster))
   if (!sound) return early('invalid-input')
+  const protectedEntries = [...PROTECTED, ...(spec.protectedPaths ?? [])]
+  const protectedPaths = (paths) => (paths ?? []).map((path) => path.replace(/^(\.\/)+/, '')).filter((path) => protectedEntries.some((entry) => entry.endsWith('/') ? path === entry.slice(0, -1) || path.startsWith(entry) : path === entry))
   const fin = spec.finish
   const planning = finishEntry ? fin?.planning : null
   if (planning != null && !(plainObject(planning) && ['planner', 'lead'].includes(planning.entry)

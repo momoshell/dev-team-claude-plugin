@@ -7,8 +7,9 @@ description: Use when starting a crew lane from a GitHub issue or an operator re
 
 A lane starts from a GitHub issue or an operator request. Write one short brief; the planner explores the code.
 The brief validator is `parseBrief` in `crew/protocols.mjs`. Read it for the field and Context rules.
-For protected paths, read `PROTECTED` in `crew/loop.mjs`. For generated files, read the regenerate handling
-in `crew/checks.mjs` (`rebase-conflict` and its `regenerate` detail).
+Before choosing `mechanical`, read both `PROTECTED` in `crew/loop.mjs` and the optional
+`protectedPaths` list in the project's `.crew/project.json`. For generated files, read the
+regenerate handling in `crew/checks.mjs` (`rebase-conflict` and its `regenerate` detail).
 
 ## Steps
 

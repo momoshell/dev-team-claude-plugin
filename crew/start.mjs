@@ -254,6 +254,7 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
     ...(project.fastChecks === undefined ? {} : { fastChecks: project.fastChecks }),
     ...(project.fastChecksTimeoutMs === undefined ? {} : { fastChecksTimeoutMs: project.fastChecksTimeoutMs }),
     ...(project.environmentSignatures === undefined ? {} : { environmentSignatures: project.environmentSignatures }),
+    ...(project.protectedPaths === undefined ? {} : { protectedPaths: project.protectedPaths }),
     ...(fields.generated === undefined ? {} : { generated: { paths: fields.generated, ...suiteSpec(fields.regenerate) } }),
     roster,
   }

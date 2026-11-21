@@ -192,13 +192,20 @@ not change publishing rechecks or ratify the proposed round budgets.
 
 ### 7. Choosing the loop
 
-1. At dispatch: `mechanical` only when the issue shows it and names none of the protected paths below, otherwise
-   `build`.
+1. At dispatch: `mechanical` only when the issue shows it and names no protected paths (built-in or project),
+   otherwise `build`.
 2. After planning: the planner may raise the lane to `judge` with its `judge` reason.
-3. After the build: code raises the lane to `judge` when `files_in_scope` or the diff touches `crew/loop.mjs`,
-   `crew/checks.mjs`, `crew/finish.mjs`, `crew/lean.mjs`, the proof module, `crew/protocols.mjs`,
-   `crew/acp/grants.mjs`, `hooks/`, `crew/agents/`, `.github/workflows/` or `docs/adr/`.
+3. Code raises the lane to `judge` if the accepted plan's `files_in_scope` or the build diff touches a protected path.
+   The built-ins include `crew/loop.mjs`, `crew/checks.mjs`, `crew/finish.mjs`, `crew/lean.mjs`, the proof module,
+   `crew/protocols.mjs`, `crew/acp/grants.mjs`, `hooks/`, `crew/agents/`, `.github/workflows/` and `docs/adr/`.
    Amended 2026-11-04, operator decision D3: the checker, finish and lean modules are protected too.
+
+Amended 2026-11-21 (#2530), operator decision: `.crew/project.json` may add
+`protectedPaths` to the built-in list. An entry is a literal repo-relative path:
+a trailing `/` protects a directory tree, otherwise it matches one exact file.
+No globs. An absent or empty list adds nothing. The list is not part of the
+onboarding hash. Start snapshots it for the lane, including finish passes and
+planning resumes. A lane that edits the list still uses its start snapshot.
 
 Code raises a lane and never lowers one. A build lane raised after its build continues on the judge loop from the
 proof. A mechanical lane has no plan, so when it is raised, its builder returns `insufficient`, or the lead bounces its builder to the planner, it restarts from

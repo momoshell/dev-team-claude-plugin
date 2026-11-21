@@ -5,3 +5,5 @@
 - [nudges-fail-open](nudges-fail-open.md) — A refuse-and-redirect arm fails open: act only on a certain match
 - [honesty-doctrine](honesty-doctrine.md) — Unknown is null with one closed reason; instrumentation never throws into its caller
 - [runtime-boundaries](runtime-boundaries.md) — Zero runtime dependencies, plugin-relative paths, enforcement files are high-tier
+- [loop-changes-cover-finish](loop-changes-cover-finish.md) — A plan that changes the lane loop states what happens on a finish pass and on a planning resume
+- [journal-rows-reach-readers](journal-rows-reach-readers.md) — A plan that adds a journal row or changes the last rows of a run names every reader that derives lane state from them

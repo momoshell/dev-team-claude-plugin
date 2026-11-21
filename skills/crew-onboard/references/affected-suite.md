@@ -35,18 +35,25 @@ lane name.
 Alternatively, optional boolean `suiteLock: true` in `.crew/project.json`
 queues project suites across the checkout's lane processes and worktrees using
 the shared Git common directory. Separate checkouts stay independent. Absent
-or false disables it; invalid values are refused. It covers start, finish and
-publishing-rebase suite rechecks, not proof, worktree setup, onboarding or
-builder checks, and does not limit lane concurrency. Start captures it for the
-lane and its finish passes; edits do not retrofit running lanes.
+or false disables the project opt-in; invalid values are refused. The project-only
+`suiteSlots` is an integer from 1 to 8 (default 1), validated even with the lock
+off. A locked lane takes any free slot up to its count; slot 1 shares the original
+directory and records with older runners. Start snapshots the effective lock and
+count for planning resumes, finish passes and publishing-rebase suite rechecks.
+Edits do not affect running lanes. The lock does not cover proof, worktree setup,
+onboarding or builder checks, and does not limit lane concurrency.
 
 Acquisition has a separate two-hour bound, outside `suiteTimeoutMs`. The journal
-result records `suite_lock_wait_s`; a bounded wait stops unmeasured with
-`suite-lock-timeout` and `suite_lock_holder` diagnostics. Lock I/O or resolution
-failure stops `suite-lock-unavailable`. Reclamation requires proven death, not
-age. Unreadable or uncertain holders remain unknown and unreclaimed; surviving
-suite groups prevent reclamation even after their launcher dies. Queueing adds
-no automatic retry of an unchanged red suite.
+result records `suite_lock_wait_s` and, on acquisition, `suite_lock_slot`. A bounded
+wait stops unmeasured with `suite-lock-timeout` and `suite_lock_holders`, one
+observation per eligible slot. `suite_lock_holder` still reports slot 1 on lock
+failures. Lock I/O or resolution failure stops `suite-lock-unavailable`. Reclamation
+requires proven death, not age. Unreadable or uncertain holders remain unknown
+and unreclaimed; surviving suite groups prevent reclamation even after their
+launcher dies. To clear all slots, first ensure no suite in any worktree is running
+or waiting, then remove `<git-common-dir>/crew-suite-lock/`. Resolve the common
+directory with `git rev-parse --git-common-dir`. Queueing adds no automatic retry
+of an unchanged red suite.
 
 ## Read the lane change from Git
 
@@ -171,7 +178,8 @@ to calibrate and commit onboarding.
 Re-run onboarding after changing the configured `suite` command, proof entries
 or `worktreeSetup`. Editing only the contents of a script named by the unchanged
 `suite` command does not require re-onboarding. Neither do changes only to
-`suiteLock`, `builderChecks`, `suiteTimeoutMs` or `proofTimeoutMs`. The onboarding hash covers
-selected configuration values, not script contents or the entire JSON file.
+`suiteLock`, `suiteSlots`, `builderChecks`, `suiteTimeoutMs` or `proofTimeoutMs`.
+The onboarding hash covers selected configuration values, not script contents
+or the entire JSON file.
 In either case, commit and push the changes to the base branch before starting
 new lanes; a local commit alone is not enough.

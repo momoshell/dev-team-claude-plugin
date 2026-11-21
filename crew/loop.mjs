@@ -13,7 +13,8 @@
 // A red suite or proof with measured host sleep gets one unchanged-tree re-run (ADR-054 §1).
 // Otherwise a red suite can re-run once on a project-declared environment signature.
 // Finish repairs its first ordinary suite red and stops on a second red or an unmeasured suite.
-// Only the checked tree is committed. The post-suite publishing rebase still repeats checks at most three times.
+// Only the checked tree is committed. A clean disjoint publishing rebase on build or judge repeats only proof;
+// other reviewed moves repeat the check round at most three times.
 // Git dropping the change as upstream stops nothing-to-commit at either move.
 // Import-only: every effect (seat turn, filesystem, check, git, journal) crosses an injected seam.
 // A seat's return is never trusted from the callback: the envelope is read back from the path
@@ -913,6 +914,20 @@ export async function runLoop(spec, deps = {}) {
         && [test.base, test.build].some((side) => side?.reason === 'timeout' && side.state === null))) return result
       return { ...result, status: 'unmeasured', reason: 'proof-timeout', proofTimeoutMs: timeoutMs ?? PROOF_TIMEOUT_DEFAULT_MS }
     }, { cwd, base, tests: namedTests, timeoutMs, lane: spec.id }, { row })))
+  const reproveCommit = async (head) => {
+    if (!namedTests.length) return null
+    const check = await proofRun(`${head}^`)
+    const { result, stopAfterRerun } = check
+    if (stopAfterRerun || result.status !== 'green' || !Array.isArray(result.rows) || result.rows.length !== namedTests.length
+      || !namedTests.every(({ file, title }, i) => result.rows[i]?.proven === true && result.rows[i].file === file && result.rows[i].title === title)) return check
+    lastProved.clear()
+    for (const row of result.rows) {
+      const key = `${row.file}\0${row.title}`
+      provedTests.set(key, row)
+      lastProved.add(key)
+    }
+    return null
+  }
   const result = await (async () => {
   try {
     try { await d.mkdir(spec.taskDir, { recursive: true }) } catch (error) { return await stop('runner-threw', { mkdir: describe(error) }) }
@@ -981,13 +996,13 @@ export async function runLoop(spec, deps = {}) {
       suiteRerun = environmentSignature === undefined ? null : `on ${revision}, triggered by environment signature ${JSON.stringify(environmentSignature)}.`
       suiteLine = `- Suite: green; exit ${result.code}; ${suiteCommand}.${suiteRerun ? ` Passed after a re-run ${suiteRerun}` : ''}`
     }
-    const suiteMeasurements = () => [suiteLine, ...earlierSuiteReruns]
+    const suiteMeasurements = (reviewed) => [reviewed ? suiteLine.replace('- Suite:', `- Suite on pre-rebase commit ${reviewed}:`) : suiteLine, ...earlierSuiteReruns]
     const checkMeasurements = () => [...proofLines, ...suiteMeasurements(), ...(!isFinish && tier === 'mechanical' && namedTests.length ? ['- Review: none, mechanical lane, not reviewed.'] : [])]
     let builderSummary = ''
     const finishReviews = []
     let firstCheck = true
     let repairing = false, recheck = false, rechecks = 0, uncountedReview = false
-    let committed, rebased, laneBody, reviewStatus, checkedTree
+    let committed, rebased, laneBody, reviewStatus, checkedTree, recheckSkip
     const readTree = () => stage('checked-tree', () => callCheck('checked-tree', d.run, { cwd, command: 'git', args: ['write-tree'] }, { command: true }))
     const recordReviewed = ({ verdict, findings }, role) => emit('verdict', { status: 'reviewed', ...(role ? { role } : {}), verdict, findings })
     const latestReviews = {}
@@ -1267,6 +1282,7 @@ export async function runLoop(spec, deps = {}) {
       const issue = /^issue ([1-9]\d*)$/.exec(spec.source)
       const closing = issue && (spec.closes ?? []).includes(Number(issue[1]))
       const proved = [...provedTests.values()]
+      const proofTarget = recheckSkip ? `rebased commit ${recheckSkip.rebased} (proof repeated against the new base).` : 'the build.'
       const title = issue && /^\s*(?:>\s*)?issue title:\s*(.+)$/im.exec(spec.brief)?.[1]
       const ask = !issue ? briefAsk(spec.brief) : ''
       const subjectPurpose = tier === 'mechanical' && !planSummary
@@ -1280,10 +1296,11 @@ export async function runLoop(spec, deps = {}) {
         ...(!issue && !ask ? ['', `Source: ${oneLine(spec.source)}`] : []),
         ...(isFinish ? ['', `The lane stopped with reason ${oneLine(fin.stop.reason)}. This report covers only this finish run.`, `${finishReviews.length} ${finishReviews.length === 1 ? 'review' : 'reviews'} in this finish run; final verdict: ${oneLine(finishReviews.at(-1)?.verdict) || 'unmeasured'}.`] : []),
         '', '## Verification',
-        ...(proved.length ? [...proved.map(({ file, title, base }) => `- ${oneLine(file)}: ${oneLine(title)} ${base?.reason === 'base-package-absent' ? 'had its package absent on the old source (base-package-absent)' : base?.reason === 'base-test-absent' ? 'had its test file absent on the old source (base-test-absent)' : 'was red on the old source'}, green on ${lastProved.has(`${file}\0${title}`) ? 'the build.' : 'an earlier build turn; the last build turn did not name it.'}`), ...(!isFinish && tier === 'mechanical' ? ['Review: none, mechanical lane, not reviewed.'] : [])]
+        ...(recheckSkip ? [`- The suite and reviews checked pre-rebase commit ${recheckSkip.reviewed} on old base ${recheckSkip.oldBase}. They were not repeated on rebased commit ${recheckSkip.rebased} on new base ${recheckSkip.onto} because the rebase was clean and shared no path.`] : []),
+        ...(proved.length ? [...proved.map(({ file, title, base }) => `- ${oneLine(file)}: ${oneLine(title)} ${base?.reason === 'base-package-absent' ? 'had its package absent on the old source (base-package-absent)' : base?.reason === 'base-test-absent' ? 'had its test file absent on the old source (base-test-absent)' : 'was red on the old source'}, green on ${lastProved.has(`${file}\0${title}`) ? proofTarget : 'an earlier build turn; the last build turn did not name it.'}`), ...(!isFinish && tier === 'mechanical' ? ['Review: none, mechanical lane, not reviewed.'] : [])]
           : !isFinish && tier === 'mechanical' ? ['Proof: mechanical lane, not reviewed.']
             : !isFinish && !testsRequired ? ['Proof: no criterion is machine-checked.'] : ['Proof: unmeasured.']),
-        ...suiteMeasurements(),
+        ...suiteMeasurements(recheckSkip?.reviewed),
         ...(open.length ? ['', '## Open points', ...open.map((f) => `- ${oneLine(f.summary)} (${oneLine(f.location)})`)] : []),
       ].join('\n')
     }
@@ -1309,6 +1326,7 @@ export async function runLoop(spec, deps = {}) {
     const fetched = await fetchOrigin()
     if (fetched.status !== 'green') return stop(fetched.reason, fetched)
 
+    const conflictsBeforeRebase = conflictTurns
     rebased = await resolveConflict(await rebaseOnBase())
     if (rebased.status !== 'green' || !text(rebased.head)) return stop(rebased.reason ?? 'runner-threw', rebased)
 
@@ -1316,6 +1334,28 @@ export async function runLoop(spec, deps = {}) {
       if (typeof rebased.onto !== 'string' || !HEX_OID.test(rebased.onto)) return stop('runner-threw', rebased)
       if (rebased.head === rebased.onto) return stop('nothing-to-commit', { head: rebased.head, onto: rebased.onto, committed: committed.head })
       if (isFinish || tier !== 'mechanical') {
+        if (!isFinish) {
+          const scope = { reviewed: committed.head, onto: rebased.onto, rebased: rebased.head }
+          const paths = []
+          if (Object.values(scope).every((oid) => HEX_OID.test(oid))) for (const [from, to] of [[`${scope.reviewed}^`, scope.reviewed], [scope.onto, scope.rebased], [`${scope.reviewed}^`, scope.onto]]) {
+            const diff = await callCheck('recheck-scope-diff', d.run, { cwd, command: 'git', args: ['diff', '--no-ext-diff', '--no-renames', '--no-relative', '--ignore-submodules=none', '--name-only', '-z', from, to, '--'] }, { command: true })
+            const out = diff.stdout
+            if (diff.status !== 'green' || typeof out !== 'string' || (out !== '' && !out.endsWith('\0'))) break
+            const names = out === '' ? [] : out.slice(0, -1).split('\0')
+            // The command runner decodes UTF-8; a replacement character may hide a different path.
+            if (names.some((name) => name === '' || name.includes('\uFFFD'))) break
+            paths.push(new Set(names))
+          }
+          const [before, after, baseChanges] = paths
+          recheckScope = baseChanges ? scope : null
+          if (baseChanges && conflictTurns === conflictsBeforeRebase && before.isDisjointFrom(baseChanges)
+            && before.size === after.size && before.isSubsetOf(after) && !await reproveCommit(rebased.head)) {
+            recheckSkip = { ...scope, oldBase: currentBase, reason: 'clean-disjoint' }
+            await emit('recheck-scope', { scope: 'measured', review: 'skipped', ...recheckSkip })
+            break
+          }
+          await emit('recheck-scope', { scope: recheckScope ? 'measured' : 'unmeasured', review: recheckScope ? 'scoped' : 'full', reason: recheckScope ? null : 'scope-unmeasured', ...scope })
+        }
         if (rechecks >= MAX_RECHECKS) return stop('recheck-bound', { rechecks, head: rebased.head, onto: rebased.onto, committed: committed.head })
         const uncommitted = await stage('uncommit', () => callCheck('uncommit', d.run, { cwd, command: 'git', args: ['reset', '--soft', rebased.onto] }, { command: true }))
         if (uncommitted.status !== 'green') return stop(uncommitted.reason, uncommitted)
@@ -1323,15 +1363,6 @@ export async function runLoop(spec, deps = {}) {
         enterPhase('recheck')
         rechecks++
         reviewedTree = null
-        if (!isFinish) {
-          const scope = { reviewed: committed.head, onto: rebased.onto, rebased: rebased.head }
-          recheckScope = Object.values(scope).every((oid) => HEX_OID.test(oid)) ? scope : null
-          if (recheckScope) for (const [from, to] of [[`${scope.reviewed}^`, scope.reviewed], [scope.onto, scope.rebased], [`${scope.reviewed}^`, scope.onto]]) {
-            const diff = await callCheck('recheck-scope-diff', d.run, { cwd, command: 'git', args: ['diff', '--no-ext-diff', '--name-only', from, to] }, { command: true })
-            if (diff.status !== 'green') { recheckScope = null; break }
-          }
-          await emit('recheck-scope', { scope: recheckScope ? 'measured' : 'unmeasured', review: recheckScope ? 'scoped' : 'full', reason: recheckScope ? null : 'scope-unmeasured', ...scope })
-        }
         recheck = true
         continue
       }
@@ -1340,23 +1371,16 @@ export async function runLoop(spec, deps = {}) {
     }
 
     if (rebased.head !== committed.head) {
-      if (namedTests.length) {
-        const { result: reproven, stopAfterRerun } = await proofRun(`${rebased.head}^`)
+      if (!recheckSkip) {
+        const failed = await reproveCommit(rebased.head)
+        if (failed) return failed.stopAfterRerun ? failed.stopAfterRerun() : stop(failed.result.reason ?? 'runner-threw', journaled(failed.result))
+        const postCheck = await suiteRun()
+        const { result: postSuite, stopAfterRerun } = postCheck
         if (stopAfterRerun) return stopAfterRerun()
-        if (reproven.status !== 'green' || reproven.reason !== null || !Array.isArray(reproven.rows) || reproven.rows.length !== namedTests.length || !reproven.rows.every((row) => row?.proven === true)) return stop(reproven.reason ?? 'runner-threw', journaled(reproven))
-        lastProved.clear()
-        for (const row of reproven.rows) {
-          const key = `${row.file}\0${row.title}`
-          provedTests.set(key, row)
-          lastProved.add(key)
-        }
+        if (postSuite.status !== 'green') return stop(postSuite.reason, postSuite)
+        recordSuitePass(postCheck, `commit ${rebased.head}`)
       }
-      const postCheck = await suiteRun()
-      const { result: postSuite, stopAfterRerun } = postCheck
-      if (stopAfterRerun) return stopAfterRerun()
-      if (postSuite.status !== 'green') return stop(postSuite.reason, postSuite)
-      recordSuitePass(postCheck, `commit ${rebased.head}`)
-      // The tree the checks passed on must be the commit that is published or reported ready.
+      // Do not publish a head or worktree changed by the post-rebase checks.
       const cleanStatus = await readStatus('post-rebase-clean')
       const cleanPaths = cleanStatus.status === 'green' && typeof cleanStatus.stdout === 'string' ? parseChangedPaths(cleanStatus.stdout) : null
       if (cleanPaths === null) return stop('paths-unmeasured', cleanStatus)

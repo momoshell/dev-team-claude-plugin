@@ -183,7 +183,7 @@ function fakes(options = {}) {
       : input.args.includes('reset') || input.args.includes('clean') ? (discardArgs.push(input.args), measured('discard', options.discard ?? green())(input))
       : input.args.includes('add') ? measured('suite-stage', options.stageResult ?? green())(input)
       : input.args.includes('write-tree') ? measured('checked-tree', options.checkedTree ?? { ...green(), stdout: `${'e'.repeat(40)}\n` })(input)
-      : input.args.includes('--no-ext-diff') ? Promise.resolve(green())
+      : input.args.includes('--no-ext-diff') ? Promise.resolve({ ...green(), stdout: 'lib.mjs\0' })
       : input.args.includes('diff') ? measured('published-paths', options.publishedPaths ?? { ...green(), stdout: 'lib.mjs\0' })(input)
       : input.args.includes('rev-parse') && input.args.at(-1) === `refs/remotes/origin/${spec.base}` ? measured('check-base', options.checkBase ?? { ...green(), stdout: `${baseOid}\n` })(input)
       : input.args.includes('rev-parse') ? measured('post-rebase-head', () => ({ ...green(), stdout: options.cleanHead ?? `${(options.rebase ?? {}).head ?? 'a'.repeat(40)}\n` }))(input)
@@ -1973,11 +1973,17 @@ test('a reviewer findings_omitted count reaches the builder fix turn (S6-12)', a
 })
 
 for (const shape of ['build', 'finish']) for (const move of ['none', 'precheck', 'publishing']) {
+  if (shape === 'build' && move === 'publishing') continue
   test(`suite sees the uncommitted lane change at the base on first and moved-base checks (#2426) [${shape}/${move}]`, () => uncommittedLaneAtBase(shape, move))
 }
 
+test('a clean disjoint publishing rebase publishes after proof without repeating the suite or reviews (#2532)', async () => {
+  for (const tier of ['build', 'judge']) await uncommittedLaneAtBase(tier, 'publishing')
+})
+
 async function uncommittedLaneAtBase(shape, move) {
   const finish = shape === 'finish'
+  const skip = !finish && move === 'publishing'
   const root = scratchDir('precheck-tree-'), cwd = join(root, 'lane'), upstream = join(root, 'upstream'), remote = join(root, 'origin.git'), taskDir = join(root, 'task')
   mkdirSync(cwd); mkdirSync(taskDir)
   const g = (...args) => repoGit(cwd, ...args)
@@ -1997,7 +2003,9 @@ async function uncommittedLaneAtBase(shape, move) {
   g('checkout', '-qb', 'lane')
   const seats = fakes({ spec: finish ? finishSpec() : { tier: shape }, edit: (v) => { if (v.role === 'planner') v.details.plan_path = join(taskDir, 'plan.md'); return v } })
   writeFileSync(join(taskDir, 'plan.md'), 'Build the lane.')
-  let proofs = 0, reviews = 0, suites = 0, published = 0
+  const oldBase = g('rev-parse', 'HEAD').trim()
+  const proofs = [], reviews = []
+  let suites = 0, publication, linkFeedback
   const checkTree = () => {
     assert.equal(g('rev-parse', 'HEAD').trim(), g('rev-parse', 'origin/main').trim())
     assert.equal(g('rev-list', '--count', 'origin/main..HEAD').trim(), '0')
@@ -2008,7 +2016,6 @@ async function uncommittedLaneAtBase(shape, move) {
     assert.match(g('diff', '--name-status', 'HEAD'), /D\s+deleted.txt/)
     assert.doesNotMatch(g('ls-files'), /scratch.txt/)
   }
-  let linkFeedback
   const result = await runLoop({ ...seats.spec, cwd, taskDir, ...(finish ? { finish: { ...seats.spec.finish, planPath: join(taskDir, 'plan.md') } } : {}) }, {
     resolveAgents: seats.deps.resolveAgents,
     journal: seats.deps.journal,
@@ -2034,19 +2041,28 @@ async function uncommittedLaneAtBase(shape, move) {
           writeFileSync(join(upstream, 'base.txt'), 'advanced\n'); repoGit(upstream, 'add', '.'); repoGit(upstream, 'commit', '-qm', 'advance'); repoGit(upstream, 'push', '-q', 'origin', 'main')
         }
       }
-      if (request.role === 'reviewer') { checkTree(); reviews++ }
+      if (['reviewer', 'tech-lead'].includes(request.role)) { if (!skip || !reviews.includes(request.role)) checkTree(); reviews.push(request.role) }
       await seats.deps.runSeat(request); writeFileSync(request.returnPath, await seats.deps.readFile(request.returnPath))
     },
-    proveTests: async (input) => { checkTree(); proofs++; assert.equal(input.base, 'HEAD'); return { status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }] } },
+    proveTests: async (input) => {
+      if (!skip || !proofs.length) { checkTree(); assert.equal(input.base, 'HEAD') }
+      proofs.push({ base: input.base, baseOid: g('rev-parse', input.base).trim(), head: g('rev-parse', 'HEAD').trim() })
+      return { status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }] }
+    },
     runSuite: async () => {
-      suites++; checkTree()
-      assert.deepEqual(g('diff', '--name-only', 'HEAD').trim().split('\n').sort(), ['deleted.txt', 'lib.mjs', 'new.txt'])
+      if (++suites === 1 || !skip) {
+        checkTree()
+        assert.deepEqual(g('diff', '--name-only', 'HEAD').trim().split('\n').sort(), ['deleted.txt', 'lib.mjs', 'new.txt'])
+      }
       if (move === 'publishing' && suites === 1) {
-        writeFileSync(join(upstream, 'base.txt'), 'advanced\n'); repoGit(upstream, 'add', '.'); repoGit(upstream, 'commit', '-qm', 'advance'); repoGit(upstream, 'push', '-q', 'origin', 'main')
+        writeFileSync(join(upstream, 'base\nlib.mjs'), 'advanced\n'); repoGit(upstream, 'add', '.'); repoGit(upstream, 'commit', '-qm', 'advance'); repoGit(upstream, 'push', '-q', 'origin', 'main')
       }
       return green()
     },
-    openPullRequest: async () => { published++; return { status: 'green', reason: null, pr: PR } },
+    openPullRequest: async (input) => {
+      publication = { ...input, head: g('rev-parse', 'HEAD').trim() }
+      return { status: 'green', reason: null, pr: PR }
+    },
   })
   if (linkPaths.length) {
     assert.equal(linkFeedback?.id, 'worktree-symlink', 'the next builder request must name the symlink reason')
@@ -2058,26 +2074,66 @@ async function uncommittedLaneAtBase(shape, move) {
     assert.equal(readFileSync(join(cwd, 'base.txt'), 'utf8'), 'advanced\n')
   }
   assert.equal(result.status, 'done', JSON.stringify(result))
-  const checks = move === 'publishing' ? 2 : 1
-  assert.deepEqual([proofs, reviews, suites, published], [checks, checks, checks, finish ? 0 : 1])
+  const rounds = move === 'publishing' && !skip ? 2 : 1
+  assert.equal(suites, rounds, shape)
+  assert.equal(reviews.filter((role) => role === 'reviewer').length, rounds, shape)
+  assert.equal(reviews.filter((role) => role === 'tech-lead').length, shape === 'judge' ? 1 : 0)
+  assert.equal(proofs.length, move === 'publishing' ? 2 : 1)
+  assert.equal(Boolean(publication), !finish)
+  const scopeRows = seats.rows.filter((r) => r.event === 'recheck-scope')
+  if (skip) {
+    const onto = g('rev-parse', 'origin/main').trim(), rebased = g('rev-parse', 'HEAD').trim()
+    const reviewed = seats.rows.find((r) => r.event === 'commit').head
+    assert.notEqual(oldBase, onto)
+    assert.notEqual(reviewed, rebased)
+    assert.deepEqual(proofs, [{ base: 'HEAD', baseOid: oldBase, head: oldBase }, { base: `${rebased}^`, baseOid: onto, head: rebased }])
+    const afterRebase = seats.rows.slice(seats.rows.findLastIndex((r) => r.event === 'stage-end' && r.stage === 'rebase') + 1)
+    assert.deepEqual(afterRebase.filter((r) => r.event === 'stage-start').map((r) => r.stage), ['proof', 'post-rebase-clean', 'post-rebase-clean', 'publish'])
+    assert.equal(scopeRows.length, 1)
+    const { scope, review, reason, oldBase: from, reviewed: checked, onto: to, rebased: head } = scopeRows[0]
+    assert.deepEqual({ scope, review, reason, from, checked, to, head }, { scope: 'measured', review: 'skipped', reason: 'clean-disjoint', from: oldBase, checked: reviewed, to: onto, head: rebased })
+    assert.equal(publication.head, rebased)
+    const verification = publication.body.split('## Verification\n')[1]
+    assert.match(verification, new RegExp(`suite and reviews checked pre-rebase commit ${reviewed} on old base ${oldBase}.*rebased commit ${rebased} on new base ${onto} because the rebase was clean and shared no path`, 'is'))
+    assert.match(verification, new RegExp(`green on rebased commit ${rebased} \\(proof repeated against the new base\\)`))
+    assert.match(verification, new RegExp(`Suite on pre-rebase commit ${reviewed}: green; exit 0; node --test lane.test.mjs`))
+    assert.doesNotMatch(verification, /Suite: green/)
+  } else {
+    assert.deepEqual(scopeRows, [])
+    assert.equal(seats.rows.some((r) => r.check === 'recheck-scope-diff'), false)
+  }
   assert.equal(g('rev-list', '--count', 'origin/main..HEAD').trim(), '1')
   assert.equal(g('status', '--porcelain'), '')
 }
 
 test('pre-check moves do not spend publishing rechecks (#2403)', async () => {
-  for (const tier of ['build', 'judge', 'mechanical']) for (const moves of [3, 4]) {
-    const A = 'a'.repeat(40)
+  for (const tier of ['build', 'judge', 'mechanical']) for (const mode of ['three', 'bound', 'skip-at-bound', 'proof-red']) {
+    const mechanical = tier === 'mechanical'
+    if (mechanical && !['three', 'bound'].includes(mode)) continue
+    const A = 'a'.repeat(40), moves = mode === 'three' ? 3 : 4
     const f = fakes({ spec: { tier }, checkBase: { ...green(), stdout: O }, cleanHead: `${MOVED.head}\n`,
       rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, ...Array(moves).fill({ ...MOVED, onto: O }), { ...MOVED, head: A, onto: O }),
       edit: (v) => { if (v.role === 'builder') v.details.subject = 'fix: lane'; return v },
     })
+    if (mode === 'skip-at-bound' || mode === 'proof-red') {
+      const run = f.deps.run, prove = f.deps.proveTests
+      let comparisons = 0
+      f.deps.run = (input) => input.args.includes('--no-ext-diff') && ++comparisons % 3 === 0 && (mode === 'proof-red' || comparisons === 12)
+        ? { ...green(), stdout: 'base.txt\0' } : run(input)
+      if (mode === 'proof-red') f.deps.proveTests = async (input) => {
+        const result = await prove(input)
+        return input.base === 'HEAD' ? result : { status: 'red', reason: 'proof-unproven', rows: [], sleep_credited_s: 1 }
+      }
+    }
     const result = await f.go()
-    assert.equal(result.status, tier !== 'mechanical' && moves === 4 ? 'stopped' : 'done', tier)
+    assert.equal(result.status, !mechanical && ['bound', 'proof-red'].includes(mode) ? 'stopped' : 'done', `${tier}/${mode}`)
     if (result.status === 'stopped') assert.equal(result.reason, 'recheck-bound')
     assert.ok(f.calls.indexOf('uncommit') < f.calls.indexOf('proof'))
     assert.equal(f.rows.filter((r) => r.event === 'pre-check-base-move').length, 1)
-    assert.equal(f.calls.filter((c) => c === 'uncommit').length, tier === 'mechanical' ? 1 : 4)
-    assert.equal(f.calls.filter((c) => c === 'proof').length, tier === 'mechanical' ? 2 : 4)
+    assert.equal(f.calls.filter((c) => c === 'uncommit').length, mechanical ? 1 : 4)
+    assert.equal(f.calls.filter((c) => c === 'proof').length, mechanical ? 2 : mode === 'proof-red' ? 12 : mode === 'skip-at-bound' ? 5 : 4)
+    assert.equal(f.calls.filter((c) => c === 'suite').length, mechanical ? 2 : 4)
+    assert.equal(f.rows.filter((r) => r.event === 'recheck-scope' && r.review === 'skipped').length, mode === 'skip-at-bound' ? 1 : 0)
   }
 })
 
@@ -2182,6 +2238,7 @@ test('a failed conflict turn is undone and a second publishing conflict gets a t
     const second = mode === 'same-base' || mode === 'moved-base'
     const onto = mode === 'moved-base' ? 'f'.repeat(40) : O
     const f = fakes({ checkBase: second ? { ...green(), stdout: O } : undefined,
+      cleanHead: mode === 'moved-base' ? MOVED.head : undefined,
       rebase: answers({ ...MOVED, head: A }, conflict, ...(second ? [
         { ...MOVED, onto: O }, { ...conflict, onto }, { ...MOVED, onto }, { ...MOVED, head: C, onto },
       ] : [conflict])),
@@ -2191,7 +2248,13 @@ test('a failed conflict turn is undone and a second publishing conflict gets a t
       edit: (v, r) => r.feedback[0]?.id === 'rebase-conflict' ? mode === 'insufficient' ? { ...v, status: 'insufficient' } : mode === 'unmeasured' ? '' : mode === 'refused' ? 'not JSON' : v : v,
     })
     const gitArgs = [], run = f.deps.run
-    f.deps.run = (input) => { gitArgs.push(input.args); return run(input) }
+    let comparisons = 0
+    f.deps.run = (input) => {
+      gitArgs.push(input.args)
+      // The conflict turn forbids the skip even when comparisons find no shared path.
+      return mode === 'moved-base' && input.args.includes('--no-ext-diff') && ++comparisons === 3
+        ? { ...green(), stdout: 'list.txt\0' } : run(input)
+    }
     const result = await f.go()
     assert.equal(builderTurns(f).filter((r) => r.feedback[0]?.id === 'rebase-conflict').length, mode === 'moved-base' ? 2 : 1, mode)
     if (mode === 'moved-base') {
@@ -2199,6 +2262,7 @@ test('a failed conflict turn is undone and a second publishing conflict gets a t
       assert.deepEqual(f.discardArgs, [['reset', '--soft', O], ['reset', '--soft', onto]])
       const recheck = f.calls.slice(f.calls.lastIndexOf('uncommit') + 1, f.calls.indexOf('publish'))
       for (const call of ['proof', 'seat:reviewer', 'suite']) assert.ok(recheck.includes(call), call)
+      assert.equal(f.rows.find((r) => r.event === 'recheck-scope')?.review, 'scoped')
       continue
     }
     assert.deepEqual(result, stopped(['reset', 'clean'].includes(mode) ? 'exit-nonzero' : 'rebase-conflict'), mode)
@@ -2301,7 +2365,7 @@ test('a post-rebase check that dirties the tree or moves HEAD stops a mechanical
   assert.deepEqual(await moved({ cleanStatus: 'garbage' }).go(), stopped('paths-unmeasured'))
 })
 
-test('a moved-head recheck whose reviewed commit is not an object id stays a full review and journals that it did (#2359)', async () => {
+test('a moved-head recheck uses full review when scope is unmeasured and scoped review on a path mismatch (#2359, #2532)', async () => {
   const A = 'a'.repeat(40), C = 'c'.repeat(40)
   for (const [reviewed, rebased] of [['unknown', MOVED.head], [A, 'unknown']]) {
     const f = fakes({ spec: { tier: 'judge' }, rebase: answers({ ...MOVED, head: A }, { ...MOVED, head: rebased, onto: O }, { ...MOVED, head: C }),
@@ -2317,17 +2381,31 @@ test('a moved-head recheck whose reviewed commit is not an object id stays a ful
     const { scope, review, reason, reviewed: r, onto, rebased: h } = rows[0]
     assert.deepEqual({ scope, review, reason, reviewed: r, onto, rebased: h }, { scope: 'unmeasured', review: 'full', reason: 'scope-unmeasured', reviewed, onto: O, rebased })
   }
-  for (const failed of [0, 1, 2]) {
+  for (const [mode, failed] of [['failed', 0], ['failed', 1], ['failed', 2], ['missing', 2], ['truncated', 2], ['shared'], ['rename'], ['changed']]) {
+    const scoped = failed === undefined
     const f = fakes({ spec: { tier: 'judge' }, rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C }),
+      cleanHead: MOVED.head,
       checkedTree: () => ({ ...green(), stdout: String(1 + f.calls.filter((c) => c === 'uncommit').length).repeat(40) }),
       commit: answers({ status: 'green', reason: null, head: A }, { status: 'green', reason: null, head: C }) })
     const run = f.deps.run
     let comparisons = 0
-    f.deps.run = (input) => input.args.includes('--no-ext-diff') && comparisons++ === failed ? redRun() : run(input)
-    assert.equal((await f.go()).status, 'done')
-    assert.equal(Object.hasOwn(f.requests.filter((r) => r.role === 'reviewer')[1], 'recheckReview'), false)
+    f.deps.run = (input) => {
+      if (!input.args.includes('--no-ext-diff')) return run(input)
+      const comparison = comparisons++
+      if (comparison === failed) return mode === 'failed' ? redRun() : { ...green(), stdout: mode === 'truncated' ? 'base.txt' : undefined }
+      let stdout = 'lib.mjs\0'
+      if (mode === 'changed') stdout = ['lib.mjs\0', 'other.mjs\0', 'base.txt\0'][comparison]
+      if (mode === 'rename' && comparison === 2) stdout = input.args.includes('--no-renames') ? 'lib.mjs\0other.mjs\0' : 'other.mjs\0'
+      return { ...green(), stdout }
+    }
+    assert.equal((await f.go()).status, 'done', mode)
+    assert.equal(f.calls.filter((c) => c === 'uncommit').length, 1, mode)
+    assert.equal(f.calls.filter((c) => c === 'suite').length, 2, mode)
+    for (const role of ['reviewer', 'tech-lead']) {
+      assert.equal(Object.hasOwn(f.requests.filter((r) => r.role === role)[1], 'recheckReview'), scoped, mode)
+    }
     const row = f.rows.find((r) => r.event === 'recheck-scope')
-    assert.deepEqual([row.scope, row.review, row.reason], ['unmeasured', 'full', 'scope-unmeasured'])
+    assert.deepEqual([row.scope, row.review, row.reason], scoped ? ['measured', 'scoped', null] : ['unmeasured', 'full', 'scope-unmeasured'], mode)
   }
 })
 

@@ -507,3 +507,30 @@ differs from the previous turn's target. An unchanged or unmeasured target, a
 conflict after the third turn, or an unresolved turn stops `rebase-conflict` with
 the existing cleanup. The moved-head recheck and review and suite bounds are
 unchanged.
+
+## Amendment 2026-11-21: proof-only recheck after a disjoint publishing rebase (#2532)
+
+The operator keeps the publishing rebase and narrows the earlier moved-head
+recheck rule. A build or judge lane, including a planning resume, keeps the
+rebased commit and repeats only proof when no builder
+conflict turn ran, all three path lists are measured, the lane path set is
+unchanged, and it shares no path with the base's changes. A rename counts
+under both names. The loop proves every named test against the new base or
+makes no proof call if there are no named tests. Before publishing, it checks
+that the worktree is clean and `HEAD` is the rebased commit. It does not fetch
+again, rerun the suite, or open another review round.
+
+If a condition fails or proof is not green for every named test, the full
+recheck still applies. The skip spends none of the three rechecks and grants
+no rounds. Finish passes retain the full recheck without measuring scope.
+Mechanical lanes still repeat proof and the suite on the committed rebased
+head. The `recheck-scope` row and PR Verification name the checked commit,
+both bases and the rebased commit; the suite and reviews did not check the
+rebased head.
+
+A base change can break a lane through another file, for example by changing a
+function the lane calls. Proof may miss that break. Of the finished disjoint
+rechecks measured on 2026-11-21, none of 15 in the-power found anything; the
+one in devteam found a red test neither side touched. After 30 more publishing
+rebases that move the head, count skips and full rechecks across checkouts.
+For each skipped PR, note whether a later red suite on the base was traced to it.

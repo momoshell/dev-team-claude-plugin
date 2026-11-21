@@ -54,13 +54,13 @@ On lane or finish suite invocations, the change is uncommitted over the held
 base commit at `HEAD`, not necessarily the latest remote tip. Only the first
 check round of a start run or finish pass refreshes the base. Later repairs keep
 that base until publishing; a new finish pass gets a new first-round refresh.
-First-round pre-check base moves and build, judge and finish publishing-rebase
+First-round pre-check base moves and full build, judge and finish publishing-rebase
 rechecks soft-reset to the new base before checks too. No lane commits sit above
 that base at suite time. The loop stages measured lane paths, but the script
-must account for staged, unstaged and nonignored untracked paths.
+must account for staged, unstaged and nonignored untracked paths. A proof-only
+publishing rebase on build or judge runs no second suite.
 
-There is one exception: a mechanical publishing-rebase recheck runs on the clean,
-committed rebased head. A clean tree must run everything. That fallback also
+A mechanical publishing-rebase suite still runs on the clean, committed rebased head. A clean tree must run everything. That fallback also
 makes onboarding and hand runs safe when there is no lane change.
 
 From the checkout root, union tracked changes against `HEAD` with nonignored

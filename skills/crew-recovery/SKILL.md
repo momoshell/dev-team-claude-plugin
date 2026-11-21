@@ -101,8 +101,11 @@ gets no turn or remains unresolved stops `rebase-conflict`. Failed moves restore
 uncommitted work only when cleanup is proven. A mechanical lane is finished on its brief; one
 whose diff reaches a protected path stops `raise-needs-plan`, and you restart it
 from its brief as a build lane.
-Only the checked tree is committed; the post-suite rebase still repeats proof,
-review and suite on the new base. It publishes nothing (`crew/finish.mjs`).
+Only the checked tree is committed. On a finish pass, a moved publishing head
+still repeats proof, review and suite on the new base and publishes nothing
+(`crew/finish.mjs`). A planning resume follows the normal tier loop instead:
+build and judge can repeat only proof after a clean, measured disjoint rebase;
+mechanical lanes still re-prove and rerun the suite on the rebased commit.
 A red suite or proof with measured host sleep runs once more on the unchanged tree
 (ADR-054 §1). A second red stops with `red-after-sleep-rerun`. If the sleep rule
 does not apply, an `exit-nonzero` suite red matching a project-declared environment

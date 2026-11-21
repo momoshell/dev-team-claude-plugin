@@ -1149,7 +1149,8 @@ test('a moved-head recheck prompt scopes the reviewer and the tech-lead to what 
   const heads = ['b'.repeat(40), H, R]
   const f = leanFixture({ tier: 'judge', loopDeps: { rebaseBranch: async () => ({ status: 'green', reason: null, head: heads.shift(), onto: O }) } })
   const run = f.options.loopDeps.run
-  f.options.loopDeps.run = async (input) => input.args.includes('write-tree') ? { ...GREEN, stdout: `${String(heads.length).repeat(40)}\n` } : run(input)
+  f.options.loopDeps.run = async (input) => input.args.includes('write-tree') ? { ...GREEN, stdout: `${String(heads.length).repeat(40)}\n` }
+    : input.args.includes('--no-ext-diff') ? { ...GREEN, stdout: 'src/a.mjs\0' } : run(input)
   await f.go()
   const reviewers = f.requests.filter((r) => r.definition.role === 'reviewer').map((r) => r.prompt)
   const leads = f.requests.filter((r) => r.definition.role === 'tech-lead').map((r) => r.prompt)

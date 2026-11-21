@@ -55,7 +55,13 @@ Optional details keys: `validation_lane`, `judge`, `question`.
 
 The required keys are for `done`; `insufficient` and `escalate` carry `summary` and a `details` object, which may be empty (`{}`), plus `details.question` for `escalate`.
 
-For either non-done status, name the specific operator question in `details.question`; if absent or invalid, `summary` carries it. The loop stops as an escalation without requiring a plan artifact. Unknown, empty or invalid detail fields are dropped and named in `dropped` on each journal `envelope` row; valid allowed fields survive, and `parsed` preserves the raw return. This tolerance does not apply to `done` or builder returns.
+Before returning `insufficient` or `escalate`:
+
+1. Finish the reading you can do without the operator's answers. Put every open operator decision you find in one `details.question` string. Number the questions if there is more than one.
+2. Ask a yes-or-no question for each decision. Name your proposal, the alternative, and the file or issue text that makes the decision necessary.
+3. If a later decision depends on an earlier answer, say which answer it depends on and ask the later question assuming the operator accepts your earlier proposal.
+
+If `details.question` is absent or invalid, `summary` carries the question. The loop stops as an escalation without requiring a plan artifact. Unknown, empty or invalid detail fields are dropped and named in `dropped` on each journal `envelope` row; valid allowed fields survive, and `parsed` preserves the raw return. This tolerance does not apply to `done` or builder returns.
 
 The `subject` is the conventional-commit subject for this change, at most 72 characters, written `type(scope): summary` with an optional scope and optional `!` after it. The type is one of `chore`, `ci`, `crew`, `docs`, `feat`, `fix`, `merge`, `perf`, `refactor`, `revert`, `spike`, `test`, `wip`, `workflow`. It names both the commit and the PR. Do not write a PR body: the loop generates it from the measured results.
 

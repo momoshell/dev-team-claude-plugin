@@ -2381,19 +2381,27 @@ test('a moved-head recheck uses full review when scope is unmeasured and scoped 
     const { scope, review, reason, reviewed: r, onto, rebased: h } = rows[0]
     assert.deepEqual({ scope, review, reason, reviewed: r, onto, rebased: h }, { scope: 'unmeasured', review: 'full', reason: 'scope-unmeasured', reviewed, onto: O, rebased })
   }
-  for (const [mode, failed] of [['failed', 0], ['failed', 1], ['failed', 2], ['missing', 2], ['truncated', 2], ['shared'], ['rename'], ['changed']]) {
-    const scoped = failed === undefined
-    const f = fakes({ spec: { tier: 'judge' }, rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C }),
+  for (const [mode, failed] of [['failed', 0], ['failed', 1], ['failed', 2], ['missing', 2], ['truncated', 2], ['shared'], ['rename'], ['changed'], ['lock-file-write']]) {
+    const writes = mode === 'lock-file-write'
+    const scoped = failed === undefined && !writes
+    const f = fakes({ spec: { tier: 'judge', ...(writes ? { fastChecks: ['fast-check'] } : {}) },
+      rebase: answers({ ...MOVED, head: A }, { ...MOVED, onto: O }, { ...MOVED, head: C }),
       cleanHead: MOVED.head,
+      ...(writes ? { reviewPaths: ' M Cargo.lock\0', paths: 'M  Cargo.lock\0' } : {}),
       checkedTree: () => ({ ...green(), stdout: String(1 + f.calls.filter((c) => c === 'uncommit').length).repeat(40) }),
       commit: answers({ status: 'green', reason: null, head: A }, { status: 'green', reason: null, head: C }) })
     const run = f.deps.run
-    let comparisons = 0
+    let comparisons = 0, wrote = false
     f.deps.run = (input) => {
+      if (input.command === 'fast-check') {
+        wrote = comparisons === 3
+        return wrote ? redRun() : green()
+      }
+      if (input.args[0] === 'status' && wrote && !f.calls.includes('uncommit')) return { ...green(), stdout: ' M Cargo.lock\0' }
       if (!input.args.includes('--no-ext-diff')) return run(input)
       const comparison = comparisons++
       if (comparison === failed) return mode === 'failed' ? redRun() : { ...green(), stdout: mode === 'truncated' ? 'base.txt' : undefined }
-      let stdout = 'lib.mjs\0'
+      let stdout = writes ? 'Cargo.lock\0' : 'lib.mjs\0'
       if (mode === 'changed') stdout = ['lib.mjs\0', 'other.mjs\0', 'base.txt\0'][comparison]
       if (mode === 'rename' && comparison === 2) stdout = input.args.includes('--no-renames') ? 'lib.mjs\0other.mjs\0' : 'other.mjs\0'
       return { ...green(), stdout }
@@ -2402,10 +2410,17 @@ test('a moved-head recheck uses full review when scope is unmeasured and scoped 
     assert.equal(f.calls.filter((c) => c === 'uncommit').length, 1, mode)
     assert.equal(f.calls.filter((c) => c === 'suite').length, 2, mode)
     for (const role of ['reviewer', 'tech-lead']) {
-      assert.equal(Object.hasOwn(f.requests.filter((r) => r.role === role)[1], 'recheckReview'), scoped, mode)
+      const turn = f.requests.filter((r) => r.role === role)[1]
+      assert.equal(Object.hasOwn(turn, 'recheckReview'), scoped, mode)
+      if (writes) {
+        assert.equal(Object.hasOwn(turn, 'deltaReview'), false)
+        assert.equal(Object.hasOwn(turn, 'reserveReview'), false)
+        assert.deepEqual(turn.changedPaths, ['Cargo.lock'])
+      }
     }
     const row = f.rows.find((r) => r.event === 'recheck-scope')
-    assert.deepEqual([row.scope, row.review, row.reason], scoped ? ['measured', 'scoped', null] : ['unmeasured', 'full', 'scope-unmeasured'], mode)
+    assert.deepEqual([row.scope, row.review, row.reason], writes ? ['measured', 'full', 'fast-check-write'] : scoped ? ['measured', 'scoped', null] : ['unmeasured', 'full', 'scope-unmeasured'], mode)
+    if (writes) assert.deepEqual([row.reviewed, row.onto, row.rebased], [A, O, MOVED.head])
   }
 })
 

@@ -513,10 +513,11 @@ export async function runLoop(spec, deps = {}) {
     const status = await readStatus('post-rebase-clean')
     const paths = status.status === 'green' && typeof status.stdout === 'string' ? parseChangedPaths(status.stdout) : null
     if (paths === null) return { reason: 'paths-unmeasured', observation: status }
-    if (paths.length > 0) return { reason: 'dirty-worktree', observation: status }
+    if (paths.length > 0) return { reason: 'dirty-worktree', observation: status, changed: true }
     const measured = await stage('post-rebase-clean', () => callCheck('post-rebase-clean', d.run, { cwd, command: 'git', args: ['rev-parse', 'HEAD'] }, { command: true }))
     if (measured.status !== 'green') return { reason: measured.reason, observation: measured }
-    if (typeof measured.stdout !== 'string' || measured.stdout.trim() !== head) return { reason: 'dirty-worktree', observation: measured }
+    const oid = typeof measured.stdout === 'string' ? measured.stdout.trim() : ''
+    if (oid !== head) return { reason: 'dirty-worktree', observation: measured, changed: HEX_OID.test(oid) }
     return null
   }
   const fastCheck = (configuredCommand) => {
@@ -1385,6 +1386,7 @@ export async function runLoop(spec, deps = {}) {
           }
           const [before, after, baseChanges] = paths
           recheckScope = baseChanges ? scope : null
+          let reason = baseChanges ? null : 'scope-unmeasured'
           const comparable = baseChanges && conflictTurns === conflictsBeforeRebase && before.size === after.size && before.isSubsetOf(after)
           if (comparable && before.isDisjointFrom(baseChanges) && !await reproveCommit(rebased.head)) {
             recheckSkip = { ...scope, oldBase: currentBase, reason: 'clean-disjoint' }
@@ -1398,7 +1400,15 @@ export async function runLoop(spec, deps = {}) {
                 && (!namedTests.length || (!await reproveCommit(rebased.head) && !await checkRebasedTree(rebased.head)))
               for (const command of spec.fastChecks) {
                 if (!green) break
-                green = (await fastCheck(command)).status === 'green' && !await checkRebasedTree(rebased.head)
+                const check = await fastCheck(command)
+                const tree = await checkRebasedTree(rebased.head)
+                if (tree?.changed) {
+                  recheckScope = null
+                  reason = 'fast-check-write'
+                  // Require fresh passes even if the staged tree matches an earlier review.
+                  for (const role of Object.keys(latestReviews)) delete latestReviews[role]
+                }
+                green = check.status === 'green' && !tree
               }
               if (green) {
                 recheckSkip = { ...scope, oldBase: currentBase, reason: 'lockfile-only', shared }
@@ -1408,7 +1418,7 @@ export async function runLoop(spec, deps = {}) {
             }
           }
           if (recheckSkip) await emit('recheck-scope', { scope: 'measured', review: 'scoped', suite: 'skipped', ...recheckSkip })
-          else await emit('recheck-scope', { scope: recheckScope ? 'measured' : 'unmeasured', review: recheckScope ? 'scoped' : 'full', reason: recheckScope ? null : 'scope-unmeasured', ...scope })
+          else await emit('recheck-scope', { scope: baseChanges ? 'measured' : 'unmeasured', review: recheckScope ? 'scoped' : 'full', reason, ...scope })
         }
         if (rechecks >= MAX_RECHECKS) return stop('recheck-bound', { rechecks, head: rebased.head, onto: rebased.onto, committed: committed.head })
         if (!recheckSkip) {

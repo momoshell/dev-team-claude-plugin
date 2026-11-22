@@ -144,7 +144,9 @@ the fetch fails; it does not probe seats. The probe is implemented in
    in the lane worktree after a builder turn, the path and symlink check, and
    any first-round base refresh, before per-test proof. This includes lanes
    that require no proof tests. Of the publishing rechecks, only lock-file
-   rechecks run fast checks, after proof. Unchanged-tree proof re-runs do not
+   rechecks run fast checks, after proof. A lock-file recheck runs fast checks on
+   the clean, committed rebased head, so a command that scopes itself to the
+   change must run everything on a clean tree. Unchanged-tree proof re-runs do not
    repeat fast checks. Commands split on whitespace without a shell and do not take
    the suite lock. Each gets 120 seconds by default. Set `fastChecksTimeoutMs`
    to a safe integer from 1 to `2**31-1` to override the deadline in milliseconds.

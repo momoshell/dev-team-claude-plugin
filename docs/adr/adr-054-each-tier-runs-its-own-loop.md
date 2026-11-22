@@ -83,8 +83,8 @@ checks earlier so a failure need not wait for the suite.
 Build, judge, mechanical and finish runs can opt in with `fastChecks` in
 `.crew/project.json`. The loop runs the commands in order after a builder turn,
 the worktree path and symlink check, and any first-round base refresh. This
-precedes proof, including lanes that require no proof tests, and does not run on
-publishing-only checks or unchanged-tree proof re-runs. An absent or empty
+precedes proof, including lanes that require no proof tests. Unchanged-tree proof
+re-runs do not repeat fast checks. An absent or empty
 list leaves the loop unchanged. Commands split on whitespace without a
 shell, receive `CREW_LANE` and run in the lane worktree without the suite lock.
 `fastChecksTimeoutMs` sets the deadline per command, 120 seconds by default.
@@ -98,7 +98,9 @@ skips remaining commands, proof, review and suite on that tree. It returns one
 must-fix item with bounded output and spends rounds like red proof. A timeout
 or unavailable measurement skips any remaining commands and continues to
 proof without a repair finding. Fast checks can return work early, not pass a
-lane; the suite stays the gate.
+lane; the suite stays the initial gate. ADR-055's 2026-11-22 amendment adds
+one publishing exception: a lock-file recheck runs fast checks after proof
+before it can skip repeating the suite.
 
 ### 2. The loops
 

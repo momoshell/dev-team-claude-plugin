@@ -534,3 +534,39 @@ rechecks measured on 2026-11-21, none of 15 in the-power found anything; the
 one in devteam found a red test neither side touched. After 30 more publishing
 rebases that move the head, count skips and full rechecks across checkouts.
 For each skipped PR, note whether a later red suite on the base was traced to it.
+
+## Amendment 2026-11-22: skip the suite after a lock-file-only publishing rebase (#2538)
+
+The operator kept scoped review after a publishing rebase and approved skipping
+its suite when the only paths shared with the base's changes are lock files.
+This applies to build and judge lanes, including planning resumes, under the
+same conflict, path measurement and path set conditions as the disjoint skip.
+A shared path counts as a lock file when its last segment is exactly
+`Cargo.lock`, `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`,
+`yarn.lock`, `bun.lock`, `bun.lockb`, `go.sum`, `poetry.lock`, `uv.lock`,
+`Gemfile.lock` or `composer.lock`. This list is built in. Both names of a rename
+still count.
+
+The lock-file recheck spends one of the three publishing rechecks and keeps the
+rebased commit. It repeats proof for any named tests against the new base, then
+runs every configured fast check in order. With no fast checks, non-green
+proof, or a red or unmeasured fast check, the loop takes the full recheck. A
+worktree change visible to Git or a moved head during checks also takes the
+full recheck. The loop does not discard check writes to make the shortcut pass.
+
+If the checks pass, the reviewer (and the tech-lead on judge) performs a scoped
+review without starting the suite or reusing an earlier pass. A request for
+changes returns the lane to the uncommitted builder path on the new base, with
+no suite skip on the next build. Publication after a pass still requires a clean
+worktree at the measured rebased commit. The `recheck-scope` row keeps
+`review: "scoped"` and adds `suite: "skipped"`, `reason: "lockfile-only"` and the
+shared paths. It and PR Verification name the commit the suite ran on, both bases
+and the rebased commit. The PR names the green fast checks and scoped review on
+the rebased commit. The disjoint proof-only skip still takes precedence and
+spends no recheck. Finish and mechanical lanes are unchanged.
+
+A dependency bump can change lane behavior even when the fast checks pass.
+The two lock-only rounds among 45 scoped rebase reviews measured on 2026-11-22
+both passed review and neither found a defect. After 30 more publishing rebases
+that move the head across checkouts, count lock-file rechecks, their review
+verdicts and any later red suite on the base traced to one.

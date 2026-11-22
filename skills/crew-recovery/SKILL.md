@@ -104,8 +104,10 @@ from its brief as a build lane.
 Only the checked tree is committed. On a finish pass, a moved publishing head
 still repeats proof, review and suite on the new base and publishes nothing
 (`crew/finish.mjs`). A planning resume follows the normal tier loop instead:
-build and judge can repeat only proof after a clean, measured disjoint rebase;
-mechanical lanes still re-prove and rerun the suite on the rebased commit.
+build and judge can repeat only proof after a clean, measured disjoint rebase.
+A lock-file-only overlap can skip the suite after proof and green fast checks,
+but still needs scoped review. Mechanical lanes still re-prove and rerun the
+suite on the rebased commit.
 A red suite or proof with measured host sleep runs once more on the unchanged tree
 (ADR-054 §1). A second red stops with `red-after-sleep-rerun`. If the sleep rule
 does not apply, an `exit-nonzero` suite red matching a project-declared environment

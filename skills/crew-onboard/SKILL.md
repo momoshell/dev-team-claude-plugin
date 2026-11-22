@@ -143,16 +143,19 @@ the fetch fails; it does not probe seats. The probe is implemented in
    them for the lane and its finish passes. The loop runs the commands in order
    in the lane worktree after a builder turn, the path and symlink check, and
    any first-round base refresh, before per-test proof. This includes lanes
-   that require no proof tests, not publishing-only checks or unchanged-tree
-   proof re-runs. Commands split on whitespace without a shell and do not take
+   that require no proof tests. Of the publishing rechecks, only lock-file
+   rechecks run fast checks, after proof. Unchanged-tree proof re-runs do not
+   repeat fast checks. Commands split on whitespace without a shell and do not take
    the suite lock. Each gets 120 seconds by default. Set `fastChecksTimeoutMs`
    to a safe integer from 1 to `2**31-1` to override the deadline in milliseconds.
    Each attempt writes a `fast-check` check row with the command, status, reason
-   and elapsed seconds. A green list continues to proof. A nonzero exit skips
-   the rest of the list, proof, review and suite on that tree, and returns the
+   and elapsed seconds. After a builder turn, a green list continues to proof.
+   A nonzero exit skips the rest of the list, proof, review and suite on that tree, and returns the
    command and bounded output to the builder as one must-fix item, spending
    rounds like a red proof. A timeout or other unmeasured command skips the
-   rest of the list but continues to proof. The suite stays the gate. See
+   rest of the list but continues to proof. Fast checks do not replace the
+   initial suite. A lock-file recheck can skip the second suite only if all
+   commands pass without changing the Git worktree or `HEAD`. See
    [ADR-054 §1](../../docs/adr/adr-054-each-tier-runs-its-own-loop.md#1-the-rule)
    for the measured cost of finding cheap failures in the suite.
 3. For each other runner, add `match` (a file glob), optional `setup`, `run`, and

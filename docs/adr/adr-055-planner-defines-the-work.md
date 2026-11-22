@@ -553,6 +553,10 @@ runs every configured fast check in order. With no fast checks, non-green
 proof, or a red or unmeasured fast check, the loop takes the full recheck. A
 worktree change visible to Git or a moved head during checks also takes the
 full recheck. The loop does not discard check writes to make the shortcut pass.
+When a fast check changed the worktree or head, that full recheck's review is
+full, not scoped, and no seat reuses an earlier pass; the `recheck-scope` row
+records `scope: "measured"`, `review: "full"` and `reason: "fast-check-write"`
+(#2540). Every other fallback keeps the scoped review.
 
 If the checks pass, the reviewer (and the tech-lead on judge) performs a scoped
 review without starting the suite or reusing an earlier pass. A request for

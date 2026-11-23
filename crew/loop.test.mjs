@@ -1038,7 +1038,7 @@ test('a finish pass runs its proof and suite under the larger of the lane\'s and
 // MUTATION: invert which finish red gets an unchanged-tree re-run.
 test('a finish first red repairs immediately unless a sleep-credited re-run passes', async () => {
   const spec = { ...finishSpec(), suite: { command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 1800000 } }
-  const f = sequenced([{ ...redRun(7), stdout: SPEC_OUT, stderr: TAP_OUT }, green()], { spec, checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder')).repeat(40) }) })
+  const f = sequenced([{ ...redRun(7), stdout: SPEC_OUT, stderr: TAP_OUT, sleep_credited_s: 5.05 }, green()], { spec, checkedTree: () => ({ ...green(), stdout: String(count(f, 'builder')).repeat(40) }) })
   assert.deepEqual(await f.go(), { status: 'done', reason: null, pr: null })
   assert.equal(builderTurns(f).length, 2)
   assert.deepEqual(f.calls.slice(f.calls.indexOf('suite'), f.calls.lastIndexOf('suite') + 1), ['suite', 'seat:builder', 'build-paths', 'proof', 'review-paths', 'suite-stage', 'checked-tree', 'seat:reviewer', 'suite'])
@@ -1054,7 +1054,7 @@ test('a finish first red repairs immediately unless a sleep-credited re-run pass
   assert.deepEqual(f.inputs[0], { cwd: '/virtual/checkout', command: 'node', args: ['--test', 'lane.test.mjs'], timeoutMs: 1800000, suiteLock: undefined, lane: f.spec.id })
   assert.equal(f.calls.filter((c) => c === 'proof').length, 2)
   assert.equal(count(f, 'reviewer'), 2)
-  assert.deepEqual(f.rows.filter((r) => r.event === 'check' && r.check === 'suite').map((r) => r.result.status), ['red', 'green'])
+  assert.deepEqual(f.rows.filter((r) => r.event === 'check' && r.check === 'suite').map((r) => [r.result.status, r.result.sleep_credited_s]), [['red', 5.05], ['green', undefined]])
   assert.match(f.seen.commit.body, /- Suite: green; exit 0; node --test lane\.test\.mjs\.\n?$/)
   const report = JSON.parse(f.writes.get('/virtual/task/finish-report.json'))
   assert.ok(report.measurements.includes('- Suite: green; exit 0; node --test lane.test.mjs.'))
@@ -1062,7 +1062,7 @@ test('a finish first red repairs immediately unless a sleep-credited re-run pass
   assert.doesNotMatch(f.seen.commit.body + JSON.stringify(report), /redCode|re-run after red|re-run after a red/)
   assert.equal(f.calls.includes('publish'), false)
 
-  const slept = sequenced([{ ...redRun(), sleep_credited_s: 28336 }, green()], { spec: { ...spec, suiteLock: true } })
+  const slept = sequenced([{ ...redRun(), sleep_credited_s: 30 }, green()], { spec: { ...spec, suiteLock: true } })
   assert.deepEqual(await slept.go(), { status: 'done', reason: null, pr: null })
   assert.deepEqual(slept.calls.slice(slept.calls.indexOf('suite'), slept.calls.lastIndexOf('suite') + 1), ['suite', 'suite'])
   const input = { ...f.inputs[0], suiteLock: true }
@@ -1075,7 +1075,7 @@ test('a finish first red repairs immediately unless a sleep-credited re-run pass
     ['stage-start', undefined], ['check', 'green'], ['stage-end', 'green'],
   ])
   assert.equal(attempts[1].result.reason, 'exit-nonzero')
-  assert.equal(attempts[2].outcome.sleep_credited_s, 28336)
+  assert.equal(attempts[2].outcome.sleep_credited_s, 30)
   assert.ok(slept.rows.some((r) => r.event === 'finish-ready' && r.status === 'ready-for-operator'))
 
   // #2520: a red that prints a declared environment signature is re-run once, with no builder turn.
@@ -2122,7 +2122,7 @@ test('pre-check moves do not spend publishing rechecks (#2403)', async () => {
         ? { ...green(), stdout: 'base.txt\0' } : run(input)
       if (mode === 'proof-red') f.deps.proveTests = async (input) => {
         const result = await prove(input)
-        return input.base === 'HEAD' ? result : { status: 'red', reason: 'proof-unproven', rows: [], sleep_credited_s: 1 }
+        return input.base === 'HEAD' ? result : { status: 'red', reason: 'proof-unproven', rows: [], sleep_credited_s: 30 }
       }
     }
     const result = await f.go()

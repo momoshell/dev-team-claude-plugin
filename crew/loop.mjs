@@ -10,7 +10,7 @@
 // An unresolved conflict stops rebase-conflict, restoring uncommitted work only when cleanup is proven.
 // A mechanical finish uses its brief and publishes nothing.
 // Mechanical: rebase -> build -> refresh base -> proof -> suite -> PR. A fix turn repeats checks.
-// A red suite or proof with measured host sleep gets one unchanged-tree re-run (ADR-054 §1).
+// A red suite or proof with at least 30 seconds of run sleep credit gets one unchanged-tree re-run (ADR-054 §1).
 // Otherwise a red suite can re-run once on a project-declared environment signature.
 // Finish repairs its first ordinary suite red and stops on a second red or an unmeasured suite.
 // Only the checked tree is committed. A clean disjoint publishing rebase on build or judge repeats only proof;
@@ -877,7 +877,7 @@ export async function runLoop(spec, deps = {}) {
     // Let the caller join any parallel review before journaling the stop.
     const stopped = (reason, result, detail) => ({ result, stopAfterRerun: () => stop(reason, { stage: name, result: journaled(result), ...detail }) })
     let result = await attempt()
-    if (result.status === 'red' && Number.isFinite(result.sleep_credited_s) && result.sleep_credited_s > 0) {
+    if (result.status === 'red' && Number.isFinite(result.sleep_credited_s) && result.sleep_credited_s >= 30) {
       result = await attempt()
       if (result.status === 'red') return stopped('red-after-sleep-rerun', result)
     } else if (name === 'suite') {

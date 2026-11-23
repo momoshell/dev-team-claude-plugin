@@ -1,6 +1,6 @@
 # ADR-054 — Each tier runs its own loop, and every stage earns its place
 
-**Status:** *proposed* 2026-11-01, operator direction ("each lane type should have its loop"); §2–§4 amended by ADR-055; checkout suite coordination amendment 2026-11-18 (#2457), amended 2026-11-21 for suite slots (#2534); §2 pending build-suite cancellation amendment 2026-11-18 (#2459); §1 host-sleep re-run amendment 2026-11-19 (#2493); §1 fast-check amendment 2026-11-20 (#2509); §1 environment-signature re-run amendment 2026-11-20 (#2520) · **Owner:** operator ·
+**Status:** *proposed* 2026-11-01, operator direction ("each lane type should have its loop"); §2–§4 amended by ADR-055; checkout suite coordination amendment 2026-11-18 (#2457), amended 2026-11-21 for suite slots (#2534); §2 pending build-suite cancellation amendment 2026-11-18 (#2459); §1 host-sleep re-run amendment 2026-11-19 (#2493); §1 fast-check amendment 2026-11-20 (#2509); §1 environment-signature re-run amendment 2026-11-20 (#2520); §1 sleep re-run threshold amendment 2026-11-23 (#2543) · **Owner:** operator ·
 **Relates to:** ADR-052 (§6 the loop), ADR-053 (build first, prove after), ADR-038 (the judge floor forces proof),
 ADR-051 (finish shape)
 
@@ -44,10 +44,17 @@ A fix turn is not a retry. After any fix turn the loop runs the proof, the suite
 the changed tree, within the role's round bound; a lane never publishes a tree that has not passed all of its tier's
 checks.
 
-A red suite or proof runs once more on the unchanged tree if the red attempt recorded a numeric
-`sleep_credited_s` greater than zero. Absent, zero or `null` credit and suite-lock wait credit do not qualify.
+A red suite or proof runs once more on the unchanged tree if the first attempt recorded a finite total
+`sleep_credited_s` of at least 30 seconds. Smaller, absent or `null` credit and suite-lock wait credit do not qualify.
 The journal records both attempts. A green re-run takes the normal green path; a second red stops the lane
-with `red-after-sleep-rerun`, even if that attempt also recorded sleep.
+with `red-after-sleep-rerun`, regardless of the second attempt's credit.
+
+#### Amendment 2026-11-23: require at least 30 seconds of run sleep credit for a re-run (#2543)
+
+In lane journals read on 2026-11-23 for lanes started since 2026-11-16, 93 of 99 suite or proof results with
+`sleep_credited_s` recorded 5.0 to 5.2 seconds of credit. Seat teardown may explain the cluster, but no trace
+confirmed it. The fixed 30-second threshold applies only to re-runs. Smaller credits are still journaled
+and extend the check's time budget as before.
 
 #### Amendment 2026-11-20: re-run a suite red on a declared environment signature (#2520)
 

@@ -18,7 +18,7 @@ const ROLE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/
 const PREFIX = 'lean:'
 const nonEmpty = (value) => typeof value === 'string' && value.trim() !== ''
 // Seat stages follow the stage(...seatTurn(...)) calls in crew/loop.mjs.
-const SEAT_STAGES = { plan: 'planner', replan: 'planner', build: 'builder', 'suite-repair': 'builder', conflict: 'builder', review: 'reviewer', lead: 'lead', 'second-review': 'tech-lead' }
+const SEAT_STAGES = { plan: 'planner', replan: 'planner', build: 'builder', 'suite-repair': 'builder', 'ci-repair': 'builder', conflict: 'builder', review: 'reviewer', lead: 'lead', 'second-review': 'tech-lead' }
 const BILLED_FIELDS = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
 
 function sideUsage(rows, getUsage) {

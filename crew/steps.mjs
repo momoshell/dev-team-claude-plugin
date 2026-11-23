@@ -4,7 +4,7 @@ import { parseArgs } from 'node:util'
 import { createLeanSource } from './lean-source.mjs'
 import { TIERS } from './protocols.mjs'
 
-const REPAIR = Object.freeze({ 'suite-repair': 'suite-red', conflict: 'rebase-conflict' })
+const REPAIR = Object.freeze({ 'suite-repair': 'suite-red', 'ci-repair': 'ci-red', conflict: 'rebase-conflict' })
 const TRIGGERS = Object.freeze([...Object.values(REPAIR), 'fast-check-red', 'proof-unproven', 'review-changes', 'finish-triage', 'replan', 'unclassified'])
 
 function isoTime(value) {
@@ -42,7 +42,7 @@ function summarize(rows, spec) {
       suite_runs++
       if (result?.status === 'red') red_suites++
     }
-    if (event === 'check' && row.check === 'ci') {
+    if (event === 'check' && row.check === 'ci' && (row.action === undefined || row.action === 'wait')) {
       ci_checks++
       if (result?.status === 'red') red_ci_checks++
       if (result?.status === 'green') greenCI++

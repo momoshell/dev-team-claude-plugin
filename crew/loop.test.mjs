@@ -2468,40 +2468,83 @@ test('a forged source or builder summary cannot forge a section or measurement i
 })
 
 test('the PR body states proof and suite honestly when no test is named, the lane is mechanical, or proof is unmeasured', async () => {
-  for (const mode of ['none', 'mechanical', 'mechanical-named', 'unmeasured', 'repair', 'ci', 'ci-empty', 'ci-conflicting']) {
+  for (const mode of ['ci-repair', 'ci-wrong-head', 'ci-closed-red', 'none', 'mechanical', 'mechanical-named', 'unmeasured', 'repair', 'ci', 'ci-empty', 'ci-conflicting']) {
     const finish = ['unmeasured', 'repair'].includes(mode)
     const mechanical = mode.startsWith('mechanical')
     const ciGate = mode.startsWith('ci')
-    const empty = ciGate && mode !== 'ci'
-    const conflict = mode === 'ci-conflicting'
-    const reason = empty ? conflict ? 'ci-unmeasured' : 'ci-no-required-checks' : null
+    const empty = ['ci-empty', 'ci-conflicting'].includes(mode)
+    const conflict = mode === 'ci-conflicting', wrongHead = mode === 'ci-wrong-head', repair = mode === 'ci-repair'
+    const closedRed = mode === 'ci-closed-red'
+    const reason = conflict || wrongHead || closedRed ? 'ci-unmeasured' : empty ? 'ci-no-required-checks' : null
     const noProof = mode === 'none' || ciGate
-    const head = 'a'.repeat(40)
-    const options = { spec: ciGate ? { suiteGate: 'ci', ciTimeoutMs: 1_000 } : finish ? finishSpec() : mechanical ? { tier: 'mechanical' } : {}, edit: (v) => {
+    const head = 'a'.repeat(40), successor = 'b'.repeat(40), repairTree = 'f'.repeat(40)
+    const pr = { ...PR, url: `https://github.com/o/r/pull/${PR.number}` }
+    let remoteHead = head, localHead = head, dirty = false, staged = false, clock = 0, successorReads = 0
+    const options = { spec: ciGate ? { suiteGate: 'ci', ciTimeoutMs: repair ? 60_000 : 1_000 } : finish ? finishSpec() : mechanical ? { tier: 'mechanical' } : {}, edit: (v, request) => {
       if (v.role === 'planner' && noProof) v.details.tests = []
       if (v.role === 'builder') {
         if (mechanical) v.details.subject = 'fix: mechanical'
         if (noProof || ['mechanical', 'unmeasured', 'repair'].includes(mode)) v.details.tests = []
+        if (request.feedback.some(({ id }) => id === 'ci-repair')) dirty = true
       }
       return v
     } }
     // For an empty read, publication has already used the ten-minute grace.
-    if (ciGate) options.publish = { status: 'green', reason: null, pr: PR, head, ciGraceMs: empty ? 0 : 600_000 }
+    if (ciGate) options.publish = { status: 'green', reason: null, pr, head, ciGraceMs: empty ? 0 : 600_000 }
+    if (repair) Object.assign(options, {
+      bounds: { builder: 1, reviewer: 1 },
+      deps: { now: () => clock, sleep: (ms) => { clock += Math.min(ms, 1_000) } },
+      checkedTree: () => ({ ...green(), stdout: dirty ? repairTree : 'e'.repeat(40) }),
+      commit: () => {
+        if (dirty) localHead = successor
+        dirty = staged = false
+        return { ...green(), head: localHead }
+      },
+    })
     const f = mode === 'repair' ? sequenced([redRun(7), green()], options) : fakes(options)
-    const checks = empty ? [] : [{ name: 'test', workflow: 'CI', bucket: 'pass', link: 'https://example.test/runs/1' }]
-    const ghArgs = []
+    const check = { name: 'test', workflow: '', bucket: 'pass', link: 'https://example.test/runs/1' }
+    const ghArgs = [], gitArgs = []
     if (ciGate) {
       const run = f.deps.run
       f.deps.run = (input) => {
-        if (input.command !== 'gh') return run(input)
-        ghArgs.push(input.args)
-        if (input.args[1] === 'view') return { ...green(), stdout: JSON.stringify({ mergeable: conflict ? 'CONFLICTING' : 'MERGEABLE' }) }
-        if (empty) return { ...redRun(), stderr: "no checks reported on the 'lane' branch\n" }
-        return { ...green(), stdout: JSON.stringify(checks) }
+        const { args } = input
+        if (input.command === 'git') {
+          if (!f.seen.publish) return run(input)
+          gitArgs.push(args)
+          if (args[0] === 'status') return { ...green(), stdout: dirty ? `${staged ? 'M ' : ' M'} lib.mjs\0` : '' }
+          if (args[0] === 'rev-parse') return { ...green(), stdout: `${localHead}\n` }
+          if (args[0] === 'symbolic-ref') return { ...green(), stdout: 'lane\n' }
+          if (args[0] === 'check-ref-format') return green()
+          if (args.includes('show')) return { ...green(), stdout: `${localHead} ${head} ${repairTree}\n` }
+          if (args[0] === 'ls-remote') return { ...green(), stdout: `${remoteHead}\trefs/heads/lane\n` }
+          if (args[0] === 'push') { remoteHead = args[2].split(':')[0]; return green() }
+          if (args.includes('add')) staged = true
+          return run(input)
+        }
+        ghArgs.push(args)
+        const json = (data) => ({ ...green(), stdout: JSON.stringify(data) })
+        const red = (repair || wrongHead || closedRed) && remoteHead === head
+        // Keep the old source's read working so the proof fails on the missing repair, not the command fake.
+        if (args[1] === 'checks') return json([{ ...check, bucket: red ? 'fail' : 'pass' }])
+        if (args[1] === 'view') return json({ headRefOid: remoteHead, baseRefName: pr.baseRefName, state: pr.state })
+        if (args[0] === 'api' && args[1] === 'graphql') {
+          // The PR API can lag behind ls-remote, then report a merged PR once checks pass.
+          const repaired = repair && remoteHead === successor
+          const oid = wrongHead ? successor : repaired && successorReads++ === 0 ? head : remoteHead
+          const state = closedRed ? 'CLOSED' : repaired && oid === successor ? 'MERGED' : pr.state
+          const statusCheckRollup = { contexts: { pageInfo: { hasNextPage: false }, nodes: empty ? [] : [{
+            __typename: 'StatusContext', context: check.name, isRequired: true, state: red ? 'FAILURE' : 'SUCCESS', targetUrl: check.link,
+          }] } }
+          return json({ data: { repository: { pullRequest: {
+            headRefOid: oid, baseRefName: pr.baseRefName, state, mergeable: conflict ? 'CONFLICTING' : 'MERGEABLE',
+            commits: { nodes: [{ commit: { oid, statusCheckRollup } }] },
+          } } } })
+        }
+        throw new Error(`unexpected gh command: ${args}`)
       }
     }
     const outcome = await f.go()
-    if (empty) assert.deepEqual(outcome, stopped(reason), mode)
+    if (reason) assert.deepEqual(outcome, stopped(reason), mode)
     else assert.equal(outcome.status, 'done', mode)
     const body = finish ? JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body : f.seen.publish.body
     assert.match(body, noProof ? /Proof: no criterion is machine-checked/ : mode === 'mechanical-named' ? /Review: none, mechanical lane, not reviewed/ : mechanical ? /Proof: mechanical lane, not reviewed/ : /Proof: unmeasured/)
@@ -2513,17 +2556,33 @@ test('the PR body states proof and suite honestly when no test is named, the lan
         assert.doesNotMatch(text, /Suite: green/)
       }
       assert.ok(!f.calls.includes('suite'))
-      const expectedGh = [['pr', 'checks', String(PR.number), '--required', '--json', 'name,workflow,bucket,link']]
-      if (empty) expectedGh.push(['pr', 'view', String(PR.number), '--json', 'mergeable'])
-      assert.deepEqual(ghArgs, expectedGh)
-      const evidence = f.rows.filter((r) => r.event === 'pr' || (r.event === 'check' && ['ci', 'suite'].includes(r.check)) || (r.event === 'verdict' && r.status === outcome.status))
-      assert.deepEqual(evidence.map(({ event, check }) => check ?? event), ['pr', 'ci', 'verdict'])
+      const evidence = f.rows.filter((r) => r.event === 'pr' || (r.event === 'check' && r.check === 'ci' && r.action === 'wait') || (r.event === 'verdict' && r.status === outcome.status))
+      assert.deepEqual(evidence.map(({ event, check }) => check ?? event), repair ? ['pr', 'ci', 'ci', 'verdict'] : ['pr', 'ci', 'verdict'])
       assert.equal(evidence[0].awaitingCi, true)
-      assert.deepEqual(evidence[0].pr, PR)
-      const { sleep_credited_s, ...ci } = evidence[1].result
-      assert.deepEqual(ci, { status: empty ? 'unmeasured' : 'green', reason, head, checks, ...(conflict ? { detail: 'pr-conflicting' } : {}) })
+      assert.deepEqual(evidence[0].pr, pr)
+      const { sleep_credited_s, ...ci } = evidence.at(-2).result
+      assert.deepEqual(ci, { status: reason ? 'unmeasured' : 'green', reason, head: repair ? successor : head, checks: wrongHead ? null : empty ? [] : [closedRed ? { ...check, bucket: 'fail' } : check],
+        ...(conflict ? { detail: 'pr-conflicting' } : wrongHead ? { detail: 'pr-head-or-target-changed', observedHead: successor } : closedRed ? { detail: 'pr-not-open' } : {}) })
       assert.ok(Number.isFinite(sleep_credited_s) && sleep_credited_s >= 0)
-      assert.equal(evidence[1].seconds, 0)
+      assert.equal(evidence.at(-2).seconds, repair ? 30 : 0)
+      const turns = f.rows.filter((r) => r.event === 'seat-turn' && r.role === 'builder' && r.stage === 'ci-repair')
+      assert.equal(turns.length, repair ? 1 : 0)
+      assert.equal(f.requests.filter(({ role }) => role === 'builder').length, repair ? 2 : 1)
+      if (repair || wrongHead) {
+        assert.deepEqual(gitArgs.filter(([verb]) => verb === 'push'), repair ? [['push', 'origin', `${successor}:refs/heads/lane`]] : [])
+        assert.ok(!gitArgs.some(([verb]) => verb === 'rebase' || verb === 'fetch'))
+        assert.ok(!ghArgs.some(([verb, sub]) => verb === 'pr' && sub === 'edit'))
+        assert.deepEqual(f.calls.slice(f.calls.indexOf('publish') + 1).filter((call) => ['rebase', 'fetch', 'publish'].includes(call)), [])
+      }
+      if (repair) {
+        assert.deepEqual(evidence[1].result.checks, [{ ...check, bucket: 'fail' }])
+        assert.equal(evidence[1].result.head, head)
+        assert.deepEqual(f.rows.filter(({ event }) => event === 'commit').map((row) => row.head), [head, successor])
+        const item = f.requests.find(({ id }) => id === turns[0].id).feedback[0]
+        assert.equal(item.id, 'ci-repair')
+        assert.equal(item.severity, 'must-fix')
+        assert.equal(item.checks[0].link, check.link)
+      }
     } else assert.match(body, /- Suite: green; exit 0; node --test lane\.test\.mjs\./)
   }
 })

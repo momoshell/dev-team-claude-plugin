@@ -120,16 +120,35 @@ check row or wait for CI.
 
 After opening and recording its PR, the loop reads required checks immediately
 and every 30 seconds, within `ciTimeoutMs` of awake time. A nonempty report of
-only `pass` or `skipping` ends the lane `done`. A pending check keeps it waiting;
-once none are pending, any `fail` stops it as `ci-red`, and any other non-passing
-bucket stops it as `ci-unmeasured`. Without a report of any required checks ten
-awake minutes after push or remote-head confirmation, a measured empty read
-stops it as `ci-no-required-checks`, or `ci-unmeasured` if the PR reports a merge
-conflict. Failed reads retry; an undecided wait at the deadline stops as
-`ci-timeout`. The journal records one terminal CI check, and `crew lanes` keeps
-the PR URL visible while waiting and after a stop.
+only `pass` or `skipping` on the pushed head ends the lane `done`, even if the
+PR has already merged. While the PR is open, a pending check keeps it waiting
+and a settled `fail` on that head goes to CI failure handling. Other settled
+non-passing buckets, a moved head, or a closed or merged PR without a green
+report stop the lane as `ci-unmeasured`. After a repair push, the loop
+waits within the ten-minute grace if GitHub still reports the parent of the
+confirmed repair commit. With no required checks reported ten awake minutes
+after push or remote confirmation, a measured empty read stops as
+`ci-no-required-checks`, or `ci-unmeasured` if the PR reports a merge conflict.
+Failed reads retry; an undecided wait stops at `ci-timeout`.
 
-A CI stop leaves the PR open. `crew finish` refuses a lane with a recorded PR.
+The loop reads failed Actions logs and strips terminal controls. A literal
+`environmentSignatures` match reruns those runs' failed jobs once per head with
+a fresh timeout. Another match stops `red-after-environment-rerun`. Before a
+repair, the loop compares the failure with the latest completed push run of the
+same workflow on the base. A failed base run with all of the same test names
+(or, when the PR log has no test names, the same failed job name) stops
+`ci-base-red`. Missing logs or different base evidence can still lead to repair.
+
+For a repairable red, the builder gets check names and links, failing tests and
+files when extracted, and bounded logs. The loop repeats fast checks, proof and
+the tier's reviews (reusing passes on the same tree), then pushes a new commit
+without rebasing or editing the PR body. The CI repair and its review are not
+refused by spent seat bounds. A non-done repair return stops the lane. There are
+at most two CI repair turns; a third repairable red stops `ci-red`. `check: ci`
+rows separate waits, reruns and base comparisons. `crew steps` counts only waits
+as CI checks. `crew lanes` keeps the PR URL visible throughout.
+
+After a terminal CI stop, the PR stays open and `crew finish` refuses the lane.
 Fix the branch by hand, then use `crew closeout <lane>` once merged or
 `crew closeout <lane> --discard` once closed.
 
@@ -145,7 +164,7 @@ Acquisition waits at most two hours of awake time, separately from `suiteTimeout
 
 Suite, proof (base/build, setup and listing), `fastChecks` and `worktreeSetup` commands receive `CREW_LANE`, the lane name, overriding an inherited value only in the child environment. Project scripts can use it to name separate databases, ports or containers. This is independent of suite queueing and affected-package selection; onboarding has no lane name to supply.
 
-Optional `builderChecks` in `.crew/project.json` is a list of non-empty, one-line commands. Its lines appear verbatim in a `## Project checks` section of build, suite-repair and finish builder prompts. Builders run them and report each result in `notes`. The loop never runs them or reads their results; no journal row or PR line reports them, and they do not replace the configured gate. Editing the list does not require re-onboarding.
+Optional `builderChecks` in `.crew/project.json` is a list of non-empty, one-line commands. Its lines appear verbatim in a `## Project checks` section of build, suite-repair, CI repair and finish builder prompts. Builders run them and report each result in `notes`. The loop never runs them or reads their results; no journal row or PR line reports them, and they do not replace the configured gate. Editing the list does not require re-onboarding.
 
 Optional `fastChecks` in `.crew/project.json` lists nonblank, NUL-free commands for the loop to run. An absent or empty list does nothing. `crew onboard` validates and keeps the settings; `crew start` snapshots them for the lane and its finish passes. Editing them does not change the onboarding hash or affect lanes already started.
 

@@ -282,5 +282,38 @@ checks, elapsed time and sleep credit. The notifier waits for the verdict.
 
 The PR stays open after a CI stop, and `crew finish` still refuses published
 lanes. Fix the branch by hand, then close out after merge or discard after
-closing the PR. CI repair, job reruns and comparison with base CI are separate
-work (#2546).
+closing the PR. The next amendment defines automatic repair before a stop.
+
+## Amendment 2026-11-23: repair a red required check in the lane (#2546)
+
+Of 80 lanes measured on 2026-11-23, 18 had a red suite that needed the builder.
+Thirteen got a repair turn and five stopped with the same test red twice.
+Five red suites went green on an unchanged rerun. CI-gated lanes keep a repair
+turn without running the suite locally.
+
+Only settled required failures measured on the confirmed pushed head qualify.
+Read each failed check's Actions log with `gh run view --log-failed`, strip
+terminal controls, and use the suite-repair bounds for feedback. An unreadable
+log does not erase the check's name or link.
+
+On a literal `environmentSignatures` match, rerun the matching runs' failed
+jobs once per head. Give the new attempts a fresh awake timeout. A green wait
+records the signature; another signature red stops `red-after-environment-rerun`.
+Before seating a builder, compare each failed check with the latest completed
+push run of its workflow on the base. If that run failed, stop unmeasured as
+`ci-base-red` with both links when its log contains every extracted lane test
+name, or when the lane log has no test names and the base has the same failed
+job name. Missing or different evidence does not block repair.
+
+The `ci-repair` stage gives the builder one must-fix item for the failed checks.
+A non-done return stops. The loop repeats fast checks, proof against the original
+proof base, and the tier's reviews, reusing passes on the same tree. The CI
+repair and its review can run after ordinary round bounds are spent. After
+checks pass, the loop pushes a new commit on the published head, without a
+rebase, amend, force push or PR body edit, and waits again. Two CI repair turns
+are allowed per run; a third repairable red stops `ci-red`.
+
+The journal separates waits, reruns and base comparisons in `ci` check rows.
+`crew steps` counts waits as CI checks and repeat `ci-repair` builders as
+`ci-red`. A terminal stop still leaves the PR open for manual recovery. Lane
+mode and finish publication are unchanged.

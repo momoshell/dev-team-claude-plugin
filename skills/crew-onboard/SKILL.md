@@ -71,6 +71,14 @@ the fetch fails; it does not probe seats. The probe is implemented in
 2. Write a draft JSON file outside the checkout. Set `suite` to that command and
    `proof` to an array of runner entries. Node's built-in test runner is the
    default for JavaScript tests, so use `proof: []` if it covers all proof tests.
+   Optionally set `suiteGate` to `lane` (the default) or `ci`. Use `ci` only
+   when the required PR checks run the suite; the lane then skips the local
+   suite and waits after opening the PR. `ciTimeoutMs` is validated in either
+   mode: a safe integer from 1 to `2**31-1` ms, default 3,600,000, used as an
+   awake-time budget only in `ci` mode. Personal `~/.crew/settings.json` can
+   force `suiteGate: "lane"` for all new lanes on the machine; any other
+   personal `suiteGate` value refuses start. Start snapshots the effective
+   gate and CI timeout for the lane, including resumes and finish passes.
    Optionally set `suiteTimeoutMs` to a safe integer from 1 to `2**31-1` ms;
    if absent, the suite timeout is `SUITE_TIMEOUT_DEFAULT_MS` (`crew/onboard.mjs`).
    Optionally set boolean `suiteLock: true` to queue project suites across this
@@ -201,7 +209,7 @@ the fetch fails; it does not probe seats. The probe is implemented in
    have matching onboarding; proof reads runner entries from the lane's
    old-source worktree. Re-run
    onboarding after changing the suite, proof entries or `worktreeSetup`. Changing only
-   `suiteLock`, `suiteSlots`, `suiteTimeoutMs`, `proofTimeoutMs`, `builderChecks`,
+   `suiteGate`, `ciTimeoutMs`, `suiteLock`, `suiteSlots`, `suiteTimeoutMs`, `proofTimeoutMs`, `builderChecks`,
    `fastChecks`, `fastChecksTimeoutMs`, `environmentSignatures` or `protectedPaths`
    in `.crew/project.json` does not require re-onboarding.
    Write a brief with

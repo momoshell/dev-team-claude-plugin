@@ -1,7 +1,8 @@
 # Choosing an affected-only lane suite
 
-Use this guide while onboarding a checkout whose full suite is slow enough to
-matter. The project's script owns dependency selection; the plugin cannot infer
+Use this guide for `suiteGate: lane` when a checkout's full suite is slow
+enough to matter. With `suiteGate: ci`, required PR checks run the suite instead.
+The project's script owns dependency selection; the plugin cannot infer
 it across toolchains. Do not change this plugin repository's suite for this
 purpose, or another project's configuration from this checkout.
 
@@ -179,7 +180,8 @@ to calibrate and commit onboarding.
 Re-run onboarding after changing the configured `suite` command, proof entries
 or `worktreeSetup`. Editing only the contents of a script named by the unchanged
 `suite` command does not require re-onboarding. Neither do changes only to
-`suiteLock`, `suiteSlots`, `builderChecks`, `suiteTimeoutMs` or `proofTimeoutMs`.
+`suiteGate`, `ciTimeoutMs`, `suiteLock`, `suiteSlots`, `builderChecks`,
+`suiteTimeoutMs` or `proofTimeoutMs`.
 The onboarding hash covers selected configuration values, not script contents
 or the entire JSON file.
 In either case, commit and push the changes to the base branch before starting

@@ -38,7 +38,7 @@ test('requireOnboarded distinguishes missing and stale project records', () => {
   const valid = { suite, proof, onboarded: { hash } }
   assert.deepEqual(ONBOARD_REASONS, ['not-onboarded', 'onboarding-stale'])
   assert.ok(Object.isFrozen(ONBOARD_REASONS))
-  assert.deepEqual(requireOnboarded('/repo', () => JSON.stringify(valid)), { suite, proof, hash, suiteTimeoutMs: 1800000, proofTimeoutMs: 120000 })
+  assert.deepEqual(requireOnboarded('/repo', () => JSON.stringify(valid)), { suite, proof, hash, suiteTimeoutMs: 1800000, proofTimeoutMs: 120000, suiteGate: 'lane', ciTimeoutMs: 3600000 })
   for (const [input, reason] of [
     [null, 'not-onboarded'], [{ suite, proof }, 'not-onboarded'],
     ['{', 'onboarding-stale'], [{ ...valid, suite: 'cargo test' }, 'onboarding-stale'],

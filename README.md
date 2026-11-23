@@ -10,10 +10,11 @@ a verdict, a **lead** answers escalations with one closed decision, and a
 old source and green on the build. Configured green-only exceptions are
 `base-package-absent` (a new package's manifest is absent on the old source) and
 `base-test-absent` (a test file is absent there with `newTestFile: true`); see
-[crew/README.md](crew/README.md) for their proof conditions. The project suite
-must be green. Commit, rebase
-and PR happen only on green (ADR-052, ADR-055). A stopped
-finishable lane, including an escalated or provably dead run, can be picked up
+[crew/README.md](crew/README.md) for their proof conditions. By default the
+project suite must pass in the lane before publication. With `suiteGate: ci`,
+the loop skips that suite and waits for the PR's required checks after it
+opens the PR (ADR-054). A stopped finishable lane, including an escalated
+or provably dead run, can be picked up
 with `crew finish <lane> --return <file>`. The same flag starts another pass on a ready lane. Every seat's full session is
 recorded, so any lane can be inspected afterwards, and the visualizer reads
 those journals and session files.

@@ -10,8 +10,10 @@ it has to rediscover it.
 starts a lane (`crew start`): a planner, builder and reviewer, and a lead on
 escalation, and a tech-lead gives judge lanes a second review. They play their seats over ACP. Code only checks the result: each test the
 builder names is normally red on the old source and green on the build (with the
-green-only exceptions below), and the project suite is green. Then it commits and opens the PR (ADR-052, ADR-055). A stopped lane is
-finished with `crew finish`.
+green-only exceptions below). By default the project suite must also pass
+before publication. With `suiteGate: ci`, the loop skips the lane suite and
+waits for the required checks after opening the PR (ADR-054). Unpublished,
+finishable stops use `crew finish`; after a CI stop, fix the open PR by hand.
 
 `README.md` is the map. `crew/README.md` is the full model, verbs, seats and
 contracts.
@@ -19,13 +21,13 @@ contracts.
 ## Commands
 
 ```bash
-npm test              # node --test over **/*.test.mjs — gates every commit
+npm test              # node --test over **/*.test.mjs, the default lane suite
 npm run viz:build     # release-time check: operator runs it on main before tagging
 npm run viz:serve     # local visualizer, reads .env.local
 crew lanes            # lane state, from the lane journals
 ```
 
-`npm test` is the lane gate. `npm run viz:build` is a RELEASE-TIME check the
+`npm test` is the project suite in `lane` mode. `npm run viz:build` is a RELEASE-TIME check the
 operator runs on main before tagging; it is never a lane's done-means. Before tagging, also run the prose-drift audit on main: read every skill, charter and doc against the code. This is a release-time check, never a lane's done-means.
 
 ## Rules that are easy to get wrong

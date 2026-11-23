@@ -13,8 +13,12 @@ export const CHECK_REASONS = Object.freeze([
   'invalid-input', 'unsupported-platform', 'exit-nonzero', 'signal', 'spawn-error', 'timeout', 'output-limit',
   'suite-lock-timeout', 'suite-lock-unavailable', 'cancelled', 'cleanup-unproven', 'proof-unproven', 'proof-timeout', 'invalid-project-config', 'setup-failed', 'runner-threw', 'nothing-to-commit', 'commit-failed', 'rebase-conflict', 'rebase-failed',
   'dirty-worktree', 'push-unmeasured', 'pr-unmeasured', 'invalid-remote-data',
+  'ci-red', 'ci-unmeasured', 'ci-timeout', 'ci-no-required-checks',
 ])
 
+export const CI_TIMEOUT_DEFAULT_MS = 3_600_000
+const CI_POLL_MS = 30_000
+const CI_NO_CHECKS_MS = 600_000
 const DEFAULT_TIMEOUT_MS = 120_000
 const MAX_TIMEOUT_MS = 2 ** 31 - 1
 const OUTPUT_LIMIT_BYTES = 64 * 1024 * 1024
@@ -635,7 +639,7 @@ function validPr(record, branch, base) {
 // Pushes the lane branch (never forced) and opens its PR, or returns the PR already open. Every claim is read back.
 export async function openPullRequest(spec = {}, deps = {}) {
   return guarded(async () => {
-    const { cwd, branch, base, title, body = '', closes = [], refs = [], builderNotes, remote = 'origin', timeoutMs = DEFAULT_TIMEOUT_MS } = spec ?? {}
+    const { cwd, branch, base, title, body = '', closes = [], refs = [], builderNotes, remote = 'origin', timeoutMs = DEFAULT_TIMEOUT_MS, suiteGate } = spec ?? {}
     deps ??= {}
     const closing = issueList(closes)
     const referenced = issueList(refs)
@@ -684,20 +688,76 @@ export async function openPullRequest(spec = {}, deps = {}) {
       remoteOid = await remoteHead()
     }
     if (remoteOid !== head) return unmeasured('push-unmeasured')
-    const composedBody = composeLanePrBody({ body, closes: closing, refs: referenced, builderNotes })
-    if (existing.length === 1) {
-      const edited = await gh(['pr', 'edit', String(existing[0].number), '--body', composedBody])
-      if (edited.status !== 'green') return notGreen(edited, 'pr-unmeasured')
-      const viewed = await gh(['pr', 'view', String(existing[0].number), '--json', 'body'])
-      if (viewed.status !== 'green') return unmeasured('pr-unmeasured')
-      let confirmedBody
-      try { confirmedBody = JSON.parse(viewed.stdout)?.body } catch { return unmeasured('pr-unmeasured') }
-      if (confirmedBody !== composedBody) return unmeasured('pr-unmeasured')
-      return { status: 'green', reason: null, pr: existing[0], reused: true }
-    }
-    await gh(['pr', 'create', '--base', base, '--head', branch, '--title', withoutIssueTokens(title), '--body', composedBody])
-    const confirmed = await openPrs() ?? []
-    if (confirmed.length !== 1 || confirmed[0].baseRefName !== base) return unmeasured('pr-unmeasured')
-    return { status: 'green', reason: null, pr: confirmed[0], reused: false }
+    // Start the no-checks grace at remote confirmation, including the time spent opening the PR.
+    const grace = suiteGate === 'ci' ? sampledBudget(CI_NO_CHECKS_MS, deps) : null
+    try {
+      grace?.watch(() => {})
+      const evidence = () => grace ? { head, ciGraceMs: grace.remaining() } : {}
+      const composedBody = composeLanePrBody({ body, closes: closing, refs: referenced, builderNotes })
+      if (existing.length === 1) {
+        const edited = await gh(['pr', 'edit', String(existing[0].number), '--body', composedBody])
+        if (edited.status !== 'green') return notGreen(edited, 'pr-unmeasured')
+        const viewed = await gh(['pr', 'view', String(existing[0].number), '--json', 'body'])
+        if (viewed.status !== 'green') return unmeasured('pr-unmeasured')
+        let confirmedBody
+        try { confirmedBody = JSON.parse(viewed.stdout)?.body } catch { return unmeasured('pr-unmeasured') }
+        if (confirmedBody !== composedBody) return unmeasured('pr-unmeasured')
+        return { status: 'green', reason: null, pr: existing[0], reused: true, ...evidence() }
+      }
+      await gh(['pr', 'create', '--base', base, '--head', branch, '--title', withoutIssueTokens(title), '--body', composedBody])
+      const confirmed = await openPrs() ?? []
+      if (confirmed.length !== 1 || confirmed[0].baseRefName !== base) return unmeasured('pr-unmeasured')
+      return { status: 'green', reason: null, pr: confirmed[0], reused: false, ...evidence() }
+    } finally { grace?.stop() }
   })
+}
+
+export async function waitForRequiredChecks({ cwd, number, head, ciGraceMs, timeoutMs = CI_TIMEOUT_DEFAULT_MS }, deps = {}) {
+  if (typeof cwd !== 'string' || cwd === '' || !Number.isSafeInteger(number) || number <= 0 || typeof head !== 'string' || !HEX_OID.test(head)
+    || !Number.isFinite(ciGraceMs) || ciGraceMs < 0 || ciGraceMs > CI_NO_CHECKS_MS || !validTimeout(timeoutMs)) return unmeasured('invalid-input')
+  const budget = sampledBudget(timeoutMs, deps)
+  let checks = null, reported = false, lastReadError = null
+  const result = (status, reason, extra = {}) => {
+    budget.stop()
+    return { status, reason, head, checks, sleep_credited_s: 0, ...budget.fields(), ...extra }
+  }
+  const gh = (args) => {
+    const remaining = budget.remaining()
+    return remaining > 0 ? runCommand({ cwd, command: 'gh', args, timeoutMs: Math.ceil(Math.min(CI_POLL_MS, remaining)) }, deps) : unmeasured('timeout')
+  }
+  const awake = () => timeoutMs - budget.remaining()
+  try {
+    budget.watch(() => {})
+    while (budget.remaining() > 0) {
+      const pollStarted = awake()
+      const read = await gh(['pr', 'checks', String(number), '--required', '--json', 'name,workflow,bucket,link'])
+      let rows
+      const stderr = read.stderr.trim()
+      const exited = !read.signal && !read.timedOut && (read.status === 'green'
+        || (read.status === 'red' && read.reason === 'exit-nonzero' && [1, 8].includes(read.code)))
+      if (exited && !stderr) try { rows = JSON.parse(read.stdout) } catch {}
+      if (exited && read.code === 1 && !read.stdout.trim() && /^no (required )?checks reported on the '.+' branch$/.test(stderr)) rows = []
+      const measured = Array.isArray(rows) && rows.every((row) => row && typeof row.name === 'string' && row.name
+        && typeof row.workflow === 'string' && typeof row.bucket === 'string' && row.bucket && typeof row.link === 'string')
+      if (measured) { checks = rows; reported ||= rows.length > 0 }
+      else lastReadError = read.error?.message || stderr || (exited ? 'malformed gh pr checks output' : read.reason)
+      if (measured && rows.length && !rows.some(({ bucket }) => bucket === 'pending')) {
+        if (rows.some(({ bucket }) => bucket === 'fail')) return result('red', 'ci-red')
+        if (rows.every(({ bucket }) => bucket === 'pass' || bucket === 'skipping')) return result('green', null)
+        return result('unmeasured', 'ci-unmeasured')
+      }
+      if (budget.remaining() <= 0) break
+      if (measured && !reported && awake() >= ciGraceMs) {
+        const view = await gh(['pr', 'view', String(number), '--json', 'mergeable'])
+        if (view.status === 'green') try {
+          if (JSON.parse(view.stdout)?.mergeable === 'CONFLICTING') return result('unmeasured', 'ci-unmeasured', { detail: 'pr-conflicting' })
+        } catch {}
+        return result('unmeasured', 'ci-no-required-checks')
+      }
+      // Re-poll at the absence threshold if this read established there are still no checks.
+      const next = Math.min(timeoutMs, pollStarted + CI_POLL_MS, measured && !reported ? ciGraceMs : Infinity)
+      for (let delay; (delay = next - awake()) > 0;) await (deps.sleep ?? sleep)(Math.ceil(delay))
+    }
+    return result('unmeasured', 'ci-timeout', lastReadError === null ? {} : { lastReadError })
+  } finally { budget.stop() }
 }

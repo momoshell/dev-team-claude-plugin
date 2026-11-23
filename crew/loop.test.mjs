@@ -2468,24 +2468,63 @@ test('a forged source or builder summary cannot forge a section or measurement i
 })
 
 test('the PR body states proof and suite honestly when no test is named, the lane is mechanical, or proof is unmeasured', async () => {
-  for (const mode of ['none', 'mechanical', 'mechanical-named', 'unmeasured', 'repair']) {
+  for (const mode of ['none', 'mechanical', 'mechanical-named', 'unmeasured', 'repair', 'ci', 'ci-empty', 'ci-conflicting']) {
     const finish = ['unmeasured', 'repair'].includes(mode)
     const mechanical = mode.startsWith('mechanical')
-    const options = { spec: finish ? finishSpec() : mechanical ? { tier: 'mechanical' } : {}, edit: (v) => {
-      if (v.role === 'planner' && mode === 'none') v.details.tests = []
+    const ciGate = mode.startsWith('ci')
+    const empty = ciGate && mode !== 'ci'
+    const conflict = mode === 'ci-conflicting'
+    const reason = empty ? conflict ? 'ci-unmeasured' : 'ci-no-required-checks' : null
+    const noProof = mode === 'none' || ciGate
+    const head = 'a'.repeat(40)
+    const options = { spec: ciGate ? { suiteGate: 'ci', ciTimeoutMs: 1_000 } : finish ? finishSpec() : mechanical ? { tier: 'mechanical' } : {}, edit: (v) => {
+      if (v.role === 'planner' && noProof) v.details.tests = []
       if (v.role === 'builder') {
         if (mechanical) v.details.subject = 'fix: mechanical'
-        if (['none', 'mechanical', 'unmeasured', 'repair'].includes(mode)) v.details.tests = []
+        if (noProof || ['mechanical', 'unmeasured', 'repair'].includes(mode)) v.details.tests = []
       }
       return v
     } }
+    // For an empty read, publication has already used the ten-minute grace.
+    if (ciGate) options.publish = { status: 'green', reason: null, pr: PR, head, ciGraceMs: empty ? 0 : 600_000 }
     const f = mode === 'repair' ? sequenced([redRun(7), green()], options) : fakes(options)
-    assert.equal((await f.go()).status, 'done', mode)
+    const checks = empty ? [] : [{ name: 'test', workflow: 'CI', bucket: 'pass', link: 'https://example.test/runs/1' }]
+    const ghArgs = []
+    if (ciGate) {
+      const run = f.deps.run
+      f.deps.run = (input) => {
+        if (input.command !== 'gh') return run(input)
+        ghArgs.push(input.args)
+        if (input.args[1] === 'view') return { ...green(), stdout: JSON.stringify({ mergeable: conflict ? 'CONFLICTING' : 'MERGEABLE' }) }
+        if (empty) return { ...redRun(), stderr: "no checks reported on the 'lane' branch\n" }
+        return { ...green(), stdout: JSON.stringify(checks) }
+      }
+    }
+    const outcome = await f.go()
+    if (empty) assert.deepEqual(outcome, stopped(reason), mode)
+    else assert.equal(outcome.status, 'done', mode)
     const body = finish ? JSON.parse(f.writes.get('/virtual/task/finish-report.json')).body : f.seen.publish.body
-    assert.match(body, mode === 'none' ? /Proof: no criterion is machine-checked/ : mode === 'mechanical-named' ? /Review: none, mechanical lane, not reviewed/ : mechanical ? /Proof: mechanical lane, not reviewed/ : /Proof: unmeasured/)
+    assert.match(body, noProof ? /Proof: no criterion is machine-checked/ : mode === 'mechanical-named' ? /Review: none, mechanical lane, not reviewed/ : mechanical ? /Proof: mechanical lane, not reviewed/ : /Proof: unmeasured/)
     if (mode === 'mechanical-named') assert.match(body, /lib\.test\.mjs: works was red on the old source, green on the build/)
     else assert.doesNotMatch(body, /red on the old source|green on the build/)
-    assert.match(body, /- Suite: green; exit 0; node --test lane\.test\.mjs\./)
+    if (ciGate) {
+      for (const text of [body, f.seen.commit.body]) {
+        assert.match(text, /Suite: not run in the lane \(`suiteGate: ci`\).*required checks gate the change/)
+        assert.doesNotMatch(text, /Suite: green/)
+      }
+      assert.ok(!f.calls.includes('suite'))
+      const expectedGh = [['pr', 'checks', String(PR.number), '--required', '--json', 'name,workflow,bucket,link']]
+      if (empty) expectedGh.push(['pr', 'view', String(PR.number), '--json', 'mergeable'])
+      assert.deepEqual(ghArgs, expectedGh)
+      const evidence = f.rows.filter((r) => r.event === 'pr' || (r.event === 'check' && ['ci', 'suite'].includes(r.check)) || (r.event === 'verdict' && r.status === outcome.status))
+      assert.deepEqual(evidence.map(({ event, check }) => check ?? event), ['pr', 'ci', 'verdict'])
+      assert.equal(evidence[0].awaitingCi, true)
+      assert.deepEqual(evidence[0].pr, PR)
+      const { sleep_credited_s, ...ci } = evidence[1].result
+      assert.deepEqual(ci, { status: empty ? 'unmeasured' : 'green', reason, head, checks, ...(conflict ? { detail: 'pr-conflicting' } : {}) })
+      assert.ok(Number.isFinite(sleep_credited_s) && sleep_credited_s >= 0)
+      assert.equal(evidence[1].seconds, 0)
+    } else assert.match(body, /- Suite: green; exit 0; node --test lane\.test\.mjs\./)
   }
 })
 

@@ -267,8 +267,7 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
     const leanRoles = rows.some((row) => row.event === 'tier-raised') ? leanRolesOf(found.dir) : []
     const { members, tier } = deriveMembers({ members: found.members, rows, leanRoles, tier: found.spec.tier })
     const phases = [], openPhases = []
-    let latest_stage = null, status = 'unknown', reason = null, pr = null, running = false, started_at = null
-    let hand_finished = false, pr_actor = null, lastAt = null
+    let latest_stage = null, status = 'unknown', reason = null, running = false, started_at = null, lastAt = null
     for (const row of rows) {
       const at = rowTime(row.at)
       if (row.event === 'run-start') { started_at = at; lastAt = null }
@@ -333,10 +332,8 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
       reason = typeof last.reason === 'string' ? last.reason : null
       if (!nonEmpty(last.status)) reason = 'final verdict records no status'
       running = status === 'reviewed'
-    } else if (last.event === 'pr' && isObject(last.pr)) {
-      status = 'done'; pr = last.pr
-      hand_finished = last.actor === 'operator'
-      pr_actor = hand_finished ? 'operator' : 'loop'
+    } else if (last.event === 'pr' && isObject(last.pr) && last.awaitingCi !== true) {
+      status = 'done'
     } else {
       status = 'running'; running = true
     }
@@ -345,6 +342,12 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
       if (!within(found.dir, path)) throw new Error('run pid resolves outside the lane')
       return readFileSync(path, encoding)
     } })) { status = 'stopped'; reason = 'run-died'; running = false }
+    // Only CI publications stay visible after a later row takes over the lane state.
+    const published = rows.findLast((row) => row.event === 'pr' && isObject(row.pr)
+      && (row.awaitingCi === true || (row === last && status === 'done')))
+    const pr = published?.pr ?? null
+    const hand_finished = published?.actor === 'operator'
+    const pr_actor = !published ? null : hand_finished ? 'operator' : 'loop'
     let ended_at = null, duration_ms = null
     if (!running && lastAt !== null) ended_at = lastAt
     if (started_at !== null && ended_at !== null) duration_ms = Date.parse(ended_at) - Date.parse(started_at)

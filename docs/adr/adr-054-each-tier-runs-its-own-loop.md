@@ -245,3 +245,42 @@ suite budget. The suite check result adds `suite_lock_slot` on acquisition or
 eligible slot. `suite_lock_holder` remains the slot 1 diagnostic. Recovery clears
 all slots: ensure no suite in any worktree is running or waiting before removing
 `<git-common-dir>/crew-suite-lock/`.
+
+## Amendment 2026-11-23: let required PR checks gate a lane (#2545)
+
+The operator approved an opt-in CI gate. Of the 149.6 lane-hours from start to
+PR in 80 lanes (74 reached a PR), local suite runs took 50.1 hours and suite
+lock waits took 39.6 hours, including publishing rechecks. On a project that
+runs the same suite on every PR, the lane need not run it again.
+
+`.crew/project.json` can set `suiteGate` to `lane` (the default) or `ci`.
+Personal `~/.crew/settings.json` can set only `suiteGate: "lane"`, overriding
+any project setting. Start refuses other personal values before creating a
+worktree. `ciTimeoutMs` is project-only, an integer from 1 to `2**31-1` ms
+(default 3,600,000), validated in either mode. Neither field enters the
+onboarding hash. Start snapshots the effective gate and budget; old specs
+without a gate keep `lane`, and edits do not change resumes or finish passes.
+
+`lane` retains the existing loop. `ci` omits the local suite, its lock,
+cancellation, retries and repair. It retains fast checks, proof (including its
+sleep retry) and review, with both judge reviews after proof. Publishing
+rebases keep the two shortcuts and the applicable proof and review rechecks.
+Commit and PR measurements state that no suite ran in the lane. Finish passes
+stop at `finish-ready`; acceptance does not require a suite evidence row or
+wait for CI.
+
+After recording a loop-published PR, including on a planning resume, the loop
+reads required checks every 30 seconds under the awake CI budget. Pending
+checks keep it waiting and failed reads retry. A nonempty report of only
+`pass` or `skipping` is green. With none pending, any `fail` is `ci-red`;
+other buckets stop as `ci-unmeasured`. Ten awake minutes after push or remote
+confirmation, an empty report with no checks reported so far stops as
+`ci-no-required-checks`, or `ci-unmeasured` if the PR reports a conflict.
+Without a decision by the deadline the stop is `ci-timeout`. Only `ci-red`
+is measured red. One terminal CI check records the result, PR head, reported
+checks, elapsed time and sleep credit. The notifier waits for the verdict.
+
+The PR stays open after a CI stop, and `crew finish` still refuses published
+lanes. Fix the branch by hand, then close out after merge or discard after
+closing the PR. CI repair, job reruns and comparison with base CI are separate
+work (#2546).

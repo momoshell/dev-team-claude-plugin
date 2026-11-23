@@ -108,8 +108,10 @@ build and judge can repeat only proof after a clean, measured disjoint rebase.
 A lock-file-only overlap can skip the suite after proof and green fast checks,
 but still needs scoped review. Mechanical lanes still re-prove and rerun the
 suite on the rebased commit.
-A red suite or proof with measured host sleep runs once more on the unchanged tree
-(ADR-054 §1). A second red stops with `red-after-sleep-rerun`. If the sleep rule
+A red suite or proof with at least 30 seconds of run sleep credit (`sleep_credited_s`)
+runs once more on the unchanged tree (ADR-054 §1). Smaller credits still extend
+the time budget and are journaled, but do not trigger a sleep re-run. If the sleep
+re-run is also red, the lane stops with `red-after-sleep-rerun`. If the sleep rule
 does not apply, an `exit-nonzero` suite red matching a project-declared environment
 signature also gets one re-run. The second check row names the triggering
 `environmentSignature`. If the second attempt also ends red with `exit-nonzero`

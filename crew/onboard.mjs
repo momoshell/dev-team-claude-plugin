@@ -4,7 +4,7 @@ import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSy
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, extname, join, matchesGlob, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { literalRelative, runSuite, validFastChecks, validSuiteSlots, validTimeout } from './checks.mjs'
+import { CI_TIMEOUT_DEFAULT_MS, literalRelative, runSuite, validFastChecks, validSuiteSlots, validTimeout } from './checks.mjs'
 import { entryCommand, junitEvents, PROOF_TIMEOUT_DEFAULT_MS, testState, validProofEntry, validWorktreeSetup, WORKTREE_SETUP_TIMEOUT_MS } from './proof.mjs'
 
 export const SUITE_TIMEOUT_DEFAULT_MS = 1800000
@@ -28,9 +28,12 @@ export const validProtectedPaths = (v) => Array.isArray(v) && [...v].every((path
   const file = path.endsWith('/') ? path.slice(0, -1) : path
   return file.trim() !== '' && literalRelative(file) && !/[*?\[\]]/.test(file)
 })
+const SUITE_GATES = Object.freeze(['lane', 'ci'])
+export const validSuiteGate = (v) => v === undefined || SUITE_GATES.includes(v)
 const validBuilderChecks = (v) => Array.isArray(v) && v.every((s) => typeof s === 'string' && s.trim() !== '' && !/[\r\n]/.test(s))
 const validProject = (p) => p && typeof p === 'object' && !Array.isArray(p) && typeof p.suite === 'string' && p.suite.trim() && !/["'\\\0]/.test(p.suite) && Array.isArray(p.proof) && p.proof.every(validProofEntry) && (p.suiteLock === undefined || typeof p.suiteLock === 'boolean') && (p.suiteTimeoutMs === undefined || validTimeout(p.suiteTimeoutMs)) && (p.proofTimeoutMs === undefined || validTimeout(p.proofTimeoutMs)) && (p.builderChecks === undefined || validBuilderChecks(p.builderChecks)) && validWorktreeSetup(p)
   && (p.suiteSlots === undefined || validSuiteSlots(p.suiteSlots))
+  && validSuiteGate(p.suiteGate) && (p.ciTimeoutMs === undefined || validTimeout(p.ciTimeoutMs))
   && (p.fastChecks === undefined || validFastChecks(p.fastChecks)) && (p.fastChecksTimeoutMs === undefined || validTimeout(p.fastChecksTimeoutMs))
   && (p.environmentSignatures === undefined || validEnvironmentSignatures(p.environmentSignatures))
   && (p.protectedPaths === undefined || validProtectedPaths(p.protectedPaths))
@@ -47,6 +50,7 @@ export function requireOnboarded(checkout, read = readRegular) {
   if (!Object.hasOwn(p, 'onboarded')) throw new OnboardRefusal('not-onboarded')
   if (!validProject(p) || !p.onboarded || typeof p.onboarded !== 'object' || (p.onboarded.hash !== projectHash(p) && (Object.hasOwn(p, 'worktreeSetup') || p.onboarded.hash !== nullListHash(p)))) throw new OnboardRefusal('onboarding-stale')
   return { suite: p.suite, proof: p.proof, hash: p.onboarded.hash, suiteTimeoutMs: p.suiteTimeoutMs ?? SUITE_TIMEOUT_DEFAULT_MS, proofTimeoutMs: p.proofTimeoutMs ?? PROOF_TIMEOUT_DEFAULT_MS, ...(p.suiteLock === undefined ? {} : { suiteLock: p.suiteLock }), ...(p.builderChecks === undefined ? {} : { builderChecks: p.builderChecks }), ...(p.worktreeSetup === undefined ? {} : { worktreeSetup: p.worktreeSetup }),
+    suiteGate: p.suiteGate ?? 'lane', ciTimeoutMs: p.ciTimeoutMs ?? CI_TIMEOUT_DEFAULT_MS,
     ...(p.suiteSlots === undefined ? {} : { suiteSlots: p.suiteSlots }),
     ...(p.fastChecks === undefined ? {} : { fastChecks: p.fastChecks }), ...(p.fastChecksTimeoutMs === undefined ? {} : { fastChecksTimeoutMs: p.fastChecksTimeoutMs }),
     ...(p.environmentSignatures === undefined ? {} : { environmentSignatures: p.environmentSignatures }),
@@ -108,6 +112,7 @@ export async function checkOnboarding({ checkout, draft, timeoutMs = 120_000 }) 
     }
     rmSync(tmp, { recursive: true, force: true }); tmp = null
     const project = { suite: p.suite, proof, ...(p.suiteLock === undefined ? {} : { suiteLock: p.suiteLock }), ...(p.suiteTimeoutMs === undefined ? {} : { suiteTimeoutMs: p.suiteTimeoutMs }), ...(p.proofTimeoutMs === undefined ? {} : { proofTimeoutMs: p.proofTimeoutMs }), ...(p.builderChecks === undefined ? {} : { builderChecks: p.builderChecks }), ...(p.worktreeSetup === undefined ? {} : { worktreeSetup: p.worktreeSetup }),
+      ...(p.suiteGate === undefined ? {} : { suiteGate: p.suiteGate }), ...(p.ciTimeoutMs === undefined ? {} : { ciTimeoutMs: p.ciTimeoutMs }),
       ...(p.suiteSlots === undefined ? {} : { suiteSlots: p.suiteSlots }),
       ...(p.fastChecks === undefined ? {} : { fastChecks: p.fastChecks }), ...(p.fastChecksTimeoutMs === undefined ? {} : { fastChecksTimeoutMs: p.fastChecksTimeoutMs }),
       ...(p.environmentSignatures === undefined ? {} : { environmentSignatures: p.environmentSignatures }),

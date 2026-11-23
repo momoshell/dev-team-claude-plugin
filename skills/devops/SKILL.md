@@ -23,14 +23,19 @@ description: >-
 - For a hand-opened PR, use `## Summary` with a `Purpose:` line stating what
   the PR achieves, the issue number and title or quoted operator request for why,
   a `How:` line for the implementation, a `Source:` line only when the issue or
-  request line does not name the source, `## Verification` for test and suite
-  results, and `## Open points` for unresolved should-fix findings when present.
+  request line does not name the source, `## Verification` for measured checks,
+  and `## Open points` for unresolved should-fix findings when present.
   Crew lanes generate this body themselves. Follow `prose-plain` for PR prose.
 - Push the lane branch: `git push -u origin <lane>`.
 - Write the body to a file and open with an absolute path:
   `gh pr create --head <lane> --title <title> --body-file <absolute-path>`.
 - Confirm with `gh pr view <number> --json state,headRefOid,mergeStateStatus` and
   `gh pr checks <number>`. The head must be the lane branch tip.
+- The lane suite runs before publication by default. With `suiteGate: ci`,
+  the lane reports no local suite and waits for required checks after opening
+  the PR. If it stops on CI, leave the PR open for manual repair; `crew finish`
+  cannot resume it. `crew closeout <lane>` works after merge, or use `--discard`
+  after closing the stopped PR.
 - Never merge for the operator. Report the state and stop.
 
 ## The crew install

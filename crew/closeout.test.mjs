@@ -365,12 +365,13 @@ test('discard holds the finish stop claim throughout teardown', () => {
   } finally { w.done() }
 })
 
-test('discard tears down a stopped lane whose recorded PR is closed unmerged', () => {
+test('discard tears down a stopped or done lane whose recorded PR is closed unmerged', () => {
   const returned = { event: 'finish-decision', choice: 'return', launchedAt: STOPPED.length }
   const publish = { event: 'stage-start', stage: 'publish' }
   for (const rows of [
     [PR_ROW, ...STOPPED], [...STOPPED, PR_ROW], [{ event: 'run-start', lane: LANE }, PR_ROW],
     [...STOPPED, returned, publish, PR_ROW], [...STOPPED, publish, PR_ROW, returned],
+    [{ event: 'run-start', lane: LANE }, { ...PR_ROW, awaitingCi: true }, { event: 'check', check: 'ci', result: { status: 'green' } }, { event: 'verdict', status: 'done' }],
   ]) {
     const w = world({ rows })
     try {

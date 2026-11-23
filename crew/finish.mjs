@@ -546,7 +546,7 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
     const roundStart = beforeReady.findLastIndex((row) => row.event === 'finish-ready' || (row.event === 'verdict' && row.status === 'stopped')
       || (row.event === 'stage-start' && ['base-paths', 'build', 'suite-repair', 'uncommit'].includes(row.stage)))
     const round = beforeReady.slice(roundStart + 1)
-    const checks = ['suite', 'proof'].map((name) => [name, round.findLast((row) => row.event === 'check' && row.check === name)])
+    const checks = (spec.suiteGate === 'ci' ? ['proof'] : ['suite', 'proof']).map((name) => [name, round.findLast((row) => row.event === 'check' && row.check === name)])
     // New ready rows declare whether proof ran so missing budget rows do not look like a legacy pass.
     if (Object.hasOwn(ready, 'proofChecked') || checks.some(([, row]) => row && Object.hasOwn(row, 'timeoutMs'))) {
       for (const [name, row] of checks) {

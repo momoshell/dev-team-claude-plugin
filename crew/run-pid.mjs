@@ -38,7 +38,7 @@ export function writeRunPid(taskDir, pid, { writeFileSync: write = writeFileSync
 }
 function openTail(rows) {
   const last = rows.findLast((row, index) => !stateless(rows, row, index) && !supersededReturn(rows, row, index))
-  return !!last && !(last.event === 'verdict' && last.status === 'stopped') && last.event !== 'pr'
+  return !!last && !(last.event === 'verdict' && ['stopped', 'done'].includes(last.status)) && !(last.event === 'pr' && last.awaitingCi !== true)
     && last.event !== 'finish-ready' && !(last.event === 'finish-decision' && last.choice !== 'return')
 }
 export function deadRun({ rows, taskDir, readFileSync: read = readFileSync, alive = probeAlive }) {

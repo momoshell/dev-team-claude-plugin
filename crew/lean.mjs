@@ -125,17 +125,21 @@ function repairPromptFor({ request, spec }) {
 
 function promptFor({ request, spec, source, charters, body, section }) {
   const { role, id, returnPath, brief, planPath, feedback } = request
+  const ciGate = spec.suiteGate === 'ci'
+  const ciStages = spec.shape === 'finish' && !spec.finish?.planning
+    ? 'The loop proves the named tests but does not run the suite (`suiteGate: ci`). CI runs it after the operator publishes the PR. Do not run these stages yourself.'
+    : 'The loop proves the named tests, commits, rebases and opens the PR without running the suite (`suiteGate: ci`). CI runs the suite after the PR opens; the loop waits for its required checks. Do not run these stages yourself.'
   const lines = [
     body,
     '',
     `Definition source: ${source}`,
     ...charters.map((charter) => `Charter file (relative links in the definition resolve from ${dirname(source)}): ${charter}`),
-    ...(role === 'builder' ? [] : ['', LOOP_STAGES]),
+    ...(ciGate ? ['', ciStages] : role === 'builder' ? [] : ['', LOOP_STAGES]),
     '',
     '## Brief',
     brief,
     ...(planPath ? ['', `Plan path: ${planPath}`] : []),
-    ...(role === 'builder' && Array.isArray(spec.builderChecks) && spec.builderChecks.length ? ['', '## Project checks', "Before returning, run each line below in the checkout, as written. They are this project's own fast checks and an exception to the rule against running whole packages. Report each line's command and result in `notes`. The loop does not run them or read their result; the suite stays the gate.", ...spec.builderChecks.map((check) => `- ${check}`)] : []),
+    ...(role === 'builder' && Array.isArray(spec.builderChecks) && spec.builderChecks.length ? ['', '## Project checks', "Before returning, run each line below in the checkout, as written. They are this project's own fast checks and an exception to the rule against running whole packages. Report each line's command and result in `notes`. The loop does not run them or read their result; " + (ciGate ? "the PR's required CI checks stay the gate." : 'the suite stays the gate.'), ...spec.builderChecks.map((check) => `- ${check}`)] : []),
     ...(role === 'reviewer' && (spec.shape !== 'finish' || spec.finish?.planning) && !request.deltaReview && !request.reserveReview && !request.recheckReview ? ['', '## Full review', 'No earlier reviewed tree is given: review the whole diff. The round-2 must-fix limit does not apply; any defect in the diff may be a must-fix. Still carry or close each earlier must-fix.'] : []),
     ...(request.recheckReview ? ['', '## Recheck review', `Compare git diff ${request.recheckReview.reviewed}^ ${request.recheckReview.reviewed} with git diff ${request.recheckReview.onto} ${request.recheckReview.rebased} to inspect lane code the rebase or the conflict turn altered. Use git diff ${request.recheckReview.reviewed}^ ${request.recheckReview.onto} to inspect the base's new commits. A must-fix is an earlier finding still unresolved, a defect in lane code the rebase or the conflict turn altered, or a defect where the base's new commits meet the lane's change. A new problem elsewhere in the already-reviewed diff is a should-fix.`] : []),
     ...(request.deltaReview ? ['', '## Delta review', `A must-fix must be an earlier finding still unresolved or a defect in code changed since tree ${request.deltaReview.baseTree}. Use git diff ${request.deltaReview.baseTree} to inspect the delta. Raise a new problem elsewhere as a should-fix.`] : []),

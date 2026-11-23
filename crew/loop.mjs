@@ -10,6 +10,7 @@
 // An unresolved conflict stops rebase-conflict, restoring uncommitted work only when cleanup is proven.
 // A mechanical finish uses its brief and publishes nothing.
 // Mechanical: rebase -> build -> refresh base -> proof -> suite -> PR. A fix turn repeats checks.
+// With suiteGate: ci, skip the local suite and wait for required checks after loop publication.
 // A red suite or proof with at least 30 seconds of run sleep credit gets one unchanged-tree re-run (ADR-054 §1).
 // Otherwise a red suite can re-run once on a project-declared environment signature.
 // Finish repairs its first ordinary suite red and stops on a second red or an unmeasured suite.
@@ -27,10 +28,10 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { resolveAgents } from './agents.mjs'
 import {
-  CHECK_REASONS, FINISH_REVIEW_ROUNDS, commitChanges, openPullRequest, parseStatus, rebaseBranch, runSuite, validFastChecks, validGenerated, validSuiteSlots, validTimeout,
+  CHECK_REASONS, FINISH_REVIEW_ROUNDS, commitChanges, openPullRequest, parseStatus, rebaseBranch, runSuite, validFastChecks, validGenerated, validSuiteSlots, validTimeout, waitForRequiredChecks,
 } from './checks.mjs'
 import { HEX_OID, describeError as describe, GIT_STATUS_ARGS, gitRepoState } from './lane-core.mjs'
-import { OnboardRefusal, readRegular, requireOnboarded, SUITE_TIMEOUT_DEFAULT_MS, validEnvironmentSignatures, validProtectedPaths } from './onboard.mjs'
+import { OnboardRefusal, readRegular, requireOnboarded, SUITE_TIMEOUT_DEFAULT_MS, validEnvironmentSignatures, validProtectedPaths, validSuiteGate } from './onboard.mjs'
 import { PROOF_TIMEOUT_DEFAULT_MS, proveTests } from './proof.mjs'
 import { TIERS, AGENT_ROLES, runOverrideDefects, validateEnvelope } from './protocols.mjs'
 
@@ -269,6 +270,7 @@ export async function runLoop(spec, deps = {}) {
   const sound = [spec.id, spec.cwd, spec.taskDir, spec.brief, spec.source, spec.branch, spec.base].every(text) && TIERS.includes(spec.tier)
     && text(spec.suite?.command) && (spec.suite.args === undefined || Array.isArray(spec.suite.args))
     && (spec.suite.timeoutMs === undefined || validTimeout(spec.suite.timeoutMs))
+    && validSuiteGate(spec.suiteGate) && (spec.ciTimeoutMs === undefined || validTimeout(spec.ciTimeoutMs))
     && (spec.proofTimeoutMs === undefined || validTimeout(spec.proofTimeoutMs))
     && (spec.fastChecks === undefined || validFastChecks(spec.fastChecks))
     && (spec.fastChecksTimeoutMs === undefined || validTimeout(spec.fastChecksTimeoutMs))
@@ -298,6 +300,7 @@ export async function runLoop(spec, deps = {}) {
     && (fin.rulings === undefined || (Array.isArray(fin.rulings) && fin.rulings.every((r) => plainObject(r) && text(r.summary))))
     && (fin.priorReviewRounds === undefined || (Number.isSafeInteger(fin.priorReviewRounds) && fin.priorReviewRounds >= 0)))) return early('invalid-input')
   const isFinish = finishEntry && !planning
+  const ciGate = spec.suiteGate === 'ci'
   const d = {
     resolveAgents, mkdir, readFile, stat, lstat, realpath, writeFile, proveTests, runSuite, commitChanges, rebaseBranch, openPullRequest,
     run: runSuite,
@@ -464,7 +467,7 @@ export async function runLoop(spec, deps = {}) {
   const callCheck = async (name, fn, input, { command = false, cancellable = false, configuredCommand, row = {} } = {}) => {
     const retained = name === 'suite' || name === 'proof'
     const fast = name === FAST_CHECK
-    const timed = retained || fast
+    const timed = retained || fast || name === 'ci'
     let result, started, ended
     if (timed) try { started = d.now() } catch {}
     try { result = await fn(input) } catch (error) { result = { status: 'unmeasured', reason: 'runner-threw', error: describe(error) } } finally {
@@ -1015,7 +1018,9 @@ export async function runLoop(spec, deps = {}) {
       suiteRerun = environmentSignature === undefined ? null : `on ${revision}, triggered by environment signature ${JSON.stringify(environmentSignature)}.`
       suiteLine = `- Suite: green; exit ${result.code}; ${suiteCommand}.${suiteRerun ? ` Passed after a re-run ${suiteRerun}` : ''}`
     }
-    const suiteMeasurements = (reviewed) => [reviewed ? suiteLine.replace('- Suite:', `- Suite on pre-rebase commit ${reviewed}:`) : suiteLine, ...earlierSuiteReruns]
+    const suiteMeasurements = (reviewed) => ciGate
+      ? ['- Suite: not run in the lane (`suiteGate: ci`); the PR’s required checks gate the change.']
+      : [reviewed ? suiteLine.replace('- Suite:', `- Suite on pre-rebase commit ${reviewed}:`) : suiteLine, ...earlierSuiteReruns]
     const checkMeasurements = () => [...proofLines, ...suiteMeasurements(), ...(!isFinish && tier === 'mechanical' && namedTests.length ? ['- Review: none, mechanical lane, not reviewed.'] : [])]
     let builderSummary = ''
     const finishReviews = []
@@ -1177,7 +1182,7 @@ export async function runLoop(spec, deps = {}) {
             return results.map((result) => result.value)
           }
           let suiteCheck, reviews = []
-          if (lockOnly) reviews = await runReviews()
+          if (lockOnly || ciGate) reviews = await runReviews()
           else if (tier === 'build') {
             const cancellation = new AbortController()
             const pair = await Promise.allSettled([suiteRun(cancellation.signal), runReviews().then((results) => {
@@ -1204,7 +1209,7 @@ export async function runLoop(spec, deps = {}) {
             if (secondReview) await recordReviewed(secondReview.details, 'tech-lead')
             return stopAfterRerun()
           }
-          if (!lockOnly) {
+          if (suiteCheck) {
             if (suite.status === 'green') recordSuitePass(suiteCheck, `tree ${checkedTree}`)
             const cancelled = tier === 'build' && suite.status === 'cancelled'
               && reviews.some((result) => !result.reused && result.envelope?.details.verdict === 'changes-needed')
@@ -1273,12 +1278,12 @@ export async function runLoop(spec, deps = {}) {
 
       if (!isFinish && tier !== 'mechanical') break
 
-      // The suite runs over the file set the commit will hold: the measured changed paths that need staging, and only those, are staged
-      // so a test that lists tracked files sees a file the lane created.
+      // Stage only the measured paths the commit will hold, even when no suite runs.
       if (!isFinish) {
         const halt = await stageChecked()
         if (halt) return halt
       }
+      if (ciGate) break
       const suiteCheck = await suiteRun()
       const { result: suite, stopAfterRerun } = suiteCheck
       if (stopAfterRerun) return stopAfterRerun()
@@ -1331,10 +1336,12 @@ export async function runLoop(spec, deps = {}) {
         ...(isFinish ? ['', `The lane stopped with reason ${oneLine(fin.stop.reason)}. This report covers only this finish run.`, `${finishReviews.length} ${finishReviews.length === 1 ? 'review' : 'reviews'} in this finish run; final verdict: ${oneLine(finishReviews.at(-1)?.verdict) || 'unmeasured'}.`] : []),
         '', '## Verification',
         ...(recheckSkip?.reason === 'lockfile-only' ? [
-          `- The suite ran on pre-rebase commit ${recheckSkip.reviewed} on old base ${recheckSkip.oldBase}. It was not repeated on rebased commit ${recheckSkip.rebased} on new base ${recheckSkip.onto} because the clean rebase shared only these lock files: ${recheckSkip.shared.map((path) => JSON.stringify(path)).join(', ')}.`,
+          `${ciGate
+            ? `- The clean rebase from ${recheckSkip.reviewed} on old base ${recheckSkip.oldBase} to ${recheckSkip.rebased} on new base ${recheckSkip.onto} shared only these lock files`
+            : `- The suite ran on pre-rebase commit ${recheckSkip.reviewed} on old base ${recheckSkip.oldBase}. It was not repeated on rebased commit ${recheckSkip.rebased} on new base ${recheckSkip.onto} because the clean rebase shared only these lock files`}: ${recheckSkip.shared.map((path) => JSON.stringify(path)).join(', ')}.`,
           ...spec.fastChecks.map((command) => `- Fast check on rebased commit ${recheckSkip.rebased}: green; ${oneLine(command)}.`),
           `- Scoped review on rebased commit ${recheckSkip.rebased}: pass (${tier === 'judge' ? 'reviewer and tech-lead' : 'reviewer'}).`,
-        ] : recheckSkip ? [`- The suite and reviews checked pre-rebase commit ${recheckSkip.reviewed} on old base ${recheckSkip.oldBase}. They were not repeated on rebased commit ${recheckSkip.rebased} on new base ${recheckSkip.onto} because the rebase was clean and shared no path.`] : []),
+        ] : recheckSkip ? [`- ${ciGate ? 'Reviews' : 'The suite and reviews'} checked pre-rebase commit ${recheckSkip.reviewed} on old base ${recheckSkip.oldBase}. They were not repeated on rebased commit ${recheckSkip.rebased} on new base ${recheckSkip.onto} because the rebase was clean and shared no path.`] : []),
         ...(proved.length ? [...proved.map(({ file, title, base }) => `- ${oneLine(file)}: ${oneLine(title)} ${base?.reason === 'base-package-absent' ? 'had its package absent on the old source (base-package-absent)' : base?.reason === 'base-test-absent' ? 'had its test file absent on the old source (base-test-absent)' : 'was red on the old source'}, green on ${lastProved.has(`${file}\0${title}`) ? proofTarget : 'an earlier build turn; the last build turn did not name it.'}`), ...(!isFinish && tier === 'mechanical' ? ['Review: none, mechanical lane, not reviewed.'] : [])]
           : !isFinish && tier === 'mechanical' ? ['Proof: mechanical lane, not reviewed.']
             : !isFinish && !testsRequired ? ['Proof: no criterion is machine-checked.'] : ['Proof: unmeasured.']),
@@ -1440,11 +1447,13 @@ export async function runLoop(spec, deps = {}) {
       if (!recheckSkip) {
         const failed = await reproveCommit(rebased.head)
         if (failed) return failed.stopAfterRerun ? failed.stopAfterRerun() : stop(failed.result.reason ?? 'runner-threw', journaled(failed.result))
-        const postCheck = await suiteRun()
-        const { result: postSuite, stopAfterRerun } = postCheck
-        if (stopAfterRerun) return stopAfterRerun()
-        if (postSuite.status !== 'green') return stop(postSuite.reason, postSuite)
-        recordSuitePass(postCheck, `commit ${rebased.head}`)
+        if (!ciGate) {
+          const postCheck = await suiteRun()
+          const { result: postSuite, stopAfterRerun } = postCheck
+          if (stopAfterRerun) return stopAfterRerun()
+          if (postSuite.status !== 'green') return stop(postSuite.reason, postSuite)
+          recordSuitePass(postCheck, `commit ${rebased.head}`)
+        }
       }
       // Do not publish a head or worktree changed by the post-rebase checks.
       const dirty = await checkRebasedTree(rebased.head)
@@ -1463,9 +1472,17 @@ export async function runLoop(spec, deps = {}) {
 
     const published = await stage('publish', () => callCheck('publish', d.openPullRequest, {
       cwd, branch: spec.branch, base: spec.base, title: subject, body: laneBody(), closes: spec.closes ?? [], ...(builderNotes ? { builderNotes } : {}),
+      ...(ciGate ? { suiteGate: 'ci' } : {}),
     }))
     if (published.status !== 'green' || !published.pr || typeof published.pr !== 'object') return stop(published.reason ?? 'runner-threw', published)
-    await emit('pr', { pr: published.pr })
+    await emit('pr', { pr: published.pr, ...(ciGate ? { awaitingCi: true } : {}) })
+    if (ciGate) {
+      const ci = await stage('ci', () => callCheck('ci', (input) => waitForRequiredChecks(input, { run: d.run }), {
+        cwd, number: published.pr.number, head: published.head, ciGraceMs: published.ciGraceMs, timeoutMs: spec.ciTimeoutMs,
+      }))
+      if (ci.status !== 'green') return stop(ci.reason, ci)
+      await emit('verdict', { status: 'done', reason: null })
+    }
     return { status: 'done', reason: null, pr: published.pr }
   } catch (error) {
     return stop('runner-threw', { threw: describe(error) })

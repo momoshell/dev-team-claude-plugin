@@ -17,7 +17,7 @@ function isoTime(value) {
 function summarize(rows, spec) {
   const seat_turns = Object.create(null), finish_decisions = Object.create(null), repeat_builders = []
   let tier = TIERS.indexOf(spec.tier), suite_runs = 0, red_suites = 0, proof_runs = 0, has_pr = false
-  let repair = null
+  let ci_checks = 0, greenCI = 0, red_ci_checks = 0, repair = null
   const buildReasons = new Map()
   // Keep the latest evidence per source; a result can replace or withdraw it.
   const reason = (source, trigger) => {
@@ -42,6 +42,11 @@ function summarize(rows, spec) {
       suite_runs++
       if (result?.status === 'red') red_suites++
     }
+    if (event === 'check' && row.check === 'ci') {
+      ci_checks++
+      if (result?.status === 'red') red_ci_checks++
+      if (result?.status === 'green') greenCI++
+    }
     if (event === 'check' && row.check === 'proof') {
       proof_runs++
       reason('proof', result?.status === 'red' ? 'proof-unproven' : null)
@@ -63,9 +68,10 @@ function summarize(rows, spec) {
   }
   const mechanical = TIERS[tier] === 'mechanical', judge = TIERS[tier] === 'judge'
   const { planner = 0, builder = 0, reviewer = 0, 'tech-lead': techLead = 0, ...extra } = seat_turns
-  const minimal = tier >= 0 && builder === 1 && suite_runs === 1 && !Object.keys(finish_decisions).length && !Object.keys(extra).length
+  const gate = spec.suiteGate === 'ci' ? suite_runs === 0 && ci_checks === 1 && greenCI === 1 : suite_runs === 1
+  const minimal = tier >= 0 && builder === 1 && gate && !Object.keys(finish_decisions).length && !Object.keys(extra).length
     && planner <= (mechanical ? 0 : 1) && reviewer === (mechanical ? 0 : 1) && techLead === (judge ? 1 : 0)
-  return { seat_turns, suite_runs, red_suites, proof_runs, finish_decisions, has_pr, minimal, repeat_builders }
+  return { seat_turns, suite_runs, red_suites, ci_checks, red_ci_checks, proof_runs, finish_decisions, has_pr, minimal, repeat_builders }
 }
 
 function report(source, since) {
@@ -74,6 +80,7 @@ function report(source, since) {
     minimal_path: { minimal: 0, lanes_with_pr: 0 },
     repeat_builders: { by_trigger: Object.fromEntries(TRIGGERS.map((trigger) => [trigger, 0])), builder_turns: 0 },
     suites: { red: 0, runs: 0 },
+    ci: { red: 0, checks: 0 },
     excluded: 0,
   }
   for (const found of source.lanes()) {
@@ -103,6 +110,8 @@ function report(source, since) {
     for (const { trigger } of steps.repeat_builders) totals.repeat_builders.by_trigger[trigger]++
     totals.suites.runs += steps.suite_runs
     totals.suites.red += steps.red_suites
+    totals.ci.checks += steps.ci_checks
+    totals.ci.red += steps.red_ci_checks
   }
   return { lanes, totals }
 }
@@ -119,10 +128,10 @@ function printText({ lanes, totals }, stdout) {
       `builder repeats: ${lane.repeat_builders.map(({ turn, trigger }) => `#${turn} ${trigger}`).join(', ') || 'none'}`,
     ].join(' | ') + '\n')
   }
-  const { minimal_path, repeat_builders, suites, excluded } = totals
+  const { minimal_path, repeat_builders, suites, ci, excluded } = totals
   stdout(`Minimal path: ${minimal_path.minimal} of ${minimal_path.lanes_with_pr} lanes with a PR\n`)
   stdout(`Builder repeats: ${Object.entries(repeat_builders.by_trigger).map(([trigger, n]) => `${trigger}: ${n} of ${repeat_builders.builder_turns}`).join(', ')} builder turns\n`)
-  stdout(`Red suites: ${suites.red} of ${suites.runs} suite runs\nExcluded lanes: ${excluded}\n`)
+  stdout(`Red suites: ${suites.red} of ${suites.runs} suite runs\nRed CI checks: ${ci.red} of ${ci.checks} CI checks\nExcluded lanes: ${excluded}\n`)
 }
 
 export function main(argv = process.argv.slice(2), {

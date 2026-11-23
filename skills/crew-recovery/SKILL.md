@@ -40,6 +40,15 @@ Read first, decide second, remove last.
   After closeout, use the archived journal and resolve the filename beside it in
   the archived task directory; closeout keeps the output files with the journal.
 
+A `ci` stage follows the recorded PR on a loop-published `suiteGate: ci` lane.
+While it waits, `crew lanes` shows the lane running with the PR URL. It writes
+one `check: 'ci'` row at the end. Read `result.checks` for the required checks
+and their links. `ci-red` is a measured failure. `ci-unmeasured`, `ci-timeout`
+and `ci-no-required-checks` do not imply a failed check. Inspect the PR for
+the last check state, missing required checks or a merge conflict. The PR
+stays open and `crew finish` refuses with `finish-published`. Fix the branch by
+hand; close out after merge or use `--discard` after the PR is closed.
+
 A `proof-timeout` stop means every unproven named test timed out on the old
 source or the build. No builder or lead turn follows. The verdict observation
 names the tests, the side that timed out and the `proofTimeoutMs` used. The
@@ -74,8 +83,10 @@ first. Otherwise the planner reruns with the previous evidence. Both receive
 labelled operator guidance and the stopped lead's question; a lead bounce can
 revise the plan. Guidance stays in force for the whole run; a new `--return`
 replaces it. Once planning succeeds, the lane uses fresh round budgets and runs
-its normal tier checks. Build runs review and suite together; judge gets reviewer
-and tech-lead review after a green suite. The lane opens and records the PR without `--accept`.
+its normal tier checks. In `lane` mode, build runs review and suite together;
+judge gets reviewer and tech-lead review after a green suite. In `ci` mode,
+reviews follow proof and the CI wait follows publication. The lane opens and
+records the PR without `--accept`.
 Merging stays with you. Another planning stop before any build can resume the
 same way. Baseline-only stops still refuse.
 After a build, use `--return` when the existing plan still fits. That finish pass
@@ -87,7 +98,8 @@ On an escalation, answer the operator question in the file. State the answer for
 the whole class of defects it covers, not just the reported instance. The pass
 re-enters the lane in its own worktree and rebases onto the current base,
 then runs builder triage, refreshes the base, proves the builder's named
-tests, reviews, runs the suite, commits and rebases. Each new finish pass gets one
+tests, reviews, runs the suite in `lane` mode, commits and rebases. A `ci` finish
+pass skips the suite and stops at `finish-ready`. Each new finish pass gets one
 pre-check refresh, on its first check round. Later proof retries, review fixes and suite
 repairs neither fetch nor move the base before checks. If the base moves on that first
 round, the loop temporarily snapshots the measured lane paths, rebases through the
@@ -102,12 +114,12 @@ uncommitted work only when cleanup is proven. A mechanical lane is finished on i
 whose diff reaches a protected path stops `raise-needs-plan`, and you restart it
 from its brief as a build lane.
 Only the checked tree is committed. On a finish pass, a moved publishing head
-still repeats proof, review and suite on the new base and publishes nothing
+still repeats proof, review and (in `lane` mode) the suite on the new base and publishes nothing
 (`crew/finish.mjs`). A planning resume follows the normal tier loop instead:
 build and judge can repeat only proof after a clean, measured disjoint rebase.
 A lock-file-only overlap can skip the suite after proof and green fast checks,
-but still needs scoped review. Mechanical lanes still re-prove and rerun the
-suite on the rebased commit.
+but still needs scoped review. Mechanical lanes still re-prove the rebased
+commit and rerun the suite if the gate is `lane`.
 A red suite or proof with at least 30 seconds of run sleep credit (`sleep_credited_s`)
 runs once more on the unchanged tree (ADR-054 §1). Smaller credits still extend
 the time budget and are journaled, but do not trigger a sleep re-run. If the sleep
@@ -122,7 +134,7 @@ that printed the signature; if it is, return it to the builder as a code
 failure. Otherwise address the environment failure before resuming with
 `crew finish <lane> --return <file>`.
 
-The first repairable suite red gives the finish builder its one repair turn.
+In `lane` mode, the first repairable suite red gives the finish builder its one repair turn.
 The repair repeats proof and the suite, and repeats review unless the reviewer
 already passed the same tree in this finish run. An unmeasured suite stops without
 repair. After repair the suite must pass, either on its first attempt or on a
@@ -130,7 +142,8 @@ permitted re-run.
 When that run is ready, decide once:
 
 - `crew finish <lane> --accept [--notes <file>]` publishes the PR the run
-  measured. Merging stays yours.
+  measured. In `ci` mode, acceptance needs no suite row and does not wait for
+  required checks. Merging stays yours.
 - `crew finish <lane> --return <file>` runs one more finish pass with the file
   as the builder's guidance. Reviews count against the three review rounds,
   except needed suite-repair and post-suite moved-head recheck reviews; those

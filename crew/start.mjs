@@ -168,7 +168,7 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
   try { rawSettings = d.readFileSync(settingsPath, 'utf8') } catch (cause) {
     if (cause?.code !== 'ENOENT') throw new StartRefusal(`cannot read ${settingsPath} for suiteLock: ${cause?.code ?? cause?.message}`, { cause })
   }
-  let suiteLock = project.suiteLock
+  let { suiteLock, suiteGate } = project
   if (rawSettings !== undefined) {
     let settings
     try { settings = JSON.parse(rawSettings) } catch (cause) {
@@ -178,6 +178,10 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
     if (Object.hasOwn(settings, 'suiteLock')) {
       if (typeof settings.suiteLock !== 'boolean') throw new StartRefusal(`${settingsPath}: suiteLock must be a boolean`)
       if (settings.suiteLock) suiteLock = true
+    }
+    if (Object.hasOwn(settings, 'suiteGate')) {
+      if (settings.suiteGate !== 'lane') throw new StartRefusal(`${settingsPath}: suiteGate must be "lane"`)
+      suiteGate = 'lane'
     }
   }
   let ask = null, title = null
@@ -249,6 +253,7 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
     id: lane, cwd: worktree, taskDir, tier, shape: fields.shape, brief: run,
     source: fields.source, branch: lane, base, closes: fields.closes === null ? [] : [fields.closes],
     suite: suiteSpec(project.suite, project.suiteTimeoutMs), proofTimeoutMs: project.proofTimeoutMs, onboarded: project.hash,
+    suiteGate, ciTimeoutMs: project.ciTimeoutMs,
     ...(suiteLock === undefined ? {} : { suiteLock }),
     ...(project.suiteSlots === undefined ? {} : { suiteSlots: project.suiteSlots }),
     ...(project.builderChecks === undefined ? {} : { builderChecks: project.builderChecks }),

@@ -458,6 +458,39 @@ test('main reports usage, refusals and success as exit codes', async () => {
   assert.equal(await main([], fakes().deps), 2)
   assert.equal(await main(['a.md', 'b.md'], fakes().deps), 2)
   assert.equal(await main(['/d/b1.md', '--checkout', '/repo/checkout'], fakes({ worktreeStatus: 1 }).deps), 1)
+
+  const argv = ['/d/b1.md', '--checkout', '/repo/checkout']
+  const baseCommit = 'a'.repeat(40), repository = 'github.com/o/r', at = 1_795_478_400_000
+  const run = { workflow: 'CI', id: 42, attempt: 2, status: 'completed', conclusion: 'failure', link: `https://${repository}/actions/runs/42` }
+  for (const override of [false, true]) {
+    const { deps, calls } = fakes({ project: { ...projectFile(), suiteGate: 'ci' } })
+    deps.now = () => at
+    const spawn = deps.spawnSync
+    deps.spawnSync = (file, args, options) => {
+      const result = spawn(file, args, options)
+      if (file === 'git' && args.slice(-3).join(' ') === 'remote get-url origin') return { status: 0, stdout: 'https://test:secret@github.com/O/R.git\n' }
+      if (file === 'gh' && args[0] === 'run') return { status: 0, stdout: JSON.stringify([{
+        headSha: baseCommit, workflowName: run.workflow, databaseId: run.id, attempt: run.attempt,
+        status: run.status, conclusion: run.conclusion, url: run.link,
+      }]) }
+      return result
+    }
+    const result = await mainWithStderr(override ? [...argv, '--allow-red-base'] : argv, deps)
+    const appends = calls.filter(([kind]) => kind === 'append')
+    if (!override) {
+      assert.deepEqual(result, { code: 1, stderr: `crew start: base-red: ${baseCommit} ${run.link}\n` })
+      assert.equal(spawned(calls, 'worktree'), undefined)
+      assert.deepEqual(appends, [])
+    } else {
+      assert.deepEqual(result, { code: 0, stderr: '' })
+      assert.ok(spawned(calls, 'worktree'))
+      assert.equal(appends.length, 1)
+      assert.equal(appends[0][1], '/home/.crew/dt-b1/b1/task/journal.jsonl')
+      assert.deepEqual(JSON.parse(appends[0][2]), { event: 'check', check: 'base-ci', at, lane: 'b1', repository,
+        base: 'main', baseCommit, state: 'red', runs: [run], override: true })
+      assert.ok(calls.indexOf(appends[0]) < calls.indexOf(leanLaunch(calls)))
+    }
+  }
 })
 
 test('a start needs a checkout', async () => {
@@ -746,7 +779,7 @@ test('crew start writes the brief generated paths and regenerate command into th
 test('main refuses --check as usage and starts nothing', async () => {
   for (const argv of [['/d/b1.md', '--check'], ['--check', '/d/b1.md'], ['/d/b1.md', '--check', '--check'], ['/d/b1.md', '--checkout', '--check']]) {
     const { deps, calls } = fakes()
-    assert.deepEqual(await mainWithStderr(argv, deps), { code: 2, stderr: 'usage: crew start <brief.md> [--checkout <dir>]\n' })
+    assert.deepEqual(await mainWithStderr(argv, deps), { code: 2, stderr: 'usage: crew start <brief.md> [--checkout <dir>] [--allow-red-base]\n' })
     assert.deepEqual(effects(calls), [])
   }
 })

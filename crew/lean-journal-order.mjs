@@ -1,5 +1,7 @@
+export const baseCiCheck = (row) => row?.event === 'check' && row.check === 'base-ci'
+
 export function stateless(rows, row, index) {
-  if (typeof row?.event !== 'string' || row.event === 'stage-end' || row.event === 'run-end-command' || row.event === 'ci-progress') return true
+  if (typeof row?.event !== 'string' || row.event === 'stage-end' || row.event === 'run-end-command' || row.event === 'ci-progress' || baseCiCheck(row)) return true
   if (row.event === 'check' && Array.isArray(rows) && Number.isSafeInteger(index)) {
     for (let i = Math.min(index, rows.length) - 1; i >= 0; i--) {
       if (rows[i]?.event === 'stage-start') break

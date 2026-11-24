@@ -7,7 +7,7 @@ plan, superseded by this README.
 
 ```
 crew onboard (--check <draft.json> | --seats) [--checkout <dir>] # calibrate the checkout or probe its seats
-crew start <brief.md> [--checkout <dir>]             # worktree + journal + a detached lane
+crew start <brief.md> [--checkout <dir>] [--allow-red-base] # worktree + journal + a detached lane
 crew lanes [--all] [--json]                          # list lanes from their journals
 crew steps [--since <ISO date>] [--json]             # count lane steps and repeat builder triggers
 crew show <lane> [<role>] [--json]                   # read a lane's recorded seat sessions
@@ -111,6 +111,18 @@ personal `suiteGate` value makes `crew start` refuse before creating a worktree.
 Onboarding validates the gate and timeout without hashing them. Start snapshots
 both for the lane, including planning resumes and finish passes. Edits affect
 only new lanes.
+
+Before creating a worktree in `ci` mode, `crew start` gives GitHub 30 seconds
+to list push runs for the fetched base commit. It refuses a measured red as
+`base-red: <sha> <run url>`. Use `--allow-red-base` for a lane that fixes the
+base. Start does not wait for running checks and allows an unmeasured read.
+It records the result in a `base-ci` journal row when it boots. `lane` mode,
+planning resumes and finish passes do not repeat this check.
+
+`crew lanes` and the visualizer show the last recorded start state per base,
+not live CI, and count lanes stopped on each matching base run. `crew lanes
+--json` includes the lane's `base_ci` snapshot or `null` if none was recorded.
+The start refusal is separate from the post-PR `ci-base-red` stop.
 
 `ci` lanes never run the local suite, including on a publishing rebase or in a
 finish pass. They keep fast checks, proof and the applicable reviews. Commit

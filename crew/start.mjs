@@ -1,8 +1,8 @@
-// crew start <brief.md> [--checkout <dir>]
+// crew start <brief.md> [--checkout <dir>] [--allow-red-base]
 //
 // The lean entry (ADR-052): one P1 brief in, one running lane out. It checks the
 // brief, creates the lane worktree and starts the run detached, handing the brief to the
-// planner as its whole input. No compile, no baseline, no gate. The lane name is the
+// planner as its whole input. CI lanes check the fetched base before boot. The lane name is the
 // brief's file name.
 //
 // The start stands on the brief parser and the agent definitions alone. It refuses before any
@@ -13,7 +13,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, join, posix, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { GIT_STATUS_ARGS, LANE } from './lane-core.mjs'
-import { runSuite } from './checks.mjs'
+import { failedAction, runSuite } from './checks.mjs'
 import { ISSUE_SOURCE, parseBrief, TIERS } from './protocols.mjs'
 import { resolveAgents, loadRoster, snapshotRoster } from './agents.mjs'
 import { writeRunPid } from './run-pid.mjs'
@@ -85,7 +85,46 @@ function suiteSpec(suite, timeoutMs = SUITE_TIMEOUT_DEFAULT_MS) {
   return { command, args, timeoutMs }
 }
 
-export async function startLane({ briefPath, checkout, deps = {} }) {
+function failedBaseRun({ status, conclusion }) {
+  return status === 'completed' && failedAction(conclusion)
+}
+
+function readBaseCi(d, checkout, base, baseCommit) {
+  let repository = null
+  const observation = { base, baseCommit }
+  const unmeasured = (reason, runs = []) => ({ ...observation, repository, state: 'unmeasured', reason, runs })
+  try {
+    // Accept URL and scp-style remotes, but keep only the host and owner/repo.
+    const origin = git(d, checkout, ['remote', 'get-url', 'origin']) ?? ''
+    const url = new URL(origin.includes('://') ? origin : origin.replace(/^(?:[^@/:]+@)?([\w.-]+):(?=[^/])/, 'ssh://$1/'))
+    const path = url.pathname.replace(/\/$/, '').replace(/\.git$/i, '')
+    if (!['https:', 'http:', 'ssh:', 'git:'].includes(url.protocol) || !/^[\w.-]+$/.test(url.hostname)
+      || !/^\/[\w.-]+\/[\w.-]+$/.test(path)) return unmeasured('read-failed')
+    repository = `${url.hostname}${path}`.toLowerCase()
+    // GitHub caps filtered lists at 1,000. At the cap, completeness is unknown.
+    const limit = 1000
+    const result = d.spawnSync('gh', ['run', 'list', '--repo', repository, '--commit', baseCommit,
+      '--branch', base, '--event', 'push', '--all', '--limit', String(limit),
+      '--json', 'workflowName,databaseId,attempt,status,conclusion,url,headSha'], { cwd: checkout, timeout: 30_000, killSignal: 'SIGKILL' })
+    if (result.error || result.status !== 0) return unmeasured('read-failed')
+    const rows = JSON.parse(result.stdout)
+    if (!Array.isArray(rows) || rows.some((row) => row?.headSha !== baseCommit || typeof row.workflowName !== 'string'
+      || !Number.isSafeInteger(row.databaseId) || row.databaseId < 1 || !Number.isSafeInteger(row.attempt) || row.attempt < 1
+      || typeof row.status !== 'string' || !row.status.trim() || typeof row.conclusion !== 'string'
+      || typeof row.url !== 'string' || row.url.toLowerCase() !== `https://${repository}/actions/runs/${row.databaseId}`)
+      || new Set(rows.map((row) => row.databaseId)).size !== rows.length) return unmeasured('read-failed')
+    const runs = rows.map(({ workflowName: workflow, databaseId: id, attempt, status, conclusion, url: link }) => ({ workflow, id, attempt, status, conclusion, link }))
+    const measured = { ...observation, repository, runs }
+    if (runs.some(failedBaseRun)) return { ...measured, state: 'red' }
+    if (runs.length >= limit) return unmeasured('read-failed', runs)
+    if (!runs.length) return unmeasured('no-runs')
+    if (runs.some(({ status }) => status !== 'completed')) return { ...measured, state: 'running' }
+    return runs.every(({ conclusion }) => ['success', 'skipped', 'neutral'].includes(conclusion))
+      ? { ...measured, state: 'green' } : unmeasured('not-green', runs)
+  } catch { return unmeasured('read-failed') }
+}
+
+export async function startLane({ briefPath, checkout, allowRedBase = false, deps = {} }) {
   const d = { ...defaultDeps(), ...deps }
   const logLine = (line) => { try { d.log(line) } catch { /* Instrumentation must not affect the start. */ } }
   const lane = laneName(briefPath)
@@ -184,6 +223,10 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
       suiteGate = 'lane'
     }
   }
+  const baseCi = suiteGate === 'ci' ? readBaseCi(d, checkout, base, baseCommit) : null
+  if (baseCi?.state === 'red' && !allowRedBase) {
+    throw new StartRefusal(baseCi.runs.filter(failedBaseRun).map(({ link }) => `base-red: ${baseCommit} ${link}`).join('\n'))
+  }
   let ask = null, title = null
   const source = ISSUE_SOURCE.exec(fields.source)?.[1]
   const references = []
@@ -268,6 +311,12 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
     d.mkdirSync(taskDir, { recursive: true })
     d.writeFileSync(join(crewDir, 'crew.json'), `${JSON.stringify({ members }, null, 2)}\n`)
     d.writeFileSync(specPath, `${JSON.stringify(spec, null, 2)}\n`)
+    if (baseCi) {
+      // The archive reader recognizes this prefix when the run list makes the row large.
+      const row = { event: 'check', check: 'base-ci', at: d.now(), lane, ...baseCi,
+        ...(baseCi.state === 'red' ? { override: true } : {}) }
+      d.appendFileSync(join(taskDir, 'journal.jsonl'), `${JSON.stringify(row)}\n`)
+    }
   } catch (cause) {
     throw new StartRefusal(`cannot record lean lane ${lane} in ${crewDir}: ${cause.code ?? cause.message}; the worktree ${worktree} and branch ${lane} are left for inspection`, { cause })
   }
@@ -291,7 +340,7 @@ export async function startLane({ briefPath, checkout, deps = {} }) {
 }
 
 export async function main(argv = process.argv.slice(2), deps = {}) {
-  const FLAGS = { '--checkout': { value: true } }
+  const FLAGS = { '--checkout': { value: true }, '--allow-red-base': { value: false } }
   const flags = {}, rest = []
   let bad = false
   for (let i = 0; i < argv.length; i++) {
@@ -304,13 +353,13 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
     } else flags[arg] = true
   }
   if (bad || rest.length !== 1) {
-    process.stderr.write('usage: crew start <brief.md> [--checkout <dir>]\n')
+    process.stderr.write('usage: crew start <brief.md> [--checkout <dir>] [--allow-red-base]\n')
     return 2
   }
   // Resolve the checkout only after the brief passes.
   const checkout = flags['--checkout'] ? resolve(flags['--checkout']) : null
   try {
-    await startLane({ briefPath: resolve(rest[0]), checkout, deps })
+    await startLane({ briefPath: resolve(rest[0]), checkout, allowRedBase: flags['--allow-red-base'], deps })
     return 0
   } catch (error) {
     if (!(error instanceof StartRefusal)) throw error

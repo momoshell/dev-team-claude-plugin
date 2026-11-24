@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { appendFileSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, watch, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { startServer } from '../visualizer/server/server.mjs'
 import { createLeanSource } from '../crew/lean-source.mjs'
@@ -259,9 +259,12 @@ test('LV2 terminal verdicts and pr rows settle a lane; empty journals are unknow
 })
 
 test('the stream reports a lane after its task journal changes', async () => {
-  await withServer(async ({ crewRoot, base }) => {
+  const calls = []
+  await withServer(async ({ crewRoot, archiveRoot, base }) => {
     const dir = lane(crewRoot, 'live', [{ event: 'stage-start', stage: 'ci' }])
+    for (let i = 0; i < 50; i++) lane(archiveRoot, `archived-${i}`, [])
     const controller = new AbortController()
+    let appendRetry
     try {
       const response = await fetch(`${base}/api/stream`, { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]) })
       assert.equal(response.status, 200)
@@ -275,7 +278,11 @@ test('the stream reports a lane after its task journal changes', async () => {
           buffer = buffer.slice(end + 2)
           if (!connected && frame === ': connected\n\n') {
             connected = true
-            appendFileSync(join(dir, 'task', 'journal.jsonl'), jsonl([{ event: 'ci-progress', stage: 'ci', checks: [] }]))
+            assert.deepEqual(calls, [crewRoot, archiveRoot].map((root) => [realpathSync(root), { recursive: true }]))
+            const append = () => appendFileSync(join(dir, 'task', 'journal.jsonl'), jsonl([{ event: 'ci-progress', stage: 'ci', checks: [] }]))
+            append()
+            // The SSE acknowledgement does not guarantee the OS watcher is ready.
+            appendRetry = setInterval(append, 250)
           }
           if (frame.startsWith(':')) continue
           assert.ok(connected, 'stream must acknowledge the subscription before sending data')
@@ -283,8 +290,11 @@ test('the stream reports a lane after its task journal changes', async () => {
         }
       }
       assert.fail('stream closed before delivering a journal event')
-    } finally { controller.abort() }
-  })
+    } finally { clearInterval(appendRetry); controller.abort() }
+  }, { watch(path, options, notify) {
+    calls.push([path, options])
+    return watch(path, options, notify)
+  } })
 })
 
 test('LV3 journal route reads task/journal.jsonl and refuses identity mismatches', async () => {

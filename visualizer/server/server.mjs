@@ -335,95 +335,104 @@ function pluginHead() {
   return read.status === 0 && HEX_OID.test(head) ? head : null
 }
 
-function journalStream(crewRoot, archiveRoot) {
+function journalStream(crewRoot, archiveRoot, watchPath = watch) {
   const root = resolve(crewRoot)
   const roots = [root, resolve(archiveRoot ?? join(dirname(root), '.crew-journal-archive'))]
-  const clients = new Set(), watchers = new Map()
-  let previous = new Map(), batch, rescan, keepAlive
+  const clients = new Set(), watchers = new Map(), pending = new Set()
+  let previous = new Map(), batch, scanLive = false, keepAlive
   function send(frame) {
     for (const res of clients) {
       if (res.writableNeedDrain) res.destroy()
       else res.write(frame)
     }
   }
-  function changed() { batch ??= setTimeout(() => { batch = undefined; scan() }, 250) }
-  function scan(initial = false) {
-    const seen = new Set(), next = new Map()
-    function watchDir(path, matches) {
-      let key
-      try {
-        const stat = lstatSync(path)
-        if (!stat.isDirectory() || realpathSync(path) !== path) return false
-        key = `${stat.dev}:${stat.ino}`
-      } catch { return false }
-      let entry = watchers.get(path)
-      if (entry?.key !== key) {
-        entry?.watcher.close()
-        watchers.delete(path)
+  const laneOf = (outer, archive) => outer.startsWith('dt-') ? (archive ? outer.replace(/\.archive-[1-9]\d*$/, '') : outer).slice(3) : ''
+  const laneName = (entry, lane) => entry === lane || entry.startsWith(`${lane}.archive-`)
+  function dirs(path) {
+    try { return readdirSync(path, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name) } catch { return [] }
+  }
+  function liveSnapshot() {
+    const next = new Map(), base = realpathOr(root)
+    for (const outer of dirs(base)) {
+      const lane = laneOf(outer, false)
+      if (!LANE.test(lane)) continue
+      const outerDir = join(base, outer)
+      for (const entry of dirs(outerDir).filter((entry) => laneName(entry, lane))) {
+        const task = join(outerDir, entry, 'task')
         try {
-          entry = { key, matches: [] }
-          const watcher = watch(path, (_, name) => { if (name === null || entry.matches.some((match) => match(name))) changed() })
-          entry.watcher = watcher
-          watchers.set(path, entry)
-          watcher.on('error', () => {
-            watcher.close()
-            if (watchers.get(path) === entry) watchers.delete(path)
-          })
-        } catch { return true } // The fallback scan can still stat this directory.
+          if (!lstatSync(task).isDirectory()) continue
+          const path = join(task, 'journal.jsonl'), stat = lstatSync(path, { bigint: true })
+          if (stat.isFile()) next.set(path, { lane, key: `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}` })
+        } catch { /* A lane may not have its journal yet. */ }
       }
-      if (!seen.has(path)) entry.matches.length = 0
-      entry.matches.push(matches)
-      seen.add(path)
+    }
+    return next
+  }
+  function changed() {
+    batch ??= setTimeout(() => {
+      batch = undefined
+      if (scanLive) {
+        scanLive = false
+        const next = liveSnapshot()
+        for (const [path, { lane, key }] of next) if (previous.get(path)?.key !== key) pending.add(lane)
+        for (const [path, { lane }] of previous) if (!next.has(path)) pending.add(lane)
+        previous = next
+      }
+      if (pending.size) send([...pending].map((lane) => `data: ${JSON.stringify({ type: 'journal', lane })}\n\n`).join(''))
+      pending.clear()
+    }, 250)
+  }
+  function watchRoot(configuredRoot, index) {
+    function install(path, recursive, notify) {
+      try {
+        const watcher = watchPath(path, { recursive }, (_, name) => {
+          if (watchers.get(index) === watcher) notify(name)
+        })
+        watcher.on('error', () => {
+          if (watchers.get(index) !== watcher) return
+          watchers.delete(index)
+          watcher.close()
+        })
+        watchers.get(index)?.close()
+        watchers.set(index, watcher)
+        return true
+      } catch { return false } // The page still polls if a watch cannot be installed.
+    }
+    function promote() {
+      let base
+      try {
+        base = realpathSync(configuredRoot)
+        if (!statSync(base).isDirectory()) return false
+      } catch { return false }
+      install(base, true, (name) => {
+        if (name == null) { scanLive = true; changed(); return }
+        const [outer, inner, task, file, extra] = name.split(sep)
+        if (extra !== undefined || task !== 'task' || file !== 'journal.jsonl') return
+        const lane = laneOf(outer, index === 1)
+        if (LANE.test(lane) && laneName(inner, lane)) { pending.add(lane); changed() }
+      })
       return true
     }
-    function dirs(path) {
-      try { return readdirSync(path, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name) } catch { return [] }
-    }
-    for (const [index, configuredRoot] of roots.entries()) {
-      const parent = realpathOr(dirname(configuredRoot)), name = basename(configuredRoot), base = join(parent, name)
-      // Watch for root creation (e.g. the first closeout) without walking the parent.
-      watchDir(parent, (entry) => entry === name)
-      const laneOf = (outer) => outer.startsWith('dt-') ? (index === 1 ? outer.replace(/\.archive-[1-9]\d*$/, '') : outer).slice(3) : ''
-      if (!watchDir(base, (entry) => LANE.test(laneOf(entry)))) continue
-      for (const outer of dirs(base)) {
-        const lane = laneOf(outer)
-        if (!LANE.test(lane)) continue
-        const outerDir = join(base, outer)
-        const laneName = (entry) => entry === lane || entry.startsWith(`${lane}.archive-`)
-        if (!watchDir(outerDir, laneName)) continue
-        for (const entry of dirs(outerDir).filter(laneName)) {
-          const laneDir = join(outerDir, entry), task = join(laneDir, 'task')
-          if (!watchDir(laneDir, (file) => file === 'task') || !watchDir(task, (file) => file === 'journal.jsonl')) continue
-          const path = join(task, 'journal.jsonl')
-          try {
-            const stat = lstatSync(path, { bigint: true })
-            if (stat.isFile()) next.set(path, { lane, key: `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}` })
-          } catch { /* A lane may not have its journal yet. */ }
-        }
-      }
-    }
-    for (const [path, { watcher }] of watchers) if (!seen.has(path)) { watcher.close(); watchers.delete(path) }
-    const changedLanes = new Set()
-    if (!initial) {
-      for (const [path, { lane, key }] of next) if (previous.get(path)?.key !== key) changedLanes.add(lane)
-      for (const [path, { lane }] of previous) if (!next.has(path)) changedLanes.add(lane)
-    }
-    previous = next
-    if (changedLanes.size) send([...changedLanes].map((lane) => `data: ${JSON.stringify({ type: 'journal', lane })}\n\n`).join(''))
+    if (promote()) return
+    // Watch for root creation (e.g. the first closeout) without walking the parent.
+    const parent = realpathOr(dirname(configuredRoot)), basenameOfRoot = basename(configuredRoot)
+    if (install(parent, false, (name) => {
+      if (name != null && name !== basenameOfRoot) return
+      const appeared = promote()
+      if (name == null || (appeared && index === 0)) { scanLive = true; changed() }
+    })) promote() // Catch creation between the first check and the parent watch.
   }
   function stop() {
     clearTimeout(batch); batch = undefined
-    clearInterval(rescan)
     clearInterval(keepAlive)
-    for (const { watcher } of watchers.values()) watcher.close()
-    watchers.clear(); previous.clear()
+    for (const watcher of watchers.values()) watcher.close()
+    watchers.clear(); previous.clear(); pending.clear(); scanLive = false
   }
   return {
     subscribe(res) {
       if (!clients.size) {
-        scan(true)
-        // A watch can miss a write, including one just after subscription.
-        rescan = setInterval(changed, 1500)
+        roots.forEach(watchRoot)
+        previous = liveSnapshot()
         keepAlive = setInterval(() => send(': keep-alive\n\n'), 25_000)
       }
       clients.add(res)
@@ -438,7 +447,7 @@ export function startServer(options = {}) {
   const config = { ...defaults(), ...options }
   config.checkout = resolve(config.checkout || process.cwd())
   const loaded_commit = pluginHead()
-  const stream = journalStream(config.crewRoot, config.leanArchiveRoot)
+  const stream = journalStream(config.crewRoot, config.leanArchiveRoot, config.watch)
   const writeMode = pluginWriteMode({ pluginRoot:config.pluginRoot ?? PROJECT_ROOT, home:config.home ?? homedir() })
   const PLUGIN_WRITE_NOTICE = 'This plugin runs from an installed, version-pinned copy whose edits the next plugin update would overwrite.'
   const pluginWriteRefusal = { schema, error:PLUGIN_WRITE_NOTICE, reason:writeMode.reason, basis:writeMode.basis, plugin_root:writeMode.plugin_root }

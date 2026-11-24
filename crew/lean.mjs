@@ -128,7 +128,7 @@ function promptFor({ request, spec, source, charters, body, section }) {
   const ciGate = spec.suiteGate === 'ci'
   const ciStages = spec.shape === 'finish' && !spec.finish?.planning
     ? 'The loop proves the named tests but does not run the suite (`suiteGate: ci`). CI runs it after the operator publishes the PR. Do not run these stages yourself.'
-    : 'The loop proves the named tests, commits, rebases and opens the PR without running the suite (`suiteGate: ci`). CI runs the suite after the PR opens; the loop waits for its required checks. Do not run these stages yourself.'
+    : 'The loop proves the named tests, commits, rebases and opens the PR without running the suite (`suiteGate: ci`). CI runs the suite after the PR opens. The loop waits for the required checks and may ask the builder to repair a CI failure. Leave repairs uncommitted: the loop checks them and pushes a new commit without rebasing or editing the PR. Do not run these stages yourself.'
   const lines = [
     body,
     '',

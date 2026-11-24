@@ -41,13 +41,20 @@ Read first, decide second, remove last.
   the archived task directory; closeout keeps the output files with the journal.
 
 A `ci` stage follows the recorded PR on a loop-published `suiteGate: ci` lane.
-While it waits, `crew lanes` shows the lane running with the PR URL. It writes
-one `check: 'ci'` row at the end. Read `result.checks` for the required checks
-and their links. `ci-red` is a measured failure. `ci-unmeasured`, `ci-timeout`
-and `ci-no-required-checks` do not imply a failed check. Inspect the PR for
-the last check state, missing required checks or a merge conflict. The PR
-stays open and `crew finish` refuses with `finish-published`. Fix the branch by
-hand; close out after merge or use `--discard` after the PR is closed.
+While it waits or repairs, `crew lanes` shows the lane running with the PR URL.
+Read the `check: 'ci'` rows for waits, reruns and base comparisons. A wait's
+`result.checks` lists required checks and links. A signature match can rerun
+failed jobs once per head. A second signature red stops
+`red-after-environment-rerun`; `ci-base-red` names a matching base failure and
+links both runs. Otherwise, the loop can send the red to `ci-repair` up to twice,
+checking each repair before pushing a new commit. A third repairable red stops
+`ci-red`.
+
+`ci-unmeasured`, `ci-timeout` and `ci-no-required-checks` are not measured reds.
+Inspect the PR for the head, the last check state, missing checks or a merge
+conflict. After any terminal stop the PR stays open and `crew finish` refuses
+with `finish-published`. Fix the branch by hand; close out after merge or use
+`--discard` after the PR is closed.
 
 A `proof-timeout` stop means every unproven named test timed out on the old
 source or the build. No builder or lead turn follows. The verdict observation

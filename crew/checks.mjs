@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { stripVTControlCharacters } from 'node:util'
 import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -13,7 +14,7 @@ export const CHECK_REASONS = Object.freeze([
   'invalid-input', 'unsupported-platform', 'exit-nonzero', 'signal', 'spawn-error', 'timeout', 'output-limit',
   'suite-lock-timeout', 'suite-lock-unavailable', 'cancelled', 'cleanup-unproven', 'proof-unproven', 'proof-timeout', 'invalid-project-config', 'setup-failed', 'runner-threw', 'nothing-to-commit', 'commit-failed', 'rebase-conflict', 'rebase-failed',
   'dirty-worktree', 'push-unmeasured', 'pr-unmeasured', 'invalid-remote-data',
-  'ci-red', 'ci-unmeasured', 'ci-timeout', 'ci-no-required-checks',
+  'ci-red', 'ci-unmeasured', 'ci-timeout', 'ci-no-required-checks', 'ci-base-red',
 ])
 
 export const CI_TIMEOUT_DEFAULT_MS = 3_600_000
@@ -636,6 +637,52 @@ function validPr(record, branch, base) {
   return record.state === 'OPEN' && record.headRefName === branch && typeof record.baseRefName === 'string' && record.isCrossRepository === false
 }
 
+async function branchHead(git, branch) {
+  const headRead = await git(['rev-parse', 'HEAD'])
+  const current = await git(['symbolic-ref', '--short', 'HEAD'])
+  if (headRead.status !== 'green') return notGreen(headRead, 'push-unmeasured')
+  if (current.status !== 'green') return notGreen(current, 'push-unmeasured')
+  const head = headRead.stdout.trim()
+  if (!HEX_OID.test(head)) return unmeasured('invalid-remote-data')
+  if (current.stdout.trim() !== branch) return unmeasured('invalid-input', { detail: `checked out branch is ${current.stdout.trim()}, not ${branch}` })
+  return { head }
+}
+
+async function confirmBranchPush(git, { remote, branch, head, parent, pinned }) {
+  const ref = `refs/heads/${branch}`
+  const read = async () => {
+    const listed = await git(['ls-remote', '--heads', remote, ref])
+    if (listed.status !== 'green') return null
+    const lines = listed.stdout.split('\n').filter(Boolean)
+    if (!lines.length) return ''
+    const [oid, name] = lines[0].split('\t')
+    return lines.length === 1 && name === ref && HEX_OID.test(oid) ? oid : null
+  }
+  let remoteOid = await read()
+  if (parent !== undefined && remoteOid !== parent) return unmeasured('push-unmeasured', { detail: 'remote branch no longer names the published head', remoteOid })
+  if (remoteOid !== head) {
+    await git(['push', remote, `${pinned ? head : 'HEAD'}:${ref}`])
+    remoteOid = await read()
+  }
+  return remoteOid === head ? { status: 'green', reason: null, head } : unmeasured('push-unmeasured')
+}
+
+// Repair only the published branch, with exactly one checked successor commit.
+export async function pushCiRepair({ cwd, branch, head, parent, tree }, deps = {}) {
+  if (![head, parent, tree].every((oid) => typeof oid === 'string' && HEX_OID.test(oid)) || head === parent) return unmeasured('invalid-input')
+  const git = (args) => runCommand({ cwd, command: 'git', args, timeoutMs: DEFAULT_TIMEOUT_MS }, deps)
+  const bad = await refProblem(git, branch)
+  if (bad) return bad
+  const local = await branchHead(git, branch)
+  if (local.status) return local
+  const commit = await git(['--no-replace-objects', 'show', '-s', '--format=%H %P %T', head])
+  if (local.head !== head || commit.status !== 'green' || commit.stdout.trim() !== `${head} ${parent} ${tree}`) {
+    return unmeasured('push-unmeasured', { detail: 'repair is not a checked commit directly on the published head' })
+  }
+  const pushed = await confirmBranchPush(git, { remote: 'origin', branch, head, parent, pinned: true })
+  return pushed.status === 'green' ? { ...pushed, parent, ciGraceMs: CI_NO_CHECKS_MS } : pushed
+}
+
 // Pushes the lane branch (never forced) and opens its PR, or returns the PR already open. Every claim is read back.
 export async function openPullRequest(spec = {}, deps = {}) {
   return guarded(async () => {
@@ -651,13 +698,10 @@ export async function openPullRequest(spec = {}, deps = {}) {
     const gh = (args) => runCommand({ cwd, command: 'gh', args, timeoutMs }, deps)
     const bad = await refProblem(git, branch) ?? await refProblem(git, base)
     if (bad) return bad
-    const headRead = await git(['rev-parse', 'HEAD'])
-    const current = await git(['symbolic-ref', '--short', 'HEAD'])
-    if (headRead.status !== 'green') return notGreen(headRead, 'push-unmeasured')
-    if (current.status !== 'green') return notGreen(current, 'push-unmeasured')
-    const head = headRead.stdout.trim()
-    if (!HEX_OID.test(head)) return unmeasured('invalid-remote-data')
-    if (current.stdout.trim() !== branch) return unmeasured('invalid-input', { detail: `checked out branch is ${current.stdout.trim()}, not ${branch}` })
+    const local = await branchHead(git, branch)
+    if (local.status) return local
+    const { head } = local
+    if (spec.head !== undefined && spec.head !== head) return unmeasured('push-unmeasured', { detail: 'local head differs from the checked commit' })
 
     // null is unknown (failed, malformed or ambiguous query), never an absent PR.
     const openPrs = async () => {
@@ -669,25 +713,11 @@ export async function openPullRequest(spec = {}, deps = {}) {
       if (!Array.isArray(records) || !records.every((record) => validPr(record, branch, base))) return null
       return records.map(({ number, url, state, headRefName, baseRefName }) => ({ number, url, state, headRefName, baseRefName }))
     }
-    // '' is a measured absent branch; null is unknown.
-    const remoteHead = async () => {
-      const listed = await git(['ls-remote', '--heads', remote, `refs/heads/${branch}`])
-      if (listed.status !== 'green') return null
-      const lines = listed.stdout.split('\n').filter((line) => line !== '')
-      if (lines.length === 0) return ''
-      const [oid, ref] = lines[0].split('\t')
-      return lines.length === 1 && ref === `refs/heads/${branch}` && HEX_OID.test(oid) ? oid : null
-    }
-
     const existing = await openPrs()
     if (existing === null || existing.length > 1) return unmeasured('pr-unmeasured')
     if (existing.length === 1 && existing[0].baseRefName !== base) return unmeasured('pr-unmeasured', { detail: `the open PR for ${branch} targets ${existing[0].baseRefName}, not ${base}`, pr: existing[0] })
-    let remoteOid = await remoteHead()
-    if (remoteOid !== head) {
-      await git(['push', remote, `HEAD:refs/heads/${branch}`])
-      remoteOid = await remoteHead()
-    }
-    if (remoteOid !== head) return unmeasured('push-unmeasured')
+    const pushed = await confirmBranchPush(git, { remote, branch, head, pinned: suiteGate === 'ci' })
+    if (pushed.status !== 'green') return pushed
     // Start the no-checks grace at remote confirmation, including the time spent opening the PR.
     const grace = suiteGate === 'ci' ? sampledBudget(CI_NO_CHECKS_MS, deps) : null
     try {
@@ -712,8 +742,112 @@ export async function openPullRequest(spec = {}, deps = {}) {
   })
 }
 
-export async function waitForRequiredChecks({ cwd, number, head, ciGraceMs, timeoutMs = CI_TIMEOUT_DEFAULT_MS }, deps = {}) {
-  if (typeof cwd !== 'string' || cwd === '' || !Number.isSafeInteger(number) || number <= 0 || typeof head !== 'string' || !HEX_OID.test(head)
+const ciRepo = ({ number, url } = {}) => {
+  const match = /^https:\/\/github\.com\/((?!\.\.?\/)[\w.-]+)\/((?!\.\.?\/)[\w.-]+)\/pull\/([1-9]\d*)$/.exec(url)
+  return match && Number.isSafeInteger(number) && match[3] === String(number) ? match.slice(1, 3) : null
+}
+const readJson = (result) => {
+  if (result.status === 'green') try { return JSON.parse(result.stdout) } catch {}
+  return null
+}
+const failedAction = (conclusion) => ['failure', 'action_required', 'startup_failure', 'timed_out'].includes(conclusion)
+
+// Use the required contexts gh pr checks uses, but read their commit OID in the same query.
+// Separate PR head and checks requests cannot prove which head supplied the contexts.
+const REQUIRED_CHECKS_QUERY = `query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $repo) { pullRequest(number: $number) {
+    headRefOid baseRefName state mergeable
+    commits(last: 1) { nodes { commit { oid statusCheckRollup { contexts(first: 100, after: $endCursor) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        __typename
+        ... on StatusContext { context state targetUrl createdAt isRequired(pullRequestNumber: $number) }
+        ... on CheckRun {
+          name status conclusion detailsUrl startedAt isRequired(pullRequestNumber: $number)
+          checkSuite { app { slug } workflowRun { resourcePath event workflow { name } } }
+        }
+      }
+    } } } } }
+  } }
+}`
+
+function requiredRows(nodes, repo) {
+  const latest = new Map()
+  const priority = ['pass', 'skipping', 'cancel', 'fail', 'pending']
+  for (const node of nodes) {
+    if (typeof node?.isRequired !== 'boolean') return null
+    if (!node.isRequired) continue
+    const legacy = node.__typename === 'StatusContext'
+    if (!legacy && node.__typename !== 'CheckRun') return null
+    const name = legacy ? node.context : node.name
+    const run = node.checkSuite?.workflowRun
+    const workflow = run?.workflow?.name ?? ''
+    const state = legacy ? node.state : node.status === 'COMPLETED' ? node.conclusion : node.status
+    const link = (legacy ? node.targetUrl : node.detailsUrl) ?? ''
+    if (typeof name !== 'string' || !name || typeof state !== 'string' || !state || typeof workflow !== 'string' || typeof link !== 'string') return null
+    const bucket = state === 'SUCCESS' ? 'pass' : ['SKIPPED', 'NEUTRAL'].includes(state) ? 'skipping'
+      : ['ERROR', 'FAILURE', 'TIMED_OUT', 'ACTION_REQUIRED'].includes(state) ? 'fail' : state === 'CANCELLED' ? 'cancel' : 'pending'
+    const key = JSON.stringify(legacy ? [name] : [name, workflow, run?.event ?? '', node.checkSuite?.app?.slug ?? ''])
+    // A queued replacement can lack startedAt. Do not let an older completed job hide it.
+    const time = Date.parse(legacy ? node.createdAt : node.startedAt) || (bucket === 'pending' ? Infinity : 0)
+    const previous = latest.get(key)
+    if (previous && (previous.time > time || (previous.time === time && priority.indexOf(previous.row.bucket) >= priority.indexOf(bucket)))) continue
+    const row = { name, workflow, bucket, link }
+    const job = /^https:\/\/github\.com(\/[\w.-]+\/[\w.-]+\/actions\/runs\/([1-9]\d*))\/job\/([1-9]\d*)$/.exec(link)
+    if (job && typeof run?.resourcePath === 'string' && job[1].toLowerCase() === run.resourcePath.toLowerCase()
+      && job[1].toLowerCase() === `/${repo.toLowerCase()}/actions/runs/${job[2]}`) {
+      row.run = job[2]
+      row.job = job[3]
+    }
+    latest.set(key, { time, row })
+  }
+  return [...latest.values()].map(({ row }) => row)
+}
+
+export function ciActions({ cwd, pr }, deps) {
+  const repo = ciRepo(pr)?.join('/')
+  const gh = (args) => repo ? runCommand({ cwd, command: 'gh', args: [...args, '-R', `github.com/${repo}`], timeoutMs: DEFAULT_TIMEOUT_MS }, deps) : unmeasured('invalid-input')
+  const log = async (run, ...args) => {
+    const result = await gh(['run', 'view', run, '--log-failed', ...args])
+    if (result.status !== 'green') return null
+    // Strip terminal strings before the individual control characters. Keep tabs for gh's column prefix.
+    const cleaned = stripVTControlCharacters(result.stdout.replace(/(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)|(?:\x1b[P^_X]|[\x90\x98\x9e\x9f])[^\x1b\x9c]*(?:\x1b\\|\x9c)/g, ''))
+      .replace(/\x1b[ -/]*[0-~]|[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '')
+      .replace(/^[^\t\n]*\t[^\t\n]*\t\d{4}-\d\d-\d\dT\S+Z ?/gm, '')
+    return cleaned.trim() ? cleaned : null
+  }
+  return {
+    log,
+    current: async (head) => {
+      const read = readJson(await gh(['pr', 'view', String(pr.number), '--json', 'headRefOid,baseRefName,state']))
+      return read?.headRefOid === head && read.baseRefName === pr.baseRefName && read.state === 'OPEN'
+    },
+    run: async (run) => readJson(await gh(['run', 'view', run, '--json', 'attempt,status,workflowDatabaseId,jobs'])),
+    rerun: (run) => gh(['run', 'rerun', run, '--failed']),
+    base: async (workflow, base) => {
+      if (!Number.isSafeInteger(workflow) || workflow <= 0) return null
+      const rows = readJson(await gh(['run', 'list', '--workflow', String(workflow), '--branch', base, '--event', 'push', '--status', 'completed', '--limit', '1', '--all', '--json', 'databaseId,attempt,headBranch,event,status,conclusion']))
+      const row = Array.isArray(rows) && rows.length === 1 ? rows[0] : null
+      if (!row || !Number.isSafeInteger(row.databaseId) || row.databaseId <= 0 || !Number.isSafeInteger(row.attempt) || row.attempt <= 0
+        || row.headBranch !== base || row.event !== 'push' || row.status !== 'completed' || typeof row.conclusion !== 'string' || !row.conclusion) return null
+      const run = String(row.databaseId), attempt = String(row.attempt)
+      return {
+        link: `https://github.com/${repo}/actions/runs/${run}`,
+        failed: failedAction(row.conclusion),
+        log: () => log(run, '--attempt', attempt),
+        failedJobs: async () => {
+          const jobs = readJson(await gh(['run', 'view', run, '--attempt', attempt, '--json', 'jobs']))?.jobs
+          return Array.isArray(jobs) && jobs.every((job) => typeof job?.name === 'string' && typeof job?.conclusion === 'string')
+            ? jobs.filter(({ conclusion }) => failedAction(conclusion)).map(({ name }) => name) : null
+        },
+      }
+    },
+  }
+}
+
+export async function waitForRequiredChecks({ cwd, pr, head, parent, ciGraceMs, timeoutMs = CI_TIMEOUT_DEFAULT_MS, reruns = [] }, deps = {}) {
+  const repo = ciRepo(pr)
+  if (typeof cwd !== 'string' || cwd === '' || !repo || typeof head !== 'string' || !HEX_OID.test(head)
     || !Number.isFinite(ciGraceMs) || ciGraceMs < 0 || ciGraceMs > CI_NO_CHECKS_MS || !validTimeout(timeoutMs)) return unmeasured('invalid-input')
   const budget = sampledBudget(timeoutMs, deps)
   let checks = null, reported = false, lastReadError = null
@@ -726,36 +860,73 @@ export async function waitForRequiredChecks({ cwd, number, head, ciGraceMs, time
     return remaining > 0 ? runCommand({ cwd, command: 'gh', args, timeoutMs: Math.ceil(Math.min(CI_POLL_MS, remaining)) }, deps) : unmeasured('timeout')
   }
   const awake = () => timeoutMs - budget.remaining()
+  const readChecks = async () => {
+    const nodes = [], cursors = new Set()
+    let cursor, mergeable, open = true
+    do {
+      const read = await gh(['api', 'graphql', '--hostname', 'github.com', '-f', `query=${REQUIRED_CHECKS_QUERY}`,
+        '-f', `owner=${repo[0]}`, '-f', `repo=${repo[1]}`, '-F', `number=${pr.number}`, ...(cursor ? ['-f', `endCursor=${cursor}`] : [])])
+      const response = readJson(read)
+      const pull = response?.data?.repository?.pullRequest
+      const commit = pull?.commits?.nodes?.[0]?.commit
+      if (!pull || response.errors?.length || !HEX_OID.test(pull.headRefOid ?? '') || !HEX_OID.test(commit?.oid ?? '')) {
+        return { error: read.stderr.trim() || read.reason || 'required check data unavailable' }
+      }
+      if (pull.baseRefName !== pr.baseRefName || !['OPEN', 'MERGED', 'CLOSED'].includes(pull.state)) {
+        return { changed: true, observedHead: pull.headRefOid }
+      }
+      if (pull.headRefOid !== head || commit.oid !== head) {
+        // The remote branch is confirmed, but GitHub may still show the replaced commit.
+        if (pull.state === 'OPEN' && awake() < ciGraceMs
+          && [pull.headRefOid, commit.oid].every((oid) => oid === head || oid === parent)) {
+          return { catchingUp: true, error: 'PR still reports the replaced head' }
+        }
+        return { changed: true, observedHead: pull.headRefOid }
+      }
+      open &&= pull.state === 'OPEN'
+      mergeable = pull.mergeable
+      const rollup = commit.statusCheckRollup
+      if (rollup === null && !cursor) break
+      const contexts = rollup?.contexts
+      if (!Array.isArray(contexts?.nodes) || typeof contexts.pageInfo?.hasNextPage !== 'boolean') return { error: 'malformed required check rollup' }
+      for (const node of contexts.nodes) nodes.push(node)
+      cursor = contexts.pageInfo.hasNextPage ? contexts.pageInfo.endCursor : null
+      if (!contexts.pageInfo.hasNextPage) break
+      if (typeof cursor !== 'string' || !cursor || cursors.has(cursor)) return { error: 'malformed required check cursor' }
+      cursors.add(cursor)
+    } while (cursor)
+    const rows = requiredRows(nodes, repo.join('/'))
+    return rows ? { rows, mergeable, open } : { error: 'malformed required checks' }
+  }
   try {
     budget.watch(() => {})
     while (budget.remaining() > 0) {
       const pollStarted = awake()
-      const read = await gh(['pr', 'checks', String(number), '--required', '--json', 'name,workflow,bucket,link'])
-      let rows
-      const stderr = read.stderr.trim()
-      const exited = !read.signal && !read.timedOut && (read.status === 'green'
-        || (read.status === 'red' && read.reason === 'exit-nonzero' && [1, 8].includes(read.code)))
-      if (exited && !stderr) try { rows = JSON.parse(read.stdout) } catch {}
-      if (exited && read.code === 1 && !read.stdout.trim() && /^no (required )?checks reported on the '.+' branch$/.test(stderr)) rows = []
-      const measured = Array.isArray(rows) && rows.every((row) => row && typeof row.name === 'string' && row.name
-        && typeof row.workflow === 'string' && typeof row.bucket === 'string' && row.bucket && typeof row.link === 'string')
-      if (measured) { checks = rows; reported ||= rows.length > 0 }
-      else lastReadError = read.error?.message || stderr || (exited ? 'malformed gh pr checks output' : read.reason)
-      if (measured && rows.length && !rows.some(({ bucket }) => bucket === 'pending')) {
+      // Wait for a newer completed attempt before reading checks. Even after completion, the old jobs
+      // can remain visible until the required rollup catches up.
+      let attemptsReady = true
+      for (const { run, attempt } of reruns) {
+        const seen = readJson(await gh(['run', 'view', run, '--json', 'attempt,status', '-R', `github.com/${repo.join('/')}`]))
+        if (seen?.status !== 'completed' || !Number.isSafeInteger(seen.attempt) || seen.attempt <= attempt) attemptsReady = false
+      }
+      const { rows, changed, observedHead, mergeable, open, catchingUp, error } = await readChecks()
+      if (changed) { checks = null; return result('unmeasured', 'ci-unmeasured', { detail: 'pr-head-or-target-changed', observedHead }) }
+      if (rows) { checks = rows; reported ||= rows.length > 0 }
+      else lastReadError = error
+      const refreshed = attemptsReady && reruns.every(({ failed }) => failed.every((old) => rows?.some((row) => row.name === old.name
+        && row.workflow === old.workflow && row.run === old.run && row.job !== old.job)))
+      if (refreshed && rows?.length && rows.every(({ bucket }) => bucket === 'pass' || bucket === 'skipping')) return result('green', null)
+      if (open === false) return result('unmeasured', 'ci-unmeasured', { detail: 'pr-not-open' })
+      if (refreshed && rows?.length && !rows.some(({ bucket }) => bucket === 'pending')) {
         if (rows.some(({ bucket }) => bucket === 'fail')) return result('red', 'ci-red')
-        if (rows.every(({ bucket }) => bucket === 'pass' || bucket === 'skipping')) return result('green', null)
         return result('unmeasured', 'ci-unmeasured')
       }
       if (budget.remaining() <= 0) break
-      if (measured && !reported && awake() >= ciGraceMs) {
-        const view = await gh(['pr', 'view', String(number), '--json', 'mergeable'])
-        if (view.status === 'green') try {
-          if (JSON.parse(view.stdout)?.mergeable === 'CONFLICTING') return result('unmeasured', 'ci-unmeasured', { detail: 'pr-conflicting' })
-        } catch {}
-        return result('unmeasured', 'ci-no-required-checks')
+      if (rows && !reported && !reruns.length && awake() >= ciGraceMs) {
+        return mergeable === 'CONFLICTING' ? result('unmeasured', 'ci-unmeasured', { detail: 'pr-conflicting' }) : result('unmeasured', 'ci-no-required-checks')
       }
-      // Re-poll at the absence threshold if this read established there are still no checks.
-      const next = Math.min(timeoutMs, pollStarted + CI_POLL_MS, measured && !reported ? ciGraceMs : Infinity)
+      // Re-poll at the grace threshold if the PR is catching up or has not reported checks.
+      const next = Math.min(timeoutMs, pollStarted + CI_POLL_MS, catchingUp || (rows && !reported && !reruns.length) ? ciGraceMs : Infinity)
       for (let delay; (delay = next - awake()) > 0;) await (deps.sleep ?? sleep)(Math.ceil(delay))
     }
     return result('unmeasured', 'ci-timeout', lastReadError === null ? {} : { lastReadError })

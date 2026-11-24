@@ -43,7 +43,10 @@ regenerate handling in `crew/checks.mjs` (`rebase-conflict` and its `regenerate`
    should read. A mechanical lane has no planner; use it only for work with no behaviour to judge and no
    protected paths. A new lane uses `shape: standard`.
 4. Start with `crew start ~/.crew/briefs/<lane>.md`. Fix any refusal and retry. In this repo, the checkout's
-   copy is `node crew/start.mjs <brief>`. Close the lane after its PR merges using `crew-recovery`.
+   copy is `node crew/start.mjs <brief>`. In `ci` mode, `base-red` refuses before creating a worktree.
+   Use `--allow-red-base` only for a lane that fixes the base. Start does not wait for running checks;
+   `crew lanes` shows the state recorded at lane start, not live CI. Close the lane after its PR merges
+   using `crew-recovery`.
 
 Use bare `issue N` pointers in `## Context` for related issues. For issue and operator-request briefs alike, `crew start` fetches each distinct reference other than the source and adds its title and whole quoted body under `## Referenced issues` immediately after Context. Do not write that generated section yourself. References are context, not asks; only `closes` binds an issue. Start refuses and names any reference it cannot read before creating the worktree. Empty or whitespace-only bodies appear as `empty body` with the title. `PR N` pointers are not fetched.
 

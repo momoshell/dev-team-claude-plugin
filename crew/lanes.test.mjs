@@ -137,13 +137,23 @@ test('a lane whose run died with no terminal row lists as stopped run-died; term
 test('an archived lane with no terminal row lists as stopped archived-without-terminal-row, even with a dead pid', () => {
   const w = world()
   try {
-    put(join(w.archiveRoot, 'dt-delta', 'delta', 'task', 'run.pid'), '123\n')
+    const task = join(w.archiveRoot, 'dt-delta', 'delta', 'task')
+    const at = '2026-11-24T12:00:00.000Z', sha = 'a'.repeat(40)
+    put(join(task, 'journal.jsonl'), jsonl([
+      { event: 'check', check: 'base-ci', state: 'green', baseCommit: sha, repository: 'github.com/o/r', base: 'main', at },
+      { event: 'stage-start', stage: 'gate' },
+    ]))
+    put(join(task, 'run.pid'), '123\n')
     const alive = () => false
     const rows = laneRows({ root: w.root, archiveRoot: w.archiveRoot, all: true, alive })
     const delta = rows.find((row) => row.lane === 'delta')
     assert.deepEqual([delta.status, delta.reason, delta.archived], ['stopped', 'archived-without-terminal-row', true])
     assert.equal(rows.find((row) => row.lane === 'alpha').status, 'reviewed')
-    assert.deepEqual(JSON.parse(w.run(['--all', '--json'], alive).out), rows)
+    const json = JSON.parse(w.run(['--all', '--json'], alive).out)
+    assert.deepEqual(json, rows)
+    assert.deepEqual(json.find((row) => row.lane === 'delta').base_ci,
+      { state: 'green', reason: null, sha, recorded_at: at, override: false })
+    assert.equal(json.find((row) => row.lane === 'alpha').base_ci, null)
     assert.ok(lines(w.run(['--all'], alive).out).includes('delta | stopped | gate | archived-without-terminal-row | not recorded | archived'))
   } finally { w.done() }
 })

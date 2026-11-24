@@ -1,9 +1,11 @@
 <script>
   import { onMount, tick } from 'svelte'
   import { ListTodo, Bot, BookOpen, Workflow, RefreshCw } from 'lucide-svelte'
+  import { summarizeBaseCi } from './lib/base-ci-summary.js'
   import { getHealth, getSessions } from './lib/api.js'
   import { sessionsFeedState } from './lib/activity.js'
   import { attentionBreakdown, leanStatus, taskBoard } from './lib/fleet.js'
+  import { leanHttpUrl } from './lib/lean.js'
   import { createRefreshLoop, journalPulse } from './lib/live.js'
   import { formatHash, parseHash, subscribeHash } from './lib/route.js'
   import TaskList from './lib/TaskList.svelte'
@@ -35,6 +37,7 @@
   let selectedRun = $derived(route.view === 'run' ? runIndex.get(route.adw_id) : null)
   let attentionRows = $derived(taskBoard(runs, { state: 'attention' }).rows.map((run) => ({ run, status: leanStatus(run) })))
   let attentionSummary = $derived(attentionBreakdown(attentionRows))
+  let baseCi = $derived(summarizeBaseCi(runs.filter((run) => run.archived !== true)))
   let pageTitle = $derived(selectedRun ? `${selectedRun.goal || 'Task'} · Factory` : route.view === 'agents' ? 'Agents · Factory' : route.view === 'skills' ? 'Skills · Factory' : 'Tasks · Factory')
 
   $effect(() => subscribeHash((next) => route = next))
@@ -159,6 +162,20 @@
 {:else}
   <main class="page">
     <div class="page-heading task-heading"><div><p class="eyebrow">Work history</p><h1>Tasks</h1><p>Find a run, understand its outcome, and inspect the evidence.</p></div><span class="updated">{autoRefresh ? 'Automatic updates enabled' : 'Automatic updates paused'}</span></div>
+    {#if baseCi.bases.length || baseCi.stops.length}
+      <section class="base-ci" aria-labelledby="base-ci-heading">
+        <h2 id="base-ci-heading">Base CI</h2>
+        <ul>
+          {#each baseCi.bases as { key, repository, branch, state, reason, sha, lane, recorded_at } (key)}
+            <li>{repository ?? 'Repository not recorded'} {branch ?? 'Branch not recorded'}: <strong>{state ?? 'unmeasured'}</strong>{reason ? ` (${reason})` : ''}
+              {sha?.slice(0, 8) ?? 'SHA not recorded'} (recorded at lane start: {lane}, {#if recorded_at}<time datetime={recorded_at}>{recorded_at}</time>{:else}time not recorded{/if})</li>
+          {/each}
+          {#each baseCi.stops as { link, count } (link)}
+            <li>ci-base-red: {count} {count === 1 ? 'lane' : 'lanes'} stopped · <a href={leanHttpUrl(link)}>{link}</a></li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
     {#if attentionRows.length}
       <div class="attention-notice"><div><strong>{attentionSummary.total} runs to review</strong><p>{attentionSummary.text} · unarchived history</p></div><button onclick={focusActivity}>Review tasks →</button></div>
     {/if}
@@ -175,6 +192,7 @@
 nav { display:flex; flex-direction:column; gap:.25rem; }.nav-label { font-size:.7rem; color:var(--muted); padding:0 .7rem .6rem; }.nav-label:not(:first-child) { margin-top:1.5rem; } nav button { display:flex; align-items:center; gap:.7rem; border:0; border-radius:var(--radius-sm); padding:.65rem .7rem; background:transparent; color:var(--muted); cursor:pointer; text-align:start; font-size:.85rem; }nav button.active { color:var(--accent); background:var(--accent-surface); box-shadow:inset 3px 0 var(--accent); font-weight:650; }
 .sidebar-footer { margin-top:auto; display:grid; gap:.65rem; padding:.6rem; }.sidebar-footer small { color:var(--muted); font-size:.7rem; }.connection { font-size:.75rem; }.connection.degraded { color:var(--status-fail); }.theme { display:flex; align-items:center; justify-content:space-between; gap:.5rem; font-size:.75rem; color:var(--muted); }.refresh { display:flex; align-items:center; gap:.5rem; border:1px solid var(--line); border-radius:var(--radius-sm); padding:.4rem .65rem; background:var(--panel); cursor:pointer; font-size:.75rem; }.refresh:disabled { opacity:.6; cursor:wait; }
 .workspace { margin-inline-start:13.5rem; min-width:0; }.page { width:min(1440px,100%); margin:auto; padding:2.5rem clamp(1rem,3vw,3rem) 4rem; }.page-heading { display:flex; align-items:end; justify-content:space-between; gap:1rem; margin-bottom:2rem; }.page-heading h1 { margin:.2rem 0 .5rem; font-size:1.65rem; font-weight:600; letter-spacing:-.03em; }.page-heading p { margin:0; color:var(--muted); font-size:.85rem; line-height:1.5; max-width:65ch; }.page-heading .eyebrow { display:none; }.updated { font-size:.7rem; color:var(--muted); }
+.base-ci { margin-bottom:1.25rem; font-size:.85rem; overflow-wrap:anywhere; }.base-ci h2 { font-size:1rem; }.base-ci ul { margin:.5rem 0 0; padding-inline-start:1.3rem; }
 .attention-notice { display:flex; align-items:center; justify-content:space-between; gap:1rem; flex-wrap:wrap; padding:1rem 1.2rem; margin-bottom:1.25rem; border:1px solid var(--line); border-radius:var(--radius); background:var(--panel); }.attention-notice strong { font-size:.85rem; font-weight:500; }.attention-notice p { margin:.35rem 0 0; color:var(--muted); font-size:.75rem; }.attention-notice button { border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--panel); padding:.4rem .65rem; font-size:.8rem; cursor:pointer; }
 .error-banner { margin:1rem; border:1px solid var(--status-fail); color:var(--status-fail); border-radius:var(--radius); padding:1rem; font-size:.85rem; overflow-wrap:anywhere; }.empty-state { margin:4rem auto; max-width:34rem; text-align:center; }.empty-state p { color:var(--muted); }.empty-state button { padding:.5rem .8rem; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--panel); cursor:pointer; }
 .skip-link { position:fixed; inset-block-start:.5rem; inset-inline-start:.5rem; z-index:100; padding:.6rem; background:var(--panel); color:var(--text); transform:translateY(-200%); }.skip-link:focus { transform:none; }

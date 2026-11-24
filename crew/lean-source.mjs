@@ -3,7 +3,7 @@
 // archive root ordered by the first journal row's time. Nothing here writes, spawns, or trusts a path the lane's own files name.
 import { closeSync, openSync, readFileSync, readdirSync, readSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { stateless, supersededReturn } from './lean-journal-order.mjs'
+import { baseCiCheck, stateless, supersededReturn } from './lean-journal-order.mjs'
 import { deadRun, probeAlive } from './run-pid.mjs'
 import { deriveMembers } from './protocols.mjs'
 import { isObject, within } from './lane-core.mjs'
@@ -55,18 +55,25 @@ function readJson(path, laneDir) {
 }
 function firstRowTime(path) {
   try {
-    // An archive's first row can use up to 8 KiB, plus one byte to detect LF or overflow.
-    const bytes = Buffer.alloc(8 * 1024 + 1)
+    // Check the first row only. The base-ci run list can exceed the usual 8 KiB bound.
+    let bytes = Buffer.alloc(8 * 1024 + 1)
+    const baseCiLimit = 16 * 1024 * 1024 // bounded by the start subprocess's output buffer
+    const prefix = Buffer.from('{"event":"check","check":"base-ci",')
     const fd = openSync(path, 'r')
     try {
       for (let end = 0; end < bytes.length;) {
-        const count = readSync(fd, bytes, end, Math.min(1024, bytes.length - end), null)
+        const count = readSync(fd, bytes, end, Math.min(end < 8192 ? 1024 : 65536, bytes.length - end), null)
         const lf = bytes.subarray(end, end + count).indexOf(0x0a)
         if (lf !== -1 || count === 0) {
           const at = JSON.parse(bytes.toString('utf8', 0, lf === -1 ? end : end + lf))?.at
           return Number.isFinite(at) ? at : null
         }
         end += count
+        if (end === bytes.length && bytes.length < baseCiLimit && bytes.subarray(0, prefix.length).equals(prefix)) {
+          const larger = Buffer.alloc(Math.min(bytes.length * 2, baseCiLimit))
+          bytes.copy(larger)
+          bytes = larger
+        }
       }
     } finally { closeSync(fd) }
   } catch { /* An unreadable first row has unknown time. */ }
@@ -268,9 +275,14 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
     const leanRoles = rows.some((row) => row.event === 'tier-raised') ? leanRolesOf(found.dir) : []
     const { members, tier } = deriveMembers({ members: found.members, rows, leanRoles, tier: found.spec.tier })
     const phases = [], openPhases = []
+    const baseCheck = rows.findLast(baseCiCheck)
+    const base_ci = baseCheck ? { state: nonEmpty(baseCheck.state) ? baseCheck.state : null,
+      reason: nonEmpty(baseCheck.reason) ? baseCheck.reason : null, sha: nonEmpty(baseCheck.baseCommit) ? baseCheck.baseCommit : null,
+      recorded_at: rowTime(baseCheck.at), override: baseCheck.override === true } : null
     let ci, ciSettled = false
     let latest_stage = null, status = 'unknown', reason = null, running = false, started_at = null, lastAt = null
     for (const row of rows) {
+      if (baseCiCheck(row)) continue
       const at = rowTime(row.at)
       if (row.event === 'run-start') { started_at = at; lastAt = null; ciSettled = false }
       else if (at !== null && row.event !== 'ci-progress') lastAt = at
@@ -338,7 +350,7 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
     latest_stage = open_stages.at(-1) ?? latest_stage
     // Ignore stage ends, advisor rows and in-flight checks after a stop when choosing the state.
     let last = rows.findLast((row, index) => !stateless(rows, row, index) && !supersededReturn(rows, row, index))
-      ?? rows.findLast((row) => row.event !== 'ci-progress')
+      ?? rows.findLast((row) => row.event !== 'ci-progress' && !baseCiCheck(row))
     // `crew finish --accept` appends a `pr` row then a `finish-decision` row: a pr row after the last
     // finish-ready, followed only by those, is the lane's state.
     const ready = rows.findLastIndex((row) => row.event === 'finish-ready')
@@ -384,6 +396,22 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
         if (Array.isArray(observation?.checks)) ci.checks = observation.checks.filter(isObject)
       }
     }
+    const base_red_links = new Set()
+    if (status === 'stopped' && reason === 'ci-base-red' && last?.event === VERDICT_EVENT) {
+      const add = (link) => {
+        if (typeof link === 'string' && /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/actions\/runs\/[1-9]\d*$/.test(link)) base_red_links.add(link)
+      }
+      const { head, baseLink } = last.observation ?? {}
+      add(baseLink)
+      // Include the other matches from this wait, not earlier waits on the same head.
+      if (nonEmpty(head)) for (let i = last.index - 1; i >= 0; i--) {
+        const row = rows[i]
+        if (row.stage !== 'ci') continue
+        if (row.event === 'stage-start' || (row.event === 'check' && row.check === 'ci' && (row.action == null || row.action === 'wait'))) break
+        if (row.event === 'check' && row.check === 'ci' && row.action === 'base-comparison' && row.head === head
+          && row.result?.reason === 'ci-base-red' && row.result.comparison === 'same') add(row.result.baseLink)
+      }
+    }
     if (!running && (ci?.state === 'waiting' || ci?.state === 'repair')) ci.state = null
     // Only CI publications stay visible after a later row takes over the lane state.
     const published = rows.findLast((row) => row.event === 'pr' && isObject(row.pr)
@@ -421,6 +449,9 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
       source: 'lean', adw_id: leanIdentity(found.lane), goal: found.lane, repo_slug: `dt-${found.lane}`, task_slug: found.lane,
       latest_stage, open_stages, status, reason, running, phases, seats, pr, hand_finished, pr_actor,
       ...(ci ? { ci } : {}),
+      base_ci, base_ci_repository: nonEmpty(baseCheck?.repository) ? baseCheck.repository : null,
+      base_ci_branch: nonEmpty(baseCheck?.base) ? baseCheck.base : null,
+      base_red_links: [...base_red_links],
       archived: found.archived, journal_rows: rows.length, journal_skipped_malformed: skipped_malformed, journal_error: error ?? null,
       tier: nonEmpty(tier) ? tier : null, shape: nonEmpty(found.spec.shape) ? found.spec.shape : null,
       mode: null, started_at, ended_at, duration_ms, last_heartbeat_at: null,

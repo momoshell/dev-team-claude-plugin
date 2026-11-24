@@ -22,6 +22,7 @@ function journalLines(rows = []) {
     else if (event === 'finish-ready') detail = parts(row.status, row.head) || 'finish details not recorded'
     else if (event === 'finish-decision') detail = parts(row.choice) || 'choice not recorded'
     else if (event === 'memory-empty') detail = parts(row.role, row.reason) || 'memory reason not recorded'
+    else if (row.event === 'check' && row.check === 'base-ci') detail = `base-ci: ${parts(row.state ?? 'Outcome not recorded', row.reason)}`
     else if (row.event === 'check') detail = `${row.check ?? 'check'}: ${leanCheckStatus(row).label}`
     else if (row.event === 'stage-end') {
       const outcome = row.outcome

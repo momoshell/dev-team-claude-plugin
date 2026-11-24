@@ -5,7 +5,7 @@
 //   2. git branch -D <lane>             (local only)
 //   3. move ~/.crew/dt-<lane> to ~/.crew-journal-archive/dt-<lane> (or a free .archive-<n> suffix on re-archive)
 // Plain closeout requires a MERGED PR in the worktree's origin repository, with the lane branch's tip as its head.
-// Discard permits stopped or abandoned lanes, published lanes with a done verdict, and quiet lanes without a journal.
+// Discard permits stopped or abandoned lanes, published lanes with a done verdict, and quiet lanes without journal state.
 // A recorded PR must be CLOSED, including after accept or a planning return.
 // It refuses tips on neither a remote-tracking ref nor the base. Discard skips git for an absent worktree.
 // Checks precede removal; a failed archive move leaves the lane directory for a retry.
@@ -104,8 +104,8 @@ function closeoutLane({ lane, discard = false, root = join(homedir(), '.crew'), 
     const last = stopRows.findLast((row, index) => !stateless(rows, row, index))
     const died = deadRun({ rows: stopRows, taskDir, alive })
     const publishedDone = prAt >= 0 && tail?.event === 'verdict' && tail.status === 'done'
-    if (text !== null && !(last?.event === 'verdict' && last.status === 'stopped') && !((abandoned || accepted) && tail === lastFinish) && !publishedDone && !died) refuse(`lane ${lane} is not stopped`)
-    const stopAt = text === null ? 0 : died ? stopRows.length : rows.lastIndexOf(last)
+    if (tail && !(last?.event === 'verdict' && last.status === 'stopped') && !((abandoned || accepted) && tail === lastFinish) && !publishedDone && !died) refuse(`lane ${lane} is not stopped`)
+    const stopAt = !tail ? 0 : died ? stopRows.length : rows.lastIndexOf(last)
     try { claim = claimStop({ writeFileSync, readFileSync, rmSync, alive }, lane, taskDir, stopAt) } catch { refuse(`lane ${lane} is not stopped`) }
     if (text === null) {
       try { lstatSync(journal); refuse(`lane ${lane} is not stopped`) } catch (error) { if (error?.code !== 'ENOENT') refuse(`lane ${lane} is not stopped`) }

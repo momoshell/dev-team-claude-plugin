@@ -40,6 +40,12 @@ Read first, decide second, remove last.
   After closeout, use the archived journal and resolve the filename beside it in
   the archived task directory; closeout keeps the output files with the journal.
 
+A `base-red` start refusal means no worktree was created. Use
+`crew start --allow-red-base <brief.md>` for a lane that fixes the base. Start does
+not wait for running checks. The `crew lanes` and visualizer headers show the
+last observation recorded at lane start, not live CI, plus counts of post-PR
+`ci-base-red` stops grouped by base run link.
+
 A `ci` stage follows the recorded PR on a loop-published `suiteGate: ci` lane.
 While it waits or repairs, `crew lanes` shows the lane running with the PR URL.
 Read the `check: 'ci'` rows for waits, reruns and base comparisons. A wait's

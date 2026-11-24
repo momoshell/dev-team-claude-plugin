@@ -243,6 +243,24 @@ test('discard ends a lane with no journal whose run pid is absent or dead', () =
   }
 })
 
+test('discard ends a lane with only a base-ci row when its run pid is absent or dead', () => {
+  const row = { event: 'check', check: 'base-ci', lane: LANE, at: 1, base: 'main', baseCommit: 'a'.repeat(40), repository: 'github.com/o/r', state: 'unmeasured', reason: 'no-runs', runs: [] }
+  for (const [pid, live] of [[false, false], [true, false], [true, true]]) {
+    const w = world({ rows: [row] })
+    try {
+      if (pid) writeFileSync(join(w.leaf, 'task', 'run.pid'), '123\n')
+      const r = close(w, { argv: [LANE, '--discard'], alive: () => live })
+      assert.equal(r.status, live ? 1 : 0, r.err)
+      if (live) {
+        assert.match(r.err, /not stopped/)
+        assertUnchanged(w)
+      } else {
+        assert.equal(readFileSync(join(w.archiveRoot, `dt-${LANE}`, LANE, 'task', 'journal.jsonl'), 'utf8'), w.journalText)
+      }
+    } finally { w.done() }
+  }
+})
+
 test('discard refuses a branch tip on neither a remote ref nor the base and prints the sha it deletes', () => {
   const w = world({ rows: STOPPED })
   try {

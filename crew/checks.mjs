@@ -751,7 +751,7 @@ const readJson = (result) => {
   if (result.status === 'green') try { return JSON.parse(result.stdout) } catch {}
   return null
 }
-const failedAction = (conclusion) => ['failure', 'action_required', 'startup_failure', 'timed_out'].includes(conclusion)
+export const failedAction = (conclusion) => ['failure', 'action_required', 'startup_failure', 'timed_out'].includes(conclusion)
 
 // Use the required contexts gh pr checks uses, but read their commit OID in the same query.
 // Separate PR head and checks requests cannot prove which head supplied the contexts.

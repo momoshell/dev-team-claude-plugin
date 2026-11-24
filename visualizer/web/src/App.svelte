@@ -1,7 +1,7 @@
 <script>
   import { onMount, tick } from 'svelte'
   import { ListTodo, Bot, BookOpen, Workflow, RefreshCw } from 'lucide-svelte'
-  import { getSessions } from './lib/api.js'
+  import { getHealth, getSessions } from './lib/api.js'
   import { sessionsFeedState } from './lib/activity.js'
   import { attentionBreakdown, leanStatus, taskBoard } from './lib/fleet.js'
   import { createRefreshLoop, journalPulse } from './lib/live.js'
@@ -22,6 +22,7 @@
   let feedDegraded = $state(false)
   let feedSources = $state(null)
   let error = $state('')
+  let staleServer = $state(false)
   let taskFocus = $state(null)
   let refreshGeneration = 0
   let refreshInFlight = false
@@ -51,8 +52,14 @@
     refreshInFlight = true
     const generation = ++refreshGeneration
     refreshing = true
+    const options = { signal: AbortSignal.timeout(15000) }
+    const health = getHealth(options).catch(() => null).then((result) => {
+      if (generation !== refreshGeneration) return
+      const { loaded_commit, current_commit } = result ?? {}
+      staleServer = Boolean(loaded_commit && current_commit && loaded_commit !== current_commit)
+    })
     try {
-      const result = await getSessions({}, { signal: AbortSignal.timeout(15000) })
+      const result = await getSessions({}, options)
       if (generation !== refreshGeneration) return
       const nextRuns = Array.isArray(result?.runs) ? result.runs : []
       runs = nextRuns
@@ -69,6 +76,7 @@
         feedSources = null
       }
     } finally {
+      await health
       refreshInFlight = false
       if (generation === refreshGeneration) refreshing = false
     }
@@ -77,7 +85,19 @@
   onMount(() => {
     refreshLoop = createRefreshLoop(refresh, { delay:30000, visible:() => !document.hidden })
     void refreshLoop.refresh()
-    return () => { refreshGeneration += 1; refreshLoop.stop() }
+    const stream = typeof EventSource === 'function' ? new EventSource('/api/stream') : null
+    let queued = false
+    if (stream) stream.onmessage = () => {
+      if (!autoRefresh || queued) return
+      if (!refreshInFlight) { void refreshLoop.refresh(); return }
+      // An append during a read may have landed after the server read the journal.
+      queued = true
+      void refreshLoop.refresh().then(() => {
+        queued = false
+        if (autoRefresh) void refreshLoop.refresh()
+      })
+    }
+    return () => { refreshGeneration += 1; stream?.close(); refreshLoop.stop() }
   })
 
   function navigate(next) { location.hash = formatHash(next) }
@@ -108,11 +128,12 @@
     <small>{lastRead ? `Read at ${new Date(lastRead).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' })}` : 'Waiting for the first reading'}</small>
     <button class="refresh" onclick={() => refreshLoop?.refresh()} disabled={refreshing}><RefreshCw size={15} aria-hidden="true" />{refreshing ? 'Refreshing…' : 'Refresh now'}</button>
     <label class="auto-refresh"><input type="checkbox" bind:checked={autoRefresh} onchange={(event) => refreshLoop?.setEnabled(event.currentTarget.checked)} />Auto-refresh</label>
-    <small>{autoRefresh ? 'Waits 30s after each reading' : 'Automatic reads paused'}</small>
+    <small>{autoRefresh ? 'Live updates with a 30s fallback' : 'Automatic reads paused'}</small>
     <label class="theme"><span>Theme</span><Dropdown bind:value={theme} options={THEME_OPTIONS} ariaLabel="Theme" width="6rem" variant="compact" /></label>
   </div>
 </aside>
 <div class="workspace" id="main-content" tabindex="-1">
+{#if staleServer}<p class="error-banner" role="status">Visualizer server is running older code; restart it</p>{/if}
 {#if error}<p class="error-banner" role="alert">Could not refresh the lane list: {error}. Use Refresh to try again. Existing rows may be out of date.</p>{/if}
 
 {#if route.view === 'run'}

@@ -9,7 +9,7 @@ import { spawn, spawn as spawnProcess, spawnSync } from 'node:child_process'
 import { pluginWriteMode, pluginWriteTargetMode, sameOrigin, hostGuard, ROUTE_PARAMS, ServerUsageError, startServer as startVisualizerServer, writeGuard } from '../visualizer/server/server.mjs'
 import { createJournalSource } from '../visualizer/server/journal-source.mjs'
 import * as webApi from '../visualizer/web/src/lib/api.js'
-import { ROOT, rawRequest, scratchDir } from './helpers.mjs'
+import { git, ROOT, rawRequest, scratchDir } from './helpers.mjs'
 const children = new Set()
 after(() => { for (const child of children) { try { child.kill('SIGKILL') } catch {} } })
 async function json(base, path, options) {
@@ -139,21 +139,33 @@ function fixture(path, { filler = 0 } = {}) {
 }
 
 test('raw request targets are refused without killing the visualizer', async () => {
-  for (const target of ['//', '///', '//?x=1']) {
-    const dir = mkdtempSync(join(tmpdir(), 'visualizer-raw-target-'))
-    let server
-    try {
-      server = await startServer(join(dir, 'ledger.db'), join(dir, 'visualizer.db'))
-      const host = new URL(server.base).host
-      const hostile = await rawRequest({ port: Number(new URL(server.base).port), requestLine: `GET ${target} HTTP/1.1`, headers: [`Host: ${host}`, 'connection: close'] })
-      assert.equal(rawStatus(hostile), 400)
-      const after = await rawRequest({ port: Number(new URL(server.base).port), requestLine: 'GET /api/health HTTP/1.1', headers: [`Host: ${host}`, 'connection: close'] })
-      assert.equal(rawStatus(after), 200)
-      assert.equal(server.child.exitCode, null)
-    } finally {
-      if (server) await stopServer(server.child)
-      rmSync(dir, { recursive: true, force: true })
+  const dir = scratchDir('visualizer-raw-target-'), plugin = join(dir, 'plugin')
+  let child
+  try {
+    mkdirSync(plugin)
+    for (const path of ['crew', 'hooks', 'package.json', 'visualizer/server', 'visualizer/web/src/lib', 'visualizer/coding-agents.json']) {
+      cpSync(join(ROOT, path), join(plugin, path), { recursive: true })
     }
+    git(plugin, 'init', '-q')
+    git(plugin, '-c', 'core.hooksPath=/dev/null', 'commit', '--allow-empty', '-qm', 'server loaded')
+    const loaded = git(plugin, 'rev-parse', 'HEAD').trim()
+    child = spawnProcess(process.execPath, [join(plugin, 'visualizer/server/server.mjs'), '--port', '0', '--crew-root', dir, '--checkout', dir], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] })
+    children.add(child)
+    const base = await announce(child)
+    git(plugin, '-c', 'core.hooksPath=/dev/null', 'commit', '--allow-empty', '-qm', 'checkout changed')
+    const current = git(plugin, 'rev-parse', 'HEAD').trim()
+    const { host, port } = new URL(base)
+    for (const target of ['//', '///', '//?x=1']) {
+      const hostile = await rawRequest({ port: Number(port), requestLine: `GET ${target} HTTP/1.1`, headers: [`Host: ${host}`, 'connection: close'] })
+      assert.equal(rawStatus(hostile), 400)
+    }
+    const after = await json(base, '/api/health')
+    assert.equal(after.status, 200)
+    assert.equal(child.exitCode, null)
+    assert.deepEqual([after.json.loaded_commit, after.json.current_commit], [loaded, current])
+  } finally {
+    if (child?.exitCode === null && child.signalCode === null) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
   }
 })
 
@@ -527,7 +539,7 @@ test('/api/events serves a lean lane from its journal and states absence for a n
 })
 
 test('VC1 visualizer server imports only admitted crew modules and pins run-pid dependencies', () => {
-  const allowed = new Set(['crew/protocols.mjs', 'crew/agents.mjs', 'crew/lean-source.mjs'])
+  const allowed = new Set(['crew/protocols.mjs', 'crew/agents.mjs', 'crew/lean-source.mjs', 'crew/lane-core.mjs'])
   const bad = []
   for (const name of readdirSync(join(ROOT, 'visualizer/server')).filter((file) => file.endsWith('.mjs'))) {
     const source = readFileSync(join(ROOT, 'visualizer/server', name), 'utf8')
@@ -542,6 +554,7 @@ test('VC1 visualizer server imports only admitted crew modules and pins run-pid 
   assert.ok(pidImports.includes('./lean-journal-order.mjs'))
   assert.deepEqual(pidImports.filter((path) => !path.startsWith('node:')), ['./lean-journal-order.mjs'])
   assert.deepEqual(imports('crew/lean-journal-order.mjs'), [])
+  assert.deepEqual(imports('crew/lane-core.mjs').filter((path) => !path.startsWith('node:')), [])
 })
 
 test('VC2 nothing under crew/ or bin/ imports from visualizer/ and the lean modules live in crew/', () => {

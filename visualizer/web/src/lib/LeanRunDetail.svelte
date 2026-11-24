@@ -2,7 +2,7 @@
   import { onMount, onDestroy, tick, untrack } from 'svelte'
   import { ArrowLeft, ArrowUpRight, Check, CircleAlert, Info, Pause, ChevronDown, Bot, ListOrdered, FileText, RefreshCw } from 'lucide-svelte'
   import { getJournal, getSeatSessions } from './api.js'
-  import { leanView, leanOutcome, leanStageStatus, leanCheckStatus, leanPullRequestUrl, leanLabel } from './lean.js'
+  import { leanView, leanOutcome, leanStageStatus, leanCheckStatus, leanHttpUrl, leanPullRequestUrl, leanLabel } from './lean.js'
   import { journalPulse } from './live.js'
   import { tokenCell } from './fleet.js'
   import LeanWaterfall from './LeanWaterfall.svelte'
@@ -37,9 +37,24 @@
   onDestroy(()=>{journalGeneration++;sessionGeneration++})
   const started=value=>{const date=new Date(value);return value && Number.isFinite(date.getTime())?date.toLocaleString():null}
 </script>
+{#snippet requiredChecks(checks)}
+  {#if checks?.length}
+    <ul class="checks" aria-label="Required CI checks">
+      {#each checks as check, index (`${check.workflow}:${check.name}:${index}`)}
+        {@const url = leanHttpUrl(check.link)}
+        {@const result = leanStageStatus(check.bucket)}
+        {@const name = [check.workflow, check.name || 'Unnamed check'].filter(Boolean).join(' / ')}
+        <li>
+          {#if url}<a href={url} target="_blank" rel="noreferrer">{name}</a>{:else}<span>{name}</span>{/if}
+          <span class={`check-result ${result.tone}`}>{check.bucket || result.label}</span>
+        </li>
+      {/each}
+    </ul>
+  {/if}
+{/snippet}
 <main class="lean-detail">
   <header class="task-header"><button class="back" onclick={onback}><ArrowLeft size={16} aria-hidden="true" />Back to tasks</button><p class="eyebrow">Lean task · recorded evidence</p><h1 tabindex="-1" bind:this={heading}>{view.lane || 'Task name not recorded'}</h1><p class="subtitle">{started(run.started_at)?`Started ${started(run.started_at)} · local time`:'Start time not recorded'}{run.archived?' · Archived':''}</p></header>
-  <section class={`outcome-card ${outcome.tone}`} aria-label="Task outcome"><span class="outcome-icon"><OutcomeIcon size={22} aria-hidden="true" /></span><div><span class="eyebrow">Result and next action</span><h2>{outcome.headline}</h2><p>{outcome.next}</p>{#if view.status.why}<p class="reason"><strong>Recorded reason</strong> {view.status.why}</p>{/if}</div>{#if prUrl}<a class="primary-link" href={prUrl} target="_blank" rel="noreferrer">Open PR #{view.pr?.number || 'recorded'}<ArrowUpRight size={16} aria-hidden="true" /></a>{/if}</section>
+  <section class={`outcome-card ${outcome.tone}`} aria-label="Task outcome"><span class="outcome-icon"><OutcomeIcon size={22} aria-hidden="true" /></span><div><span class="eyebrow">Result and next action</span><div aria-live={run.ci ? 'polite' : undefined}><h2>{outcome.headline}</h2>{#if outcome.next}<p>{outcome.next}</p>{/if}</div>{@render requiredChecks(run.ci?.checks)}{#if view.status.why}<p class="reason"><strong>Recorded reason</strong> {view.status.why}</p>{/if}</div>{#if prUrl}<a class="primary-link" href={prUrl} target="_blank" rel="noreferrer">Open PR #{view.pr?.number || 'recorded'}<ArrowUpRight size={16} aria-hidden="true" /></a>{/if}</section>
   <dl class="facts"><div><dt>Latest stage</dt><dd>{leanLabel(view.stage)}</dd></div><div><dt>Workflow</dt><dd>{leanLabel(run.shape)}</dd></div><div><dt>Assurance</dt><dd>{({mechanical:'Quick',build:'Standard',judge:'Rigorous'})[run.tier] || leanLabel(run.tier)}</dd></div></dl>
   {#if view.pr && !prUrl}<p class="delivery-note">Pull request #{view.pr.number || 'not recorded'} was recorded, but no usable link is available.</p>{/if}
   <section class="card" aria-labelledby="lean-seats-heading"><header class="section-header"><div><p class="eyebrow"><Bot size={15} aria-hidden="true" />Recorded activity</p><h2 id="lean-seats-heading">Execution</h2><p>Inspect lane stages, then select a seat and recording for messages and tool calls.</p></div><button disabled={sessionLoading || !activeRole} onclick={()=>loadSessions(activeRole)}><RefreshCw size={15} aria-hidden="true" />Refresh sessions</button></header>
@@ -49,7 +64,7 @@
       <details class="stage-details"><summary><ListOrdered size={15} aria-hidden="true" /><span>Stage timing and checks</span><ChevronDown size={15} class="chevron" aria-hidden="true" /></summary><div class="stage-evidence">
   <LeanWaterfall {run} />
   <section class="card sequence" aria-labelledby="lean-sequence-heading"><header class="section-header"><div><p class="eyebrow"><ListOrdered size={15} aria-hidden="true" />Execution sequence</p><h2 id="lean-sequence-heading">What happened</h2><p>Stages in recorded order. Complete boundaries are measured in the waterfall above.</p></div><span class="count">{phases.length} recorded {phases.length===1?'stage':'stages'}</span></header>
-    {#if phases.length}<ol class="stages">{#each phases as phase,index (phase.id ?? index)}{@const state=leanStageStatus(phase.status)}<li><span class="step-number">{String(index+1).padStart(2,'0')}</span><div class="stage-copy"><div class="stage-heading"><h3>{leanLabel(phase.name)}</h3><span class={`status-badge ${state.tone}`}>{state.label}</span></div>{#if phase.reason}<p class="stage-reason">{phase.reason}</p>{/if}{#if phase.checks?.length}<ul class="checks">{#each phase.checks as check}{@const result=leanCheckStatus(check)}<li><span>{leanLabel(check.check)}</span><span class={`check-result ${result.tone}`}>{result.label}</span>{#if check.result?.reason}<p>{check.result.reason}</p>{/if}{#if check.result?.rows?.length}<ul>{#each check.result.rows as row}<li>{row.title || 'Title not recorded'} · {row.file || 'File not recorded'} · {row.proven ? 'proven' : row.reason || 'reason not recorded'}</li>{/each}</ul>{/if}{#if check.result}<details class="check-evidence"><summary>Inspect check evidence<ChevronDown size={14} class="chevron" aria-hidden="true" /></summary><pre>{JSON.stringify(check.result,null,2)}</pre></details>{/if}</li>{/each}</ul>{/if}</div></li>{/each}</ol>{:else}<p class="empty">No stages were recorded. Refresh the journal or inspect agent sessions below.</p>{/if}
+    {#if phases.length}<ol class="stages">{#each phases as phase,index (phase.id ?? index)}{@const state=leanStageStatus(phase.status)}<li><span class="step-number">{String(index+1).padStart(2,'0')}</span><div class="stage-copy"><div class="stage-heading"><h3>{leanLabel(phase.name)}</h3><span class={`status-badge ${state.tone}`}>{state.label}</span></div>{#if phase.reason}<p class="stage-reason">{phase.reason}</p>{/if}{@render requiredChecks(phase.ci_checks)}{#if phase.checks?.length}<ul class="checks">{#each phase.checks as check}{@const result=leanCheckStatus(check)}<li><span>{leanLabel(check.action ?? check.check)}</span><span class={`check-result ${result.tone}`}>{result.label}</span>{#if check.result?.reason}<p>{check.result.reason}</p>{/if}{#if check.result?.rows?.length}<ul>{#each check.result.rows as row}<li>{row.title || 'Title not recorded'} · {row.file || 'File not recorded'} · {row.proven ? 'proven' : row.reason || 'reason not recorded'}</li>{/each}</ul>{/if}{#if check.result}<details class="check-evidence"><summary>Inspect check evidence<ChevronDown size={14} class="chevron" aria-hidden="true" /></summary><pre>{JSON.stringify(check.result,null,2)}</pre></details>{/if}</li>{/each}</ul>{/if}</div></li>{/each}</ol>{:else}<p class="empty">No stages were recorded. Refresh the journal or inspect agent sessions below.</p>{/if}
   </section>
       </div></details>
     </div>

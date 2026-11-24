@@ -17,6 +17,7 @@ export const CHECK_REASONS = Object.freeze([
   'ci-red', 'ci-unmeasured', 'ci-timeout', 'ci-no-required-checks', 'ci-base-red',
 ])
 
+export const MAX_CI_REPAIRS = 2
 export const CI_TIMEOUT_DEFAULT_MS = 3_600_000
 const CI_POLL_MS = 30_000
 const CI_NO_CHECKS_MS = 600_000
@@ -911,8 +912,11 @@ export async function waitForRequiredChecks({ cwd, pr, head, parent, ciGraceMs, 
       }
       const { rows, changed, observedHead, mergeable, open, catchingUp, error } = await readChecks()
       if (changed) { checks = null; return result('unmeasured', 'ci-unmeasured', { detail: 'pr-head-or-target-changed', observedHead }) }
-      if (rows) { checks = rows; reported ||= rows.length > 0 }
-      else lastReadError = error
+      if (rows) {
+        checks = rows
+        reported ||= rows.length > 0
+        await deps.onProgress?.({ head, checks })
+      } else lastReadError = error
       const refreshed = attemptsReady && reruns.every(({ failed }) => failed.every((old) => rows?.some((row) => row.name === old.name
         && row.workflow === old.workflow && row.run === old.run && row.job !== old.job)))
       if (refreshed && rows?.length && rows.every(({ bucket }) => bucket === 'pass' || bucket === 'skipping')) return result('green', null)

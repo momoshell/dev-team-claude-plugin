@@ -29,7 +29,7 @@ async function withServer(work, overrides = {}) {
   await new Promise((ok) => handles.server.once('listening', ok))
   const base = `http://127.0.0.1:${handles.server.address().port}`
   const get = async (path, options) => { const r = await fetch(base + path, options); return { status: r.status, body: await r.json() } }
-  try { await work({ crewRoot, archiveRoot, get }) } finally {
+  try { await work({ crewRoot, archiveRoot, get, base }) } finally {
     handles.server.closeAllConnections?.()
     await new Promise((ok) => handles.server.close(ok))
     rmSync(sandbox, { recursive: true, force: true })
@@ -223,11 +223,67 @@ test('LV2 terminal verdicts and pr rows settle a lane; empty journals are unknow
     lane(crewRoot, 'stopped', [{ event: 'stage-start', stage: 'build' }, { event: 'verdict', stage: 'build', status: 'stopped', reason: 'runner-threw' }])
     lane(crewRoot, 'pub', [{ event: 'verdict', stage: 'review', status: 'reviewed' }, { event: 'stage-start', stage: 'publish' }, { event: 'pr', stage: 'start', pr: { number: 3, url: 'u' } }])
     lane(crewRoot, 'empty', [])
+    const pr = { number: 4, url: 'https://github.com/o/r/pull/4' }
+    const head = 'a'.repeat(40), at = 1_700_000_000_000
+    const pending = { name: 'test', workflow: 'suite', bucket: 'pending', link: 'https://github.com/o/r/actions/runs/1/job/2', run: '1', job: '2' }
+    const pass = { ...pending, bucket: 'pass' }, fail = { ...pending, bucket: 'fail' }
+    const startCi = { event: 'stage-start', stage: 'ci', at }
+    const progress = { event: 'ci-progress', stage: 'ci', head, checks: [pending], at: at + 1 }
+    const wait = { event: 'check', stage: 'ci', check: 'ci', action: 'wait', at: at + 2 }
+    const red = { status: 'red', reason: 'ci-red', head, checks: [fail] }
+    const green = { status: 'green', reason: null, head, checks: [pass] }
+    const endCi = { event: 'stage-end', stage: 'ci', at: at + 3 }
+    const verdict = { event: 'verdict', stage: null, at: at + 4 }
+    const repair = { event: 'stage-start', stage: 'ci-repair', at: at + 4 }
+    const baseComparison = { ...wait, action: 'base-comparison', result: { status: 'green', reason: null, comparison: 'different' } }
+    const cases = [
+      ['waiting', [progress], 'running', null, 'waiting', pending, 0, progress.at],
+      ['repairing', [{ ...wait, result: red }, baseComparison, { ...endCi, outcome: { repair: [] } }, repair], 'running', null, 'repair', fail, 1, repair.at],
+      ['green', [{ ...wait, result: green }, { ...endCi, outcome: green }, { ...verdict, status: 'done', reason: null }], 'done', null, 'green', pass, 0, wait.at],
+      ['ci-stopped', [{ ...wait, result: red }, { ...endCi, outcome: red }, { ...verdict, status: 'stopped', reason: 'ci-base-red', observation: red }, { ...progress, at: at + 5 }], 'stopped', 'ci-base-red', 'ci-base-red', fail, 0, verdict.at],
+    ]
+    for (const [name, tail] of cases) lane(crewRoot, name, [{ event: 'pr', stage: null, pr, awaitingCi: true, at: at - 1 }, startCi, ...tail])
     const byId = Object.fromEntries((await get('/api/sessions')).body.runs.map((run) => [run.adw_id, run]))
     assert.deepEqual([byId['lean:stopped'].status, byId['lean:stopped'].reason, byId['lean:stopped'].running], ['stopped', 'runner-threw', false])
     assert.deepEqual([byId['lean:pub'].status, byId['lean:pub'].reason], ['done', null]); assert.notEqual(byId['lean:pub'].ship.state, 'merged')
     assert.equal(byId['lean:empty'].status, 'unknown'); assert.ok(byId['lean:empty'].reason)
-    assert.equal((await get('/api/sessions?status=stopped')).body.runs.length, 1)
+    assert.equal((await get('/api/sessions?status=stopped')).body.runs.length, 2)
+    assert.equal('ci' in byId['lean:pub'], false)
+    for (const [name, , status, reason, state, check, repair_round, updated] of cases) {
+      const run = byId[`lean:${name}`]
+      assert.deepEqual([run.status, run.reason, run.pr], [status, reason, pr], name)
+      assert.deepEqual(run.ci, { state, checks: [check], head, repair_round, max_repairs: 2, updated_at: new Date(updated).toISOString(), timeout_ms: 3_600_000 }, name)
+      assert.deepEqual(run.phases.at(-1).ci_checks, [check], name)
+    }
+  })
+})
+
+test('the stream reports a lane after its task journal changes', async () => {
+  await withServer(async ({ crewRoot, base }) => {
+    const dir = lane(crewRoot, 'live', [{ event: 'stage-start', stage: 'ci' }])
+    const controller = new AbortController()
+    try {
+      const response = await fetch(`${base}/api/stream`, { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]) })
+      assert.equal(response.status, 200)
+      assert.match(response.headers.get('content-type'), /^text\/event-stream\b/)
+      let connected = false, buffer = ''
+      for await (const chunk of response.body) {
+        buffer += Buffer.from(chunk).toString('utf8')
+        let end
+        while ((end = buffer.indexOf('\n\n')) !== -1) {
+          const frame = buffer.slice(0, end + 2)
+          buffer = buffer.slice(end + 2)
+          if (!connected && frame === ': connected\n\n') {
+            connected = true
+            appendFileSync(join(dir, 'task', 'journal.jsonl'), jsonl([{ event: 'ci-progress', stage: 'ci', checks: [] }]))
+          }
+          if (frame.startsWith(':')) continue
+          assert.ok(connected, 'stream must acknowledge the subscription before sending data')
+          return assert.equal(frame, 'data: {"type":"journal","lane":"live"}\n\n')
+        }
+      }
+      assert.fail('stream closed before delivering a journal event')
+    } finally { controller.abort() }
   })
 })
 

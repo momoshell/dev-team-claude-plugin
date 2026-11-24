@@ -1,6 +1,6 @@
 <script>
   import { configurationDimensionCell, configurationFilterView, durationCell, leanStatus, needsAttention, shipStatus, taskBoard, tokenCell } from './fleet.js'
-  import { leanLabel, leanLatestStage } from './lean.js'
+  import { leanCiLabel, leanLabel, leanLatestStage } from './lean.js'
   import Pagination from './Pagination.svelte'
   import Dropdown from './Dropdown.svelte'
 
@@ -71,6 +71,7 @@
       <tbody>
         {#each paged as run (run.adw_id)}
           {@const status = statusFor(run)}
+          {@const ci = leanCiLabel(run.ci)}
           {@const ship = shipStatus(run)}
           {@const duration = durationCell(run)}
           {@const tokens = tokenCell(run)}
@@ -78,7 +79,7 @@
           {@const assuranceCell = configurationDimensionCell(run, 'assurance')}
           <tr class:running={run.running === true}>
             <td class="task-cell"><button type="button" class="task-link" onclick={(event) => { event.stopPropagation(); onopen(run) }}><strong>{run.goal || 'Untitled run'}</strong><span>{run.repo_slug || 'repository unavailable'}</span></button></td>
-            <td><span class={`status ${status.tone}`}><span class="status-dot" aria-hidden="true"></span>{status.word}</span>{#if needsAttention(status.key)}<details class="row-reason"><summary>Why review?</summary><p>{status.why || (status.key === 'ready' ? 'The run is ready for an operator decision: accept, return or abandon with crew finish.' : 'Open the run to inspect its last recorded outcome and evidence.')}</p></details>{/if}</td>
+            <td><span class={`status ${status.tone}`}><span class="status-dot" aria-hidden="true"></span>{status.word}</span>{#if ci}<small class="ci-state">{ci}</small>{/if}{#if needsAttention(status.key)}<details class="row-reason"><summary>Why review?</summary><p>{status.why || (status.key === 'ready' ? 'The run is ready for an operator decision: accept, return or abandon with crew finish.' : 'Open the run to inspect its last recorded outcome and evidence.')}</p></details>{/if}</td>
             <td title={ship.reason}><span class={`status ${ship.tone}`}><span class="status-dot" aria-hidden="true"></span>{ship.word}</span></td>
             <td class="run-setup"><div><strong class:missing={assuranceCell.dashed} class:dashed={assuranceCell.dashed}>{assuranceCell.text}</strong></div><small title={`${assuranceCell.summary ?? ''} ${executionCell.summary ?? ''}`}><span class:dashed={executionCell.dashed}>{executionCell.text}</span></small></td>
             <td class="execution"><strong>{leanLatestStage(run) ? leanLabel(leanLatestStage(run)) : 'Not started'}</strong><small>{run.phases?.length || 0} recorded phases</small></td>
@@ -118,7 +119,7 @@ th { padding:.65rem .85rem; color:var(--muted); font-size:.67rem; letter-spacing
 td { padding:.8rem .85rem; border-top:1px solid color-mix(in srgb,var(--line) 78%,transparent); vertical-align:middle; }
 tbody tr { transition:background .15s ease; } tbody tr:hover { background:var(--accent-soft); } tbody tr.running { box-shadow:inset 2px 0 var(--status-running); }
 .task-link { display:grid; gap:.2rem; border:0; background:transparent; text-align:left; cursor:pointer; padding:0; }.task-link strong { max-width:22rem; overflow-wrap:anywhere; white-space:normal; font-size:.88rem; }
-.task-link span, small { display:block; color:var(--muted); font-size:.71rem; margin-top:.25rem; white-space:nowrap; } code { font-family:var(--mono); color:var(--muted); }
+.task-link span, small { display:block; color:var(--muted); font-size:.71rem; margin-top:.25rem; white-space:nowrap; }.ci-state { max-width:16rem; white-space:normal; }
 .status { display:inline-flex; align-items:center; gap:.4rem; font-size:.8rem; white-space:nowrap; }.status-dot { width:.45rem; height:.45rem; border-radius:50%; background:currentColor; box-shadow:0 0 0 3px color-mix(in srgb,currentColor 12%,transparent); }
 .status.ok { color:var(--status-ok); }.status.fail { color:var(--status-fail); }.status.aborted { color:var(--status-running); }.status.busy { color:var(--status-running); }.status.serious { color:var(--status-escalated); }.status.quiet { color:var(--muted); }
 .run-setup > div { display:flex; align-items:center; gap:.38rem; }.run-setup strong { font-size:.78rem; white-space:nowrap; }.run-setup strong.missing { color:var(--muted); }.run-setup small { max-width:13rem; white-space:normal; }.dashed { border-bottom:1px dashed currentColor; color:var(--muted); }

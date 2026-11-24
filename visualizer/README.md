@@ -16,7 +16,13 @@ Registered routes: `/api/sessions`, `/api/events`, `/api/journal`,
 `/api/seat-sessions`, `/api/plugin-write-mode`, `/api/agent-library`,
 `/api/agent-library/save`, `/api/harness-settings`, `/api/skill-library`,
 `/api/skill-library/save`, `/api/skill-rules`,
-`/api/agents/propose` and `/api/health`.
+`/api/agents/propose`, `/api/health` and `/api/stream`.
+
+The board shows required CI checks from the lane journal, not from GitHub.
+`/api/stream` sends journal-change notices for live and archived lanes. The
+board still polls 30 seconds after a read when no notice arrives.
+`/api/health` reports `loaded_commit` and `current_commit` for the visualizer's
+own checkout. Restart the server if the board reports a mismatch.
 
 Read routes have no authentication. When bound to a non-loopback host such as
 `--host 0.0.0.0`, the server exposes lane journals, seat sessions and agent

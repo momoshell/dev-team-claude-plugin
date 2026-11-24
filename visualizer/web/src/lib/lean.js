@@ -77,7 +77,41 @@ export function leanStageStatus(value) {
   if (value==='skipped') return {label:'Skipped',tone:'quiet'}
   return {label:value ? displayName(value) : 'Outcome not recorded',tone:'quiet'}
 }
+const ciStops = Object.freeze({
+  'ci-red': 'Required CI checks failed',
+  'ci-base-red': 'CI stopped: main fails the same check',
+  'ci-timeout': 'CI timed out',
+  'ci-unmeasured': 'CI could not be verified',
+  'ci-no-required-checks': 'No required CI checks reported',
+  'red-after-environment-rerun': 'CI still failed after rerunning failed jobs',
+})
+
+export function leanCiLabel(ci) {
+  if (ci?.state === 'waiting') return 'Waiting on CI'
+  if (ci?.state === 'repair') return `Repairing CI failure, round ${ci.repair_round} of ${ci.max_repairs}`
+  if (ci?.state === 'green') return 'CI green'
+  if (ci?.state === 'red') return 'CI checks failed'
+  return Object.hasOwn(ciStops, ci?.state) ? ciStops[ci.state] : null
+}
+
+export function leanCiCounts(checks) {
+  if (!checks?.length) return null
+  const count = (bucket) => checks.filter((check) => check.bucket === bucket).length
+  return `${count('pass')} passed · ${count('pending')} pending · ${count('fail')} failed`
+}
+
 export function leanOutcome(run = {}) {
+  const ci = run.ci, headline = leanCiLabel(ci)
+  if (run.status === 'stopped' && ci && ci.state === run.reason && Object.hasOwn(ciStops, ci.state)) {
+    const budget = ci.state === 'ci-timeout' && ci.timeout_ms != null ? `The wait budget was ${ci.timeout_ms / 1000} seconds of awake time. ` : ''
+    return { headline, next: `${budget}The PR stays open and crew finish refuses it. Fix the branch by hand, then run crew closeout after merge.`, tone: 'attention', icon: 'pause' }
+  }
+  if (run.running && headline) {
+    const next = ci.state !== 'waiting' ? null : leanCiCounts(ci.checks)
+      ?? (ci.checks?.length === 0 ? 'No required checks reported yet.' : 'Required checks not yet measured.')
+    return { headline, next, tone: ci.state === 'red' ? 'fail' : 'quiet', icon: 'info' }
+  }
+  if (run.status === 'done' && ci?.state === 'green') return { headline, next: 'Review the recorded pull request. Merge status is not recorded here.', tone: 'ok', icon: 'check' }
   if (run.status==='ready-for-operator') return {headline:'Ready for an operator decision',next:'Use crew finish <lane> to accept, return or abandon.',tone:'attention',icon:'alert'}
   if (run.status==='returned') return {headline:'Returned; no new run recorded',next:'Inspect the recorded decision before continuing.',tone:'attention',icon:'alert'}
   if (run.status==='abandoned') return {headline:'Task abandoned by an operator',next:'Inspect the recorded decision; the lane stays in Needs attention until it is archived.',tone:'attention',icon:'alert'}
@@ -86,15 +120,17 @@ export function leanOutcome(run = {}) {
   if (run.status==='running' || run.status==='reviewed') return {headline:run.status==='reviewed'?'Review recorded; task still open':'No terminal outcome recorded',next:'Inspect the last recorded stage. This journal does not establish whether agents are still active.',tone:'quiet',icon:'info'}
   return {headline:'Outcome not recorded',next:'Refresh the journal or inspect the recorded sessions for more evidence.',tone:'quiet',icon:'info'}
 }
-export function leanPullRequestUrl(pr) {
-  try {const url=new URL(pr?.url);return ['https:','http:'].includes(url.protocol) && !url.username && !url.password ? url.href : null}catch{return null}
+export function leanHttpUrl(value) {
+  try {const url=new URL(value);return ['https:','http:'].includes(url.protocol) && !url.username && !url.password ? url.href : null}catch{return null}
 }
-export const leanLabel = displayName
+export const leanPullRequestUrl = (pr) => leanHttpUrl(pr?.url)
+export const leanLabel = (value) => value === 'ci' ? 'CI' : value === 'ci-repair' ? 'CI repair' : displayName(value)
 
 export function leanCheckStatus(check = {}) {
   const result=check.result
   if(result?.accepted===true){const state=leanStageStatus(result.result?.status);return {label:`Baseline accepted · ${state.label.toLowerCase()}`,tone:state.tone==='fail'?'attention':state.tone}}
   if(result?.accepted===false)return {label:'Baseline rejected',tone:'fail'}
+  if (result?.status === 'green' && ['rerun', 'base-comparison'].includes(check.action)) return { label: 'Completed', tone: 'quiet' }
   if(result?.status)return leanStageStatus(result.status)
   if(Number.isFinite(result?.code))return {label:`Exit code ${result.code} recorded`,tone:result.code===0?'quiet':'fail'}
   return {label:'Outcome not recorded',tone:'quiet'}

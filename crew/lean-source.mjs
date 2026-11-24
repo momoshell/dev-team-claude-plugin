@@ -7,6 +7,7 @@ import { stateless, supersededReturn } from './lean-journal-order.mjs'
 import { deadRun, probeAlive } from './run-pid.mjs'
 import { deriveMembers } from './protocols.mjs'
 import { isObject, within } from './lane-core.mjs'
+import { CHECK_REASONS, CI_TIMEOUT_DEFAULT_MS, MAX_CI_REPAIRS, validTimeout } from './checks.mjs'
 
 const LEAN_SPEC_FILE = 'lean.json'
 const VERDICT_EVENT = 'verdict'
@@ -267,13 +268,14 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
     const leanRoles = rows.some((row) => row.event === 'tier-raised') ? leanRolesOf(found.dir) : []
     const { members, tier } = deriveMembers({ members: found.members, rows, leanRoles, tier: found.spec.tier })
     const phases = [], openPhases = []
+    let ci, ciSettled = false
     let latest_stage = null, status = 'unknown', reason = null, running = false, started_at = null, lastAt = null
     for (const row of rows) {
       const at = rowTime(row.at)
-      if (row.event === 'run-start') { started_at = at; lastAt = null }
-      else if (at !== null) lastAt = at
+      if (row.event === 'run-start') { started_at = at; lastAt = null; ciSettled = false }
+      else if (at !== null && row.event !== 'ci-progress') lastAt = at
       const stage = nonEmpty(row.stage) ? row.stage : null
-      if (stage) latest_stage = stage
+      if (stage && row.event !== 'ci-progress') latest_stage = stage
       if (row.event === 'stage-start' && stage) {
         const phase = { id: phases.length + 1, name: stage, status: 'running', checks: [], started_at: at, ended_at: null }
         phases.push(phase); openPhases.push(phase)
@@ -291,11 +293,41 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
         if (phase) (phase.turns ??= []).push({ role: row.role, seconds, reason: seconds !== null ? null : nonEmpty(row.unmeasured?.seconds) ? row.unmeasured.seconds : 'seconds-malformed' })
       } else if (row.event === 'check' && stage) {
         const phase = phases.findLast((entry) => entry.name === stage)
-        const check = { check: row.check ?? null, result: summarizeCheckResult(row.result) }
+        const check = { check: row.check ?? null, result: summarizeCheckResult(row.result),
+          ...(row.check === 'ci' && nonEmpty(row.action) ? { action: row.action } : {}) }
         if (phase) phase.checks.push(check)
         else phases.push({ id: phases.length + 1, name: stage, status: 'running', checks: [check], started_at: null, ended_at: null })
       } else if (row.event === VERDICT_EVENT && stage && !phases.some((entry) => entry.name === stage)) {
         phases.push({ id: phases.length + 1, name: stage, status: nonEmpty(row.status) ? row.status : 'unknown', checks: [], started_at: null, ended_at: null })
+      }
+
+      if (row.event === VERDICT_EVENT && ['done', 'stopped'].includes(row.status)) ciSettled = true
+      if (stage !== 'ci' && stage !== 'ci-repair') continue
+      if (row.event === 'stage-start') ciSettled = false
+      if (ciSettled) continue
+      ci ??= { state: null, checks: null, head: null, repair_round: 0, max_repairs: MAX_CI_REPAIRS, updated_at: null,
+        timeout_ms: validTimeout(found.spec.ciTimeoutMs) ? found.spec.ciTimeoutMs : CI_TIMEOUT_DEFAULT_MS }
+      const phase = phases.findLast((entry) => entry.name === stage)
+      if (row.event === 'stage-start') {
+        if (stage === 'ci-repair') {
+          Object.assign(ci, { state: 'repair', repair_round: ci.repair_round + 1, updated_at: at })
+          phase.ci_checks = ci.checks
+        } else Object.assign(ci, { state: 'waiting', checks: null, head: null, updated_at: at })
+      } else if (stage === 'ci') {
+        const checkRow = row.event === 'check' && row.check === 'ci'
+        const wait = checkRow && (row.action == null || row.action === 'wait')
+        const rerun = checkRow && row.action === 'rerun' && row.result?.status === 'green'
+        const stageResult = row.event === 'stage-end' && !['green', 'red'].includes(ci.state)
+          && ['green', 'red'].includes(row.outcome?.status) ? row.outcome : null
+        if (row.event === 'ci-progress' || wait || rerun || stageResult) {
+          const snapshot = stageResult ?? (wait ? row.result : row)
+          const state = wait || stageResult ? snapshot?.status : 'waiting'
+          Object.assign(ci, { state: ['waiting', 'green', 'red'].includes(state) ? state : null,
+            checks: Array.isArray(snapshot?.checks) ? snapshot.checks.filter(isObject) : null,
+            head: nonEmpty(snapshot?.head) ? snapshot.head : null, updated_at: at })
+          // Keep the measured failure on this phase until the rerun reports new checks.
+          if (phase && !rerun) phase.ci_checks = ci.checks
+        }
       }
     }
     for (const phase of phases) {
@@ -305,7 +337,8 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
     const open_stages = openPhases.map((phase) => phase.name)
     latest_stage = open_stages.at(-1) ?? latest_stage
     // Ignore stage ends, advisor rows and in-flight checks after a stop when choosing the state.
-    let last = rows.findLast((row, index) => !stateless(rows, row, index) && !supersededReturn(rows, row, index)) ?? rows.at(-1)
+    let last = rows.findLast((row, index) => !stateless(rows, row, index) && !supersededReturn(rows, row, index))
+      ?? rows.findLast((row) => row.event !== 'ci-progress')
     // `crew finish --accept` appends a `pr` row then a `finish-decision` row: a pr row after the last
     // finish-ready, followed only by those, is the lane's state.
     const ready = rows.findLastIndex((row) => row.event === 'finish-ready')
@@ -317,8 +350,8 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
     }
     const terminalIndex = rows.findLastIndex((row, index) => row.event === 'finish-ready' || (row.event === 'finish-decision' && !supersededReturn(rows, row, index)))
     const terminal = rows[terminalIndex]
-    if (error || !rows.length) {
-      reason = error ?? (skipped_malformed ? 'task journal has no readable rows' : 'task journal is empty')
+    if (error || !last) {
+      reason = error ?? (rows.length ? 'task journal has no state rows' : skipped_malformed ? 'task journal has no readable rows' : 'task journal is empty')
     } else if (terminal?.event === 'finish-ready' && !(last.event === VERDICT_EVENT && last.status === 'stopped' && last.index > terminalIndex)
       && !(last.event === 'pr' && isObject(last.pr) && last.actor === 'operator' && last.index > terminalIndex)
       && !rows.some((row, index) => index > terminalIndex && row.launchedAt > terminalIndex && supersededReturn(rows, row, index))) {
@@ -342,6 +375,16 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
       if (!within(found.dir, path)) throw new Error('run pid resolves outside the lane')
       return readFileSync(path, encoding)
     } })) { status = 'stopped'; reason = 'run-died'; running = false }
+    if (ci && status === 'stopped') {
+      if ((reason?.startsWith('ci-') && CHECK_REASONS.includes(reason)) || reason === 'red-after-environment-rerun') {
+        const observation = last?.observation
+        ci.state = reason
+        ci.updated_at = rowTime(last?.at)
+        if (nonEmpty(observation?.head)) ci.head = observation.head
+        if (Array.isArray(observation?.checks)) ci.checks = observation.checks.filter(isObject)
+      }
+    }
+    if (!running && (ci?.state === 'waiting' || ci?.state === 'repair')) ci.state = null
     // Only CI publications stay visible after a later row takes over the lane state.
     const published = rows.findLast((row) => row.event === 'pr' && isObject(row.pr)
       && (row.awaitingCi === true || (row === last && status === 'done')))
@@ -362,7 +405,7 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
     if (!turns.length) pending.tokens = 'no seat-turn rows recorded'
     else if (missing) pending.tokens = nonEmpty(missing.unmeasured?.usage) ? missing.unmeasured.usage : 'usage-malformed'
     const startIndex = rows.findLastIndex((row) => row.event === 'run-start')
-    const endReason = error || !rows.length ? reason : running ? 'the lane is still open: no terminal row recorded'
+    const endReason = error || !last ? reason : running ? 'the lane is still open: no terminal row recorded'
       : startIndex >= 0 && startIndex === rows.length - 1 ? 'the lane journal records no row after run-start'
         : 'lean journal rows after run-start carry no timestamps'
     if (ended_at !== null) delete pending.ended_at
@@ -377,6 +420,7 @@ export function createLeanSource({ crewRoot, archiveRoot, alive = probeAlive, no
     return {
       source: 'lean', adw_id: leanIdentity(found.lane), goal: found.lane, repo_slug: `dt-${found.lane}`, task_slug: found.lane,
       latest_stage, open_stages, status, reason, running, phases, seats, pr, hand_finished, pr_actor,
+      ...(ci ? { ci } : {}),
       archived: found.archived, journal_rows: rows.length, journal_skipped_malformed: skipped_malformed, journal_error: error ?? null,
       tier: nonEmpty(tier) ? tier : null, shape: nonEmpty(found.spec.shape) ? found.spec.shape : null,
       mode: null, started_at, ended_at, duration_ms, last_heartbeat_at: null,

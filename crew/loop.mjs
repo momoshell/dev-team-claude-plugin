@@ -28,7 +28,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { resolveAgents } from './agents.mjs'
 import {
-  CHECK_REASONS, FINISH_REVIEW_ROUNDS, ciActions, commitChanges, openPullRequest, parseStatus, pushCiRepair, rebaseBranch, runSuite, validFastChecks, validGenerated, validSuiteSlots, validTimeout, waitForRequiredChecks,
+  CHECK_REASONS, FINISH_REVIEW_ROUNDS, MAX_CI_REPAIRS, ciActions, commitChanges, openPullRequest, parseStatus, pushCiRepair, rebaseBranch, runSuite, validFastChecks, validGenerated, validSuiteSlots, validTimeout, waitForRequiredChecks,
 } from './checks.mjs'
 import { HEX_OID, describeError as describe, GIT_STATUS_ARGS, gitRepoState } from './lane-core.mjs'
 import { OnboardRefusal, readRegular, requireOnboarded, SUITE_TIMEOUT_DEFAULT_MS, validEnvironmentSignatures, validProtectedPaths, validSuiteGate } from './onboard.mjs'
@@ -38,7 +38,6 @@ import { TIERS, AGENT_ROLES, runOverrideDefects, validateEnvelope } from './prot
 export const DEFAULT_ROUNDS = 2
 const MAX_ENVELOPE_REPAIRS = 1
 const MAX_RECHECKS = 3
-const MAX_CI_REPAIRS = 2
 const MAX_CONFLICT_TURNS = 3
 const MAX_PROGRESS_TURNS = 6
 const WORKTREE_SYMLINK = 'worktree-symlink'
@@ -1506,7 +1505,14 @@ export async function runLoop(spec, deps = {}) {
       const reruns = []
       let environmentSignature
       for (;;) {
-        const ci = await callCheck('ci', (input) => waitForRequiredChecks(input, { run: d.run, now: deps.now, sleep: d.sleep }), {
+        let previous
+        const onProgress = async ({ head, checks }) => {
+          const snapshot = JSON.stringify(checks.map(({ name, workflow, bucket, run, job }) => JSON.stringify([name, workflow, bucket, run, job])).sort())
+          if (snapshot === previous) return
+          previous = snapshot
+          await emit('ci-progress', { head, checks })
+        }
+        const ci = await callCheck('ci', (input) => waitForRequiredChecks(input, { run: d.run, now: deps.now, sleep: d.sleep, onProgress }), {
           cwd, pr, head, parent, ciGraceMs, timeoutMs: spec.ciTimeoutMs, reruns,
         }, { row: { action: 'wait', ...(environmentSignature === undefined ? {} : { environmentSignature }) } })
         if (ci.reason !== 'ci-red') return ci

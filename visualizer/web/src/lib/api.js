@@ -4,6 +4,7 @@ async function request(path, options) {
   if (!response.ok) throw new Error(data.error || `request failed (${response.status})`)
   return data
 }
+export const getHealth = (options) => request('/api/health', options)
 export const getSessions = (filters = {}, options) => request(`/api/sessions?${new URLSearchParams(filters)}`, options)
 export const getJournal = (repoSlug, taskSlug, adwId, options) => request(`/api/journal?${new URLSearchParams({ repo_slug: repoSlug, task_slug: taskSlug, adw_id: adwId })}`, options)
 export const getSeatSessions = (repoSlug, taskSlug, adwId, role, options) => request(`/api/seat-sessions?${new URLSearchParams({ repo_slug: repoSlug, task_slug: taskSlug, adw_id: adwId, role })}`, options)

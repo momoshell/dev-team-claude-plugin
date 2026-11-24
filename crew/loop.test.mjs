@@ -2479,8 +2479,8 @@ test('the PR body states proof and suite honestly when no test is named, the lan
     const noProof = mode === 'none' || ciGate
     const head = 'a'.repeat(40), successor = 'b'.repeat(40), repairTree = 'f'.repeat(40)
     const pr = { ...PR, url: `https://github.com/o/r/pull/${PR.number}` }
-    let remoteHead = head, localHead = head, dirty = false, staged = false, clock = 0, successorReads = 0
-    const options = { spec: ciGate ? { suiteGate: 'ci', ciTimeoutMs: repair ? 60_000 : 1_000 } : finish ? finishSpec() : mechanical ? { tier: 'mechanical' } : {}, edit: (v, request) => {
+    let remoteHead = head, localHead = head, dirty = false, staged = false, clock = 0, successorReads = 0, polls = 0
+    const options = { spec: ciGate ? { suiteGate: 'ci', ciTimeoutMs: mode === 'ci' ? 90_000 : repair ? 60_000 : 1_000 } : finish ? finishSpec() : mechanical ? { tier: 'mechanical' } : {}, edit: (v, request) => {
       if (v.role === 'planner' && noProof) v.details.tests = []
       if (v.role === 'builder') {
         if (mechanical) v.details.subject = 'fix: mechanical'
@@ -2491,9 +2491,9 @@ test('the PR body states proof and suite honestly when no test is named, the lan
     } }
     // For an empty read, publication has already used the ten-minute grace.
     if (ciGate) options.publish = { status: 'green', reason: null, pr, head, ciGraceMs: empty ? 0 : 600_000 }
+    if (repair || mode === 'ci') options.deps = { now: () => clock, sleep: (ms) => { clock += Math.min(ms, 1_000) } }
     if (repair) Object.assign(options, {
       bounds: { builder: 1, reviewer: 1 },
-      deps: { now: () => clock, sleep: (ms) => { clock += Math.min(ms, 1_000) } },
       checkedTree: () => ({ ...green(), stdout: dirty ? repairTree : 'e'.repeat(40) }),
       commit: () => {
         if (dirty) localHead = successor
@@ -2532,8 +2532,9 @@ test('the PR body states proof and suite honestly when no test is named, the lan
           const repaired = repair && remoteHead === successor
           const oid = wrongHead ? successor : repaired && successorReads++ === 0 ? head : remoteHead
           const state = closedRed ? 'CLOSED' : repaired && oid === successor ? 'MERGED' : pr.state
+          const checkState = mode === 'ci' && polls++ < 2 ? 'PENDING' : red ? 'FAILURE' : 'SUCCESS'
           const statusCheckRollup = { contexts: { pageInfo: { hasNextPage: false }, nodes: empty ? [] : [{
-            __typename: 'StatusContext', context: check.name, isRequired: true, state: red ? 'FAILURE' : 'SUCCESS', targetUrl: check.link,
+            __typename: 'StatusContext', context: check.name, isRequired: true, state: checkState, targetUrl: check.link,
           }] } }
           return json({ data: { repository: { pullRequest: {
             headRefOid: oid, baseRefName: pr.baseRefName, state, mergeable: conflict ? 'CONFLICTING' : 'MERGEABLE',
@@ -2564,7 +2565,14 @@ test('the PR body states proof and suite honestly when no test is named, the lan
       assert.deepEqual(ci, { status: reason ? 'unmeasured' : 'green', reason, head: repair ? successor : head, checks: wrongHead ? null : empty ? [] : [closedRed ? { ...check, bucket: 'fail' } : check],
         ...(conflict ? { detail: 'pr-conflicting' } : wrongHead ? { detail: 'pr-head-or-target-changed', observedHead: successor } : closedRed ? { detail: 'pr-not-open' } : {}) })
       assert.ok(Number.isFinite(sleep_credited_s) && sleep_credited_s >= 0)
-      assert.equal(evidence.at(-2).seconds, repair ? 30 : 0)
+      assert.equal(evidence.at(-2).seconds, mode === 'ci' ? 60 : repair ? 30 : 0)
+      if (mode === 'ci') {
+        assert.equal(polls, 3)
+        assert.deepEqual(f.rows.filter(({ event }) => event === 'ci-progress').map(({ stage, head, checks }) => ({ stage, head, checks })), [
+          { stage: 'ci', head, checks: [{ ...check, bucket: 'pending' }] },
+          { stage: 'ci', head, checks: [check] },
+        ])
+      }
       const turns = f.rows.filter((r) => r.event === 'seat-turn' && r.role === 'builder' && r.stage === 'ci-repair')
       assert.equal(turns.length, repair ? 1 : 0)
       assert.equal(f.requests.filter(({ role }) => role === 'builder').length, repair ? 2 : 1)

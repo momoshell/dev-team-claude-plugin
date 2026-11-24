@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 import { createServer } from 'node:http'
 import { isIP } from 'node:net'
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
-import { resolve, join, dirname, sep, relative } from 'node:path'
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync, watch } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { resolve, join, dirname, basename, sep, relative } from 'node:path'
 import { homedir, networkInterfaces } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createJournalSource } from './journal-source.mjs'
 import { createLeanSource } from '../../crew/lean-source.mjs'
 import { proposeAgentEdit } from './agents-edit.mjs'
 import { AGENT_ROLES } from '../../crew/protocols.mjs'
+import { HEX_OID, LANE } from '../../crew/lane-core.mjs'
 import { createAgentLibrary } from './agent-library.mjs'
 import { createSkillLibrary } from './skill-library.mjs'
 
@@ -73,6 +75,7 @@ export const ROUTE_PARAMS = Object.freeze({
   '/api/skill-rules': [],
   '/api/agents/propose': [],
   '/api/health': [],
+  '/api/stream': [],
 })
 
 function refuseUnknownParams(url) {
@@ -325,9 +328,117 @@ export function pluginWriteTargetMode({ target, home = homedir(), existsSync: ex
   return { writable:true, reason:null, basis:null, plugin_root: resolvedTarget }
 }
 
+function pluginHead() {
+  // An explicit git dir accepts worktree gitfiles without discovering an unrelated parent repository.
+  const read = spawnSync('git', [`--git-dir=${join(PROJECT_ROOT, '.git')}`, 'rev-parse', '--verify', 'HEAD^{commit}'], { cwd: PROJECT_ROOT, encoding: 'utf8', timeout: 1000 })
+  const head = read.stdout?.trim()
+  return read.status === 0 && HEX_OID.test(head) ? head : null
+}
+
+function journalStream(crewRoot, archiveRoot) {
+  const root = resolve(crewRoot)
+  const roots = [root, resolve(archiveRoot ?? join(dirname(root), '.crew-journal-archive'))]
+  const clients = new Set(), watchers = new Map()
+  let previous = new Map(), batch, rescan, keepAlive
+  function send(frame) {
+    for (const res of clients) {
+      if (res.writableNeedDrain) res.destroy()
+      else res.write(frame)
+    }
+  }
+  function changed() { batch ??= setTimeout(() => { batch = undefined; scan() }, 250) }
+  function scan(initial = false) {
+    const seen = new Set(), next = new Map()
+    function watchDir(path, matches) {
+      let key
+      try {
+        const stat = lstatSync(path)
+        if (!stat.isDirectory() || realpathSync(path) !== path) return false
+        key = `${stat.dev}:${stat.ino}`
+      } catch { return false }
+      let entry = watchers.get(path)
+      if (entry?.key !== key) {
+        entry?.watcher.close()
+        watchers.delete(path)
+        try {
+          entry = { key, matches: [] }
+          const watcher = watch(path, (_, name) => { if (name === null || entry.matches.some((match) => match(name))) changed() })
+          entry.watcher = watcher
+          watchers.set(path, entry)
+          watcher.on('error', () => {
+            watcher.close()
+            if (watchers.get(path) === entry) watchers.delete(path)
+          })
+        } catch { return true } // The fallback scan can still stat this directory.
+      }
+      if (!seen.has(path)) entry.matches.length = 0
+      entry.matches.push(matches)
+      seen.add(path)
+      return true
+    }
+    function dirs(path) {
+      try { return readdirSync(path, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name) } catch { return [] }
+    }
+    for (const [index, configuredRoot] of roots.entries()) {
+      const parent = realpathOr(dirname(configuredRoot)), name = basename(configuredRoot), base = join(parent, name)
+      // Watch for root creation (e.g. the first closeout) without walking the parent.
+      watchDir(parent, (entry) => entry === name)
+      const laneOf = (outer) => outer.startsWith('dt-') ? (index === 1 ? outer.replace(/\.archive-[1-9]\d*$/, '') : outer).slice(3) : ''
+      if (!watchDir(base, (entry) => LANE.test(laneOf(entry)))) continue
+      for (const outer of dirs(base)) {
+        const lane = laneOf(outer)
+        if (!LANE.test(lane)) continue
+        const outerDir = join(base, outer)
+        const laneName = (entry) => entry === lane || entry.startsWith(`${lane}.archive-`)
+        if (!watchDir(outerDir, laneName)) continue
+        for (const entry of dirs(outerDir).filter(laneName)) {
+          const laneDir = join(outerDir, entry), task = join(laneDir, 'task')
+          if (!watchDir(laneDir, (file) => file === 'task') || !watchDir(task, (file) => file === 'journal.jsonl')) continue
+          const path = join(task, 'journal.jsonl')
+          try {
+            const stat = lstatSync(path, { bigint: true })
+            if (stat.isFile()) next.set(path, { lane, key: `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}` })
+          } catch { /* A lane may not have its journal yet. */ }
+        }
+      }
+    }
+    for (const [path, { watcher }] of watchers) if (!seen.has(path)) { watcher.close(); watchers.delete(path) }
+    const changedLanes = new Set()
+    if (!initial) {
+      for (const [path, { lane, key }] of next) if (previous.get(path)?.key !== key) changedLanes.add(lane)
+      for (const [path, { lane }] of previous) if (!next.has(path)) changedLanes.add(lane)
+    }
+    previous = next
+    if (changedLanes.size) send([...changedLanes].map((lane) => `data: ${JSON.stringify({ type: 'journal', lane })}\n\n`).join(''))
+  }
+  function stop() {
+    clearTimeout(batch); batch = undefined
+    clearInterval(rescan)
+    clearInterval(keepAlive)
+    for (const { watcher } of watchers.values()) watcher.close()
+    watchers.clear(); previous.clear()
+  }
+  return {
+    subscribe(res) {
+      if (!clients.size) {
+        scan(true)
+        // A watch can miss a write, including one just after subscription.
+        rescan = setInterval(changed, 1500)
+        keepAlive = setInterval(() => send(': keep-alive\n\n'), 25_000)
+      }
+      clients.add(res)
+      res.once('close', () => { clients.delete(res); if (!clients.size) stop() })
+      res.write(': connected\n\n')
+    },
+    close() { for (const res of clients) res.end(); clients.clear(); stop() },
+  }
+}
+
 export function startServer(options = {}) {
   const config = { ...defaults(), ...options }
   config.checkout = resolve(config.checkout || process.cwd())
+  const loaded_commit = pluginHead()
+  const stream = journalStream(config.crewRoot, config.leanArchiveRoot)
   const writeMode = pluginWriteMode({ pluginRoot:config.pluginRoot ?? PROJECT_ROOT, home:config.home ?? homedir() })
   const PLUGIN_WRITE_NOTICE = 'This plugin runs from an installed, version-pinned copy whose edits the next plugin update would overwrite.'
   const pluginWriteRefusal = { schema, error:PLUGIN_WRITE_NOTICE, reason:writeMode.reason, basis:writeMode.basis, plugin_root:writeMode.plugin_root }
@@ -513,7 +624,12 @@ export function startServer(options = {}) {
       }
       if (url.pathname === '/api/health') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
-        return json(res, 200, { schema, ...journal.health(), readonly: false, writes: SERVER_WRITES })
+        return json(res, 200, { schema, ...journal.health(), readonly: false, writes: SERVER_WRITES, loaded_commit, current_commit: pluginHead() })
+      }
+      if (url.pathname === '/api/stream') {
+        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
+        res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache, no-transform' })
+        return req.method === 'HEAD' ? res.end() : stream.subscribe(res)
       }
       if (url.pathname.startsWith('/api/')) return method === 'GET' ? json(res, 404, { schema, error: 'not found' }) : json(res, 405, { schema, error: 'not found' }, { allow: 'GET' })
       if (method !== 'GET' && method !== 'HEAD') return res.writeHead(405, { allow: 'GET, HEAD' }).end()
@@ -522,8 +638,12 @@ export function startServer(options = {}) {
   })
   // server.close() alone lets one in-flight request hold the process open with no
   // timeout (h5 F11). This closes THIS server's own sockets and signals no other process.
-  const close = () => { server.close(); server.closeIdleConnections(); server.closeAllConnections() }
+  const close = () => { stream.close(); server.close(); server.closeIdleConnections(); server.closeAllConnections() }
   process.once('SIGTERM', close); process.once('SIGINT', close)
+  server.once('close', () => {
+    stream.close()
+    process.off('SIGTERM', close); process.off('SIGINT', close)
+  })
   server.listen(config.port, config.host, () => {
     const address = server.address()
     process.stdout.write(`${JSON.stringify({ listening: true, port: address.port, crew_root: config.crewRoot, readonly: false, writes: SERVER_WRITES })}\n`)

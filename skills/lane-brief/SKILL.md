@@ -45,8 +45,10 @@ regenerate handling in `crew/checks.mjs` (`rebase-conflict` and its `regenerate`
 4. Start with `crew start ~/.crew/briefs/<lane>.md`. Fix any refusal and retry. In this repo, the checkout's
    copy is `node crew/start.mjs <brief>`. In `ci` mode, `base-red` refuses before creating a worktree.
    Use `--allow-red-base` only for a lane that fixes the base. Start does not wait for running checks;
-   `crew lanes` shows the state recorded at lane start, not live CI. Close the lane after its PR merges
-   using `crew-recovery`.
+   `crew lanes` shows the base CI state recorded at lane start, not live CI.
+   After start succeeds, check this lane's row in `crew lanes` periodically without waiting for a watch request. Keep watching while the lane is running, even if it has a PR.
+   Stop polling when the lane finishes, stops, or needs an operator decision. Report the PR, stop reason, or pending decision as applicable. For a stopped lane, refer to `crew-recovery`; don't resume it on your own.
+   Close the lane after its PR merges using `crew-recovery`.
 
 Use bare `issue N` pointers in `## Context` for related issues. For issue and operator-request briefs alike, `crew start` fetches each distinct reference other than the source and adds its title and whole quoted body under `## Referenced issues` immediately after Context. Do not write that generated section yourself. References are context, not asks; only `closes` binds an issue. Start refuses and names any reference it cannot read before creating the worktree. Empty or whitespace-only bodies appear as `empty body` with the title. `PR N` pointers are not fetched.
 

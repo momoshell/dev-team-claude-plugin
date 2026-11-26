@@ -829,9 +829,12 @@ export function ciActions({ cwd, pr }, deps) {
       if (!Number.isSafeInteger(workflow) || workflow <= 0) return null
       // A repository may collapse base pushes into one CI run (a superseded queued run ends
       // `cancelled` before it starts); a cancelled run says nothing about the base, so read
-      // the newest completed run that was not cancelled.
+      // the newest completed run that was not cancelled. When cancelled runs sit above it and
+      // it failed, a newer base commit may have fixed that failure: the base state is unknown.
       const rows = readJson(await gh(['run', 'list', '--workflow', String(workflow), '--branch', base, '--event', 'push', '--status', 'completed', '--limit', '20', '--all', '--json', 'databaseId,attempt,headBranch,event,status,conclusion']))
-      const row = Array.isArray(rows) ? rows.find((candidate) => candidate?.conclusion !== 'cancelled') ?? null : null
+      const index = Array.isArray(rows) ? rows.findIndex((candidate) => candidate?.conclusion !== 'cancelled') : -1
+      const row = index < 0 ? null : rows[index]
+      if (row && index > 0 && failedAction(row.conclusion)) return null
       if (!row || !Number.isSafeInteger(row.databaseId) || row.databaseId <= 0 || !Number.isSafeInteger(row.attempt) || row.attempt <= 0
         || row.headBranch !== base || row.event !== 'push' || row.status !== 'completed' || typeof row.conclusion !== 'string' || !row.conclusion) return null
       const run = String(row.databaseId), attempt = String(row.attempt)

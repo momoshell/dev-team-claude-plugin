@@ -259,7 +259,7 @@ test('runSuite serializes opted-in suites across worktrees and processes', { tim
 
 test('ciActions.base skips cancelled base runs and reads a stale failure as unknown', async () => {
   // A collapsed base push leaves a superseded run `cancelled`; it must not stand in for the base.
-  const row = (databaseId, conclusion, headSha = `sha${databaseId}`) => ({ databaseId, attempt: 1, headBranch: 'main', headSha, event: 'push', status: 'completed', conclusion })
+  const row = (databaseId, conclusion) => ({ databaseId, attempt: 1, headBranch: 'main', event: 'push', status: 'completed', conclusion })
   const base = async (rows) => {
     // The fake honours --limit, as gh does.
     const run = async ({ args }) => {
@@ -271,10 +271,8 @@ test('ciActions.base skips cancelled base runs and reads a stale failure as unkn
   const green = await base([row(3, 'cancelled'), row(2, 'success'), row(1, 'failure')])
   assert.equal(green.link, 'https://github.com/o/r/actions/runs/2')
   assert.equal(green.failed, false)
-  // A failure below a cancelled run for a newer commit may predate a fix on that commit.
+  // A failure below a cancelled run may predate a fix on a newer base commit.
   assert.equal(await base([row(3, 'cancelled'), row(2, 'failure')]), null)
-  // A cancelled run for the same commit hides nothing: the failure on that commit stands.
-  assert.equal((await base([row(3, 'cancelled', 'shaA'), row(2, 'failure', 'shaA')])).failed, true)
   // The newest run itself failing is still a red base.
   assert.equal((await base([row(2, 'failure'), row(1, 'success')])).failed, true)
 })

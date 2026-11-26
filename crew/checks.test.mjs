@@ -5,7 +5,7 @@ import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { scratchDir } from '../test/helpers.mjs'
-import { CHECK_REASONS, runSuite } from './checks.mjs'
+import { CHECK_REASONS, ciActions, runSuite } from './checks.mjs'
 import { sampledBudget } from './host-sleep.mjs'
 
 const GATE_TIMEOUT_MS = 10_000
@@ -255,4 +255,24 @@ test('runSuite serializes opted-in suites across worktrees and processes', { tim
     for (const { child } of runners) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
     for (const tree of trees) git('worktree', 'remove', '--force', tree)
   }
+})
+
+test('ciActions.base skips cancelled base runs and reads a stale failure as unknown', async () => {
+  // A collapsed base push leaves a superseded run `cancelled`; it must not stand in for the base.
+  const row = (databaseId, conclusion) => ({ databaseId, attempt: 1, headBranch: 'main', event: 'push', status: 'completed', conclusion })
+  const base = async (rows) => {
+    // The fake honours --limit, as gh does.
+    const run = async ({ args }) => {
+      const limit = Number(args[args.indexOf('--limit') + 1])
+      return { status: 'green', code: 0, reason: null, signal: null, timedOut: false, stdout: JSON.stringify(rows.slice(0, limit)), stderr: '' }
+    }
+    return ciActions({ cwd: '/unused', pr: { number: 7, url: 'https://github.com/o/r/pull/7' } }, { run }).base(5, 'main')
+  }
+  const green = await base([row(3, 'cancelled'), row(2, 'success'), row(1, 'failure')])
+  assert.equal(green.link, 'https://github.com/o/r/actions/runs/2')
+  assert.equal(green.failed, false)
+  // A failure below a cancelled run may predate a fix on a newer base commit.
+  assert.equal(await base([row(3, 'cancelled'), row(2, 'failure')]), null)
+  // The newest run itself failing is still a red base.
+  assert.equal((await base([row(2, 'failure'), row(1, 'success')])).failed, true)
 })

@@ -829,12 +829,14 @@ export function ciActions({ cwd, pr }, deps) {
       if (!Number.isSafeInteger(workflow) || workflow <= 0) return null
       // A repository may collapse base pushes into one CI run (a superseded queued run ends
       // `cancelled` before it starts); a cancelled run says nothing about the base, so read
-      // the newest completed run that was not cancelled. When cancelled runs sit above it and
-      // it failed, a newer base commit may have fixed that failure: the base state is unknown.
-      const rows = readJson(await gh(['run', 'list', '--workflow', String(workflow), '--branch', base, '--event', 'push', '--status', 'completed', '--limit', '20', '--all', '--json', 'databaseId,attempt,headBranch,event,status,conclusion']))
+      // the newest completed run that was not cancelled. When it failed and a cancelled run
+      // above it is for another commit, that newer commit may have fixed the failure: the base
+      // state is unknown. A green run below cancelled runs still reads as not red, so a lane
+      // repairs its own red check, as it did before bases were collapsed.
+      const rows = readJson(await gh(['run', 'list', '--workflow', String(workflow), '--branch', base, '--event', 'push', '--status', 'completed', '--limit', '20', '--all', '--json', 'databaseId,attempt,headBranch,headSha,event,status,conclusion']))
       const index = Array.isArray(rows) ? rows.findIndex((candidate) => candidate?.conclusion !== 'cancelled') : -1
       const row = index < 0 ? null : rows[index]
-      if (row && index > 0 && failedAction(row.conclusion)) return null
+      if (row && failedAction(row.conclusion) && rows.slice(0, index).some((cancelled) => cancelled?.headSha !== row.headSha)) return null
       if (!row || !Number.isSafeInteger(row.databaseId) || row.databaseId <= 0 || !Number.isSafeInteger(row.attempt) || row.attempt <= 0
         || row.headBranch !== base || row.event !== 'push' || row.status !== 'completed' || typeof row.conclusion !== 'string' || !row.conclusion) return null
       const run = String(row.databaseId), attempt = String(row.attempt)

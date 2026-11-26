@@ -827,8 +827,11 @@ export function ciActions({ cwd, pr }, deps) {
     rerun: (run) => gh(['run', 'rerun', run, '--failed']),
     base: async (workflow, base) => {
       if (!Number.isSafeInteger(workflow) || workflow <= 0) return null
-      const rows = readJson(await gh(['run', 'list', '--workflow', String(workflow), '--branch', base, '--event', 'push', '--status', 'completed', '--limit', '1', '--all', '--json', 'databaseId,attempt,headBranch,event,status,conclusion']))
-      const row = Array.isArray(rows) && rows.length === 1 ? rows[0] : null
+      // A repository may collapse base pushes into one CI run (a superseded queued run ends
+      // `cancelled` before it starts); a cancelled run says nothing about the base, so read
+      // the newest completed run that was not cancelled.
+      const rows = readJson(await gh(['run', 'list', '--workflow', String(workflow), '--branch', base, '--event', 'push', '--status', 'completed', '--limit', '20', '--all', '--json', 'databaseId,attempt,headBranch,event,status,conclusion']))
+      const row = Array.isArray(rows) ? rows.find((candidate) => candidate?.conclusion !== 'cancelled') ?? null : null
       if (!row || !Number.isSafeInteger(row.databaseId) || row.databaseId <= 0 || !Number.isSafeInteger(row.attempt) || row.attempt <= 0
         || row.headBranch !== base || row.event !== 'push' || row.status !== 'completed' || typeof row.conclusion !== 'string' || !row.conclusion) return null
       const run = String(row.databaseId), attempt = String(row.attempt)

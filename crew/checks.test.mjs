@@ -5,7 +5,7 @@ import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { scratchDir } from '../test/helpers.mjs'
-import { CHECK_REASONS, runSuite } from './checks.mjs'
+import { CHECK_REASONS, ciActions, runSuite } from './checks.mjs'
 import { sampledBudget } from './host-sleep.mjs'
 
 const GATE_TIMEOUT_MS = 10_000
@@ -255,4 +255,17 @@ test('runSuite serializes opted-in suites across worktrees and processes', { tim
     for (const { child } of runners) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
     for (const tree of trees) git('worktree', 'remove', '--force', tree)
   }
+})
+
+test('ciActions.base reads the newest completed base run that was not cancelled', async () => {
+  // A collapsed base push leaves a superseded run `cancelled`; it must not stand in for the base.
+  const rows = [
+    { databaseId: 3, attempt: 1, headBranch: 'main', event: 'push', status: 'completed', conclusion: 'cancelled' },
+    { databaseId: 2, attempt: 1, headBranch: 'main', event: 'push', status: 'completed', conclusion: 'failure' },
+    { databaseId: 1, attempt: 1, headBranch: 'main', event: 'push', status: 'completed', conclusion: 'success' },
+  ]
+  const run = async () => ({ status: 'green', code: 0, reason: null, signal: null, timedOut: false, stdout: JSON.stringify(rows), stderr: '' })
+  const base = await ciActions({ cwd: '/unused', pr: { number: 7, url: 'https://github.com/o/r/pull/7' } }, { run }).base(5, 'main')
+  assert.equal(base.link, 'https://github.com/o/r/actions/runs/2')
+  assert.equal(base.failed, true)
 })

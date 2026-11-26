@@ -66,8 +66,8 @@ First-round pre-check base moves and full build, judge and finish publishing-reb
 rechecks soft-reset to the new base before checks too. No lane commits sit above
 that base at suite time. The loop stages measured lane paths, but the script
 must account for staged, unstaged and nonignored untracked paths. Proof-only
-and lock-file publishing rechecks on build or judge run no second suite when
-their checks pass.
+publishing rechecks on build or judge run no second suite when their checks
+pass; lock-file rechecks skip it only when `fastChecks` is configured and passes.
 
 A mechanical publishing-rebase suite still runs on the clean, committed rebased head. A clean tree must run everything. That fallback also
 makes onboarding and hand runs safe when there is no lane change.

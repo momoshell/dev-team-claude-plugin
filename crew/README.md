@@ -146,8 +146,9 @@ Failed reads retry; an undecided wait stops at `ci-timeout`.
 The loop reads failed Actions logs and strips terminal controls. A literal
 `environmentSignatures` match reruns those runs' failed jobs once per head with
 a fresh timeout. Another match stops `red-after-environment-rerun`. Before a
-repair, the loop compares the failure with the latest completed push run of the
-same workflow on the base. A failed base run with all of the same test names
+repair, the loop compares the failure with the newest completed push run of the
+same workflow on the base that was not cancelled; a failed run with cancelled
+runs above it counts as missing evidence. A failed base run with all of the same test names
 (or, when the PR log has no test names, the same failed job name) stops
 `ci-base-red`. Missing logs or different base evidence can still lead to repair.
 
@@ -348,7 +349,7 @@ That follow-up has not run.
 
 - **Proof** — each named test normally must fail in its own body on the old source and pass on the build. A runner's optional `manifest` file name lets a new package's own test prove on a green build alone when its manifest is absent from the old-source commit (`base-package-absent`); there is no red side. With `newTestFile: true`, a no-report old-source run can instead prove on a green build report if the test file is absent from the old-source commit (`base-test-absent`). Both exceptions are weaker evidence: a vacuous test can pass. Neither is a kill proof.
 - **Suite** — the project-defined command runs with a timeout and a process-group kill. Commit measurements and PR or finish verification name the command; green does not imply full coverage.
-- **Commit, rebase, PR** — only on green; the PR is opened, never merged.
+- **Commit, rebase, PR** — only on green; with `suiteGate: ci` the PR opens before its required checks, and the loop waits for them. The PR is opened, never merged.
 
 ### Suite Git state
 
@@ -446,7 +447,8 @@ Everything durable is a file; session chat is never the record.
 Seats run unattended, so the enforced tool boundary is each seat's grants, not
 a prompt. Only the builder is granted repo writes; other seats write their
 envelope and task-dir artifacts. Worktree isolation separates lanes, not seats
-within a lane. The loop opens a PR after a green suite and never merges.
+within a lane. The loop opens a PR after a green suite (with `suiteGate: ci`, after proof and
+review, then waits for the required checks) and never merges.
 
 A repo seat may signal only processes descended from its own agent. The gate
 checks ancestry with `ps` at call time and refuses when `ps` cannot tell. It

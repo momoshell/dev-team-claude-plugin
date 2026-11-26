@@ -123,7 +123,7 @@ carry a `; bump x.y.z` subject suffix.
 What is enforced instead is the thing that actually shipped wrong metadata:
 `plugin.json` and `.claude-plugin/marketplace.json` must always agree.
 `test/version-agreement.test.mjs` asserts it, so it fails in the same
-`node --test` run that gates every crew commit — bump both files or neither.
+`node --test` run that gates every crew commit in `lane` mode — bump both files or neither.
 
 ## Visualizer
 

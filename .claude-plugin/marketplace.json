@@ -21,7 +21,7 @@
         "url": "https://github.com/momoshell/dev-team-claude-plugin.git",
         "ref": "main"
       },
-      "description": "Crew: a team runtime \u2014 agents do the work, code keeps it correct. One brief starts a lane: a planner, builder and reviewer play their seats over ACP, and code commits and opens the PR only after a per-test proof (each named test red on the old source, green on the build) and a green project suite.",
+      "description": "Crew: a team runtime \u2014 agents do the work, code keeps it correct. One brief starts a lane: a planner, builder and reviewer play their seats over ACP, and code commits and opens the PR only after proof of each test the builder names (red on the old source, green on the build) and, by default, a green project suite; with `suiteGate: ci` the required PR checks gate it instead.",
       "homepage": "https://github.com/momoshell/dev-team-claude-plugin"
     }
   ]

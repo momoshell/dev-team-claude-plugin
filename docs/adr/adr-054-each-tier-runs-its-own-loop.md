@@ -299,8 +299,9 @@ log does not erase the check's name or link.
 On a literal `environmentSignatures` match, rerun the matching runs' failed
 jobs once per head. Give the new attempts a fresh awake timeout. A green wait
 records the signature; another signature red stops `red-after-environment-rerun`.
-Before seating a builder, compare each failed check with the latest completed
-push run of its workflow on the base. If that run failed, stop unmeasured as
+Before seating a builder, compare each failed check with the newest completed
+push run of its workflow on the base that was not cancelled; a failed run with
+cancelled runs above it counts as missing evidence. If that run failed, stop unmeasured as
 `ci-base-red` with both links when its log contains every extracted lane test
 name, or when the lane log has no test names and the base has the same failed
 job name. Missing or different evidence does not block repair.

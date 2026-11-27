@@ -1,6 +1,6 @@
 <script>
   import { configurationDimensionCell, configurationFilterView, durationCell, leanStatus, needsAttention, shipStatus, taskBoard, tokenCell } from './fleet.js'
-  import { leanCiLabel, leanLabel, leanLatestStage } from './lean.js'
+  import { leanCiLabel, leanCiPresentation, leanLabel, leanLatestStage, leanPullRequestUrl } from './lean.js'
   import Pagination from './Pagination.svelte'
   import Dropdown from './Dropdown.svelte'
 
@@ -71,16 +71,37 @@
       <tbody>
         {#each paged as run (run.adw_id)}
           {@const status = statusFor(run)}
-          {@const ci = leanCiLabel(run.ci)}
+          {@const ci = leanCiPresentation(run)}
+          {@const ciNote = ci ? null : leanCiLabel(run.ci)}
+          {@const tone = ci?.tone ?? status.tone}
           {@const ship = shipStatus(run)}
+          {@const open = ship.key === 'open'}
+          {@const prNumber = open ? run.pr?.number : null}
+          {@const prUrl = open ? leanPullRequestUrl(run.pr) : null}
+          {@const shipLabel = prNumber ? `PR #${prNumber} ${ship.word}` : ship.word}
           {@const duration = durationCell(run)}
           {@const tokens = tokenCell(run)}
           {@const executionCell = configurationDimensionCell(run, 'execution_shape')}
           {@const assuranceCell = configurationDimensionCell(run, 'assurance')}
-          <tr class:running={run.running === true}>
+          <tr class={ci?.tone} class:running={run.running === true}>
             <td class="task-cell"><button type="button" class="task-link" onclick={(event) => { event.stopPropagation(); onopen(run) }}><strong>{run.goal || 'Untitled run'}</strong><span>{run.repo_slug || 'repository unavailable'}</span></button></td>
-            <td><span class={`status ${status.tone}`}><span class="status-dot" aria-hidden="true"></span>{status.word}</span>{#if ci}<small class="ci-state">{ci}</small>{/if}{#if needsAttention(status.key)}<details class="row-reason"><summary>Why review?</summary><p>{status.why || (status.key === 'ready' ? 'The run is ready for an operator decision: accept, return or abandon with crew finish.' : 'Open the run to inspect its last recorded outcome and evidence.')}</p></details>{/if}</td>
-            <td title={ship.reason}><span class={`status ${ship.tone}`}><span class="status-dot" aria-hidden="true"></span>{ship.word}</span></td>
+            <td>
+              <span class={`status ${tone}`} class:ci-status={ci != null}>
+                <span class="status-dot" aria-hidden="true"></span>
+                <span>{#if ci?.failed?.name && ci.failed.href}CI failed: <a href={ci.failed.href} target="_blank" rel="noreferrer">{ci.failed.name}</a>{:else}{ci?.label ?? status.word}{/if}</span>
+              </span>
+              {#if ci?.failed && !ci.failed.href}<small>Check link not recorded</small>{/if}
+              {#if ciNote}<small class="ci-state">{ciNote}</small>{/if}
+              {#if needsAttention(status.key)}<details class="row-reason"><summary>Why review?</summary><p>{status.why || (status.key === 'ready' ? 'The run is ready for an operator decision: accept, return or abandon with crew finish.' : 'Open the run to inspect its last recorded outcome and evidence.')}</p></details>{/if}
+            </td>
+            <td title={ship.reason}>
+              <span class={`status ${open ? ci?.tone ?? ship.tone : ship.tone}`}>
+                <span class="status-dot" aria-hidden="true"></span>
+                {#if prNumber && prUrl}<a href={prUrl} target="_blank" rel="noreferrer">{shipLabel}</a>{:else}{shipLabel}{/if}
+              </span>
+              {#if open && !prNumber}<small>PR number not recorded</small>{/if}
+              {#if open && !prUrl}<small>PR link not recorded</small>{/if}
+            </td>
             <td class="run-setup"><div><strong class:missing={assuranceCell.dashed} class:dashed={assuranceCell.dashed}>{assuranceCell.text}</strong></div><small title={`${assuranceCell.summary ?? ''} ${executionCell.summary ?? ''}`}><span class:dashed={executionCell.dashed}>{executionCell.text}</span></small></td>
             <td class="execution"><strong>{leanLatestStage(run) ? leanLabel(leanLatestStage(run)) : 'Not started'}</strong><small>{run.phases?.length || 0} recorded phases</small></td>
             <td class="time"><strong>{duration.dashed ? (run.running ? status.word : '—') : duration.text}</strong><small>{formatDate(run.started_at)}</small></td>
@@ -117,11 +138,18 @@ caption { text-align:start; color:var(--muted); padding:.65rem .85rem; font-size
 .table-wrap { overflow:auto; } table { width:100%; min-width:940px; border-collapse:collapse; }
 th { padding:.65rem .85rem; color:var(--muted); font-size:.67rem; letter-spacing:.11em; text-transform:uppercase; text-align:left; font-weight:700; }
 td { padding:.8rem .85rem; border-top:1px solid color-mix(in srgb,var(--line) 78%,transparent); vertical-align:middle; }
-tbody tr { transition:background .15s ease; } tbody tr:hover { background:var(--accent-soft); } tbody tr.running { box-shadow:inset 2px 0 var(--status-running); }
+tbody tr { transition:background .15s ease; } tbody tr:hover { background:var(--accent-soft); } tbody tr.running { box-shadow:inset 2px 0 var(--row-marker, var(--status-running)); }
+tbody tr.running.waiting { --row-marker:var(--status-waiting); }
+tbody tr.running.fail { --row-marker:var(--status-fail); }
+tbody tr.running.ok { --row-marker:var(--status-ok); }
 .task-link { display:grid; gap:.2rem; border:0; background:transparent; text-align:left; cursor:pointer; padding:0; }.task-link strong { max-width:22rem; overflow-wrap:anywhere; white-space:normal; font-size:.88rem; }
 .task-link span, small { display:block; color:var(--muted); font-size:.71rem; margin-top:.25rem; white-space:nowrap; }.ci-state { max-width:16rem; white-space:normal; }
 .status { display:inline-flex; align-items:center; gap:.4rem; font-size:.8rem; white-space:nowrap; }.status-dot { width:.45rem; height:.45rem; border-radius:50%; background:currentColor; box-shadow:0 0 0 3px color-mix(in srgb,currentColor 12%,transparent); }
 .status.ok { color:var(--status-ok); }.status.fail { color:var(--status-fail); }.status.aborted { color:var(--status-running); }.status.busy { color:var(--status-running); }.status.serious { color:var(--status-escalated); }.status.quiet { color:var(--muted); }
+.status.waiting { color:var(--status-waiting); }
+.status a { color:inherit; text-decoration:underline; }
+.ci-status { white-space:normal; overflow-wrap:anywhere; }
+.ci-status .status-dot { flex-shrink:0; }
 .run-setup > div { display:flex; align-items:center; gap:.38rem; }.run-setup strong { font-size:.78rem; white-space:nowrap; }.run-setup strong.missing { color:var(--muted); }.run-setup small { max-width:13rem; white-space:normal; }.dashed { border-bottom:1px dashed currentColor; color:var(--muted); }
 
 

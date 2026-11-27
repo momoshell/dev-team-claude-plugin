@@ -101,6 +101,34 @@ export function leanCiCounts(checks) {
   return `${count('pass')} passed · ${count('pending')} pending · ${count('fail')} failed`
 }
 
+export function leanCiPresentation(run) {
+  const ci = run.ci
+  if (!run.running || !ci) return null
+  // A repair still carries the failed checks that triggered it.
+  if (ci.state === 'repair') {
+    return { label: `repairing CI · round ${ci.repair_round ?? 'not recorded'} of ${ci.max_repairs ?? 'not recorded'}`, tone: 'busy' }
+  }
+  const checks = Array.isArray(ci.checks) ? ci.checks : null
+  const failed = checks?.find((check) => check.bucket === 'fail')
+  if (failed) {
+    const name = typeof failed.name === 'string' ? failed.name.trim() : ''
+    const href = leanHttpUrl(failed.link)
+    return { label: `CI failed: ${name || 'check name not recorded'}`, tone: 'fail', failed: { name, href } }
+  }
+  if (ci.state === 'waiting') {
+    const total = checks?.length
+    const passed = checks?.filter((check) => check.bucket === 'pass').length
+    const absent = total === 0 ? 'no required checks reported yet' : 'checks not yet measured'
+    return {
+      label: `waiting on CI · ${total ? `${passed} of ${total} passed` : absent}`,
+      compact: `Waiting on CI · ${total ? `${passed}/${total}` : absent}`,
+      tone: 'waiting',
+    }
+  }
+  const label = leanCiLabel(ci)
+  return label ? { label, tone: ci.state === 'green' ? 'ok' : ci.state === 'red' ? 'fail' : 'quiet' } : null
+}
+
 export function leanOutcome(run = {}) {
   const ci = run.ci, headline = leanCiLabel(ci)
   if (run.status === 'stopped' && ci && ci.state === run.reason && Object.hasOwn(ciStops, ci.state)) {

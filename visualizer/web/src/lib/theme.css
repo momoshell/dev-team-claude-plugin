@@ -35,6 +35,7 @@
   --status-ok-raw: #4dcc87;
   --status-fail-raw: #ff6b6b;
   --status-running-raw: #f2bf62;
+  --status-waiting-raw: #7fb2ff;
   --status-skipped-raw: #7e8996;
   --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
@@ -64,6 +65,7 @@
   --status-ok: #167346;
   --status-fail: #c83f49;
   --status-running: #875600;
+  --status-waiting: #2f6db5;
   --status-skipped: var(--status-skipped-raw);
   --status-escalated: #b44432;
   --role-planner: var(--role-planner-light);
@@ -94,6 +96,7 @@
   --status-ok: var(--status-ok-raw);
   --status-fail: var(--status-fail-raw);
   --status-running: var(--status-running-raw);
+  --status-waiting: var(--status-waiting-raw);
   --status-skipped: var(--status-skipped-raw);
   --status-escalated: var(--serious);
   --role-planner: var(--role-planner-dark);
@@ -125,6 +128,7 @@
     --status-ok: var(--status-ok-raw);
     --status-fail: var(--status-fail-raw);
     --status-running: var(--status-running-raw);
+    --status-waiting: var(--status-waiting-raw);
     --status-skipped: var(--status-skipped-raw);
     --status-escalated: var(--serious);
     --role-planner: var(--role-planner-dark);

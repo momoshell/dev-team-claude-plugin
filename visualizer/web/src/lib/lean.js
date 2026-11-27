@@ -106,7 +106,9 @@ export function leanCiPresentation(run) {
   if (!run.running || !ci) return null
   // A repair still carries the failed checks that triggered it.
   if (ci.state === 'repair') {
-    return { label: `repairing CI · round ${ci.repair_round ?? 'not recorded'} of ${ci.max_repairs ?? 'not recorded'}`, tone: 'busy' }
+    const headline = 'repairing CI'
+    const detail = `round ${ci.repair_round ?? 'not recorded'} of ${ci.max_repairs ?? 'not recorded'}`
+    return { headline, detail, label: `${headline} · ${detail}`, tone: 'busy' }
   }
   const checks = Array.isArray(ci.checks) ? ci.checks : null
   const failed = checks?.find((check) => check.bucket === 'fail')
@@ -119,8 +121,12 @@ export function leanCiPresentation(run) {
     const total = checks?.length
     const passed = checks?.filter((check) => check.bucket === 'pass').length
     const absent = total === 0 ? 'no required checks reported yet' : 'checks not yet measured'
+    const headline = 'waiting on CI'
+    const detail = total ? `${passed} of ${total} passed` : absent
     return {
-      label: `waiting on CI · ${total ? `${passed} of ${total} passed` : absent}`,
+      headline,
+      detail,
+      label: `${headline} · ${detail}`,
       compact: `Waiting on CI · ${total ? `${passed}/${total}` : absent}`,
       tone: 'waiting',
     }

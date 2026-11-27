@@ -95,23 +95,6 @@ export function leanStatus(run = {}) {
   return { key, word, tone: meta?.tone ?? 'quiet', where: null, why, open }
 }
 
-const SHIP_STATUS_META = Object.freeze({
-  merged: Object.freeze({ key:'merged', word:'shipped', tone:'ok' }),
-  open: Object.freeze({ key:'open', word:'open', tone:'busy' }),
-  'closed-unmerged': Object.freeze({ key:'closed-unmerged', word:'closed', tone:'fail' }),
-  unpublished: Object.freeze({ key:'unpublished', word:'unpublished', tone:'quiet' }),
-  'not-applicable': Object.freeze({ key:'not-applicable', word:'not applicable', tone:'quiet' }),
-  unmeasured: Object.freeze({ key:'unmeasured', word:'not measured', tone:'quiet' }),
-})
-
-export function shipStatus(run = {}) {
-  const ship = run?.ship
-  const meta = SHIP_STATUS_META[ship?.state]
-  const reason = typeof ship?.reason === 'string' && ship.reason.trim() ? ship.reason : null
-  if (!meta || reason === null) return { key:'unmeasured', word:'not measured', tone:'quiet', reason:'ship state not measured' }
-  return { ...meta, reason: ship.stale === true ? `${reason} (cached ship state is stale.)` : reason }
-}
-
 const ATTENTION_SEGMENT_LABELS = Object.freeze({
   ready: 'ready for operator', returned: 'returned', aborted: 'stopped', abandoned: 'abandoned',
 })
@@ -177,8 +160,9 @@ export function tokenCell(run = {}) {
 }
 
 export function durationCell(run = {}) {
-  const duration = finiteNumber(run?.duration_ms)
-  if (duration == null) return absenceMark(run?.pending?.duration_ms)
+  const running = run?.running === true
+  const duration = finiteNumber(running ? Date.now() - Date.parse(run.started_at) : run?.duration_ms)
+  if (duration == null) return absenceMark(running ? 'start not recorded' : run?.pending?.duration_ms)
   const seconds = Math.max(0, Math.round(duration / 1000))
   if (seconds < 60) return measuredCell(duration, `${seconds}s`)
   const minutes = Math.floor(seconds / 60)

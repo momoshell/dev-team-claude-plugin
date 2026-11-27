@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { startServer } from '../visualizer/server/server.mjs'
 import { createLeanSource } from '../crew/lean-source.mjs'
 import { taskBoard, leanStatus, tokenCell } from '../visualizer/web/src/lib/fleet.js'
-import { leanCheckStatus, leanStageStatus, leanView } from '../visualizer/web/src/lib/lean.js'
+import { leanCheckStatus, leanCiPresentation, leanStageStatus, leanView } from '../visualizer/web/src/lib/lean.js'
 import { scratchDir } from './helpers.mjs'
 
 const jsonl = (rows) => rows.map((row) => JSON.stringify(row)).join('\n') + '\n'
@@ -58,6 +58,17 @@ test('the latest stage names the open review, not the ended suite, in the summar
     const detail = readFileSync(new URL('../visualizer/web/src/lib/LeanRunDetail.svelte', import.meta.url), 'utf8')
     assert.match(task, /leanLatestStage\(run\)/); assert.doesNotMatch(task, /phases\.at\(-1\)/); assert.match(detail, /leanLabel\(view\.stage\)/)
   } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('waiting CI status keeps its words intact and its count below the label', () => {
+  const checks = ['pass', 'pass', 'pass', 'pass', 'pending'].map(bucket => ({ bucket }))
+  const { headline, detail } = leanCiPresentation({ running: true, ci: { state: 'waiting', checks } })
+  assert.equal(headline, 'waiting on CI')
+  assert.equal(detail, '4 of 5 passed')
+  const task = readFileSync(new URL('../visualizer/web/src/lib/TaskList.svelte', import.meta.url), 'utf8')
+  assert.match(task, /\{ci\?\.headline[^}]*\}[^\n]*\n\s*<\/span>\s*\{#if ci\?\.detail\}<small\b[^>]*>\{ci\.detail\}<\/small>/)
+  assert.match(task, /\.ci-status\s*\{[^}]*white-space:\s*normal\b/)
+  assert.doesNotMatch(task, /\.ci-status\s*\{[^}]*(?:overflow-wrap|word-break):\s*(?:anywhere|break-word|break-all)\b/)
 })
 
 test('lean lane tokens are the seat-turn usage sum, null with the unmeasured reason, with the turn count', () => {

@@ -1,7 +1,36 @@
+// Whether a named event carries lane state by default.
+export const JOURNAL_EVENTS = Object.freeze({
+  'builder-continue': true,
+  check: true,
+  'ci-progress': false,
+  commit: true,
+  envelope: true,
+  'finish-decision': true,
+  'finish-ready': true,
+  'finish-uncommit': true,
+  'lead-bound-refund': true,
+  'lead-rulings': true,
+  'loop-result': true,
+  'memory-empty': true,
+  'pre-check-base-move': true,
+  pr: true,
+  'recheck-scope': true,
+  'review-reused': true,
+  roster: true,
+  'run-end-command': false,
+  'run-start': true,
+  'seat-turn': true,
+  'stage-end': false,
+  'stage-start': true,
+  'tier-raised': true,
+  verdict: true,
+  'worktree-setup': true,
+})
+
 export const baseCiCheck = (row) => row?.event === 'check' && row.check === 'base-ci'
 
 export function stateless(rows, row, index) {
-  if (typeof row?.event !== 'string' || row.event === 'stage-end' || row.event === 'run-end-command' || row.event === 'ci-progress' || baseCiCheck(row)) return true
+  if (typeof row?.event !== 'string' || (Object.hasOwn(JOURNAL_EVENTS, row.event) && JOURNAL_EVENTS[row.event] === false) || baseCiCheck(row)) return true
   if (row.event === 'check' && Array.isArray(rows) && Number.isSafeInteger(index)) {
     for (let i = Math.min(index, rows.length) - 1; i >= 0; i--) {
       if (rows[i]?.event === 'stage-start') break

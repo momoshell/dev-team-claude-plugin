@@ -377,6 +377,12 @@ selection rules, full-run fallbacks and approval trials.
 
 Everything durable is a file; session chat is never the record.
 
+`JOURNAL_EVENTS` in `crew/lean-journal-order.mjs` owns journal event names and
+whether they carry lane state by default. Add new names there; the literal
+writer scan in `crew/acp-client.test.mjs` checks both directions. For a new lane
+ending, add a row with each reader's expected result in
+`crew/journal-endings.test.mjs`.
+
 - **P1 brief** and **P5 agent definition**: markdown with frontmatter.
 - **P2 envelope**: one JSON object per seat turn at the path the loop issued,
   `{ role, id, status: done|insufficient|escalate, summary, details }`; the

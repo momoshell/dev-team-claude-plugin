@@ -812,7 +812,7 @@ test('from round 2 the reviewer hears the earlier findings, and a return that dr
     const cwd = scratchDir('loop-cancel-suite-'), ready = join(cwd, 'ready.json')
     // Start the detached child's pipe-close delay at cancellation, not at startup.
     const descendant = `process.on('SIGUSR2', () => setTimeout(() => process.exit(0), 3000)); console.log('suite ready'); require('node:fs').writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ pgid: process.ppid, pid: process.pid })); setTimeout(() => process.exit(0), 10_000)`
-    const source = `const child = require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], { stdio: 'inherit', detached: ${cleanup === 'delayed'} }); process.on('SIGTERM', () => ${cleanup === 'delayed' ? "{ child.kill('SIGUSR2'); process.exit(0) }" : "child.kill('SIGTERM')"}); child.on('exit', () => process.exit(0)); setTimeout(() => { child.kill('SIGKILL'); process.exit(0) }, 5000)`
+    const source = `const child = require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], { stdio: 'inherit', detached: ${cleanup === 'delayed'} }); process.on('SIGTERM', () => ${cleanup === 'delayed' ? "{ child.kill('SIGUSR2'); process.exit(0) }" : "child.kill('SIGTERM')"}); child.on('exit', () => process.exit(0))`
     const f = fakes({ review: 1, deps: { now: Date.now } })
     const suite = f.deps.runSuite, seat = f.deps.runSeat
     let first = true, group, running, cancelled = false

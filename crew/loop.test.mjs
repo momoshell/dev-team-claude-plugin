@@ -2518,14 +2518,15 @@ test('a forged source or builder summary cannot forge a section or measurement i
 })
 
 test('the PR body states proof and suite honestly when no test is named, the lane is mechanical, or proof is unmeasured', async () => {
-  for (const mode of ['ci-repair', 'ci-cancel-failed-step', 'ci-cancel-clean-step', 'ci-wrong-head', 'ci-closed-red', 'none', 'mechanical', 'mechanical-named', 'unmeasured', 'repair', 'ci', 'ci-empty', 'ci-conflicting']) {
+  for (const mode of ['ci-repair', 'ci-cancel-failed-step', 'ci-cancel-mixed-steps', 'ci-cancel-clean-step', 'ci-wrong-head', 'ci-closed-red', 'none', 'mechanical', 'mechanical-named', 'unmeasured', 'repair', 'ci', 'ci-empty', 'ci-conflicting']) {
     const finish = ['unmeasured', 'repair'].includes(mode)
     const mechanical = mode.startsWith('mechanical')
     const ciGate = mode.startsWith('ci')
     const empty = ['ci-empty', 'ci-conflicting'].includes(mode)
     const conflict = mode === 'ci-conflicting', wrongHead = mode === 'ci-wrong-head', closedRed = mode === 'ci-closed-red'
     const cancelled = mode.startsWith('ci-cancel-')
-    const repair = mode === 'ci-repair' || mode === 'ci-cancel-failed-step'
+    const mixedSteps = mode === 'ci-cancel-mixed-steps'
+    const repair = mode === 'ci-repair' || mode === 'ci-cancel-failed-step' || mixedSteps
     const reason = conflict || wrongHead || closedRed || (cancelled && !repair) ? 'ci-unmeasured' : empty ? 'ci-no-required-checks' : null
     const noProof = mode === 'none' || ciGate
     const head = 'a'.repeat(40), successor = 'b'.repeat(40), repairTree = 'f'.repeat(40)
@@ -2555,6 +2556,7 @@ test('the PR body states proof and suite honestly when no test is named, the lan
     const f = mode === 'repair' ? sequenced([redRun(7), green()], options) : fakes(options)
     const check = { name: 'test', workflow: '', bucket: 'pass', link: 'https://example.test/runs/1' }
     const runPath = '/o/r/actions/runs/123', step = 'Run tests', jobFailure = 'cancelled job assertion'
+    const passingStep = `After ${step}`
     const cancelledCheck = { name: check.name, workflow: 'CI', bucket: 'cancel', link: `https://github.com${runPath}/job/456`, run: '123', job: '456' }
     const jobRead = ['api', 'repos/o/r/actions/jobs/456', '--hostname', 'github.com']
     const ghArgs = [], gitArgs = []
@@ -2581,11 +2583,14 @@ test('the PR body states proof and suite honestly when no test is named, the lan
         // Keep the old source's read working so the proof fails on the missing repair, not the command fake.
         if (args[1] === 'checks') return json([{ ...check, bucket: red ? 'fail' : 'pass' }])
         if (cancelled && args[0] === 'api' && args[1] === jobRead[1]) {
-          return json({ id: 456, run_id: 123, conclusion: 'cancelled', steps: [{ name: step, conclusion: repair ? 'failure' : 'success' }] })
+          const steps = [{ name: step, conclusion: repair ? 'failure' : 'cancelled' }]
+          if (mixedSteps) steps.push({ name: passingStep, conclusion: 'success' })
+          return json({ id: 456, run_id: 123, conclusion: 'cancelled', steps })
         }
         if (cancelled && args[0] === 'run' && args[1] === 'view' && args.includes('--log')) {
           assert.deepEqual(args, ['run', 'view', '123', '--log', '--job', '456', '-R', 'github.com/o/r'])
-          return { ...green(), stdout: `test\t${step}\t2026-11-28T00:00:00Z \x1b[31mnot ok 1 - ${jobFailure}\x1b[0m` }
+          const failure = `test\t${step}\t2026-11-28T00:00:00Z \x1b[31mnot ok 1 - ${jobFailure}\x1b[0m`
+          return { ...green(), stdout: mixedSteps ? `${failure}\ntest\t${passingStep}\t2026-11-28T00:00:01Z not ok 2 - passing step noise` : failure }
         }
         if (args[1] === 'view') return json({ headRefOid: remoteHead, baseRefName: pr.baseRefName, state: pr.state })
         if (args[0] === 'api' && args[1] === 'graphql') {

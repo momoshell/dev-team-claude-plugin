@@ -14,6 +14,34 @@ function isoTime(value) {
   return Date.parse(value)
 }
 
+const journalTime = (at) => typeof at === 'string' ? isoTime(at) : Number.isFinite(at) ? new Date(at).getTime() : NaN
+const printTime = (at) => new Date(at).toJSON()
+
+function* stoppedVerdicts(rows) {
+  let lastStage = null
+  for (const row of rows) {
+    if (row.event === 'stage-start') lastStage = row.stage ?? null
+    if (row.event === 'verdict' && row.status === 'stopped') {
+      yield { row, kind: [row.reason ?? null, row.stage ?? lastStage, row.observation?.role ?? null] }
+    }
+  }
+}
+
+function conflictPaths(rows) {
+  let paths = null
+  const pending = rows.slice()
+  while (pending.length) {
+    for (const [key, value] of Object.entries(pending.pop())) {
+      if (key === 'conflicts' && Array.isArray(value)) {
+        paths ??= new Set()
+        for (const path of value) if (typeof path === 'string') paths.add(path)
+      }
+      if (value !== null && typeof value === 'object') pending.push(value)
+    }
+  }
+  return paths
+}
+
 function summarize(rows, spec) {
   const seat_turns = Object.create(null), finish_decisions = Object.create(null), repeat_builders = []
   let tier = TIERS.indexOf(spec.tier), suite_runs = 0, red_suites = 0, proof_runs = 0, has_pr = false
@@ -74,8 +102,11 @@ function summarize(rows, spec) {
   return { seat_turns, suite_runs, red_suites, ci_checks, red_ci_checks, proof_runs, finish_decisions, has_pr, minimal, repeat_builders }
 }
 
-function report(source, since) {
-  const lanes = []
+function report(source, since, now) {
+  const lanes = [], stops = []
+  const kinds = new Map(), previousKinds = new Set(), paths = new Map()
+  let lanesWithStops = 0, lanesWithRepeatStops = 0, lanesWithConflicts = 0
+  const previousSince = since - (now - since)
   const totals = {
     minimal_path: { minimal: 0, lanes_with_pr: 0 },
     repeat_builders: { by_trigger: Object.fromEntries(TRIGGERS.map((trigger) => [trigger, 0])), builder_turns: 0 },
@@ -86,19 +117,52 @@ function report(source, since) {
   for (const found of source.lanes()) {
     const { rows, skipped_malformed, skipped_line_numbers, error } = source.readJournalRows(found)
     const first = rows[0]
-    const at = typeof first?.at === 'string' ? isoTime(first.at) : Number.isFinite(first?.at) ? new Date(first.at).getTime() : NaN
-    if (at < since && !(skipped_line_numbers[0] < first.line_number)) continue
+    const at = journalTime(first?.at)
+    // A skipped row before the first readable one leaves the start indeterminate.
+    const previous = at < since && !(skipped_line_numbers[0] < first.line_number)
+    if (previous && at < previousSince) continue
     const invalid = rows.find((row) => typeof row.event === 'string' && (!row.event.trim()
       || (row.event === 'seat-turn' && (typeof row.role !== 'string' || !row.role.trim()))
       || (row.event === 'finish-decision' && (typeof row.choice !== 'string' || !row.choice.trim()))))
     const reason = error ?? (skipped_malformed ? `task journal has ${skipped_malformed} unreadable rows`
       : !first ? 'task journal is empty' : !Number.isFinite(at) ? 'first journal row has no valid time'
         : invalid ? `task journal has an incomplete row at line ${invalid.line_number}` : null)
+    if (previous) {
+      if (!reason) for (const { kind } of stoppedVerdicts(rows)) previousKinds.add(JSON.stringify(kind))
+      continue
+    }
     const lane = { lane: found.lane, archived: found.archived }
     if (reason) {
       lanes.push({ ...lane, reason })
       totals.excluded++
       continue
+    }
+    let laneStops = 0
+    for (const { row, kind } of stoppedVerdicts(rows)) {
+      const [reason, stage, role] = kind
+      const key = JSON.stringify(kind), time = journalTime(row.at)
+      const { question, checks } = row.observation ?? {}
+      stops.push({ lane: found.lane, at: printTime(time), reason, stage, role, question })
+      if (!kinds.has(key)) kinds.set(key, { reason, stage, role, stops: 0, lanes: new Set(), first_at: Infinity, last_at: -Infinity, buckets: Object.create(null) })
+      const group = kinds.get(key)
+      group.stops++
+      group.lanes.add(found.lane)
+      laneStops++
+      if (Number.isFinite(time)) {
+        group.first_at = Math.min(group.first_at, time)
+        group.last_at = Math.max(group.last_at, time)
+      }
+      if (Array.isArray(checks)) {
+        const buckets = new Set(checks.map((check) => check?.bucket).filter((bucket) => typeof bucket === 'string' && bucket !== 'pass'))
+        for (const bucket of buckets) group.buckets[bucket] = (group.buckets[bucket] ?? 0) + 1
+      }
+    }
+    if (laneStops > 0) lanesWithStops++
+    if (laneStops > 1) lanesWithRepeatStops++
+    const lanePaths = conflictPaths(rows)
+    if (lanePaths) {
+      lanesWithConflicts++
+      for (const path of lanePaths) paths.set(path, (paths.get(path) ?? 0) + 1)
     }
     const steps = summarize(rows, found.spec)
     lanes.push({ ...lane, started_at: new Date(at).toISOString(), ...steps })
@@ -113,12 +177,22 @@ function report(source, since) {
     totals.ci.checks += steps.ci_checks
     totals.ci.red += steps.red_ci_checks
   }
-  return { lanes, totals }
+  const stops_by_kind = {
+    lanes_listed: lanes.length, lanes_with_stops: lanesWithStops, lanes_with_repeat_stops: lanesWithRepeatStops,
+    kinds: [...kinds].map(([key, group]) => ({ ...group, lanes: group.lanes.size,
+      first_at: printTime(group.first_at), last_at: printTime(group.last_at), new: !previousKinds.has(key) })),
+  }
+  const rebase_conflict_paths = {
+    lanes_with_conflicts_lists: lanesWithConflicts,
+    paths: [...paths].sort(([a, n], [b, m]) => m - n || (a < b ? -1 : a > b ? 1 : 0))
+      .map(([path, lanes]) => ({ path, lanes })),
+  }
+  return { lanes, totals, stops_by_kind, stops, rebase_conflict_paths }
 }
 
 const counts = (values) => Object.entries(values).map(([key, count]) => `${key}: ${count}`).join(', ') || 'none'
 
-function printText({ lanes, totals }, stdout) {
+function printText({ lanes, totals, stops_by_kind, rebase_conflict_paths }, stdout) {
   for (const lane of lanes) {
     const name = `${lane.lane}${lane.archived ? ' (archived)' : ''}`
     stdout(lane.reason ? `${name} | excluded: ${lane.reason}\n` : [
@@ -132,25 +206,36 @@ function printText({ lanes, totals }, stdout) {
   stdout(`Minimal path: ${minimal_path.minimal} of ${minimal_path.lanes_with_pr} lanes with a PR\n`)
   stdout(`Builder repeats: ${Object.entries(repeat_builders.by_trigger).map(([trigger, n]) => `${trigger}: ${n} of ${repeat_builders.builder_turns}`).join(', ')} builder turns\n`)
   stdout(`Red suites: ${suites.red} of ${suites.runs} suite runs\nRed CI checks: ${ci.red} of ${ci.checks} CI checks\nExcluded lanes: ${excluded}\n`)
+  const { lanes_listed, lanes_with_stops, lanes_with_repeat_stops, kinds } = stops_by_kind
+  stdout(`Stops by kind: ${lanes_with_stops} of ${lanes_listed} lanes stopped; ${lanes_with_repeat_stops} of ${lanes_listed} lanes stopped more than once\n`)
+  for (const kind of kinds) {
+    const label = [kind.reason ?? 'unknown reason', kind.stage ?? 'unknown stage', kind.role].filter((value) => value !== null).join(' / ')
+    const buckets = Object.entries(kind.buckets).map(([bucket, n]) => `${bucket}: ${n} of ${kind.stops} stops`)
+    stdout(`${label}${kind.new ? ' (new)' : ''} | ${kind.stops} stops in ${kind.lanes} lanes | first: ${kind.first_at ?? 'unknown'}, last: ${kind.last_at ?? 'unknown'}${buckets.length ? ` | ${buckets.join(', ')}` : ''}\n`)
+  }
+  const { lanes_with_conflicts_lists, paths } = rebase_conflict_paths
+  stdout(`Rebase-conflict paths: ${lanes_with_conflicts_lists} lanes with a conflicts list\n`)
+  for (const { path, lanes } of paths.slice(0, 10)) stdout(`${JSON.stringify(path)}: ${lanes} of ${lanes_with_conflicts_lists} lanes\n`)
 }
 
 export function main(argv = process.argv.slice(2), {
   root = join(homedir(), '.crew'), archiveRoot, now = Date.now,
   stdout = (text) => process.stdout.write(text), stderr = (text) => process.stderr.write(text),
 } = {}) {
-  let values, since
+  let values, since, currentTime
   try {
     const parsed = parseArgs({ args: argv, options: { since: { type: 'string' }, json: { type: 'boolean' } }, tokens: true })
     if (parsed.tokens.length !== new Set(parsed.tokens.map(({ name }) => name)).size || parsed.tokens.some(({ rawName, kind }) => kind !== 'option' || !rawName?.startsWith('--'))) throw new Error('invalid flags')
     values = parsed.values
-    since = values.since === undefined ? now() - 7 * 24 * 60 * 60 * 1000 : isoTime(values.since)
+    currentTime = now()
+    since = values.since === undefined ? currentTime - 7 * 24 * 60 * 60 * 1000 : isoTime(values.since)
     if (!Number.isFinite(since)) throw new Error('invalid cutoff')
   } catch {
     stderr('usage: crew steps [--since <ISO date>] [--json]\n')
     return 2
   }
   let steps
-  try { steps = report(createLeanSource({ crewRoot: root, archiveRoot }), since) } catch (error) {
+  try { steps = report(createLeanSource({ crewRoot: root, archiveRoot }), since, currentTime) } catch (error) {
     stderr(`crew steps: ${error.message}\n`)
     return 1
   }

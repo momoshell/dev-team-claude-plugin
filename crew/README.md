@@ -9,7 +9,7 @@ plan, superseded by this README.
 crew onboard (--check <draft.json> | --seats) [--checkout <dir>] # calibrate the checkout or probe its seats
 crew start <brief.md> [--checkout <dir>] [--allow-red-base] # worktree + journal + a detached lane
 crew lanes [--all] [--json]                          # list lanes from their journals
-crew steps [--since <ISO date>] [--json]             # count lane steps and repeat builder triggers
+crew steps [--since <ISO date>] [--json]             # report lane steps, stops and conflict paths
 crew show <lane> [<role>] [--json]                   # read a lane's recorded seat sessions
 crew finish <lane>                                   # report a stopped or ready lane, read-only
 crew finish <lane> --accept [--notes <file>] | --return <file> | --abandon
@@ -29,7 +29,7 @@ the brief, the task directory, the lane journal and every seat's session file.
 It includes lanes whose first journal row is at or after `--since` (for example,
 `2026-11-20`), or within the last seven days by default. `--json` prints the same
 report as one object. Unreadable journals and journals with no usable first-row
-time are listed with a reason and excluded from the totals.
+time are listed with a reason and contribute no steps, stops or paths.
 
 Each lane shows seat turns by role, suite runs and red suites, proof runs, and
 hand decisions by choice. A minimal lane has one builder turn, no hand decision
@@ -46,6 +46,26 @@ or `unclassified` when the journal does not establish one.
 Totals show minimal lanes out of lanes with a PR, repeats by trigger out of
 all builder turns, red suites out of suite runs, red CI checks out of all CI
 checks, and the number of excluded lanes.
+
+**Stops by kind** counts stopped verdicts by reason, stage and observation role
+when known. A verdict with no stage uses the last preceding stage start. Each
+kind shows its stop count, distinct lane count, first and last recorded stop
+times, and how many stops recorded each non-pass check bucket. Two stops of the
+same kind in one lane count as two stops and one lane. Totals show lanes that
+stopped at least once and lanes that stopped more than once, both out of all
+listed lanes (including exclusions).
+
+A kind is `new` if it did not occur in a readable lane whose first row falls in
+the equal-length window just before `--since`. By default this compares lanes
+started in the last seven days to lanes started in the preceding seven days.
+These windows select lanes by their first row, not by when individual stops
+occurred. JSON also lists each stop with lane, time, reason, stage, role and any
+recorded operator question.
+
+**Rebase-conflict paths** counts each path once per lane, out of lanes whose
+journal has any `conflicts` list, including an empty list. Text shows up to ten
+paths in descending lane count; JSON includes every path.
+
 The command writes nothing and starts no child processes.
 
 `crew closeout <lane> --discard` archives a stopped lane with no PR or a PR

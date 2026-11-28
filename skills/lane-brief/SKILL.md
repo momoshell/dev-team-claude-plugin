@@ -29,6 +29,11 @@ regenerate handling in `crew/checks.mjs` (`rebase-conflict` and its `regenerate`
    base that those inputs can produce that result, by arithmetic, code-path inspection or a quick run.
    If they cannot, correct the issue before dispatch; if the check was not performed, mark that premise
    unmeasured in the issue rather than omitting it.
+   When the issue or a decision specifies where a proof test goes, check that a `proof[].match` entry in
+   the base project's `.crew/project.json` covers the path or, if no entry matches, that the default Node
+   runner takes the file (`.js`, `.mjs` or `.cjs`). Check that the test file is not a source file the lane
+   edits and does not define the helper or fixture the lane fixes. If any check fails, correct the issue
+   before dispatch.
    For each acceptance line that tightens a shared rule, find every affected caller on the base and
    check that this lane's diff alone can satisfy the line. If it needs a later lane's work, move the
    line to that lane and record the move in both issues.

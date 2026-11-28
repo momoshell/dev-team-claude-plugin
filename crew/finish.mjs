@@ -36,7 +36,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { FINISH_REVIEW_ROUNDS, composeLanePrBody, openPullRequest, runSuite, validTimeout, withoutIssueTokens } from './checks.mjs'
-import { HEX_OID, LANE, isObject, parseJournalRows } from './lane-core.mjs'
+import { HEX_OID, LANE, describeError, isObject, parseJournalRows } from './lane-core.mjs'
 import { AGENT_ROLES, TIERS, validateEnvelope } from './protocols.mjs'
 import { deadRun, parsePidRecord, pidRecord, probeAlive, selfStartedAt, writeRunPid } from './run-pid.mjs'
 import { holdIdleSleep } from './host-sleep.mjs'
@@ -413,6 +413,21 @@ function readText(d, file, what) {
   }
 }
 
+function retainReturnNotes(d, taskDir, notes) {
+  for (let n = 1; ; n++) {
+    const notesFile = `return-notes-${n}.txt`
+    try {
+      d.writeFileSync(join(taskDir, notesFile), notes, { encoding: 'utf8', flag: 'wx' })
+    } catch (error) {
+      if (error?.code === 'EEXIST') continue
+      let notesError
+      try { notesError = describeError(error) } catch { notesError = { code: null, message: 'unprintable error' } }
+      return { notesFile: null, notesError }
+    }
+    return { notesFile }
+  }
+}
+
 const reviewCount = (rows) => Math.max(
   rows.filter((row) => row.counted !== false && row.event === 'verdict' && row.status === 'reviewed').length,
   new Set(rows.flatMap((row, index) => row.counted !== false && row.event === 'envelope' && row.role === 'reviewer' ? [typeof row.id === 'string' ? row.id : index] : [])).size,
@@ -465,7 +480,7 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
     try {
       const started = finishLane({ lane, root: crewRoot, deps: d, guidance: notes, priorReviewRounds, recoveredStopAt, expected: { rows, spec, recordedTier, died } })
       launched = true
-      d.appendFileSync(join(taskDir, 'journal.jsonl'), `${JSON.stringify({ event: 'finish-decision', lane, choice, at: d.now(), launchedAt: rows.length, notesSha256: createHash('sha256').update(notes).digest('hex') })}\n`)
+      d.appendFileSync(join(taskDir, 'journal.jsonl'), `${JSON.stringify({ event: 'finish-decision', lane, choice, at: d.now(), launchedAt: rows.length, notesSha256: createHash('sha256').update(notes).digest('hex'), ...retainReturnNotes(d, taskDir, notes) })}\n`)
       return { ...started, choice }
     } catch (error) {
       // Once spawned, keep the decision claim even if recording fails: a retry must not launch another pass.
@@ -563,7 +578,7 @@ export async function decideFinish({ lane, root, choice, file, deps = {} }) {
   try {
     const notes = typeof file === 'string' ? readText(d, file, choice === 'return' ? 'the guidance file' : 'the notes file') : null
     const journal = join(taskDir, 'journal.jsonl')
-    const decision = () => d.appendFileSync(journal, `${JSON.stringify({ event: 'finish-decision', lane, choice, at: d.now(), ...(choice === 'return' ? { launchedAt: rows.length } : {}), notesSha256: notes === null ? null : createHash('sha256').update(notes).digest('hex'), ...(choice === 'accept' && Object.hasOwn(spec, 'onboarded') ? { onboarding: { start: spec.onboarded, finish: project.hash } } : {}) })}\n`)
+    const decision = () => d.appendFileSync(journal, `${JSON.stringify({ event: 'finish-decision', lane, choice, at: d.now(), ...(choice === 'return' ? { launchedAt: rows.length } : {}), notesSha256: notes === null ? null : createHash('sha256').update(notes).digest('hex'), ...(choice === 'return' ? retainReturnNotes(d, taskDir, notes) : {}), ...(choice === 'accept' && Object.hasOwn(spec, 'onboarded') ? { onboarding: { start: spec.onboarded, finish: project.hash } } : {}) })}\n`)
 
     if (choice === 'abandon') {
       decision()

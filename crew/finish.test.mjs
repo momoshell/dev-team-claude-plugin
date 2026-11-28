@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { git, scratchDir, trackProcessGroupFile } from '../test/helpers.mjs'
 import { createHash } from 'node:crypto'
 import * as finishModule from './finish.mjs'
@@ -596,15 +596,20 @@ test('a return decision recorded after its child ends belongs to the original st
     try {
       writeFileSync(join(f.root, 'dt-lane9', 'lane9', 'crew.json'), JSON.stringify({ members: { planner: { agent: 'pi' } } }))
       const file = join(f.base, 'guidance'), journal = join(f.taskDir, 'journal.jsonl')
-      writeFileSync(file, 'answer')
+      const notes = ['réponse\r\nfirst']
+      writeFileSync(file, notes[0])
       const child = terminal === 'ready'
         ? { event: 'finish-ready', head: 'b'.repeat(40), subject: 'fix: child', body: 'measured', reviewRounds: 1 }
         : { event: 'verdict', status: 'stopped', stage: 'review', reason: 'seat-escalated' }
+      const denied = initial === 'ready' && terminal === 'stopped'
       const deps = { ...r?.deps, platform: 'linux', alive: () => false, log: () => {}, spawnDetached: () => {
         appendFileSync(journal, `${JSON.stringify({ event: 'stage-start', stage: 'build' })}\n${JSON.stringify(child)}\n`)
         return 4242
+      }, writeFileSync: (path, ...args) => {
+        if (denied && basename(path).startsWith('return-notes-')) throw Object.assign(new Error('notes write denied'), { code: 'EACCES' })
+        return writeFileSync(path, ...args)
       } }
-      assert.equal(await reasonOf(decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps })), null, initial)
+      assert.equal((await decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps })).pid, 4242, initial)
       const listed = laneRows({ root: f.root, archiveRoot: join(f.base, 'archive'), alive: () => false })[0]
       const logs = []
       const code = await main(['lane9'], { ...deps, crewRoot: f.root, log: (line) => logs.push(line) })
@@ -613,10 +618,30 @@ test('a return decision recorded after its child ends belongs to the original st
         assert.equal(await reasonOf(decideFinish({ lane: 'lane9', root: f.root, choice: 'accept', deps: { ...deps, run: async () => ({ status: 'green', stdout: 'b'.repeat(40) }), openPullRequest: async () => { published.push(true); return { status: 'green', pr: PR } } } })), null)
         assert.equal(published.length, 1)
       } else if (initial === 'stop') {
+        notes.push('second answer\n')
+        writeFileSync(file, notes[1])
         let spawned = 0
         assert.equal(await reasonOf(decideFinish({ lane: 'lane9', root: f.root, choice: 'return', file, deps: { ...deps, spawnDetached: () => { spawned++; return 4243 } } })), null)
         assert.equal(spawned, 1)
         assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'finish.json'), 'utf8')).finish.stop.reason, 'seat-escalated')
+      }
+      const decisions = readFileSync(journal, 'utf8').trim().split('\n').map(JSON.parse)
+        .filter((row) => row.event === 'finish-decision' && row.choice === 'return')
+      assert.equal(decisions.length, notes.length)
+      assert.equal(new Set(decisions.map((row) => row.notesFile)).size, decisions.length)
+      for (const [i, row] of decisions.entries()) {
+        const expected = Buffer.from(notes[i])
+        if (denied) {
+          assert.equal(row.notesFile, null)
+          assert.deepEqual(row.notesError, { code: 'EACCES', message: 'notes write denied' })
+          assert.equal(row.notesSha256, createHash('sha256').update(expected).digest('hex'))
+        } else {
+          assert.equal(typeof row.notesFile, 'string')
+          assert.equal(row.notesFile, basename(row.notesFile))
+          const contents = readFileSync(join(f.taskDir, row.notesFile))
+          assert.deepEqual(contents, expected)
+          assert.equal(row.notesSha256, createHash('sha256').update(contents).digest('hex'))
+        }
       }
       assert.deepEqual([listed.status, listed.reason], terminal === 'ready' ? ['ready-for-operator', null] : ['stopped', 'seat-escalated'])
       assert.equal(code, 0)

@@ -2,7 +2,7 @@ import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSy
 import { createHash, randomUUID } from 'node:crypto'
 import { dirname, join, relative, resolve } from 'node:path'
 import { validateMap } from '../../hooks/skill-gate.mjs'
-import { parseSkillFile, validateSkillFile, SKILL_FILE_LIMIT, SKILL_ROLES } from '../web/src/lib/skill-files.js'
+import { parseSkillFile, validateSkillFile, SKILL_FILE_LIMIT, SKILL_ROLES } from '../shared/skill-files.js'
 
 const hash = text => createHash('sha256').update(text).digest('hex')
 const problem = (error,status=400) => ({ok:false,error,status})

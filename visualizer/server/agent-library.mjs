@@ -2,7 +2,7 @@ import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, 
 import { createHash, randomUUID } from 'node:crypto'
 import { delimiter, dirname, join, relative, resolve } from 'node:path'
 import { homedir } from 'node:os'
-import { AGENT_FILE_LIMIT, composeAgentFile, parseAgentFile, validateAgentFile } from '../web/src/lib/agent-files.js'
+import { AGENT_FILE_LIMIT, composeAgentFile, parseAgentFile, validateAgentFile } from '../shared/agent-files.js'
 
 const digest = (text) => createHash('sha256').update(text).digest('hex')
 const safeName = (name) => typeof name === 'string' && /^[a-z][a-z0-9._-]{0,79}$/.test(name)

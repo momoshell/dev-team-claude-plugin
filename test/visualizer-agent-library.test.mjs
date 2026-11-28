@@ -6,7 +6,7 @@ import {mkdirSync,writeFileSync,readFileSync,existsSync,rmSync,symlinkSync,realp
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {createAgentLibrary} from '../visualizer/server/agent-library.mjs'
-import {parseAgentFile,composeAgentFile,validateAgentFile} from '../visualizer/web/src/lib/agent-files.js'
+import {parseAgentFile,composeAgentFile,validateAgentFile} from '../visualizer/shared/agent-files.js'
 import {startServer} from '../visualizer/server/server.mjs'
 const definition=(instructions='Review the change and explain findings.')=>composeAgentFile({name:'reviewer',description:'Review code',metadata:'tools: Read, Grep\nmodel: sonnet\ncustom:\n  nested: true',instructions})
 function fixture(t) {const root=realpathSync(scratchDir('agent-library-'));t.after(()=>rmSync(root,{recursive:true,force:true}));mkdirSync(join(root,'home'));return {root,library:createAgentLibrary({checkout:root,home:join(root,'home'),env:{PATH:''}})}}

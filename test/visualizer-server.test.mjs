@@ -143,7 +143,7 @@ test('raw request targets are refused without killing the visualizer', async () 
   let child
   try {
     mkdirSync(plugin)
-    for (const path of ['crew', 'hooks', 'package.json', 'visualizer/server', 'visualizer/web/src/lib', 'visualizer/coding-agents.json']) {
+    for (const path of ['crew', 'hooks', 'package.json', 'visualizer/server', 'visualizer/shared', 'visualizer/coding-agents.json']) {
       cpSync(join(ROOT, path), join(plugin, path), { recursive: true })
     }
     git(plugin, 'init', '-q')

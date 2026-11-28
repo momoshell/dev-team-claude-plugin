@@ -5,7 +5,7 @@
   import { onMount, onDestroy, tick } from 'svelte'
   import { Plus, Pencil, Download, BookOpen, ArrowLeft } from 'lucide-svelte'
   import { getSkillLibrary, saveSkillFile } from './api.js'
-  import { parseSkillFile, composeSkillFile, validateSkillFile, SKILL_FILE_LIMIT } from './skill-files.js'
+  import { parseSkillFile, composeSkillFile, validateSkillFile, SKILL_FILE_LIMIT } from '../../../shared/skill-files.js'
   import SkillRules from './SkillRules.svelte'
   import './skills.css'
   let payload=$state({definitions:[],notes:[],writable:false,map:null}), loading=$state(true), error=$state(''), notice=$state('')

@@ -64,6 +64,7 @@ test('PreToolUse denies crew start and finish that resolve to a crew without the
   ]) { const output = runBash(command); denied(output); assert.ok(output.includes(stale), command) }
   for (const command of [
     `cd ${checkout} && node ${ROOT}/bin/crew.mjs start x.md`,
+    `node ${ROOT}/bin/crew.mjs finish lane`,
     `node ${stale}/bin/crew.mjs lanes`,
     `node ${home}/missing/bin/crew.mjs start x.md`,
   ]) assert.equal(runBash(command), '', command)

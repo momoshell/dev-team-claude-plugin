@@ -37,6 +37,16 @@ regenerate handling in `crew/checks.mjs` (`rebase-conflict` and its `regenerate`
    When the operator approves a proposed Measured section, rewrite each approved “Recommend …” as
    `Decided (operator, <date>)` and remove any wording that says the decision is still open or tells
    readers to wait for the owner. Do this before folding the section into the issue.
+   If the issue leaves a choice to the lane (`Decide in this lane`) or has a `Recommended:` without
+   a matching `Decided (operator, <date>)` line, ask the operator and record the answer in the issue
+   before dispatch.
+   For each decision that reads a value, cite the base-branch line that shows the value exists at
+   that point in the code path, or correct the issue before dispatch if the value is not there.
+   Do not start the lane until every issue the source names as a blocker is closed.
+   Compare each `Decided` item with the other decisions and with `out_of_scope`, and take any pair
+   that cannot both hold to the operator before dispatch.
+   Keep files this change must edit out of `out_of_scope`, name the sibling lane beside each file
+   fenced because that lane owns it, and leave other fences intact.
 3. Write the brief to `~/.crew/briefs/<lane>.md`. Use `<project>-<issue>-<slug>` for the lane name (for example,
    `devteam-1962-lane-names`); see `LANE` in `crew/lane-core.mjs` for the allowed characters. Choose `source`, the issue bound by `closes`, whether the
    work is `mechanical`, and what is `out_of_scope`. Use Context pointers to the files and symbols the planner

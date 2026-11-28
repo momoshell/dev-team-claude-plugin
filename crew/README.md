@@ -319,6 +319,12 @@ no-test rule and its exceptions. Add an assertion or table row to an existing te
 already driving the path before writing a new test. Repairing or removing an
 existing test that the change breaks is maintenance, not an added test.
 
+The [builder](agents/builder.md), [reviewer](agents/reviewer.md) and
+[tech-lead](agents/tech-lead.md) charters own the rule: for test files that
+existed on the base, builders list each assertion or test removed or loosened in
+`notes` with the changed behaviour that requires it, and reviewers check every
+changed file's diff for lost assertions about behaviour the brief does not change.
+
 The planner lists only selected changed behaviour in Properties, with the
 applicable exception or explicit test ask and the test's file and title. Other
 changed criteria go under Not machine-checked because the rule calls for no test.

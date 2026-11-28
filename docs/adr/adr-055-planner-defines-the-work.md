@@ -574,3 +574,21 @@ The two lock-only rounds among 45 scoped rebase reviews measured on 2026-11-22
 both passed review and neither found a defect. After 30 more publishing rebases
 that move the head across checkouts, count lock-file rechecks, their review
 verdicts and any later red suite on the base traced to one.
+
+## Amendment 2026-11-28: assertions removed from existing tests (#2567)
+
+This supplements the 2026-11-17 rule that repairing or removing an existing test
+that the change breaks is maintenance, not an added test. In `notes`, the builder
+lists each assertion or whole test removed or loosened in a test file that
+existed on the base, naming the changed behaviour that requires it. Moving an
+assertion unchanged is not a removal.
+
+The reviewer and tech-lead read the diff of every changed test file that existed
+on the base, including deleted files, not just the removals the builder listed.
+Within the review's existing scope and must-fix limits, an assertion removed or
+loosened for behaviour the brief does not change is a `must-fix` whose `trigger`
+names the behaviour no longer asserted. Report unlisted removals or loosenings
+at the severity they earn. Judge lanes whose purpose is removing or changing
+tests against their briefs.
+
+The loop, proof and protocols do not change.

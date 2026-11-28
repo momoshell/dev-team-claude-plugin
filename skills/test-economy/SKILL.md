@@ -16,7 +16,10 @@ The brief's ask governs test selection only when adding or changing tests is the
 purpose of the lane. A test merely named or listed within a behaviour change,
 including in a referenced issue, follows the same no-test rule and its exceptions.
 Repairing or removing an existing test that the change breaks is maintenance, not
-an added test. A mechanical builder applies this rule without a plan.
+an added test. In `notes`, list each assertion or whole test you remove or loosen
+in a test file that existed on the base. For each, name the changed behaviour
+that requires it. Moving an assertion unchanged is not a removal. A mechanical
+builder applies these rules without a plan.
 
 Make the change first, then write only the tests the plan names. An unplanned
 added test needs an applicable exception in `notes`. Where a test is called for,

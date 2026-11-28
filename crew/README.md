@@ -447,6 +447,13 @@ Everything durable is a file; session chat is never the record.
   unavailable output, not empty streams. Closeout archives these files with the
   task directory; resolve `outputFile` beside the archived `journal.jsonl` too.
 
+  Each `finish-decision` row with `choice: 'return'` names its own guidance copy
+  in `notesFile`. Resolve the name beside `journal.jsonl`, in the live or archived
+  task directory. The file's SHA-256 digest matches `notesSha256`. A failed copy
+  does not stop the return: `notesFile: null` and `notesError: {code, message}`
+  report the write failure. Older return rows omit `notesFile`; accept and abandon
+  rows do not use these fields.
+
 ## Files
 
 - `start.mjs` — `crew start`: checks the brief, creates the worktree, starts the detached run.

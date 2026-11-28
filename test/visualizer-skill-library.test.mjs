@@ -6,7 +6,7 @@ import {mkdirSync,readFileSync,writeFileSync,realpathSync,rmSync,symlinkSync,exi
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {createSkillLibrary} from '../visualizer/server/skill-library.mjs'
-import {composeSkillFile,parseSkillFile,validateSkillFile} from '../visualizer/web/src/lib/skill-files.js'
+import {composeSkillFile,parseSkillFile,validateSkillFile} from '../visualizer/shared/skill-files.js'
 import {resolveSeatSkills} from '../hooks/skill-gate.mjs'
 import {startServer} from '../visualizer/server/server.mjs'
 const content=(name='example')=>composeSkillFile({name,description:'Use for release checks.',instructions:'# Review\n\nCheck [gates](references/gates.md).',metadata:'license: MIT\nmetadata:\n  owner: team'})

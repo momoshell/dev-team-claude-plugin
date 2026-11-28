@@ -4,7 +4,7 @@
 <script>
   import { onMount, onDestroy, tick } from 'svelte'
   import { saveSkillRules } from './api.js'
-  import { SKILL_ROLES, deliveryLabel, ruleSummary, lines } from './skill-files.js'
+  import { SKILL_ROLES, deliveryLabel, ruleSummary, lines } from '../../../shared/skill-files.js'
   let {payload,onreload}= $props()
   let editing=$state(null), draft=$state(null), saving=$state(false), error=$state(''), notice=$state(''), removeIndex=$state(null), discarding=$state(false)
   let errorBox=$state()

@@ -6,10 +6,10 @@
   import { Plus, FileText, Download, Pencil, ArrowLeft, Search, Terminal } from 'lucide-svelte'
   import { getAgentLibrary, saveAgentFile, saveHarnessSettings, proposeAgentEdit } from './api.js'
   import DiffBlock from './DiffBlock.svelte'
-  import { parseAgentFile, composeAgentFile, validateAgentFile, AGENT_FILE_LIMIT } from './agent-files.js'
+  import { parseAgentFile, composeAgentFile, validateAgentFile, AGENT_FILE_LIMIT } from '../../../shared/agent-files.js'
 
   import { transportLabel, capabilityLabel } from './agent-settings.js'
-  import { SKILL_ROLES } from './skill-files.js'
+  import { SKILL_ROLES } from '../../../shared/skill-files.js'
 
   let payload = $state({definitions:[],harnesses:[],notes:[],scanned:[],writable:false})
   let harnessModeInput = $state()

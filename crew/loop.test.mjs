@@ -120,6 +120,7 @@ test('a lead accept on a spent bound with nothing to accept is a bounce to that 
 function fakes(options = {}) {
   const calls = [], rows = [], requests = [], tiers = [], seen = {}, returns = new Map(), writes = new Map()
   let reviewTurns = 0, secondTurns = 0, reviewReads = 0, baseOid = 'c'.repeat(40)
+  let checkoutHead = 'a'.repeat(40), commitParent
   const discardArgs = []
   const spec = {
     id: 'lane', cwd: '/virtual/checkout', taskDir: '/virtual/task', tier: 'build', shape: 'standard', brief: '## The ask\nBuild the lane.',
@@ -143,6 +144,15 @@ function fakes(options = {}) {
     calls.push(name); seen[name] = structuredClone(input)
     if (options.throwCheck === name) throw Object.assign(new Error('denied'), { code: 'EPERM' })
     return typeof result === 'function' ? result(input) : structuredClone(result)
+  }
+  const resetOrClean = async (name, result, input) => {
+    discardArgs.push(input.args)
+    const outcome = await measured(name, result)(input)
+    if (outcome.status === 'green' && input.args[0] === 'reset') {
+      const target = input.args.at(-1)
+      checkoutHead = target.endsWith('^') ? commitParent : target
+    }
+    return outcome
   }
   const deps = {
     resolveAgents: (tier) => { tiers.push(tier); if (tier === 'judge' && options.throwJudge) throw new Error('judge unavailable'); const roles = ['planner', 'builder', 'reviewer', 'lead', ...(tier === 'judge' ? ['tech-lead'] : [])].filter((role) => !(spec.tier === 'mechanical' && tier !== 'mechanical' ? [] : options.unseated ?? []).includes(role)); return { seats: Object.fromEntries(roles.map((role) => [role, { agent: 'pi', provider: 'test', id: role, effort: tier === 'judge' ? 'xhigh' : 'high', ...(options.bounds?.[role] ? { rounds: options.bounds[role] } : {}) }])), advisor: null } },
@@ -175,20 +185,25 @@ function fakes(options = {}) {
     },
     proveTests: measured('proof', options.proof ?? { status: 'green', reason: null, rows: [{ file: 'lib.test.mjs', title: 'works', proven: true }] }),
     runSuite: measured('suite', options.suite ?? green()),
-    commitChanges: (input) => ['wip: crew finish base', 'wip: crew pre-check base'].includes(input.subject)
-      ? measured('base-commit', { status: 'green', reason: null, head: 'a'.repeat(40), files: input.files })(input)
-      : measured('commit', options.commit ?? { status: 'green', reason: null, head: 'a'.repeat(40), files: ['lib.mjs'] })(input),
-    // Keep the pre-proof status probes separate from the scripted review and commit paths.
-    run: (input) => input.args.includes('reset') && input.args.includes('--soft') ? (discardArgs.push(input.args), measured(spec.shape === 'finish' && !calls.includes('seat:builder') ? 'base-restore' : 'uncommit', green())(input))
-      : input.args.includes('reset') || input.args.includes('clean') ? (discardArgs.push(input.args), measured('discard', options.discard ?? green())(input))
+    commitChanges: async (input) => {
+      const result = await (['wip: crew finish base', 'wip: crew pre-check base'].includes(input.subject)
+        ? measured('base-commit', { status: 'green', reason: null, head: 'a'.repeat(40), files: input.files })(input)
+        : measured('commit', options.commit ?? { status: 'green', reason: null, head: 'a'.repeat(40), files: ['lib.mjs'] })(input))
+      if (result.status === 'green') { commitParent = checkoutHead; checkoutHead = result.head }
+      return result
+    },
+    // Keep the pre-proof probes separate from the scripted post-rebase and status reads.
+    run: (input) => input.args.includes('reset') && input.args.includes('--soft') ? resetOrClean(spec.shape === 'finish' && !calls.includes('seat:builder') ? 'base-restore' : 'uncommit', green(), input)
+      : input.args.includes('reset') || input.args.includes('clean') ? resetOrClean('discard', options.discard ?? green(), input)
       : input.args.includes('add') ? measured('suite-stage', options.stageResult ?? green())(input)
       : input.args.includes('write-tree') ? measured('checked-tree', options.checkedTree ?? { ...green(), stdout: `${'e'.repeat(40)}\n` })(input)
       : input.args.includes('--no-ext-diff') ? Promise.resolve({ ...green(), stdout: 'lib.mjs\0' })
       : input.args.includes('diff') ? measured('published-paths', options.publishedPaths ?? { ...green(), stdout: 'lib.mjs\0' })(input)
       : input.args.includes('rev-parse') && input.args.at(-1) === `refs/remotes/origin/${spec.base}` ? measured('check-base', options.checkBase ?? { ...green(), stdout: `${baseOid}\n` })(input)
-      : input.args.includes('rev-parse') ? measured('post-rebase-head', () => ({ ...green(), stdout: options.cleanHead ?? `${(options.rebase ?? {}).head ?? 'a'.repeat(40)}\n` }))(input)
+      : input.args.includes('rev-parse') && ['seat:builder', 'base-paths'].includes(calls.at(-1)) ? measured('build-head', { ...green(), stdout: `${checkoutHead}\n` })(input)
+      : input.args.includes('rev-parse') ? measured('post-rebase-head', { ...green(), stdout: options.cleanHead ?? `${checkoutHead}\n` })(input)
       : input.args.includes('status') && spec.shape === 'finish' && !calls.includes('rebase') ? measured('base-paths', { ...green(), stdout: ' M lib.mjs\0' })(input)
-      : input.args.includes('status') && calls.at(-1) === 'seat:builder' ? measured('build-paths', { ...green(), stdout: ' M lib.mjs\0' })(input)
+      : input.args.includes('status') && ['seat:builder', 'build-head'].includes(calls.at(-1)) ? measured('build-paths', { ...green(), stdout: ' M lib.mjs\0' })(input)
       : input.args.includes('status') && calls.at(-1) === 'fetch' && calls.lastIndexOf('commit') > calls.lastIndexOf('rebase') ? measured('publish-paths', options.publishPaths ?? green())(input)
       : input.args.includes('status') && calls.includes('commit') && calls.lastIndexOf('rebase') > calls.lastIndexOf('uncommit') ? measured('post-rebase-clean', () => ({ ...green(), stdout: options.cleanStatus ?? '' }))(input)
       : input.args.includes('status')
@@ -201,7 +216,7 @@ function fakes(options = {}) {
       : Promise.reject(new Error(`unexpected git command: ${input.args}`)),
     rebaseBranch: async (input) => {
       const result = await measured('rebase', options.rebase ?? { status: 'green', reason: null, head: 'a'.repeat(40), onto: 'c'.repeat(40) })(input)
-      if (result.status === 'green') baseOid = result.onto
+      if (result.status === 'green') { baseOid = result.onto; checkoutHead = result.head }
       return result
     },
     openPullRequest: measured('publish', options.publish ?? { status: 'green', reason: null, pr: PR }),
@@ -1560,9 +1575,10 @@ test('a pre-build planning return resumes planning and publishes without accept'
 
 test('a committed finish-ready return after conflict resolution proves against the rebase base and ends with one commit (#2399)', async () => {
   await committedReadyReturn(true)
+  await committedReadyReturn(true, { commitDuringBuild: true })
 })
 
-async function committedReadyReturn(conflict, stop = false) {
+async function committedReadyReturn(conflict, { stop = false, commitDuringBuild = false } = {}) {
   const root = scratchDir('finish-return-'), cwd = join(root, 'checkout'), remote = join(root, 'origin.git')
   const taskDir = join(root, 'dt-lane', 'lane', 'task')
   mkdirSync(cwd); mkdirSync(taskDir, { recursive: true })
@@ -1625,6 +1641,7 @@ async function committedReadyReturn(conflict, stop = false) {
     return value
   } })
   const triageHeads = [], resolutions = []
+  let builderHead = null
   const result = await runLoop(finish, {
     resolveAgents: seats.deps.resolveAgents,
     runSeat: async (request) => {
@@ -1636,6 +1653,10 @@ async function committedReadyReturn(conflict, stop = false) {
         } else {
           triageHeads.push(g('rev-parse', 'HEAD').trim())
           writeFileSync(join(cwd, 'return.txt'), 'return edit\n')
+          if (commitDuringBuild && builderHead === null) {
+            g('add', 'return.txt'); g('commit', '-qm', 'builder committed the lane')
+            builderHead = g('rev-parse', 'HEAD').trim()
+          }
         }
       }
       await seats.deps.runSeat(request)
@@ -1654,6 +1675,14 @@ async function committedReadyReturn(conflict, stop = false) {
     } })
     assert.equal(spawned, 2)
     assert.equal(JSON.parse(readFileSync(launched.specPath, 'utf8')).finish.guidance, 'Keep both edits and resume.')
+    return
+  }
+  if (commitDuringBuild) {
+    assert.deepEqual(result, stopped('head-moved'))
+    const verdict = rows.find((row) => row.event === 'verdict' && row.status === 'stopped')
+    assert.equal(verdict.stage, 'build')
+    assert.deepEqual(verdict.observation, { base: onto, head: builderHead })
+    assert.equal(rows.some((row) => row.event === 'check' && row.check === 'proof'), false)
     return
   }
   const proof = rows.find((row) => row.event === 'check' && row.check === 'proof')?.result
@@ -2282,7 +2311,7 @@ test('a failed conflict turn is undone and a second publishing conflict gets a t
   for (const mode of ['failed-head', 'empty-head']) {
     const f = fakes({ rebase: answers({ ...MOVED, head: A }, conflict), cleanHead: mode === 'empty-head' ? '' : undefined })
     const run = f.deps.run
-    f.deps.run = (input) => input.args[0] === 'rev-parse' && input.args[1] === 'HEAD' && mode === 'failed-head' ? { ...green(), status: 'red', reason: 'exit-nonzero', code: 1 } : run(input)
+    f.deps.run = (input) => input.args[0] === 'rev-parse' && input.args[1] === 'HEAD' && f.calls.at(-1) === 'rebase' && mode === 'failed-head' ? { ...green(), status: 'red', reason: 'exit-nonzero', code: 1 } : run(input)
     assert.deepEqual(await f.go(), stopped(mode === 'failed-head' ? 'exit-nonzero' : 'runner-threw'))
     assert.equal(builderTurns(f).filter((r) => r.feedback[0]?.id === 'rebase-conflict').length, 0)
     assert.deepEqual(f.discardArgs, [])

@@ -860,7 +860,8 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
   }
   mkdirSync(spec.cwd, { recursive: true })
   const requests = [], logs = [], reviews = answers.reviews ?? ['pass']
-  let review = 0, reads = 0, rebasedHead = null, committed = false, baseOid = 'c'.repeat(40)
+  let review = 0, reads = 0, postRebase = false, committed = false, baseOid = 'c'.repeat(40)
+  let checkoutHead = 'b'.repeat(40)
   const envelope = (role, id) => {
     const n = Number(id.split('.').at(-1))
     const own = answers[`${role}.${n}`]
@@ -897,18 +898,22 @@ function leanFixture({ tier = 'build', answers = {}, acp, deps = {}, loopDeps = 
       commitChanges: async () => ({ status: 'green', reason: null, head: 'a'.repeat(40) }),
       rebaseBranch: async () => ({ status: 'green', reason: null, head: (committed ? 'a' : 'b').repeat(40), onto: baseOid }),
       openPullRequest: async () => ({ status: 'green', reason: null, pr: { number: 7, url: 'https://example.test/7' } }),
-      // After the rebase the tree is the rebased head and clean; before it, status reads the scripted paths.
-      run: async (input) => input.args.includes('write-tree') ? { ...GREEN, stdout: `${'e'.repeat(40)}\n` }
-        : input.args.includes('rev-parse') ? { ...GREEN, stdout: `${input.args.at(-1) === `refs/remotes/origin/${spec.base}` ? baseOid : rebasedHead}\n` }
-        : input.args.includes('status') ? { ...GREEN, stdout: rebasedHead ? '' : [status].flat()[Math.min(reads++, [status].flat().length - 1)] } : GREEN,
+      run: async (input) => {
+        if (input.args[0] === 'reset') { checkoutHead = input.args.at(-1); postRebase = false }
+        if (input.args.includes('write-tree')) return { ...GREEN, stdout: `${'e'.repeat(40)}\n` }
+        if (input.args.includes('rev-parse')) return { ...GREEN, stdout: `${input.args.at(-1) === `refs/remotes/origin/${spec.base}` ? baseOid : checkoutHead}\n` }
+        // Only a committed rebase is clean; uncommit restores the scripted paths.
+        if (input.args.includes('status')) return { ...GREEN, stdout: postRebase ? '' : [status].flat()[Math.min(reads++, [status].flat().length - 1)] }
+        return GREEN
+      },
       ...loopDeps,
     },
     ...deps,
   }
   const commit = options.loopDeps.commitChanges
-  options.loopDeps.commitChanges = async (input) => { const result = await commit(input); if (result.status === 'green') committed = true; return result }
+  options.loopDeps.commitChanges = async (input) => { const result = await commit(input); if (result.status === 'green') { committed = true; checkoutHead = result.head } return result }
   const rebase = options.loopDeps.rebaseBranch
-  options.loopDeps.rebaseBranch = async (input) => { const result = await rebase(input); if (result.status === 'green') { baseOid = result.onto; if (committed) rebasedHead = result.head } return result }
+  options.loopDeps.rebaseBranch = async (input) => { const result = await rebase(input); if (result.status === 'green') { baseOid = result.onto; checkoutHead = result.head; postRebase = committed } return result }
   const sessionOf = (role, n) => join(spec.taskDir, 'lean', role, `lane.${role}.${n}.jsonl`)
   return { spec, requests, logs, go: () => runLean(spec, options), sessionOf, options }
 }
@@ -1043,10 +1048,6 @@ test('a Muse seat refused at session/new for being logged out stops as authentic
       journal: async (row) => rows.push(row),
       ...(target === 'conflict' ? { rebaseBranch: async () => ++rebases === 1 ? { status: 'green', reason: null, head: 'b'.repeat(40), onto: 'c'.repeat(40) } : { status: 'red', reason: 'rebase-conflict', conflicts: ['file'] } } : {}),
     } })
-    if (target === 'conflict') {
-      const run = f.options.loopDeps.run
-      f.options.loopDeps.run = async (input) => input.args.includes('rev-parse') ? { ...GREEN, stdout: `${'c'.repeat(40)}\n` } : run(input)
-    }
     const answered = f.options.runAcpSeat
     f.options.runAcpSeat = async (input) => {
       if (target === 'lead' ? input.definition.role === 'lead' : input.prompt.includes('Rebase ')) {
@@ -1545,7 +1546,7 @@ test('the bridge entry reads one spec file; a malformed or unreadable spec is on
   assert.equal(await leanMain([specPath], good.options), 0)
   assert.equal(existsSync(good.sessionOf('planner', 1)), true)
   const stoppedRows = []
-  const failing = leanFixture({ loopDeps: { run: async ({ args }) => { if (args.includes('status')) throw EPERM; return { ...GREEN, stdout: args.includes('rev-parse') ? 'c'.repeat(40) : '' } } } })
+  const failing = leanFixture({ loopDeps: { run: async ({ args }) => { if (args.includes('status')) throw EPERM; return { ...GREEN, stdout: args.includes('rev-parse') ? 'b'.repeat(40) : '' } } } })
   const failingPath = join(dir, 'failing.json')
   writeFileSync(failingPath, JSON.stringify(failing.spec))
   assert.equal(await leanMain([failingPath], { ...failing.options, log: (line) => stoppedRows.push(line) }), 1)

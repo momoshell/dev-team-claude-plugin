@@ -62,10 +62,8 @@ const endings = [
   ['dead in open stage', openBuild, dead, [], dead, DIED, 'stop=run-died', DEAD_NO_PR, true, true, true],
   ['dead awaiting CI', awaiting, dead, [2, 4, 7], dead, DIED, PUBLISHED, true, true, HAS_PR, true],
   ['finish ready', ready, null, [3, 6], null, READY, 'stop=finish-ready', NO_PR, USE_FINISH, true, true],
-  ['returned planning stop', returned(planStop), live, [3], null, RETURNED, FINISH_RUNNING, NO_PR, USE_FINISH, NOT_STOPPED, true,
-    { finish: 'Bare finish reports the old planning stop after its return has already launched.' }],
-  ['returned post-build stop', returned(stopped), live, [3], null, RETURNED, FINISH_RUNNING, NO_PR, USE_FINISH, NOT_STOPPED, true,
-    { finish: 'Bare finish reports the old post-build stop after its return has already launched.' }],
+  ['returned planning stop', returned(planStop), live, [3], null, RETURNED, FINISH_RUNNING, NO_PR, USE_FINISH, NOT_STOPPED, true],
+  ['returned post-build stop', returned(stopped), live, [3], null, RETURNED, FINISH_RUNNING, NO_PR, USE_FINISH, NOT_STOPPED, true],
   ['returned from death', returned(openBuild), live, [], null, RETURNED, NO_STOP, NO_PR, USE_FINISH, NOT_STOPPED, true],
   ['returned ready', returned(ready), live, [3, 6], null, RETURNED, FINISH_RUNNING, NO_PR, USE_FINISH, NOT_STOPPED, true],
   ['planning return then publication', returned(planStop, republish), null, [3, 7], null, DONE, PUBLISHED, true, NOT_STOPPED, HAS_PR, true],
@@ -149,33 +147,34 @@ function checkCloseout(f, discard, expected) {
 }
 
 test('lane endings through journal readers', async (t) => {
-  for (const [name, history, pid, ignored, died, state, report, close, discard, record, included, todos = {}] of endings) {
+  for (const [name, history, pid, ignored, died, state, report, close, discard, record, included] of endings) {
+    const parent = scratchDir('journal-endings-')
+    t.after(() => rmSync(parent, { recursive: true, force: true }))
+    const rows = history.map((row, i) => ({ lane, at: at + i, ...row }))
+    const f = fixture(parent, rows, pid)
+
+    // Assert finish in the parent body so proof sees the failure, not just a failed subtest.
+    const logs = [], write = process.stderr.write
+    let error = '', status
+    process.stderr.write = (text) => { error += text; return true }
+    try {
+      status = await finish([lane], { crewRoot: f.root, alive, log: (text) => logs.push(text), spawnDetached: unexpected, run: unexpected, kill: unexpected })
+    } finally { process.stderr.write = write }
+    if (typeof report === 'string') {
+      assert.equal(status, 0, `${name}: ${error}`)
+      assert.deepEqual(logs, [`crew finish: lane=${lane} ${report}`], name)
+    } else {
+      assert.equal(status, 1, `${name}: ${logs.join('\n')}`)
+      assert.match(error, report, name)
+    }
+    assert.equal(readFileSync(f.journal, 'utf8'), f.text, name)
+
     await t.test(name, async (t) => {
-      const parent = scratchDir('journal-endings-')
-      t.after(() => rmSync(parent, { recursive: true, force: true }))
-      const rows = history.map((row, i) => ({ lane, at: at + i, ...row }))
-      const f = fixture(parent, rows, pid)
       await t.test('stateless', () => assert.deepEqual(rows.flatMap((row, i) => stateless(rows, row, i) ? [i] : []), ignored))
       await t.test('deadRun', () => assert.equal(deadRun({ ...f, rows })?.pid ?? null, died))
       await t.test('lean source', () => {
         const [run] = createLeanSource({ crewRoot: f.root, archiveRoot: f.archiveRoot, alive }).listRuns()
         assert.deepEqual([run.status, run.reason], state)
-      })
-      await t.test('finish', { todo: todos.finish ?? false }, async () => {
-        const logs = [], write = process.stderr.write
-        let error = '', status
-        process.stderr.write = (text) => { error += text; return true }
-        try {
-          status = await finish([lane], { crewRoot: f.root, alive, log: (text) => logs.push(text), spawnDetached: unexpected, run: unexpected, kill: unexpected })
-        } finally { process.stderr.write = write }
-        if (typeof report === 'string') {
-          assert.equal(status, 0, error)
-          assert.deepEqual(logs, [`crew finish: lane=${lane} ${report}`])
-        } else {
-          assert.equal(status, 1, logs.join('\n'))
-          assert.match(error, report)
-        }
-        assert.equal(readFileSync(f.journal, 'utf8'), f.text)
       })
       await t.test('closeout', () => checkCloseout(fixture(parent, rows, pid, { absent: true }), false, close))
       await t.test('discard', () => checkCloseout(fixture(parent, rows, pid, { absent: true }), true, discard))

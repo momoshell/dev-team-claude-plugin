@@ -189,6 +189,7 @@ function fakes(options = {}) {
       : input.args.includes('rev-parse') ? measured('post-rebase-head', () => ({ ...green(), stdout: options.cleanHead ?? `${(options.rebase ?? {}).head ?? 'a'.repeat(40)}\n` }))(input)
       : input.args.includes('status') && spec.shape === 'finish' && !calls.includes('rebase') ? measured('base-paths', { ...green(), stdout: ' M lib.mjs\0' })(input)
       : input.args.includes('status') && calls.at(-1) === 'seat:builder' ? measured('build-paths', { ...green(), stdout: ' M lib.mjs\0' })(input)
+      : input.args.includes('status') && calls.at(-1) === 'fetch' && calls.lastIndexOf('commit') > calls.lastIndexOf('rebase') ? measured('publish-paths', options.publishPaths ?? green())(input)
       : input.args.includes('status') && calls.includes('commit') && calls.lastIndexOf('rebase') > calls.lastIndexOf('uncommit') ? measured('post-rebase-clean', () => ({ ...green(), stdout: options.cleanStatus ?? '' }))(input)
       : input.args.includes('status')
       ? (['suite', 'seat:reviewer', 'seat:tech-lead'].includes(calls.at(-1))
@@ -987,7 +988,7 @@ test('a judge reuses each roles pass on an unchanged recheck tree (#2412)', asyn
   assert.match(f.seen.publish.body, /## Open points\n- reviewer note \(lib.mjs:1\)\n- tech-lead note \(lib.mjs:1\)/)
 })
 
-const EFFECTS = ['paths', 'commit', 'fetch', 'rebase', 'publish']
+const EFFECTS = ['paths', 'commit', 'fetch', 'publish-paths', 'rebase', 'publish']
 const PUBLISH_EFFECTS = EFFECTS.filter((effect) => effect !== 'fetch')
 
 // MUTATION: pass the lane's own timeouts to the checks, or read the onboarding once at loop entry, and a raise that arrives
@@ -1367,7 +1368,7 @@ test('the suite runs after exactly the measured changed paths are staged, again 
   const f = fakes({ reviewPaths: ' M lib.mjs\0?? new.test.mjs\0R  b.mjs\0a.mjs\0' })
   assert.equal((await f.go()).status, 'done')
   assert.deepEqual(f.seen['suite-stage'], { cwd: '/virtual/checkout', command: 'git', args: ['--literal-pathspecs', 'add', '--', 'lib.mjs', 'new.test.mjs'] })
-  assert.deepEqual(f.calls.slice(f.calls.indexOf('suite-stage')), ['suite-stage', 'checked-tree', 'suite', 'seat:reviewer', 'paths', 'checked-tree', 'commit', 'fetch', 'rebase', 'publish'])
+  assert.deepEqual(f.calls.slice(f.calls.indexOf('suite-stage')), ['suite-stage', 'checked-tree', 'suite', 'seat:reviewer', 'paths', 'checked-tree', ...EFFECTS.slice(1)])
   const r = sequenced([redRun(1), green()], { checkedTree: () => ({ ...green(), stdout: String(count(r, 'builder')).repeat(40) }) })
   assert.equal((await r.go()).status, 'done')
   assert.equal(r.calls.filter((c) => c === 'suite-stage').length, 2)
@@ -2441,8 +2442,28 @@ test('a build or judge lane whose tree changes after its suite and reviews start
       assert.equal(f.calls.filter((call) => call === 'commit').length, commits)
       assert.equal(f.calls.includes('publish'), false)
     }
-    const unchangedDeletion = fakes({ spec: { tier }, reviewPaths: 'AD deleted.mjs\0 M lib.mjs\0', paths: 'AD deleted.mjs\0M  lib.mjs\0' })
-    assert.equal((await unchangedDeletion.go()).status, 'done', tier)
+    const path = 'deleted[1].mjs', deletion = `AD ${path}\0`
+    let staged = true
+    const unchangedDeletion = fakes({ spec: { tier }, reviewPaths: `${deletion} M lib.mjs\0`, paths: `${deletion}M  lib.mjs\0`,
+      publishPaths: () => ({ ...green(), stdout: staged ? deletion : '' }),
+      rebase: () => unchangedDeletion.calls.includes('commit') && staged
+        ? { status: 'red', reason: 'dirty-worktree' } : { ...MOVED, head: 'a'.repeat(40) },
+    })
+    const run = unchangedDeletion.deps.run
+    const unstage = ['--literal-pathspecs', 'rm', '--cached', '--quiet', '--ignore-unmatch', '--', path]
+    unchangedDeletion.deps.run = (input) => {
+      if (input.command !== 'git' || input.args.join('\0') !== unstage.join('\0')) return run(input)
+      staged = false
+      return green()
+    }
+    const outcome = await unchangedDeletion.go()
+    assert.equal(outcome.status, 'done', `${tier}: ${outcome.reason}`)
+    const rows = unchangedDeletion.rows
+    assert.deepEqual(rows.slice(rows.findIndex((r) => r.event === 'commit') + 1)
+      .filter((r) => r.stage === 'publish-unstage' || (r.event === 'check' && r.check === 'rebase'))
+      .map((r) => [r.event, r.stage, r.result?.status]), [
+      ['stage-start', 'publish-unstage', undefined], ['check', 'publish-unstage', 'green'], ['stage-end', 'publish-unstage', undefined], ['check', 'rebase', 'green'],
+    ], tier)
   }
 })
 

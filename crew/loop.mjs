@@ -1381,6 +1381,16 @@ export async function runLoop(spec, deps = {}) {
     const fetched = await fetchOrigin()
     if (fetched.status !== 'green') return stop(fetched.reason, fetched)
 
+    const publishStatus = await readStatus('publish-paths')
+    if (publishStatus.status !== 'green' || typeof publishStatus.stdout !== 'string' || parseChangedPaths(publishStatus.stdout) === null) return stop('paths-unmeasured', publishStatus)
+    const dropped = worktreeRecords(publishStatus.stdout).filter((record) => record.startsWith('AD ')).map((record) => record.slice(3))
+    // UTF-8 decoding may have replaced path bytes, so these operands are not safe to remove.
+    if (dropped.some((path) => path.includes('\uFFFD'))) return stop('paths-unmeasured', publishStatus)
+    if (dropped.length) {
+      const unstaged = await stage('publish-unstage', () => callCheck('publish-unstage', d.run, { cwd, command: 'git', args: ['--literal-pathspecs', 'rm', '--cached', '--quiet', '--ignore-unmatch', '--', ...dropped] }, { command: true }))
+      if (unstaged.status !== 'green') return stop(unstaged.reason, unstaged)
+    }
+
     const conflictsBeforeRebase = conflictTurns
     rebased = await resolveConflict(await rebaseOnBase())
     if (rebased.status !== 'green' || !text(rebased.head)) return stop(rebased.reason ?? 'runner-threw', rebased)

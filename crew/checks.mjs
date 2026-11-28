@@ -808,14 +808,18 @@ function requiredRows(nodes, repo) {
 export function ciActions({ cwd, pr }, deps) {
   const repo = ciRepo(pr)?.join('/')
   const gh = (args) => repo ? runCommand({ cwd, command: 'gh', args: [...args, '-R', `github.com/${repo}`], timeoutMs: DEFAULT_TIMEOUT_MS }, deps) : unmeasured('invalid-input')
-  const log = async (run, flag, ...args) => {
-    const result = await gh(['run', 'view', run, flag, ...args])
+  const log = async (run, args, failedStep) => {
+    const result = await gh(['run', 'view', run, ...args])
     if (result.status !== 'green') return null
     // Strip terminal strings before the individual control characters. Keep tabs for gh's column prefix.
     const cleaned = stripVTControlCharacters(result.stdout.replace(/(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)|(?:\x1b[P^_X]|[\x90\x98\x9e\x9f])[^\x1b\x9c]*(?:\x1b\\|\x9c)/g, ''))
       .replace(/\x1b[ -/]*[0-~]|[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '')
-      .replace(/^[^\t\n]*\t[^\t\n]*\t\d{4}-\d\d-\d\dT\S+Z ?/gm, '')
-    return cleaned.trim() ? cleaned : null
+    const selected = failedStep === undefined ? '' : cleaned.split('\n').filter((line) => {
+      const columns = line.split('\t', 3)
+      return columns.length === 3 && columns[1] === failedStep
+    }).join('\n')
+    const output = (selected || cleaned).replace(/^[^\t\n]*\t[^\t\n]*\t\d{4}-\d\d-\d\dT\S+Z ?/gm, '')
+    return output.trim() ? output : null
   }
   return {
     log,
@@ -841,7 +845,7 @@ export function ciActions({ cwd, pr }, deps) {
       return {
         link: `https://github.com/${repo}/actions/runs/${run}`,
         failed: failedAction(row.conclusion),
-        log: () => log(run, '--log-failed', '--attempt', attempt),
+        log: () => log(run, ['--log-failed', '--attempt', attempt]),
         failedJobs: async () => {
           const jobs = readJson(await gh(['run', 'view', run, '--attempt', attempt, '--json', 'jobs']))?.jobs
           return Array.isArray(jobs) && jobs.every((job) => typeof job?.name === 'string' && typeof job?.conclusion === 'string')

@@ -93,7 +93,10 @@ before its first lane.
   `frontend-svelte`, `ui-design`, `devops`, `ux`, `code-less`, `prose-plain`)
   work in any repo the moment the plugin is installed; the runtime skills
   (`lane-brief`, `crew-recovery`) drive the crew CLI and need
-  this source tree. `crew-onboard` owns the split and the foreign-checkout
+  this source tree. The operator invokes the runtime skill
+  [`lane-lessons`](skills/lane-lessons/SKILL.md) to read lane journals and
+  propose rules or checks for approval.
+  `crew-onboard` owns the split and the foreign-checkout
   procedure. Commands are thin entry points that name the skill owning each
   procedure: `/dispatch`, `/close-out`, `/status`, `/onboard`, `/review`.
 - **`bin/crew.mjs`** — the crew launcher: start, show, record-pr, finish,

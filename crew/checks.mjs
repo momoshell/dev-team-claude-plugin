@@ -808,8 +808,8 @@ function requiredRows(nodes, repo) {
 export function ciActions({ cwd, pr }, deps) {
   const repo = ciRepo(pr)?.join('/')
   const gh = (args) => repo ? runCommand({ cwd, command: 'gh', args: [...args, '-R', `github.com/${repo}`], timeoutMs: DEFAULT_TIMEOUT_MS }, deps) : unmeasured('invalid-input')
-  const log = async (run, ...args) => {
-    const result = await gh(['run', 'view', run, '--log-failed', ...args])
+  const log = async (run, flag, ...args) => {
+    const result = await gh(['run', 'view', run, flag, ...args])
     if (result.status !== 'green') return null
     // Strip terminal strings before the individual control characters. Keep tabs for gh's column prefix.
     const cleaned = stripVTControlCharacters(result.stdout.replace(/(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)|(?:\x1b[P^_X]|[\x90\x98\x9e\x9f])[^\x1b\x9c]*(?:\x1b\\|\x9c)/g, ''))
@@ -841,7 +841,7 @@ export function ciActions({ cwd, pr }, deps) {
       return {
         link: `https://github.com/${repo}/actions/runs/${run}`,
         failed: failedAction(row.conclusion),
-        log: () => log(run, '--attempt', attempt),
+        log: () => log(run, '--log-failed', '--attempt', attempt),
         failedJobs: async () => {
           const jobs = readJson(await gh(['run', 'view', run, '--attempt', attempt, '--json', 'jobs']))?.jobs
           return Array.isArray(jobs) && jobs.every((job) => typeof job?.name === 'string' && typeof job?.conclusion === 'string')
@@ -928,7 +928,14 @@ export async function waitForRequiredChecks({ cwd, pr, head, parent, ciGraceMs, 
       if (refreshed && rows?.length && rows.every(({ bucket }) => bucket === 'pass' || bucket === 'skipping')) return result('green', null)
       if (open === false) return result('unmeasured', 'ci-unmeasured', { detail: 'pr-not-open' })
       if (refreshed && rows?.length && !rows.some(({ bucket }) => bucket === 'pending')) {
-        if (rows.some(({ bucket }) => bucket === 'fail')) return result('red', 'ci-red')
+        checks = rows.slice()
+        for (const [index, check] of rows.entries()) {
+          if (check.bucket !== 'cancel' || !check.job) continue
+          const steps = readJson(await gh(['api', `repos/${repo.join('/')}/actions/jobs/${check.job}`, '--hostname', 'github.com']))?.steps
+          const failed = Array.isArray(steps) && steps.find((step) => step?.conclusion === 'failure' && typeof step.name === 'string' && step.name.trim())
+          if (failed) checks[index] = { ...check, bucket: 'fail', originalBucket: 'cancel', failedStep: failed.name }
+        }
+        if (checks.some(({ bucket }) => bucket === 'fail')) return result('red', 'ci-red')
         return result('unmeasured', 'ci-unmeasured')
       }
       if (budget.remaining() <= 0) break

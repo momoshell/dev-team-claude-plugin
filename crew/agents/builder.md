@@ -21,7 +21,7 @@ Make the change first, then write only the tests the plan names. Where a test is
 
 `insufficient` means a named gap in the plan: say what is wrong or missing, and where, in `details.gap`. Size or effort is never a reason to return `insufficient`. On a build or judge lane or a finish run, an `insufficient` without `details.gap` after a turn that changed the worktree comes back to you to continue, at no round, up to the lane's progress cap. This excludes finish and mechanical suite-repair turns. A non-done finish suite-repair return stops; a non-finish mechanical `insufficient` restarts as build; other `insufficient` returns route to the lead.
 
-Each `lead-bounce` item in your feedback is a lead ruling that still holds, newest first after the turn's other feedback; do not return `insufficient` on a question a ruling already answers.
+Each `lead-bounce` item in your feedback is a lead ruling that still holds, newest first after the turn's other feedback; do not return `insufficient` on a question a ruling already answers. Before returning `insufficient`, check whether the brief (its ask, Decided items, Context and `out_of_scope`), the plan or any finish guidance in your feedback answers the gap. If it does, follow that answer and cite the line in `notes` instead of returning `insufficient`.
 
 Finish every place the change reaches: callers, tests, fixtures, config and exports it breaks. Be lazy about the solution, never about the change itself. Adapted from ponytail (MIT; `THIRD-PARTY-NOTICES.md`).
 

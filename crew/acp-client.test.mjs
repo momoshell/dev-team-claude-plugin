@@ -6,6 +6,7 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import { scratchDir } from '../test/helpers.mjs'
+import * as journalOrder from './lean-journal-order.mjs'
 import {
   ACP_UPDATE_KINDS, acpClient, acpSeatPaths,
 } from './acp-client.mjs'
@@ -412,9 +413,11 @@ test('prompt refusals preserve only string error messages in outcomes and journa
 
 const imports = /\b(?:from\s*|import\s*\(\s*|import\s*|require\s*\(\s*)['"]([^'"\n\r]*)['"]/g
 
+// Keep quoted strings intact when stripping comments (for example, URLs).
+const withoutComments = (source) => source.replace(/(?:'[^'\\]*(?:\\[\s\S][^'\\]*)*'|"[^"\\]*(?:\\[\s\S][^"\\]*)*"|`[^`\\]*(?:\\[\s\S][^`\\]*)*`)|(\/\*[\s\S]*?\*\/|\/\/[^\n\r]*)/g, (text, comment) => comment ? ' ' : text)
+
 function checkImports(source, file) {
-  // Keep quoted strings intact when stripping comments (for example, URLs).
-  source = source.replace(/(?:'[^'\\]*(?:\\[\s\S][^'\\]*)*'|"[^"\\]*(?:\\[\s\S][^"\\]*)*"|`[^`\\]*(?:\\[\s\S][^`\\]*)*`)|(\/\*[\s\S]*?\*\/|\/\/[^\n\r]*)/g, (text, comment) => comment ? ' ' : text)
+  source = withoutComments(source)
   // Comments left in templates can hide an import in an interpolation; refuse them.
   assert.doesNotMatch(source, /\b(?:import|require|from)\s*(?:\/\*|\/\/)/, `${file}: comment-separated import in template`)
   // Require a complete literal argument, not a literal prefix of an expression.
@@ -436,6 +439,22 @@ test('matched literal imports are built-in or relative and the package has no ru
       checkImports(readFileSync(file, 'utf8'), file)
     }
   }
+})
+
+test('journal event table matches literal writer names under crew', () => {
+  const names = new Set()
+  for (const entry of readdirSync(join(REGISTER_ROOT, 'crew'), { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile() || !/\.(?:mjs|js|ts)$/.test(entry.name) || /\.test\.(?:mjs|js|ts)$/.test(entry.name)) continue
+    const source = withoutComments(readFileSync(join(entry.parentPath, entry.name), 'utf8'))
+    // This is a literal scan, not a parser. Leave template interpolations visible for inline JSON.stringify rows.
+    for (const match of source.matchAll(/\bemit\s*\(\s*(['"])([^'"\\\r\n]+)\1\s*(?=[,)])|[{,]\s*event\s*:\s*(['"])([^'"\\\r\n]+)\3\s*(?=[,}])/g)) {
+      names.add(match[2] ?? match[4])
+    }
+  }
+  const table = journalOrder.JOURNAL_EVENTS ?? {}
+  assert.deepEqual(Object.keys(table).sort(), [...names].sort())
+  assert.ok(Object.isFrozen(table))
+  assert.ok(Object.values(table).every((flag) => typeof flag === 'boolean'))
 })
 
 test('import boundary rejects comment-separated package and nonliteral imports', () => {

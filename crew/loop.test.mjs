@@ -2518,14 +2518,15 @@ test('a forged source or builder summary cannot forge a section or measurement i
 })
 
 test('the PR body states proof and suite honestly when no test is named, the lane is mechanical, or proof is unmeasured', async () => {
-  for (const mode of ['ci-repair', 'ci-wrong-head', 'ci-closed-red', 'none', 'mechanical', 'mechanical-named', 'unmeasured', 'repair', 'ci', 'ci-empty', 'ci-conflicting']) {
+  for (const mode of ['ci-repair', 'ci-cancel-failed-step', 'ci-cancel-clean-step', 'ci-wrong-head', 'ci-closed-red', 'none', 'mechanical', 'mechanical-named', 'unmeasured', 'repair', 'ci', 'ci-empty', 'ci-conflicting']) {
     const finish = ['unmeasured', 'repair'].includes(mode)
     const mechanical = mode.startsWith('mechanical')
     const ciGate = mode.startsWith('ci')
     const empty = ['ci-empty', 'ci-conflicting'].includes(mode)
-    const conflict = mode === 'ci-conflicting', wrongHead = mode === 'ci-wrong-head', repair = mode === 'ci-repair'
-    const closedRed = mode === 'ci-closed-red'
-    const reason = conflict || wrongHead || closedRed ? 'ci-unmeasured' : empty ? 'ci-no-required-checks' : null
+    const conflict = mode === 'ci-conflicting', wrongHead = mode === 'ci-wrong-head', closedRed = mode === 'ci-closed-red'
+    const cancelled = mode.startsWith('ci-cancel-')
+    const repair = mode === 'ci-repair' || mode === 'ci-cancel-failed-step'
+    const reason = conflict || wrongHead || closedRed || (cancelled && !repair) ? 'ci-unmeasured' : empty ? 'ci-no-required-checks' : null
     const noProof = mode === 'none' || ciGate
     const head = 'a'.repeat(40), successor = 'b'.repeat(40), repairTree = 'f'.repeat(40)
     const pr = { ...PR, url: `https://github.com/o/r/pull/${PR.number}` }
@@ -2553,6 +2554,9 @@ test('the PR body states proof and suite honestly when no test is named, the lan
     })
     const f = mode === 'repair' ? sequenced([redRun(7), green()], options) : fakes(options)
     const check = { name: 'test', workflow: '', bucket: 'pass', link: 'https://example.test/runs/1' }
+    const runPath = '/o/r/actions/runs/123', step = 'Run tests', jobFailure = 'cancelled job assertion'
+    const cancelledCheck = { name: check.name, workflow: 'CI', bucket: 'cancel', link: `https://github.com${runPath}/job/456`, run: '123', job: '456' }
+    const jobRead = ['api', 'repos/o/r/actions/jobs/456', '--hostname', 'github.com']
     const ghArgs = [], gitArgs = []
     if (ciGate) {
       const run = f.deps.run
@@ -2576,6 +2580,13 @@ test('the PR body states proof and suite honestly when no test is named, the lan
         const red = (repair || wrongHead || closedRed) && remoteHead === head
         // Keep the old source's read working so the proof fails on the missing repair, not the command fake.
         if (args[1] === 'checks') return json([{ ...check, bucket: red ? 'fail' : 'pass' }])
+        if (cancelled && args[0] === 'api' && args[1] === jobRead[1]) {
+          return json({ id: 456, run_id: 123, conclusion: 'cancelled', steps: [{ name: step, conclusion: repair ? 'failure' : 'success' }] })
+        }
+        if (cancelled && args[0] === 'run' && args[1] === 'view' && args.includes('--log')) {
+          assert.deepEqual(args, ['run', 'view', '123', '--log', '--job', '456', '-R', 'github.com/o/r'])
+          return { ...green(), stdout: `test\t${step}\t2026-11-28T00:00:00Z \x1b[31mnot ok 1 - ${jobFailure}\x1b[0m` }
+        }
         if (args[1] === 'view') return json({ headRefOid: remoteHead, baseRefName: pr.baseRefName, state: pr.state })
         if (args[0] === 'api' && args[1] === 'graphql') {
           // The PR API can lag behind ls-remote, then report a merged PR once checks pass.
@@ -2583,9 +2594,11 @@ test('the PR body states proof and suite honestly when no test is named, the lan
           const oid = wrongHead ? successor : repaired && successorReads++ === 0 ? head : remoteHead
           const state = closedRed ? 'CLOSED' : repaired && oid === successor ? 'MERGED' : pr.state
           const checkState = mode === 'ci' && polls++ < 2 ? 'PENDING' : red ? 'FAILURE' : 'SUCCESS'
-          const statusCheckRollup = { contexts: { pageInfo: { hasNextPage: false }, nodes: empty ? [] : [{
-            __typename: 'StatusContext', context: check.name, isRequired: true, state: checkState, targetUrl: check.link,
-          }] } }
+          const node = cancelled && remoteHead === head ? {
+            __typename: 'CheckRun', name: cancelledCheck.name, isRequired: true, status: 'COMPLETED', conclusion: 'CANCELLED', detailsUrl: cancelledCheck.link,
+            checkSuite: { app: { slug: 'github-actions' }, workflowRun: { resourcePath: runPath, event: 'pull_request', workflow: { name: cancelledCheck.workflow } } },
+          } : { __typename: 'StatusContext', context: check.name, isRequired: true, state: checkState, targetUrl: check.link }
+          const statusCheckRollup = { contexts: { pageInfo: { hasNextPage: false }, nodes: empty ? [] : [node] } }
           return json({ data: { repository: { pullRequest: {
             headRefOid: oid, baseRefName: pr.baseRefName, state, mergeable: conflict ? 'CONFLICTING' : 'MERGEABLE',
             commits: { nodes: [{ commit: { oid, statusCheckRollup } }] },
@@ -2612,7 +2625,8 @@ test('the PR body states proof and suite honestly when no test is named, the lan
       assert.equal(evidence[0].awaitingCi, true)
       assert.deepEqual(evidence[0].pr, pr)
       const { sleep_credited_s, ...ci } = evidence.at(-2).result
-      assert.deepEqual(ci, { status: reason ? 'unmeasured' : 'green', reason, head: repair ? successor : head, checks: wrongHead ? null : empty ? [] : [closedRed ? { ...check, bucket: 'fail' } : check],
+      const finalCheck = cancelled && !repair ? cancelledCheck : closedRed ? { ...check, bucket: 'fail' } : check
+      assert.deepEqual(ci, { status: reason ? 'unmeasured' : 'green', reason, head: repair ? successor : head, checks: wrongHead ? null : empty ? [] : [finalCheck],
         ...(conflict ? { detail: 'pr-conflicting' } : wrongHead ? { detail: 'pr-head-or-target-changed', observedHead: successor } : closedRed ? { detail: 'pr-not-open' } : {}) })
       assert.ok(Number.isFinite(sleep_credited_s) && sleep_credited_s >= 0)
       assert.equal(evidence.at(-2).seconds, mode === 'ci' ? 60 : repair ? 30 : 0)
@@ -2632,14 +2646,20 @@ test('the PR body states proof and suite honestly when no test is named, the lan
         assert.ok(!ghArgs.some(([verb, sub]) => verb === 'pr' && sub === 'edit'))
         assert.deepEqual(f.calls.slice(f.calls.indexOf('publish') + 1).filter((call) => ['rebase', 'fetch', 'publish'].includes(call)), [])
       }
+      if (cancelled) assert.deepEqual(ghArgs.filter(([, endpoint]) => endpoint === jobRead[1]), [jobRead])
       if (repair) {
-        assert.deepEqual(evidence[1].result.checks, [{ ...check, bucket: 'fail' }])
+        const failedCheck = cancelled ? { ...cancelledCheck, bucket: 'fail', originalBucket: 'cancel', failedStep: step } : { ...check, bucket: 'fail' }
+        assert.deepEqual(evidence[1].result.checks, [failedCheck])
         assert.equal(evidence[1].result.head, head)
         assert.deepEqual(f.rows.filter(({ event }) => event === 'commit').map((row) => row.head), [head, successor])
         const item = f.requests.find(({ id }) => id === turns[0].id).feedback[0]
         assert.equal(item.id, 'ci-repair')
         assert.equal(item.severity, 'must-fix')
-        assert.equal(item.checks[0].link, check.link)
+        assert.equal(item.checks[0].link, failedCheck.link)
+        if (cancelled) {
+          assert.deepEqual(item.checks[0].failingTests, [jobFailure])
+          assert.deepEqual(item.checks[0].outputTail, [`not ok 1 - ${jobFailure}`])
+        }
       }
     } else assert.match(body, /- Suite: green; exit 0; node --test lane\.test\.mjs\./)
   }

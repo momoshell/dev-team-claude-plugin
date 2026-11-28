@@ -154,9 +154,12 @@ After opening and recording its PR, the loop reads required checks immediately
 and every 30 seconds, within `ciTimeoutMs` of awake time. A nonempty report of
 only `pass` or `skipping` on the pushed head ends the lane `done`, even if the
 PR has already merged. While the PR is open, a pending check keeps it waiting
-and a settled `fail` on that head goes to CI failure handling. Other settled
-non-passing buckets, a moved head, or a closed or merged PR without a green
-report stop the lane as `ci-unmeasured`. After a repair push, the loop
+and a settled `fail` on that head goes to CI failure handling. A settled
+`cancel` counts as `fail` if its linked Actions job reports a failed step. The
+`check: ci` wait row records the original bucket and the failed step's name.
+Other settled non-passing buckets, including a `cancel` with no confirmed failed
+step, stop the lane as `ci-unmeasured`, as do a moved head or a closed or merged
+PR without a green report. After a repair push, the loop
 waits within the ten-minute grace if GitHub still reports the parent of the
 confirmed repair commit. With no required checks reported ten awake minutes
 after push or remote confirmation, a measured empty read stops as

@@ -1544,7 +1544,7 @@ export async function runLoop(spec, deps = {}) {
         const failed = ci.checks.filter(({ bucket }) => bucket === 'fail')
         const failures = []
         for (const check of failed) {
-          const log = check.run ? await actions.log(check.run, '--job', check.job) : null
+          const log = check.run ? await actions.log(check.run, check.originalBucket === 'cancel' ? '--log' : '--log-failed', '--job', check.job) : null
           failures.push({ ...check, available: log !== null, signature: signatureIn(log), ...suiteFailures([{ stdout: log }], Infinity) })
         }
         const repeated = failures.find(({ signature }) => signature !== undefined)?.signature

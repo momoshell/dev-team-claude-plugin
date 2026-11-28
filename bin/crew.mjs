@@ -77,7 +77,7 @@ function changedPaths(home, from, to) {
 export function rebuildPlan(changed, { hasModules, hasDist }) {
   const lock = changed.includes('package-lock.json') || changed.includes('package.json')
   const install = lock || !hasModules
-  const build = install || !hasDist || changed.some((path) => path.startsWith('visualizer/web/'))
+  const build = install || !hasDist || changed.some((path) => path.startsWith('visualizer/web/') || path.startsWith('visualizer/shared/'))
   return { install, build }
 }
 

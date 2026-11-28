@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { rebuildPlan } from './crew.mjs'
 
 const BIN = fileURLToPath(new URL('./crew.mjs', import.meta.url))
 const scratch = (name) => realpathSync(mkdtempSync(join(tmpdir(), `bin-crew-${name}-`)))
@@ -136,6 +137,10 @@ test('update refuses when pgrep cannot run, rather than reading it as no process
     assert.equal(out.stderr.trim().split('\n').length, 1)
     assert.equal(git(home, 'rev-parse', 'HEAD'), head)
   } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('update plans a web rebuild for a shared visualizer change', () => {
+  assert.equal(rebuildPlan(['visualizer/shared/agent-files.js'], { hasModules: true, hasDist: true }).build, true)
 })
 
 test('update fast-forwards stable to origin/main and reports the range', () => {
